@@ -1026,6 +1026,128 @@ describe('CronScheduler', () => {
         expect(loadedIds.has(d.id)).toBe(true);
       }
     });
+
+    it('fails a legacy task with a condition precondition CLOSED: never installs or fires it, leaves it on disk', async () => {
+      // A pre-removal `isolated` guard task still carrying a `condition`
+      // precondition. `condition` is gone from DurableCronTask, and
+      // durableTaskToJob no longer carries it, so installing this task would
+      // silently turn a "only run if X" gate into an unconditional fire. It
+      // must be skipped entirely (never installed, never fired) but LEFT on
+      // disk so the user can re-create it. `condition` is not part of the type,
+      // so cast past it to seed the on-disk shape an old version wrote.
+      const onFire = vi.fn();
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await writeCronTasks(tmpDir, [
+          {
+            ...seed({ id: 'legacy-cond', cron: '* * * * *' }),
+            condition: 'files changed since last run',
+          } as unknown as DurableCronTask,
+          // Control: a plain task with no condition loads and fires normally.
+          seed({ id: 'plain', cron: '* * * * *' }),
+        ]);
+
+        await scheduler.enableDurable('session-1');
+        // The guarded task is filtered out of the job map; the plain one loads.
+        const loadedIds = scheduler.list().map((j) => j.id);
+        expect(loadedIds).toContain('plain');
+        expect(loadedIds).not.toContain('legacy-cond');
+
+        scheduler.start(onFire);
+        // A minute the every-minute cron matches (past any jitter).
+        scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
+
+        const firedIds = onFire.mock.calls.map((c) => (c[0] as CronJob).id);
+        expect(firedIds).toContain('plain');
+        expect(firedIds).not.toContain('legacy-cond');
+
+        // The legacy task is left on disk (fix-or-delete), not silently dropped.
+        expect((await readCronTasks(tmpDir)).map((t) => t.id)).toContain(
+          'legacy-cond',
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('warns once (operator breadcrumb) the first time a legacy-condition task is skipped', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await writeCronTasks(tmpDir, [
+          {
+            ...seed({ id: 'legacy-warn', cron: '* * * * *' }),
+            condition: 'only when X',
+          } as unknown as DurableCronTask,
+        ]);
+
+        const legacyWarns = () =>
+          warnSpy.mock.calls.filter(
+            (c) =>
+              /legacy precondition/.test(String(c[0])) &&
+              /will NOT fire/.test(String(c[0])),
+          );
+
+        await scheduler.enableDurable('session-1');
+        expect(legacyWarns()).toHaveLength(1);
+        expect(String(legacyWarns()[0]![0])).toContain('legacy-warn');
+
+        // Re-loading the same file must NOT re-warn for an already-reported id.
+        await (
+          scheduler as unknown as { loadFileTasks(b: boolean): Promise<void> }
+        ).loadFileTasks(true);
+        expect(legacyWarns()).toHaveLength(1);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('still fires a bare legacy runMode:isolated task (no condition), warning once', async () => {
+      // A pre-removal task written with `runMode: 'isolated'` and NO
+      // precondition. Unlike a legacy-condition task (a safety gate → fail
+      // closed), this one has no gate: it STILL fires — just no longer in a
+      // fresh per-run session (history now accumulates in its bound session).
+      // The scheduler installs and fires it, but logs a one-time behavior-change
+      // notice. `runMode` is gone from DurableCronTask, so cast past it to seed
+      // the on-disk shape an old version wrote.
+      const onFire = vi.fn();
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await writeCronTasks(tmpDir, [
+          {
+            ...seed({ id: 'legacy-runmode', cron: '* * * * *' }),
+            runMode: 'isolated',
+          } as unknown as DurableCronTask,
+        ]);
+
+        const runModeWarns = () =>
+          warnSpy.mock.calls.filter(
+            (c) =>
+              /isolated/.test(String(c[0])) &&
+              /create_sub_session/.test(String(c[0])),
+          );
+
+        await scheduler.enableDurable('session-1');
+        // Unlike a legacy-condition task, this one IS installed…
+        expect(scheduler.list().map((j) => j.id)).toContain('legacy-runmode');
+        // …and the first load logs the one-time behavior-change breadcrumb.
+        expect(runModeWarns()).toHaveLength(1);
+        expect(String(runModeWarns()[0]![0])).toContain('legacy-runmode');
+
+        scheduler.start(onFire);
+        // A minute the every-minute cron matches (past any jitter).
+        scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
+        const firedIds = onFire.mock.calls.map((c) => (c[0] as CronJob).id);
+        expect(firedIds).toContain('legacy-runmode');
+
+        // Re-loading the same file must NOT re-warn for an already-reported id.
+        await (
+          scheduler as unknown as { loadFileTasks(b: boolean): Promise<void> }
+        ).loadFileTasks(true);
+        expect(runModeWarns()).toHaveLength(1);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
   });
 
   describe('durable ownership', () => {

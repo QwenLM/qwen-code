@@ -60,7 +60,7 @@ const mockSanitizeLogText = vi.hoisted(() =>
 );
 const mockRouterClearAll = vi.hoisted(() => vi.fn());
 const mockRouterGetTarget = vi.hoisted(() => vi.fn());
-const mockRouterRemoveSessionId = vi.hoisted(() => vi.fn());
+const mockRouterHandleSessionDied = vi.hoisted(() => vi.fn());
 const mockRouterRestoreSessions = vi.hoisted(() => vi.fn());
 const mockRouterSetBridge = vi.hoisted(() => vi.fn());
 const mockRouterSetChannelScope = vi.hoisted(() => vi.fn());
@@ -88,7 +88,7 @@ const mockSessionRouter = vi.hoisted(() =>
   vi.fn(() => ({
     clearAll: mockRouterClearAll,
     getTarget: mockRouterGetTarget,
-    removeSessionId: mockRouterRemoveSessionId,
+    handleSessionDied: mockRouterHandleSessionDied,
     restoreSessions: mockRouterRestoreSessions,
     setBridge: mockRouterSetBridge,
     setChannelScope: mockRouterSetChannelScope,
@@ -652,9 +652,9 @@ describe('startCommand.handler', () => {
     expect(mockSanitizeLogText).toHaveBeenCalledWith('dead\nsession', 128);
     expect(mockSanitizeLogText).toHaveBeenCalledWith('boom\nreason', 512);
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
-      '[Channel] Session dead\\nsession died (boom\\nreason), removing routing state',
+      '[Channel] Session dead\\nsession died (boom\\nreason), updating routing state',
     );
-    expect(mockRouterRemoveSessionId).toHaveBeenCalledWith('dead\nsession');
+    expect(mockRouterHandleSessionDied).toHaveBeenCalledWith('dead\nsession');
     expect(mockChannelOnSessionDied).not.toHaveBeenCalled();
   });
 
@@ -734,7 +734,7 @@ describe('startCommand.handler', () => {
     sessionDiedListener!({ sessionId: 'dead-session' });
 
     expect(mockChannelOnSessionDied).toHaveBeenCalledWith('dead-session');
-    expect(mockRouterRemoveSessionId).not.toHaveBeenCalled();
+    expect(mockRouterHandleSessionDied).not.toHaveBeenCalled();
   });
 
   it('registers session cleanup on the replacement bridge before restoring sessions', async () => {
@@ -780,7 +780,7 @@ describe('startCommand.handler', () => {
 
       restartedSessionDiedListener({ sessionId: 'dead-after-restart' });
 
-      expect(mockRouterRemoveSessionId).toHaveBeenCalledWith(
+      expect(mockRouterHandleSessionDied).toHaveBeenCalledWith(
         'dead-after-restart',
       );
     } finally {

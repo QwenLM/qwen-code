@@ -4,7 +4,6 @@ import { createAndAttachSessionForPrompt } from './sessionPreparation';
 type CreateSessionArgs = Parameters<typeof createAndAttachSessionForPrompt>[0];
 const sessionResult = { sessionId: 'session-1' };
 const modelResult = { model: 'qwen3' };
-const approvalModeResult = { mode: 'yolo' };
 
 function createActions(
   overrides: Partial<CreateSessionArgs['sessionActions']> = {},
@@ -15,18 +14,13 @@ function createActions(
     closeSession: vi.fn(async () => {}),
     clearSession: vi.fn(async () => {}),
     setModel: vi.fn(async () => modelResult),
-    setApprovalMode: vi.fn(async () => approvalModeResult),
     ...overrides,
   };
 }
 
 describe('createAndAttachSessionForPrompt', () => {
-  it('attaches the session before a model switch failure can abort setup', async () => {
+  it('folds the approval mode into createSession and applies the model after attach', async () => {
     const order: string[] = [];
-    const error = new Error('model failed');
-    const warn = vi.fn();
-    const waitForModel = createDeferred<void>();
-    const approvalStarted = createDeferred<void>();
     const actions = createActions({
       createSession: vi.fn(async () => {
         order.push('create');
@@ -37,76 +31,118 @@ describe('createAndAttachSessionForPrompt', () => {
       }),
       setModel: vi.fn(async () => {
         order.push('model');
-        await waitForModel.promise;
-        throw error;
-      }),
-      setApprovalMode: vi.fn(async () => {
-        order.push('approval');
-        approvalStarted.resolve();
-        return approvalModeResult;
+        return modelResult;
       }),
     });
 
-    const result = createAndAttachSessionForPrompt({
+    await createAndAttachSessionForPrompt({
       sessionActions: actions,
       modelId: 'qwen3',
       modeId: 'yolo',
-      warn,
+      workspaceCwd: '/ws/secondary',
     });
-    await approvalStarted.promise;
-    waitForModel.resolve();
-    await result;
 
-    expect(order.slice(0, 2)).toEqual(['create', 'attach']);
-    expect(order.slice(2).sort()).toEqual(['approval', 'model']);
+    // Approval mode rides along with creation — no follow-up round-trip.
+    expect(actions.createSession).toHaveBeenCalledWith({
+      workspaceCwd: '/ws/secondary',
+      approvalMode: 'yolo',
+    });
+    // Model is still a post-create call, sequenced after attach.
+    expect(order).toEqual(['create', 'attach', 'model']);
+    expect(actions.setModel).toHaveBeenCalledWith('qwen3');
+  });
+
+  it('omits approvalMode when the mode is not a recognized daemon approval mode', async () => {
+    const actions = createActions();
+
+    await createAndAttachSessionForPrompt({
+      sessionActions: actions,
+      modeId: 'not-a-mode',
+    });
+
+    expect(actions.createSession).toHaveBeenCalledWith({
+      workspaceCwd: undefined,
+    });
+  });
+
+  it('creates the session without a model call when no model is selected', async () => {
+    const actions = createActions();
+
+    await createAndAttachSessionForPrompt({
+      sessionActions: actions,
+      modeId: 'plan',
+    });
+
+    expect(actions.createSession).toHaveBeenCalledWith({
+      workspaceCwd: undefined,
+      approvalMode: 'plan',
+    });
+    expect(actions.setModel).not.toHaveBeenCalled();
+  });
+
+  it('warns but resolves when the post-create model switch fails', async () => {
+    const order: string[] = [];
+    const error = new Error('model failed');
+    const warn = vi.fn();
+    const actions = createActions({
+      createSession: vi.fn(async () => {
+        order.push('create');
+        return sessionResult;
+      }),
+      attachSession: vi.fn(async () => {
+        order.push('attach');
+      }),
+      setModel: vi.fn(async () => {
+        order.push('model');
+        throw error;
+      }),
+    });
+
+    await expect(
+      createAndAttachSessionForPrompt({
+        sessionActions: actions,
+        modelId: 'qwen3',
+        modeId: 'yolo',
+        warn,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(order).toEqual(['create', 'attach', 'model']);
     expect(warn).toHaveBeenCalledWith(
       '[WebShell] failed to set model for new session:',
       error,
     );
   });
 
-  it('keeps the attached session when approval mode setup fails', async () => {
-    const order: string[] = [];
-    const error = new Error('mode failed');
-    const warn = vi.fn();
-    const waitForModel = createDeferred<void>();
-    const approvalStarted = createDeferred<void>();
+  it('propagates a create failure (fail-closed approval mode) without attaching or setting the model', async () => {
+    // The daemon tears the session down and rejects `POST /session` when the
+    // requested approval mode can't be applied at spawn. That rejection must
+    // abort the whole flow — no session, no model call — rather than leaving a
+    // half-created session in the wrong mode.
+    const error = new Error('approval_mode_initialization_failed');
     const actions = createActions({
       createSession: vi.fn(async () => {
-        order.push('create');
-        return sessionResult;
-      }),
-      attachSession: vi.fn(async () => {
-        order.push('attach');
-      }),
-      setModel: vi.fn(async () => {
-        order.push('model');
-        await waitForModel.promise;
-        return modelResult;
-      }),
-      setApprovalMode: vi.fn(async () => {
-        order.push('approval');
-        approvalStarted.resolve();
         throw error;
       }),
     });
 
-    const result = createAndAttachSessionForPrompt({
-      sessionActions: actions,
-      modelId: 'qwen3',
-      modeId: 'yolo',
-      warn,
-    });
-    await approvalStarted.promise;
-    waitForModel.resolve();
-    await result;
+    await expect(
+      createAndAttachSessionForPrompt({
+        sessionActions: actions,
+        modelId: 'qwen3',
+        modeId: 'yolo',
+      }),
+    ).rejects.toThrow(error);
 
-    expect(order.slice(0, 2)).toEqual(['create', 'attach']);
-    expect(order.slice(2).sort()).toEqual(['approval', 'model']);
-    expect(warn).toHaveBeenCalledWith(
-      '[WebShell] failed to set approval mode for new session:',
-      error,
-    );
+    expect(actions.createSession).toHaveBeenCalledWith({
+      workspaceCwd: undefined,
+      approvalMode: 'yolo',
+    });
+    expect(actions.attachSession).not.toHaveBeenCalled();
+    expect(actions.setModel).not.toHaveBeenCalled();
+    // Nothing was created client-side, so there is nothing to close/clear.
+    expect(actions.closeSession).not.toHaveBeenCalled();
+    expect(actions.clearSession).not.toHaveBeenCalled();
   });
 
   it('closes and clears the created session when attach fails', async () => {
@@ -138,7 +174,6 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.clearSession).toHaveBeenCalledOnce();
     expect(order).toEqual(['close', 'clear']);
     expect(actions.setModel).not.toHaveBeenCalled();
-    expect(actions.setApprovalMode).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledWith(
       '[WebShell] failed to attach new session:',
       error,
@@ -172,15 +207,15 @@ describe('createAndAttachSessionForPrompt', () => {
       closeError,
     );
   });
-});
 
-function createDeferred<T>(): {
-  promise: Promise<T>;
-  resolve: (value?: T | PromiseLike<T>) => void;
-} {
-  let resolve!: (value?: T | PromiseLike<T>) => void;
-  const promise = new Promise<T>((res) => {
-    resolve = (value) => res(value as T | PromiseLike<T>);
+  it('forwards workspaceCwd to createSession', async () => {
+    const actions = createActions();
+    await createAndAttachSessionForPrompt({
+      sessionActions: actions,
+      workspaceCwd: '/ws/secondary',
+    });
+    expect(actions.createSession).toHaveBeenCalledWith({
+      workspaceCwd: '/ws/secondary',
+    });
   });
-  return { promise, resolve };
-}
+});

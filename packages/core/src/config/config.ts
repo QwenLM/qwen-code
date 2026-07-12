@@ -1368,6 +1368,31 @@ export interface ConfigInitializeOptions {
    * AND closes the 2N subprocess leak.
    */
   skipMcpDiscovery?: boolean;
+  /**
+   * Skip hook system and hook MessageBus initialization. Read-only replay
+   * helpers use this to avoid loading or subscribing user/workspace hooks.
+   */
+  skipHooks?: boolean;
+  /**
+   * Skip SkillManager creation and file watching. Read-only replay helpers do
+   * not need skill discovery and must not start long-lived watchers.
+   */
+  skipSkillManager?: boolean;
+  /**
+   * Force file checkpointing off for read-only replay helpers, even when the
+   * Config was constructed with checkpointing enabled.
+   */
+  skipFileCheckpointing?: boolean;
+  /**
+   * Warm the tool registry in best-effort (non-strict) mode. Read-only replay
+   * Configs set this so a tool whose constructor requires a subsystem this
+   * Config deliberately skipped (e.g. `SkillTool` needs the `SkillManager` that
+   * `skipSkillManager` omits) is logged and skipped instead of aborting
+   * `initialize()`. Replay only needs optional tool_call metadata, and
+   * `ToolCallEmitter` already falls back to the recorded tool name when a tool
+   * is absent from the registry.
+   */
+  lenientToolWarmup?: boolean;
 }
 
 const DEFAULT_BARE_CORE_TOOLS = [
@@ -1441,6 +1466,41 @@ function resolveCronRecurringMaxAgeDays(setting: number | undefined): number {
   }
   return normalizeRecurringMaxAge(raw, DEFAULT_RECURRING_MAX_AGE_DAYS);
 }
+
+/** Request from the `create_sub_session` tool to spawn a fresh top-level
+ * sub-session and run a prompt in it. */
+export interface SubSessionSpawnRequest {
+  prompt: string;
+  /** `'sent'` = resolve as soon as the prompt is dispatched; `'first-turn'` =
+   * resolve after the sub-session's first turn finishes (result returned). */
+  completion: 'sent' | 'first-turn';
+  /** Optional model service id for the sub-session. */
+  model?: string;
+  /** Optional display name for the sub-session in the session list. */
+  name?: string;
+}
+
+/** Result returned to the `create_sub_session` tool. `result` (the sub-session's
+ * first-turn output) is present only for `completion: 'first-turn'`. */
+export interface SubSessionSpawnResult {
+  sessionId: string;
+  result?: string;
+  stopReason?: string;
+  /** Whether the parent lineage was durably persisted to the sub-session's
+   * transcript. `false` = live-only (the parent link disappears from the
+   * persisted session list after a daemon restart). Absent when unknown. */
+  parentSessionPersisted?: boolean;
+}
+
+/**
+ * Injected capability that spawns a sub-session. Used by the `create_sub_session`
+ * tool. Wired ONLY by the daemon/ACP session layer (`Session.ts` →
+ * `this.client.extMethod`); absent in interactive TUI / headless (no bridge),
+ * which is precisely the tool's daemon-only gate.
+ */
+export type SubSessionSpawner = (
+  req: SubSessionSpawnRequest,
+) => Promise<SubSessionSpawnResult>;
 
 export class Config {
   private sessionId: string;
@@ -2093,6 +2153,10 @@ export class Config {
     }
     this.initialized = true;
     this.debugLogger.info('Config initialization started');
+    if (options?.skipFileCheckpointing === true) {
+      this.fileCheckpointingEnabled = false;
+      this.fileHistoryService = undefined;
+    }
 
     // Initialize centralized FileDiscoveryService
     this.getFileService();
@@ -2113,8 +2177,8 @@ export class Config {
     }
     this.debugLogger.debug('Extension manager initialized');
 
-    // Bare mode skips all hook loading and execution.
-    if (!this.getDisableAllHooks()) {
+    // Bare mode and read-only replay helpers skip all hook loading and execution.
+    if (!options?.skipHooks && !this.getDisableAllHooks()) {
       this.hookSystem = new HookSystem(this);
       await this.hookSystem.initialize();
       this.debugLogger.debug('Hook system initialized');
@@ -2186,6 +2250,22 @@ export class Config {
                   ? createHookOutput('Stop', stopResult.finalOutput)
                   : undefined;
                 stopHookCount = stopResult.allOutputs.length;
+                break;
+              }
+              case 'MessageDisplay': {
+                const messageDisplayResult =
+                  await hookSystem.fireMessageDisplayEvent(
+                    (input['message_id'] as string) || '',
+                    (input['displayed_text'] as string) || '',
+                    (input['is_final'] as boolean) || false,
+                    signal,
+                  );
+                result = messageDisplayResult.finalOutput
+                  ? createHookOutput(
+                      'MessageDisplay',
+                      messageDisplayResult.finalOutput,
+                    )
+                  : undefined;
                 break;
               }
               case 'PreToolUse': {
@@ -2317,13 +2397,18 @@ export class Config {
     }
 
     this.subagentManager = new SubagentManager(this);
-    this.skillManager = new SkillManager(this);
-    if (this.getBareMode() || this.isSafeMode()) {
-      await this.skillManager.refreshCache();
+    if (!options?.skipSkillManager) {
+      this.skillManager = new SkillManager(this);
+      if (this.getBareMode() || this.isSafeMode()) {
+        await this.skillManager.refreshCache();
+      } else {
+        await this.skillManager.startWatching();
+      }
+      this.debugLogger.debug('Skill manager initialized');
     } else {
-      await this.skillManager.startWatching();
+      this.skillManager = null;
+      this.debugLogger.debug('Skill manager skipped');
     }
-    this.debugLogger.debug('Skill manager initialized');
 
     this.memoryPressureConfig = loadMemoryPressureConfig();
     this.memoryPressureMonitor = new MemoryPressureMonitor(
@@ -2389,8 +2474,13 @@ export class Config {
     this.modelsConfig.detectAndCaptureRuntimeModel();
 
     // Warm all lazy tool factories so telemetry can access tool metadata synchronously.
-    // Use strict mode so a broken built-in tool surfaces immediately at startup.
-    await this.toolRegistry.warmAll({ strict: true });
+    // Strict by default so a broken built-in tool surfaces immediately at startup;
+    // read-only replay Configs pass `lenientToolWarmup` so a tool that cannot be
+    // constructed under their deliberately-skipped subsystems (e.g. SkillTool without
+    // a SkillManager) is logged and skipped instead of aborting initialize().
+    await this.toolRegistry.warmAll({
+      strict: options?.lenientToolWarmup !== true,
+    });
 
     // Fire-and-forget MCP discovery. Each server's tools land in the
     // registry as it becomes ready; the cli's AppContainer debounces
@@ -3532,6 +3622,8 @@ export class Config {
       this.contentGeneratorConfig.contextWindowSize = config.contextWindowSize;
       this.contentGeneratorConfig.enableCacheControl =
         config.enableCacheControl;
+      this.contentGeneratorConfig.forceGlobalCacheScope =
+        config.forceGlobalCacheScope;
       this.contentGeneratorConfig.splitToolMedia = config.splitToolMedia;
       this.contentGeneratorConfig.toolResultContentFormat =
         config.toolResultContentFormat;
@@ -3554,6 +3646,10 @@ export class Config {
       if ('enableCacheControl' in sources) {
         this.contentGeneratorConfigSources['enableCacheControl'] =
           sources['enableCacheControl'];
+      }
+      if ('forceGlobalCacheScope' in sources) {
+        this.contentGeneratorConfigSources['forceGlobalCacheScope'] =
+          sources['forceGlobalCacheScope'];
       }
       if ('contextWindowSize' in sources) {
         this.contentGeneratorConfigSources['contextWindowSize'] =
@@ -6398,6 +6494,18 @@ export class Config {
       });
     }
 
+    // create_sub_session: spawn a fresh top-level sub-session and run a prompt
+    // in it. Only functional under `qwen serve` (needs the bridge, wired as a
+    // spawner by the ACP session); the tool's execute() reports a clear
+    // daemon-only error otherwise. Registered unconditionally so the message is
+    // available rather than the tool silently missing.
+    await registerLazy(ToolNames.CREATE_SUB_SESSION, async () => {
+      const { CreateSubSessionTool } = await import(
+        '../tools/create-sub-session.js'
+      );
+      return new CreateSubSessionTool(this);
+    });
+
     // Register team collaboration tools (experimental). The team-specific
     // tools (team_create/team_delete/task_create/task_update/task_list)
     // are gated on this flag.
@@ -6535,5 +6643,22 @@ export class Config {
     }
     // Pre-init path: stash for `createToolRegistry` to consume.
     this.pendingMcpBudgetCallback = cb;
+  }
+
+  private subSessionSpawner?: SubSessionSpawner;
+
+  /**
+   * Wire the sub-session spawner used by the `create_sub_session` tool. Set by
+   * the daemon/ACP session layer (which routes it to the bridge over
+   * `extMethod`); left unset in interactive TUI / headless — the tool then
+   * reports itself as daemon-only. `undefined` clears it on session teardown.
+   */
+  setSubSessionSpawner(spawner: SubSessionSpawner | undefined): void {
+    this.subSessionSpawner = spawner;
+  }
+
+  /** The injected sub-session spawner, or undefined outside daemon mode. */
+  getSubSessionSpawner(): SubSessionSpawner | undefined {
+    return this.subSessionSpawner;
   }
 }

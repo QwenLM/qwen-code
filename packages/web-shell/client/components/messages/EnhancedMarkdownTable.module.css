@@ -8,6 +8,32 @@
   background: var(--card);
 }
 
+.densityCompact {
+  --table-cell-padding: 3px 6px;
+  --table-header-padding: 5px 7px;
+  --table-detail-padding: 7px 9px;
+  --table-detail-gap: 5px;
+  --table-line-height: 1.35;
+  --table-column-min-width: 72px;
+  --table-column-max-width: 240px;
+}
+
+.densityStandard {
+  --table-cell-padding: 6px 8px;
+  --table-header-padding: 7px 8px;
+  --table-detail-padding: 9px 11px;
+  --table-detail-gap: 6px;
+  --table-line-height: 1.45;
+}
+
+.densityComfortable {
+  --table-cell-padding: 8px 10px;
+  --table-header-padding: 9px 10px;
+  --table-detail-padding: 11px 13px;
+  --table-detail-gap: 8px;
+  --table-line-height: 1.55;
+}
+
 .toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -81,7 +107,7 @@
 }
 
 .table {
-  --action-column-width: 72px;
+  --action-column-width: 88px;
 
   width: max-content;
   min-width: 100%;
@@ -105,8 +131,8 @@
   position: sticky;
   top: 0;
   z-index: 3;
-  min-width: 120px;
-  max-width: 360px;
+  min-width: var(--table-column-min-width, 120px);
+  max-width: var(--table-column-max-width, 360px);
   overflow: visible;
   background: var(--card);
   color: var(--foreground);
@@ -132,7 +158,7 @@
   gap: 8px;
   align-items: center;
   justify-content: space-between;
-  padding: 7px 8px;
+  padding: var(--table-header-padding, 7px 8px);
   border: none;
   background: transparent;
   color: inherit;
@@ -254,6 +280,37 @@
   color: var(--foreground);
   font-size: 12px;
   font-weight: 400;
+}
+
+.columnContextMenu {
+  position: fixed;
+  z-index: 1000;
+  width: 220px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card);
+  box-shadow: 0 14px 28px rgb(0 0 0 / 30%);
+  color: var(--foreground);
+  font-size: 12px;
+}
+
+.columnContextMenuAction {
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.columnContextMenuAction:hover,
+.columnContextMenuAction:focus-visible {
+  background: var(--subtle-bg-strong);
+  outline: none;
 }
 
 .filterMenuTitle {
@@ -382,16 +439,39 @@
 }
 
 .cell {
-  min-width: 120px;
-  max-width: 360px;
-  padding: 6px 8px;
+  min-width: var(--table-column-min-width, 120px);
+  max-width: var(--table-column-max-width, 360px);
+  padding: var(--table-cell-padding, 6px 8px);
   background: var(--card);
   color: var(--foreground);
+  line-height: var(--table-line-height, 1.45);
   text-align: left;
   vertical-align: top;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   cursor: cell;
+}
+
+.cellContent,
+.detailValueContent {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.cellText,
+.detailValueText {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.cellContentCollapsed .cellText,
+.detailValueCollapsed .detailValueText {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
 }
 
 .dragging .cell {
@@ -415,6 +495,7 @@ tr:hover .selectedCell {
 
 .actionHeaderCell,
 .actionCell {
+  box-sizing: border-box;
   width: var(--action-column-width);
   min-width: var(--action-column-width);
   max-width: var(--action-column-width);
@@ -442,6 +523,13 @@ tr:hover .selectedCell {
   position: sticky;
   left: var(--action-column-width);
   z-index: 4;
+}
+
+.hasFrozenColumn .frozenHeaderCell,
+.hasFrozenColumn .frozenCell {
+  box-shadow:
+    8px 0 14px -12px rgb(0 0 0 / 55%),
+    inset -1px 0 0 var(--border, rgb(255 255 255 / 18%));
 }
 
 .stickyActionHeaderCell,
@@ -479,7 +567,9 @@ tr:hover .frozenCell.selectedCell {
       color-mix(in srgb, var(--agent-blue-500) 20%, transparent)
     ),
     var(--card);
-  box-shadow: inset 0 0 0 1px var(--agent-blue-500);
+  box-shadow:
+    8px 0 14px -12px rgb(0 0 0 / 55%),
+    inset 0 0 0 1px var(--agent-blue-500);
 }
 
 .rowDetailButton {
@@ -510,8 +600,8 @@ tr:hover .frozenCell.selectedCell {
 
 .detailPanel {
   display: grid;
-  gap: 7px;
-  padding: 10px 12px;
+  gap: var(--table-detail-gap, 6px);
+  padding: var(--table-detail-padding, 9px 11px);
 }
 
 .detailTitle {
@@ -521,13 +611,17 @@ tr:hover .frozenCell.selectedCell {
 
 .detailItem {
   display: grid;
-  grid-template-columns: minmax(90px, 180px) minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: minmax(84px, 140px) minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
 }
 
 .detailLabel {
   color: var(--muted-foreground);
   font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .detailValue {
@@ -537,9 +631,180 @@ tr:hover .frozenCell.selectedCell {
   white-space: pre-wrap;
 }
 
+.themeDark {
+  --background: #0d0d0d;
+  --foreground: #fafafa;
+  --muted-foreground: #808598;
+  --border: #2a2a2a;
+  --card: #161616;
+  --agent-blue-500: #6785ff;
+}
+
+.themeLight {
+  --background: #ffffff;
+  --foreground: #0a0a0b;
+  --muted-foreground: #a3a3a5;
+  --border: #e3e4e6;
+  --card: #ffffff;
+  --agent-blue-500: #0033ff;
+}
+
+.cellDialogBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: color-mix(in srgb, var(--background) 62%, transparent);
+}
+
+.cellDialog {
+  position: relative;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  width: min(520px, calc(100vw - 32px));
+  min-height: 190px;
+  padding: 20px 24px 16px;
+  border: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+  border-radius: 10px;
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--card) 96%, white 4%),
+    color-mix(in srgb, var(--card) 92%, black 8%)
+  );
+  box-shadow: 0 18px 56px rgb(0 0 0 / 38%);
+  color: var(--foreground);
+  font-size: 13px;
+}
+
+.cellDialogCloseIcon {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.cellDialogCloseIcon:hover {
+  color: var(--foreground);
+}
+
+.cellDialogTitle {
+  margin-bottom: 16px;
+  font-size: inherit;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.cellDialogValue {
+  min-height: 100px;
+  max-height: min(32vh, 200px);
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--background) 72%, transparent);
+  color: var(--foreground);
+  font: inherit;
+  font-weight: 600;
+  line-height: 1.45;
+  cursor: text;
+  user-select: text;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.cellDialogFooter {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  align-items: center;
+  margin-top: auto;
+  padding-top: 20px;
+}
+
+.cellDialogActions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.cellDialogButton {
+  min-width: 64px;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--foreground) 12%, transparent);
+  color: var(--foreground);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.cellDialogButton:hover {
+  background: color-mix(in srgb, var(--foreground) 18%, transparent);
+}
+
+.cellDialogPrimaryButton {
+  background: var(--agent-blue-500);
+  color: white;
+}
+
+.cellDialogPrimaryButton:hover {
+  background: color-mix(in srgb, var(--agent-blue-500) 86%, white 14%);
+}
+
+.emptyValue {
+  color: var(--muted-foreground);
+  font-style: italic;
+}
+
 .emptyState {
   padding: 16px;
   color: var(--muted-foreground);
   font-size: 13px;
   text-align: center;
+}
+
+@media (max-width: 640px) {
+  .cellDialogBackdrop {
+    padding: 10px;
+  }
+
+  .cellDialog {
+    width: 100%;
+    min-height: 0;
+    padding: 20px 14px 14px;
+  }
+
+  .cellDialogTitle {
+    margin-bottom: 14px;
+  }
+
+  .cellDialogFooter {
+    flex-direction: column;
+    align-items: stretch;
+    padding-top: 18px;
+  }
+
+  .cellDialogActions {
+    justify-content: flex-end;
+  }
+
+  .cellDialogButton {
+    min-width: 0;
+    padding: 6px 12px;
+  }
 }

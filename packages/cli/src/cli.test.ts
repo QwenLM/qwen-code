@@ -8,6 +8,7 @@ import type { Argv } from 'yargs';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import {
   copyFileSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -376,15 +377,17 @@ describe('bootstrap import boundaries', () => {
     expect(output).toBe(`${expectedVersion}\n`);
   });
 
-  it('falls through to cli.js when wrapper package.json parsing fails', () => {
+  it('falls through to cli.js when wrapper package.json lookup fails', () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-cli-entry-'));
+    const entryDir = path.join(tempDir, 'bin');
     try {
+      mkdirSync(entryDir);
       copyFileSync(
         '../../scripts/cli-entry.js',
-        path.join(tempDir, 'cli-entry.mjs'),
+        path.join(entryDir, 'cli-entry.mjs'),
       );
       writeFileSync(
-        path.join(tempDir, 'cli.js'),
+        path.join(entryDir, 'cli.js'),
         "process.stdout.write('fallback-cli\\n');\n",
       );
       const env = { ...process.env };
@@ -392,7 +395,7 @@ describe('bootstrap import boundaries', () => {
 
       const output = execFileSync(
         process.execPath,
-        [path.join(tempDir, 'cli-entry.mjs'), '--version'],
+        [path.join(entryDir, 'cli-entry.mjs'), '--version'],
         {
           encoding: 'utf8',
           env,
@@ -425,6 +428,7 @@ describe('bootstrap import boundaries', () => {
       ['reviewCommand', 'review'],
       ['serveCommand', 'serve'],
       ['sessionsCommand', 'sessions'],
+      ['updateCommand', 'update'],
     ]);
     const registeredIdentifiers = [
       ...configSource.matchAll(/\.command\((\w+Command)\)/g),

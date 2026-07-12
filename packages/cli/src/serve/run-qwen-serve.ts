@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { X509Certificate } from 'node:crypto';
+import { X509Certificate, createHash, timingSafeEqual } from 'node:crypto';
 import * as fs from 'node:fs';
 import type { Server } from 'node:http';
 import * as https from 'node:https';
@@ -19,6 +19,7 @@ import express, {
   type Response,
 } from 'express';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
+import { isWithinRoot } from '../config/path-comparison.js';
 import {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
   normalizeCompactedReplayMaxBytes,
@@ -31,7 +32,10 @@ import {
   preResolveServeFastPathHomeEnvOverrides,
   type ServeFastPathSettings,
 } from './fast-path-settings.js';
-import { resolveWorkspaceInputs } from './workspace-inputs.js';
+import {
+  MAX_REGISTERED_WORKSPACES,
+  resolveWorkspaceInputs,
+} from './workspace-inputs.js';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import type {
@@ -41,6 +45,9 @@ import type {
   TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
+// Dynamic-imported below (not at module scope) so the serve fast-path bundle
+// closure check doesn't trace create-sub-session's transitive deps through
+// the run-qwen-serve chunk. The launcher is only needed after listen().
 import { PathMutexRegistry } from './fs/path-mutex-registry.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
@@ -73,12 +80,14 @@ import {
   type ServeAuthProviderInstallRequest,
   type ServeAuthProviderInstallResult,
   type ServeOptions,
+  type ServeChannelSelection,
 } from './types.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from './workspace-registry.js';
+import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
 import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';
@@ -97,16 +106,31 @@ import { DaemonMetricsRing, computeCpuPercent } from './daemon-metrics-ring.js';
 import { createLargePipeFrameObserver } from './large-pipe-frame-observer.js';
 import type {
   ChannelWorkerSupervisor,
+  ChannelWorkerSnapshot,
   CreateChannelWorkerSupervisorOptions,
 } from './channel-worker-supervisor.js';
 import { QWEN_SERVER_TOKEN_ENV } from './channel-worker-env.js';
+import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import { channelSelectionNames } from './channel-selection.js';
+import {
+  resolveChannelWorkspaceGroups,
+  type ChannelWorkspaceGroup,
+} from './channel-workspace-grouping.js';
+import {
+  createChannelWorkerGroup,
+  type ChannelWorkerGroup,
+  type ChannelWorkerGroupSnapshot,
+} from './channel-worker-group.js';
 import {
   finalizeStartupProfile,
   profileCheckpoint,
 } from '../utils/startupProfiler.js';
-import type { ServiceInfo } from '../commands/channel/pidfile.js';
+import type {
+  ServiceInfo,
+  ServiceInfoWorker,
+} from '../commands/channel/pidfile.js';
 import { findCliEntryPath } from '../commands/channel/cli-entry-path.js';
+import { sanitizeLogText } from '@qwen-code/channel-base';
 import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
 
 // Reverse MCP channel; enabled only by explicit option or env opt-in.
@@ -170,6 +194,10 @@ type RunQwenServeOptions = Omit<ServeOptions, 'token' | 'workspace'> & {
 };
 type WorkspaceSettingsWrite =
   import('./workspace-service/types.js').WorkspaceSettingsWrite;
+type ChannelWebhookConfigRuntime = {
+  loadChannelsConfig: typeof import('../commands/channel/runtime.js').loadChannelsConfig;
+  parseChannelWebhookConfig: typeof import('../commands/channel/config-utils.js').parseChannelWebhookConfig;
+};
 
 function isPositiveIntegerMs(value: number): boolean {
   return Number.isFinite(value) && Number.isInteger(value) && value > 0;
@@ -458,6 +486,12 @@ export function extractContextFilename(value: unknown): string | undefined {
   return undefined;
 }
 
+function sessionArtifactsPersistenceAvailableFromSettings(
+  settings: { general?: { chatRecording?: unknown } } | undefined,
+): boolean {
+  return settings?.general?.chatRecording !== false;
+}
+
 /**
  * Per-workspace promise chain that serializes settings read-modify-write
  * cycles inside this process.
@@ -520,6 +554,7 @@ type ChannelServicePidfile = {
     channels: string[];
     servePid?: number;
     workerPid?: number;
+    workers?: ServiceInfoWorker[];
   }): void;
   reserveServeServiceInfo(opts: {
     channels: string[];
@@ -533,6 +568,8 @@ type ChannelWorkerRuntime = {
     opts: CreateChannelWorkerSupervisorOptions,
   ): ChannelWorkerSupervisor;
   channelServicePidfile: ChannelServicePidfile;
+  loadChannelsConfig: (typeof import('../commands/channel/runtime.js'))['loadChannelsConfig'];
+  findCliEntryPath(): string;
 };
 
 let channelWorkerRuntimePromise: Promise<ChannelWorkerRuntime> | undefined;
@@ -540,10 +577,14 @@ async function loadChannelWorkerRuntime(): Promise<ChannelWorkerRuntime> {
   channelWorkerRuntimePromise ??= Promise.all([
     import('./channel-worker-supervisor.js'),
     import('../commands/channel/pidfile.js'),
+    import('../commands/channel/runtime.js'),
+    import('../commands/channel/cli-entry-path.js'),
   ])
-    .then(([supervisor, pidfile]) => ({
+    .then(([supervisor, pidfile, channelRuntime, cliEntryPath]) => ({
       createChannelWorkerSupervisor: supervisor.createChannelWorkerSupervisor,
       channelServicePidfile: pidfile,
+      loadChannelsConfig: channelRuntime.loadChannelsConfig,
+      findCliEntryPath: cliEntryPath.findCliEntryPath,
     }))
     .catch((err: unknown) => {
       channelWorkerRuntimePromise = undefined;
@@ -552,7 +593,7 @@ async function loadChannelWorkerRuntime(): Promise<ChannelWorkerRuntime> {
   return channelWorkerRuntimePromise;
 }
 
-function createDisabledChannelWorkerSupervisor(): ChannelWorkerSupervisor {
+export function createDisabledChannelWorkerSupervisor(): ChannelWorkerSupervisor {
   const snapshot = {
     enabled: false,
     state: 'disabled' as const,
@@ -561,8 +602,17 @@ function createDisabledChannelWorkerSupervisor(): ChannelWorkerSupervisor {
   return {
     async start() {},
     async stop() {},
+    async restart() {
+      return { ...snapshot, channels: [] };
+    },
     killAllSync() {},
     snapshot: () => ({ ...snapshot, channels: [] }),
+    async enqueueWebhookTask() {
+      throw new ChannelWebhookEnqueueError(
+        'channel_worker_unavailable',
+        'Channel worker is not running.',
+      );
+    },
   };
 }
 
@@ -688,6 +738,7 @@ export interface RunQwenServeDeps {
     opts: CreateChannelWorkerSupervisorOptions,
   ) => ChannelWorkerSupervisor;
   channelServicePidfile?: ChannelServicePidfile;
+  workspaceRegistrationStore?: WorkspaceRegistrationStore;
 }
 
 function shouldPreheatBridge(deps: RunQwenServeDeps): boolean {
@@ -754,6 +805,25 @@ function loadSettingsRuntimeModules(): Promise<{
     trustedFolders,
   }));
   return settingsRuntimePromise;
+}
+
+let channelWebhookConfigRuntimePromise:
+  | Promise<ChannelWebhookConfigRuntime>
+  | undefined;
+function loadChannelWebhookConfigRuntime(): Promise<ChannelWebhookConfigRuntime> {
+  channelWebhookConfigRuntimePromise ??= Promise.all([
+    import('../commands/channel/runtime.js'),
+    import('../commands/channel/config-utils.js'),
+  ])
+    .then(([channelRuntime, configUtils]) => ({
+      loadChannelsConfig: channelRuntime.loadChannelsConfig,
+      parseChannelWebhookConfig: configUtils.parseChannelWebhookConfig,
+    }))
+    .catch((err: unknown) => {
+      channelWebhookConfigRuntimePromise = undefined;
+      throw err;
+    });
+  return channelWebhookConfigRuntimePromise;
 }
 
 async function loadServeRuntimeModules() {
@@ -834,6 +904,8 @@ function sessionIdleTimeoutMs(value: number | undefined): number {
 function currentServeFeaturesForRunQwenServe(
   opts: ServeOptions,
   sessionShellCommandEnabled: boolean,
+  sessionArtifactsPersistenceAvailable: boolean,
+  env: Readonly<Record<string, string | undefined>>,
 ): string[] {
   return getAdvertisedServeFeatures(undefined, {
     requireAuth: opts.requireAuth === true,
@@ -848,16 +920,15 @@ function currentServeFeaturesForRunQwenServe(
       : {}),
     persistSettingAvailable: true,
     sessionShellCommandEnabled,
+    sessionArtifactsPersistenceAvailable,
     rateLimit: opts.rateLimit === true,
     reloadAvailable: true,
+    channelReloadAvailable: opts.channelSelection !== undefined,
     // Advertise the same WS feature flags as the runtime path (serve-features.ts)
     // so the bootstrap `/capabilities` window doesn't briefly under-report them.
     clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
     cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
-    browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(
-      opts,
-      process.env,
-    ),
+    browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(opts, env),
   });
 }
 
@@ -866,7 +937,9 @@ function createBootstrapCapabilities(input: {
   boundWorkspace: string;
   qwenCodeVersion?: string;
   sessionShellCommandEnabled: boolean;
+  sessionArtifactsPersistenceAvailable: boolean;
   permissionPolicy: PermissionPolicy | undefined;
+  env: Readonly<Record<string, string | undefined>>;
 }): CapabilitiesEnvelope {
   return {
     v: CAPABILITIES_SCHEMA_VERSION,
@@ -878,6 +951,8 @@ function createBootstrapCapabilities(input: {
     features: currentServeFeaturesForRunQwenServe(
       input.opts,
       input.sessionShellCommandEnabled,
+      input.sessionArtifactsPersistenceAvailable,
+      input.env,
     ),
     modelServices: [],
     workspaceCwd: input.boundWorkspace,
@@ -1053,12 +1128,14 @@ function createBootstrapServeApp(input: {
   daemonLog: DaemonLogger;
   qwenCodeVersion?: string;
   sessionShellCommandEnabled: boolean;
+  sessionArtifactsPersistenceAvailable: boolean;
   permissionPolicy: PermissionPolicy | undefined;
   multiWorkspaceCapabilitiesRequireRuntime: boolean;
   getRuntimeError: () => string | undefined;
   getChannelWorkerSnapshot: () => ReturnType<
     ChannelWorkerSupervisor['snapshot']
   >;
+  getChannelWorkerSnapshots: () => ChannelWorkerGroupSnapshot[];
   onHealthServed?: () => void;
 }): Application {
   const {
@@ -1069,10 +1146,12 @@ function createBootstrapServeApp(input: {
     daemonLog,
     qwenCodeVersion,
     sessionShellCommandEnabled,
+    sessionArtifactsPersistenceAvailable,
     permissionPolicy,
     multiWorkspaceCapabilitiesRequireRuntime,
     getRuntimeError,
     getChannelWorkerSnapshot,
+    getChannelWorkerSnapshots,
     onHealthServed,
   } = input;
   const app = express();
@@ -1134,7 +1213,9 @@ function createBootstrapServeApp(input: {
         boundWorkspace,
         qwenCodeVersion,
         sessionShellCommandEnabled,
+        sessionArtifactsPersistenceAvailable,
         permissionPolicy,
+        env: process.env,
       }),
     );
   });
@@ -1150,6 +1231,7 @@ function createBootstrapServeApp(input: {
     }
     const runtimeError = getRuntimeError();
     const channelWorker = getChannelWorkerSnapshot();
+    const channelWorkers = getChannelWorkerSnapshots();
     const runtimeFailed = runtimeError !== undefined;
     const issue: DaemonStatusIssue = runtimeError
       ? {
@@ -1215,6 +1297,8 @@ function createBootstrapServeApp(input: {
         features: currentServeFeaturesForRunQwenServe(
           opts,
           sessionShellCommandEnabled,
+          sessionArtifactsPersistenceAvailable,
+          process.env,
         ),
       },
       runtime: {
@@ -1227,6 +1311,7 @@ function createBootstrapServeApp(input: {
         },
         channel: { live: false },
         channelWorker,
+        ...(channelWorkers.length > 0 ? { channelWorkers } : {}),
         transport: {
           restSseActive: 0,
           acp: {
@@ -1295,6 +1380,7 @@ function createDelegatingServeApp(
     startRuntime?: () => void;
     runtimeReady?: Promise<void>;
     authenticateDeferredRuntimeRequest?: RequestHandler;
+    authenticateDeferredChannelWebhookRequest?: RequestHandler;
   } = {},
 ): Application {
   const app = express();
@@ -1309,16 +1395,15 @@ function createDelegatingServeApp(
         options.startRuntime &&
         options.runtimeReady
       ) {
-        if (
-          options.authenticateDeferredRuntimeRequest &&
-          !runSynchronousRequestGate(
-            options.authenticateDeferredRuntimeRequest,
-            req,
-            res,
-            next,
-          )
-        ) {
-          return;
+        const webhookRequest = isChannelWebhookRequest(req);
+        const authGate = webhookRequest
+          ? (options.authenticateDeferredChannelWebhookRequest ??
+            options.authenticateDeferredRuntimeRequest)
+          : options.authenticateDeferredRuntimeRequest;
+        if (authGate) {
+          if (!runSynchronousRequestGate(authGate, req, res, next)) {
+            return;
+          }
         }
         options.startRuntime();
         try {
@@ -1346,6 +1431,104 @@ function isBootstrapServeRoute(req: Request): boolean {
       ? req.path.slice(0, -1)
       : req.path;
   return BOOTSTRAP_SERVE_PATHS.has(path);
+}
+
+function isChannelWebhookRequest(req: Request): boolean {
+  return (
+    req.method === 'POST' &&
+    /^\/channels\/[^/]+\/webhooks\/[^/]+\/?$/u.test(req.path)
+  );
+}
+
+function createDeferredChannelWebhookAuth(
+  resolveWorkspace: (channelName: string) => string,
+  runtime: ChannelWebhookConfigRuntime,
+  daemonLog: Pick<DaemonLogger, 'warn'>,
+): RequestHandler {
+  return (req, res, next) => {
+    const match = /^\/channels\/([^/]+)\/webhooks\/([^/]+)\/?$/u.exec(req.path);
+    const channelName = decodeDeferredWebhookPathSegment(match?.[1]);
+    const source = decodeDeferredWebhookPathSegment(match?.[2]);
+    if (!channelName || !source) {
+      daemonLog.warn('deferred webhook auth failed', {
+        channelName: channelName ?? 'unknown',
+        source: source ?? 'unknown',
+        reason: 'invalid webhook path',
+      });
+      res.status(401).json({ error: 'Invalid webhook secret' });
+      return;
+    }
+
+    const secret = readDeferredWebhookSecret(
+      runtime,
+      resolveWorkspace(channelName),
+      channelName,
+      source,
+    );
+    if (!matchesWebhookSecret(req.get('x-qwen-webhook-secret'), secret)) {
+      daemonLog.warn('deferred webhook auth failed', {
+        channelName,
+        source,
+        reason: secret ? 'secret mismatch' : 'source not configured',
+      });
+      res.status(401).json({ error: 'Invalid webhook secret' });
+      return;
+    }
+
+    next();
+  };
+}
+
+function decodeDeferredWebhookPathSegment(
+  segment: string | undefined,
+): string | undefined {
+  if (segment === undefined) return undefined;
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return undefined;
+  }
+}
+
+function readDeferredWebhookSecret(
+  runtime: ChannelWebhookConfigRuntime,
+  workspace: string,
+  channelName: string,
+  source: string,
+): string | undefined {
+  try {
+    const rawConfig = runtime.loadChannelsConfig(workspace)[channelName];
+    if (typeof rawConfig !== 'object' || rawConfig === null) {
+      return undefined;
+    }
+    return runtime.parseChannelWebhookConfig(
+      channelName,
+      rawConfig as Record<string, unknown>,
+    )?.sources[source]?.secret;
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    writeStderrLine(
+      `[webhook-secret] failed to read deferred webhook secret for ${sanitizeLogText(channelName, 128)}/${sanitizeLogText(source, 128)}: ${sanitizeLogText(reason, 512)}`,
+    );
+    return undefined;
+  }
+}
+
+function matchesWebhookSecret(
+  candidate: string | undefined,
+  expected: string | undefined,
+): boolean {
+  if (
+    typeof candidate !== 'string' ||
+    typeof expected !== 'string' ||
+    expected.length === 0
+  ) {
+    return false;
+  }
+
+  const expectedDigest = createHash('sha256').update(expected).digest();
+  const candidateDigest = createHash('sha256').update(candidate).digest();
+  return timingSafeEqual(expectedDigest, candidateDigest);
 }
 
 function isCorsPreflightRequest(req: Request): boolean {
@@ -1782,6 +1965,70 @@ export async function runQwenServe(
       }
     }
   }
+  if (workspaceInputs.length > MAX_REGISTERED_WORKSPACES) {
+    throw new Error(
+      `At most ${MAX_REGISTERED_WORKSPACES} --workspace values may be registered.`,
+    );
+  }
+  let workspaceRegistrationStore = deps.workspaceRegistrationStore;
+  if (
+    workspaceRegistrationStore === undefined &&
+    process.env['QWEN_SERVE_NO_PERSISTENT_REGISTRATION'] !== '1'
+  ) {
+    const { WorkspaceRegistrationStore } = await import(
+      './workspace-registration-store.js'
+    );
+    workspaceRegistrationStore = new WorkspaceRegistrationStore(boundWorkspace);
+  }
+  if (workspaceRegistrationStore) {
+    try {
+      const stored = await workspaceRegistrationStore.read();
+      for (const storedWorkspace of stored.workspaces) {
+        let cwd: string;
+        try {
+          cwd = validateAndCanonicalizeWorkspace(storedWorkspace);
+        } catch (err) {
+          writeStderrLine(
+            `qwen serve: skipping persisted workspace registration ${JSON.stringify(
+              storedWorkspace,
+            )}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          continue;
+        }
+        if (workspaceInputs.some((workspace) => workspace.cwd === cwd)) {
+          continue;
+        }
+        const nested = workspaceInputs.some(
+          (workspace) =>
+            isWithinRoot(cwd, workspace.cwd) ||
+            isWithinRoot(workspace.cwd, cwd),
+        );
+        if (nested) {
+          writeStderrLine(
+            `qwen serve: skipping persisted workspace registration ${JSON.stringify(
+              storedWorkspace,
+            )}: path nests with an explicit or earlier restored workspace`,
+          );
+          continue;
+        }
+        if (workspaceInputs.length >= MAX_REGISTERED_WORKSPACES) {
+          writeStderrLine(
+            `qwen serve: skipping persisted workspace registration ${JSON.stringify(
+              storedWorkspace,
+            )}: workspace limit reached`,
+          );
+          continue;
+        }
+        workspaceInputs.push({ raw: storedWorkspace, cwd });
+      }
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: failed to read persisted workspace registrations: ${
+          err instanceof Error ? err.message : String(err)
+        }; continuing with explicit workspaces only`,
+      );
+    }
+  }
   if (workspaceInputs.length > 1 && deps.bridge) {
     throw new Error(
       'Injected bridge dependencies are only supported with a single workspace; ' +
@@ -1802,9 +2049,12 @@ export async function runQwenServe(
   let permissionPolicy: PermissionPolicy | undefined;
   let permissionConsensusQuorum: number | undefined;
   let bootSettings: ServeFastPathSettings | undefined;
+  let sessionArtifactsPersistenceAvailable = true;
   try {
     bootSettings =
       deps.bootSettings ?? loadServeFastPathSettings(boundWorkspace);
+    sessionArtifactsPersistenceAvailable =
+      sessionArtifactsPersistenceAvailableFromSettings(bootSettings);
     contextFilenameForInit = extractContextFilename(
       bootSettings.context?.fileName,
     );
@@ -2073,21 +2323,86 @@ export async function runQwenServe(
     daemonMetricsSampler?.dispose();
     daemonMetricsSampler = undefined;
   };
-  let channelWorker: ChannelWorkerSupervisor =
-    createDisabledChannelWorkerSupervisor();
-  const getChannelWorkerSnapshot = () => channelWorker.snapshot();
-  const writeChannelWorkerPidfile = (
-    snapshot = channelWorker.snapshot(),
-    options: { clearWorkerPid?: boolean } = {},
-  ): void => {
+  let channelWorkerGroup: ChannelWorkerGroup | undefined;
+  let channelWorkspaceGroups: readonly ChannelWorkspaceGroup[] | undefined;
+  const getChannelWebhookConfigSources = () => {
+    if (workspaceInputs.length <= 1 || !opts.channelSelection) {
+      return [{ workspaceCwd: boundWorkspace }];
+    }
+    return (channelWorkspaceGroups ?? []).map((group) => ({
+      workspaceCwd: group.workspaceCwd,
+      ...(group.selection.mode === 'names'
+        ? { channelNames: group.selection.names }
+        : {}),
+    }));
+  };
+  const resolveChannelWebhookWorkspace = (channelName: string): string =>
+    getChannelWebhookConfigSources().find(
+      (source) =>
+        !source.channelNames || source.channelNames.includes(channelName),
+    )?.workspaceCwd ?? boundWorkspace;
+  let closeServerAfterChannelWorkerStartupFailure = false;
+  let runtimeFailureListenerClose: Promise<void> | undefined;
+  const getChannelWorkerSnapshot = (): ChannelWorkerSnapshot =>
+    channelWorkerGroup?.primarySnapshot() ?? {
+      enabled: false,
+      state: 'disabled',
+      channels: [],
+    };
+  const getChannelWorkerSnapshots = (): ChannelWorkerGroupSnapshot[] =>
+    channelWorkerGroup?.snapshots() ?? [];
+  const reloadChannelWorker = async (): Promise<ChannelWorkerSnapshot> => {
+    if (!channelWorkerGroup) {
+      return { enabled: false, state: 'disabled' as const, channels: [] };
+    }
+    let snapshots: ChannelWorkerGroupSnapshot[] = [];
+    try {
+      snapshots = await channelWorkerGroup.restart();
+    } finally {
+      writeChannelWorkerPidfile();
+    }
+    return (
+      snapshots.find((snapshot) => snapshot.primary) ??
+      snapshots[0] ?? {
+        enabled: false,
+        state: 'disabled' as const,
+        channels: [],
+      }
+    );
+  };
+  // Rewrite the full worker list from the current group snapshots on every
+  // ready/exit. A synchronous full rewrite (rather than a read-modify-write of
+  // a single entry) keeps concurrent per-worker updates from losing each other.
+  const isLiveWorker = (snapshot: ChannelWorkerGroupSnapshot): boolean =>
+    snapshot.state === 'running' || snapshot.state === 'starting';
+  const writeChannelWorkerPidfile = (): void => {
     if (!opts.channelSelection || !channelServicePidfile) return;
+    const snapshots = getChannelWorkerSnapshots();
+    const workers: ServiceInfoWorker[] = snapshots.map((snapshot) => ({
+      workspaceId: snapshot.workspaceId,
+      workspaceCwd: snapshot.workspaceCwd,
+      channels: snapshot.channels,
+      // Drop a stale pid (worker exited/failed/stopped) so readers never signal
+      // a dead process — mirrors the pre-4b clear-on-exit behavior.
+      ...(isLiveWorker(snapshot) && snapshot.pid !== undefined
+        ? { workerPid: snapshot.pid }
+        : {}),
+    }));
+    const channels = [
+      ...new Set(snapshots.flatMap((snapshot) => snapshot.channels)),
+    ];
+    const primary = snapshots.find((snapshot) => snapshot.primary);
+    // Only surface the per-workspace worker list in multi-workspace mode; a
+    // single-workspace daemon keeps the byte-identical channels/workerPid shape.
+    const includeWorkers = workspaceInputs.length > 1 && workers.length > 0;
     try {
       channelServicePidfile.writeServeServiceInfo({
-        channels: snapshot.channels,
+        channels,
         servePid: process.pid,
-        ...(!options.clearWorkerPid && snapshot.pid !== undefined
-          ? { workerPid: snapshot.pid }
+        ...(primary && isLiveWorker(primary) && primary.pid !== undefined
+          ? { workerPid: primary.pid }
           : {}),
+        ...(includeWorkers ? { workers } : {}),
       });
     } catch (err) {
       daemonLog.warn(
@@ -2536,12 +2851,27 @@ export async function runQwenServe(
           );
         }
       });
+    // `create_sub_session` tool: spawn a fresh top-level sub-session on request
+    // from a child's agent turn and (for 'first-turn') return its result.
+    // Dynamic-imported (not at module scope) so the serve fast-path bundle
+    // closure check doesn't trace create-sub-session's transitive deps.
+    const { createSubSessionLauncher } = await import(
+      './create-sub-session.js'
+    );
+    // Late-binds the bridge (constructed just below) via `() => bridgeRef`. Only
+    // wired on the daemon-created bridge — an injected `deps.bridge` (embed/test)
+    // brings its own options.
+    const subSessionLauncher = createSubSessionLauncher({
+      getBridge: () => bridgeRef,
+      boundWorkspace,
+    });
     const bridge =
       deps.bridge ??
       runtime.createAcpSessionBridge({
         // Reverse tool channel: let `BridgeClient.extMethod` reach the WS
         // connection that hosts a named client MCP server (#5626).
         clientMcpSender: clientMcpSenderRegistry.lookup,
+        onCreateSubSession: subSessionLauncher.launch,
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
         sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
@@ -2600,6 +2930,7 @@ export async function runQwenServe(
       persistDisabledTools: persistDisabledToolsFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
+      preheatAcpChild: () => bridge.preheat(),
       reloadDaemonEnv: (workspace) =>
         withSettingsLock(workspace, async () => {
           const fresh = settingsRuntime.settings.loadSettings(workspace, {
@@ -2746,6 +3077,11 @@ export async function runQwenServe(
       };
     };
 
+    // Collects stop() callbacks from every per-workspace sub-session launcher
+    // (primary + secondaries). Called during shutdown so no new sub-sessions
+    // are admitted while bridges are being torn down.
+    const subSessionStoppers: Array<() => void> = [];
+
     for (const workspaceInput of workspaceInputs.slice(1)) {
       let secondarySettings:
         | ReturnType<SettingsRuntime['loadSettings']>
@@ -2808,8 +3144,20 @@ export async function runQwenServe(
           : {}),
       });
       const secondaryClientMcpSenderRegistry = new ClientMcpSenderRegistry();
+      // Wire sub-session support for the secondary workspace too — without
+      // this, create_sub_session calls from sessions bound to a secondary
+      // workspace hit methodNotFound.
+      // eslint-disable-next-line prefer-const -- assigned once after bridge creation; `let` required because the launcher closure captures it before the assignment.
+      let secondaryBridgeRef:
+        | ReturnType<typeof runtime.createAcpSessionBridge>
+        | undefined;
+      const secondarySubSessionLauncher = createSubSessionLauncher({
+        getBridge: () => secondaryBridgeRef,
+        boundWorkspace: workspaceInput.cwd,
+      });
       const secondaryBridge = runtime.createAcpSessionBridge({
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
+        onCreateSubSession: secondarySubSessionLauncher.launch,
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
         sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
@@ -2855,8 +3203,10 @@ export async function runQwenServe(
             fresh.setValue(WORKSPACE_SETTING_SCOPE, 'tools.approvalMode', mode);
           }),
       });
+      secondaryBridgeRef = secondaryBridge;
       runtimeBridges.push(secondaryBridge);
       internalRuntimeBridgesForCleanup.push(secondaryBridge);
+      subSessionStoppers.push(secondarySubSessionLauncher.stop);
       const secondaryWorkspaceService = runtime.createDaemonWorkspaceService({
         boundWorkspace: workspaceInput.cwd,
         contextFilename: contextFilenameForInit ?? 'QWEN.md',
@@ -2868,6 +3218,7 @@ export async function runQwenServe(
         workspaceSkillsStatusProvider:
           runtime.createWorkspaceSkillsStatusProvider(),
         isChannelLive: () => secondaryBridge.isChannelLive(),
+        preheatAcpChild: () => secondaryBridge.preheat(),
         persistDisabledTools: persistDisabledToolsFn,
         persistSetting: persistSettingFn,
         persistSettings: persistSettingsFn,
@@ -3007,7 +3358,7 @@ export async function runQwenServe(
         // limiter are both toggleable).
         const acp = (
           app.locals?.['acpHandle'] as AcpHttpHandle | undefined
-        )?.registry.getSnapshot();
+        )?.getSnapshot();
         const hits = getRateLimiter(app)?.getHitCounts();
         const rejectedTotal = hits
           ? hits.prompt + hits.mutation + hits.read
@@ -3102,8 +3453,212 @@ export async function runQwenServe(
       },
     };
 
+    // Factory for dynamically creating workspace runtimes (POST /workspaces).
+    const createDynamicWorkspaceRuntime = async (
+      cwd: string,
+    ): Promise<import('./workspace-registry.js').WorkspaceRuntime> => {
+      let wsSettings: ReturnType<SettingsRuntime['loadSettings']> | undefined;
+      try {
+        wsSettings = settingsRuntime.settings.loadSettings(cwd);
+      } catch (err) {
+        // Match the startup secondary-workspace path: surface why full settings
+        // couldn't be read instead of silently falling back to defaults.
+        writeStderrLine(
+          `qwen serve: could not read full settings for dynamic workspace ` +
+            `${cwd} (${err instanceof Error ? err.message : String(err)}); ` +
+            `falling back to defaults.`,
+        );
+      }
+      const trusted = wsSettings
+        ? settingsRuntime.trustedFolders.getWorkspaceTrustStatus(
+            wsSettings.merged,
+            cwd,
+          ).effective.state === 'trusted'
+        : false;
+      const wsEnv = createRuntimeEnvMetadata(cwd, wsSettings);
+      const wsHash = core.hashDaemonWorkspace(cwd);
+      const wsFsFactory = runtime.resolveBridgeFsFactory({
+        boundWorkspaces: [cwd],
+        trusted,
+        emit: deps.fsAuditEmit,
+        pathLocks: sharedPathLocks,
+        ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
+      });
+      const wsChannelFactory = runtime.createSpawnChannelFactory({
+        sourceEnv: wsEnv.effectiveEnv,
+        onDiagnosticLine: diagnosticSink,
+        pipeHooks: {
+          onMessageSent: (bytes) => recordPipeMessage('outbound', bytes),
+          onMessageReceived: (bytes) => recordPipeMessage('inbound', bytes),
+          onMessageObserved: ({ direction, bytes, message }) =>
+            observeLargePipeFrame({
+              direction: daemonPipeDirection(direction),
+              bytes,
+              message,
+            }),
+        },
+        ...(opts.experimentalLsp === true
+          ? { extraArgs: ['--experimental-lsp'] }
+          : {}),
+      });
+      const wsClientMcpRegistry = new ClientMcpSenderRegistry();
+      // eslint-disable-next-line prefer-const
+      let wsBridgeRef:
+        | ReturnType<typeof runtime.createAcpSessionBridge>
+        | undefined;
+      const wsSubSessionLauncher = createSubSessionLauncher({
+        getBridge: () => wsBridgeRef,
+        boundWorkspace: cwd,
+      });
+      const wsBridge = runtime.createAcpSessionBridge({
+        clientMcpSender: wsClientMcpRegistry.lookup,
+        onCreateSubSession: wsSubSessionLauncher.launch,
+        maxSessions: opts.maxSessions,
+        freshSessionAdmission: totalSessionAdmission.admit,
+        sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
+        ...(opts.maxPendingPromptsPerSession !== undefined
+          ? { maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession }
+          : {}),
+        ...(opts.eventRingSize !== undefined
+          ? { eventRingSize: opts.eventRingSize }
+          : {}),
+        ...(opts.compactedReplayMaxBytes !== undefined
+          ? { compactedReplayMaxBytes: opts.compactedReplayMaxBytes }
+          : {}),
+        ...(opts.channelIdleTimeoutMs !== undefined
+          ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
+          : {}),
+        ...(opts.sessionReapIntervalMs !== undefined
+          ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
+          : {}),
+        ...(opts.sessionIdleTimeoutMs !== undefined
+          ? { sessionIdleTimeoutMs: opts.sessionIdleTimeoutMs }
+          : {}),
+        ...(opts.permissionResponseTimeoutMs !== undefined
+          ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
+          : {}),
+        boundWorkspace: cwd,
+        sessionShellCommandEnabled,
+        childEnvOverrides,
+        channelFactory: wsChannelFactory,
+        onDiagnosticLine: diagnosticSink,
+        telemetry: createRuntimeBridgeTelemetry(wsHash),
+        ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+        ...(permissionConsensusQuorum !== undefined
+          ? { permissionConsensusQuorum }
+          : {}),
+        permissionAudit: permissionAuditPublisher,
+        statusProvider: runtime.createDaemonStatusProvider({
+          env: wsEnv.effectiveEnv,
+        }),
+        fileSystem: createBridgeFileSystemAdapter(wsFsFactory),
+        persistApprovalMode: (workspace, mode) =>
+          withSettingsLock(workspace, async () => {
+            const fresh = settingsRuntime.settings.loadSettings(workspace);
+            fresh.setValue(WORKSPACE_SETTING_SCOPE, 'tools.approvalMode', mode);
+          }),
+      });
+      wsBridgeRef = wsBridge;
+      const wsService = runtime.createDaemonWorkspaceService({
+        boundWorkspace: cwd,
+        contextFilename: contextFilenameForInit ?? 'QWEN.md',
+        statusProvider: runtime.createDaemonStatusProvider({
+          env: wsEnv.effectiveEnv,
+        }),
+        workspaceProvidersStatusProvider:
+          runtime.createWorkspaceProvidersStatusProvider({
+            env: wsEnv.effectiveEnv,
+          }),
+        workspaceSkillsStatusProvider:
+          runtime.createWorkspaceSkillsStatusProvider(),
+        isChannelLive: () => wsBridge.isChannelLive(),
+        preheatAcpChild: () => wsBridge.preheat(),
+        persistDisabledTools: persistDisabledToolsFn,
+        persistSetting: persistSettingFn,
+        persistSettings: persistSettingsFn,
+        reloadDaemonEnv: (workspace) =>
+          withSettingsLock(workspace, async () => {
+            const fresh = settingsRuntime.settings.loadSettings(workspace, {
+              skipLoadEnvironment: true,
+            });
+            const result = settingsRuntime.settings.reloadEnvironment(
+              fresh.merged,
+              workspace,
+            );
+            // Mirror the startup secondary-workspace path: rebuild the runtime
+            // env snapshot and update the metadata so `.env` changes actually
+            // propagate to child processes spawned by this workspace's bridge.
+            try {
+              const refreshedRuntimeEnv =
+                settingsRuntime.environment.buildRuntimeEnvironment(
+                  fresh.merged,
+                  workspace,
+                  daemonRuntimeBaseEnv,
+                );
+              logRuntimeEnvFileReadFailures(workspace, refreshedRuntimeEnv);
+              wsEnv.replace(refreshedRuntimeEnv.effectiveEnv);
+              wsEnv.metadata.envFileReadFailed =
+                refreshedRuntimeEnv.envFileReadFailed;
+              wsEnv.metadata.envFileReadFailures.splice(
+                0,
+                wsEnv.metadata.envFileReadFailures.length,
+                ...refreshedRuntimeEnv.envFileReadFailures,
+              );
+              wsEnv.metadata.overlayKeys.splice(
+                0,
+                wsEnv.metadata.overlayKeys.length,
+                ...refreshedRuntimeEnv.overlayKeys,
+              );
+              wsEnv.metadata.envFilePaths.splice(
+                0,
+                wsEnv.metadata.envFilePaths.length,
+                ...refreshedRuntimeEnv.envFilePaths,
+              );
+              delete wsEnv.metadata.fallbackReason;
+            } catch (err) {
+              wsEnv.metadata.fallbackReason =
+                err instanceof Error ? err.message : String(err);
+              daemonLog.warn(
+                'failed to rebuild dynamic runtime env snapshot after daemon env reload; preserving previous runtime env',
+                {
+                  workspace,
+                  error: wsEnv.metadata.fallbackReason,
+                },
+              );
+            }
+            return result;
+          }),
+        queryWorkspaceStatus: (method, idle) =>
+          wsBridge.queryWorkspaceStatus(method, idle),
+        invokeWorkspaceCommand: (method, params, invokeOpts) =>
+          wsBridge.invokeWorkspaceCommand(method, params, invokeOpts),
+        refreshExtensionsForAllSessions: () =>
+          wsBridge.refreshExtensionsForAllSessions(),
+        publishWorkspaceEvent: (event) => wsBridge.publishWorkspaceEvent(event),
+      });
+      // Register shared-array cleanup only after the runtime is fully built, so
+      // a throw during createDaemonWorkspaceService (or any later step) can't
+      // leave an orphaned bridge/channel in the shutdown arrays.
+      runtimeBridges.push(wsBridge);
+      internalRuntimeBridgesForCleanup.push(wsBridge);
+      subSessionStoppers.push(wsSubSessionLauncher.stop);
+      return {
+        workspaceId: wsHash,
+        workspaceCwd: cwd,
+        primary: false,
+        trusted,
+        env: wsEnv.metadata,
+        bridge: wsBridge,
+        workspaceService: wsService,
+        routeFileSystemFactory: wsFsFactory,
+        clientMcpSenderRegistry: wsClientMcpRegistry,
+      };
+    };
+
     const app = runtime.createServeApp(opts, () => actualPort, {
       workspaceRegistry,
+      createWorkspaceRuntime: createDynamicWorkspaceRuntime,
+      workspaceRegistrationStore,
       bridge,
       webShellDir,
       boundWorkspace,
@@ -3118,6 +3673,21 @@ export async function runQwenServe(
       primaryRuntimeEnv,
       daemonLog,
       getChannelWorkerSnapshot,
+      getChannelWorkerSnapshots,
+      channelWebhookConfigSources: getChannelWebhookConfigSources(),
+      enqueueChannelWebhookTask: async (task) => {
+        if (!channelWorkerGroup) {
+          throw new ChannelWebhookEnqueueError(
+            'channel_worker_unavailable',
+            'Channel worker is not running.',
+          );
+        }
+        return channelWorkerGroup.enqueueWebhookTask(task);
+      },
+      // Gate both the `channel_reload` capability and the reload route on the
+      // presence of this dep, so it is advertised only when a channel worker
+      // exists to reload.
+      ...(opts.channelSelection ? { reloadChannelWorker } : {}),
       getPerfSnapshot: () => ({
         eventLoop: currentDaemonEventLoopMonitor.snapshot(),
         promptQueueWait: {
@@ -3145,6 +3715,10 @@ export async function runQwenServe(
       persistDisabledTools: persistDisabledToolsFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
+      sessionArtifactsPersistenceAvailable:
+        sessionArtifactsPersistenceAvailableFromSettings(
+          runtimeBootSettings?.merged,
+        ),
       installAuthProvider: (req) =>
         withSettingsLock(
           boundWorkspace,
@@ -3190,15 +3764,23 @@ export async function runQwenServe(
           },
         ),
     });
+    // Park the sub-session launcher's stop on app.locals so the close handler
+    // can flip it off before tearing down the bridge it spawns into (symmetric
+    // with stopScheduledTaskKeepalive). Defensive: a launch during drain would
+    // otherwise just fail its spawnOrAttach against the shutting-down bridge.
+    (
+      app.locals as { subSessionStoppers?: Array<() => void> }
+    ).subSessionStoppers = subSessionStoppers;
+    subSessionStoppers.push(subSessionLauncher.stop);
     return { app, bridge };
   };
 
   if (deps.bridge) {
     const runtime = await buildRuntime();
     runtimeAppForCleanup = runtime.app;
-    runtimeApp = runtime.app;
     bridgeRef = runtime.bridge;
     if (!opts.channelSelection) {
+      runtimeApp = runtime.app;
       runtimeStartupSettled = true;
       markRuntimeReady();
     }
@@ -3214,14 +3796,23 @@ export async function runQwenServe(
     daemonLog,
     qwenCodeVersion: cliVersion,
     sessionShellCommandEnabled,
+    sessionArtifactsPersistenceAvailable,
     permissionPolicy,
     multiWorkspaceCapabilitiesRequireRuntime: workspaceInputs.length > 1,
     getRuntimeError: () => runtimeStartupError,
     getChannelWorkerSnapshot,
+    getChannelWorkerSnapshots,
     onHealthServed: deferRuntimeUntilFirstHealth
       ? () => startRuntimeAfterHealth?.()
       : undefined,
   });
+  const deferredChannelWebhookAuth = deferRuntimeUntilFirstHealth
+    ? createDeferredChannelWebhookAuth(
+        resolveChannelWebhookWorkspace,
+        await loadChannelWebhookConfigRuntime(),
+        daemonLog,
+      )
+    : undefined;
   const app =
     runtimeApp ??
     createDelegatingServeApp(bootstrapApp, () => runtimeApp, {
@@ -3229,6 +3820,7 @@ export async function runQwenServe(
       startRuntime: () => startRuntimeForRequest?.(),
       runtimeReady,
       authenticateDeferredRuntimeRequest: bearerAuth(opts.token),
+      authenticateDeferredChannelWebhookRequest: deferredChannelWebhookAuth,
     });
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but
@@ -3279,6 +3871,59 @@ export async function runQwenServe(
     );
   }
 
+  const channelValidationSettingsRuntime =
+    opts.channelSelection && workspaceInputs.length > 1
+      ? await loadSettingsRuntimeModules()
+      : undefined;
+  const resolveChannelWorkspaceGroupsAtListen = () => {
+    if (
+      !opts.channelSelection ||
+      workspaceInputs.length <= 1 ||
+      !channelValidationSettingsRuntime ||
+      !channelRuntime
+    ) {
+      return undefined;
+    }
+    const settingsByWorkspace = new Map<
+      string,
+      ReturnType<SettingsRuntime['loadSettings']>
+    >();
+    const workspaces = workspaceInputs.map((workspace, index) => {
+      const settings = channelValidationSettingsRuntime.settings.loadSettings(
+        workspace.cwd,
+      );
+      settingsByWorkspace.set(workspace.cwd, settings);
+      const trusted =
+        index === 0 && deps.trustedWorkspace !== undefined
+          ? deps.trustedWorkspace
+          : channelValidationSettingsRuntime.trustedFolders.getWorkspaceTrustStatus(
+              settings.merged,
+              workspace.cwd,
+            ).effective.state === 'trusted';
+      return {
+        workspaceCwd: workspace.cwd,
+        primary: index === 0,
+        trusted,
+      };
+    });
+    const grouping = resolveChannelWorkspaceGroups({
+      workspaces,
+      selection: opts.channelSelection,
+      loadChannelsConfig: (cwd) => {
+        const settings = settingsByWorkspace.get(cwd);
+        if (!settings) return {};
+        return channelRuntime.loadChannelsConfig(cwd, settings);
+      },
+    });
+    if (!grouping.ok) {
+      throw Object.assign(new Error(grouping.error.message), {
+        code: grouping.error.code,
+        ...(grouping.error.channel ? { channel: grouping.error.channel } : {}),
+      });
+    }
+    return grouping.groups;
+  };
+
   reserveChannelServicePidfile();
 
   return await new Promise<RunHandle>((resolve, reject) => {
@@ -3326,57 +3971,34 @@ export async function runQwenServe(
       const scheme = tlsOptions ? 'https' : 'http';
       const url = `${scheme}://${formatHostForUrl(opts.hostname)}:${actualPort}`;
       try {
-        if (opts.channelSelection) {
-          const createSupervisor =
-            deps.channelWorkerSupervisorFactory ??
-            channelRuntime?.createChannelWorkerSupervisor;
-          if (!createSupervisor) {
-            throw new Error(
-              'Channel worker supervisor runtime is not available.',
-            );
-          }
-          channelWorker = createSupervisor({
-            cliEntryPath: findCliEntryPath(),
-            daemonUrl: formatChannelWorkerDaemonUrl(opts.hostname, actualPort),
-            ...(token ? { daemonToken: token } : {}),
-            workspace: boundWorkspace,
-            selection: opts.channelSelection,
-            onReady: (snapshot) => {
-              writeChannelWorkerPidfile(snapshot);
-            },
-            onLog: ({ stream, line }) => {
-              const message = `channel worker ${stream}: ${line}`;
-              if (stream === 'stderr') {
-                daemonLog.warn(message);
-              } else {
-                daemonLog.info(message);
-              }
-            },
-            onExit: (snapshot) => {
-              daemonLog.warn(
-                `channel worker exited (state=${snapshot.state}, pid=${snapshot.pid ?? 'unknown'}, ` +
-                  `code=${snapshot.exitCode ?? 'null'}, signal=${snapshot.signal ?? 'null'}, ` +
-                  `error=${snapshot.error ?? 'none'}, restartCount=${snapshot.restartCount ?? 0}, ` +
-                  `nextRestartAt=${snapshot.nextRestartAt ?? 'none'}, ` +
-                  `staleHeartbeatAt=${snapshot.staleHeartbeatAt ?? 'none'})`,
-              );
-              writeChannelWorkerPidfile(snapshot, { clearWorkerPid: true });
-            },
-          });
-        }
+        channelWorkspaceGroups = resolveChannelWorkspaceGroupsAtListen();
       } catch (err) {
         removeCurrentServePidfile();
         const error = err instanceof Error ? err : new Error(String(err));
         server.close((closeErr) => {
           if (closeErr) {
             daemonLog.error(
-              'server close after channel worker setup error failed',
+              'server close after channel worker validation error failed',
               closeErr,
             );
           }
           reject(error);
         });
         return;
+      }
+      if (channelWorkspaceGroups) {
+        for (const group of channelWorkspaceGroups) {
+          daemonLog.info('channel worker group assigned', {
+            workspace: group.workspaceCwd,
+            channels:
+              group.selection.mode === 'all' ? ['all'] : group.selection.names,
+          });
+        }
+        if (opts.channelSelection?.mode === 'all') {
+          writeStderrLine(
+            'qwen serve: --channel all is primary-workspace only; non-primary workspace channels are not hosted.',
+          );
+        }
       }
       writeStdoutLine(
         `qwen serve listening on ${url} (mode=${opts.mode}, ` +
@@ -3481,12 +4103,14 @@ export async function runQwenServe(
         }
       };
       const stopChannelWorkerAfterFailedStartup = async (): Promise<void> => {
-        await channelWorker.stop().catch((stopErr) => {
-          daemonLog.error(
-            'channel worker stop after runtime startup error failed',
-            stopErr instanceof Error ? stopErr : null,
-          );
-        });
+        await (channelWorkerGroup?.stop() ?? Promise.resolve()).catch(
+          (stopErr) => {
+            daemonLog.error(
+              'channel worker stop after runtime startup error failed',
+              stopErr instanceof Error ? stopErr : null,
+            );
+          },
+        );
       };
       const failRuntimeStartup = async (
         err: unknown,
@@ -3498,6 +4122,7 @@ export async function runQwenServe(
           return;
         }
         runtimeStartupSettled = true;
+        runtimeApp = undefined;
         clearRuntimeStartupTimer();
         const message = error.message;
         runtimeStartupError = message;
@@ -3519,6 +4144,20 @@ export async function runQwenServe(
         for (const bridge of [...new Set(bridgesForCleanup)]) {
           await shutdownBridgeAfterFailedStartup(bridge);
         }
+        if (closeServerAfterChannelWorkerStartupFailure && server.listening) {
+          runtimeFailureListenerClose = new Promise((resolve) => {
+            server.close((closeErr) => {
+              if (closeErr) {
+                daemonLog.error(
+                  'server close after runtime startup error failed',
+                  closeErr,
+                );
+              }
+              resolve();
+            });
+          });
+          server.closeAllConnections();
+        }
         markRuntimeFailed(error);
       };
       const armRuntimeStartupTimer = (): void => {
@@ -3532,10 +4171,104 @@ export async function runQwenServe(
         }, runtimeStartupTimeoutMs);
         runtimeStartupTimer.unref();
       };
-      const completeRuntimeStartup = async (): Promise<void> => {
+      const startChannelWorkerGroup = async (
+        channelSelection: ServeChannelSelection,
+        candidateApp: Application,
+      ): Promise<void> => {
+        const registry = candidateApp.locals?.['workspaceRegistry'] as
+          | WorkspaceRegistry
+          | undefined;
+        if (!registry) {
+          throw new Error(
+            'Workspace registry is not available for channel workers.',
+          );
+        }
+        const createSupervisor =
+          deps.channelWorkerSupervisorFactory ??
+          channelRuntime?.createChannelWorkerSupervisor;
+        if (!createSupervisor) {
+          throw new Error('Channel worker runtime is not available.');
+        }
+        const runtimes = registry.list();
+        let groups: readonly ChannelWorkspaceGroup[];
+        if (runtimes.length <= 1) {
+          // Single workspace: preserve today's behavior — bind the raw
+          // selection to the primary runtime and let the worker validate its
+          // own channel config. No serve-layer grouping is required.
+          groups = [
+            {
+              workspaceCwd: registry.primary.workspaceCwd,
+              selection: channelSelection,
+            },
+          ];
+        } else {
+          if (!channelWorkspaceGroups) {
+            throw new Error('Channel worker workspace plan is not available.');
+          }
+          groups = channelWorkspaceGroups;
+        }
+        channelWorkerGroup = createChannelWorkerGroup({
+          groups,
+          registry,
+          createSupervisor,
+          shared: {
+            cliEntryPath: findCliEntryPath(),
+            daemonUrl: formatChannelWorkerDaemonUrl(opts.hostname, actualPort),
+            ...(token ? { daemonToken: token } : {}),
+          },
+          onReady: (snapshot) => {
+            if (runtimeStartupError !== undefined) return;
+            if (workspaceInputs.length > 1) {
+              daemonLog.info('channel worker ready', {
+                workspace: snapshot.workspaceCwd,
+                pid: snapshot.pid,
+                channels: snapshot.channels,
+              });
+            }
+            writeChannelWorkerPidfile();
+          },
+          onExit: (snapshot) => {
+            // A workspace= breadcrumb is only meaningful with multiple
+            // runtimes; single-workspace keeps the pre-4b log shape.
+            const workspacePrefix =
+              workspaceInputs.length > 1
+                ? `workspace=${snapshot.workspaceCwd}, `
+                : '';
+            daemonLog.warn(
+              `channel worker exited (${workspacePrefix}state=${snapshot.state}, pid=${snapshot.pid ?? 'unknown'}, ` +
+                `code=${snapshot.exitCode ?? 'null'}, signal=${snapshot.signal ?? 'null'}, ` +
+                `error=${snapshot.error ?? 'none'}, restartCount=${snapshot.restartCount ?? 0}, ` +
+                `nextRestartAt=${snapshot.nextRestartAt ?? 'none'}, ` +
+                `staleHeartbeatAt=${snapshot.staleHeartbeatAt ?? 'none'})`,
+            );
+            writeChannelWorkerPidfile();
+          },
+          onLog: ({ stream, line, workspaceCwd }) => {
+            const message =
+              workspaceInputs.length > 1
+                ? `channel worker [${workspaceCwd}] ${stream}: ${line}`
+                : `channel worker ${stream}: ${line}`;
+            if (stream === 'stderr') {
+              daemonLog.warn(message);
+            } else {
+              daemonLog.info(message);
+            }
+          },
+        });
+        await channelWorkerGroup.start();
+      };
+      const completeRuntimeStartup = async (
+        candidateApp: Application,
+      ): Promise<void> => {
         if (runtimeStartupSettled) return;
+        runtimeApp = candidateApp;
+        const acpHandle = candidateApp.locals?.['acpHandle'] as
+          | AcpHttpHandle
+          | undefined;
+        acpHandle?.attachServer?.(server);
         if (opts.channelSelection) {
-          await channelWorker.start();
+          closeServerAfterChannelWorkerStartupFailure = true;
+          await startChannelWorkerGroup(opts.channelSelection, candidateApp);
           if (runtimeStartupSettled) return;
         }
         if (runtimeStartupSettled) return;
@@ -3586,15 +4319,10 @@ export async function runQwenServe(
               );
               return;
             }
-            runtimeApp = runtime.app;
-            const acpHandle = runtime.app.locals?.['acpHandle'] as
-              | AcpHttpHandle
-              | undefined;
-            acpHandle?.attachServer?.(server);
             if (shouldPreheat) {
               startBridgePreheat(runtime.bridge);
             }
-            await completeRuntimeStartup();
+            await completeRuntimeStartup(runtime.app);
           })
           .catch((err) => failRuntimeStartup(err));
       };
@@ -3647,7 +4375,7 @@ export async function runQwenServe(
           // `qwen` processes in the operator's `ps` output.
           daemonLog.warn(`received ${signal} during drain — forcing exit`);
           try {
-            channelWorker.killAllSync();
+            channelWorkerGroup?.killAllSync();
             for (const runtimeBridge of getRuntimeBridgesForCleanup()) {
               runtimeBridge.killAllSync();
             }
@@ -3702,6 +4430,15 @@ export async function runQwenServe(
             (
               app.locals as { stopScheduledTaskKeepalive?: () => void }
             ).stopScheduledTaskKeepalive?.();
+            // Same rationale for the create_sub_session launchers: stop accepting
+            // new sub-session spawns before the bridges are torn down. Calls
+            // every workspace's launcher stop (primary + secondaries).
+            const stoppers = (
+              app.locals as { subSessionStoppers?: Array<() => void> }
+            ).subSessionStoppers;
+            if (stoppers) {
+              for (const stop of stoppers) stop();
+            }
             clearRuntimeStartAfterHealthTimer();
             clearRuntimeStartFallbackTimer();
             cancelDeferredRuntimeStartup();
@@ -3837,12 +4574,14 @@ export async function runQwenServe(
                 disposeDaemonEventLoopMonitor();
                 // The worker owns daemon-backed sessions; disconnect it before
                 // tearing down the ACP bridge it is attached to.
-                await channelWorker.stop().catch((err) => {
-                  daemonLog.error(
-                    'channel worker stop error',
-                    err instanceof Error ? err : null,
-                  );
-                });
+                await (channelWorkerGroup?.stop() ?? Promise.resolve()).catch(
+                  (err) => {
+                    daemonLog.error(
+                      'channel worker stop error',
+                      err instanceof Error ? err : null,
+                    );
+                  },
+                );
                 removeCurrentServePidfile();
                 for (const bridgeForShutdown of getRuntimeBridgesForCleanup()) {
                   if (shutdownBridges.has(bridgeForShutdown)) continue;
@@ -3858,6 +4597,12 @@ export async function runQwenServe(
                 }
               })
               .finally(() => {
+                if (!server.listening) {
+                  void (runtimeFailureListenerClose ?? Promise.resolve()).then(
+                    () => finish(),
+                  );
+                  return;
+                }
                 // Phase 2: arm the force timer NOW so it only races
                 // server.close, not the bridge tear-down above.
                 // `RunHandle.close()` contract says "fully
@@ -3920,19 +4665,21 @@ export async function runQwenServe(
       server.on('error', (err) => {
         daemonLog.error('server error', err instanceof Error ? err : null);
       });
-      if (runtimeApp && bridgeRef) {
-        const acpHandle = runtimeApp.locals?.['acpHandle'] as
-          | AcpHttpHandle
-          | undefined;
-        acpHandle?.attachServer?.(server);
+      const preparedRuntimeApp = runtimeApp ?? runtimeAppForCleanup;
+      if (preparedRuntimeApp && bridgeRef && deps.bridge) {
         if (shouldPreheat) {
           startBridgePreheat(bridgeRef);
         }
         if (opts.channelSelection && !runtimeStartupSettled) {
           armRuntimeStartupTimer();
-          runtimeStarting = completeRuntimeStartup().catch((err) =>
-            failRuntimeStartup(err, bridgeRef),
+          runtimeStarting = completeRuntimeStartup(preparedRuntimeApp).catch(
+            (err) => failRuntimeStartup(err, bridgeRef),
           );
+        } else {
+          const acpHandle = preparedRuntimeApp.locals?.['acpHandle'] as
+            | AcpHttpHandle
+            | undefined;
+          acpHandle?.attachServer?.(server);
         }
       } else if (deferRuntimeUntilFirstHealth) {
         scheduleRuntimeStartFallback();

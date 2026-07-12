@@ -44,6 +44,16 @@ export interface CronTaskRun {
    * owner id was known.
    */
   sessionId?: string;
+  /**
+   * READ-ONLY backward-compatibility field. A pre-removal version stamped this
+   * on a fire whose precondition withheld the prompt (it was booked as a run
+   * but nothing executed). The isolated/precondition machinery is gone, so this
+   * is never written anymore — but stored history still carries it, and dropping
+   * it would misreport a deliberately-skipped fire as an ordinary successful
+   * run. Preserved through read/validation/passthrough so the UI keeps its
+   * "skipped" marker on legacy entries. Absent = a real dispatched run.
+   */
+  withheld?: boolean;
 }
 
 /** Cap on a task's on-disk run history. A ring, newest kept — this bounds the
@@ -111,6 +121,38 @@ export function appendCronRun(
   return next.length > MAX_TASK_RUNS
     ? next.slice(next.length - MAX_TASK_RUNS)
     : next;
+}
+
+/**
+ * True for a task written by a pre-removal version as an `isolated` task with a
+ * `condition` precondition. The field is no longer part of {@link
+ * DurableCronTask} (validation accepts it as an unknown key), so it is read off
+ * the raw object. A blank/absent condition is not a gate.
+ *
+ * The isolated run mode and its preconditions were removed; such a task can no
+ * longer be evaluated. Every consumer — the scheduler, the REST list view, and
+ * the manual `/run` endpoint — uses this to FAIL CLOSED (skip / block / reject)
+ * so a removed safety gate ("only run when X") can never silently degrade into
+ * "always run" on any path. The user re-creates the task if they still want it.
+ */
+export function taskHasLegacyCondition(task: DurableCronTask): boolean {
+  const condition = (task as unknown as Record<string, unknown>)['condition'];
+  return typeof condition === 'string' && condition.length > 0;
+}
+
+/**
+ * True for a task written by a pre-removal version with `runMode: 'isolated'`
+ * (with or without a precondition). The field is no longer part of {@link
+ * DurableCronTask}, so it is read off the raw object.
+ *
+ * Unlike a legacy precondition (which is a safety gate → fail closed), a bare
+ * isolated task has no gate: it can still run, just no longer in a fresh
+ * per-run session — it now accumulates history in its bound session. So the
+ * scheduler still fires it, but logs a one-time notice so an operator who
+ * relied on the clean-slate isolation is not left wondering why runs now differ.
+ */
+export function taskHasLegacyRunMode(task: DurableCronTask): boolean {
+  return (task as unknown as Record<string, unknown>)['runMode'] === 'isolated';
 }
 
 /**
@@ -366,7 +408,11 @@ function isValidRuns(value: unknown): value is CronTaskRun[] {
     return (
       isFiniteTimestamp(run['at']) &&
       (run['kind'] === undefined || typeof run['kind'] === 'string') &&
-      (run['sessionId'] === undefined || typeof run['sessionId'] === 'string')
+      (run['sessionId'] === undefined ||
+        typeof run['sessionId'] === 'string') &&
+      // Read-only legacy compat: validate so a stored `withheld` marker isn't
+      // rejected on read (it is never written anymore).
+      (run['withheld'] === undefined || typeof run['withheld'] === 'boolean')
     );
   });
 }

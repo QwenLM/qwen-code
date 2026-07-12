@@ -36,6 +36,25 @@ describe('<ThinkMessage />', () => {
     expect(output).not.toContain('Analyzing the code structure');
   });
 
+  it('advertises click in the collapsed hint only when clickable (VP mode)', () => {
+    const withoutClick = render(
+      <ThinkMessage {...defaultProps} isPending={false} expanded={false} />,
+    ).lastFrame();
+    expect(withoutClick).not.toContain('click');
+    expect(withoutClick).toContain(`${toggleKeyHint} to expand`);
+
+    const withClick = render(
+      <ThinkMessage
+        {...defaultProps}
+        isPending={false}
+        expanded={false}
+        clickable={true}
+      />,
+    ).lastFrame();
+    expect(withClick).toContain('click');
+    expect(withClick).toContain(`${toggleKeyHint} to expand`);
+  });
+
   it('should render full text when committed and expanded', () => {
     const { lastFrame } = render(
       <ThinkMessage {...defaultProps} isPending={false} expanded={true} />,
@@ -91,6 +110,43 @@ describe('<ThinkMessage />', () => {
     expect(output).toContain('Thought for');
     expect(output).toContain('2m 5s');
   });
+
+  it('should render full streaming content when pending and expanded', () => {
+    const longText =
+      'Line 1: initial analysis\nLine 2: deeper reasoning\nLine 3: more thought\nLine 4: conclusions';
+    const { lastFrame } = render(
+      <ThinkMessage
+        {...defaultProps}
+        text={longText}
+        isPending={true}
+        expanded={true}
+      />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('Thinking');
+    expect(output).toContain('Line 1');
+    expect(output).toContain('Line 2');
+    expect(output).toContain('Line 3');
+    expect(output).toContain('Line 4');
+  });
+
+  it('should only show tail lines when pending and not expanded', () => {
+    const lines = Array.from({ length: 20 }, (_, i) => `Line ${i + 1}`);
+    const longText = lines.join('\n');
+    const { lastFrame } = render(
+      <ThinkMessage
+        {...defaultProps}
+        text={longText}
+        isPending={true}
+        expanded={false}
+        contentWidth={40}
+      />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('Thinking');
+    expect(output).toContain('Line 20');
+    expect(output).not.toContain('Line 1\n');
+  });
 });
 
 describe('<ThinkMessageContent />', () => {
@@ -128,5 +184,23 @@ describe('<ThinkMessageContent />', () => {
     );
     const output = lastFrame();
     expect(output).toContain('Continuation of the reasoning');
+  });
+
+  it('should render full streaming content when pending and expanded', () => {
+    const longText =
+      'Line 1: step one\nLine 2: step two\nLine 3: step three\nLine 4: step four';
+    const { lastFrame } = render(
+      <ThinkMessageContent
+        {...defaultProps}
+        text={longText}
+        isPending={true}
+        expanded={true}
+      />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('Line 1');
+    expect(output).toContain('Line 2');
+    expect(output).toContain('Line 3');
+    expect(output).toContain('Line 4');
   });
 });

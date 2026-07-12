@@ -27,6 +27,15 @@ export interface ListWorkspaceSessionsOptions {
   archiveState?: SessionArchiveState;
   view?: 'organized';
   group?: string;
+  /**
+   * Restrict the result to sessions spawned by this parent (via
+   * `create_sub_session`), matched exactly against each session's
+   * `parentSessionId`. When set on the default (non-organized) path the whole
+   * workspace is gathered and filtered before pagination, so a page is never
+   * silently short of matches; the returned cursor is opaque and activity-based
+   * (not the numeric storage cursor). Absent = no parent filter.
+   */
+  parentSessionId?: string;
 }
 
 export interface ListWorkspaceSessionsResult {
@@ -36,10 +45,15 @@ export interface ListWorkspaceSessionsResult {
   truncated?: boolean;
 }
 
+export interface ListWorkspaceSessionsReadOptions {
+  /** Merge live bridge state into persisted summaries. */
+  mergeLive?: boolean;
+}
+
 export class InvalidCursorError extends Error {
   constructor(
     cursor: string,
-    kind: 'numeric' | 'organized' | 'live' = 'numeric',
+    kind: 'numeric' | 'organized' | 'live' | 'parent' = 'numeric',
   ) {
     super(`Invalid cursor: "${cursor}" is not a valid ${kind} cursor`);
     this.name = 'InvalidCursorError';
@@ -150,6 +164,60 @@ function encodeLiveSessionCursor(last: LiveSessionCursorKey): string {
   return Buffer.from(JSON.stringify(last), 'utf8').toString('base64url');
 }
 
+/**
+ * Decodes a `?parentSessionId=` page cursor, binding it to the query that
+ * produced it. The cursor carries the `parentSessionId` and `archiveState` it
+ * was minted for, and decode REJECTS a cursor whose scope differs from the
+ * current request — otherwise a cursor from parent A (or from the active set)
+ * replayed against parent B (or the archived set) would be accepted and
+ * silently skip every session newer than that unrelated key. Same
+ * bind-and-validate contract as {@link parseOrganizedCursor}.
+ */
+function parseParentSessionCursor(
+  cursor: string,
+  expected: { parentSessionId: string; archiveState: SessionArchiveState },
+): LiveSessionCursorKey | undefined {
+  if (cursor === '') return undefined;
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(cursor, 'base64url').toString('utf8'),
+    ) as unknown;
+    const last = (parsed as { last?: LiveSessionCursorKey }).last;
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      Array.isArray(parsed) ||
+      typeof last !== 'object' ||
+      last === null ||
+      Array.isArray(last) ||
+      typeof last.activityTime !== 'number' ||
+      !Number.isFinite(last.activityTime) ||
+      typeof last.sessionId !== 'string' ||
+      last.sessionId.length === 0 ||
+      (parsed as { parentSessionId?: unknown }).parentSessionId !==
+        expected.parentSessionId ||
+      (parsed as { archiveState?: unknown }).archiveState !==
+        expected.archiveState
+    ) {
+      throw new Error('invalid parent cursor');
+    }
+    return { activityTime: last.activityTime, sessionId: last.sessionId };
+  } catch {
+    throw new InvalidCursorError(cursor, 'parent');
+  }
+}
+
+function encodeParentSessionCursor(
+  last: LiveSessionCursorKey,
+  parentSessionId: string,
+  archiveState: SessionArchiveState,
+): string {
+  return Buffer.from(
+    JSON.stringify({ parentSessionId, archiveState, last }),
+    'utf8',
+  ).toString('base64url');
+}
+
 function toSummary(item: {
   sessionId: string;
   cwd: string;
@@ -157,6 +225,7 @@ function toSummary(item: {
   mtime: number;
   prompt: string;
   customTitle?: string;
+  parentSessionId?: string;
   isArchived?: boolean;
 }): BridgeSessionSummary {
   return {
@@ -165,9 +234,37 @@ function toSummary(item: {
     createdAt: item.startTime,
     updatedAt: new Date(item.mtime).toISOString(),
     displayName: item.customTitle || item.prompt,
+    ...(item.parentSessionId ? { parentSessionId: item.parentSessionId } : {}),
     clientCount: 0,
     hasActivePrompt: false,
     isArchived: item.isArchived === true,
+  };
+}
+
+/**
+ * Merges a live session's summary onto its persisted counterpart for a session
+ * that exists in both. The persisted record owns identity/immutable facts
+ * (`createdAt`, `parentSessionId` lineage) while the live entry owns volatile
+ * state (`clientCount`, `hasActivePrompt`, a fresher `displayName`/`updatedAt`).
+ * Shared by all three list paths (default, organized, by-parent) so the merge
+ * rule lives in one place.
+ */
+function mergeLiveSessionSummary(
+  existing: BridgeSessionSummary,
+  live: BridgeSessionSummary,
+): BridgeSessionSummary {
+  return {
+    ...existing,
+    ...live,
+    createdAt: existing.createdAt,
+    displayName: live.displayName ?? existing.displayName,
+    // Immutable lineage; the persisted transcript is authoritative, and a live
+    // entry only carries it when spawned this run.
+    parentSessionId: existing.parentSessionId ?? live.parentSessionId,
+    updatedAt: live.updatedAt ?? existing.updatedAt,
+    clientCount: live.clientCount,
+    hasActivePrompt: live.hasActivePrompt,
+    isArchived: false,
   };
 }
 
@@ -289,6 +386,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
   workspaceCwd: string,
   options: ListWorkspaceSessionsOptions,
   pageSize: number,
+  readOptions: ListWorkspaceSessionsReadOptions,
 ): Promise<ListWorkspaceSessionsResult> {
   const archiveState = options.archiveState ?? 'active';
   const sessionService = new SessionService(workspaceCwd);
@@ -327,7 +425,11 @@ async function listOrganizedWorkspaceSessionsForResponse(
     );
   }
 
-  if (archiveState !== 'archived' && isFirstPage) {
+  if (
+    readOptions.mergeLive !== false &&
+    archiveState !== 'archived' &&
+    isFirstPage
+  ) {
     try {
       const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
       for (const live of liveSessions) {
@@ -337,16 +439,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
           bySessionId.set(
             live.sessionId,
             applyOrganization(
-              {
-                ...existing,
-                ...live,
-                createdAt: existing.createdAt,
-                displayName: live.displayName ?? existing.displayName,
-                updatedAt: live.updatedAt ?? existing.updatedAt,
-                clientCount: live.clientCount,
-                hasActivePrompt: live.hasActivePrompt,
-                isArchived: false,
-              },
+              mergeLiveSessionSummary(existing, live),
               organization,
             ),
           );
@@ -421,10 +514,110 @@ async function listOrganizedWorkspaceSessionsForResponse(
   };
 }
 
+/**
+ * Lists only the sessions spawned by `parentSessionId`. Unlike the default
+ * storage-paginated path, this gathers the whole workspace (capped, like the
+ * organized view) and filters before paginating, so a page is never short of
+ * matches and the client can page to completion without wading through empty
+ * pages. Sorted newest-activity-first and paginated with the same opaque
+ * activity cursor as the live-only path.
+ */
+async function listWorkspaceSessionsByParentForResponse(
+  bridge: AcpSessionBridge,
+  workspaceCwd: string,
+  options: ListWorkspaceSessionsOptions,
+  pageSize: number,
+  parentSessionId: string,
+  readOptions: ListWorkspaceSessionsReadOptions,
+): Promise<ListWorkspaceSessionsResult> {
+  const archiveState = options.archiveState ?? 'active';
+  const sessionService = new SessionService(workspaceCwd);
+  const bySessionId = new Map<string, BridgeSessionSummary>();
+  const persisted = await listAllPersistedSummaries(
+    sessionService,
+    archiveState,
+  );
+  for (const session of persisted.sessions) {
+    bySessionId.set(session.sessionId, session);
+  }
+
+  let liveMergeFailed = false;
+  if (readOptions.mergeLive !== false && archiveState !== 'archived') {
+    try {
+      for (const live of bridge.listWorkspaceSessions(workspaceCwd)) {
+        const existing = bySessionId.get(live.sessionId);
+        if (existing) {
+          bySessionId.set(
+            live.sessionId,
+            mergeLiveSessionSummary(existing, live),
+          );
+        } else if (!(await sessionService.sessionExists(live.sessionId))) {
+          bySessionId.set(live.sessionId, {
+            ...live,
+            createdAt: live.createdAt,
+            clientCount: live.clientCount,
+            hasActivePrompt: live.hasActivePrompt,
+            isArchived: false,
+          });
+        }
+      }
+    } catch (error) {
+      liveMergeFailed = true;
+      writeStderrLine(
+        `qwen serve: session-by-parent live merge failed; using persisted sessions only: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  const matches = [...bySessionId.values()]
+    .filter((session) => session.parentSessionId === parentSessionId)
+    .sort((a, b) =>
+      compareLiveSessionCursorKeys(
+        getLiveSessionCursorKey(a),
+        getLiveSessionCursorKey(b),
+      ),
+    );
+  const cursorKey =
+    options.cursor !== undefined && options.cursor !== ''
+      ? parseParentSessionCursor(options.cursor, {
+          parentSessionId,
+          archiveState,
+        })
+      : undefined;
+  const afterCursor =
+    cursorKey === undefined
+      ? matches
+      : matches.filter(
+          (session) =>
+            compareLiveSessionCursorKeys(
+              cursorKey,
+              getLiveSessionCursorKey(session),
+            ) < 0,
+        );
+  const page = afterCursor.slice(0, pageSize);
+  const nextCursor =
+    page.length < afterCursor.length
+      ? encodeParentSessionCursor(
+          getLiveSessionCursorKey(page[page.length - 1]!),
+          parentSessionId,
+          archiveState,
+        )
+      : undefined;
+  return {
+    sessions: page,
+    ...(nextCursor !== undefined ? { nextCursor } : {}),
+    ...(liveMergeFailed ? { liveMergeFailed: true } : {}),
+    ...(persisted.truncated ? { truncated: true } : {}),
+  };
+}
+
 export async function listWorkspaceSessionsForResponse(
   bridge: AcpSessionBridge,
   workspaceCwd: string,
   options?: ListWorkspaceSessionsOptions,
+  readOptions: ListWorkspaceSessionsReadOptions = {},
 ): Promise<ListWorkspaceSessionsResult> {
   const rawSize = options?.size;
   const requestedSize =
@@ -439,6 +632,18 @@ export async function listWorkspaceSessionsForResponse(
       workspaceCwd,
       options,
       pageSize,
+      readOptions,
+    );
+  }
+
+  if (options?.parentSessionId !== undefined) {
+    return listWorkspaceSessionsByParentForResponse(
+      bridge,
+      workspaceCwd,
+      options,
+      pageSize,
+      options.parentSessionId,
+      readOptions,
     );
   }
 
@@ -461,7 +666,7 @@ export async function listWorkspaceSessionsForResponse(
     bySessionId.set(item.sessionId, toSummary(item));
   }
 
-  if (archiveState === 'archived') {
+  if (archiveState === 'archived' || readOptions.mergeLive === false) {
     const sessions = [...bySessionId.values()];
     const nextCursor =
       persisted.nextCursor != null ? String(persisted.nextCursor) : undefined;
@@ -472,16 +677,7 @@ export async function listWorkspaceSessionsForResponse(
   for (const live of liveSessions) {
     const existing = bySessionId.get(live.sessionId);
     if (existing) {
-      bySessionId.set(live.sessionId, {
-        ...existing,
-        ...live,
-        createdAt: existing.createdAt,
-        displayName: live.displayName ?? existing.displayName,
-        updatedAt: live.updatedAt ?? existing.updatedAt,
-        clientCount: live.clientCount,
-        hasActivePrompt: live.hasActivePrompt,
-        isArchived: false,
-      });
+      bySessionId.set(live.sessionId, mergeLiveSessionSummary(existing, live));
     } else if (
       isFirstPage &&
       !(await sessionService.sessionExists(live.sessionId))

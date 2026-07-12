@@ -55,6 +55,11 @@ import { ToolRegistry } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
+import {
+  MessageBusType,
+  type HookExecutionRequest,
+  type HookExecutionResponse,
+} from '../confirmation-bus/types.js';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
 import type { LoadServerHierarchicalMemoryOptions } from '../utils/memoryDiscovery.js';
 import { readAutoMemoryIndex } from '../memory/store.js';
@@ -2316,6 +2321,46 @@ describe('Server Config (config.ts)', () => {
         ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
       ]);
+    });
+
+    it('should skip hook, skill, and file checkpointing side effects when requested', async () => {
+      const config = new Config({
+        ...baseParams,
+        fileCheckpointingEnabled: true,
+      });
+
+      await expect(
+        config.initialize({
+          skipMcpDiscovery: true,
+          skipHooks: true,
+          skipSkillManager: true,
+          skipFileCheckpointing: true,
+        }),
+      ).resolves.toBeUndefined();
+
+      expect(HookSystem).not.toHaveBeenCalled();
+      expect(config.getHookSystem()).toBeUndefined();
+      expect(SkillManager).not.toHaveBeenCalled();
+      expect(config.getSkillManager()).toBeNull();
+      expect(config.getFileCheckpointingEnabled()).toBe(false);
+    });
+
+    it('warms tools strictly by default and leniently when lenientToolWarmup is set', async () => {
+      // Regression guard for the read-only transcript-replay path: a Config that
+      // skips the SkillManager must warm tools leniently, otherwise warmAll()
+      // aborts initialize() when SkillTool's constructor throws.
+      const warmAll = vi.mocked(ToolRegistry.prototype.warmAll);
+
+      warmAll.mockClear();
+      await new Config({ ...baseParams }).initialize();
+      expect(warmAll).toHaveBeenLastCalledWith({ strict: true });
+
+      warmAll.mockClear();
+      await new Config({ ...baseParams }).initialize({
+        skipSkillManager: true,
+        lenientToolWarmup: true,
+      });
+      expect(warmAll).toHaveBeenLastCalledWith({ strict: false });
     });
 
     it('registers loop_wakeup when cron is enabled', async () => {
@@ -6327,6 +6372,7 @@ describe('Model Switching and Config Updates', () => {
       ['contextWindowSize']: 1_000_000,
       ['samplingParams']: { temperature: 0.7 },
       ['enableCacheControl']: true,
+      ['forceGlobalCacheScope']: true,
     };
 
     vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
@@ -6352,6 +6398,7 @@ describe('Model Switching and Config Updates', () => {
       ['contextWindowSize']: 128_000,
       ['samplingParams']: { temperature: 0.8 },
       ['enableCacheControl']: false,
+      ['forceGlobalCacheScope']: false,
       ['toolResultContentFormat']: 'string',
       ['modalities']: { image: true },
     };
@@ -6363,6 +6410,7 @@ describe('Model Switching and Config Updates', () => {
         contextWindowSize: { kind: 'computed', detail: 'auto' },
         samplingParams: { kind: 'settings' },
         enableCacheControl: { kind: 'settings' },
+        forceGlobalCacheScope: { kind: 'settings' },
         toolResultContentFormat: { kind: 'settings' },
         modalities: { kind: 'computed', detail: 'auto' },
       },
@@ -6384,6 +6432,7 @@ describe('Model Switching and Config Updates', () => {
     expect(updatedConfig['contextWindowSize']).toBe(128_000);
     expect(updatedConfig['samplingParams']?.temperature).toBe(0.8);
     expect(updatedConfig['enableCacheControl']).toBe(false);
+    expect(updatedConfig['forceGlobalCacheScope']).toBe(false);
     expect(updatedConfig['toolResultContentFormat']).toBe('string');
     // Modalities are model-derived; a hot switch must refresh them so the
     // vision-bridge gate reflects the new model (it reads getEffectiveInputModalities()).
@@ -6398,6 +6447,7 @@ describe('Model Switching and Config Updates', () => {
     expect(sources['contextWindowSize']?.detail).toBe('auto');
     expect(sources['samplingParams']?.kind).toBe('settings');
     expect(sources['enableCacheControl']?.kind).toBe('settings');
+    expect(sources['forceGlobalCacheScope']?.kind).toBe('settings');
     expect(sources['toolResultContentFormat']?.kind).toBe('settings');
     expect(sources['modalities']?.kind).toBe('computed');
   });
@@ -6831,6 +6881,78 @@ describe('Model Switching and Config Updates', () => {
 
       // Zero context_limit: returns undefined
       expect(buildContextUsage(0, 64000)).toBeUndefined();
+    });
+  });
+
+  describe('MessageDisplay dispatch through the hook execution bridge', () => {
+    it('extracts message_id/displayed_text/is_final from the request input and forwards them positionally', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+
+      const fireMessageDisplayEvent = vi
+        .fn()
+        .mockResolvedValue({ finalOutput: undefined, allOutputs: [] });
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = { fireMessageDisplayEvent };
+
+      const messageBus = config.getMessageBus();
+      expect(messageBus).toBeDefined();
+
+      const response = await messageBus!.request<
+        HookExecutionRequest,
+        HookExecutionResponse
+      >(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'MessageDisplay',
+          input: {
+            message_id: 'msg-123',
+            displayed_text: 'Hello, world',
+            is_final: true,
+          },
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+
+      expect(fireMessageDisplayEvent).toHaveBeenCalledWith(
+        'msg-123',
+        'Hello, world',
+        true,
+        undefined,
+      );
+      expect(response.success).toBe(true);
+    });
+
+    it('defaults missing fields (empty message_id/text, is_final false) rather than throwing', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+
+      const fireMessageDisplayEvent = vi
+        .fn()
+        .mockResolvedValue({ finalOutput: undefined, allOutputs: [] });
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = { fireMessageDisplayEvent };
+
+      const messageBus = config.getMessageBus();
+      const response = await messageBus!.request<
+        HookExecutionRequest,
+        HookExecutionResponse
+      >(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'MessageDisplay',
+          input: {},
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+
+      expect(fireMessageDisplayEvent).toHaveBeenCalledWith(
+        '',
+        '',
+        false,
+        undefined,
+      );
+      expect(response.success).toBe(true);
     });
   });
 });

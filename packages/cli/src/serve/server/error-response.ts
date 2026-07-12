@@ -27,6 +27,7 @@ import {
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
   RestoreInProgressError,
+  SessionArtifactAuthorizationError,
   SessionArchivedError,
   SessionArchivingError,
   SessionBusyError,
@@ -279,6 +280,15 @@ export function sendBridgeError(
     });
     return;
   }
+  if (err instanceof SessionArtifactAuthorizationError) {
+    res.status(403).json({
+      error: err.message,
+      code: 'session_artifact_forbidden',
+      sessionId: err.sessionId,
+      artifactId: err.artifactId,
+    });
+    return;
+  }
   if (err instanceof SessionShellDisabledError) {
     res.status(403).json({
       error: err.message,
@@ -518,6 +528,46 @@ export function sendBridgeError(
           error: errorMessage(err),
           code: 'directory_not_trusted',
           path: d.path,
+        });
+        return;
+      }
+      if (kind === 'invalid_transcript_cursor') {
+        res.status(400).json({
+          error: errorMessage(err),
+          code: 'invalid_transcript_cursor',
+        });
+        return;
+      }
+      if (kind === 'invalid_transcript_limit') {
+        res.status(400).json({
+          error: errorMessage(err),
+          code: 'invalid_transcript_limit',
+        });
+        return;
+      }
+      if (kind === 'transcript_snapshot_unavailable') {
+        const d = data as { sessionId?: string };
+        res.status(409).json({
+          error: errorMessage(err),
+          code: 'transcript_snapshot_unavailable',
+          ...(d.sessionId ? { sessionId: d.sessionId } : {}),
+        });
+        return;
+      }
+      if (kind === 'transcript_too_large') {
+        const d = data as {
+          sessionId?: string;
+          snapshotSize?: number;
+          maxBytes?: number;
+        };
+        res.status(413).json({
+          error: errorMessage(err),
+          code: 'transcript_too_large',
+          ...(d.sessionId ? { sessionId: d.sessionId } : {}),
+          ...(typeof d.snapshotSize === 'number'
+            ? { snapshotSize: d.snapshotSize }
+            : {}),
+          ...(typeof d.maxBytes === 'number' ? { maxBytes: d.maxBytes } : {}),
         });
         return;
       }

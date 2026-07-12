@@ -22,6 +22,12 @@ import {
 import { useStdin } from 'ink';
 import { EventEmitter } from 'node:events';
 
+const mockClipboardHasImage = vi.hoisted(() => vi.fn());
+
+vi.mock('../utils/clipboardUtils.js', () => ({
+  clipboardHasImage: mockClipboardHasImage,
+}));
+
 // Mock the 'ink' module to control stdin
 vi.mock('ink', async (importOriginal) => {
   const original = await importOriginal<typeof import('ink')>();
@@ -83,6 +89,7 @@ describe('KeypressContext - Kitty Protocol', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockClipboardHasImage.mockResolvedValue(false);
     stdin = new MockStdin();
     (useStdin as Mock).mockReturnValue({
       stdin,
@@ -605,6 +612,27 @@ describe('KeypressContext - Kitty Protocol', () => {
           sequence: pastedText,
         }),
       );
+    });
+
+    it('reports an unavailable native module for an empty paste', async () => {
+      const keyHandler = vi.fn();
+      mockClipboardHasImage.mockImplementation(async (onUnavailable) => {
+        onUnavailable?.();
+        return false;
+      });
+      const { result } = renderHook(() => useKeypressContext(), { wrapper });
+      act(() => result.current.subscribe(keyHandler));
+
+      act(() => stdin.sendPaste(''));
+
+      await waitFor(() => {
+        expect(keyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            paste: true,
+            clipboardImageUnavailable: true,
+          }),
+        );
+      });
     });
 
     describe('paste mode markers', () => {

@@ -98,6 +98,12 @@
   margin-left: 2px;
 }
 
+.fieldHint {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted-foreground);
+}
+
 .input,
 .textarea,
 .select {
@@ -118,11 +124,194 @@
   line-height: 1.5;
 }
 
+.promptEditorWrap {
+  position: relative;
+  width: 100%;
+}
+
+.promptEditor {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 13px;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: inherit;
+  resize: vertical;
+  min-height: 72px;
+  max-height: 220px;
+  line-height: 1.5;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .input:focus,
 .textarea:focus,
+.promptEditor:focus,
 .select:focus {
   outline: 2px solid var(--primary);
   outline-offset: -1px;
+}
+
+.promptPlaceholder {
+  position: absolute;
+  top: 11px;
+  right: 11px;
+  left: 11px;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.promptTag {
+  display: inline-flex;
+  align-items: center;
+  max-width: min(36ch, 100%);
+  min-height: 22px;
+  margin: 0 0.25ch;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--muted);
+  color: var(--foreground);
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  line-height: 1.2;
+  vertical-align: baseline;
+}
+
+.promptTagIcon {
+  display: block;
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  margin-left: 7px;
+  background: currentColor;
+  mask: var(--composer-tag-icon-url) center / contain no-repeat;
+  -webkit-mask: var(--composer-tag-icon-url) center / contain no-repeat;
+}
+
+.promptTagValue {
+  min-width: 0;
+  max-width: 30ch;
+  overflow: hidden;
+  padding: 3px 7px 3px 0.5ch;
+  color: var(--foreground);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.referencePopover {
+  min-width: 0;
+}
+
+.referenceBar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: -6px;
+}
+
+.referenceButton {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 5px 12px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.referenceButton:hover,
+.referenceButtonActive {
+  color: var(--foreground);
+  background: var(--background);
+}
+
+.referenceButtonIcon {
+  display: block;
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  background: currentColor;
+  mask: var(--composer-tag-icon-url) center / contain no-repeat;
+  -webkit-mask: var(--composer-tag-icon-url) center / contain no-repeat;
+}
+
+.referencePicker {
+  position: fixed;
+  z-index: calc(var(--web-shell-dialog-backdrop-z-index, 1000) + 10);
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--background);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 18%);
+}
+
+.referenceItem {
+  appearance: none;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 9px 10px;
+  background: transparent;
+  color: var(--foreground);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.referenceItem:last-child {
+  border-bottom: 0;
+}
+
+.referenceItem:hover {
+  background: var(--muted);
+}
+
+.referenceItemLabel,
+.referenceItemDescription {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.referenceItemLabel {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.referenceItemDescription {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.referenceEmpty,
+.referenceError {
+  padding: 10px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.referenceError {
+  color: var(--error-color);
 }
 
 .scheduleRow {

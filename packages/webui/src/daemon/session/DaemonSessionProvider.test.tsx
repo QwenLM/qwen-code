@@ -100,6 +100,8 @@ interface MockClient {
   workspaceMcpTools: () => Promise<unknown>;
   restartMcpServer: () => Promise<unknown>;
   workspaceSkills: () => Promise<unknown>;
+  workspaceAcpStatus: () => Promise<unknown>;
+  workspaceAcpPreheat: () => Promise<unknown>;
   workspaceTools: () => Promise<unknown>;
   setWorkspaceToolEnabled: () => Promise<unknown>;
   workspaceMemory: () => Promise<unknown>;
@@ -140,6 +142,8 @@ const sdkMocks = vi.hoisted(() => {
   const workspaceMcpTools = vi.fn();
   const restartMcpServer = vi.fn();
   const workspaceSkills = vi.fn();
+  const workspaceAcpStatus = vi.fn();
+  const workspaceAcpPreheat = vi.fn();
   const workspaceTools = vi.fn();
   const setWorkspaceToolEnabled = vi.fn();
   const workspaceMemory = vi.fn();
@@ -168,6 +172,8 @@ const sdkMocks = vi.hoisted(() => {
     workspaceMcpTools = workspaceMcpTools;
     restartMcpServer = restartMcpServer;
     workspaceSkills = workspaceSkills;
+    workspaceAcpStatus = workspaceAcpStatus;
+    workspaceAcpPreheat = workspaceAcpPreheat;
     workspaceTools = workspaceTools;
     setWorkspaceToolEnabled = setWorkspaceToolEnabled;
     workspaceMemory = workspaceMemory;
@@ -210,6 +216,8 @@ const sdkMocks = vi.hoisted(() => {
     capabilities,
     workspaceProviders,
     workspaceSkills,
+    workspaceAcpStatus,
+    workspaceAcpPreheat,
     MockDaemonClient,
     MockDaemonSessionClient,
     workspaceMcpTools,
@@ -257,6 +265,14 @@ const sdkMocks = vi.hoisted(() => {
         workspaceCwd: '/mock-workspace',
         initialized: true,
         skills: [],
+      });
+      workspaceAcpStatus.mockReset();
+      workspaceAcpStatus.mockResolvedValue({ channelLive: true });
+      workspaceAcpPreheat.mockReset();
+      workspaceAcpPreheat.mockResolvedValue({
+        ready: true,
+        channelLive: true,
+        durationMs: 1,
       });
       workspaceTools.mockReset();
       workspaceTools.mockResolvedValue({
@@ -472,6 +488,112 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it('preheats ACP and refreshes deferred skills when ACP is not running', async () => {
+    sdkMocks.workspaceAcpStatus.mockResolvedValue({ channelLive: false });
+    sdkMocks.workspaceSkills
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: '/mock-workspace',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'review',
+            description: 'Review code',
+            level: 'bundled',
+            modelInvocable: true,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: '/mock-workspace',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'review',
+            description: 'Review code',
+            level: 'bundled',
+            modelInvocable: true,
+          },
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'pdf',
+            description: 'Work with PDFs',
+            level: 'extension',
+            modelInvocable: true,
+          },
+        ],
+      });
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+    await act(async () => {
+      await flushPromises();
+      await flushPromises();
+    });
+
+    expect(sdkMocks.workspaceAcpPreheat).toHaveBeenCalledWith(5000);
+    expect(sdkMocks.workspaceSkills).toHaveBeenCalledTimes(2);
+    expect(connection?.skills).toEqual(['review', 'pdf']);
+  });
+
+  it('clears deferred skills when ACP refresh returns an empty list', async () => {
+    sdkMocks.workspaceAcpStatus.mockResolvedValue({ channelLive: false });
+    sdkMocks.workspaceSkills
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: '/mock-workspace',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'review',
+            description: 'Review code',
+            level: 'bundled',
+            modelInvocable: true,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: '/mock-workspace',
+        initialized: true,
+        skills: [],
+      });
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+    await act(async () => {
+      await flushPromises();
+      await flushPromises();
+    });
+
+    expect(connection?.skills).toEqual([]);
+    expect(connection?.commands).toEqual([]);
+  });
+
   it('warns when deferred workspace providers fail', async () => {
     const error = new Error('providers unavailable');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -516,12 +638,14 @@ describe('DaemonSessionProvider', () => {
     });
 
     // Skills failing must not block the deferred connect: providers still
-    // resolve and the connection reports connected, just without skill commands.
+    // resolve and the connection reports connected, without clearing any
+    // previous skill commands.
     expect(connection).toMatchObject({
       status: 'connected',
       workspaceCwd: '/mock-workspace',
     });
-    expect(connection).not.toHaveProperty('commands');
+    expect(connection?.commands).toBeUndefined();
+    expect(connection?.skills).toBeUndefined();
     expect(warn).toHaveBeenCalledWith(
       '[DaemonSessionProvider] workspaceSkills failed in deferred connect:',
       error,
@@ -2038,6 +2162,29 @@ describe('DaemonSessionProvider', () => {
             durationMs: 42,
           },
         };
+        yield {
+          id: 26,
+          v: 1,
+          type: 'artifact_changed',
+          data: {
+            sessionId: 'session-1',
+            change: {
+              action: 'created',
+              artifactId: 'artifact-1',
+              artifact: {
+                id: 'artifact-1',
+                kind: 'html',
+                storage: 'workspace',
+                source: 'tool',
+                status: 'available',
+                title: 'Report',
+                workspacePath: 'report.html',
+                createdAt: '2026-07-09T00:00:00.000Z',
+                updatedAt: '2026-07-09T00:00:00.000Z',
+              },
+            },
+          },
+        };
       },
     });
     sdkMocks.sessions.push(session);
@@ -2059,6 +2206,7 @@ describe('DaemonSessionProvider', () => {
       toolsVersion: 1,
       settingsVersion: 1,
       mcpVersion: 1,
+      artifactsVersion: 1,
       initVersion: 0,
       authVersion: 0,
     });
@@ -2893,7 +3041,7 @@ describe('DaemonSessionProvider', () => {
               truncatedEvents: 4,
               retainedEvents: 2,
               maxBytes: 512,
-              fullTranscriptAvailable: false,
+              fullTranscriptAvailable: true,
             },
           },
           {
@@ -5254,21 +5402,22 @@ describe('DaemonSessionProvider', () => {
       modelServices: [],
       workspaceCwd: '/mock-workspace',
     });
+    const releaseHeartbeatFailure = createDeferred<void>();
     const heartbeat = vi.fn(async () => {
+      await releaseHeartbeatFailure.promise;
       throw Object.assign(new Error('session gone'), { status: 410 });
     });
+    const submitStarted = createDeferred<void>();
     const session = createMockSession({
       heartbeat,
-      submitPrompt: vi.fn(
-        (_req: unknown, signal?: AbortSignal) =>
-          new Promise<NonBlockingPromptAccepted>((_resolve, reject) => {
-            signal?.addEventListener(
-              'abort',
-              () => reject(createAbortError()),
-              { once: true },
-            );
-          }),
-      ),
+      submitPrompt: vi.fn((_req: unknown, signal?: AbortSignal) => {
+        submitStarted.resolve();
+        return new Promise<NonBlockingPromptAccepted>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(createAbortError()), {
+            once: true,
+          });
+        });
+      }),
       events: createIdleEvents(),
     });
     sdkMocks.sessions.push(session);
@@ -5291,10 +5440,12 @@ describe('DaemonSessionProvider', () => {
     let promptResult: Promise<unknown> | undefined;
     await act(async () => {
       promptResult = providerActions.sendPrompt('still running');
+      await submitStarted.promise;
       await flushPromises();
     });
 
     await act(async () => {
+      releaseHeartbeatFailure.resolve();
       await wait(50);
       await flushPromises();
     });

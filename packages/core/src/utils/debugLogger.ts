@@ -33,9 +33,9 @@ let ensureDebugDirPromise: Promise<void> | null = null;
 let ensuredDebugDirPath: string | null = null;
 let hasWriteFailure = false;
 let globalSession: DebugLogSession | null = null;
-const sessionContext = new AsyncLocalStorage<DebugLogSession>();
+const sessionContext = new AsyncLocalStorage<DebugLogSession | false>();
 
-function isDebugLogFileEnabled(): boolean {
+export function isDebugLogFileEnabled(): boolean {
   const value = process.env['QWEN_DEBUG_LOG_FILE'];
   if (!value) return false;
   const normalized = value.trim().toLowerCase();
@@ -43,7 +43,9 @@ function isDebugLogFileEnabled(): boolean {
 }
 
 function getActiveSession(): DebugLogSession | null {
-  return sessionContext.getStore() ?? globalSession;
+  const contextSession = sessionContext.getStore();
+  if (contextSession === false) return null;
+  return contextSession ?? globalSession;
 }
 
 function ensureDebugDirExists(): Promise<void> {
@@ -193,11 +195,15 @@ export function runWithDebugLogSession<T>(
   return sessionContext.run(session, fn);
 }
 
+export function runWithoutDebugLogSession<T>(fn: () => T): T {
+  return sessionContext.run(false, fn);
+}
+
 /**
  * Creates a debug logger that writes to the current debug log session.
  *
  * Session resolution order:
- * 1) async-local session (runWithDebugLogSession)
+ * 1) async-local suppression or session
  * 2) process-wide session (setDebugLogSession)
  */
 export function createDebugLogger(tag?: string): DebugLogger {

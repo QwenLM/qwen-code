@@ -79,21 +79,43 @@ describe('GlobTool', () => {
     await fs.rm(tempRootDir, { recursive: true, force: true });
   });
 
-  const mockTruncationGlobResults = (prefix: string, count: number) => {
+  const mockGlobStreamResults = (
+    prefix: string,
+    count: number,
+    extension = 'streamlimit',
+  ) => {
     const baseMtimeMs = Date.now();
-    const entries = Array.from(
-      { length: count },
-      (_, index): GlobResultPath => {
+    let yielded = 0;
+
+    async function* streamEntries() {
+      for (let index = 0; index < count; index++) {
+        yielded++;
         const fileNumber = index + 1;
-        return {
+        yield {
           fullpath: () =>
-            path.join(tempRootDir, `${prefix}${fileNumber}.trunctest`),
+            path.join(tempRootDir, `${prefix}${fileNumber}.${extension}`),
           mtimeMs: baseMtimeMs + fileNumber,
         } as unknown as GlobResultPath;
-      },
+      }
+    }
+
+    const iterator = streamEntries();
+    const stream = {
+      [Symbol.asyncIterator]: () => iterator,
+      destroy: vi.fn(() => {
+        void iterator.return?.();
+      }),
+    };
+
+    vi.mocked(glob.globStream).mockReturnValueOnce(
+      stream as unknown as ReturnType<typeof glob.globStream>,
     );
 
-    vi.mocked(glob.glob).mockResolvedValueOnce(entries);
+    return { getYielded: () => yielded, destroy: stream.destroy };
+  };
+
+  const mockTruncationGlobResults = (prefix: string, count: number) => {
+    mockGlobStreamResults(prefix, count, 'trunctest');
   };
 
   describe('execute', () => {
@@ -280,7 +302,13 @@ describe('GlobTool', () => {
     });
 
     it('should return a GLOB_EXECUTION_ERROR on glob failure', async () => {
-      vi.mocked(glob.glob).mockRejectedValue(new Error('Glob failed'));
+      vi.mocked(glob.globStream).mockReturnValueOnce({
+        [Symbol.asyncIterator]: () => ({
+          next: async () => {
+            throw new Error('Glob failed');
+          },
+        }),
+      } as unknown as ReturnType<typeof glob.globStream>);
       const params: GlobToolParams = { pattern: '*.txt' };
       const invocation = globTool.build(params);
       const result = await invocation.execute(abortSignal);
@@ -288,8 +316,6 @@ describe('GlobTool', () => {
       expect(result.llmContent).toContain(
         'Error during glob search operation: Glob failed',
       );
-      // Reset glob.
-      vi.mocked(glob.glob).mockReset();
     });
   });
 
@@ -452,6 +478,39 @@ describe('GlobTool', () => {
 
       // Should still only have 2 txt files (fileA.txt, FileB.TXT), not doubled
       expect(result.llmContent).toContain('Found 2 file(s)');
+    });
+
+    it('should not scan later workspace directories after hitting the collection limit', async () => {
+      const secondDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'glob-tool-second-'),
+      );
+      await fs.writeFile(path.join(secondDir, '.git'), '');
+      const globStreamCallsBefore = vi.mocked(glob.globStream).mock.calls
+        .length;
+      const stream = mockGlobStreamResults('limit', 10_005);
+
+      const multiDirConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () =>
+          createMockWorkspaceContext(tempRootDir, [secondDir]),
+      } as unknown as Config;
+
+      try {
+        const invocation = new GlobTool(multiDirConfig).build({
+          pattern: '*.streamlimit',
+        });
+        const result = await invocation.execute(abortSignal);
+        const llmContent = partListUnionToString(result.llmContent);
+
+        expect(vi.mocked(glob.globStream).mock.calls.length).toBe(
+          globStreamCallsBefore + 1,
+        );
+        expect(stream.getYielded()).toBeLessThan(10_005);
+        expect(llmContent).toContain('Found at least');
+        expect(llmContent).toContain('Narrow the pattern or path');
+      } finally {
+        await fs.rm(secondDir, { recursive: true, force: true });
+      }
     });
 
     it('should use single directory description when only one workspace dir', async () => {
@@ -701,14 +760,14 @@ describe('GlobTool', () => {
       );
       await fs.mkdir(path.join(tempRootDir, 'node_modules'));
 
-      vi.mocked(glob.glob).mockClear();
+      vi.mocked(glob.globStream).mockClear();
 
       const invocation = new GlobTool(mockConfig).build({
         pattern: '**/*.keep',
       });
       await invocation.execute(abortSignal);
 
-      const lastCall = vi.mocked(glob.glob).mock.calls.at(-1);
+      const lastCall = vi.mocked(glob.globStream).mock.calls.at(-1);
       const globOptions = lastCall?.[1] as
         | { ignore?: { ignored?: unknown; childrenIgnored?: unknown } }
         | undefined;
@@ -795,6 +854,22 @@ describe('GlobTool', () => {
   });
 
   describe('file count truncation', () => {
+    it('stops collecting glob results at a bounded scan limit', async () => {
+      const totalResults = 10_005;
+      const stream = mockGlobStreamResults('limit', totalResults);
+
+      const params: GlobToolParams = { pattern: '*.streamlimit' };
+      const invocation = globTool.build(params);
+      const result = await invocation.execute(abortSignal);
+      const llmContent = partListUnionToString(result.llmContent);
+
+      expect(stream.getYielded()).toBeLessThan(totalResults);
+      expect(stream.destroy).toHaveBeenCalled();
+      expect(llmContent).toContain('Found at least');
+      expect(llmContent).toContain('Narrow the pattern or path');
+      expect(result.returnDisplay).toContain('(truncated)');
+    });
+
     it('should truncate results when more than 100 files are found', async () => {
       mockTruncationGlobResults('file', 150);
 

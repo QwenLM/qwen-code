@@ -1,5 +1,6 @@
 import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import type { ChannelBase, ChannelBaseOptions } from './ChannelBase.js';
+import type { ChannelWebhookConfig } from './ChannelWebhookTask.js';
 
 export type SenderPolicy = 'allowlist' | 'pairing' | 'open';
 export type SessionScope = 'user' | 'thread' | 'single';
@@ -63,6 +64,7 @@ export interface ChannelConfig {
   instructions?: string;
   identity?: ChannelIdentityConfig;
   memoryScope?: ChannelMemoryScopeConfig;
+  webhooks?: ChannelWebhookConfig;
   model?: string;
   groupPolicy: GroupPolicy; // default: "disabled"
   dmPolicy: DmPolicy; // default: "open"

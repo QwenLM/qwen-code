@@ -24,6 +24,7 @@ import {
   extractServerTimestamp,
   matchTurnEvent,
   normalizeDaemonEvent,
+  type CreateSessionRequest,
   type DaemonEvent,
   type DaemonTranscriptBlock,
   type DaemonTranscriptState,
@@ -190,6 +191,7 @@ const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   settingsVersion: 0,
   mcpVersion: 0,
   extensionsVersion: 0,
+  artifactsVersion: 0,
   initVersion: 0,
   authVersion: 0,
 };
@@ -227,6 +229,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   workspaceCapabilitiesRef.current = workspace?.capabilities;
   const workspaceGetCapabilitiesRef = useRef(workspace?.getCapabilities);
   workspaceGetCapabilitiesRef.current = workspace?.getCapabilities;
+  const workspaceAcpPreheatInFlightRef = useRef(false);
   const initialRestoreSessionIdRef = useRef(sessionId);
   const initialRestoreSessionId = initialRestoreSessionIdRef.current;
   // Captured once at mount: if the host did not provide an initial session,
@@ -451,10 +454,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               // session-scoped supported-commands snapshot (which also carries
               // custom/MCP/workflow commands) still lands once the first prompt
               // creates a session.
-              const [providerResult, skillsResult] = await Promise.allSettled([
-                client.workspaceProviders(),
-                client.workspaceSkills(),
-              ]);
+              const [providerResult, skillsResult, acpStatusResult] =
+                await Promise.allSettled([
+                  client.workspaceProviders(),
+                  client.workspaceSkills(),
+                  client.workspaceAcpStatus(),
+                ]);
               if (providerResult.status === 'rejected') {
                 console.warn(
                   '[DaemonSessionProvider] workspaceProviders failed in deferred connect:',
@@ -465,6 +470,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 console.warn(
                   '[DaemonSessionProvider] workspaceSkills failed in deferred connect:',
                   skillsResult.reason,
+                );
+              }
+              if (acpStatusResult.status === 'rejected') {
+                console.warn(
+                  '[DaemonSessionProvider] workspaceAcpStatus failed in deferred connect:',
+                  acpStatusResult.reason,
                 );
               }
               const providers =
@@ -480,6 +491,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   ? skillsResult.value
                   : undefined,
               );
+              const preserveClearedSessionCommands =
+                skillsResult.status === 'rejected' ||
+                (manualSessionClearRef.current &&
+                  deferredSkillCommands.length === 0);
               setConnection((current) => ({
                 ...current,
                 status: 'connected',
@@ -490,13 +505,54 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 contextWindow: providerModelStatus.contextWindow,
                 providers,
                 capabilities: caps,
-                ...(deferredSkillCommands.length > 0
-                  ? { commands: deferredSkillCommands }
-                  : {}),
-                ...(deferredSkills.length > 0
-                  ? { skills: deferredSkills }
-                  : {}),
+                commands: preserveClearedSessionCommands
+                  ? current.commands
+                  : deferredSkillCommands,
+                skills: preserveClearedSessionCommands
+                  ? current.skills
+                  : deferredSkills,
               }));
+              if (
+                acpStatusResult.status === 'fulfilled' &&
+                !acpStatusResult.value.channelLive &&
+                !workspaceAcpPreheatInFlightRef.current
+              ) {
+                workspaceAcpPreheatInFlightRef.current = true;
+                void (async () => {
+                  try {
+                    const preheat = await client.workspaceAcpPreheat(5_000);
+                    if (
+                      disposed ||
+                      abort.signal.aborted ||
+                      !preheat.ready ||
+                      connectionRef.current.sessionId
+                    ) {
+                      return;
+                    }
+                    const refreshed = await client.workspaceSkills();
+                    if (
+                      disposed ||
+                      abort.signal.aborted ||
+                      connectionRef.current.sessionId
+                    ) {
+                      return;
+                    }
+                    const { commands, skills } = mapWorkspaceSkills(refreshed);
+                    setConnection((current) =>
+                      current.sessionId
+                        ? current
+                        : { ...current, commands, skills },
+                    );
+                  } catch (error) {
+                    console.warn(
+                      '[DaemonSessionProvider] ACP preheat for workspace skills failed:',
+                      error,
+                    );
+                  } finally {
+                    workspaceAcpPreheatInFlightRef.current = false;
+                  }
+                })();
+              }
               return;
             }
             const restoreMethod =
@@ -1626,7 +1682,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           workspaceCwd:
             activeWorkspaceCwdRef.current ?? sessionRef.current?.workspaceCwd,
         }),
-        createDetachedSession: () => {
+        createDetachedSession: (
+          workspaceCwd?: string,
+          overrides?: Pick<CreateSessionRequest, 'approvalMode'>,
+        ) => {
           const client =
             workspaceClientRef.current ??
             new DaemonClient({
@@ -1637,7 +1696,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             ...createSessionRequestRef.current,
             sessionScope: 'thread' as const,
             workspaceCwd:
-              activeWorkspaceCwdRef.current ?? sessionRef.current?.workspaceCwd,
+              workspaceCwd ??
+              activeWorkspaceCwdRef.current ??
+              sessionRef.current?.workspaceCwd,
+            ...(overrides?.approvalMode !== undefined
+              ? { approvalMode: overrides.approvalMode }
+              : {}),
           };
           const requestClientId = clientId
             ? clientIdRef.current
@@ -2170,6 +2234,7 @@ function bumpWorkspaceEventSignals(
   let settings = 0;
   let mcp = 0;
   let extensions = 0;
+  let artifacts = 0;
   let lastExtensionChange:
     | DaemonWorkspaceEventSignals['lastExtensionChange']
     | undefined;
@@ -2208,6 +2273,9 @@ function bumpWorkspaceEventSignals(
           failed: event.failed,
         };
         break;
+      case 'session.artifact.changed':
+        artifacts += 1;
+        break;
       case 'workspace.initialized':
         init += 1;
         break;
@@ -2223,7 +2291,18 @@ function bumpWorkspaceEventSignals(
     }
   }
 
-  if (memory + agents + tools + settings + mcp + extensions + init + auth === 0)
+  if (
+    memory +
+      agents +
+      tools +
+      settings +
+      mcp +
+      extensions +
+      artifacts +
+      init +
+      auth ===
+    0
+  )
     return;
 
   setSignals((current) => ({
@@ -2233,6 +2312,7 @@ function bumpWorkspaceEventSignals(
     settingsVersion: current.settingsVersion + settings,
     mcpVersion: current.mcpVersion + mcp,
     extensionsVersion: current.extensionsVersion + extensions,
+    artifactsVersion: current.artifactsVersion + artifacts,
     ...(lastExtensionChange ? { lastExtensionChange } : {}),
     initVersion: current.initVersion + init,
     authVersion: current.authVersion + auth,
