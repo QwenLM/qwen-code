@@ -17,6 +17,7 @@ describe('ci flaky rerun workflow', () => {
   it('runs every ten minutes and limits write permissions to a separate action job', () => {
     expect(workflow).toContain("cron: '*/10 * * * *'");
     expect(workflow).toContain("ACTIVE_DAYS: '7'");
+    expect(workflow).toContain("MAX_CANDIDATES_PER_RUN: '5'");
     expect(workflow).toContain('classify:');
     expect(workflow).toContain('act:');
     expect(workflow).toContain("actions: 'read'");
@@ -44,6 +45,7 @@ describe('ci flaky rerun workflow', () => {
     expect(workflow).toContain('actions/download-artifact@');
     expect(workflow).toContain("GITHUB_TOKEN: ''");
     expect(workflow).toContain('settings: |-');
+    expect(workflow).toContain('--max-candidates "${MAX_CANDIDATES_PER_RUN}"');
     expect(workflow).not.toContain('settings_json');
   });
 
@@ -52,6 +54,7 @@ describe('ci flaky rerun workflow', () => {
     expect(skill).toContain('JavaScript driver owns');
     expect(skill).toContain('This skill chooses');
     expect(skill).toContain('every candidate');
+    expect(skill).toContain('bounded batch');
     expect(skill).toContain('ci-flaky-input.json');
     expect(skill).toContain('ci-flaky-decisions.json');
     expect(skill).toContain('`rerun`');

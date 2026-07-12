@@ -14,6 +14,7 @@ import { promisify } from 'node:util';
 const execFile = promisify(execFileCallback);
 const DEFAULT_STALE_MINUTES = 30;
 const DEFAULT_ACTIVE_DAYS = 7;
+const DEFAULT_MAX_CANDIDATES_PER_RUN = 5;
 const MAX_ACTIONS_PER_HEAD = 3;
 const MARKER = 'qwen-ci-flaky-rerun';
 
@@ -156,7 +157,8 @@ export function selectCandidateTargets(prs, options = {}) {
       if (seenPrs.has(target.prNumber)) return false;
       seenPrs.add(target.prNumber);
       return true;
-    });
+    })
+    .sort((a, b) => timeMs(a.completedAt) - timeMs(b.completedAt));
 }
 
 export function selectTarget(prs, options = {}) {
@@ -427,6 +429,11 @@ async function scan(args) {
     .split(',')
     .filter(Boolean);
   const options = { trustedMarkerLogins };
+  const requestedMax = Number(args.get('max-candidates'));
+  const maxCandidates =
+    Number.isSafeInteger(requestedMax) && requestedMax > 0
+      ? requestedMax
+      : DEFAULT_MAX_CANDIDATES_PER_RUN;
   const targets = [];
   for (const candidate of candidates) {
     const pr = prs.find((item) => item.number === candidate.prNumber);
@@ -437,6 +444,7 @@ async function scan(args) {
       behindBy: await client.behindBy(candidate.headSha),
       actionCount: actionCountForHead({ ...pr, comments }, candidate, options),
     });
+    if (targets.length >= maxCandidates) break;
   }
   if (targets.length > 0)
     await writeSkillInputs(client, targets, args.get('workdir'));

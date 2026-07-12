@@ -5,12 +5,12 @@ description: Use when a scheduled PR CI patrol needs safe actions for stale fail
 
 # PR CI Failure Patrol
 
-Classify every candidate stale PR CI failure. This skill is read-only and owns the judgment step; it never handles main-branch failures.
+Classify every candidate in the bounded batch of stale PR CI failures. This skill is read-only and owns the judgment step; it never handles main-branch failures.
 
 ## Workflow contract
 
 - JavaScript driver owns deterministic GitHub work: scan active PRs, fetch logs and branch distance, enforce the three-action head limit, and perform GitHub writes.
-- This skill chooses one action per trusted candidate. Low confidence means no action.
+- The driver scans all failed PRs but passes only a bounded batch. This skill chooses one action per trusted candidate. Low confidence means no action.
 
 Inputs live in the current workdir:
 

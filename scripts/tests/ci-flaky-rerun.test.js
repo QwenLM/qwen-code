@@ -94,7 +94,7 @@ describe('ci flaky rerun patrol', () => {
     });
   });
 
-  it('prefers recent stale failures over ancient failures', () => {
+  it('prioritizes the oldest stale failure so new failures cannot starve it', () => {
     expect(
       selectTarget(
         [
@@ -114,8 +114,8 @@ describe('ci flaky rerun patrol', () => {
         { now: NOW, staleMinutes: 30 },
       ),
     ).toMatchObject({
-      prNumber: 42,
-      runId: 123,
+      prNumber: 41,
+      runId: 122,
     });
   });
 
@@ -199,9 +199,11 @@ describe('ci flaky rerun patrol', () => {
     expect(script).toContain('`updated:>=${activeSince} status:failure`');
   });
 
-  it('collects every eligible failed PR before handing judgment to the skill', () => {
+  it('bounds each skill batch after scanning all eligible failed PRs', () => {
     expect(script).toContain('const targets = []');
     expect(script).toContain('targets.push({');
+    expect(script).toContain('DEFAULT_MAX_CANDIDATES_PER_RUN');
+    expect(script).toContain('if (targets.length >= maxCandidates) break;');
     expect(script).toContain('await writeSkillInputs(client, targets,');
     expect(script).not.toContain('target = {\n      ...candidate,');
   });
@@ -237,8 +239,8 @@ describe('ci flaky rerun patrol', () => {
         pr(),
       ]).map((target) => [target.prNumber, target.runId]),
     ).toEqual([
-      [42, 123],
       [41, 122],
+      [42, 123],
     ]);
   });
 

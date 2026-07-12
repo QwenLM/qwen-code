@@ -15,6 +15,7 @@ concurrency:
 env:
   STALE_MINUTES: '30'
   ACTIVE_DAYS: '7'
+  MAX_CANDIDATES_PER_RUN: '5'
   WORKDIR: '${{ github.workspace }}/.qwen/ci-flaky-rerun'
 
 jobs:
@@ -52,6 +53,7 @@ jobs:
             --workdir "${WORKDIR}" \
             --stale-minutes "${STALE_MINUTES}" \
             --active-days "${ACTIVE_DAYS}" \
+            --max-candidates "${MAX_CANDIDATES_PER_RUN}" \
             --trusted-marker-logins 'qwen-code-ci-bot,github-actions[bot]' | tee "${WORKDIR}/scan.out"
           cat "${WORKDIR}/scan.out" >> "${GITHUB_OUTPUT}"
           if test -s "${WORKDIR}/ci-flaky-input.json"; then
