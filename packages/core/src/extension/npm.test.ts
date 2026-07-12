@@ -434,6 +434,34 @@ describe('downloadFromNpmRegistry', () => {
     expect(tar.t).not.toHaveBeenCalled();
   });
 
+  it('stops following npm metadata redirect loops', async () => {
+    vi.mocked(https.get).mockImplementation(
+      (_url: unknown, _options: unknown, callback: unknown) => {
+        if (typeof callback === 'function') {
+          callback({
+            statusCode: 302,
+            headers: { location: '/metadata-loop' },
+            on: vi.fn(),
+            resume: vi.fn(),
+          } as never);
+        }
+        return { on: vi.fn().mockReturnThis(), destroy: vi.fn() } as never;
+      },
+    );
+
+    await expect(
+      downloadFromNpmRegistry(
+        {
+          source: '@scope/pkg',
+          type: 'npm',
+          registryUrl: 'https://registry.example.com',
+        },
+        '/tmp/qwen-extension',
+      ),
+    ).rejects.toThrow('Too many redirects while fetching npm package metadata');
+    expect(https.get).toHaveBeenCalledTimes(11);
+  });
+
   it('resolves relative npm tarball redirects', async () => {
     let requestCount = 0;
     vi.mocked(https.get).mockImplementation(
@@ -474,6 +502,38 @@ describe('downloadFromNpmRegistry', () => {
     expect(vi.mocked(https.get).mock.calls[2]?.[0]).toBe(
       'https://registry.example.com/pkg-final.tgz',
     );
+  });
+
+  it('stops following npm tarball redirect loops', async () => {
+    let requestCount = 0;
+    vi.mocked(https.get).mockImplementation(
+      (_url: unknown, _options: unknown, callback: unknown) => {
+        requestCount += 1;
+        const response =
+          requestCount === 1
+            ? npmMetadataResponse('https://registry.example.com/pkg.tgz')
+            : {
+                statusCode: 302,
+                headers: { location: '/tarball-loop' },
+                on: vi.fn(),
+                destroy: vi.fn(),
+              };
+        if (typeof callback === 'function') callback(response as never);
+        return { on: vi.fn().mockReturnThis(), destroy: vi.fn() } as never;
+      },
+    );
+
+    await expect(
+      downloadFromNpmRegistry(
+        {
+          source: '@scope/pkg',
+          type: 'npm',
+          registryUrl: 'https://registry.example.com',
+        },
+        '/tmp/qwen-extension',
+      ),
+    ).rejects.toThrow('Too many redirects while downloading npm package');
+    expect(https.get).toHaveBeenCalledTimes(12);
   });
 
   it('preserves the original abort reason during a redirected npm download', async () => {

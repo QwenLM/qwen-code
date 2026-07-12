@@ -17,6 +17,7 @@ import { assertTarArchiveHasNoLinks } from './archive-safety.js';
 const debugLogger = createDebugLogger('EXT_NPM');
 const NPM_ARCHIVE_DOWNLOAD_TIMEOUT_MS = 120_000;
 const NPM_ARCHIVE_DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024;
+const NPM_MAX_REDIRECTS = 10;
 
 export interface NpmDownloadResult {
   version: string;
@@ -196,8 +197,14 @@ function fetchNpmJson<T>(
   url: string,
   authToken?: string,
   signal?: AbortSignal,
+  redirectCount = 0,
 ): Promise<T> {
   signal?.throwIfAborted();
+  if (redirectCount > NPM_MAX_REDIRECTS) {
+    return Promise.reject(
+      new Error('Too many redirects while fetching npm package metadata'),
+    );
+  }
   const headers: Record<string, string> = {
     Accept: 'application/json',
   };
@@ -224,7 +231,12 @@ function fetchNpmJson<T>(
             const originalOrigin = new URL(url).origin;
             const redirectToken =
               redirectUrl.origin === originalOrigin ? authToken : undefined;
-            fetchNpmJson<T>(redirectUrl.toString(), redirectToken, signal)
+            fetchNpmJson<T>(
+              redirectUrl.toString(),
+              redirectToken,
+              signal,
+              redirectCount + 1,
+            )
               .then(resolve)
               .catch(reject);
             return;
@@ -270,7 +282,14 @@ function downloadNpmFileRedirect(
   context: NpmDownloadContext,
   authToken?: string,
   signal?: AbortSignal,
+  redirectCount = 0,
 ): Promise<void> {
+  signal?.throwIfAborted();
+  if (redirectCount > NPM_MAX_REDIRECTS) {
+    return Promise.reject(
+      new Error('Too many redirects while downloading npm package'),
+    );
+  }
   const headers: Record<string, string> = {};
   if (authToken) {
     headers['Authorization'] = `Bearer ${authToken}`;
@@ -290,7 +309,6 @@ function downloadNpmFileRedirect(
       settled = true;
       reject(error);
     };
-    signal?.throwIfAborted();
     const requestGeneration = ++context.requestGeneration;
     const req = client
       .get(url, { headers, signal }, (res) => {
@@ -321,6 +339,7 @@ function downloadNpmFileRedirect(
               context,
               redirectToken,
               signal,
+              redirectCount + 1,
             )
               .then(finish)
               .catch(fail);

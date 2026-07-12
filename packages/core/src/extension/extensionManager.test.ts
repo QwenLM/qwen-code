@@ -159,6 +159,9 @@ describe('extension tests', () => {
     return new ExtensionManager({
       workspaceDir: tempWorkspaceDir,
       isWorkspaceTrusted: true,
+      extensionStore: new ExtensionStore({
+        extensionsDir: userExtensionsDir,
+      }),
       ...options,
     });
   }
