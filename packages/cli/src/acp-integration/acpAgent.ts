@@ -290,7 +290,7 @@ import {
   collectGoalStatusItemsFromRecords,
   restoreGoalFromHistory,
 } from '../ui/utils/restoreGoal.js';
-import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
 const debugLogger = createDebugLogger('ACP_AGENT');
 const QWEN_ACP_LOCAL_READ_ROOTS_ENV = 'QWEN_ACP_LOCAL_READ_ROOTS';
@@ -3550,7 +3550,7 @@ class QwenAgent implements Agent {
         // wrote a line for it (it is the only caller that knows the condition
         // is malformed). Logging here too would double-report the one case,
         // while the env gates below report once.
-        this.#warnGoalRestore(
+        writeStderrLineSafe(
           `qwen: not restoring the active goal for session ${config.getSessionId()} (${restored.blockedBy}).`,
         );
       }
@@ -3558,28 +3558,11 @@ class QwenAgent implements Agent {
       // Not debugLogger: it no-ops unless a debug session is active, and a
       // failed restore is invisible from the outside — the transcript still
       // shows the goal as active while no hook drives it.
-      this.#warnGoalRestore(
+      writeStderrLineSafe(
         `qwen: goal restore failed for session ${config.getSessionId()}: ${error}`,
       );
     } finally {
       session.installGoalTerminalObserver();
-    }
-  }
-
-  /**
-   * stderr for the goal-restore path, which must never take a session down.
-   *
-   * `writeStderrLine` reaches `process.stderr.write`, which throws on EPIPE or
-   * a closed fd — reachable in a daemon whose stderr was redirected or whose
-   * reader went away. A throw from the `catch` above would escape
-   * `#restoreGoalOnResume` into `loadSession`, and a best-effort restore would
-   * be failing the very session load it promises not to block.
-   */
-  #warnGoalRestore(message: string): void {
-    try {
-      writeStderrLine(message);
-    } catch {
-      // stderr is gone. There is, definitionally, nowhere to report that.
     }
   }
 

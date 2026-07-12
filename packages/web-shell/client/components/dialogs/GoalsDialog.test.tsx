@@ -232,6 +232,60 @@ describe('GoalsDialog', () => {
     expect(onError).toHaveBeenCalled();
   });
 
+  it('reloads the list when Refresh is clicked', async () => {
+    // The poll is on a 10s lane, so Refresh is the only way to see a goal you
+    // just set from another window without waiting.
+    await mount([]);
+    expect(actions.listGoals).toHaveBeenCalledTimes(1);
+
+    actions.listGoals.mockResolvedValue({
+      goals: [baseGoal({ condition: 'freshly appeared' })],
+      droppedCount: 0,
+    });
+    click(findButton('Refresh'));
+    await flush();
+
+    expect(actions.listGoals).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).toContain('freshly appeared');
+  });
+
+  it("disables a goal's clear button while its clear is in flight", async () => {
+    // Without this, a double-click fires two concurrent clears at the same
+    // session — the second racing a goal that is already gone.
+    await mount([baseGoal()]);
+    // After mount: the helper itself stubs clearGoal with a resolved value.
+    let release: (() => void) | undefined;
+    actions.clearGoal.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve({ cleared: true });
+        }),
+    );
+
+    const clearButton = () =>
+      document.querySelector<HTMLButtonElement>(
+        'button[aria-label="Clear goal"]',
+      );
+    expect(clearButton()?.disabled).toBe(false);
+
+    click(clearButton());
+    await flush();
+
+    expect(actions.clearGoal).toHaveBeenCalledTimes(1);
+    expect(clearButton()?.disabled).toBe(true);
+
+    // A second click while the first is still in flight must do nothing.
+    click(clearButton());
+    await flush();
+    expect(actions.clearGoal).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      release?.();
+      await Promise.resolve();
+    });
+    await flush();
+  });
+
   it('rejects an empty condition instead of submitting it', async () => {
     const onCreateGoal = vi.fn();
     await mount([], { onCreateGoal });

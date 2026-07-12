@@ -32,7 +32,7 @@ import {
   parseGoalStatusItem,
   type GoalRestoreBlockedReason,
 } from '../../ui/utils/restoreGoal.js';
-import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { writeStderrLineSafe } from '../../utils/stdioHelpers.js';
 
 /**
  * Shown on the `cleared` card that supersedes an active goal the resumed
@@ -483,7 +483,11 @@ export class HistoryReplayer {
           // otherwise ride out to every client inside `_meta.goalStatus`.
           // `restoreGoalFromHistory` refuses the same card, so skipping it here
           // keeps the card and the hook consistent — neither survives.
-          writeStderrLine(
+          //
+          // Safe variant: a throwing stderr would abandon this record's
+          // remaining cards and then abort the whole replay, losing the
+          // transcript over a failed diagnostic about one bad card.
+          writeStderrLineSafe(
             'qwen: skipping replay of a goal card whose condition is empty.',
           );
         } else if (goalStatus.kind !== 'checking') {

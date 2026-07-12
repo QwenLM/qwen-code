@@ -6,9 +6,10 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-vi.mock('../../utils/stdioHelpers.js', () => ({
-  writeStderrLine: vi.fn(),
-}));
+// Deliberately NOT mocked: `writeStderrLineSafe` is the thing under test in
+// "survives a broken stderr" below, and a mocked stand-in would re-implement the
+// very try/catch it is supposed to prove exists. Tests that trigger a stderr
+// line spy on `process.stderr.write` instead.
 
 import {
   HistoryReplayer,
@@ -1101,6 +1102,41 @@ describe('HistoryReplayer', () => {
         .filter(Boolean);
       expect(texts).toEqual(['hello']);
       expect(goalStatuses()).toHaveLength(1);
+    });
+
+    it('survives a broken stderr instead of abandoning the transcript', async () => {
+      // The empty-condition card writes a diagnostic. `process.stderr.write`
+      // throws on EPIPE (`qwen … | head`, or a daemon whose stderr reader went
+      // away), and a raw `writeStderrLine` would take that throw out through the
+      // item loop and the record loop, aborting the whole replay: the user loses
+      // their transcript because we failed to *complain* about one bad card.
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => {
+          throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+        });
+
+      const record = goalRecord();
+      (
+        record as unknown as { systemPayload: Record<string, unknown> }
+      ).systemPayload['outputHistoryItems'] = [
+        // Trips the diagnostic...
+        { type: 'goal_status', kind: 'set', condition: '' },
+        // ...and this must still be replayed afterwards.
+        { type: 'goal_status', kind: 'set', condition: 'ship it' },
+        { type: 'assistant', text: 'hello' },
+      ];
+
+      await expect(replayer.replay([record])).resolves.toBeUndefined();
+
+      expect(stderr).toHaveBeenCalled();
+      expect(goalStatuses()).toEqual([{ kind: 'set', condition: 'ship it' }]);
+      const texts = sentUpdates()
+        .map((u) => (u['content'] as Record<string, unknown>)?.['text'])
+        .filter(Boolean);
+      expect(texts).toEqual(['hello']);
+
+      stderr.mockRestore();
     });
 
     it('survives a slash_command record whose outputHistoryItems is not an array', async () => {

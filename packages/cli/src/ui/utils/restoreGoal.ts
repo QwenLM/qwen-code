@@ -22,7 +22,7 @@ import {
   type HistoryItemGoalStatus,
   type HistoryItemWithoutId,
 } from '../types.js';
-import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { writeStderrLineSafe } from '../../utils/stdioHelpers.js';
 
 export interface RestorableGoal {
   condition: string;
@@ -227,7 +227,7 @@ export function recordGoalStatusItem(
       // Optional chaining used to swallow this. A goal set without a recording
       // service works for the rest of the session and then vanishes on resume,
       // which is indistinguishable from the restore bug this module fixes.
-      writeStderrLine(
+      writeStderrLineSafe(
         `qwen: no chat recording service; goal_status (kind=${item.kind}) will not survive a resume.`,
       );
       return;
@@ -244,7 +244,7 @@ export function recordGoalStatusItem(
     // recording exists to prevent — so leave a trace.
     // Not debugLogger: that no-ops unless a debug session is active, and a
     // lost write here is invisible until the goal fails to survive a resume.
-    writeStderrLine(
+    writeStderrLineSafe(
       `qwen: failed to record goal_status (kind=${item.kind}): ${error}`,
     );
   }
@@ -359,7 +359,7 @@ export function restoreGoalFromHistory(
   // ACP's `#restoreGoalOnResume` skips its own line for this reason, so exactly
   // one line is written either way.
   if (goalConditionBlockedBy(restorable.condition)) {
-    writeStderrLine(
+    writeStderrLineSafe(
       `qwen: refusing to restore a goal for session ${sessionId}: the condition is empty.`,
     );
     unregisterGoalHook(config, sessionId);
