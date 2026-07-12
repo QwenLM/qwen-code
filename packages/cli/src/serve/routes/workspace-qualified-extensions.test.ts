@@ -149,7 +149,7 @@ function auth(pending: request.Test): request.Test {
 
 function mockExtensionManager(
   installType: 'archive-url' | 'local' = 'archive-url',
-): void {
+): Extension {
   const extension = {
     id: extensionId,
     name: 'demo',
@@ -207,6 +207,7 @@ function mockExtensionManager(
     ExtensionManager.prototype,
     'clearExtensionWorkspaceActivation',
   ).mockResolvedValue(snapshot);
+  return extension;
 }
 
 async function pollOperation(
@@ -1029,6 +1030,41 @@ describe('extension management v2 REST', () => {
       expect(commitPrepared).toHaveBeenCalledWith(prepared);
       expect(disposePrepared).toHaveBeenCalledWith(prepared);
     } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('reports an up-to-date V2 update as checked without committing', async () => {
+    const h = await makeHarness();
+    const extension = mockExtensionManager();
+    const prepareUpdate = vi
+      .spyOn(ExtensionManager.prototype, 'prepareExtensionUpdate')
+      .mockResolvedValue({ upToDate: true, extension });
+    const commitPrepared = vi.spyOn(
+      ExtensionManager.prototype,
+      'commitPreparedExtension',
+    );
+    try {
+      const started = await auth(
+        request(h.app).post(`/extensions/${extensionId}/update`),
+      );
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({
+        status: 'succeeded',
+        result: {
+          status: 'checked',
+          name: 'demo',
+          updated: false,
+          reason: 'up_to_date',
+        },
+      });
+      expect(commitPrepared).not.toHaveBeenCalled();
+    } finally {
+      prepareUpdate.mockRestore();
+      commitPrepared.mockRestore();
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
   });

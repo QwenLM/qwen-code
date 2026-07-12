@@ -301,39 +301,29 @@ export function createExtensionsController(
   const refreshExtensionsForAllSessions = async (): Promise<{
     refreshed: number;
     failed: number;
-  }> => {
-    let markStarted: (() => void) | undefined;
-    const started = new Promise<void>((resolve) => {
-      markStarted = resolve;
-    });
-    const queued = commitQueue.run(
-      async () => {
-        const result = await workspace.refreshExtensionsForAllSessions();
+  }> =>
+    await commitQueue.run(async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
         extensionsStatusCache = undefined;
+        const result = await Promise.race([
+          workspace.refreshExtensionsForAllSessions(),
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(() => {
+              reject(
+                new Error(
+                  `extension refresh timed out after ${EXTENSION_REFRESH_TIMEOUT_MS}ms`,
+                ),
+              );
+            }, EXTENSION_REFRESH_TIMEOUT_MS);
+            timer.unref();
+          }),
+        ]);
         return result;
-      },
-      { onStart: () => markStarted?.() },
-    );
-    await started;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      return await Promise.race([
-        queued,
-        new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => {
-            reject(
-              new Error(
-                `extension refresh timed out after ${EXTENSION_REFRESH_TIMEOUT_MS}ms`,
-              ),
-            );
-          }, EXTENSION_REFRESH_TIMEOUT_MS);
-          timer.unref();
-        }),
-      ]);
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
-  };
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    });
 
   const runQueuedExtensionMutation = (
     operation: string,

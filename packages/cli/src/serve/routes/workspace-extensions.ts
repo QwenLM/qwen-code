@@ -1271,7 +1271,7 @@ export function registerWorkspaceExtensionRoutes(
           );
           if (preparedResult.upToDate) {
             return {
-              status: 'updated',
+              status: 'checked',
               name: extension.name,
               updated: false,
               reason: 'up_to_date',

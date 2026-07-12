@@ -17,7 +17,7 @@ describe('createExtensionsController', () => {
     vi.restoreAllMocks();
   });
 
-  it('times out a manual refresh without releasing its commit lane', async () => {
+  it('releases the commit lane after a manual refresh times out', async () => {
     vi.useFakeTimers();
     let refreshCalls = 0;
     let releaseRefresh:
@@ -55,15 +55,11 @@ describe('createExtensionsController', () => {
       (result) => result,
       (error: unknown) => (error instanceof Error ? error.message : 'error'),
     );
-    await vi.advanceTimersByTimeAsync(30_000);
-    expect(refreshCalls).toBe(1);
-    expect(await Promise.race([nextOutcome, Promise.resolve('pending')])).toBe(
-      'pending',
-    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(refreshCalls).toBe(2);
+    await expect(nextOutcome).resolves.toEqual({ refreshed: 1, failed: 0 });
 
     releaseRefresh?.({ refreshed: 0, failed: 0 });
-    await expect(nextOutcome).resolves.toEqual({ refreshed: 1, failed: 0 });
-    expect(refreshCalls).toBe(2);
   });
 
   it('starts the status cache lifetime after a slow refresh completes', async () => {
