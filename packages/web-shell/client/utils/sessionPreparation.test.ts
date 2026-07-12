@@ -1,9 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createAndAttachSessionForPrompt } from './sessionPreparation';
 
 type CreateSessionArgs = Parameters<typeof createAndAttachSessionForPrompt>[0];
 const sessionResult = { sessionId: 'session-1' };
 const modelResult = { model: 'qwen3' };
+
+afterEach(() => vi.useRealTimers());
 
 function createActions(
   overrides: Partial<CreateSessionArgs['sessionActions']> = {},
@@ -175,7 +177,7 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(order).toEqual(['close', 'clear']);
     expect(actions.setModel).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledWith(
-      '[WebShell] failed to prepare new session:',
+      '[WebShell] failed to attach new session:',
       error,
     );
   });
@@ -258,6 +260,7 @@ describe('createAndAttachSessionForPrompt', () => {
   it('cleans up the created session when onSessionCreated rejects', async () => {
     const error = new Error('callback failed');
     const actions = createActions();
+    const warn = vi.fn();
 
     await expect(
       createAndAttachSessionForPrompt({
@@ -265,12 +268,46 @@ describe('createAndAttachSessionForPrompt', () => {
         onSessionCreated: vi.fn(async () => {
           throw error;
         }),
-        warn: vi.fn(),
+        warn,
       }),
     ).rejects.toThrow(error);
 
     expect(actions.attachSession).not.toHaveBeenCalled();
     expect(actions.closeSession).toHaveBeenCalledOnce();
     expect(actions.clearSession).toHaveBeenCalledOnce();
+    expect(actions.setModel).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] failed to run onSessionCreated:',
+      error,
+    );
+  });
+
+  it('cleans up when onSessionCreated times out', async () => {
+    vi.useFakeTimers();
+    const actions = createActions();
+
+    const result = createAndAttachSessionForPrompt({
+      sessionActions: actions,
+      onSessionCreated: () => new Promise<void>(() => {}),
+      warn: vi.fn(),
+    });
+    const rejection = result.catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(await rejection).toEqual(new Error('onSessionCreated timed out'));
+    expect(actions.attachSession).not.toHaveBeenCalled();
+    expect(actions.closeSession).toHaveBeenCalledOnce();
+    expect(actions.clearSession).toHaveBeenCalledOnce();
   });
 });
+
+function createDeferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value?: T | PromiseLike<T>) => void;
+} {
+  let resolve!: (value?: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = (value) => res(value as T | PromiseLike<T>);
+  });
+  return { promise, resolve };
+}

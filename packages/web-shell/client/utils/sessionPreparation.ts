@@ -3,6 +3,8 @@ import {
   type DaemonApprovalMode,
 } from '@qwen-code/webui/daemon-react-sdk';
 
+const SESSION_CREATED_CALLBACK_TIMEOUT_MS = 30_000;
+
 type PromptSessionActions = {
   createSession: (options?: {
     workspaceCwd?: string;
@@ -45,11 +47,28 @@ export async function createAndAttachSessionForPrompt({
     workspaceCwd,
     ...(approvalMode ? { approvalMode } : {}),
   });
+  let preparationStep = 'run onSessionCreated';
   try {
-    await onSessionCreated?.(sessionId);
+    if (onSessionCreated) {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          onSessionCreated(sessionId),
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(
+              () => reject(new Error('onSessionCreated timed out')),
+              SESSION_CREATED_CALLBACK_TIMEOUT_MS,
+            );
+          }),
+        ]);
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+    preparationStep = 'attach new session';
     await sessionActions.attachSession();
   } catch (error) {
-    warn('[WebShell] failed to prepare new session:', error);
+    warn(`[WebShell] failed to ${preparationStep}:`, error);
     await sessionActions.closeSession().catch((closeError: unknown) => {
       warn('[WebShell] failed to close unattached session:', closeError);
     });

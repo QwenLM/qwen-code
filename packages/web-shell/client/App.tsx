@@ -418,7 +418,7 @@ export interface WebShellApi {
 export interface WebShellProps {
   /** Called whenever the attached daemon session id changes. */
   onSessionIdChange?: (sessionId: string | undefined) => void;
-  /** Called after a new session is created. Session setup waits for it to resolve. */
+  /** Called after a new session is created. Session setup waits up to 30 seconds. */
   onSessionCreated?: (sessionId: string) => Promise<void>;
   /** Visual theme for the embedded shell. */
   theme?: WebShellTheme;
@@ -2302,6 +2302,8 @@ export function App({
   }, []);
   const [isPreparingPrompt, setIsPreparingPrompt] = useState(false);
   const createSessionPromiseRef = useRef<Promise<void> | null>(null);
+  const onSessionCreatedRef = useRef(onSessionCreated);
+  onSessionCreatedRef.current = onSessionCreated;
   useEffect(() => {
     if (connection.sessionId) {
       createSessionPromiseRef.current = null;
@@ -2321,7 +2323,7 @@ export function App({
           modelId,
           modeId,
           workspaceCwd: selectedWorkspaceCwdRef.current,
-          onSessionCreated,
+          onSessionCreated: onSessionCreatedRef.current,
         });
         // One-shot: the picker targets only the *next* new session, so clear
         // it after creation. The next new chat defaults back to the primary
@@ -2333,7 +2335,7 @@ export function App({
       });
     }
     return createSessionPromiseRef.current;
-  }, [onSessionCreated, sessionActions]);
+  }, [sessionActions]);
   const onSubmitBeforeRef = useRef(onSubmitBefore);
   onSubmitBeforeRef.current = onSubmitBefore;
   const [sessionListReloadToken, setSessionListReloadToken] = useState(0);
