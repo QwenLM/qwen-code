@@ -817,6 +817,54 @@ describe('ExtensionStore', () => {
     expect(fs.existsSync(journal)).toBe(false);
   });
 
+  it('keeps an artifact when state reached the target generation before the journal phase', async () => {
+    const store = makeStore();
+    const identity = { id: 'c3'.repeat(32), name: 'demo' };
+    const initial = await store.ensureInitialized([identity]);
+    const targetSnapshot = structuredClone(initial);
+    targetSnapshot.generation = 1;
+    const transactionId = 'recover-after-state-write';
+    const destination = path.join(extensionsDir, identity.name);
+    const backup = path.join(storeDir, 'rollback', transactionId);
+    const journal = path.join(
+      storeDir,
+      'transactions',
+      `${transactionId}.json`,
+    );
+    await fsp.mkdir(destination);
+    await fsp.writeFile(path.join(destination, 'version'), 'new');
+    await fsp.mkdir(backup);
+    await fsp.writeFile(path.join(backup, 'version'), 'old');
+    await fsp.writeFile(
+      path.join(storeDir, 'state.json'),
+      JSON.stringify(targetSnapshot),
+    );
+    await fsp.writeFile(
+      journal,
+      JSON.stringify({
+        version: 1,
+        transactionId,
+        operation: 'update',
+        phase: 'artifact_swapped',
+        destinationDirectory: destination,
+        stagingDirectory: path.join(storeDir, 'staging', transactionId),
+        backupDirectory: backup,
+        previousGeneration: 0,
+        targetGeneration: 1,
+        targetSnapshot,
+      }),
+    );
+
+    const recovered = await store.readSnapshot();
+
+    expect(recovered.generation).toBe(1);
+    expect(await fsp.readFile(path.join(destination, 'version'), 'utf8')).toBe(
+      'new',
+    );
+    expect(fs.existsSync(backup)).toBe(false);
+    expect(fs.existsSync(journal)).toBe(false);
+  });
+
   it('finishes cleanup after a committed transaction', async () => {
     const store = makeStore();
     const identity = { id: 'd1'.repeat(32), name: 'demo' };
