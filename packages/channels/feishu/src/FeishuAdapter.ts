@@ -311,7 +311,13 @@ export class FeishuChannel extends ChannelBase {
         appSecret: this.config.clientSecret!,
         loggerLevel: lark.LoggerLevel.warn,
         autoReconnect: true,
-        onReady: () => settle(),
+        onReady: () => {
+          if (settled) {
+            client.close();
+            return;
+          }
+          settle();
+        },
         onError: fail,
       });
       this.wsClient = client;

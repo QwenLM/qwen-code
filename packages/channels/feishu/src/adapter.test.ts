@@ -982,6 +982,9 @@ describe('FeishuChannel', () => {
 
         await rejection;
         expect(wsMock.close).toHaveBeenCalledOnce();
+
+        wsMock.options?.onReady?.();
+        expect(wsMock.close).toHaveBeenCalledTimes(2);
       } finally {
         vi.useRealTimers();
       }
