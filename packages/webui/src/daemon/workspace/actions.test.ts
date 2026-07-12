@@ -21,12 +21,19 @@ describe('workspace actions', () => {
       baseUrl: '',
     });
 
-    const result = expect(
-      actions.removeWorkspace('secondary', { force: true, timeoutMs: 10 }),
-    ).rejects.toThrow('Remove workspace timed out after 10ms');
+    const result = actions
+      .removeWorkspace('secondary', { force: true, timeoutMs: 10 })
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
     await vi.advanceTimersByTimeAsync(10);
 
-    await result;
+    const error = await result;
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toMatchObject({
+      message: 'Remove workspace timed out after 10ms',
+    });
     expect(remove).toHaveBeenCalledWith({ force: true, timeoutMs: 10 });
   });
 });
