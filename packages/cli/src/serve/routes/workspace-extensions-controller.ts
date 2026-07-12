@@ -8,6 +8,7 @@ import * as crypto from 'node:crypto';
 import {
   ExtensionManager,
   redactUrlCredentials,
+  stripAnsiAndControl,
   type ExtensionSetting,
 } from '@qwen-code/qwen-code-core';
 import type { Request, Response } from 'express';
@@ -33,6 +34,9 @@ import {
 } from '../extension-operation-scheduler.js';
 
 const MAX_UNFINISHED_EXTENSION_OPERATIONS = 10;
+
+const sanitizeDaemonMessage = (message: string): string =>
+  stripAnsiAndControl(redactUrlCredentials(message));
 const EXTENSION_PREPARATION_CONCURRENCY = 2;
 const EXTENSION_REFRESH_TIMEOUT_MS = 30_000;
 const RECONCILE_SLOW_MS = 30_000;
@@ -434,7 +438,7 @@ export function createExtensionsController(
               commitWarnings.push({
                 workspaceCwd: boundWorkspace,
                 code: warning.code,
-                error: redactUrlCredentials(warning.error).slice(0, 500),
+                error: sanitizeDaemonMessage(warning.error).slice(0, 500),
               });
             }
             return result;
@@ -591,7 +595,7 @@ export function createExtensionsController(
               `qwen serve: [${boundWorkspace}] extensions ${operation}: refreshed ${result.refreshed} session(s), ${result.failed} failed`,
             );
           } catch (refreshErr) {
-            const message = redactUrlCredentials(
+            const message = sanitizeDaemonMessage(
               refreshErr instanceof Error
                 ? refreshErr.message
                 : String(refreshErr),
@@ -621,11 +625,11 @@ export function createExtensionsController(
               });
             } catch (broadcastErr) {
               writeStderrLine(
-                `qwen serve: [${boundWorkspace}] extensions ${operation}: failed to broadcast refresh failure: ${
+                `qwen serve: [${boundWorkspace}] extensions ${operation}: failed to broadcast refresh failure: ${sanitizeDaemonMessage(
                   broadcastErr instanceof Error
-                    ? redactUrlCredentials(broadcastErr.message)
-                    : String(broadcastErr)
-                }`,
+                    ? broadcastErr.message
+                    : String(broadcastErr),
+                )}`,
               );
             }
             writeStderrLine(
@@ -634,7 +638,7 @@ export function createExtensionsController(
           }
         }
       } catch (err) {
-        const message = redactUrlCredentials(
+        const message = sanitizeDaemonMessage(
           err instanceof Error ? err.message : String(err),
         );
         const code =
@@ -664,7 +668,7 @@ export function createExtensionsController(
             warnings.push({
               workspaceCwd: boundWorkspace,
               code: 'status_invalidation_failed',
-              error: redactUrlCredentials(
+              error: sanitizeDaemonMessage(
                 invalidationError instanceof Error
                   ? invalidationError.message
                   : String(invalidationError),
@@ -726,11 +730,11 @@ export function createExtensionsController(
           });
         } catch (broadcastErr) {
           writeStderrLine(
-            `qwen serve: [${boundWorkspace}] extensions ${operation}: failed to broadcast failure: ${
+            `qwen serve: [${boundWorkspace}] extensions ${operation}: failed to broadcast failure: ${sanitizeDaemonMessage(
               broadcastErr instanceof Error
-                ? redactUrlCredentials(broadcastErr.message)
-                : String(broadcastErr)
-            }`,
+                ? broadcastErr.message
+                : String(broadcastErr),
+            )}`,
           );
         }
         try {

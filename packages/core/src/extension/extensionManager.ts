@@ -76,6 +76,7 @@ import {
   getEnvContents,
   maybePromptForSettings,
   promptForSetting,
+  validateExtensionSettingEnvVars,
 } from './extensionSettings.js';
 import type {
   ExtensionSetting,
@@ -1312,6 +1313,7 @@ export class ExtensionManager {
         );
       }
       validateName(config.name);
+      validateExtensionSettingEnvVars(config.settings);
       return config;
     } catch (e) {
       throw new Error(

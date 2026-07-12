@@ -137,6 +137,33 @@ describe('extensionSettings', () => {
       expect(mockRequestSetting).not.toHaveBeenCalled();
     });
 
+    it('rejects invalid environment variable names before prompting', async () => {
+      const config: ExtensionConfig = {
+        name: 'test-ext',
+        version: '1.0.0',
+        settings: [
+          {
+            name: 'API key',
+            description: 'API key',
+            envVar: 'API_KEY\nforged',
+          },
+        ],
+      };
+
+      await expect(
+        maybePromptForSettings(
+          config,
+          '12345',
+          mockRequestSetting,
+          undefined,
+          undefined,
+        ),
+      ).rejects.toThrow(
+        'Extension setting "envVar" must be a valid environment variable name.',
+      );
+      expect(mockRequestSetting).not.toHaveBeenCalled();
+    });
+
     it('should prompt for all settings if there is no previous config', async () => {
       const config: ExtensionConfig = {
         name: 'test-ext',

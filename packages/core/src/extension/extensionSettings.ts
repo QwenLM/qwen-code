@@ -24,6 +24,18 @@ export interface ExtensionSetting {
   sensitive?: boolean;
 }
 
+const ENV_VAR_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+export function validateExtensionSettingEnvVars(
+  settings: readonly ExtensionSetting[] | undefined,
+): void {
+  if (settings?.some((setting) => !ENV_VAR_NAME_PATTERN.test(setting.envVar))) {
+    throw new Error(
+      'Extension setting "envVar" must be a valid environment variable name.',
+    );
+  }
+}
+
 export interface ResolvedExtensionSetting {
   name: string;
   envVar: string;
@@ -75,6 +87,8 @@ export async function maybePromptForSettings(
   envFilePathOverride?: string,
 ): Promise<void> {
   const { name: extensionName, settings } = extensionConfig;
+  validateExtensionSettingEnvVars(settings);
+  validateExtensionSettingEnvVars(previousExtensionConfig?.settings);
   if (
     (!settings || settings.length === 0) &&
     (!previousExtensionConfig?.settings ||

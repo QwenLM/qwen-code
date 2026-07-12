@@ -785,6 +785,30 @@ describe('extension tests', () => {
       expect(extensions[0].config.name).toBe('good-ext');
     });
 
+    it('should skip extensions with invalid setting environment variable names', async () => {
+      const extensionDir = path.join(userExtensionsDir, 'bad-setting');
+      fs.mkdirSync(extensionDir);
+      fs.writeFileSync(
+        path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({
+          name: 'bad-setting',
+          version: '1.0.0',
+          settings: [
+            {
+              name: 'API key',
+              description: 'API key',
+              envVar: 'API_KEY\nforged',
+            },
+          ],
+        }),
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      expect(manager.getLoadedExtensions()).toEqual([]);
+    });
+
     it('should skip extensions with missing name and log a warning', async () => {
       // Good extension
       createExtension({

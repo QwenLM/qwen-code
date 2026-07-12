@@ -737,9 +737,13 @@ describe('extension management v2 REST', () => {
   it('preserves structured update preparation error codes', async () => {
     const h = await makeHarness();
     mockExtensionManager();
-    const timeout = Object.assign(new Error('preparation timed out'), {
-      code: 'extension_prepare_timeout',
-    });
+    const timeout = Object.assign(
+      new Error('preparation timed out\n\u001b[31mforged\u001b[0m'),
+      {
+        code: 'extension_prepare_timeout',
+      },
+    );
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     vi.spyOn(
       ExtensionManager.prototype,
       'prepareExtensionUpdate',
@@ -756,8 +760,14 @@ describe('extension management v2 REST', () => {
         status: 'failed',
         code: 'extension_prepare_timeout',
         error:
-          'Update check failed for extension "demo": preparation timed out',
+          'Update check failed for extension "demo": preparation timed outforged',
       });
+      expect(stderr).not.toHaveBeenCalledWith(
+        expect.stringContaining('\nforged'),
+      );
+      expect(stderr).not.toHaveBeenCalledWith(
+        expect.stringContaining('\u001b'),
+      );
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
