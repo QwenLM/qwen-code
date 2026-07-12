@@ -887,8 +887,12 @@ describe('ScheduledTasksDialog multi-workspace', () => {
 
   // Fan-out mount: `listScheduledTasks(wsId)` returns each workspace's own tasks
   // (the primary is queried with undefined, secondaries with their id). The
-  // dialog tags each task with its workspace and merges them.
-  async function mountMulti(byWorkspace: Record<string, MockTask[]>) {
+  // dialog tags each task with its workspace and merges them. `ws` overrides the
+  // registered workspaces (e.g. to make the primary untrusted).
+  async function mountMulti(
+    byWorkspace: Record<string, MockTask[]>,
+    ws: typeof WORKSPACES = WORKSPACES,
+  ) {
     actions.listScheduledTasks.mockImplementation(async (wsId?: string) =>
       wsId === undefined
         ? (byWorkspace['primary'] ?? [])
@@ -909,7 +913,7 @@ describe('ScheduledTasksDialog multi-workspace', () => {
           <ScheduledTasksDialog
             onRunPrompt={vi.fn()}
             onCreateViaChat={vi.fn()}
-            workspaces={WORKSPACES}
+            workspaces={ws}
             onError={vi.fn()}
           />
         </I18nProvider>,
@@ -1028,5 +1032,38 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     // The picker is shown (so the user sees the workspace) but disabled — a
     // PATCH can't move a task between per-workspace files.
     expect(wsSelect?.disabled).toBe(true);
+  });
+
+  it('keeps an untrusted primary in the aggregate and picker (trust-free route)', async () => {
+    // Rare: folder-trust on and the primary folder not trusted. The primary is
+    // still reachable via its trust-free unqualified route, so it must not drop
+    // out of the list, and it must stay the selectable default in the New form
+    // (otherwise the picker shows a secondary while a create still lands on the
+    // primary). Secondaries stay gated on trust.
+    const wsUntrustedPrimary = [
+      { id: 'id-main', cwd: '/repo/main', primary: true, trusted: false },
+      { id: 'id-other', cwd: '/repo/other', primary: false, trusted: true },
+    ];
+    await mountMulti(
+      {
+        primary: [baseTask({ id: 'p1', name: 'Primary task' })],
+        'id-other': [baseTask({ id: 's1', name: 'Second task' })],
+      },
+      wsUntrustedPrimary,
+    );
+
+    // The untrusted primary is queried (via its trust-free route) and shown.
+    expect(actions.listScheduledTasks).toHaveBeenCalledWith(undefined);
+    expect(document.body.textContent).toContain('Primary task');
+
+    // In the New form the primary is a selectable option and stays the default,
+    // so the shown selection matches where a create actually lands.
+    click(findButton('New scheduled task'));
+    const wsSelect = findWorkspaceSelect()!;
+    const values = Array.from(wsSelect.querySelectorAll('option')).map(
+      (o) => o.value,
+    );
+    expect(values).toContain(''); // '' = the primary (its undefined action id)
+    expect(wsSelect.value).toBe(''); // default targets the primary, no desync
   });
 });

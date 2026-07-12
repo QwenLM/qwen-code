@@ -470,8 +470,15 @@ export function ScheduledTasksDialog({
   // array each render would re-fire its mount effect in a loop.
   const workspaceList = useMemo(() => workspaces ?? [], [workspaces]);
   const isMultiWorkspace = workspaceList.length > 1;
-  const trustedWorkspaces = useMemo(
-    () => workspaceList.filter((ws) => ws.trusted),
+  // The workspaces the page can actually read + write: every trusted one, PLUS
+  // the primary even when it is untrusted. The primary is reached through the
+  // trust-free unqualified route (the same one the single-workspace page always
+  // used), so excluding an untrusted primary would silently drop its readable
+  // tasks from the aggregate AND desync the create picker (its default targets
+  // the primary, so the primary must be a selectable option). Secondaries stay
+  // gated on trust — their qualified route rejects an untrusted read/write.
+  const operableWorkspaces = useMemo(
+    () => workspaceList.filter((ws) => ws.primary || ws.trusted),
     [workspaceList],
   );
   // The workspace id to pass to the per-task actions: primary uses its
@@ -549,13 +556,14 @@ export function ScheduledTasksDialog({
       let list: DaemonScheduledTask[];
       let firstError: string | null = null;
       if (isMultiWorkspace) {
-        // Fan out over every TRUSTED workspace (untrusted ones reject reads and
-        // can't own runnable tasks anyway) and tag each task with its workspace
-        // so the cards can badge it and the mutations can target its file. One
-        // workspace failing (corrupt file, etc.) must not blank the whole list —
-        // keep the others and surface the first error.
+        // Fan out over every OPERABLE workspace (trusted secondaries + the
+        // primary, which is always reachable via its trust-free route) and tag
+        // each task with its workspace so the cards can badge it and the
+        // mutations can target its file. One workspace failing (corrupt file,
+        // etc.) must not blank the whole list — keep the others and surface the
+        // first error.
         const results = await Promise.all(
-          trustedWorkspaces.map(async (ws) => {
+          operableWorkspaces.map(async (ws) => {
             try {
               const tasks = await actions.listScheduledTasks(
                 workspaceActionId(ws),
@@ -587,7 +595,7 @@ export function ScheduledTasksDialog({
       setLoadError(err instanceof Error ? err.message : String(err));
       setTasks((prev) => prev ?? []);
     }
-  }, [actions, isMultiWorkspace, trustedWorkspaces, workspaceActionId]);
+  }, [actions, isMultiWorkspace, operableWorkspaces, workspaceActionId]);
 
   useEffect(() => {
     void reload();
@@ -1110,13 +1118,13 @@ export function ScheduledTasksDialog({
                   value={formWorkspaceId ?? ''}
                   // A task lives in one workspace's file; editing can't move it,
                   // so the picker is fixed while editing and when only one
-                  // workspace is trusted (nothing to choose).
-                  disabled={!!editingId || trustedWorkspaces.length <= 1}
+                  // workspace is operable (nothing to choose).
+                  disabled={!!editingId || operableWorkspaces.length <= 1}
                   onChange={(e) =>
                     setFormWorkspaceId(e.target.value || undefined)
                   }
                 >
-                  {trustedWorkspaces.map((ws) => (
+                  {operableWorkspaces.map((ws) => (
                     <option key={ws.id} value={workspaceActionId(ws) ?? ''}>
                       {workspaceLabel(ws.cwd, ws.primary, t)}
                     </option>
