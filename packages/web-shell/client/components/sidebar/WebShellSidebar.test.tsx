@@ -3,7 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
-import type { WebShellSidebarFooterItem } from './WebShellSidebar';
+import type {
+  WebShellSidebarBranding,
+  WebShellSidebarFooterItem,
+} from './WebShellSidebar';
 
 const {
   mockConnection,
@@ -160,7 +163,7 @@ function renderSidebar(
     selectedWorkspaceCwd: string;
     onSelectWorkspace: (workspaceCwd: string | undefined) => void;
     mobileOpen: boolean;
-    branding: false;
+    branding: false | WebShellSidebarBranding;
     footer: false | { items: readonly WebShellSidebarFooterItem[] };
   }> = {},
 ): {
@@ -758,6 +761,38 @@ describe('WebShellSidebar — version footer', () => {
     expect(menu?.lastElementChild?.getAttribute('aria-disabled')).toBe('true');
   });
 
+  it.each([
+    [
+      'Escape',
+      () =>
+        document.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+        ),
+    ],
+    [
+      'an outside pointer event',
+      () =>
+        document.body.dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true }),
+        ),
+    ],
+    ['scroll', () => window.dispatchEvent(new Event('scroll'))],
+    ['resize', () => window.dispatchEvent(new Event('resize'))],
+  ])('closes More on %s', (_trigger, dismiss) => {
+    setStoredSidebarWidth(260);
+    const { container } = renderSidebar(false, {
+      canOpenSessionsOverview: true,
+      canOpenSplitView: true,
+    });
+    click(container.querySelector('[aria-label="More actions"]'));
+    expect(container.querySelector('[role="menu"]')).not.toBeNull();
+
+    act(() => {
+      dismiss();
+    });
+    expect(container.querySelector('[role="menu"]')).toBeNull();
+  });
+
   it('renders a non-semver fallback (e.g. "unknown") without a bogus "v" prefix', () => {
     mockConnection.capabilities = { qwenCodeVersion: 'unknown' };
     setStoredSidebarWidth(420);
@@ -865,6 +900,18 @@ describe('WebShellSidebar — brand logo', () => {
     expect(
       hostHidden.container.querySelector('svg path[fill="#6D44E8"]'),
     ).toBeNull();
+  });
+
+  it('uses host-provided branding in place of the default mark', () => {
+    const { container } = renderSidebar(false, {
+      branding: {
+        render: () => <span data-testid="custom-brand">Host brand</span>,
+      },
+    });
+    expect(
+      container.querySelector('[data-testid="custom-brand"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('svg path[fill="#6D44E8"]')).toBeNull();
   });
 });
 
