@@ -1087,14 +1087,38 @@ function hasThoughtPart(parts: Part[]): boolean {
 }
 
 const THINKING_TAG_PATTERN = /<\/?think(?:ing)?\b/i;
+const THINKING_TAG_STARTS = [
+  '<think',
+  '</think',
+  '<thinking',
+  '</thinking',
+] as const;
+
+function getPartText(parts: Part[], visibleOnly = false): string {
+  return parts
+    .map((part) =>
+      (!visibleOnly || part.thought !== true) && typeof part.text === 'string'
+        ? part.text
+        : '',
+    )
+    .join('');
+}
 
 function hasThinkingTagPart(parts: Part[], visibleOnly = false): boolean {
-  return parts.some(
-    (part) =>
-      (!visibleOnly || part.thought !== true) &&
-      typeof part.text === 'string' &&
-      THINKING_TAG_PATTERN.test(part.text),
-  );
+  return THINKING_TAG_PATTERN.test(getPartText(parts, visibleOnly));
+}
+
+function endsWithThinkingTagPrefix(
+  parts: Part[],
+  visibleOnly = false,
+): boolean {
+  const text = getPartText(parts, visibleOnly).toLowerCase();
+  const tagStart = text.lastIndexOf('<');
+  if (tagStart < 0) {
+    return false;
+  }
+  const suffix = text.slice(tagStart);
+  return THINKING_TAG_STARTS.some((tag) => tag.startsWith(suffix));
 }
 
 /**
@@ -1379,16 +1403,20 @@ export function convertOpenAIChunkToGemini(
       }
     }
 
-    // Hold risky protocol-looking text until the stream proves it was not
-    // paired with a malformed nameless tool call.
-    const hasUntrustedProtocolText = hasThinkingTagPart(parts);
+    // Hold protocol-looking text until the stream proves it was not part of a
+    // malformed attempt.
+    const pendingAndCurrentParts = [
+      ...(requestContext.pendingUntrustedResponseParts ?? []),
+      ...parts,
+    ];
+    const hasUntrustedProtocolText =
+      hasThinkingTagPart(parts) ||
+      (requestContext.hasStructuredReasoningContent &&
+        (hasThinkingTagPart(pendingAndCurrentParts, true) ||
+          endsWithThinkingTagPrefix(pendingAndCurrentParts, true)));
     const hasVisibleThinkingTagLeak =
       requestContext.hasStructuredReasoningContent &&
-      (hasThinkingTagPart(parts, true) ||
-        hasThinkingTagPart(
-          requestContext.pendingUntrustedResponseParts ?? [],
-          true,
-        ));
+      hasThinkingTagPart(pendingAndCurrentParts, true);
     const toolCallWithoutName = toolCallParser.hasNamelessToolCall();
     const malformedNamelessToolCall =
       Boolean(choice.finish_reason) && toolCallWithoutName;
@@ -1440,8 +1468,7 @@ export function convertOpenAIChunkToGemini(
     // (turn.ts) correctly sets wasOutputTruncated=true.
     // Withhold the finish signal so the existing invalid-stream retry drops
     // the buffered attempt instead of accepting a silently lost tool call.
-    const effectiveFinishReason =
-      shouldDropMalformedAttempt
+    const effectiveFinishReason = shouldDropMalformedAttempt
       ? undefined
       : toolCallsTruncated && choice.finish_reason !== 'length'
         ? 'length'

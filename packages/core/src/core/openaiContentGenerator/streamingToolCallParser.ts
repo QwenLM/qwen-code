@@ -261,9 +261,12 @@ export class StreamingToolCallParser {
   }
 
   hasNamelessToolCall(): boolean {
-    return [...this.buffers.keys()].some(
-      (index) => !this.toolCallMeta.get(index)?.name,
-    );
+    for (const index of this.buffers.keys()) {
+      if (!this.toolCallMeta.get(index)?.name) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
