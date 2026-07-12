@@ -147,4 +147,45 @@ describe('useOtherWorkspaceSessions', () => {
     expect(listWorkspaceSessions).toHaveBeenCalledTimes(2);
     expect(latest.sessions.map((s) => s.sessionId)).toEqual(['b1']);
   });
+
+  it('discards a stale in-flight fetch when the target set changes', async () => {
+    // /b resolves slowly; after the target set switches to /c (a workspace is
+    // (un)registered mid-flight), the stale /b result must not overwrite /c's.
+    let resolveB: (v: DaemonSessionSummary[]) => void = () => {};
+    const bPending = new Promise<DaemonSessionSummary[]>((r) => {
+      resolveB = r;
+    });
+    listWorkspaceSessions.mockImplementation(async (cwd: string) => {
+      if (cwd === '/b') return bPending;
+      if (cwd === '/c') return [session('c1', '/c')];
+      return [];
+    });
+
+    capabilities = {
+      workspaces: [ws('/w', true, true), ws('/b', false, true)],
+    };
+    render();
+    // Do not flush — /b's fetch is still in flight (bPending is unresolved).
+
+    // Switch the target set to /c before /b resolves.
+    capabilities = {
+      workspaces: [ws('/w', true, true), ws('/c', false, true)],
+    };
+    await act(async () => {
+      root!.render(<Harness />);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(latest.sessions.map((s) => s.sessionId)).toEqual(['c1']);
+
+    // Now resolve the stale /b fetch — its `cancelled` guard must drop it, so
+    // the list stays on /c's result rather than reverting to /b's.
+    await act(async () => {
+      resolveB([session('b1', '/b')]);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(latest.sessions.map((s) => s.sessionId)).toEqual(['c1']);
+  });
 });

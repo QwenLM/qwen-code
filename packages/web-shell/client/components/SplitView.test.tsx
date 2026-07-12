@@ -456,6 +456,7 @@ describe('SplitView', () => {
     render({ sessionIds: ['s1'] });
     await flushAsync(); // let the other-workspace fan-out resolve
     openPicker();
+    await flushAsync(); // opening the picker re-fires reload()/reloadOther()
     const options = pickerOptions();
     // Primary sessions are still listed…
     expect(options.some((o) => o.includes('Two'))).toBe(true);
@@ -475,6 +476,7 @@ describe('SplitView', () => {
     render();
     await flushAsync();
     openPicker();
+    await flushAsync(); // opening the picker re-fires reload()/reloadOther()
     const betaButton = Array.from(
       container!.querySelectorAll('[role="option"] button'),
     ).find((el) =>
