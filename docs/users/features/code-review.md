@@ -45,7 +45,7 @@ The `/review` command runs a multi-stage pipeline:
 Step 1:  Determine scope + effort level (local diff / PR worktree / file)
          Capture the diff to a file + partition it into chunks
 Step 2:  Load project review rules (medium/high)
-Step 3C: low/medium effort: inline pass, no subagents      [0 LLM calls]
+Step 3C: low/medium effort: inline pass, no subagents  [0 subagent calls]
 Step 3A: high, <=500 src AND <=3200 total: 12 agents       [12+ LLM calls]
            |-- Agent 0: Issue Fidelity & Root-Cause Ownership
            |-- Agent 1a: Correctness — line-by-line scan
@@ -103,7 +103,7 @@ Steps 3A/3B/4/5 are the high-effort pipeline; at `--effort low|medium` a single 
 | Agent 7: Build & Test             | Runs build and test commands, reports failures                                                                                                                                                                                                                                                  |
 | Agent 8: Diff-specialized finders | 0-2 extra finders written per-review when the diff concentrates in a domain with known failure modes (reconnect logic, module loaders, schedulers, codecs)                                                                                                                                      |
 
-The three Correctness agents are **procedural**: each is defined by how it walks the diff (line-by-line / deleted lines / cross-file edges), not by a bug taxonomy — so their coverage is complementary instead of overlapping. All agents run in parallel (Agent 1 launches 3 procedural variants and Agent 6 launches 3 persona variants concurrently, totaling 12 parallel tasks for same-repo PR reviews; Agent 0 is skipped for local-diff and file-path reviews, which run 11; cross-repo lightweight mode also skips Agents 1c and 7, running 10).
+The three Correctness agents are **procedural**: each is defined by how it walks the diff (line-by-line / deleted lines / cross-file edges), not by a bug taxonomy — so their coverage is complementary instead of overlapping. All agents run in parallel (Agent 1 launches 3 procedural variants and Agent 6 launches 3 persona variants concurrently, totaling 12 parallel tasks for same-repo PR reviews, plus 0-2 Agent 8 finders when the diff's domain calls for them — so 12-14 in practice; Agent 0 is skipped for local-diff and file-path reviews, which run 11-13; cross-repo lightweight mode also skips Agents 1c and 7, running 10-12).
 
 Every finding must state a **failure scenario** — the concrete input, state, or timing that triggers it and the wrong outcome that results (for quality findings, the concrete cost instead). A finding that cannot name its scenario is dropped at the source, and verification re-traces the claimed scenario through the real code rather than judging the finding's prose.
 
