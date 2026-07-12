@@ -638,6 +638,7 @@ An immediately busy non-force request returns a fast pre-drain activity snapshot
 ### `GET /workspace-registrations`
 
 List the persisted desired workspace set for this primary workspace. Entries remain visible with `active: false` when a stored directory could not be restored during the current start.
+An entry remains `active: true` while its runtime is draining because the runtime still owns live resources until removal completes.
 
 ```json
 {

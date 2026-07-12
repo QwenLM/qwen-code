@@ -1060,11 +1060,14 @@ export function WebShellSidebar({
           setWorkspaceRemovalActivity(body.activity);
           return;
         }
-        if (body?.code === 'workspace_mismatch') {
+        if (error.status === 400 && body?.code === 'workspace_mismatch') {
           await reconcileRemovedWorkspace(candidate);
           return;
         }
-        if (body?.code === 'workspace_removal_in_progress') {
+        if (
+          error.status === 409 &&
+          body?.code === 'workspace_removal_in_progress'
+        ) {
           setWorkspaceRemovalRemoteInProgress(true);
           for (let attempt = 0; attempt < 20; attempt++) {
             if (workspaceRemovalDismissedRef.current) return;

@@ -895,20 +895,13 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     });
   });
 
-  it('routes a draining workspace upgrade to its drain gate', async () => {
+  it('rejects a new WebSocket upgrade while its workspace is draining', async () => {
     expect(workspaceRegistry.beginDrain(secondaryRuntime)).toBe(true);
     handle!.beginWorkspaceDrain('secondary-id');
 
-    const reply = await initializeWs('/workspaces/secondary-id/acp');
-
-    expect(reply).toMatchObject({
-      error: {
-        data: {
-          code: 'workspace_draining',
-          workspaceCwd: '/ws-b',
-        },
-      },
-    });
+    await expect(initializeWs('/workspaces/secondary-id/acp')).rejects.toThrow(
+      'Unexpected server response: 503',
+    );
   });
 
   it('accepts correlation replies while rejecting new work during drain', async () => {

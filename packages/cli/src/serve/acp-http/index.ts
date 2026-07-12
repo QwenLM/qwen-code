@@ -1497,6 +1497,13 @@ export function mountAcpHttp(
         activeMount = resolvedMount;
       }
 
+      if (activeMount.draining) {
+        logReject(`workspace-draining ${activeMount.routeLabel}`);
+        socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+
       wss!.handleUpgrade(req, socket, head, (ws: WebSocket) => {
         if (disposed) {
           ws.close(1012, 'Server shutting down');
