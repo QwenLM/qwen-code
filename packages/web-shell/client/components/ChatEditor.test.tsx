@@ -96,7 +96,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
   };
 });
 
-let mounted: Array<{ root: Root; container: HTMLDivElement }> = [];
+const mounted: Array<{ root: Root; container: HTMLDivElement }> = [];
 
 afterEach(() => {
   for (const { root, container } of mounted.splice(0)) {
