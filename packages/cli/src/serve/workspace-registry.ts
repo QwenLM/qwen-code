@@ -275,10 +275,11 @@ export function createWorkspaceRegistry(
         const matches: WorkspaceRuntime[] = [];
         for (const workspaceCwd of indexedCwds) {
           const runtime = byCwd.get(workspaceCwd);
-          if (!runtime || states.get(runtime) !== 'active') {
+          if (!runtime || states.get(runtime) === 'removed') {
             sessionOwnerIndex?.remove(sessionId, workspaceCwd);
             continue;
           }
+          if (states.get(runtime) !== 'active') continue;
           try {
             runtime.bridge.getSessionSummary(sessionId);
             matches.push(runtime);

@@ -373,6 +373,9 @@ describe('createWorkspaceRegistry', () => {
     expect(registry.resolveLiveSessionOwner('fallback')).toEqual({
       kind: 'not_found',
     });
+    expect(sessionOwnerIndex.getWorkspaceCwds('indexed')).toEqual([
+      secondary.workspaceCwd,
+    ]);
 
     registry.cancelDrain(secondary);
     expect(registry.resolveLiveSessionOwner('indexed')).toEqual({
