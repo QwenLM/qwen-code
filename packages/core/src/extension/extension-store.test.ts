@@ -856,6 +856,97 @@ describe('ExtensionStore', () => {
     expect(fs.existsSync(journal)).toBe(false);
   });
 
+  it.each([
+    {
+      name: 'prepared install',
+      operation: 'install' as const,
+      phase: 'prepared' as const,
+      stagingExists: true,
+      destinationVersion: undefined,
+      backupVersion: undefined,
+      expectedDestinationVersion: undefined,
+    },
+    {
+      name: 'artifact-swapped install',
+      operation: 'install' as const,
+      phase: 'artifact_swapped' as const,
+      stagingExists: false,
+      destinationVersion: 'new',
+      backupVersion: undefined,
+      expectedDestinationVersion: undefined,
+    },
+    {
+      name: 'artifact-swapped uninstall',
+      operation: 'uninstall' as const,
+      phase: 'artifact_swapped' as const,
+      stagingExists: false,
+      destinationVersion: undefined,
+      backupVersion: 'old',
+      expectedDestinationVersion: 'old',
+    },
+  ])('rolls back a fabricated $name journal', async (scenario) => {
+    const store = makeStore();
+    const identity = { id: 'c4'.repeat(32), name: 'demo' };
+    const initial = await store.ensureInitialized([identity]);
+    const targetSnapshot = structuredClone(initial);
+    targetSnapshot.generation = 1;
+    const transactionId = scenario.name.replaceAll(' ', '-');
+    const destination = path.join(extensionsDir, identity.name);
+    const staging = path.join(storeDir, 'staging', transactionId);
+    const backup = path.join(storeDir, 'rollback', transactionId);
+    const journal = path.join(
+      storeDir,
+      'transactions',
+      `${transactionId}.json`,
+    );
+    if (scenario.stagingExists) {
+      await fsp.mkdir(staging);
+      await fsp.writeFile(path.join(staging, 'version'), 'staged');
+    }
+    if (scenario.destinationVersion) {
+      await fsp.mkdir(destination);
+      await fsp.writeFile(
+        path.join(destination, 'version'),
+        scenario.destinationVersion,
+      );
+    }
+    if (scenario.backupVersion) {
+      await fsp.mkdir(backup);
+      await fsp.writeFile(path.join(backup, 'version'), scenario.backupVersion);
+    }
+    await fsp.writeFile(
+      journal,
+      JSON.stringify({
+        version: 1,
+        transactionId,
+        operation: scenario.operation,
+        phase: scenario.phase,
+        destinationDirectory: destination,
+        ...(scenario.operation === 'install'
+          ? { stagingDirectory: staging }
+          : {}),
+        backupDirectory: backup,
+        previousGeneration: 0,
+        targetGeneration: 1,
+        targetSnapshot,
+      }),
+    );
+
+    const recovered = await store.readSnapshot();
+
+    expect(recovered.generation).toBe(0);
+    if (scenario.expectedDestinationVersion) {
+      await expect(
+        fsp.readFile(path.join(destination, 'version'), 'utf8'),
+      ).resolves.toBe(scenario.expectedDestinationVersion);
+    } else {
+      expect(fs.existsSync(destination)).toBe(false);
+    }
+    expect(fs.existsSync(staging)).toBe(false);
+    expect(fs.existsSync(backup)).toBe(false);
+    expect(fs.existsSync(journal)).toBe(false);
+  });
+
   it('recovers an artifact-swapped transaction before reading a snapshot', async () => {
     const store = makeStore();
     const identity = { id: 'c2'.repeat(32), name: 'demo' };
