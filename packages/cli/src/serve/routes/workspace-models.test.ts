@@ -29,6 +29,21 @@ function readUserSettings(): Record<string, unknown> {
   return JSON.parse(fs.readFileSync(path.join(home, 'settings.json'), 'utf8'));
 }
 
+function writeWorkspaceSettings(settings: Record<string, unknown>): void {
+  const dir = path.join(workspace, '.qwen');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, 'settings.json'),
+    JSON.stringify(settings, null, 2),
+  );
+}
+
+function readWorkspaceSettings(): Record<string, unknown> {
+  return JSON.parse(
+    fs.readFileSync(path.join(workspace, '.qwen', 'settings.json'), 'utf8'),
+  );
+}
+
 function makeApp() {
   const app = express();
   app.use(express.json());
@@ -91,6 +106,28 @@ describe('DELETE /workspace/models', () => {
     );
     const saved = readUserSettings();
     expect(saved['modelProviders']).toEqual({
+      openai: [{ id: 'deepseek-v4' }],
+    });
+  });
+
+  it('writes to the workspace scope when the workspace owns modelProviders', async () => {
+    writeWorkspaceSettings({
+      modelProviders: { openai: [{ id: 'gpt-4o' }, { id: 'deepseek-v4' }] },
+    });
+    const { app, broadcastSettingsChanged } = makeApp();
+
+    const res = await request(app)
+      .delete('/workspace/models')
+      .send({ authType: 'openai', modelId: 'gpt-4o' });
+
+    expect(res.status).toBe(200);
+    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+      'modelProviders',
+      { openai: [{ id: 'deepseek-v4' }] },
+      'workspace',
+      undefined,
+    );
+    expect(readWorkspaceSettings()['modelProviders']).toEqual({
       openai: [{ id: 'deepseek-v4' }],
     });
   });
@@ -250,7 +287,7 @@ describe('DELETE /workspace/models', () => {
       modelProviders: { openai: [{ id: 'gpt-4o' }, { id: 'deepseek-v4' }] },
       modelFallbacks: 'gpt-4o,deepseek-v4',
     });
-    const { app } = makeApp();
+    const { app, broadcastSettingsChanged } = makeApp();
 
     const res = await request(app)
       .delete('/workspace/models')
@@ -258,5 +295,11 @@ describe('DELETE /workspace/models', () => {
 
     expect(res.status).toBe(200);
     expect(readUserSettings()['modelFallbacks']).toBe('deepseek-v4');
+    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+      'modelFallbacks',
+      'deepseek-v4',
+      'user',
+      undefined,
+    );
   });
 });

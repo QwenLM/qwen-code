@@ -59,7 +59,12 @@ export function ModelManagementSection({
     <div className={styles.section} data-testid="model-management">
       <div className={styles.header}>
         <span className={styles.title}>{t('settings.models.title')}</span>
-        <button type="button" className={styles.addButton} onClick={onAddModel}>
+        <button
+          type="button"
+          className={styles.addButton}
+          disabled={busy}
+          onClick={onAddModel}
+        >
           {t('settings.models.add')}
         </button>
       </div>

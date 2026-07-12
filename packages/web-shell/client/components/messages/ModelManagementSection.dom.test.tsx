@@ -164,4 +164,32 @@ describe('ModelManagementSection', () => {
     const { container } = renderSection({ providers: [] });
     expect(container.textContent).toContain('No configured models');
   });
+
+  it('marks the current model by base id when currentModelId is the base form', () => {
+    const { container } = renderSection({ currentModelId: 'deepseek-v4' });
+    const setButtons = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).filter((b) => b.textContent?.trim() === 'Set current');
+    // deepseek-v4 is now current (matched by baseModelId) → no button; gpt-4o
+    // and the runtime model remain selectable.
+    expect(setButtons).toHaveLength(2);
+    expect(container.textContent).toContain('Current');
+  });
+
+  it('omits baseUrl from the delete target for a model without one', () => {
+    const { container, props } = renderSection();
+    // DeepSeek V4 has no baseUrl; its Delete is the second (GPT-4o is first).
+    const deletes = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).filter((b) => b.textContent?.trim() === 'Delete');
+    act(() => deletes[1]!.click());
+    act(() => buttonByText(container, 'Confirm').click());
+    expect(props.onDeleteModel).toHaveBeenCalledWith({
+      authType: 'openai',
+      modelId: 'deepseek-v4',
+    });
+    const arg = (props.onDeleteModel as ReturnType<typeof vi.fn>).mock
+      .calls[0][0];
+    expect('baseUrl' in arg).toBe(false);
+  });
 });

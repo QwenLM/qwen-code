@@ -1986,7 +1986,7 @@ export interface DaemonWorkspaceSettingsStatus {
 
 export interface DaemonSettingUpdateResult {
   key: string;
-  scope: 'workspace';
+  scope: 'workspace' | 'user';
   value: unknown;
   requiresRestart: boolean;
 }

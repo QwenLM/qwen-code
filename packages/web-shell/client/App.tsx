@@ -921,10 +921,10 @@ function translateCopyMessage(
 }
 
 /**
- * Read a model setting's value for the scope currently being edited, falling
- * back to the merged/effective value. Model pickers persist to
- * `modelSettingScope`, so their "current" value must reflect that same scope —
- * otherwise editing the User tab shows (and appears to clear) workspace values.
+ * Read a model setting's value for the scope currently being edited. Model
+ * pickers persist to `modelSettingScope`, so their "current" value reflects
+ * only that scope's own value (not the merged/effective one) — otherwise the
+ * User tab would show, and appear to clear, an inherited workspace value.
  */
 function readScopedModelSetting(
   settings: ReadonlyArray<{
@@ -936,9 +936,7 @@ function readScopedModelSetting(
 ): unknown {
   const setting = settings.find((s) => s.key === key);
   if (!setting) return undefined;
-  const scoped =
-    scope === 'user' ? setting.values.user : setting.values.workspace;
-  return scoped ?? setting.values.effective;
+  return scope === 'user' ? setting.values.user : setting.values.workspace;
 }
 
 export function App({
@@ -5022,7 +5020,16 @@ export function App({
         'modelFallbacks',
         baseIds.join(','),
       )
-        .then(() => reloadWorkspaceSettings())
+        .then(() => {
+          // A reload failure shouldn't surface as "save failed" — the value
+          // was already persisted. Just log it.
+          reloadWorkspaceSettings().catch((err: unknown) => {
+            console.warn(
+              '[web-shell] failed to reload settings after fallbacks save',
+              err,
+            );
+          });
+        })
         .catch((error: unknown) =>
           reportError(error, t('settings.models.fallbacks.saveFailed')),
         );
