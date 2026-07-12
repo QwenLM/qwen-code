@@ -3674,6 +3674,51 @@ describe('DaemonClient', () => {
       }
     });
 
+    it('chunks operation timeouts larger than the maximum timer delay', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      let pollSignal: AbortSignal | null | undefined;
+      const { fetch } = recordingFetch(
+        (request) =>
+          new Promise<Response>((_resolve, reject) => {
+            pollSignal = request.signal;
+            request.signal?.addEventListener(
+              'abort',
+              () => reject(request.signal?.reason),
+              { once: true },
+            );
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 0,
+      });
+      const maximumTimerDelayMs = 2_147_483_647;
+      const outcome = client
+        .waitForExtensionOperation(
+          { accepted: true, operationId: 'op-1' },
+          { timeoutMs: maximumTimerDelayMs + 100 },
+        )
+        .catch((error: unknown) => error);
+
+      try {
+        await vi.advanceTimersByTimeAsync(maximumTimerDelayMs);
+        expect(pollSignal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(99);
+        expect(pollSignal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(outcome).resolves.toMatchObject({
+          message: expect.stringContaining(
+            'server operation was not cancelled',
+          ),
+        });
+        expect(pollSignal?.aborted).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('routes global extension methods through /extensions/*', async () => {
       const { fetch, calls } = recordingFetch((req) => {
         if (req.url === 'http://daemon/extensions') {

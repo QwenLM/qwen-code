@@ -16,22 +16,24 @@ function formatEntryPath(entryPath: string): string {
 }
 
 export async function assertTarArchiveHasNoLinks(file: string): Promise<void> {
-  let unsupportedLinkPath: string | undefined;
+  const unsupportedLinkPaths: string[] = [];
   await tar.t({
     file,
     onReadEntry: (entry) => {
-      if (
-        !unsupportedLinkPath &&
-        (entry.type === 'SymbolicLink' || entry.type === 'Link')
-      ) {
-        unsupportedLinkPath =
+      if (entry.type === 'SymbolicLink' || entry.type === 'Link') {
+        const unsupportedLinkPath =
           formatEntryPath(entry.path) || '<sanitized empty path>';
+        unsupportedLinkPaths.push(unsupportedLinkPath);
       }
     },
   });
-  if (unsupportedLinkPath) {
+  if (unsupportedLinkPaths.length > 0) {
+    const entryLabel =
+      unsupportedLinkPaths.length === 1
+        ? 'unsupported link entry'
+        : `${unsupportedLinkPaths.length} unsupported link entries`;
     throw new Error(
-      `Tar archive contains unsupported link entry: ${unsupportedLinkPath}`,
+      `Tar archive contains ${entryLabel}: ${unsupportedLinkPaths.join(', ')}`,
     );
   }
 }

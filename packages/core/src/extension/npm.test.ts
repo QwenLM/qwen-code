@@ -624,6 +624,34 @@ describe('downloadFromNpmRegistry', () => {
     expect(tar.x).not.toHaveBeenCalled();
   });
 
+  it('reports every rejected tar link', async () => {
+    mockNpmDownload('https://registry.example.com/pkg.tgz');
+    vi.mocked(tar.t).mockImplementationOnce(async (options) => {
+      options.onReadEntry?.({
+        type: 'SymbolicLink',
+        path: 'package/first-link',
+      } as never);
+      options.onReadEntry?.({
+        type: 'Link',
+        path: 'package/second-link',
+      } as never);
+    });
+
+    await expect(
+      downloadFromNpmRegistry(
+        {
+          source: '@scope/pkg',
+          type: 'npm',
+          registryUrl: 'https://registry.example.com',
+        },
+        '/tmp/qwen-extension',
+      ),
+    ).rejects.toThrow(
+      'Tar archive contains 2 unsupported link entries: package/first-link, package/second-link',
+    );
+    expect(tar.x).not.toHaveBeenCalled();
+  });
+
   it('rejects npm tarballs larger than 100 MB', async () => {
     mockNpmDownload(
       'https://registry.example.com/pkg.tgz',

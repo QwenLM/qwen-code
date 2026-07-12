@@ -362,6 +362,24 @@ describe('git extension helpers', () => {
         cloneFromGit(installMetadata, '/dest', controller.signal),
       ).rejects.toBe(controller.signal.reason);
     });
+
+    it('preserves a git failure when the signal aborts as a side effect', async () => {
+      const controller = new AbortController();
+      mockGit.clone.mockImplementationOnce(async () => {
+        controller.abort();
+        throw new Error('authentication failed');
+      });
+
+      await expect(
+        cloneFromGit(
+          { source: 'http://my-repo.com', type: 'git' },
+          '/dest',
+          controller.signal,
+        ),
+      ).rejects.toThrow(
+        'Failed to clone Git repository from http://my-repo.com authentication failed',
+      );
+    });
   });
 
   describe('checkForExtensionUpdate', () => {
