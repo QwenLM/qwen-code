@@ -43,7 +43,26 @@ This workflow ensures that all changes meet our quality standards before they ca
   - Ensure all CI checks pass. A green checkmark ✅ will appear next to your commit when everything is successful.
   - If a check fails (a red "X" ❌), click the "Details" link next to the failed check to view the logs, identify the problem, and push a fix.
 
-### 3. Ongoing Triage for Pull Requests: `PR Auditing and Label Sync`
+### 3. Stale CI Failure Patrol
+
+This workflow follows up on failed checks that have been sitting long enough to avoid racing normal GitHub Actions retries or fresh pushes.
+
+- **Workflow File**: `.github/workflows/qwen-ci-failure-patrol.yml`
+- **When it runs**: Every 10 minutes, with a 30-minute grace period before acting on a failed run.
+- **What it does for PRs**:
+  - If the failure is classified as high-confidence flaky or infrastructure-related, it reruns the failed jobs.
+  - If the PR is behind `main` and the current `main` branch has a relevant successful signal, it asks GitHub to update the PR branch.
+  - Otherwise, it posts an English explanation of the failure with a Chinese translation folded under a `<details>` section.
+  - It will take at most three actions for the same PR head SHA. A new push changes the SHA and resets the counter.
+- **What it does for `main` failures**:
+  - It currently watches post-merge testing workflows that run on `main`: `E2E Tests` and `SDK Python`.
+  - Failures create or reuse one deduplicated issue, label it with `type/bug`, `status/ready-for-agent`, and `autofix/approved`, then explicitly dispatch the Qwen Autofix issue workflow.
+- **Safety boundaries**:
+  - The classifier receives sanitized CI metadata and logs, but no GitHub write token.
+  - The workflow owns all reruns, comments, branch updates, labels, issue creation, and Autofix dispatch.
+  - The bot does not directly edit arbitrary contributor branches.
+
+### 4. Ongoing Triage for Pull Requests: `PR Auditing and Label Sync`
 
 This workflow runs periodically to ensure all open PRs are correctly linked to issues and have consistent labels.
 
@@ -57,7 +76,7 @@ This workflow runs periodically to ensure all open PRs are correctly linked to i
   - **Always link your PR to an issue.** This is the most important step. Add a line like `Resolves #<issue-number>` to your PR description.
   - This will ensure your PR is correctly categorized and moves through the review process smoothly.
 
-### 4. Ongoing Triage for Issues: `Scheduled Issue Triage`
+### 5. Ongoing Triage for Issues: `Scheduled Issue Triage`
 
 This is a fallback workflow to ensure that no issue gets missed by the triage process.
 
@@ -69,7 +88,7 @@ This is a fallback workflow to ensure that no issue gets missed by the triage pr
 - **What you should do**:
   - You typically don't need to do anything. This workflow is a safety net to ensure every issue is eventually categorized, even if the initial triage fails.
 
-### 5. Release Automation
+### 6. Release Automation
 
 This workflow handles the process of packaging and publishing new versions of Qwen Code.
 

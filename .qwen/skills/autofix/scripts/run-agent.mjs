@@ -41,6 +41,11 @@ const specs = {
     invocation: (o) =>
       `/autofix address-review --pr ${o.pr} --issue ${o.issue} --workdir ${o.workdir} --conflict ${o.conflict} --base ${o.base}`,
   },
+  'classify-ci-failure': {
+    inputs: ['ci-failure.json'],
+    outputs: ['ci-decision.json'],
+    invocation: (o) => `/autofix classify-ci-failure --workdir ${o.workdir}`,
+  },
 };
 
 function fail(message) {

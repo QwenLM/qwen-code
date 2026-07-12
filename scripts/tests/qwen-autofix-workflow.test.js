@@ -175,6 +175,18 @@ function runDevelopIssue(dir, stub) {
   ]);
 }
 
+function runClassifyCiFailure(dir, stub, extraArgs = []) {
+  return runAutofixRunner([
+    '--mode',
+    'classify-ci-failure',
+    '--workdir',
+    dir,
+    '--qwen-bin',
+    stub,
+    ...extraArgs,
+  ]);
+}
+
 describe('qwen-autofix workflow', () => {
   it('keeps ECS issue autofix limited to forced and ready-for-agent issues', () => {
     expect(workflow).toContain('autofixTier');
@@ -868,7 +880,7 @@ describe('qwen-autofix workflow', () => {
     const { stderr } = runAutofixRunner(['--mode', 'bogus', '--print-prompt']);
 
     expect(stderr).toContain(
-      '--mode must be one of: assess-candidates, develop-issue, address-review',
+      '--mode must be one of: assess-candidates, develop-issue, address-review, classify-ci-failure',
     );
   });
 
@@ -902,6 +914,31 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
+  it('builds a read-only CI failure classifier prompt', () => {
+    const stdout = execFileSync(
+      process.execPath,
+      [
+        autofixRunnerScriptPath,
+        '--mode',
+        'classify-ci-failure',
+        '--workdir',
+        '/tmp/ci-failure-patrol',
+        '--print-prompt',
+      ],
+      { encoding: 'utf8' },
+    );
+
+    expect(stdout).toContain('Mode: classify-ci-failure');
+    expect(stdout).toContain(
+      '/autofix classify-ci-failure --workdir /tmp/ci-failure-patrol',
+    );
+    expect(stdout).toContain('ci-failure.json');
+    expect(stdout).toContain('ci-decision.json');
+    expect(stdout).toContain('untrusted');
+    expect(stdout).toContain('Do not push, comment, create pull requests');
+    expect(stdout).toContain('never invoke GitHub');
+  });
+
   it('keeps autofix runner failure paths explicit', () => {
     withRunnerDir((dir) => {
       expect(runAutofixRunner(['--mode', 'develop-issue']).stderr).toContain(
@@ -923,6 +960,43 @@ describe('qwen-autofix workflow', () => {
       );
     });
   }, 10000);
+
+  it('requires CI classifier input and output files', () => {
+    withRunnerDir((dir) => {
+      const stub = writeQwenStub(dir);
+
+      expect(runClassifyCiFailure(dir, stub).stderr).toContain(
+        'ci-failure.json',
+      );
+
+      writeFileSync(join(dir, 'ci-failure.json'), '{"scope":"pr"}\n');
+      expect(runClassifyCiFailure(dir, stub).stderr).toContain(
+        'ci-decision.json',
+      );
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'ci-decision.json',
+      );
+    });
+  }, 10000);
+
+  it('accepts exactly one CI classifier decision output', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'ci-failure.json'), '{"scope":"pr"}\n');
+      const stub = writeWorkdirStub(dir, [
+        'writeFileSync(`${workdir}/ci-decision.json`, JSON.stringify({',
+        "  classification: 'other',",
+        "  confidence: 'low',",
+        "  reason_en: 'Insufficient evidence.',",
+        "  reason_zh: '证据不足。',",
+        "  evidence: ['failed job'],",
+        '}));',
+      ]);
+
+      const result = runClassifyCiFailure(dir, stub);
+      expect(result.status).toBe(0);
+      expect(existsSync(join(dir, 'failure.md'))).toBe(false);
+    });
+  });
 
   it('allows non-package fixes after deterministic verification', () => {
     expect(verificationGateSteps).toHaveLength(2);
