@@ -282,10 +282,21 @@ export class ExtensionStore {
           }
           return existing;
         }
-        for (const identity of extensions) {
+        const identities = new Map(
+          Object.entries(existing.extensions).map(([id, policy]) => [
+            id,
+            { id, name: policy.name },
+          ]),
+        );
+        for (const identity of extensions)
+          identities.set(identity.id, identity);
+        for (const identity of identities.values()) {
           assertIdentity(identity);
-          const rules = legacy[identity.name]?.overrides ?? [];
           const existingPolicy = existing.extensions[identity.id];
+          const rules = this.importedLegacyRules(
+            legacy[identity.name]?.overrides ?? [],
+            existingPolicy,
+          );
           if (existingPolicy) {
             const previousRules = existingPolicy.legacyPathRules ?? [];
             const policyChanged =
@@ -411,11 +422,6 @@ export class ExtensionStore {
       }
 
       const currentPolicy = snapshot.extensions[input.identity.id];
-      if (input.operation === 'install' && currentPolicy) {
-        throw new ExtensionConflictError(
-          `Extension id ${input.identity.id} is already installed.`,
-        );
-      }
       if (input.operation === 'update' && !currentPolicy) {
         throw new ExtensionConflictError(
           `Extension "${input.identity.name}" is not installed.`,
@@ -783,6 +789,37 @@ export class ExtensionStore {
       if (overrides.length > 0) projection[policy.name] = { overrides };
     }
     return projection;
+  }
+
+  private importedLegacyRules(
+    incomingRules: readonly string[],
+    policy: ExtensionPolicy | undefined,
+  ): string[] {
+    if (!policy) return [...incomingRules];
+    const generatedCounts = new Map<string, number>();
+    const generatedRules: string[] = [];
+    if (policy.defaultActivation === 'disabled') generatedRules.push('!/*');
+    for (const [workspacePath, activation] of Object.entries(
+      policy.workspaceOverrides,
+    )) {
+      const effective =
+        activation === 'inherit' ? policy.defaultActivation : activation;
+      generatedRules.push(
+        Override.fromInput(
+          effective === 'disabled' ? `!${workspacePath}` : workspacePath,
+          false,
+        ).output(),
+      );
+    }
+    for (const rule of generatedRules) {
+      generatedCounts.set(rule, (generatedCounts.get(rule) ?? 0) + 1);
+    }
+    return incomingRules.filter((rule) => {
+      const remaining = generatedCounts.get(rule) ?? 0;
+      if (remaining === 0) return true;
+      generatedCounts.set(rule, remaining - 1);
+      return false;
+    });
   }
 
   private async writeSnapshotUnlocked(

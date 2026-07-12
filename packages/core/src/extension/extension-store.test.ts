@@ -540,6 +540,57 @@ describe('ExtensionStore', () => {
     });
   });
 
+  it('does not import generated V2 rules as legacy rules', async () => {
+    const store = makeStore();
+    const identity = { id: 'e5'.repeat(32), name: 'demo' };
+    await store.ensureInitialized([identity]);
+    await store.setDefaultActivation(identity, 'disabled');
+    await store.setWorkspaceActivation(
+      identity,
+      '/workspace/enabled',
+      'enabled',
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await fsp.writeFile(
+      enablementPath,
+      JSON.stringify({
+        demo: {
+          overrides: ['!/*', '/workspace/enabled/', '!/workspace/legacy/*'],
+        },
+      }),
+    );
+
+    const imported = await store.ensureInitialized([identity]);
+
+    expect(imported.extensions[identity.id]?.legacyPathRules).toEqual([
+      '!/workspace/legacy/*',
+    ]);
+  });
+
+  it('imports newer V1 rules for policies omitted from a partial refresh', async () => {
+    const store = makeStore();
+    const first = { id: 'e6'.repeat(32), name: 'first' };
+    const second = { id: 'e7'.repeat(32), name: 'second' };
+    await store.ensureInitialized([first, second]);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await fsp.writeFile(
+      enablementPath,
+      JSON.stringify({
+        first: { overrides: ['!/workspace/first/*'] },
+        second: { overrides: ['!/workspace/second/*'] },
+      }),
+    );
+
+    const imported = await store.ensureInitialized([first]);
+
+    expect(imported.extensions[first.id]?.legacyPathRules).toEqual([
+      '!/workspace/first/*',
+    ]);
+    expect(imported.extensions[second.id]?.legacyPathRules).toEqual([
+      '!/workspace/second/*',
+    ]);
+  });
+
   it('fails closed when the V2 state is corrupt', async () => {
     await fsp.mkdir(storeDir, { recursive: true });
     await fsp.writeFile(path.join(storeDir, 'state.json'), '{not-json');
@@ -730,23 +781,41 @@ describe('ExtensionStore', () => {
     ).resolves.toBe('second-updated');
   });
 
-  it('rejects install when the identity already exists in policy state', async () => {
+  it('replaces stale policy state when its artifact is absent', async () => {
     const store = makeStore();
     const identity = { id: '93'.repeat(32), name: 'existing-policy' };
-    await store.ensureInitialized([identity]);
-    await store.setDefaultActivation(identity, 'disabled');
+    const destination = path.join(extensionsDir, identity.name);
+    const initialStaging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(initialStaging, 'version'), 'old artifact');
+    await store.commitArtifact({
+      operation: 'install',
+      identity,
+      stagingDirectory: initialStaging,
+      destinationDirectory: destination,
+      initialActivation: {
+        scope: 'workspace',
+        workspacePath: '/workspace/a',
+      },
+    });
+    await fsp.rm(destination, { recursive: true });
     const staging = await store.createStagingDirectory();
     await fsp.writeFile(path.join(staging, 'version'), 'new artifact');
 
+    const snapshot = await store.commitArtifact({
+      operation: 'install',
+      identity,
+      stagingDirectory: staging,
+      destinationDirectory: destination,
+      initialActivation: { scope: 'user' },
+    });
+
+    expect(snapshot.extensions[identity.id]).toMatchObject({
+      defaultActivation: 'enabled',
+      workspaceOverrides: {},
+    });
     await expect(
-      store.commitArtifact({
-        operation: 'install',
-        identity,
-        stagingDirectory: staging,
-        destinationDirectory: path.join(extensionsDir, identity.name),
-        initialActivation: { scope: 'user' },
-      }),
-    ).rejects.toMatchObject({ code: 'extension_conflict' });
+      fsp.readFile(path.join(destination, 'version'), 'utf8'),
+    ).resolves.toBe('new artifact');
   });
 
   it('rejects update when the artifact has no matching policy', async () => {
