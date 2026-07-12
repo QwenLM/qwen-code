@@ -282,6 +282,28 @@ describe('ChatPane', () => {
     expect(container!.textContent).toContain('Refactor core');
   });
 
+  it('uses the plain composer placeholder on a single-workspace daemon', () => {
+    render({ title: 'Refactor core' });
+    expect(latestChatEditorProps.placeholderText).toBe('Message this session…');
+  });
+
+  it('names the pane workspace in the composer placeholder on a multi-workspace daemon', () => {
+    // This pane's session lives in the non-primary "api" workspace.
+    connectionState.workspaceCwd = '/work/api';
+    connectionState.capabilities = {
+      features: [],
+      workspaceCwd: '/work/web-shell',
+      workspaces: [
+        { id: 'w0', cwd: '/work/web-shell', primary: true, trusted: true },
+        { id: 'w1', cwd: '/work/api', primary: false, trusted: true },
+      ],
+    };
+    render({ title: 'Add pagination' });
+    expect(latestChatEditorProps.placeholderText).toBe(
+      'Message this session in api…',
+    );
+  });
+
   it('reports loaded pane artifacts to the outer panel owner', async () => {
     const onPaneArtifactsChange = vi.fn();
     connectionState.capabilities = { features: ['session_artifacts'] };
