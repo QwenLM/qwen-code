@@ -1895,7 +1895,7 @@ describe('App session callbacks', () => {
     ).toBeNull();
   });
 
-  it('lands on the first pane, not an empty new chat, when a shrink closes a URL-driven split', async () => {
+  it('folds the split without switching the chat session on shrink', async () => {
     let large = true;
     let changeHandler: ((event: { matches: boolean }) => void) | undefined;
     Object.defineProperty(window, 'matchMedia', {
@@ -1914,9 +1914,7 @@ describe('App session callbacks', () => {
         removeEventListener: vi.fn(),
       })),
     });
-    // The single chat has no session of its own — the split was entered from a
-    // `?split=` deep link — so a naive close would strand on an empty new chat.
-    mockConnection.sessionId = undefined;
+    mockConnection.sessionId = 'session-1';
     window.history.replaceState(null, '', '/?split=s1,s2');
 
     try {
@@ -1932,12 +1930,13 @@ describe('App session callbacks', () => {
         await Promise.resolve();
       });
 
-      // The split folds back to chat and re-attaches to the first pane's
-      // session instead of stranding the user on an empty new chat.
+      // The split folds back to chat, but folding must leave the chat's own
+      // connection untouched — switching sessions here would drop its session /
+      // git-branch / URL context and break the lossless restore on regrow.
       expect(
         container.querySelector('[data-testid="split-view-page"]'),
       ).toBeNull();
-      expect(mockSessionActions.loadSession).toHaveBeenCalledWith('s1');
+      expect(mockSessionActions.loadSession).not.toHaveBeenCalled();
     } finally {
       window.history.replaceState(null, '', '/');
     }

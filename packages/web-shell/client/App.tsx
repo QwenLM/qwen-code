@@ -2097,23 +2097,12 @@ export function App({
       notifyControlledSplitClose();
       setMainView('chat');
       focusComposerAfterSplitCloseRef.current = true;
-      // Remember to restore the split once the screen grows back, so a transient
-      // shrink is lossless rather than permanently dropping the panes.
+      // Fold, don't discard: remember to restore the same split once the screen
+      // grows back, so a transient shrink is lossless. The chat's own connection
+      // (its session, git branch, URL, …) is left untouched — restoring the
+      // split, or dropping back to that chat, is exactly what it was before.
       if (!externalSplitControlled) {
         splitFoldedByShrinkRef.current = true;
-      }
-      // Meanwhile give the folded-down chat a session instead of stranding the
-      // user on an empty new chat (the common case when the split came from the
-      // Session Overview or a `?split=a,b` link). Best-effort; a load failure
-      // (e.g. a non-primary-workspace session the single connection can't own)
-      // just leaves the empty chat.
-      const firstPane = splitSessionIdsRef.current[0];
-      if (
-        firstPane &&
-        !currentSessionIdRef.current &&
-        !externalSplitControlled
-      ) {
-        void sessionActions.loadSession(firstPane).catch(() => undefined);
       }
     }
   }, [
@@ -2121,7 +2110,6 @@ export function App({
     activePanel,
     mainView,
     notifyControlledSplitClose,
-    sessionActions,
     externalSplitControlled,
   ]);
   // Land focus on the composer after a shrink-driven split close so keyboard
