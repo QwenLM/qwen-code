@@ -85,6 +85,73 @@ describe('createExtensionsController', () => {
     expect(refreshCache).toHaveBeenCalledOnce();
   });
 
+  it('aborts timed-out preparation without committing and releases its slot', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    let releaseBlocker!: () => void;
+    const blocker = new Promise<void>((resolve) => {
+      releaseBlocker = resolve;
+    });
+    const controller = createExtensionsController({
+      boundWorkspace: '/work/bound',
+      bridge: {
+        broadcastExtensionsChanged: vi.fn(),
+      } as unknown as AcpSessionBridge,
+      workspace: {} as DaemonWorkspaceService,
+    });
+    const manager = {
+      refreshCache: vi.fn(async () => undefined),
+    } as unknown as ExtensionManager;
+    const responseBody = vi.fn();
+    const response = {
+      status: vi.fn().mockReturnThis(),
+      location: vi.fn().mockReturnThis(),
+      set: vi.fn().mockReturnThis(),
+      json: responseBody,
+    } as unknown as Response;
+    const commit = vi.fn(async () => ({ generation: 1 }));
+    const held = controller.preparationQueue.run(async () => await blocker);
+
+    controller.runQueuedExtensionMutation(
+      'install',
+      { name: 'demo' },
+      response,
+      async (_extensionManager, _signal, context) => {
+        await context!.prepare(
+          async (signal) =>
+            await new Promise<void>((_resolve, reject) => {
+              signal.addEventListener('abort', () => reject(signal.reason), {
+                once: true,
+              });
+            }),
+        );
+        await context!.commit(commit);
+        return { status: 'installed', name: 'demo' };
+      },
+      { manager, deadlineMs: 100 },
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    const operationId = responseBody.mock.calls[0]?.[0].operationId as string;
+    let probeStarted = false;
+    const probe = controller.preparationQueue.run(async () => {
+      probeStarted = true;
+    });
+    expect(probeStarted).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(100);
+    await probe;
+
+    expect(controller.getOperation(operationId)).toMatchObject({
+      status: 'failed',
+      code: 'extension_prepare_timeout',
+    });
+    expect(commit).not.toHaveBeenCalled();
+    expect(probeStarted).toBe(true);
+
+    releaseBlocker();
+    await held;
+  });
+
   it('releases the operation slot when the acceptance response throws', () => {
     let operationId: string | undefined;
     const throwingResponse = {
