@@ -153,6 +153,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   // Carries `currentModelId` and `currentApprovalMode` so reconnecting
   // clients can seed their reducer without an extra round-trip.
   'session_snapshot',
+  'git_branch_changed',
 ] as const;
 
 const DAEMON_KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set<string>(

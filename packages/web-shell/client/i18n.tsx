@@ -16,6 +16,7 @@ type MessageValue =
 type Messages = Record<string, MessageValue>;
 
 const EN: Messages = {
+  'git.currentBranch': (v) => `Current Git branch: ${v?.branch ?? ''}`,
   'about.auth': 'Auth',
   'about.baseUrl': 'Base URL',
   'about.fastModel': 'Fast Model',
@@ -1762,6 +1763,7 @@ const EN: Messages = {
 
 const ZH: Messages = {
   ...EN,
+  'git.currentBranch': (v) => `当前 Git 分支：${v?.branch ?? ''}`,
   // Tool display names (chat-stream badge labels). Keyed by `toolName.<wire>`;
   // a wire name with no entry here falls back to the English display name via
   // `localizeToolDisplayName`. Proper tool names / acronyms stay in English

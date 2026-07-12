@@ -102,6 +102,8 @@ interface MockClient {
   workspaceSkills: () => Promise<unknown>;
   workspaceAcpStatus: () => Promise<unknown>;
   workspaceAcpPreheat: () => Promise<unknown>;
+  workspaceGit: () => Promise<unknown>;
+  workspaceByCwd: (workspaceCwd: string) => Pick<MockClient, 'workspaceGit'>;
   workspaceTools: () => Promise<unknown>;
   setWorkspaceToolEnabled: () => Promise<unknown>;
   workspaceMemory: () => Promise<unknown>;
@@ -144,6 +146,8 @@ const sdkMocks = vi.hoisted(() => {
   const workspaceSkills = vi.fn();
   const workspaceAcpStatus = vi.fn();
   const workspaceAcpPreheat = vi.fn();
+  const workspaceGit = vi.fn();
+  const workspaceByCwd = vi.fn((_workspaceCwd: string) => ({ workspaceGit }));
   const workspaceTools = vi.fn();
   const setWorkspaceToolEnabled = vi.fn();
   const workspaceMemory = vi.fn();
@@ -174,6 +178,8 @@ const sdkMocks = vi.hoisted(() => {
     workspaceSkills = workspaceSkills;
     workspaceAcpStatus = workspaceAcpStatus;
     workspaceAcpPreheat = workspaceAcpPreheat;
+    workspaceGit = workspaceGit;
+    workspaceByCwd = workspaceByCwd;
     workspaceTools = workspaceTools;
     setWorkspaceToolEnabled = setWorkspaceToolEnabled;
     workspaceMemory = workspaceMemory;
@@ -218,6 +224,8 @@ const sdkMocks = vi.hoisted(() => {
     workspaceSkills,
     workspaceAcpStatus,
     workspaceAcpPreheat,
+    workspaceGit,
+    workspaceByCwd,
     MockDaemonClient,
     MockDaemonSessionClient,
     workspaceMcpTools,
@@ -274,6 +282,16 @@ const sdkMocks = vi.hoisted(() => {
         channelLive: true,
         durationMs: 1,
       });
+      workspaceGit.mockReset();
+      workspaceGit.mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/mock-workspace',
+        branch: 'main',
+      });
+      workspaceByCwd.mockReset();
+      workspaceByCwd.mockImplementation((_workspaceCwd: string) => ({
+        workspaceGit,
+      }));
       workspaceTools.mockReset();
       workspaceTools.mockResolvedValue({
         v: 1,
@@ -436,8 +454,35 @@ describe('DaemonSessionProvider', () => {
       status: 'connected',
       workspaceCwd: '/mock-workspace',
       currentMode: 'yolo',
+      gitBranch: 'main',
     });
     expect(connection).not.toHaveProperty('sessionId');
+  });
+
+  it('populates git branch from the active session workspace', async () => {
+    sdkMocks.sessions.push(createMockSession());
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'session-1',
+      workspaceCwd: '/mock-workspace',
+      gitBranch: 'main',
+    });
+    expect(sdkMocks.workspaceByCwd).toHaveBeenCalledWith('/mock-workspace');
   });
 
   it('populates skill slash commands during deferred connect (before first prompt)', async () => {
@@ -5329,12 +5374,12 @@ describe('DaemonSessionProvider', () => {
       heartbeatFailureThreshold: 2,
     });
 
+    await vi.waitFor(() =>
+      expect(heartbeat.mock.calls.length).toBeGreaterThanOrEqual(2),
+    );
     await act(async () => {
-      await wait(10);
       await flushPromises();
     });
-
-    expect(heartbeat.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(connection).toMatchObject({
       status: 'disconnected',
       error: 'session gone',
@@ -5379,12 +5424,13 @@ describe('DaemonSessionProvider', () => {
       heartbeatFailureThreshold: 2,
     });
 
+    await vi.waitFor(() =>
+      expect(heartbeat.mock.calls.length).toBeGreaterThanOrEqual(2),
+    );
     await act(async () => {
-      await wait(10);
       await flushPromises();
     });
 
-    expect(heartbeat.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(connection).toMatchObject({
       status: 'disconnected',
       error: 'session gone',
