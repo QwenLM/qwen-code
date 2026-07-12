@@ -884,6 +884,11 @@
   background: var(--agent-purple-600);
 }
 
+.groupColorCustom {
+  box-shadow: inset 0 0 0 1px
+    color-mix(in srgb, var(--foreground) 28%, transparent);
+}
+
 .iconButton:disabled {
   cursor: not-allowed;
   opacity: 0.38;

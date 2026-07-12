@@ -1116,7 +1116,7 @@ describe('WebShellSidebar — session organization', () => {
 
     const hexInput = Array.from(
       document.body.querySelectorAll<HTMLInputElement>('input'),
-    ).find((input) => input.maxLength === 7);
+    ).find((input) => input.maxLength === 9);
     const picker = document.body.querySelector<HTMLInputElement>(
       'input[type="color"]',
     );
@@ -1126,25 +1126,23 @@ describe('WebShellSidebar — session organization', () => {
       document.body.querySelectorAll<HTMLButtonElement>('button'),
     ).find((button) => button.textContent === 'save');
     act(() => {
-      setInputValue?.call(hexInput, '12abef');
-      hexInput!.dispatchEvent(new Event('input', { bubbles: true }));
-    });
-    expect(saveButton?.disabled).toBe(true);
-    expect(
-      document.body.querySelector<HTMLInputElement>('input[type="color"]'),
-    ).not.toBeNull();
-    expect(
-      document.body.querySelector('[role="alert"]')?.textContent,
-    ).toContain('six-digit Hex color');
-
-    act(() => {
       setInputValue?.call(picker, '#12abef');
       picker!.dispatchEvent(new Event('input', { bubbles: true }));
       picker!.dispatchEvent(new Event('change', { bubbles: true }));
     });
     expect(hexInput?.value).toBe('#12abef');
     act(() => {
-      setInputValue?.call(hexInput, '#12ABEF');
+      setInputValue?.call(hexInput, '12abef');
+      hexInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(saveButton?.disabled).toBe(true);
+    expect(picker?.value).toBe('#12abef');
+    expect(
+      document.body.querySelector('[role="alert"]')?.textContent,
+    ).toContain('six-digit Hex color');
+
+    act(() => {
+      setInputValue?.call(hexInput, ' #12ABEF ');
       hexInput!.dispatchEvent(new Event('input', { bubbles: true }));
     });
 
@@ -1154,6 +1152,26 @@ describe('WebShellSidebar — session organization', () => {
       name: 'Custom',
       color: '#12abef',
     });
+
+    click(
+      document.body.querySelector<HTMLButtonElement>('[aria-label="Group"]'),
+    );
+    click(
+      Array.from(
+        document.body.querySelectorAll<HTMLButtonElement>('button'),
+      ).find((button) => button.textContent?.includes('Create group')) ?? null,
+    );
+    const nextColorSelect = Array.from(
+      document.body.querySelectorAll<HTMLSelectElement>('select'),
+    ).find((select) => select.value === 'red');
+    act(() => {
+      setSelectValue?.call(nextColorSelect, '__custom__');
+      nextColorSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(
+      document.body.querySelector<HTMLInputElement>('input[type="color"]')
+        ?.value,
+    ).toBe('#416ef5');
   });
 
   it('edits an existing custom group and switches it back to a preset', async () => {
@@ -1201,7 +1219,7 @@ describe('WebShellSidebar — session organization', () => {
       document.body.querySelectorAll<HTMLSelectElement>('select'),
     ).find((select) => select.value === '__custom__');
     const hexInput = document.body.querySelector<HTMLInputElement>(
-      'input[maxlength="7"]',
+      'input[maxlength="9"]',
     );
     expect(colorSelect).toBeDefined();
     expect(hexInput?.value).toBe('#12abef');
@@ -1215,7 +1233,7 @@ describe('WebShellSidebar — session organization', () => {
       colorSelect!.dispatchEvent(new Event('change', { bubbles: true }));
     });
     expect(
-      document.body.querySelector<HTMLInputElement>('input[maxlength="7"]'),
+      document.body.querySelector<HTMLInputElement>('input[maxlength="9"]'),
     ).toBeNull();
 
     const saveButton = Array.from(

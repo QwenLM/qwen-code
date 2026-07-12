@@ -605,6 +605,7 @@ export type DaemonSessionGroupPresetColor =
   | 'blue'
   | 'purple';
 
+/** Shape hint only; the daemon validates exactly six Hex digits at runtime. */
 export type DaemonSessionGroupHexColor = `#${string}`;
 
 export type DaemonSessionGroupColor =

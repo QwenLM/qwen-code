@@ -28,7 +28,8 @@ npx vitest run src/services/session-organization-service.test.ts
 
 Expected after implementation:
 
-- create/update accepts `#12ABEF` and returns `#12abef`;
+- create/update accepts `#12ABEF` (including accidental surrounding
+  whitespace) and returns `#12abef`;
 - list/restart preserves the canonical value;
 - malformed Hex values return `invalid_group_color`;
 - session quick tags still reject Hex;
@@ -63,6 +64,7 @@ Expected after implementation:
 
 - Create/Rename group offers a Custom option.
 - The native color input and Hex text field stay synchronized.
+- Invalid text keeps the picker on the last valid custom color.
 - Invalid Hex disables Save and exposes an accessible error.
 - Existing custom values reopen in Custom mode.
 - Custom group dots use the persisted Hex color.
@@ -105,11 +107,11 @@ Verified on macOS:
 - WebShell sidebar: 61 passed; only pre-existing React `act()` warnings.
 - Full `server.test.ts`: 674 passed, 1 unrelated failure in extension-update
   status handling (expected 202, received 200).
-- Root build/typecheck are blocked on upstream main by
-  `ScheduledTasksDialog.tsx` importing the removed `../composerTagIcons`
-  module. `npm run bundle` succeeds but omits WebShell because that upstream
-  build did not produce `packages/web-shell/dist`.
+- Root build passes after syncing upstream main with the
+  `ScheduledTasksDialog` import fix from #6748. Core and WebShell package
+  typechecks pass.
 
-The manual WebShell check could not run because the upstream build blocker
-prevents producing the local WebShell artifact. Windows and Linux behavior is
-delegated to CI.
+The WebShell editor was rendered against a local fixture daemon to capture the
+picker + Hex field screenshot in the PR. Persistence and normalization were
+verified through the live REST path and focused tests. Windows and Linux
+behavior is delegated to CI.

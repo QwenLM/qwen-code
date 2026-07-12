@@ -86,11 +86,13 @@ describe('SessionOrganizationService', () => {
   it('accepts and normalizes custom hex colors for named groups', async () => {
     const group = await service.createGroup({
       name: 'Custom',
-      color: '#12ABef',
+      color: ' #12ABef ' as never,
     });
     expect(group.color).toBe('#12abef');
 
-    const updated = await service.updateGroup(group.id, { color: '#FEDCBA' });
+    const updated = await service.updateGroup(group.id, {
+      color: ' #FEDCBA ' as never,
+    });
     expect(updated.color).toBe('#fedcba');
 
     const catalog = await service.listGroups();
@@ -415,6 +417,12 @@ describe('SessionOrganizationService', () => {
     await expect(
       service.updateSessionOrganization(sessionIdA, {
         color: '#12abef' as never,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_group_color', field: 'color' });
+
+    await expect(
+      service.updateSessionOrganization(sessionIdA, {
+        color: ' blue ' as never,
       }),
     ).rejects.toMatchObject({ code: 'invalid_group_color', field: 'color' });
   });

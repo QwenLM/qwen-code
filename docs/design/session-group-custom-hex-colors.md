@@ -24,8 +24,9 @@ Tracked by [#6744](https://github.com/QwenLM/qwen-code/issues/6744).
 
 - Accept only six-digit `#RRGGBB`. Three-, four-, and eight-digit forms are
   rejected so every persisted value has one predictable shape.
-- Canonicalize Hex values to lowercase in core. Clients may normalize earlier
-  for immediate feedback, but core remains authoritative.
+- Trim surrounding whitespace and canonicalize Hex values to lowercase in
+  core. Clients may normalize earlier for immediate feedback, but core remains
+  authoritative.
 - Do not expand quick session color tags. Their six-value catalog remains a
   compact ordering/filter dimension and stays backward compatible.
 - Keep the sidecar schema version at 1. The stored field remains a string and

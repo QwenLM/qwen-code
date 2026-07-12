@@ -21,6 +21,7 @@ import {
 import type {
   DaemonSessionGroup,
   DaemonSessionGroupColor,
+  DaemonSessionGroupHexColor,
   DaemonSessionGroupPresetColor,
   DaemonSessionSummary,
 } from '@qwen-code/sdk/daemon';
@@ -52,7 +53,7 @@ const RECENT_SESSION_SECTION_ID = 'recent';
 const GROUP_MENU_WIDTH = 240;
 const GROUP_MENU_MARGIN = 8;
 const CUSTOM_GROUP_COLOR_OPTION = '__custom__';
-const DEFAULT_CUSTOM_GROUP_COLOR = '#416ef5';
+const DEFAULT_CUSTOM_GROUP_COLOR: DaemonSessionGroupHexColor = '#416ef5';
 
 /**
  * Palette order for the quick color-grouping buckets. Mirrors core's
@@ -168,11 +169,14 @@ function getDefaultGroupColor(
 function normalizeGroupColorInput(
   value: string,
 ): DaemonSessionGroupColor | undefined {
-  if (SESSION_GROUP_COLORS.includes(value as DaemonSessionGroupPresetColor)) {
-    return value as DaemonSessionGroupPresetColor;
+  const normalized = value.trim();
+  if (
+    SESSION_GROUP_COLORS.includes(normalized as DaemonSessionGroupPresetColor)
+  ) {
+    return normalized as DaemonSessionGroupPresetColor;
   }
-  if (/^#[0-9a-f]{6}$/i.test(value)) {
-    return value.toLowerCase() as DaemonSessionGroupColor;
+  if (/^#[0-9a-f]{6}$/i.test(normalized)) {
+    return normalized.toLowerCase() as DaemonSessionGroupHexColor;
   }
   return undefined;
 }
@@ -180,6 +184,7 @@ function normalizeGroupColorInput(
 function getGroupColorClass(
   color: DaemonSessionGroupColor,
 ): string | undefined {
+  if (color.startsWith('#')) return styles.groupColorCustom;
   switch (color) {
     case 'red':
       return styles.groupColorRed;
@@ -612,6 +617,8 @@ export function WebShellSidebar({
   const [groupEditor, setGroupEditor] = useState<GroupEditorState | null>(null);
   const [groupName, setGroupName] = useState('');
   const [groupColor, setGroupColor] = useState<DaemonSessionGroupColor>('blue');
+  const [lastValidCustomGroupColor, setLastValidCustomGroupColor] =
+    useState<DaemonSessionGroupHexColor>(DEFAULT_CUSTOM_GROUP_COLOR);
   const [deleteGroupCandidate, setDeleteGroupCandidate] =
     useState<DaemonSessionGroup | null>(null);
   const [collapsedSessionSectionIds, setCollapsedSessionSectionIds] = useState<
@@ -1160,6 +1167,7 @@ export function WebShellSidebar({
     setGroupMenu(null);
     setGroupName('');
     setGroupColor(getDefaultGroupColor(colorOptions));
+    setLastValidCustomGroupColor(DEFAULT_CUSTOM_GROUP_COLOR);
     setGroupEditor({ mode: 'create' });
   }, [colorOptions]);
 
@@ -1168,6 +1176,7 @@ export function WebShellSidebar({
       setGroupMenu(null);
       setGroupName('');
       setGroupColor(getDefaultGroupColor(colorOptions));
+      setLastValidCustomGroupColor(DEFAULT_CUSTOM_GROUP_COLOR);
       setGroupEditor({ mode: 'create', targetSession: session });
     },
     [colorOptions],
@@ -1176,6 +1185,12 @@ export function WebShellSidebar({
   const handleRenameGroup = useCallback((group: DaemonSessionGroup) => {
     setGroupName(group.name);
     setGroupColor(group.color);
+    const normalized = normalizeGroupColorInput(group.color);
+    setLastValidCustomGroupColor(
+      normalized?.startsWith('#')
+        ? (normalized as DaemonSessionGroupHexColor)
+        : DEFAULT_CUSTOM_GROUP_COLOR,
+    );
     setGroupEditor({ mode: 'edit', group });
   }, []);
 
@@ -1184,6 +1199,7 @@ export function WebShellSidebar({
     setGroupEditor(null);
     setGroupName('');
     setGroupColor(getDefaultGroupColor(colorOptions));
+    setLastValidCustomGroupColor(DEFAULT_CUSTOM_GROUP_COLOR);
   }, [colorOptions, groupBusy]);
 
   const saveGroupEditor = useCallback(() => {
@@ -2491,7 +2507,7 @@ export function WebShellSidebar({
                     const value = event.target.value;
                     setGroupColor(
                       value === CUSTOM_GROUP_COLOR_OPTION
-                        ? DEFAULT_CUSTOM_GROUP_COLOR
+                        ? lastValidCustomGroupColor
                         : (value as DaemonSessionGroupPresetColor),
                     );
                   }}
@@ -2511,27 +2527,34 @@ export function WebShellSidebar({
                   <input
                     className={styles.groupColorPicker}
                     type="color"
-                    value={normalizedGroupColor ?? DEFAULT_CUSTOM_GROUP_COLOR}
+                    value={lastValidCustomGroupColor}
                     aria-label={t('sidebar.groupColor.picker')}
-                    onChange={(event) =>
-                      setGroupColor(
-                        event.target.value.toLowerCase() as DaemonSessionGroupColor,
-                      )
-                    }
+                    onChange={(event) => {
+                      const value =
+                        event.target.value.toLowerCase() as DaemonSessionGroupHexColor;
+                      setLastValidCustomGroupColor(value);
+                      setGroupColor(value);
+                    }}
                   />
                   <label className={styles.groupHexField}>
                     <span>{t('sidebar.groupColor.hex')}</span>
                     <input
                       className={styles.dialogInput}
                       value={groupColor}
-                      maxLength={7}
+                      maxLength={9}
                       spellCheck={false}
                       aria-invalid={normalizedGroupColor === undefined}
-                      onChange={(event) =>
-                        setGroupColor(
-                          event.target.value as DaemonSessionGroupColor,
-                        )
-                      }
+                      onChange={(event) => {
+                        const value = event.target
+                          .value as DaemonSessionGroupColor;
+                        setGroupColor(value);
+                        const normalized = normalizeGroupColorInput(value);
+                        if (normalized?.startsWith('#')) {
+                          setLastValidCustomGroupColor(
+                            normalized as DaemonSessionGroupHexColor,
+                          );
+                        }
+                      }}
                     />
                   </label>
                   {normalizedGroupColor === undefined && (

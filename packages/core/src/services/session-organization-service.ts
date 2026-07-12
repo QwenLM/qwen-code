@@ -20,6 +20,7 @@ export const GROUP_COLOR_OPTIONS = [
 ] as const;
 
 export type SessionGroupPresetColor = (typeof GROUP_COLOR_OPTIONS)[number];
+/** Shape hint only; runtime validation below enforces exactly six Hex digits. */
 export type SessionGroupHexColor = `#${string}`;
 export type SessionGroupColor = SessionGroupPresetColor | SessionGroupHexColor;
 
@@ -140,11 +141,12 @@ function normalizeGroupName(name: unknown): string {
 }
 
 function normalizeGroupColor(color: unknown): SessionGroupColor {
-  if (typeof color === 'string' && isPresetGroupColor(color)) {
-    return color;
+  const normalized = typeof color === 'string' ? color.trim() : color;
+  if (typeof normalized === 'string' && isPresetGroupColor(normalized)) {
+    return normalized;
   }
-  if (typeof color === 'string' && /^#[0-9a-f]{6}$/i.test(color)) {
-    return color.toLowerCase() as SessionGroupHexColor;
+  if (typeof normalized === 'string' && /^#[0-9a-f]{6}$/i.test(normalized)) {
+    return normalized.toLowerCase() as SessionGroupHexColor;
   }
   throw new SessionOrganizationError(
     '`color` must be a supported preset or a #RRGGBB hex value',
