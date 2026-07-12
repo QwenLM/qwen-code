@@ -290,12 +290,12 @@ For large diffs (>10 modified symbols), the caller-direction analysis prioritize
 
 The high-effort pipeline bounds each stage (shard size, audit rounds), but total calls scale with findings — `ceil(F/8)` verification shards — and, under 3B, with chunk count (reverse audit runs per chunk per round). Typical 3A profile:
 
-| Stage                            | LLM calls                      | Notes                                                                                         |
-| -------------------------------- | ------------------------------ | --------------------------------------------------------------------------------------------- |
-| Review agents (Step 3)           | 12 (+0-2)                      | Run in parallel; cross-repo skips Agents 1c and 7 (10), local/file skips Agent 0 (11)         |
-| Sharded verification (Step 4)    | ceil(F/8)                      | F = findings; at most 8 per verification agent, launched together                             |
-| Iterative reverse audit (Step 5) | 2-5 (3A); rounds × chunks (3B) | Two consecutive dry rounds to stop (cap 5); 3B fans out one auditor per chunk per round       |
-| **Total**                        | **~15-19 (~13-18)**            | 3A same-repo: ~15-19; cross-repo or local/file: ~13-18; 3B scales with chunks (see DESIGN.md) |
+| Stage                            | LLM calls                      | Notes                                                                                                          |
+| -------------------------------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| Review agents (Step 3)           | 12 (+0-2)                      | Run in parallel; cross-repo skips Agents 1c and 7 (10), local/file skips Agent 0 (11)                          |
+| Sharded verification (Step 4)    | ceil(F/8)                      | F = findings; at most 8 per verification agent, launched together                                              |
+| Iterative reverse audit (Step 5) | 2-5 (3A); rounds × chunks (3B) | Two consecutive dry rounds to stop (cap 5); 3B fans out one auditor per chunk per round                        |
+| **Total**                        | **~15-21 (~13-20)**            | 3A same-repo: ~15-21 (typical ~15-17); cross-repo or local/file: ~13-20; 3B scales with chunks (see DESIGN.md) |
 
 Most PRs converge to the lower end of the range; the caps prevent runaway cost on pathological cases. At `--effort low|medium` the review runs entirely inline — **0 subagent calls**.
 

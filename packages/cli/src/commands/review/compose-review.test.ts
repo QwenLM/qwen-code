@@ -259,3 +259,34 @@ describe('composeReview — stacked states compose, none erased', () => {
     }
   });
 });
+
+describe('composeReview — RC carries every applicable disclosure (no clause squeezed out)', () => {
+  it('RC + context-unavailable keeps the diff-only trust warning in the body', () => {
+    const r = composeReview(
+      base({ criticalsInline: 1, contextUnavailable: true }),
+    );
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain('Reviewed diff-only');
+  });
+
+  it('RC + uncoverable chunk alone still discloses the unread scope (was gated on other parts)', () => {
+    const r = composeReview(
+      base({ criticalsInline: 1, uncoverableChunks: ['chunk 3 (a.min.js)'] }),
+    );
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain('Not reviewed: chunk 3 (a.min.js)');
+  });
+
+  it('RC + cannot-tell existing Critical carries the unresolved disclosure', () => {
+    const r = composeReview(
+      base({ criticalsInline: 1, cannotTellCriticals: ['old blocker'] }),
+    );
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain('Unresolved, please confirm:');
+  });
+
+  it('a clean RC still submits an empty body', () => {
+    const r = composeReview(base({ criticalsInline: 2 }));
+    expect(r.body).toBe('');
+  });
+});

@@ -340,7 +340,7 @@ The countermeasure is cheap and needs no new machinery: before Step 4, sanity-ch
 
 ## LLM call budget
 
-**Small diffs (≤ 500 source lines AND ≤ 3200 total diff lines, Step 3A, high effort) — typically 15-19 calls:**
+**Small diffs (≤ 500 source lines AND ≤ 3200 total diff lines, Step 3A, high effort) — 15-21 calls (typically 15-17):**
 
 | Stage                   | Calls               | Why                                                                                                                                                                                                                                      |
 | ----------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -443,7 +443,7 @@ For a PR with 15 findings:
 | Our design (5 agents, batch verify, single reverse) | 7                    | 5+1+1 — original design                                                                              |
 | Our design (9 agents, iterative reverse)            | 11-13                | 9+1+(1-3) — +50% cost for meaningfully higher recall                                                 |
 | Our design (10 agents)                              | 12-14                | 10+1+(1-3) — adds issue-fidelity/root-cause gate                                                     |
-| Our design (12 agents + effort levels, current)     | 15-19 high / 0 quick | 12(+0-2)+ceil(F/8)+(2-5) under 3A; low/medium run inline with no subagents — cost scales with intent |
+| Our design (12 agents + effort levels, current)     | 15-21 high / 0 quick | 12(+0-2)+ceil(F/8)+(2-5) under 3A; low/medium run inline with no subagents — cost scales with intent |
 | Claude /ultrareview                                 | 5-20                 | Cloud-hosted, cost on Anthropic                                                                      |
 
 ## Future optimization: Fork Subagent

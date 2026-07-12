@@ -157,10 +157,20 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
 
   const bodyCriticalBlock = bodyCriticals.map((l) => withMarker(l));
 
+  const contextUnavailableClause =
+    'Reviewed diff-only — the PR’s existing discussion could not be fetched, so this is not an approval and not a no-blockers claim.';
+
   if (event === 'REQUEST_CHANGES') {
-    // Empty body, except the sanctioned carve-outs.
-    const parts = [...bodyCriticalBlock, ...cannotTellBlock];
-    if (parts.length > 0) parts.push(...notReviewedParts);
+    // Empty body, except the disclosures: every clause whose state holds
+    // appears on every event — a confirmed blocker must not squeeze out the
+    // trust warning (clause 2), an undecided existing Critical (clause 5),
+    // or the unread-scope disclosure (clause 6).
+    const parts = [
+      ...(contextUnavailable ? [contextUnavailableClause] : []),
+      ...cannotTellBlock,
+      ...notReviewedParts,
+      ...bodyCriticalBlock,
+    ];
     return {
       event,
       body: finish(parts.join('\n\n')),
@@ -195,9 +205,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // 2. Context-unavailable clause — when present, it opens the body and no
   //    clause may certify "no blockers".
   if (contextUnavailable) {
-    clauses.push(
-      'Reviewed diff-only — the PR’s existing discussion could not be fetched, so this is not an approval and not a no-blockers claim.',
-    );
+    clauses.push(contextUnavailableClause);
   } else {
     // 3. Opener — certifying only when the review can actually certify it.
     const canCertify =
