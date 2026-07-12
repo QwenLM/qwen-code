@@ -1,12 +1,19 @@
-import { type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import {
   DaemonSessionProvider,
   DaemonWorkspaceProvider,
+  useWorkspace,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { App, type WebShellProps } from './App';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { RootErrorFallback } from './components/RootErrorFallback';
-import { normalizeLanguage, type WebShellLanguage } from './i18n';
+import { Spinner } from './components/ui/spinner';
+import { WorkspaceUnavailableState } from './components/WorkspaceUnavailableState';
+import {
+  getTranslator,
+  normalizeLanguage,
+  type WebShellLanguage,
+} from './i18n';
 
 export interface WebShellWithProvidersProps extends WebShellProps {
   /** Daemon API base URL. Defaults to the browser origin when omitted. */
@@ -15,6 +22,8 @@ export interface WebShellWithProvidersProps extends WebShellProps {
   token?: string;
   /** Session id to load. Undefined starts on an empty page. */
   sessionId?: string;
+  /** Registered daemon workspace id for the session. Undefined uses primary. */
+  workspaceId?: string;
   /** Client identity to reuse when attaching to an externally created session. */
   clientId?: string;
 }
@@ -72,7 +81,8 @@ export function WebShell(props: WebShellProps) {
  * are available without extra setup.
  */
 export function WebShellWithProviders(props: WebShellWithProvidersProps) {
-  const { baseUrl, token, sessionId, clientId, ...webShellProps } = props;
+  const { baseUrl, token, sessionId, workspaceId, clientId, ...webShellProps } =
+    props;
   const resolvedBaseUrl = resolveBaseUrl(baseUrl);
 
   return (
@@ -84,15 +94,78 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
       }
     >
       <DaemonWorkspaceProvider baseUrl={resolvedBaseUrl} token={token}>
-        <DaemonSessionProvider
+        <WebShellSessionProvider
           sessionId={sessionId}
+          workspaceId={workspaceId}
           clientId={clientId}
-          suppressOwnUserEcho
-        >
-          <App {...webShellProps} />
-        </DaemonSessionProvider>
+          webShellProps={webShellProps}
+        />
       </DaemonWorkspaceProvider>
     </RootBoundary>
+  );
+}
+
+function WebShellSessionProvider({
+  sessionId,
+  workspaceId,
+  clientId,
+  webShellProps,
+}: {
+  sessionId?: string;
+  workspaceId?: string;
+  clientId?: string;
+  webShellProps: WebShellProps;
+}) {
+  const workspace = useWorkspace();
+  const [usePrimaryNewSession, setUsePrimaryNewSession] = useState(false);
+  useEffect(() => setUsePrimaryNewSession(false), [sessionId, workspaceId]);
+  const effectiveSessionId = usePrimaryNewSession ? undefined : sessionId;
+  const effectiveWorkspaceId = usePrimaryNewSession ? undefined : workspaceId;
+  const targetWorkspace = workspace.capabilities?.workspaces?.find(
+    (entry) => entry.id === effectiveWorkspaceId,
+  );
+
+  if (effectiveWorkspaceId && !workspace.capabilities) {
+    const t = getTranslator(normalizeLanguage(webShellProps.language));
+    return (
+      <div
+        data-web-shell-root
+        data-web-shell-shadcn
+        className={`flex min-h-32 w-full items-center justify-center gap-2 text-sm text-muted-foreground ${webShellProps.theme === 'dark' ? 'dark' : ''}`}
+        role="status"
+        aria-live="polite"
+      >
+        <Spinner />
+        <span>{t('common.loading')}</span>
+      </div>
+    );
+  }
+  if (effectiveWorkspaceId && !targetWorkspace) {
+    const t = getTranslator(normalizeLanguage(webShellProps.language));
+    return (
+      <WorkspaceUnavailableState
+        title={t('workspace.notFound')}
+        description={t('workspace.notFoundDescription')}
+        actionLabel={t('session.new')}
+        theme={webShellProps.theme}
+        onAction={() => {
+          setUsePrimaryNewSession(true);
+          webShellProps.onSessionIdChange?.(undefined, undefined);
+        }}
+      />
+    );
+  }
+
+  return (
+    <DaemonSessionProvider
+      key={effectiveWorkspaceId ?? 'primary'}
+      sessionId={effectiveSessionId}
+      workspaceCwd={targetWorkspace?.cwd}
+      clientId={clientId}
+      suppressOwnUserEcho
+    >
+      <App {...webShellProps} />
+    </DaemonSessionProvider>
   );
 }
 

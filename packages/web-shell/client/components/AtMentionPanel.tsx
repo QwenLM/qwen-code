@@ -9,6 +9,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useI18n } from '../i18n';
+import { useWebShellPortalRoot } from '../portalRoot';
 import {
   FILE_PROVIDER_ID,
   sanitizeDisplayText,
@@ -48,6 +49,7 @@ export function AtMentionPanel({
   onSearch: (query: string) => boolean;
   onSelectTab: (tabId: string) => boolean;
 }) {
+  const portalRoot = useWebShellPortalRoot();
   const { t } = useI18n();
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
@@ -502,7 +504,7 @@ export function AtMentionPanel({
         </div>
       </div>
     </div>,
-    document.body,
+    portalRoot ?? document.body,
   );
 }
 

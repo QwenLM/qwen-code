@@ -20,6 +20,7 @@ import {
   useStreamingState,
   useTranscriptBlocks,
   useTranscriptStore,
+  useWorkspace,
   useWorkspaceActions,
   useWorkspaceEventSignals,
   type DaemonWorkspaceActions,
@@ -187,6 +188,7 @@ import {
   THEME_SETTING_KEY,
   LANGUAGE_SETTING_KEY,
   themeSettingToWebShellTheme,
+  webShellThemeToSettingValue,
   type WebShellTheme,
 } from './themeContext';
 import {
@@ -216,6 +218,8 @@ import {
   type WebShellBottomStatusItem,
 } from './customization';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
+import { WebShellPortalRootContext } from './portalRoot';
+import './styles/globals.css';
 import styles from './App.module.css';
 
 export const CompactModeContext = createContext(false);
@@ -417,7 +421,10 @@ export interface WebShellApi {
 
 export interface WebShellProps {
   /** Called whenever the attached daemon session id changes. */
-  onSessionIdChange?: (sessionId: string | undefined) => void;
+  onSessionIdChange?: (
+    sessionId: string | undefined,
+    workspaceId?: string,
+  ) => void;
   /** Visual theme for the embedded shell. */
   theme?: WebShellTheme;
   /** Called when `/theme` changes the web-shell theme. */
@@ -554,6 +561,7 @@ export interface WebShellProps {
 type SessionActionsWithCreate = {
   createSession: (options?: {
     workspaceCwd?: string;
+    approvalMode?: string;
   }) => Promise<{ sessionId: string }>;
   attachSession: () => Promise<void>;
   closeSession: () => Promise<void>;
@@ -1090,6 +1098,7 @@ export function App({
   const store = useTranscriptStore();
   const blocks = useTranscriptBlocks();
   const connection = useConnection();
+  const workspace = useWorkspace();
   const sessionActions = useActions();
   const { notices, dismissNotice } = useSessionNotices();
   const workspaceActions = useWorkspaceActions();
@@ -1139,6 +1148,7 @@ export function App({
   const chatPaneRef = useRef<HTMLDivElement | null>(null);
   const currentSessionIdRef = useRef(connection.sessionId);
   const lastNotifiedSessionIdRef = useRef<string | undefined>(undefined);
+  const lastNotifiedWorkspaceIdRef = useRef<string | undefined>(undefined);
   const lastGoalSessionIdRef = useRef(connection.sessionId);
   const displayMessages = useMemo(() => {
     const localMessages = [recapMessage].filter(
@@ -1752,6 +1762,9 @@ export function App({
   const showBottomPanels =
     showFloatingTodos || floatingBottomStatusItems.length > 0;
   const footerRef = useRef<HTMLDivElement>(null);
+  const appRootRef = useRef<HTMLDivElement>(null);
+  const [portalRoot, setPortalRoot] = useState<HTMLElement | null>(null);
+  const portalRootVariableNamesRef = useRef<Set<string>>(new Set());
   const bottomPanelsRef = useRef<HTMLDivElement>(null);
   const [bottomPanelInset, setBottomPanelInset] = useState(0);
   const [bottomPanelHeight, setBottomPanelHeight] = useState(0);
@@ -2312,12 +2325,15 @@ export function App({
           currentModelRef.current || connectionRef.current.currentModel;
         const modeId =
           currentModeRef.current || connectionRef.current.currentMode;
+        const primaryWorkspaceCwd = workspace.capabilities?.workspaces?.find(
+          (entry) => entry.primary,
+        )?.cwd;
         await createAndAttachSessionForPrompt({
           sessionActions: sessionActions as typeof sessionActions &
             SessionActionsWithCreate,
           modelId,
           modeId,
-          workspaceCwd: selectedWorkspaceCwdRef.current,
+          workspaceCwd: selectedWorkspaceCwdRef.current ?? primaryWorkspaceCwd,
         });
         // One-shot: the picker targets only the *next* new session, so clear
         // it after creation. The next new chat defaults back to the primary
@@ -2329,7 +2345,7 @@ export function App({
       });
     }
     return createSessionPromiseRef.current;
-  }, [sessionActions]);
+  }, [sessionActions, workspace.capabilities?.workspaces]);
   const onSubmitBeforeRef = useRef(onSubmitBefore);
   onSubmitBeforeRef.current = onSubmitBefore;
   const [sessionListReloadToken, setSessionListReloadToken] = useState(0);
@@ -3089,12 +3105,34 @@ export function App({
       // Keep the dead-session route visible until the user explicitly starts a
       // new chat; clearing it here would immediately hide the recovery state.
       lastNotifiedSessionIdRef.current = connection.sessionId;
+      lastNotifiedWorkspaceIdRef.current = undefined;
       return;
     }
-    if (lastNotifiedSessionIdRef.current === connection.sessionId) return;
+    const activeWorkspace = workspace.capabilities?.workspaces?.find(
+      (entry) => entry.cwd === connection.workspaceCwd,
+    );
+    if (connection.sessionId && !workspace.capabilities) return;
+    const workspaceId =
+      activeWorkspace && !activeWorkspace.primary
+        ? activeWorkspace.id
+        : undefined;
+    if (
+      lastNotifiedSessionIdRef.current === connection.sessionId &&
+      lastNotifiedWorkspaceIdRef.current === workspaceId
+    ) {
+      return;
+    }
     lastNotifiedSessionIdRef.current = connection.sessionId;
-    onSessionIdChange?.(connection.sessionId);
-  }, [connection.missingSession, connection.sessionId, onSessionIdChange]);
+    lastNotifiedWorkspaceIdRef.current = workspaceId;
+    onSessionIdChange?.(connection.sessionId, workspaceId);
+  }, [
+    connection.missingSession,
+    connection.sessionId,
+    connection.workspaceCwd,
+    onSessionIdChange,
+    workspace.capabilities,
+    workspace.capabilities?.workspaces,
+  ]);
 
   const lastRenameSessionRef = useRef<string | undefined>(undefined);
   const lastRenameNameRef = useRef<string | undefined>(undefined);
@@ -3281,23 +3319,28 @@ export function App({
     branchCurrentSession();
   }, [branchCurrentSession]);
 
-  const createNewSession = useCallback(async () => {
-    // Close the drawer before awaiting so a failed createSession() doesn't leave
-    // it stuck open with the page scroll still locked, matching loadSidebarSession.
-    closeMobileDrawer();
-    // Starting a new chat means the user wants to see it — leave any open
-    // Settings/Status panel so the fresh chat is visible (no-op when closed).
-    closePanel();
-    try {
-      await (
-        sessionActions as typeof sessionActions & SessionActionsWithCreate
-      ).clearSession();
-      return true;
-    } catch (error) {
-      reportError(error, 'Failed to start a new chat');
-      return false;
-    }
-  }, [closeMobileDrawer, closePanel, reportError, sessionActions]);
+  const createNewSession = useCallback(
+    async (workspaceCwd?: string) => {
+      selectedWorkspaceCwdRef.current = workspaceCwd;
+      setSelectedWorkspaceCwd(workspaceCwd);
+      // Close the drawer before awaiting so a failed createSession() doesn't leave
+      // it stuck open with the page scroll still locked, matching loadSidebarSession.
+      closeMobileDrawer();
+      // Starting a new chat means the user wants to see it — leave any open
+      // Settings/Status panel so the fresh chat is visible (no-op when closed).
+      closePanel();
+      try {
+        await (
+          sessionActions as typeof sessionActions & SessionActionsWithCreate
+        ).clearSession();
+        return true;
+      } catch (error) {
+        reportError(error, 'Failed to start a new chat');
+        return false;
+      }
+    },
+    [closeMobileDrawer, closePanel, reportError, sessionActions],
+  );
   const handleMissingSessionNewSession = useCallback(async () => {
     if (creatingMissingSessionRef.current) return;
     creatingMissingSessionRef.current = true;
@@ -3315,7 +3358,7 @@ export function App({
   }, [createNewSession, onSessionIdChange]);
 
   const loadSidebarSession = useCallback(
-    async (sessionId: string) => {
+    async (sessionId: string, workspaceCwd?: string) => {
       setSidebarSwitchingSessionId(sessionId);
       // Close the drawer before awaiting the load; the transcript clears
       // immediately and shows its loading skeleton for the selected session.
@@ -3324,7 +3367,7 @@ export function App({
       // Settings/Status panel (no-op when the panel is closed).
       closePanel();
       try {
-        await sessionActions.loadSession(sessionId);
+        await sessionActions.loadSession(sessionId, { workspaceCwd });
       } catch (error) {
         setSidebarSwitchingSessionId((current) =>
           current === sessionId ? null : current,
@@ -5043,6 +5086,7 @@ export function App({
     selectedTheme === WebShellThemeId.Light
       ? styles.themeLight
       : styles.themeDark,
+    selectedTheme === WebShellThemeId.Dark ? 'dark' : undefined,
     externalClassName,
   ]
     .filter(Boolean)
@@ -5086,457 +5130,437 @@ export function App({
     previousEmptyStateRef.current = isChatEmptyState;
   }, [isChatEmptyState]);
 
+  useLayoutEffect(() => {
+    const root = document.createElement('div');
+    root.dataset.webShellPortalRoot = '';
+    root.dataset.webShellShadcn = '';
+    document.body.appendChild(root);
+    setPortalRoot(root);
+    return () => {
+      root.remove();
+      setPortalRoot(null);
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    const root = appRootRef.current;
+    if (!root || !portalRoot) return;
+    let frameId: number | null = null;
+    const syncVariables = () => {
+      frameId = null;
+      const computedStyle = getComputedStyle(root);
+      const nextNames = new Set<string>();
+      portalRoot.dataset.webShellShadcn = '';
+      portalRoot.classList.toggle(
+        'dark',
+        selectedTheme === WebShellThemeId.Dark,
+      );
+      portalRoot.lang = selectedLanguage;
+      for (let index = 0; index < computedStyle.length; index += 1) {
+        const name = computedStyle[index];
+        if (!name.startsWith('--')) continue;
+        nextNames.add(name);
+        portalRoot.style.setProperty(
+          name,
+          computedStyle.getPropertyValue(name),
+        );
+      }
+      for (const name of portalRootVariableNamesRef.current) {
+        if (!nextNames.has(name)) portalRoot.style.removeProperty(name);
+      }
+      portalRootVariableNamesRef.current = nextNames;
+    };
+    const scheduleSync = () => {
+      if (frameId === null) frameId = requestAnimationFrame(syncVariables);
+    };
+    syncVariables();
+    const observer = new MutationObserver(scheduleSync);
+    let element: HTMLElement | null = root;
+    while (element) {
+      observer.observe(element, {
+        attributes: true,
+        attributeFilter: ['class', 'style', 'data-theme', 'lang'],
+      });
+      element = element.parentElement;
+    }
+    window.addEventListener('resize', scheduleSync);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', scheduleSync);
+      if (frameId !== null) cancelAnimationFrame(frameId);
+    };
+  }, [appClassName, appStyle, portalRoot, selectedLanguage, selectedTheme]);
+
   return (
     <ThemeProvider value={selectedTheme}>
       <I18nProvider language={selectedLanguage}>
-        <div className={appClassName} style={appStyle} data-web-shell-root>
-          {!onToast && <ToastHost toasts={toasts} onDismiss={dismissToast} />}
-          {showResumeDialog && (
-            <DialogShell
-              title={t('resume.title')}
-              size="lg"
-              onClose={() => setShowResumeDialog(false)}
-            >
-              <ResumeDialog
-                onSelect={(sessionId) => {
-                  closeMobileDrawer();
-                  closePanel();
-                  sessionActions
-                    .loadSession(sessionId)
-                    .catch((error: unknown) => {
-                      reportError(error, 'Failed to load session');
-                    });
-                }}
+        <WebShellPortalRootContext.Provider value={portalRoot}>
+          <div
+            ref={appRootRef}
+            className={appClassName}
+            style={appStyle}
+            data-web-shell-root
+            data-web-shell-shadcn
+            lang={selectedLanguage}
+          >
+            {!onToast && <ToastHost toasts={toasts} onDismiss={dismissToast} />}
+            {showResumeDialog && (
+              <DialogShell
+                title={t('resume.title')}
+                size="lg"
                 onClose={() => setShowResumeDialog(false)}
-              />
-            </DialogShell>
-          )}
-          {modelDialogMode && (
-            <DialogShell
-              title={t(MODE_TITLE_KEY[modelDialogMode])}
-              size="lg"
-              onClose={() => setModelDialogMode(null)}
-            >
-              <ModelDialog
-                mode={modelDialogMode}
-                models={modelDialogMode === 'voice' ? voiceModels : undefined}
-                currentModelId={
-                  modelDialogMode === 'voice'
-                    ? currentVoiceModel
-                    : modelDialogMode === 'vision'
-                      ? currentVisionModel
-                      : modelDialogMode === 'fast'
-                        ? currentFastModel
-                        : undefined
-                }
-                onSelect={(modelId) => {
-                  if (modelDialogMode) {
-                    modelHandlers[modelDialogMode](modelId);
+              >
+                <ResumeDialog
+                  onSelect={(sessionId) => {
+                    closeMobileDrawer();
+                    closePanel();
+                    sessionActions
+                      .loadSession(sessionId)
+                      .catch((error: unknown) => {
+                        reportError(error, 'Failed to load session');
+                      });
+                  }}
+                  onClose={() => setShowResumeDialog(false)}
+                />
+              </DialogShell>
+            )}
+            {modelDialogMode && (
+              <DialogShell
+                title={t(MODE_TITLE_KEY[modelDialogMode])}
+                size="lg"
+                onClose={() => setModelDialogMode(null)}
+              >
+                <ModelDialog
+                  mode={modelDialogMode}
+                  models={modelDialogMode === 'voice' ? voiceModels : undefined}
+                  currentModelId={
+                    modelDialogMode === 'voice'
+                      ? currentVoiceModel
+                      : modelDialogMode === 'vision'
+                        ? currentVisionModel
+                        : modelDialogMode === 'fast'
+                          ? currentFastModel
+                          : undefined
                   }
-                  setModelDialogMode(null);
-                }}
-              />
-            </DialogShell>
-          )}
-          {showApprovalModeDialog && (
-            <DialogShell
-              title={t('mode.select')}
-              size="sm"
-              onClose={() => setShowApprovalModeDialog(false)}
-            >
-              <ApprovalModeDialog
-                currentMode={currentMode}
-                onSelect={(modeId) => {
-                  handleSetMode(modeId);
-                  setShowApprovalModeDialog(false);
-                }}
-              />
-            </DialogShell>
-          )}
-          {showToolsDialog && (
-            <DialogShell
-              title={t('tools.title')}
-              size="lg"
-              onClose={() => setShowToolsDialog(false)}
-            >
-              <ToolsDialog />
-            </DialogShell>
-          )}
-          {showExtensionsDialog && (
-            <DialogShell
-              title={t('extensions.manage.title')}
-              size="lg"
-              onClose={() => setShowExtensionsDialog(false)}
-            >
-              <ExtensionsDialog />
-            </DialogShell>
-          )}
-          {mcpDialogMessage && (
-            <DialogShell
-              title={t('mcp.manageServers')}
-              size="lg"
-              onClose={() => setMcpDialogMessage(null)}
-            >
-              <McpDialog
-                message={mcpDialogMessage}
+                  onSelect={(modelId) => {
+                    if (modelDialogMode) {
+                      modelHandlers[modelDialogMode](modelId);
+                    }
+                    setModelDialogMode(null);
+                  }}
+                />
+              </DialogShell>
+            )}
+            {showApprovalModeDialog && (
+              <DialogShell
+                title={t('mode.select')}
+                size="sm"
+                onClose={() => setShowApprovalModeDialog(false)}
+              >
+                <ApprovalModeDialog
+                  currentMode={currentMode}
+                  onSelect={(modeId) => {
+                    handleSetMode(modeId);
+                    setShowApprovalModeDialog(false);
+                  }}
+                />
+              </DialogShell>
+            )}
+            {showToolsDialog && (
+              <DialogShell
+                title={t('tools.title')}
+                size="lg"
+                onClose={() => setShowToolsDialog(false)}
+              >
+                <ToolsDialog />
+              </DialogShell>
+            )}
+            {showExtensionsDialog && (
+              <DialogShell
+                title={t('extensions.manage.title')}
+                size="lg"
+                onClose={() => setShowExtensionsDialog(false)}
+              >
+                <ExtensionsDialog />
+              </DialogShell>
+            )}
+            {mcpDialogMessage && (
+              <DialogShell
+                title={t('mcp.manageServers')}
+                size="lg"
                 onClose={() => setMcpDialogMessage(null)}
-              />
-            </DialogShell>
-          )}
-          {tasksDialogMessage && (
-            <DialogShell
-              title={t('tasks.title')}
-              size="lg"
-              onClose={() => setTasksDialogMessage(null)}
-            >
-              <TasksStatusMessage
-                message={tasksDialogMessage}
-                embedded
-                manageActiveEvent={false}
+              >
+                <McpDialog
+                  message={mcpDialogMessage}
+                  onClose={() => setMcpDialogMessage(null)}
+                />
+              </DialogShell>
+            )}
+            {tasksDialogMessage && (
+              <DialogShell
+                title={t('tasks.title')}
+                size="lg"
                 onClose={() => setTasksDialogMessage(null)}
-              />
-            </DialogShell>
-          )}
-          {agentsDialogMode && (
-            <DialogShell
-              title={
-                agentsDialogMode === 'manage'
-                  ? t('agent.manage')
-                  : agentsDialogMode === 'menu'
-                    ? t('agents.title')
-                    : t('agent.create')
-              }
-              size="lg"
-              onClose={() => setAgentsDialogMode(null)}
-            >
-              <AgentsMessage
-                mode={agentsDialogMode}
-                embedded
-                onMessage={(text) => store.dispatch([{ type: 'status', text }])}
+              >
+                <TasksStatusMessage
+                  message={tasksDialogMessage}
+                  embedded
+                  manageActiveEvent={false}
+                  onClose={() => setTasksDialogMessage(null)}
+                />
+              </DialogShell>
+            )}
+            {agentsDialogMode && (
+              <DialogShell
+                title={
+                  agentsDialogMode === 'manage'
+                    ? t('agent.manage')
+                    : agentsDialogMode === 'menu'
+                      ? t('agents.title')
+                      : t('agent.create')
+                }
+                size="lg"
                 onClose={() => setAgentsDialogMode(null)}
-              />
-            </DialogShell>
-          )}
-          {showMemoryDialog && (
-            <DialogShell
-              title={t('memory.menu')}
-              size="lg"
-              onClose={() => setShowMemoryDialog(false)}
-            >
-              <MemoryMessage
-                refreshSignal={memoryRefreshSignal}
-                addSignal={memoryAddSignal}
-                addScope={memoryAddScope}
-                onMessage={(text, type = 'status') => {
-                  store.dispatch([{ type, text }]);
-                }}
-              />
-            </DialogShell>
-          )}
-          {showHelpDialog && (
-            <DialogShell
-              title={t('help.title')}
-              size="md"
-              onClose={() => setShowHelpDialog(false)}
-            >
-              <HelpDialog commands={commands} />
-            </DialogShell>
-          )}
-          {showThemeDialog && (
-            <DialogShell
-              title={t('theme.title')}
-              size="sm"
-              onClose={() => setShowThemeDialog(false)}
-            >
-              <ThemeDialog
-                currentTheme={selectedTheme}
-                onSelect={handleThemeChange}
+              >
+                <AgentsMessage
+                  mode={agentsDialogMode}
+                  embedded
+                  onMessage={(text) =>
+                    store.dispatch([{ type: 'status', text }])
+                  }
+                  onClose={() => setAgentsDialogMode(null)}
+                />
+              </DialogShell>
+            )}
+            {showMemoryDialog && (
+              <DialogShell
+                title={t('memory.menu')}
+                size="lg"
+                onClose={() => setShowMemoryDialog(false)}
+              >
+                <MemoryMessage
+                  refreshSignal={memoryRefreshSignal}
+                  addSignal={memoryAddSignal}
+                  addScope={memoryAddScope}
+                  onMessage={(text, type = 'status') => {
+                    store.dispatch([{ type, text }]);
+                  }}
+                />
+              </DialogShell>
+            )}
+            {showHelpDialog && (
+              <DialogShell
+                title={t('help.title')}
+                size="md"
+                onClose={() => setShowHelpDialog(false)}
+              >
+                <HelpDialog commands={commands} />
+              </DialogShell>
+            )}
+            {showThemeDialog && (
+              <DialogShell
+                title={t('theme.title')}
+                size="sm"
                 onClose={() => setShowThemeDialog(false)}
-              />
-            </DialogShell>
-          )}
-          {showAuthDialog && (
-            <DialogShell
-              title={t('auth.title')}
-              size="lg"
-              onClose={() => setShowAuthDialog(false)}
-            >
-              <AuthMessage
-                onMessage={(text, type = 'status') => {
-                  store.dispatch([
-                    type === 'error'
-                      ? { type: 'error', text }
-                      : { type: 'status', text },
-                  ]);
-                }}
+              >
+                <ThemeDialog
+                  currentTheme={selectedTheme}
+                  onSelect={handleThemeChange}
+                  onClose={() => setShowThemeDialog(false)}
+                />
+              </DialogShell>
+            )}
+            {showAuthDialog && (
+              <DialogShell
+                title={t('auth.title')}
+                size="lg"
                 onClose={() => setShowAuthDialog(false)}
-              />
-            </DialogShell>
-          )}
-          {showDeleteDialog && (
-            <DialogShell
-              title={t('delete.title')}
-              size="lg"
-              onClose={() => setShowDeleteDialog(false)}
-            >
-              <DeleteSessionDialog
-                onDeleted={(sessionIds) => {
-                  store.dispatch([
-                    {
-                      type: 'status',
-                      text:
-                        sessionIds.length === 1
-                          ? `${t('delete.deleted')} (${sessionIds[0]!.slice(0, 8)})`
-                          : t('delete.deletedCount', {
-                              count: sessionIds.length,
-                            }),
-                    },
-                  ]);
-                }}
-                onError={(error) => {
-                  if (isAlreadyDispatched(error)) return;
-                  const reason =
-                    error instanceof Error ? error.message : String(error);
-                  pushToast('error', t('delete.failed', { reason }));
-                }}
+              >
+                <AuthMessage
+                  onMessage={(text, type = 'status') => {
+                    store.dispatch([
+                      type === 'error'
+                        ? { type: 'error', text }
+                        : { type: 'status', text },
+                    ]);
+                  }}
+                  onClose={() => setShowAuthDialog(false)}
+                />
+              </DialogShell>
+            )}
+            {showDeleteDialog && (
+              <DialogShell
+                title={t('delete.title')}
+                size="lg"
                 onClose={() => setShowDeleteDialog(false)}
-              />
-            </DialogShell>
-          )}
-          {showReleaseDialog && (
-            <DialogShell
-              title={t('release.title')}
-              size="lg"
-              onClose={() => setShowReleaseDialog(false)}
-            >
-              <ReleaseSessionDialog
-                onReleased={(sessionId) => {
-                  store.dispatch([
-                    {
-                      type: 'status',
-                      text: `${t('release.released')} (${sessionId.slice(0, 8)})`,
-                    },
-                  ]);
-                }}
-                onError={(error) => {
-                  if (isAlreadyDispatched(error)) return;
-                  const reason =
-                    error instanceof Error ? error.message : String(error);
-                  pushToast('error', t('release.failed', { reason }));
-                }}
+              >
+                <DeleteSessionDialog
+                  onDeleted={(sessionIds) => {
+                    store.dispatch([
+                      {
+                        type: 'status',
+                        text:
+                          sessionIds.length === 1
+                            ? `${t('delete.deleted')} (${sessionIds[0]!.slice(0, 8)})`
+                            : t('delete.deletedCount', {
+                                count: sessionIds.length,
+                              }),
+                      },
+                    ]);
+                  }}
+                  onError={(error) => {
+                    if (isAlreadyDispatched(error)) return;
+                    const reason =
+                      error instanceof Error ? error.message : String(error);
+                    pushToast('error', t('delete.failed', { reason }));
+                  }}
+                  onClose={() => setShowDeleteDialog(false)}
+                />
+              </DialogShell>
+            )}
+            {showReleaseDialog && (
+              <DialogShell
+                title={t('release.title')}
+                size="lg"
                 onClose={() => setShowReleaseDialog(false)}
-              />
-            </DialogShell>
-          )}
-          {showRewindDialog && (
-            <DialogShell
-              title={t('rewind.title')}
-              subtitle={t('rewind.subtitle')}
-              size="lg"
-              onClose={() => setShowRewindDialog(false)}
-            >
-              <RewindDialog
-                blocks={blocks}
-                loadSnapshots={loadRewindSnapshots}
-                rewind={rewindConversationOnly}
-                onError={handleRewindError}
+              >
+                <ReleaseSessionDialog
+                  onReleased={(sessionId) => {
+                    store.dispatch([
+                      {
+                        type: 'status',
+                        text: `${t('release.released')} (${sessionId.slice(0, 8)})`,
+                      },
+                    ]);
+                  }}
+                  onError={(error) => {
+                    if (isAlreadyDispatched(error)) return;
+                    const reason =
+                      error instanceof Error ? error.message : String(error);
+                    pushToast('error', t('release.failed', { reason }));
+                  }}
+                  onClose={() => setShowReleaseDialog(false)}
+                />
+              </DialogShell>
+            )}
+            {showRewindDialog && (
+              <DialogShell
+                title={t('rewind.title')}
+                subtitle={t('rewind.subtitle')}
+                size="lg"
                 onClose={() => setShowRewindDialog(false)}
-              />
-            </DialogShell>
-          )}
+              >
+                <RewindDialog
+                  blocks={blocks}
+                  loadSnapshots={loadRewindSnapshots}
+                  rewind={rewindConversationOnly}
+                  onError={handleRewindError}
+                  onClose={() => setShowRewindDialog(false)}
+                />
+              </DialogShell>
+            )}
 
-          <div className={styles.appShell}>
-            {sidebarOptions.enabled && (
+            <div className={styles.appShell}>
+              {sidebarOptions.enabled && (
+                <div
+                  data-sidebar-shell=""
+                  {...(mobileDrawerOpen
+                    ? { role: 'dialog', 'aria-modal': 'true' as const }
+                    : {})}
+                  aria-label={t('sidebar.label')}
+                  className={[
+                    styles.mobileDrawer,
+                    mobileDrawerOpen ? styles.mobileDrawerOpen : undefined,
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                >
+                  <div
+                    className={styles.mobileBackdrop}
+                    onClick={closeMobileDrawer}
+                    aria-hidden="true"
+                  />
+                  <WebShellSidebar
+                    collapsed={sidebarCollapsed && !mobileDrawerOpen}
+                    onCollapsedChange={handleSidebarCollapsedChange}
+                    onOpenSettings={() => {
+                      closeMobileDrawer();
+                      openPanel('settings');
+                    }}
+                    theme={selectedTheme}
+                    onThemeChange={(theme) => {
+                      handleThemeChange(theme);
+                      void setWorkspaceSetting(
+                        'workspace',
+                        THEME_SETTING_KEY,
+                        webShellThemeToSettingValue(theme),
+                      );
+                    }}
+                    onOpenDaemonStatus={() => {
+                      closeMobileDrawer();
+                      openPanel('status');
+                    }}
+                    onOpenScheduledTasks={() => {
+                      closeMobileDrawer();
+                      openScheduledTasks();
+                    }}
+                    onOpenSessions={() => {
+                      closeMobileDrawer();
+                      openPanel('sessions');
+                    }}
+                    canOpenSessionsOverview={isLargeScreen}
+                    onOpenSplitView={() => {
+                      closeMobileDrawer();
+                      openSplitView();
+                    }}
+                    canOpenSplitView={isLargeScreen}
+                    onNewSession={(workspaceCwd) => {
+                      setMainView('chat');
+                      return createNewSession(workspaceCwd);
+                    }}
+                    onLoadSession={(sessionId, workspaceCwd) => {
+                      setMainView('chat');
+                      return loadSidebarSession(sessionId, workspaceCwd);
+                    }}
+                    onError={reportError}
+                    mobileOpen={mobileDrawerOpen}
+                    sessionListReloadToken={sessionListReloadToken}
+                    selectedWorkspaceCwd={selectedWorkspaceCwd}
+                    onSelectWorkspace={setSelectedWorkspaceCwd}
+                  />
+                </div>
+              )}
               <div
-                data-sidebar-shell=""
-                {...(mobileDrawerOpen
-                  ? { role: 'dialog', 'aria-modal': 'true' as const }
-                  : {})}
-                aria-label={t('sidebar.label')}
+                ref={chatPaneRef}
                 className={[
-                  styles.mobileDrawer,
-                  mobileDrawerOpen ? styles.mobileDrawerOpen : undefined,
+                  styles.chatPane,
+                  mainView !== 'chat' ? styles.chatPaneShowingPage : undefined,
+                  hasMobileComposerBottom
+                    ? styles.chatPaneWithMobileComposerBottom
+                    : undefined,
                 ]
                   .filter(Boolean)
                   .join(' ')}
               >
-                <div
-                  className={styles.mobileBackdrop}
-                  onClick={closeMobileDrawer}
-                  aria-hidden="true"
-                />
-                <WebShellSidebar
-                  collapsed={sidebarCollapsed && !mobileDrawerOpen}
-                  onCollapsedChange={handleSidebarCollapsedChange}
-                  onOpenSettings={() => {
-                    closeMobileDrawer();
-                    openPanel('settings');
-                  }}
-                  onOpenDaemonStatus={() => {
-                    closeMobileDrawer();
-                    openPanel('status');
-                  }}
-                  onOpenScheduledTasks={() => {
-                    closeMobileDrawer();
-                    openScheduledTasks();
-                  }}
-                  onOpenSessions={() => {
-                    closeMobileDrawer();
-                    openPanel('sessions');
-                  }}
-                  canOpenSessionsOverview={isLargeScreen}
-                  onOpenSplitView={() => {
-                    closeMobileDrawer();
-                    openSplitView();
-                  }}
-                  canOpenSplitView={isLargeScreen}
-                  onNewSession={() => {
-                    setMainView('chat');
-                    return createNewSession();
-                  }}
-                  onLoadSession={(sessionId) => {
-                    setMainView('chat');
-                    return loadSidebarSession(sessionId);
-                  }}
-                  onError={reportError}
-                  mobileOpen={mobileDrawerOpen}
-                  sessionListReloadToken={sessionListReloadToken}
-                  selectedWorkspaceCwd={selectedWorkspaceCwd}
-                  onSelectWorkspace={setSelectedWorkspaceCwd}
-                />
-              </div>
-            )}
-            <div
-              ref={chatPaneRef}
-              className={[
-                styles.chatPane,
-                mainView !== 'chat' ? styles.chatPaneShowingPage : undefined,
-                hasMobileComposerBottom
-                  ? styles.chatPaneWithMobileComposerBottom
-                  : undefined,
-              ]
-                .filter(Boolean)
-                .join(' ')}
-            >
-              {sidebarOptions.enabled &&
-                !activePanel &&
-                mainView === 'chat' && (
-                  <button
-                    type="button"
-                    className={[
-                      styles.hamburgerButton,
-                      isChatEmptyState
-                        ? styles.hamburgerButtonFloating
-                        : undefined,
-                    ]
-                      .filter(Boolean)
-                      .join(' ')}
-                    onClick={() => setMobileDrawerOpen((open) => !open)}
-                    aria-label={t('sidebar.toggleMenu')}
-                    aria-expanded={mobileDrawerOpen}
-                  >
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      aria-hidden="true"
-                    >
-                      <line x1="3" y1="6" x2="21" y2="6" />
-                      <line x1="3" y1="12" x2="21" y2="12" />
-                      <line x1="3" y1="18" x2="21" y2="18" />
-                    </svg>
-                  </button>
-                )}
-              {activePanel && (
-                <section
-                  className={styles.panelHost}
-                  role="region"
-                  data-testid="inline-panel"
-                  aria-label={
-                    activePanel === 'settings'
-                      ? t('settings.title')
-                      : activePanel === 'status'
-                        ? t('daemon.title')
-                        : t('sessionsOverview.title')
-                  }
-                >
-                  <div className={styles.panelHeader}>
-                    <button
-                      ref={panelBackRef}
-                      type="button"
-                      className={styles.panelBack}
-                      data-testid="panel-back"
-                      onClick={closePanel}
-                      aria-label={t('common.back')}
-                      title={t('common.back')}
-                    >
-                      <svg viewBox="0 0 24 24" aria-hidden="true">
-                        <path
-                          d="M15 5l-7 7 7 7"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
-                      </svg>
-                    </button>
-                    <div className={styles.panelTitle}>
-                      {activePanel === 'settings'
-                        ? t('settings.title')
-                        : activePanel === 'status'
-                          ? t('daemon.title')
-                          : t('sessionsOverview.title')}
-                    </div>
-                  </div>
-                  <div className={styles.panelBody} key={activePanel}>
-                    {activePanel === 'settings' ? (
-                      <SettingsMessage
-                        settingsState={workspaceSettingsState}
-                        embedded
-                        onLanguageChange={handleSettingsLanguageChange}
-                        onThemeChange={handleThemeChange}
-                        chatWidthMode={chatWidthMode}
-                        onChatWidthModeChange={handleChatWidthModeChange}
-                        onSubDialog={(key) => {
-                          if (key === 'fastModel') setModelDialogMode('fast');
-                          else if (key === 'visionModel')
-                            setModelDialogMode('vision');
-                          else if (key === 'tools.approvalMode')
-                            setShowApprovalModeDialog(true);
-                        }}
-                      />
-                    ) : activePanel === 'status' ? (
-                      <DaemonStatusDialog />
-                    ) : (
-                      <SessionOverviewPanel
-                        onOpenSession={handleOpenSessionFromOverview}
-                        onOpenSplit={openSplitView}
-                      />
-                    )}
-                  </div>
-                </section>
-              )}
-              {mainView === 'scheduledTasks' && (
-                <div
-                  className={styles.fullPage}
-                  data-testid="scheduled-tasks-page"
-                >
-                  <div className={styles.fullPageHeader}>
+                {sidebarOptions.enabled &&
+                  !activePanel &&
+                  mainView === 'chat' && (
                     <button
                       type="button"
-                      className={styles.fullPageBack}
-                      onClick={() => setMainView('chat')}
-                      aria-label={t('common.back')}
-                      title={t('common.back')}
+                      className={[
+                        styles.hamburgerButton,
+                        isChatEmptyState
+                          ? styles.hamburgerButtonFloating
+                          : undefined,
+                      ]
+                        .filter(Boolean)
+                        .join(' ')}
+                      onClick={() => setMobileDrawerOpen((open) => !open)}
+                      aria-label={t('sidebar.toggleMenu')}
+                      aria-expanded={mobileDrawerOpen}
                     >
                       <svg
                         viewBox="0 0 24 24"
-                        width="18"
-                        height="18"
                         fill="none"
                         stroke="currentColor"
                         strokeWidth="2"
@@ -5544,424 +5568,602 @@ export function App({
                         strokeLinejoin="round"
                         aria-hidden="true"
                       >
-                        <path d="M15 18l-6-6 6-6" />
+                        <line x1="3" y1="6" x2="21" y2="6" />
+                        <line x1="3" y1="12" x2="21" y2="12" />
+                        <line x1="3" y1="18" x2="21" y2="18" />
                       </svg>
                     </button>
-                    <div className={styles.fullPageTitle}>
-                      {t('scheduledTasks.title')}
+                  )}
+                {activePanel && (
+                  <section
+                    className={styles.panelHost}
+                    role="region"
+                    data-testid="inline-panel"
+                    aria-label={
+                      activePanel === 'settings'
+                        ? t('settings.title')
+                        : activePanel === 'status'
+                          ? t('daemon.title')
+                          : t('sessionsOverview.title')
+                    }
+                  >
+                    <div className={styles.panelHeader}>
+                      <button
+                        ref={panelBackRef}
+                        type="button"
+                        className={styles.panelBack}
+                        data-testid="panel-back"
+                        onClick={closePanel}
+                        aria-label={t('common.back')}
+                        title={t('common.back')}
+                      >
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                          <path
+                            d="M15 5l-7 7 7 7"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
+                      </button>
+                      <div className={styles.panelTitle}>
+                        {activePanel === 'settings'
+                          ? t('settings.title')
+                          : activePanel === 'status'
+                            ? t('daemon.title')
+                            : t('sessionsOverview.title')}
+                      </div>
+                    </div>
+                    <div className={styles.panelBody} key={activePanel}>
+                      {activePanel === 'settings' ? (
+                        <SettingsMessage
+                          settingsState={workspaceSettingsState}
+                          embedded
+                          onLanguageChange={handleSettingsLanguageChange}
+                          onThemeChange={handleThemeChange}
+                          chatWidthMode={chatWidthMode}
+                          onChatWidthModeChange={handleChatWidthModeChange}
+                          onSubDialog={(key) => {
+                            if (key === 'fastModel') setModelDialogMode('fast');
+                            else if (key === 'visionModel')
+                              setModelDialogMode('vision');
+                            else if (key === 'tools.approvalMode')
+                              setShowApprovalModeDialog(true);
+                          }}
+                        />
+                      ) : activePanel === 'status' ? (
+                        <DaemonStatusDialog />
+                      ) : (
+                        <SessionOverviewPanel
+                          onOpenSession={handleOpenSessionFromOverview}
+                          onOpenSplit={openSplitView}
+                        />
+                      )}
+                    </div>
+                  </section>
+                )}
+                {mainView === 'scheduledTasks' && (
+                  <div
+                    className={styles.fullPage}
+                    data-testid="scheduled-tasks-page"
+                  >
+                    <div className={styles.fullPageHeader}>
+                      <button
+                        type="button"
+                        className={styles.fullPageBack}
+                        onClick={() => setMainView('chat')}
+                        aria-label={t('common.back')}
+                        title={t('common.back')}
+                      >
+                        <svg
+                          viewBox="0 0 24 24"
+                          width="18"
+                          height="18"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          aria-hidden="true"
+                        >
+                          <path d="M15 18l-6-6 6-6" />
+                        </svg>
+                      </button>
+                      <div className={styles.fullPageTitle}>
+                        {t('scheduledTasks.title')}
+                      </div>
+                    </div>
+                    <div className={styles.fullPageBody}>
+                      <ScheduledTasksDialog
+                        onRunPrompt={runTaskManually}
+                        onCreateViaChat={() => {
+                          // Start a FRESH session and jump to it so the task-
+                          // creation chat doesn't pile onto the current
+                          // conversation, then prime the composer so the user can
+                          // describe the task in natural language; the agent
+                          // creates it via its cron_create tool. Focus is deferred
+                          // so the new session's composer is mounted/visible first.
+                          setMainView('chat');
+                          void createNewSession().then((created) => {
+                            // If the new session couldn't be started,
+                            // createNewSession already surfaced the error — do NOT
+                            // prime the (still-current) session with the task
+                            // starter, which would land in the wrong conversation.
+                            if (!created) return;
+                            onSessionIdChange?.(undefined);
+                            window.setTimeout(() => {
+                              editorRef.current?.insertText(
+                                t('scheduledTasks.chatStarter'),
+                                { mode: 'replace' },
+                              );
+                              editorRef.current?.focus();
+                            }, 0);
+                          });
+                        }}
+                        onOpenSession={(sessionId) => {
+                          // The task's bound session IS its run history — switch
+                          // to the chat view and load that session's transcript.
+                          setMainView('chat');
+                          loadSidebarSession(sessionId).catch(
+                            (error: unknown) => {
+                              reportError(error, 'Failed to open session');
+                            },
+                          );
+                        }}
+                        onError={reportError}
+                      />
                     </div>
                   </div>
-                  <div className={styles.fullPageBody}>
-                    <ScheduledTasksDialog
-                      onRunPrompt={runTaskManually}
-                      onCreateViaChat={() => {
-                        // Start a FRESH session and jump to it so the task-
-                        // creation chat doesn't pile onto the current
-                        // conversation, then prime the composer so the user can
-                        // describe the task in natural language; the agent
-                        // creates it via its cron_create tool. Focus is deferred
-                        // so the new session's composer is mounted/visible first.
-                        setMainView('chat');
-                        void createNewSession().then((created) => {
-                          // If the new session couldn't be started,
-                          // createNewSession already surfaced the error — do NOT
-                          // prime the (still-current) session with the task
-                          // starter, which would land in the wrong conversation.
-                          if (!created) return;
-                          onSessionIdChange?.(undefined);
-                          window.setTimeout(() => {
-                            editorRef.current?.insertText(
-                              t('scheduledTasks.chatStarter'),
-                              { mode: 'replace' },
-                            );
-                            editorRef.current?.focus();
-                          }, 0);
-                        });
-                      }}
-                      onOpenSession={(sessionId) => {
-                        // The task's bound session IS its run history — switch
-                        // to the chat view and load that session's transcript.
-                        setMainView('chat');
-                        loadSidebarSession(sessionId).catch(
-                          (error: unknown) => {
-                            reportError(error, 'Failed to open session');
-                          },
-                        );
-                      }}
-                      onError={reportError}
-                    />
-                  </div>
-                </div>
-              )}
-              {mainView === 'split' && (
-                <div className={styles.fullPage} data-testid="split-view-page">
-                  {/* The outer session's approval overlay is suppressed under the
+                )}
+                {mainView === 'split' && (
+                  <div
+                    className={styles.fullPage}
+                    data-testid="split-view-page"
+                  >
+                    {/* The outer session's approval overlay is suppressed under the
                       split (it would own ghost keyboard shortcuts). If that
                       session isn't one of the panes, the approval would be
                       invisible — surface a notice with a way back to it. */}
-                  {approvalOverlayActive && (
-                    <div
-                      className={styles.splitApprovalNotice}
-                      role="status"
-                      data-testid="split-approval-notice"
-                    >
-                      <span>{t('splitView.outerApprovalPending')}</span>
-                      <button type="button" onClick={() => setMainView('chat')}>
-                        {t('splitView.goToApproval')}
-                      </button>
-                    </div>
-                  )}
-                  {/* Share the app-level customization + compact-mode contexts so
+                    {approvalOverlayActive && (
+                      <div
+                        className={styles.splitApprovalNotice}
+                        role="status"
+                        data-testid="split-approval-notice"
+                      >
+                        <span>{t('splitView.outerApprovalPending')}</span>
+                        <button
+                          type="button"
+                          onClick={() => setMainView('chat')}
+                        >
+                          {t('splitView.goToApproval')}
+                        </button>
+                      </div>
+                    )}
+                    {/* Share the app-level customization + compact-mode contexts so
                       split panes render markdown/tool-headers/thinking the same
                       way the single-session chat does (todo contexts stay chat-
                       only — they belong to the outer session, not the panes). */}
-                  <WebShellCustomizationProvider value={customization}>
-                    <CompactModeContext.Provider value={compactMode}>
-                      <SplitView
-                        sessionIds={splitSessionIds}
-                        // Mirror live pane add/remove back up so switching away
-                        // and re-entering restores the same panes. Keep this
-                        // callback stable to avoid looping SplitView's reporting
-                        // effect.
-                        onPanesChange={handleSplitPanesChange}
-                        // Refresh the "add pane" picker when the session list
-                        // changes elsewhere, matching the sidebar.
-                        sessionListReloadToken={sessionListReloadToken}
-                        // Back returns to the Session Overview (the hub the split
-                        // is launched from), not the single-session chat.
-                        onExit={handleSplitExit}
-                        onError={reportError}
-                        onRightPanelOpen={handleTurnOutputOpen}
-                        onPaneArtifactsChange={handlePaneArtifactsChange}
-                        messageTurnOutputs={messageTurnOutputs}
-                      />
-                    </CompactModeContext.Provider>
-                  </WebShellCustomizationProvider>
-                </div>
-              )}
-              <div
-                className={[
-                  styles.chatViewWrap,
-                  hasMobileComposerBottom
-                    ? styles.chatViewWithMobileComposerBottom
-                    : undefined,
-                  hasWelcomeMiddle
-                    ? styles.chatViewWithWelcomeMiddle
-                    : undefined,
-                  activePanel || mainView !== 'chat'
-                    ? styles.chatViewHidden
-                    : undefined,
-                ]
-                  .filter(Boolean)
-                  .join(' ')}
-                // Hide the outer chat whenever a panel or a full-page view (split
-                // / scheduled tasks) is up. `display:none` drops the subtree from
-                // layout and the tab order, and aria-hidden keeps AT out — so no
-                // keyboard/AT can reach the outer composer/toolbar behind the
-                // split. State is preserved (the node stays mounted).
-                aria-hidden={
-                  activePanel || mainView !== 'chat' ? true : undefined
-                }
-              >
-                {showMissingSessionState && (
-                  <div className={styles.missingSessionState}>
-                    <div className={styles.missingSessionMessage}>
-                      {t('session.missing')}
-                    </div>
-                    <button
-                      type="button"
-                      className={styles.missingSessionButton}
-                      disabled={isCreatingMissingSession}
-                      onClick={handleMissingSessionNewSession}
-                    >
-                      {t('session.new')}
-                    </button>
+                    <WebShellCustomizationProvider value={customization}>
+                      <CompactModeContext.Provider value={compactMode}>
+                        <SplitView
+                          sessionIds={splitSessionIds}
+                          // Mirror live pane add/remove back up so switching away
+                          // and re-entering restores the same panes. Keep this
+                          // callback stable to avoid looping SplitView's reporting
+                          // effect.
+                          onPanesChange={handleSplitPanesChange}
+                          // Refresh the "add pane" picker when the session list
+                          // changes elsewhere, matching the sidebar.
+                          sessionListReloadToken={sessionListReloadToken}
+                          // Back returns to the Session Overview (the hub the split
+                          // is launched from), not the single-session chat.
+                          onExit={handleSplitExit}
+                          onError={reportError}
+                          onRightPanelOpen={handleTurnOutputOpen}
+                          onPaneArtifactsChange={handlePaneArtifactsChange}
+                          messageTurnOutputs={messageTurnOutputs}
+                        />
+                      </CompactModeContext.Provider>
+                    </WebShellCustomizationProvider>
                   </div>
                 )}
                 <div
-                  className={
-                    showMissingSessionState
-                      ? styles.chatSubtreeHidden
-                      : styles.chatSubtree
+                  className={[
+                    styles.chatViewWrap,
+                    hasMobileComposerBottom
+                      ? styles.chatViewWithMobileComposerBottom
+                      : undefined,
+                    hasWelcomeMiddle
+                      ? styles.chatViewWithWelcomeMiddle
+                      : undefined,
+                    activePanel || mainView !== 'chat'
+                      ? styles.chatViewHidden
+                      : undefined,
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                  // Hide the outer chat whenever a panel or a full-page view (split
+                  // / scheduled tasks) is up. `display:none` drops the subtree from
+                  // layout and the tab order, and aria-hidden keeps AT out — so no
+                  // keyboard/AT can reach the outer composer/toolbar behind the
+                  // split. State is preserved (the node stays mounted).
+                  aria-hidden={
+                    activePanel || mainView !== 'chat' ? true : undefined
                   }
                 >
-                  <WebShellCustomizationProvider value={customization}>
-                    <CompactModeContext.Provider value={compactMode}>
-                      <TodoContextsProvider
-                        timeline={todoTimeline}
-                        details={todoDetails}
+                  {showMissingSessionState && (
+                    <div className={styles.missingSessionState}>
+                      <div className={styles.missingSessionMessage}>
+                        {t('session.missing')}
+                      </div>
+                      <button
+                        type="button"
+                        className={styles.missingSessionButton}
+                        disabled={isCreatingMissingSession}
+                        onClick={handleMissingSessionNewSession}
                       >
-                        <InteractionBlockContext.Provider
-                          value={registerInteractionBlocker}
+                        {t('session.new')}
+                      </button>
+                    </div>
+                  )}
+                  <div
+                    className={
+                      showMissingSessionState
+                        ? styles.chatSubtreeHidden
+                        : styles.chatSubtree
+                    }
+                  >
+                    <WebShellCustomizationProvider value={customization}>
+                      <CompactModeContext.Provider value={compactMode}>
+                        <TodoContextsProvider
+                          timeline={todoTimeline}
+                          details={todoDetails}
                         >
-                          {(() => {
-                            const contentClassName = [
-                              styles.content,
-                              showFloatingTodos ||
-                              displayMessages.length > 0 ||
-                              pendingApproval
-                                ? styles.contentHasMessages
-                                : undefined,
-                            ]
-                              .filter(Boolean)
-                              .join(' ');
+                          <InteractionBlockContext.Provider
+                            value={registerInteractionBlocker}
+                          >
+                            {(() => {
+                              const contentClassName = [
+                                styles.content,
+                                showFloatingTodos ||
+                                displayMessages.length > 0 ||
+                                pendingApproval
+                                  ? styles.contentHasMessages
+                                  : undefined,
+                              ]
+                                .filter(Boolean)
+                                .join(' ');
 
-                            const messageList = (
-                            <MessageList
-                              ref={messageListRef}
-                              messages={displayMessages}
-                              pendingApproval={pendingToolApproval}
-                              onShowContextDetail={handleShowContextDetail}
-                              loadingTranscript={connection.loadingTranscript}
-                              catchingUp={connection.catchingUp}
-                              isResponding={streamingState !== 'idle'}
-                              activeTurnStartedAt={activeTurnStartedAt}
-                              workspaceCwd={connection.workspaceCwd || ''}
-                              hideSessionTimeline={
-                                effectiveChatWidthMode === 'wide'
-                              }
-                              showRetryHint={showRetryHint}
-                              onRetryClick={handleRetry}
-                              onBranchSession={handleBranchCurrentSession}
-                              bottomOverlayInset={bottomPanelInset}
-                              welcomeHeader={
-                                isChatEmptyState ? welcomeHeader : undefined
-                              }
-                              centerWelcomeHeader={
-                                showMobileWelcomeFooterMiddle || undefined
-                              }
-                              tailContent={undefined}
-                              tailKey={undefined}
-                              onCanScrollToBottomChange={
-                                handleCanScrollToBottomChange
-                              }
-                              virtualScrollThreshold={virtualScrollThreshold}
-                              turnFileChanges={
-                                visibleTurnOutputKinds.has('file')
-                                  ? fileChangesByTurn
-                                  : undefined
-                              }
-                              turnArtifacts={
-                                visibleTurnOutputKinds.has('artifact')
-                                  ? artifactsByTurn
-                                  : undefined
-                              }
-                              turnScheduledTasks={
-                                visibleTurnOutputKinds.has('scheduled_task')
-                                  ? scheduledTasksByTurn
-                                  : undefined
-                              }
-                              onTurnOutputOpen={handleTurnOutputOpen}
-                              onReviewChanges={openReviewPanel}
-                              onOpenArtifact={openArtifactPanel}
-                              onOpenScheduledTask={openScheduledTaskPanel}
-                            />
-                            );
-
-                            const btwPanel =
-                              !showMobileWelcomeFooterMiddle &&
-                              btwMessage?.role === 'btw' ? (
-                              <div className={styles.btwPanel}>
-                                <BtwMessage
-                                  question={btwMessage.question}
-                                  answer={btwMessage.answer}
-                                  isPending={btwMessage.isPending}
+                              const messageList = (
+                                <MessageList
+                                  ref={messageListRef}
+                                  messages={displayMessages}
+                                  pendingApproval={pendingToolApproval}
+                                  onShowContextDetail={handleShowContextDetail}
+                                  loadingTranscript={
+                                    connection.loadingTranscript
+                                  }
+                                  catchingUp={connection.catchingUp}
+                                  isResponding={streamingState !== 'idle'}
+                                  activeTurnStartedAt={activeTurnStartedAt}
+                                  workspaceCwd={connection.workspaceCwd || ''}
+                                  hideSessionTimeline={
+                                    effectiveChatWidthMode === 'wide'
+                                  }
+                                  showRetryHint={showRetryHint}
+                                  onRetryClick={handleRetry}
+                                  onBranchSession={handleBranchCurrentSession}
+                                  bottomOverlayInset={bottomPanelInset}
+                                  welcomeHeader={
+                                    isChatEmptyState ? welcomeHeader : undefined
+                                  }
+                                  centerWelcomeHeader={
+                                    showMobileWelcomeFooterMiddle || undefined
+                                  }
+                                  tailContent={undefined}
+                                  tailKey={undefined}
+                                  onCanScrollToBottomChange={
+                                    handleCanScrollToBottomChange
+                                  }
+                                  virtualScrollThreshold={
+                                    virtualScrollThreshold
+                                  }
+                                  turnFileChanges={
+                                    visibleTurnOutputKinds.has('file')
+                                      ? fileChangesByTurn
+                                      : undefined
+                                  }
+                                  turnArtifacts={
+                                    visibleTurnOutputKinds.has('artifact')
+                                      ? artifactsByTurn
+                                      : undefined
+                                  }
+                                  turnScheduledTasks={
+                                    visibleTurnOutputKinds.has('scheduled_task')
+                                      ? scheduledTasksByTurn
+                                      : undefined
+                                  }
+                                  onTurnOutputOpen={handleTurnOutputOpen}
+                                  onReviewChanges={openReviewPanel}
+                                  onOpenArtifact={openArtifactPanel}
+                                  onOpenScheduledTask={openScheduledTaskPanel}
                                 />
-                              </div>
-                              ) : null;
+                              );
 
-                            if (showMobileWelcomeFooterMiddle) {
+                              const btwPanel =
+                                !showMobileWelcomeFooterMiddle &&
+                                btwMessage?.role === 'btw' ? (
+                                  <div className={styles.btwPanel}>
+                                    <BtwMessage
+                                      question={btwMessage.question}
+                                      answer={btwMessage.answer}
+                                      isPending={btwMessage.isPending}
+                                    />
+                                  </div>
+                                ) : null;
+
+                              if (showMobileWelcomeFooterMiddle) {
+                                return (
+                                  <div className={styles.mobileWelcomeGroup}>
+                                    <div
+                                      style={contentStyle}
+                                      className={contentClassName}
+                                    >
+                                      {messageList}
+                                      {btwPanel}
+                                    </div>
+                                    <div
+                                      className={
+                                        styles.mobileWelcomeFooterMiddle
+                                      }
+                                    >
+                                      {welcomeFooter}
+                                    </div>
+                                  </div>
+                                );
+                              }
                               return (
-                                <div className={styles.mobileWelcomeGroup}>
-                                  <div
-                                    style={contentStyle}
-                                    className={contentClassName}
-                                  >
-                                    {messageList}
-                                    {btwPanel}
-                                  </div>
-                                  <div
-                                    className={styles.mobileWelcomeFooterMiddle}
-                                  >
-                                    {welcomeFooter}
-                                  </div>
+                                <div
+                                  style={contentStyle}
+                                  className={contentClassName}
+                                >
+                                  {messageList}
+                                  {btwPanel}
                                 </div>
                               );
-                            }
-                            return (
-                              <div
-                                style={contentStyle}
-                                className={contentClassName}
-                              >
-                                {messageList}
-                                {btwPanel}
-                              </div>
-                            );
-                          })()}
-                        </InteractionBlockContext.Provider>
-                      </TodoContextsProvider>
-                    </CompactModeContext.Provider>
+                            })()}
+                          </InteractionBlockContext.Provider>
+                        </TodoContextsProvider>
+                      </CompactModeContext.Provider>
 
-                    <div
-                      ref={footerRef}
-                      style={contentStyle}
-                      className={
-                        CustomFooter
-                          ? `${styles.footer} ${styles.footerWithCustomFooter}`
-                          : styles.footer
-                      }
-                    >
-                      {canScrollMessageListToBottom && (
-                        <div
-                          className={
-                            showBottomPanels
-                              ? `${styles.scrollToBottomLayer} ${styles.scrollToBottomLayerWithTodos}`
-                              : styles.scrollToBottomLayer
-                          }
-                        >
-                          <button
-                            type="button"
-                            className={styles.scrollToBottomButton}
-                            aria-label={t('chat.scrollToBottom')}
-                            onClick={() => resumeChatBottomFollow('smooth')}
+                      <div
+                        ref={footerRef}
+                        style={contentStyle}
+                        className={
+                          CustomFooter
+                            ? `${styles.footer} ${styles.footerWithCustomFooter}`
+                            : styles.footer
+                        }
+                      >
+                        {canScrollMessageListToBottom && (
+                          <div
+                            className={
+                              showBottomPanels
+                                ? `${styles.scrollToBottomLayer} ${styles.scrollToBottomLayerWithTodos}`
+                                : styles.scrollToBottomLayer
+                            }
                           >
-                            <svg
-                              className={styles.scrollToBottomIcon}
-                              viewBox="0 0 24 24"
-                              aria-hidden="true"
+                            <button
+                              type="button"
+                              className={styles.scrollToBottomButton}
+                              aria-label={t('chat.scrollToBottom')}
+                              onClick={() => resumeChatBottomFollow('smooth')}
                             >
-                              <path
-                                d="M12 5v13M6.5 12.5 12 18l5.5-5.5"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                              />
-                            </svg>
-                          </button>
-                        </div>
-                      )}
-                      {showBottomPanels && (
-                        <div
-                          ref={bottomPanelsRef}
-                          className={styles.bottomPanels}
-                        >
-                          <TodoPanel
-                            todos={showFloatingTodos ? floatingTodos : []}
-                            statusItems={floatingBottomStatusItems}
-                          />
-                        </div>
-                      )}
-                      {/* Only render the outer session's approval on the chat
+                              <svg
+                                className={styles.scrollToBottomIcon}
+                                viewBox="0 0 24 24"
+                                aria-hidden="true"
+                              >
+                                <path
+                                  d="M12 5v13M6.5 12.5 12 18l5.5-5.5"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                />
+                              </svg>
+                            </button>
+                          </div>
+                        )}
+                        {showBottomPanels && (
+                          <div
+                            ref={bottomPanelsRef}
+                            className={styles.bottomPanels}
+                          >
+                            <TodoPanel
+                              todos={showFloatingTodos ? floatingTodos : []}
+                              statusItems={floatingBottomStatusItems}
+                            />
+                          </div>
+                        )}
+                        {/* Only render the outer session's approval on the chat
                           view. Under a full-page view (split / scheduled tasks)
                           it would sit hidden yet still own global keyboard
                           shortcuts — a keypress could confirm an unseen
                           approval. Each split pane surfaces its own approval. */}
-                      {pendingToolApproval && mainView === 'chat' && (
-                        <div
-                          ref={approvalOverlayRef}
-                          tabIndex={-1}
-                          data-testid="approval-overlay"
-                          className={styles.approvalOverlay}
-                        >
-                          <ToolApproval
-                            request={pendingToolApproval}
-                            onConfirm={handleConfirm}
-                            variant="floating"
-                          />
-                        </div>
-                      )}
-                      {pendingAskUserApproval && mainView === 'chat' && (
-                        <div
-                          ref={approvalOverlayRef}
-                          tabIndex={-1}
-                          data-testid="approval-overlay"
-                          className={styles.approvalOverlay}
-                        >
-                          <AskUserQuestion
-                            request={pendingAskUserApproval}
-                            onConfirm={handleConfirm}
-                            variant="floating"
-                          />
-                        </div>
-                      )}
-                      <div className={styles.composer}>
-                        <StreamingStatus startedAt={activeTurnStartedAt} />
-                        {escapeHintVisible && streamingState === 'idle' && (
-                          <div className={styles.escClearStatus} role="status">
-                            {t('editor.escClearHint')}
-                          </div>
-                        )}
-                        <QueuedPromptDisplay
-                          prompts={queuedPrompts}
-                          t={t}
-                          onDelete={removeQueuedPrompt}
-                          onInsert={insertQueuedPrompt}
-                          onEdit={editQueuedPrompt}
-                        />
-                        {CustomComposerHeader && (
-                          <div className={styles.composerHeader}>
-                            <CustomComposerHeader
-                              disabled={isDisabled}
-                              isRunning={streamingState !== 'idle'}
-                              currentMode={currentMode}
-                              currentModel={currentModel}
-                              sessionName={sessionDisplayName}
+                        {pendingToolApproval && mainView === 'chat' && (
+                          <div
+                            ref={approvalOverlayRef}
+                            tabIndex={-1}
+                            data-testid="approval-overlay"
+                            className={styles.approvalOverlay}
+                          >
+                            <ToolApproval
+                              request={pendingToolApproval}
+                              onConfirm={handleConfirm}
+                              variant="floating"
                             />
                           </div>
                         )}
-                        <ChatEditor
-                          ref={setEditorHandle}
-                          onSubmit={handleEditorSubmit}
-                          onCycleMode={handleCycleMode}
-                          onToggleShortcuts={handleToggleShortcuts}
-                          onCancel={handleCancel}
-                          isRunning={streamingState !== 'idle'}
-                          isPreparing={isPreparingPrompt}
-                          cancelArmed={cancelArmed}
-                          disabled={isDisabled}
-                          commands={commands}
-                          skills={loadedSkills}
-                          slashCommandCategoryOrder={slashCommandCategoryOrder}
-                          builtinAtProviders={builtinAtProviders}
-                          atProviders={atProviders}
-                          composerTagIcons={composerTagIcons}
-                          queuedMessages={queuedTexts}
-                          onFocusFooter={handleFocusTaskPill}
-                          onPopQueuedMessages={editLastQueuedPrompt}
-                          onClearQueuedMessages={clearQueuedPrompts}
-                          currentMode={currentMode}
-                          currentModel={currentModel}
-                          gitBranch={connection.gitBranch}
-                          chatWidthMode={chatWidthMode}
-                          showChatWidthToggle={!isChatEmptyState}
-                          chatWidthToggleMin={chatWidthToggleMin}
-                          visibleToolbarActions={composerToolbarActions}
-                          availableModels={availableModels}
-                          onSelectMode={handleSetMode}
-                          onSelectModel={handleModelSelect}
-                          onChatWidthModeChange={handleChatWidthModeChange}
-                          sessionName={sessionDisplayName}
-                          dialogOpen={
-                            interactionBlocked || approvalOverlayActive
-                          }
-                          followupState={followupState}
-                          onAcceptFollowup={onAcceptFollowup}
-                          onDismissFollowup={onDismissFollowup}
-                          composerInput={composerInput}
-                          composerInputVersion={composerInputVersion}
-                          placeholderText={t(
-                            getComposerPlaceholderKey({
-                              catchingUp: Boolean(connection.catchingUp),
-                              isPreparingPrompt,
-                              isStreaming: streamingState !== 'idle',
-                            }),
+                        {pendingAskUserApproval && mainView === 'chat' && (
+                          <div
+                            ref={approvalOverlayRef}
+                            tabIndex={-1}
+                            data-testid="approval-overlay"
+                            className={styles.approvalOverlay}
+                          >
+                            <AskUserQuestion
+                              request={pendingAskUserApproval}
+                              onConfirm={handleConfirm}
+                              variant="floating"
+                            />
+                          </div>
+                        )}
+                        <div className={styles.composer}>
+                          <StreamingStatus startedAt={activeTurnStartedAt} />
+                          {escapeHintVisible && streamingState === 'idle' && (
+                            <div
+                              className={styles.escClearStatus}
+                              role="status"
+                            >
+                              {t('editor.escClearHint')}
+                            </div>
                           )}
-                        />
-                      </div>
-                      {CustomFooter ? (
-                        hasMobileComposerBottom ? (
-                          <div className={styles.customFooter}>
+                          <QueuedPromptDisplay
+                            prompts={queuedPrompts}
+                            t={t}
+                            onDelete={removeQueuedPrompt}
+                            onInsert={insertQueuedPrompt}
+                            onEdit={editQueuedPrompt}
+                          />
+                          {CustomComposerHeader && (
+                            <div className={styles.composerHeader}>
+                              <CustomComposerHeader
+                                disabled={isDisabled}
+                                isRunning={streamingState !== 'idle'}
+                                currentMode={currentMode}
+                                currentModel={currentModel}
+                                sessionName={sessionDisplayName}
+                              />
+                            </div>
+                          )}
+                          <ChatEditor
+                            ref={setEditorHandle}
+                            onSubmit={handleEditorSubmit}
+                            onCycleMode={handleCycleMode}
+                            onToggleShortcuts={handleToggleShortcuts}
+                            onCancel={handleCancel}
+                            isRunning={streamingState !== 'idle'}
+                            isPreparing={isPreparingPrompt}
+                            cancelArmed={cancelArmed}
+                            disabled={isDisabled}
+                            commands={commands}
+                            skills={loadedSkills}
+                            slashCommandCategoryOrder={
+                              slashCommandCategoryOrder
+                            }
+                            builtinAtProviders={builtinAtProviders}
+                            atProviders={atProviders}
+                            composerTagIcons={composerTagIcons}
+                            queuedMessages={queuedTexts}
+                            onFocusFooter={handleFocusTaskPill}
+                            onPopQueuedMessages={editLastQueuedPrompt}
+                            onClearQueuedMessages={clearQueuedPrompts}
+                            currentMode={currentMode}
+                            currentModel={currentModel}
+                            gitBranch={connection.gitBranch}
+                            chatWidthMode={chatWidthMode}
+                            showChatWidthToggle={!isChatEmptyState}
+                            chatWidthToggleMin={chatWidthToggleMin}
+                            visibleToolbarActions={composerToolbarActions}
+                            availableModels={availableModels}
+                            onSelectMode={handleSetMode}
+                            onSelectModel={handleModelSelect}
+                            workspaces={
+                              (workspace.capabilities?.workspaces?.length ??
+                                0) > 1
+                                ? (
+                                    workspace.capabilities?.workspaces ?? []
+                                  ).map((entry) => ({
+                                    id: entry.id,
+                                    cwd: entry.cwd,
+                                    label:
+                                      entry.cwd
+                                        .split(/[\\/]+/)
+                                        .filter(Boolean)
+                                        .at(-1) ?? entry.cwd,
+                                    primary: entry.primary,
+                                  }))
+                                : undefined
+                            }
+                            selectedWorkspaceCwd={
+                              connection.sessionId
+                                ? workspace.capabilities?.workspaces?.find(
+                                    (entry) =>
+                                      entry.cwd === connection.workspaceCwd,
+                                  )?.primary
+                                  ? undefined
+                                  : connection.workspaceCwd
+                                : selectedWorkspaceCwd
+                            }
+                            workspaceSelectionDisabled={Boolean(
+                              connection.sessionId,
+                            )}
+                            onSelectWorkspace={(cwd) => {
+                              selectedWorkspaceCwdRef.current = cwd;
+                              setSelectedWorkspaceCwd(cwd);
+                            }}
+                            onChatWidthModeChange={handleChatWidthModeChange}
+                            sessionName={sessionDisplayName}
+                            dialogOpen={
+                              interactionBlocked || approvalOverlayActive
+                            }
+                            followupState={followupState}
+                            onAcceptFollowup={onAcceptFollowup}
+                            onDismissFollowup={onDismissFollowup}
+                            composerInput={composerInput}
+                            composerInputVersion={composerInputVersion}
+                            placeholderText={t(
+                              getComposerPlaceholderKey({
+                                catchingUp: Boolean(connection.catchingUp),
+                                isPreparingPrompt,
+                                isStreaming: streamingState !== 'idle',
+                              }),
+                            )}
+                          />
+                        </div>
+                        {CustomFooter ? (
+                          hasMobileComposerBottom ? (
+                            <div className={styles.customFooter}>
+                              <CustomFooter
+                                connected={connected}
+                                mode={currentMode}
+                                model={currentModel}
+                                streamingState={streamingState}
+                                contextUsageRatio={
+                                  (connection.contextWindow ?? 0) > 0
+                                    ? (connection.tokenCount ?? 0) /
+                                      (connection.contextWindow ?? 0)
+                                    : 0
+                                }
+                                activeGoal={activeGoal}
+                                tasks={footerTasks}
+                                availableModes={MODES_CYCLE}
+                                availableModels={(connection.models ?? [])
+                                  .filter(isVisibleComposerModel)
+                                  .map((m) => ({
+                                    id: m.id,
+                                    label: getModelDisplayName(m.label || m.id),
+                                    contextWindow: m.contextWindow,
+                                  }))}
+                                skills={loadedSkills}
+                                onSelectMode={handleSetMode}
+                                onSelectModel={handleModelSelect}
+                              />
+                            </div>
+                          ) : (
                             <CustomFooter
                               connected={connected}
                               mode={currentMode}
@@ -5987,104 +6189,78 @@ export function App({
                               onSelectMode={handleSetMode}
                               onSelectModel={handleModelSelect}
                             />
-                          </div>
+                          )
                         ) : (
-                          <CustomFooter
-                            connected={connected}
-                            mode={currentMode}
-                            model={currentModel}
-                            streamingState={streamingState}
-                            contextUsageRatio={
-                              (connection.contextWindow ?? 0) > 0
-                                ? (connection.tokenCount ?? 0) /
-                                  (connection.contextWindow ?? 0)
-                                : 0
+                          <StatusBar
+                            onSelectMode={() =>
+                              setShowApprovalModeDialog((v) => !v)
                             }
+                            onSelectModel={() =>
+                              setModelDialogMode((v) => (v ? null : 'main'))
+                            }
+                            onShowContext={() =>
+                              showContextUsage('/context', false)
+                            }
+                            onOpenSettings={() => openPanel('settings')}
+                            ref={statusBarRef}
+                            onOpenTasks={() => openTasksPanel()}
+                            onReturnToInput={handleReturnToEditor}
+                            tasks={backgroundTasks}
                             activeGoal={activeGoal}
-                            tasks={footerTasks}
-                            availableModes={MODES_CYCLE}
-                            availableModels={(connection.models ?? [])
-                              .filter(isVisibleComposerModel)
-                              .map((m) => ({
-                                id: m.id,
-                                label: getModelDisplayName(m.label || m.id),
-                                contextWindow: m.contextWindow,
-                              }))}
-                            skills={loadedSkills}
-                            onSelectMode={handleSetMode}
-                            onSelectModel={handleModelSelect}
+                            hideSettings={hideSettings}
+                            onToggleShortcuts={handleToggleShortcuts}
+                            compact={true}
                           />
-                        )
-                      ) : (
-                        <StatusBar
-                          onSelectMode={() =>
-                            setShowApprovalModeDialog((v) => !v)
-                          }
-                          onSelectModel={() =>
-                            setModelDialogMode((v) => (v ? null : 'main'))
-                          }
-                          onShowContext={() =>
-                            showContextUsage('/context', false)
-                          }
-                          onOpenSettings={() => openPanel('settings')}
-                          ref={statusBarRef}
-                          onOpenTasks={() => openTasksPanel()}
-                          onReturnToInput={handleReturnToEditor}
-                          tasks={backgroundTasks}
-                          activeGoal={activeGoal}
-                          hideSettings={hideSettings}
-                          onToggleShortcuts={handleToggleShortcuts}
-                          compact={true}
-                        />
-                      )}
-                      {isChatEmptyState && welcomeFooter && (
-                        <div
-                          className={[
-                            styles.emptyWelcomeFooter,
-                            showMobileWelcomeFooterMiddle
-                              ? styles.desktopWelcomeFooter
-                              : undefined,
-                          ]
-                            .filter(Boolean)
-                            .join(' ')}
-                        >
-                          {welcomeFooter}
-                        </div>
-                      )}
-                    </div>
-                  </WebShellCustomizationProvider>
+                        )}
+                        {isChatEmptyState && welcomeFooter && (
+                          <div
+                            className={[
+                              styles.emptyWelcomeFooter,
+                              showMobileWelcomeFooterMiddle
+                                ? styles.desktopWelcomeFooter
+                                : undefined,
+                            ]
+                              .filter(Boolean)
+                              .join(' ')}
+                          >
+                            {welcomeFooter}
+                          </div>
+                        )}
+                      </div>
+                    </WebShellCustomizationProvider>
+                  </div>
                 </div>
               </div>
+              {artifactPanelOpen && (
+                <>
+                  <div
+                    className={styles.artifactResizeHandle}
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-valuemin={MIN_ARTIFACT_PANEL_WIDTH}
+                    aria-valuemax={getMaxArtifactPanelWidth()}
+                    aria-valuenow={artifactPanelWidth}
+                    onPointerDown={handleArtifactPanelResizeStart}
+                  />
+                  <ArtifactPanel
+                    artifacts={artifactPanelArtifacts}
+                    tabs={artifactPanelTabs}
+                    activeTabId={activeArtifactPanelTabId}
+                    reviewChanges={reviewChanges}
+                    selectedReviewPath={selectedReviewPath}
+                    panelWidth={artifactPanelWidth}
+                    workspaceCwd={connection.workspaceCwd || ''}
+                    loading={artifactsLoading}
+                    error={artifactsError}
+                    onSelectTab={setActiveArtifactPanelTabId}
+                    onCloseTab={closeArtifactPanelTab}
+                    onClose={closeArtifactPanel}
+                  />
+                </>
+              )}
             </div>
-            {artifactPanelOpen && (
-              <>
-                <div
-                  className={styles.artifactResizeHandle}
-                  role="separator"
-                  aria-orientation="vertical"
-                  aria-valuemin={MIN_ARTIFACT_PANEL_WIDTH}
-                  aria-valuemax={getMaxArtifactPanelWidth()}
-                  aria-valuenow={artifactPanelWidth}
-                  onPointerDown={handleArtifactPanelResizeStart}
-                />
-                <ArtifactPanel
-                  artifacts={artifactPanelArtifacts}
-                  tabs={artifactPanelTabs}
-                  activeTabId={activeArtifactPanelTabId}
-                  reviewChanges={reviewChanges}
-                  selectedReviewPath={selectedReviewPath}
-                  panelWidth={artifactPanelWidth}
-                  workspaceCwd={connection.workspaceCwd || ''}
-                  loading={artifactsLoading}
-                  error={artifactsError}
-                  onSelectTab={setActiveArtifactPanelTabId}
-                  onCloseTab={closeArtifactPanelTab}
-                  onClose={closeArtifactPanel}
-                />
-              </>
-            )}
           </div>
-        </div>
+        </WebShellPortalRootContext.Provider>
       </I18nProvider>
     </ThemeProvider>
   );

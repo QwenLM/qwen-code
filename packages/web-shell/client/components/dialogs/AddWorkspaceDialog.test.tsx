@@ -96,7 +96,30 @@ describe('AddWorkspaceDialog', () => {
       await Promise.resolve();
     });
 
-    expect(onAdd).toHaveBeenCalledWith('/abs/project');
+    expect(onAdd).toHaveBeenCalledWith('/abs/project', true);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('submits with persist=false when the switch is toggled off', async () => {
+    const onAdd = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+    mount(<AddWorkspaceDialog onClose={onClose} onAdd={onAdd} />);
+
+    // Toggle the persist switch off (Radix renders it as a button[role="switch"]).
+    const sw = document.querySelector<HTMLButtonElement>(
+      '#add-workspace-persist',
+    )!;
+    act(() => {
+      sw.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    type('/abs/project');
+    submit();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(onAdd).toHaveBeenCalledWith('/abs/project', false);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -126,7 +149,7 @@ describe('AddWorkspaceDialog', () => {
       await Promise.resolve();
     });
 
-    expect(onAdd).toHaveBeenCalledWith('C:\\Users\\me\\project');
+    expect(onAdd).toHaveBeenCalledWith('C:\\Users\\me\\project', true);
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(alert()).toBeNull();
   });

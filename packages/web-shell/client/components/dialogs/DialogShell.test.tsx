@@ -288,7 +288,7 @@ describe('DialogShell', () => {
     );
 
     const backdrop = document.querySelector<HTMLElement>(
-      '[data-keyboard-scope]',
+      '[data-slot="dialog-overlay"]',
     );
     const panel = document.querySelector<HTMLElement>('[role="dialog"]');
     expect(backdrop).toBeTruthy();
@@ -316,7 +316,7 @@ describe('DialogShell', () => {
     );
 
     const backdrop = document.querySelector<HTMLElement>(
-      '[data-keyboard-scope]',
+      '[data-slot="dialog-overlay"]',
     )!;
     const panel = document.querySelector<HTMLElement>('[role="dialog"]')!;
 
@@ -338,7 +338,7 @@ describe('DialogShell', () => {
     );
 
     const backdrop = document.querySelector<HTMLElement>(
-      '[data-keyboard-scope]',
+      '[data-slot="dialog-overlay"]',
     )!;
     const panel = document.querySelector<HTMLElement>('[role="dialog"]')!;
 
