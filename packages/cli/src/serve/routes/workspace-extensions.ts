@@ -219,6 +219,12 @@ export function registerWorkspaceExtensionRoutes(
           onRuntimeReconciled,
         }
       : {};
+  const mutationClientBridges = (
+    runtimes?: readonly WorkspaceRuntime[],
+  ): readonly AcpSessionBridge[] =>
+    (runtimes ?? workspaceRegistry?.list())?.map(
+      (runtime) => runtime.bridge,
+    ) ?? [bridge];
 
   if (workspaceRegistry) {
     let observedGeneration: number | undefined;
@@ -887,6 +893,7 @@ export function registerWorkspaceExtensionRoutes(
     if (
       !primaryController.validateExtensionMutationClient(req, res, {
         requireClientId: false,
+        bridges: mutationClientBridges(options.refreshRuntimes),
       })
     ) {
       return;
@@ -1272,6 +1279,7 @@ export function registerWorkspaceExtensionRoutes(
       if (
         !primaryController.validateExtensionMutationClient(req, res, {
           requireClientId: false,
+          bridges: mutationClientBridges(),
         })
       ) {
         return;

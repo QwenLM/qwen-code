@@ -220,7 +220,7 @@ export function validateMcpRuntimeServerName(
 
 /**
  * Workspace-level mutation routes validate the parsed `X-Qwen-Client-Id`
- * against `bridge.knownClientIds()` so the `originatorClientId` stamped
+ * against the supplied bridge set so the `originatorClientId` stamped
  * onto fan-out events is grounded in a known identity. Returns the
  * validated client id (or `undefined` when no header was supplied),
  * `null` when a 400 has already been emitted.
@@ -228,11 +228,12 @@ export function validateMcpRuntimeServerName(
 export function parseAndValidateWorkspaceClientId(
   req: Request,
   res: Response,
-  bridge: AcpSessionBridge,
+  bridge: AcpSessionBridge | readonly AcpSessionBridge[],
 ): string | undefined | null {
   const raw = parseClientIdHeader(req, res);
   if (raw === null || raw === undefined) return raw;
-  if (!bridge.knownClientIds().has(raw)) {
+  const bridges = Array.isArray(bridge) ? bridge : [bridge];
+  if (!bridges.some((candidate) => candidate.knownClientIds().has(raw))) {
     res.status(400).json({
       error: `Client id "${raw}" is not registered for this workspace`,
       code: 'invalid_client_id',

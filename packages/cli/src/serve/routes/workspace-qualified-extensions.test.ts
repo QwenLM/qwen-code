@@ -653,6 +653,61 @@ describe('extension management v2 REST', () => {
     }
   });
 
+  it('validates mutation clients against the targeted runtime set', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(h.primary.bridge, 'knownClientIds').mockReturnValue(
+      new Set(['primary-client']),
+    );
+    vi.spyOn(h.secondary.bridge, 'knownClientIds').mockReturnValue(
+      new Set(['secondary-client']),
+    );
+    const secondaryAuth = (pending: request.Test) =>
+      pending
+        .set('Host', host())
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'secondary-client');
+    try {
+      const wrongRuntime = await request(h.app)
+        .put(
+          `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/${extensionId}/activation`,
+        )
+        .set('Host', host())
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'primary-client')
+        .send({ state: 'enabled' });
+      expect(wrongRuntime.status).toBe(400);
+      expect(wrongRuntime.body).toMatchObject({ code: 'invalid_client_id' });
+
+      const targeted = await secondaryAuth(
+        request(h.app)
+          .put(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/${extensionId}/activation`,
+          )
+          .send({ state: 'enabled' }),
+      );
+      expect(targeted.status).toBe(202);
+      await expect(
+        pollOperation(h.app, targeted.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+
+      const global = await secondaryAuth(
+        request(h.app)
+          .put(`/extensions/${extensionId}/activation`)
+          .send({ state: 'disabled' }),
+      );
+      expect(global.status).toBe(202);
+      await expect(
+        pollOperation(h.app, global.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+    } finally {
+      (
+        h.app.locals as { stopExtensionGenerationReconciler?: () => void }
+      ).stopExtensionGenerationReconciler?.();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('allows bearer-authenticated global install without a workspace client id', async () => {
     const h = await makeHarness();
     mockExtensionManager();

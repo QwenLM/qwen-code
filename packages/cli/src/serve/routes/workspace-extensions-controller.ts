@@ -134,7 +134,10 @@ export interface ExtensionsController {
   validateExtensionMutationClient(
     req: Request,
     res: Response,
-    opts?: { requireClientId?: boolean },
+    opts?: {
+      requireClientId?: boolean;
+      bridges?: readonly AcpSessionBridge[];
+    },
   ): boolean;
   runQueuedExtensionMutation(
     operation: string,
@@ -215,9 +218,16 @@ export function createExtensionsController(
   const validateExtensionMutationClient = (
     req: Request,
     res: Response,
-    opts: { requireClientId?: boolean } = {},
+    opts: {
+      requireClientId?: boolean;
+      bridges?: readonly AcpSessionBridge[];
+    } = {},
   ): boolean => {
-    const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
+    const clientId = parseAndValidateWorkspaceClientId(
+      req,
+      res,
+      opts.bridges ?? bridge,
+    );
     if (clientId === null) return false;
     if (clientId === undefined && opts.requireClientId !== false) {
       res.status(400).json({
