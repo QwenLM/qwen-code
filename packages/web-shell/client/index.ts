@@ -1,6 +1,8 @@
 export { App as WebShell } from './App';
 export type {
   WebShellApi,
+  WebShellComposerPlaceholders,
+  WebShellComposerPlaceholderState,
   WebShellProps,
   WebShellSidebarOptions,
   BugReportInfo,

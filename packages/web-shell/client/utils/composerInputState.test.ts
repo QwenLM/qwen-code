@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   getComposerPlaceholderKey,
+  getComposerPlaceholderState,
   shouldBlockComposerSubmit,
   shouldDisableComposerInput,
 } from './composerInputState';
@@ -70,6 +71,30 @@ describe('composer input state', () => {
         isStreaming: true,
       }),
     ).toBe('editor.processing');
+  });
+
+  it('exposes the semantic placeholder state independently of i18n keys', () => {
+    expect(
+      getComposerPlaceholderState({
+        catchingUp: false,
+        isPreparingPrompt: false,
+        isStreaming: false,
+      }),
+    ).toBe('idle');
+    expect(
+      getComposerPlaceholderState({
+        catchingUp: true,
+        isPreparingPrompt: true,
+        isStreaming: true,
+      }),
+    ).toBe('loading');
+    expect(
+      getComposerPlaceholderState({
+        catchingUp: false,
+        isPreparingPrompt: true,
+        isStreaming: true,
+      }),
+    ).toBe('processing');
   });
 
   it('still disables editing for pending approvals', () => {

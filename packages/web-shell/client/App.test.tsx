@@ -35,6 +35,7 @@ type ChatEditorTestProps = {
   skills?: Array<{ name: string; description: string }>;
   isPreparing?: boolean;
   dialogOpen?: boolean;
+  placeholderText?: string;
 };
 
 const {
@@ -719,6 +720,48 @@ afterEach(() => {
 });
 
 describe('App session callbacks', () => {
+  it('uses configured composer placeholders by state and falls back for blank values', async () => {
+    const composerPlaceholders = {
+      idle: 'Ask a question',
+      loading: 'Preparing chat',
+      processing: 'Working on it',
+    };
+    const { rerender } = renderApp({ composerPlaceholders });
+    await flush();
+
+    expect(testState.latestChatEditorProps?.placeholderText).toBe(
+      'Ask a question',
+    );
+
+    testState.streamingState = 'responding';
+    rerender({ composerPlaceholders });
+    await flush();
+    expect(testState.latestChatEditorProps?.placeholderText).toBe(
+      'Working on it',
+    );
+
+    rerender({ composerPlaceholders: { idle: 'Ask a question' } });
+    await flush();
+    expect(testState.latestChatEditorProps?.placeholderText).toBe(
+      'Processing. New messages will be queued.',
+    );
+
+    mockConnection.catchingUp = true;
+    rerender({ composerPlaceholders });
+    await flush();
+    expect(testState.latestChatEditorProps?.placeholderText).toBe(
+      'Preparing chat',
+    );
+
+    mockConnection.catchingUp = false;
+    testState.streamingState = 'idle';
+    rerender({ composerPlaceholders: { idle: '   ' } });
+    await flush();
+    expect(testState.latestChatEditorProps?.placeholderText).toBe(
+      'Type a message or @ file path',
+    );
+  });
+
   it('filters disabled skills from the web-shell skills list', async () => {
     mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
       skills: [

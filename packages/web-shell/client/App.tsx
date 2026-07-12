@@ -172,8 +172,10 @@ import {
 } from './utils/sessionPreparation';
 import {
   getComposerPlaceholderKey,
+  getComposerPlaceholderState,
   shouldBlockComposerSubmit,
   shouldDisableComposerInput,
+  type ComposerPlaceholderState,
 } from './utils/composerInputState';
 import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
 import {
@@ -428,6 +430,12 @@ export interface WebShellApi {
   openSessionDrawer: () => void;
 }
 
+export type WebShellComposerPlaceholderState = ComposerPlaceholderState;
+
+export type WebShellComposerPlaceholders = Readonly<
+  Partial<Record<WebShellComposerPlaceholderState, string>>
+>;
+
 export interface WebShellProps {
   /** Called whenever the attached daemon session id changes. */
   onSessionIdChange?: (sessionId: string | undefined) => void;
@@ -464,6 +472,11 @@ export interface WebShellProps {
   shellRef?: React.Ref<WebShellApi>;
   /** Built-in composer toolbar actions to show. Defaults to all actions. */
   composerToolbarActions?: readonly ComposerToolbarAction[];
+  /**
+   * Main-composer copy by semantic state. Omitted or blank entries retain the
+   * WebShell localized default; shell-mode and follow-up copy still wins.
+   */
+  composerPlaceholders?: WebShellComposerPlaceholders;
   /** Called when connection status changes (idle/connecting/connected/disconnected/error). */
   onConnectionChange?: (status: string) => void;
   /** Called when prompt status changes (idle/waiting/responding). */
@@ -960,6 +973,7 @@ export function App({
   messageTurnOutputs,
   shellRef,
   composerToolbarActions,
+  composerPlaceholders,
   compactThinking = false,
   collapseCompletedTurns = true,
   markdownTableMode = 'basic',
@@ -4924,6 +4938,19 @@ export function App({
     pendingApproval: pendingApproval !== null,
     isPreparingPrompt,
   });
+  const composerPlaceholderInputState = {
+    catchingUp: Boolean(connection.catchingUp),
+    isPreparingPrompt,
+    isStreaming: streamingState !== 'idle',
+  };
+  const composerPlaceholderState = getComposerPlaceholderState(
+    composerPlaceholderInputState,
+  );
+  const customComposerPlaceholder =
+    composerPlaceholders?.[composerPlaceholderState];
+  const composerPlaceholderText = customComposerPlaceholder?.trim()
+    ? customComposerPlaceholder
+    : t(getComposerPlaceholderKey(composerPlaceholderInputState));
 
   const handleModelSelect = useCallback(
     (modelId: string) => {
@@ -6041,13 +6068,7 @@ export function App({
                           onDismissFollowup={onDismissFollowup}
                           composerInput={composerInput}
                           composerInputVersion={composerInputVersion}
-                          placeholderText={t(
-                            getComposerPlaceholderKey({
-                              catchingUp: Boolean(connection.catchingUp),
-                              isPreparingPrompt,
-                              isStreaming: streamingState !== 'idle',
-                            }),
-                          )}
+                          placeholderText={composerPlaceholderText}
                         />
                       </div>
                       {CustomFooter ? (
