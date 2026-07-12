@@ -250,6 +250,41 @@ describe('mapWorkspaceSkills', () => {
 });
 
 describe('updateConnectionFromDaemonEvent', () => {
+  it('updates and clears the current git branch', () => {
+    const changed = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace', gitBranch: 'main' },
+      {
+        v: 1,
+        type: 'git_branch_changed',
+        data: { workspaceCwd: '/workspace', branch: 'feature/web-shell' },
+      },
+    );
+    expect(changed.gitBranch).toBe('feature/web-shell');
+
+    const cleared = applyEvent(changed, {
+      v: 1,
+      type: 'git_branch_changed',
+      data: { workspaceCwd: '/workspace', branch: null },
+    });
+    expect(cleared.gitBranch).toBeUndefined();
+  });
+
+  it('ignores git branch changes from a previous workspace', () => {
+    const current = {
+      status: 'connected' as const,
+      workspaceCwd: '/workspace/current',
+      gitBranch: 'main',
+    };
+
+    const next = applyEvent(current, {
+      v: 1,
+      type: 'git_branch_changed',
+      data: { workspaceCwd: '/workspace/previous', branch: 'stale-branch' },
+    });
+
+    expect(next).toBe(current);
+  });
+
   it('replaces commands and skills from an available_commands_update', () => {
     const next = applyEvent(
       { status: 'connected', workspaceCwd: '/workspace' },

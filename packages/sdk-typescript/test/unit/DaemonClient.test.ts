@@ -600,6 +600,51 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('reads primary and workspace-qualified Git status over REST', async () => {
+      const primary = {
+        v: 1 as const,
+        workspaceCwd: '/work/main',
+        branch: 'main',
+      };
+      const secondary = {
+        v: 1 as const,
+        workspaceCwd: '/work/secondary',
+        branch: 'feature/web-shell',
+      };
+      const { fetch, calls } = recordingFetch((req) =>
+        jsonResponse(
+          200,
+          req.url.endsWith('/workspace/git') ? primary : secondary,
+        ),
+      );
+      const transportFetch = vi.fn(async () =>
+        jsonResponse(500, { error: 'transport should not be used' }),
+      );
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+
+      await expect(client.workspaceGit()).resolves.toEqual(primary);
+      await expect(
+        client.workspaceByCwd('/work/secondary').workspaceGit(),
+      ).resolves.toEqual(secondary);
+      expect(calls.map((call) => [call.method, call.url])).toEqual([
+        ['GET', 'http://daemon/workspace/git'],
+        ['GET', 'http://daemon/workspaces/%2Fwork%2Fsecondary/git'],
+      ]);
+      expect(transportFetch).not.toHaveBeenCalled();
+    });
+
     it('lets ACP preheat wait longer than the client default timeout', async () => {
       let resolveResponse: ((value: Response) => void) | undefined;
       const slowFetch = vi.fn(
