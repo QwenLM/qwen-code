@@ -147,9 +147,9 @@ export async function collectHistoryReplayUpdates({
       updates.length,
       error,
     );
-    return { updates, replayError };
+    return { updates: liftSessionUpdateTimestamps(updates), replayError };
   }
-  return { updates };
+  return { updates: liftSessionUpdateTimestamps(updates) };
 }
 
 export function liftSessionUpdateTimestamps(
@@ -227,7 +227,7 @@ export async function replayTranscriptRecordPage({
   return {
     updates: liftSessionUpdateTimestamps(updates),
     ...(nextCursor ? { nextCursor } : {}),
-    hasMore: page.hasMore,
+    hasMore: replayError === undefined && page.hasMore,
     startTime: page.startTime,
     lastUpdated: page.lastUpdated,
     ...(replayError ? { partial: true, replayError } : {}),

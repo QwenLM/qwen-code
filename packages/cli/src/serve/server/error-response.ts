@@ -155,6 +155,7 @@ export function sendBridgeError(
     res.status(400).json({
       error: err.message,
       code: 'invalid_transcript_cursor',
+      ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
     });
     return;
   }

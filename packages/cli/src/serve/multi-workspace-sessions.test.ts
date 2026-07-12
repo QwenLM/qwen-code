@@ -1525,6 +1525,7 @@ describe('multi-workspace session dispatch', () => {
         .set('Host', host());
       expect(crossWorkspace.status).toBe(400);
       expect(crossWorkspace.body.code).toBe('invalid_transcript_cursor');
+      expect(crossWorkspace.body.sessionId).toBe(sessionId);
 
       const second = await request(app)
         .get(
@@ -1564,6 +1565,7 @@ describe('multi-workspace session dispatch', () => {
         .set('Host', host());
       expect(expired.status).toBe(400);
       expect(expired.body.code).toBe('invalid_transcript_cursor');
+      expect(expired.body.sessionId).toBe(sessionId);
     });
   });
 

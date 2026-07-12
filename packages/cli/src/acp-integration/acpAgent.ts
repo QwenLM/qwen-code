@@ -191,7 +191,6 @@ import {
   collectHistoryReplayUpdates,
   copyCumulativeUsage,
   createReplayCumulativeUsage,
-  liftSessionUpdateTimestamps,
   replayTranscriptRecordPage,
 } from './session/history-replay-page.js';
 import {
@@ -3182,7 +3181,7 @@ class QwenAgent implements Agent {
             cumulativeUsage: replayUsage,
             logger: debugLogger,
           });
-          replayUpdates = liftSessionUpdateTimestamps(replay.updates);
+          replayUpdates = replay.updates;
           copyCumulativeUsage(session.cumulativeUsage, replayUsage);
           if (replay.replayError !== undefined) {
             replayEnvelope = {
@@ -7826,7 +7825,7 @@ class QwenAgent implements Agent {
         });
 
         return {
-          updates: liftSessionUpdateTimestamps(replay.updates),
+          updates: replay.updates,
           startTime: sessionData.conversation.startTime,
           lastUpdated: sessionData.conversation.lastUpdated,
           // Signal to the client that replay aborted partway so it doesn't
