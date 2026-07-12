@@ -1545,28 +1545,30 @@ describe('extension tests', () => {
         },
       );
       const manager = createExtensionManager();
-      vi.spyOn(manager, 'loadExtension').mockRejectedValue(
-        new Error('invalid extension config'),
+      const prepared = await manager.prepareExtensionInstall({
+        installMetadata: { type: 'local', source: archivePath },
+        initialActivation: { scope: 'user' },
+        requestConsent: async () => {},
+      });
+      fs.writeFileSync(
+        path.join(prepared.stagingDirectory, EXTENSIONS_CONFIG_FILENAME),
+        '{ invalid json',
       );
 
-      let installError: unknown;
+      let committed: Awaited<
+        ReturnType<ExtensionManager['commitPreparedExtension']>
+      >;
       try {
-        await manager.installExtension(
-          { type: 'local', source: archivePath },
-          async () => {},
-          undefined,
-          tempWorkspaceDir,
-        );
-      } catch (error) {
-        installError = error;
+        committed = await manager.commitPreparedExtension(prepared);
+      } finally {
+        await manager.disposePreparedExtension(prepared);
       }
 
-      expect(installError).toMatchObject({
-        code: 'extension_committed_with_warnings',
-        committed: true,
-        message: expect.stringContaining('invalid extension config'),
-        cause: expect.objectContaining({ message: 'invalid extension config' }),
+      expect(committed.warnings).toContainEqual({
+        code: 'extension_reload_failed',
+        error: expect.stringContaining('Failed to load extension config'),
       });
+      expect(committed.extension).toBeUndefined();
     });
 
     it('reports a committed update reload failure as needing restart', async () => {

@@ -1115,6 +1115,7 @@ export class ExtensionManager {
 
   async loadExtension(
     context: LoadExtensionContext,
+    options: { throwOnError?: boolean } = {},
   ): Promise<Extension | null> {
     const { extensionDir, workspaceDir } = context;
     if (!fs.statSync(extensionDir).isDirectory()) {
@@ -1242,6 +1243,7 @@ export class ExtensionManager {
 
       return extension;
     } catch (e) {
+      if (options.throwOnError) throw e;
       debugLogger.warn(
         `Warning: Skipping extension in ${effectiveExtensionPath}: ${getErrorMessage(
           e,
@@ -1785,9 +1787,12 @@ export class ExtensionManager {
         stagingPath = undefined;
 
         try {
-          extension = await this.loadExtension({
-            extensionDir: destinationPath,
-          });
+          extension = await this.loadExtension(
+            {
+              extensionDir: destinationPath,
+            },
+            { throwOnError: true },
+          );
           if (!extension) throw new Error('Extension not found after commit.');
         } catch (reloadError) {
           this.extensionCache?.delete(newExtensionName);
@@ -1999,9 +2004,12 @@ export class ExtensionManager {
       let extension: Extension | undefined;
       try {
         extension =
-          (await this.loadExtension({
-            extensionDir: prepared.destinationDirectory,
-          })) ?? undefined;
+          (await this.loadExtension(
+            {
+              extensionDir: prepared.destinationDirectory,
+            },
+            { throwOnError: true },
+          )) ?? undefined;
         if (!extension) throw new Error('Extension not found after commit.');
         this.extensionCache?.set(extension.name, extension);
         this.applyStoreActivation(snapshot);
