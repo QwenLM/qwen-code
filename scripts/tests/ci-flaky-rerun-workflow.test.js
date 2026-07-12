@@ -14,11 +14,16 @@ const workflow = readFileSync(
 const skill = readFileSync('.qwen/skills/ci-flaky-patrol/SKILL.md', 'utf8');
 
 describe('ci flaky rerun workflow', () => {
-  it('runs every ten minutes and only needs PR/action write permissions', () => {
+  it('runs every ten minutes and limits write permissions to a separate action job', () => {
     expect(workflow).toContain("cron: '*/10 * * * *'");
     expect(workflow).toContain("ACTIVE_DAYS: '7'");
+    expect(workflow).toContain('classify:');
+    expect(workflow).toContain('act:');
+    expect(workflow).toContain("actions: 'read'");
+    expect(workflow).toContain("pull-requests: 'read'");
     expect(workflow).toContain("pull-requests: 'write'");
     expect(workflow).toContain("actions: 'write'");
+    expect(workflow).toContain("GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'");
     expect(workflow).not.toContain("issues: 'write'");
     expect(workflow).not.toContain('scan-main');
     expect(workflow).not.toContain('update-branch');
@@ -31,12 +36,14 @@ describe('ci flaky rerun workflow', () => {
     expect(workflow).toContain(
       "OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'",
     );
-    expect(workflow).toContain('"read_file"');
-    expect(workflow).toContain('"write_file"');
     expect(workflow).toContain('"sandbox": true');
     expect(workflow).toContain('target_sha');
-    expect(workflow).toContain('ci-flaky-rerun-trusted.mjs');
-    expect(workflow).toContain('ci-flaky-rerun-trusted.mjs" act');
+    expect(workflow).toContain('node .github/scripts/ci-flaky-rerun.mjs act');
+    expect(workflow).toContain('actions/upload-artifact@');
+    expect(workflow).toContain('actions/download-artifact@');
+    expect(workflow).toContain("GITHUB_TOKEN: ''");
+    expect(workflow).toContain('settings: |-');
+    expect(workflow).not.toContain('settings_json');
   });
 
   it('keeps the skill responsible for judgment and JS responsible for GitHub writes', () => {
