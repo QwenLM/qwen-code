@@ -372,6 +372,7 @@ export type {
   DaemonWorkspaceTrustState,
   DaemonWorkspaceTrustStatus,
   DaemonWorkspaceCapability,
+  DaemonWorkspaceGitStatus,
   DaemonAvailableCommand,
   DaemonArchiveSessionsResult,
   DaemonCapabilities,
