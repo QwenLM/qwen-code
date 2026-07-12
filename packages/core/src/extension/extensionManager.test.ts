@@ -326,6 +326,9 @@ describe('extension tests', () => {
       } as unknown as PreparedExtensionMutation;
 
       await expect(
+        manager.commitPreparedExtension(forged),
+      ).rejects.toMatchObject({ code: 'invalid_prepared_extension' });
+      await expect(
         manager.disposePreparedExtension(forged),
       ).rejects.toMatchObject({ code: 'invalid_prepared_extension' });
       expect(fs.existsSync(protectedPath)).toBe(true);
