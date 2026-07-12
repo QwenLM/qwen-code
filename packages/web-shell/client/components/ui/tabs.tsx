@@ -11,7 +11,6 @@ function Tabs({
 }: React.ComponentProps<typeof TabsPrimitive.Root>) {
   return (
     <TabsPrimitive.Root
-      orientation={orientation}
       data-slot="tabs"
       data-orientation={orientation}
       className={cn(
