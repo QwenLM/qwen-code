@@ -772,7 +772,9 @@ describe('createChannelWorkerGroup', () => {
     const createSupervisor = (opts: CreateChannelWorkerSupervisorOptions) => {
       recorded.push(opts);
       return {
-        start: vi.fn(async () => {}),
+        start: vi.fn(async () => {
+          opts.onReady?.(snapshot({ state: 'running' }));
+        }),
         stop: vi.fn(async () => {}),
         restart: vi.fn(async () => snapshot({})),
         killAllSync: vi.fn(),
@@ -795,6 +797,7 @@ describe('createChannelWorkerGroup', () => {
     await group.reconcile([
       { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['c'] } },
     ]);
+    expect(onLog).not.toHaveBeenCalled();
     recorded[0]!.onReady?.(snapshot({ state: 'running' }));
     recorded[0]!.onExit?.(snapshot({ state: 'exited' }));
 

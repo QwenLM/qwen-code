@@ -127,6 +127,7 @@ export function createChannelWorkerGroup(
 ): ChannelWorkerGroup {
   let generation = 0;
   let entries = new Map<string, ChannelWorkerGroupEntry>();
+  const pendingGenerations = new Map<string, number>();
   let restartInFlight: Promise<ChannelWorkerGroupSnapshot[]> | undefined;
   let reconciling: Promise<ChannelWorkerGroupReconcileResult> | undefined;
   let stopping = false;
@@ -199,7 +200,9 @@ export function createChannelWorkerGroup(
                 entryGeneration
               ) {
                 opts.onReady!(withRuntimeMeta(snapshot));
-              } else {
+              } else if (
+                pendingGenerations.get(runtime.workspaceCwd) !== entryGeneration
+              ) {
                 opts.onLog?.({
                   stream: 'stderr',
                   line: `Ignored stale channel worker ready (generation=${entryGeneration}).`,
@@ -415,7 +418,9 @@ export function createChannelWorkerGroup(
           }
         }
         for (const target of targets.values()) {
-          newEntries.push(createEntry(target));
+          const entry = createEntry(target);
+          newEntries.push(entry);
+          pendingGenerations.set(entry.workspaceCwd, entry.generation);
         }
         if (oldAffected.length === 0 && newEntries.length === 0) {
           return { changed: false, workers: entrySnapshots() };
@@ -465,6 +470,7 @@ export function createChannelWorkerGroup(
         entries = committed;
         return { changed: true, workers: entrySnapshots() };
       })().finally(() => {
+        pendingGenerations.clear();
         reconciling = undefined;
       });
       return reconciling;
