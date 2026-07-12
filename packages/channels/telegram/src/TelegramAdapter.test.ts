@@ -239,7 +239,8 @@ describe('TelegramChannel', () => {
   });
 
   it('clears typing when a session dies without a terminal event', () => {
-    const channel = createChannel({}, { removeSessionId: vi.fn() });
+    const handleSessionDied = vi.fn();
+    const channel = createChannel({}, { handleSessionDied });
     const bot = installFakeBot(channel);
 
     channel.emitLifecycle({
@@ -254,6 +255,8 @@ describe('TelegramChannel', () => {
     expect(bot.api.sendChatAction).toHaveBeenCalledTimes(1);
 
     channel.onSessionDied('session-1');
+
+    expect(handleSessionDied).toHaveBeenCalledWith('session-1');
 
     vi.advanceTimersByTime(4000);
     expect(bot.api.sendChatAction).toHaveBeenCalledTimes(1);

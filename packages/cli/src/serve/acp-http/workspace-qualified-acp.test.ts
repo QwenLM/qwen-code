@@ -6,10 +6,14 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
+import { promises as fsp } from 'node:fs';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import WebSocket from 'ws';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
+import { Storage } from '@qwen-code/qwen-code-core';
 import { type AcpHttpHandle, mountAcpHttp } from './index.js';
 import { DeviceFlowRegistry } from '../auth/device-flow.js';
 import { CdpTunnelRegistry } from '../cdp-tunnel/cdp-tunnel-registry.js';
@@ -23,6 +27,7 @@ import { WorkspaceRememberTaskLane } from '../workspace-remember.js';
 import type { WorkspaceFileSystemFactory } from '../fs/index.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { createSessionOrganizationService } from '../session-organization-helpers.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({ writeStderrLine: vi.fn() }));
 
@@ -70,6 +75,42 @@ const INITIALIZE = JSON.stringify({
   id: 1,
   method: 'initialize',
 });
+
+async function writeStoredSession(sessionId: string, cwd: string) {
+  const chatsDir = path.join(new Storage(cwd).getProjectDir(), 'chats');
+  await fsp.mkdir(chatsDir, { recursive: true });
+  await fsp.writeFile(
+    path.join(chatsDir, `${sessionId}.jsonl`),
+    `${JSON.stringify({
+      uuid: `${sessionId}-user-1`,
+      parentUuid: null,
+      sessionId,
+      timestamp: '2026-07-11T00:00:00.000Z',
+      type: 'user',
+      message: { role: 'user', parts: [{ text: 'secondary session' }] },
+      cwd,
+    })}\n`,
+    'utf8',
+  );
+}
+
+async function withRuntimeDir<T>(fn: () => Promise<T>): Promise<T> {
+  const previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+  const runtimeDir = await fsp.mkdtemp(
+    path.join(os.tmpdir(), 'qwen-workspace-qualified-acp-'),
+  );
+  process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+  try {
+    return await fn();
+  } finally {
+    if (previousRuntimeDir === undefined) {
+      delete process.env['QWEN_RUNTIME_DIR'];
+    } else {
+      process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
+    }
+    await fsp.rm(runtimeDir, { recursive: true, force: true });
+  }
+}
 
 describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
   let server: Server;
@@ -339,6 +380,48 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     expect(response['error']).toMatchObject({ code: -32602 });
   });
 
+  it('updates persisted organization in the selected workspace only', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440180';
+      await writeStoredSession(sessionId, '/ws-b');
+
+      const response = await sendWsRequest('/workspaces/secondary-id/acp', {
+        jsonrpc: '2.0',
+        id: 2,
+        method: '_qwen/session/update_organization',
+        params: { sessionId, isPinned: true },
+      });
+
+      expect(response['result']).toMatchObject({ sessionId, isPinned: true });
+      const listed = await sendWsRequest('/workspaces/secondary-id/acp', {
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'session/list',
+        params: { view: 'organized', group: 'pinned' },
+      });
+      expect(listed['result']).toMatchObject({
+        sessions: [expect.objectContaining({ sessionId, isPinned: true })],
+      });
+
+      const legacy = await sendWsRequest('/acp', {
+        jsonrpc: '2.0',
+        id: 4,
+        method: '_qwen/session/update_organization',
+        params: { sessionId, isPinned: false },
+      });
+      expect(legacy['error']).toMatchObject({ code: -32602 });
+
+      const secondarySnapshot =
+        await createSessionOrganizationService('/ws-b').readSnapshot();
+      const primarySnapshot =
+        await createSessionOrganizationService('/ws').readSnapshot();
+      expect(secondarySnapshot.sessions.get(sessionId)).toMatchObject({
+        isPinned: true,
+      });
+      expect(primarySnapshot.sessions.has(sessionId)).toBe(false);
+    });
+  });
+
   it('rejects an untrusted workspace with 403 untrusted_workspace', async () => {
     const res = await postInitialize('/workspaces/untrusted-id/acp');
     expect(res.status).toBe(403);
@@ -379,7 +462,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     expect(res.status).toBe(500);
   });
 
-  it('does not expose qualified HTTP or WS routes with one runtime', async () => {
+  it('exposes qualified HTTP and WS routes with one runtime', async () => {
     const primaryBridge = makeBridge();
     const registry = createWorkspaceRegistry([
       makeRuntime({
@@ -414,7 +497,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
           body: INITIALIZE,
         },
       );
-      expect(qualified.status).toBe(404);
+      expect(qualified.status).toBe(200);
 
       const upgradeStatus = await new Promise<number>((resolve) => {
         const ws = new WebSocket(
@@ -430,7 +513,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
         });
         ws.on('error', () => resolve(0));
       });
-      expect(upgradeStatus).not.toBe(101);
+      expect(upgradeStatus).toBe(101);
 
       const legacy = await fetch(`http://127.0.0.1:${singlePort}/acp`, {
         method: 'POST',
@@ -438,6 +521,25 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
         body: INITIALIZE,
       });
       expect(legacy.status).toBe(200);
+
+      registry.add(
+        makeRuntime({
+          id: 'dynamic-id',
+          cwd: '/dynamic',
+          primary: false,
+          trusted: true,
+          bridge: makeBridge(),
+        }),
+      );
+      const dynamic = await fetch(
+        `http://127.0.0.1:${singlePort}/workspaces/dynamic-id/acp`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: INITIALIZE,
+        },
+      );
+      expect(dynamic.status).toBe(200);
     } finally {
       singleHandle.dispose();
       singleServer.closeAllConnections?.();

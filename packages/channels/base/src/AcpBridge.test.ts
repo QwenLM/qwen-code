@@ -289,6 +289,41 @@ describe('AcpBridge', () => {
     );
   });
 
+  it('excludes nested subagent text from the final response', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Nested research report.' },
+            _meta: {
+              parentToolCallId: 'agent-call-1',
+              subagentType: 'Explore',
+            },
+          },
+        });
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Final answer.' },
+          },
+        });
+      }),
+    };
+
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
+      'Final answer.',
+    );
+  });
+
   it('returns only the final turn text after auto-approved tool calls', async () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',

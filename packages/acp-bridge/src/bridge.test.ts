@@ -4409,6 +4409,20 @@ describe('createAcpSessionBridge', () => {
 
       const aPromise = firstUserChunk(iterA);
       const bPromise = firstUserChunk(iterB);
+      const inputAnnotations = [
+        {
+          type: 'reference',
+          start: 0,
+          end: 7,
+          text: '@file/a',
+          reference: {
+            id: 'file:@file/a',
+            kind: 'file',
+            value: 'file/a',
+            serialized: '@file/a',
+          },
+        },
+      ];
 
       // Client A sends the prompt with its trusted clientId.
       await bridge.sendPrompt(
@@ -4416,6 +4430,7 @@ describe('createAcpSessionBridge', () => {
         {
           sessionId: session.sessionId,
           prompt: [{ type: 'text', text: 'hello from A' }],
+          _meta: { inputAnnotations, privateRequestId: 'hidden' },
         },
         undefined,
         { clientId: session.clientId },
@@ -4443,6 +4458,12 @@ describe('createAcpSessionBridge', () => {
         expect((update._meta as { source?: string })?.source).toBe(
           'bridge-echo',
         );
+        expect(
+          (update._meta as { inputAnnotations?: unknown })?.inputAnnotations,
+        ).toEqual(inputAnnotations);
+        expect(
+          (update._meta as { privateRequestId?: unknown })?.privateRequestId,
+        ).toBeUndefined();
       }
 
       abortA.abort();

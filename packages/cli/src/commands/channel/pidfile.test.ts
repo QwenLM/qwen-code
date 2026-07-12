@@ -178,6 +178,33 @@ describe('writeServiceInfo + readServiceInfo', () => {
     });
   });
 
+  it('round-trips multi-workspace worker metadata', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+    const workers = [
+      {
+        workspaceId: 'primary',
+        workspaceCwd: '/work/primary',
+        channels: ['telegram'],
+        workerPid: 8765,
+      },
+      {
+        workspaceId: 'secondary',
+        workspaceCwd: '/work/secondary',
+        channels: ['feishu'],
+      },
+    ];
+
+    writeServeServiceInfo({
+      channels: ['telegram', 'feishu'],
+      servePid: 4321,
+      workerPid: 8765,
+      workers,
+    });
+
+    expect(readServiceInfo()).toMatchObject({ workers });
+  });
+
   it('updates a matching serve-owned reservation with worker metadata', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     process.kill = vi.fn(() => true) as any;
@@ -382,6 +409,30 @@ describe('writeServiceInfo + readServiceInfo', () => {
       { pid: 1234, startedAt: 'not-a-date', channels: ['telegram'] },
       { pid: 1234, startedAt: new Date().toISOString(), channels: 'telegram' },
       { pid: 1234, startedAt: new Date().toISOString(), channels: [42] },
+      {
+        pid: 1234,
+        startedAt: new Date().toISOString(),
+        channels: [],
+        workers: 'invalid',
+      },
+      {
+        pid: 1234,
+        startedAt: new Date().toISOString(),
+        channels: [],
+        workers: [{}],
+      },
+      {
+        pid: 1234,
+        startedAt: new Date().toISOString(),
+        channels: [],
+        workers: [{ channels: [], workspaceId: 42 }],
+      },
+      {
+        pid: 1234,
+        startedAt: new Date().toISOString(),
+        channels: [],
+        workers: [{ channels: [], workerPid: 0 }],
+      },
     ];
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

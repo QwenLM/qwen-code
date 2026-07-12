@@ -120,6 +120,8 @@ interface CollectedRefs {
   nestedMedia: PartRef[];
 }
 
+export type PreserveReadFileResult = (filePath: string) => boolean;
+
 function refKey(r: PartRef): string {
   return `${r.contentIndex}:${r.partIndex}`;
 }
@@ -149,7 +151,10 @@ function hasNestedMedia(part: Part): boolean {
  * `toolResultsNumToKeep: 1` keeps 1 tool result AND 1 media item, not
  * 1 entry total across the combined list.
  */
-function collectCompactablePartRefs(history: Content[]): CollectedRefs {
+function collectCompactablePartRefs(
+  history: Content[],
+  preserveReadFileResult?: PreserveReadFileResult,
+): CollectedRefs {
   const tool: PartRef[] = [];
   const media: PartRef[] = [];
   const nestedMedia: PartRef[] = [];
@@ -174,7 +179,20 @@ function collectCompactablePartRefs(history: Content[]): CollectedRefs {
       }
     }
   }
-  return { tool, media, nestedMedia };
+  if (!preserveReadFileResult) {
+    return { tool, media, nestedMedia };
+  }
+
+  const preservedRefs = buildPreservedReadRefs(
+    history,
+    tool,
+    preserveReadFileResult,
+  );
+  return {
+    tool: tool.filter((ref) => !preservedRefs.has(refKey(ref))),
+    media,
+    nestedMedia,
+  };
 }
 
 // --- Helpers ---
@@ -310,6 +328,33 @@ function getFilePathsForResponse(
   return paths && paths.length > 0 ? [...new Set(paths)] : undefined;
 }
 
+function buildPreservedReadRefs(
+  history: Content[],
+  refs: PartRef[],
+  preserveReadFileResult: PreserveReadFileResult,
+): Set<string> {
+  const callIdToFilePath = buildCallIdToFilePath(history);
+  const preserved = new Set<string>();
+  for (const ref of refs) {
+    const part = getPart(history, ref);
+    if (
+      part?.functionResponse?.name !== ToolNames.READ_FILE ||
+      isErrorResponse(part)
+    ) {
+      continue;
+    }
+    const paths = getFilePathsForResponse(part, callIdToFilePath);
+    if (
+      paths &&
+      paths.length > 0 &&
+      paths.every((filePath) => preserveReadFileResult(filePath))
+    ) {
+      preserved.add(refKey(ref));
+    }
+  }
+  return preserved;
+}
+
 function buildKeptFilePaths(
   history: Content[],
   refs: PartRef[],
@@ -347,6 +392,7 @@ function planSizeBasedClearing(
   settings: ClearContextOnIdleSettings,
   keepRecent: number,
   pendingContent: Content | Content[] | undefined,
+  preserveReadFileResult?: PreserveReadFileResult,
 ): SizeClearPlan | null {
   const threshold = getToolResultsTotalCharsThreshold(settings);
   if (!Number.isFinite(threshold) || threshold < 0) {
@@ -373,10 +419,16 @@ function planSizeBasedClearing(
     return null;
   }
 
-  const keepToolRefs = buildKeepRefs(tool, keepRecent);
+  const preservedToolRefs = preserveReadFileResult
+    ? buildPreservedReadRefs(virtualHistory, tool, preserveReadFileResult)
+    : new Set<string>();
+  const compactableToolRefs = tool.filter(
+    (ref) => !preservedToolRefs.has(refKey(ref)),
+  );
+  const keepToolRefs = buildKeepRefs(compactableToolRefs, keepRecent);
   const clearRefs: PartRef[] = [];
   let remainingChars = totalChars;
-  for (const ref of tool) {
+  for (const ref of compactableToolRefs) {
     if (remainingChars <= threshold) break;
 
     const key = refKey(ref);
@@ -395,7 +447,7 @@ function planSizeBasedClearing(
 
   return {
     clearRefs,
-    toolRefs: tool,
+    toolRefs: compactableToolRefs,
     keepToolRefs,
     toolResultCharsBefore: totalChars,
     toolResultCharsAfter: remainingChars - pendingChars,
@@ -412,6 +464,7 @@ export interface MicrocompactOptions {
   force?: boolean;
   sizeOnly?: boolean;
   pendingContent?: Content | Content[];
+  preserveReadFileResult?: PreserveReadFileResult;
 }
 
 export interface MicrocompactMeta {
@@ -494,7 +547,10 @@ export function microcompactHistory(
   }
 
   if (triggerReason === 'force' || triggerReason === 'idle') {
-    ({ tool, media, nestedMedia } = collectCompactablePartRefs(history));
+    ({ tool, media, nestedMedia } = collectCompactablePartRefs(
+      history,
+      opts?.preserveReadFileResult,
+    ));
     // Each kind gets its own keepRecent budget: setting
     // `toolResultsNumToKeep: 1` keeps 1 of each, not 1 total. This
     // matches what users typically expect when they configure the
@@ -514,6 +570,7 @@ export function microcompactHistory(
       settings,
       keepRecent,
       pending,
+      opts?.preserveReadFileResult,
     );
     if (!sizePlan) {
       return { history };

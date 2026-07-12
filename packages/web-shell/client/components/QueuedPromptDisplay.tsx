@@ -5,6 +5,7 @@
  */
 
 import type { PromptImage } from '../adapters/promptTypes';
+import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import deleteIconUrl from '../assets/icons/delete.svg';
 import editIconUrl from '../assets/icons/edit.svg';
 import insertIconUrl from '../assets/icons/insert.svg';
@@ -21,6 +22,7 @@ export interface QueuedPrompt {
   sessionId?: string;
   text: string;
   images?: PromptImage[];
+  inputAnnotations?: DaemonInputAnnotation[];
   onComplete?: () => void;
   serverPromptId?: string;
   serverState?: 'submitting' | 'queued' | 'running';

@@ -48,6 +48,14 @@ const TARGET_PREBUILD_DIR = new Map([
   ['win-x64', 'win32-x64'],
 ]);
 
+const TARGET_CLIPBOARD_PACKAGE = new Map([
+  ['darwin-arm64', '@teddyzhu/clipboard-darwin-arm64'],
+  ['darwin-x64', '@teddyzhu/clipboard-darwin-x64'],
+  ['linux-arm64', '@teddyzhu/clipboard-linux-arm64-gnu'],
+  ['linux-x64', '@teddyzhu/clipboard-linux-x64-gnu'],
+  ['win-x64', '@teddyzhu/clipboard-win32-x64-msvc'],
+]);
+
 const DIST_REQUIRED_PATHS = [
   'cli.js',
   'cli-entry.js',
@@ -135,6 +143,7 @@ async function main() {
 
     copyRuntimeAssets(packageRoot, outDir);
     copyNativeAddon(packageRoot, target);
+    copyClipboardAddon(packageRoot, target, args.nativeModulesDir);
     extractNodeArchive(nodeArchive, runtimeExtractDir);
     const nodeDir = path.join(packageRoot, 'node');
     copyExtractedNode(runtimeExtractDir, nodeDir);
@@ -172,6 +181,7 @@ function isMainModule() {
 function parseArgs(argv) {
   const args = {
     help: false,
+    nativeModulesDir: undefined,
     outDir: undefined,
     nodeArchive: undefined,
     skipChecksums: false,
@@ -192,6 +202,10 @@ function parseArgs(argv) {
         break;
       case '--node-archive':
         args.nodeArchive = readOptionValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--native-modules-dir':
+        args.nativeModulesDir = readOptionValue(argv, index, arg);
         index += 1;
         break;
       case '--out-dir':
@@ -229,11 +243,14 @@ Usage:
 
 Options:
   --target TARGET         One of: ${Array.from(TARGETS.keys()).join(', ')}
-  --node-archive PATH    Downloaded Node.js runtime archive.
-  --out-dir DIR          Output directory. Defaults to dist/standalone.
-  --version VERSION      Qwen Code version. Defaults to package.json version.
-  --skip-checksums       Do not update SHA256SUMS. Used by release packaging.
-  -h, --help             Show this help message.`);
+  --node-archive PATH     Downloaded Node.js runtime archive.
+  --native-modules-dir DIR
+                          Staged native node_modules directory. Missing
+                          clipboard packages are fatal when this is supplied.
+  --out-dir DIR           Output directory. Defaults to dist/standalone.
+  --version VERSION       Qwen Code version. Defaults to package.json version.
+  --skip-checksums        Do not update SHA256SUMS. Used by release packaging.
+  -h, --help              Show this help message.`);
 }
 
 function assertRequiredInputs() {
@@ -271,8 +288,8 @@ function copyRuntimeAssets(packageRoot, outDir) {
   fs.mkdirSync(libDir, { recursive: true });
 
   for (const entry of fs.readdirSync(distDir)) {
-    // Standalone rebuilds a clean, target-trimmed lib/node_modules via
-    // copyNativeAddon(). If a local dist/node_modules exists from older
+    // Standalone rebuilds a clean, target-trimmed lib/node_modules via the
+    // native addon copy steps. If a local dist/node_modules exists from older
     // packaging output or manual testing, copying it would drag in unrelated
     // packages or every platform's native prebuild.
     if (
@@ -374,6 +391,53 @@ function copyNativeAddon(packageRoot, target) {
   fs.cpSync(nodeGypBuildSrc, path.join(modulesDir, 'node-gyp-build'), copyOpts);
 
   assertNoSymlinks(modulesDir, 'Bundled native addon still contains symlinks.');
+}
+
+function copyClipboardAddon(packageRoot, target, nativeModulesDir) {
+  const modulesSrc = path.resolve(
+    nativeModulesDir || path.join(rootDir, 'node_modules'),
+  );
+  const nativePackage = TARGET_CLIPBOARD_PACKAGE.get(target);
+  const packageNames = ['@teddyzhu/clipboard', nativePackage];
+  const packageSources = packageNames.map((packageName) =>
+    path.join(modulesSrc, packageName),
+  );
+  const nativePackageSrc = packageSources[1];
+  const hasRequiredFiles =
+    packageSources.every((packageSrc) =>
+      fs.existsSync(path.join(packageSrc, 'package.json')),
+    ) &&
+    fs.readdirSync(nativePackageSrc).some((entry) => entry.endsWith('.node'));
+
+  if (!hasRequiredFiles) {
+    const message = `clipboard packages for ${target} are missing from ${modulesSrc}`;
+    if (nativeModulesDir) {
+      fail(`Required ${message}`);
+    }
+    console.warn(
+      `[standalone] ${message}; bundling without clipboard image support.`,
+    );
+    return;
+  }
+
+  const modulesDest = path.join(packageRoot, 'lib', 'node_modules');
+  const copyOpts = {
+    recursive: true,
+    dereference: true,
+    verbatimSymlinks: false,
+  };
+  for (let index = 0; index < packageNames.length; index += 1) {
+    fs.cpSync(
+      packageSources[index],
+      path.join(modulesDest, packageNames[index]),
+      copyOpts,
+    );
+  }
+
+  assertNoSymlinks(
+    modulesDest,
+    'Bundled clipboard addon still contains symlinks.',
+  );
 }
 
 function hasNativePrebuild(prebuildDir) {
@@ -733,4 +797,4 @@ function fail(message) {
   throw new Error(`Error: ${message}`);
 }
 
-export { TARGETS, writeSha256Sums };
+export { TARGET_CLIPBOARD_PACKAGE, TARGETS, writeSha256Sums };

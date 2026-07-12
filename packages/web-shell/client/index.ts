@@ -28,6 +28,7 @@ export type {
   UserMessageContentParser,
   AssistantTurnFooterRenderer,
   ComposerToolbarStartRenderer,
+  ComposerHeaderRenderer,
   ComposerToolbarRightRenderer,
   WelcomeFooterRenderer,
   WebShellAtItemRenderInfo,

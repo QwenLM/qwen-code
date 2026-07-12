@@ -9,6 +9,7 @@ import {
   createDebugLogger,
   isDebugLoggingDegraded,
   resetDebugLoggingState,
+  runWithoutDebugLogSession,
   setDebugLogSession,
   type DebugLogSession,
 } from './debugLogger.js';
@@ -77,6 +78,24 @@ describe('debugLogger', () => {
       logger.warn('test');
       logger.error('test');
       expect(fs.appendFile).not.toHaveBeenCalled();
+    });
+
+    it('suppresses the global debug session within an async context', async () => {
+      const logger = createDebugLogger('READ_ONLY');
+
+      await runWithoutDebugLogSession(async () => {
+        logger.warn('hidden before await');
+        await Promise.resolve();
+        logger.error('hidden after await');
+      });
+      await vi.runAllTimersAsync();
+
+      expect(fs.mkdir).not.toHaveBeenCalled();
+      expect(fs.appendFile).not.toHaveBeenCalled();
+
+      logger.info('visible outside context');
+      await vi.runAllTimersAsync();
+      expect(fs.appendFile).toHaveBeenCalledOnce();
     });
 
     it('writes debug log without trace context when telemetry context is unset', async () => {

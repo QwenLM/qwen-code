@@ -19,6 +19,8 @@ export default {
 
   'User level': '用户级',
   'Project level': '项目级',
+  'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.':
+    '剪贴板图片粘贴不可用，因为原生剪贴板模块加载失败。请重新安装 Qwen Code，或改用 npm 安装方式。',
 
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)

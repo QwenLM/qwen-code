@@ -2260,6 +2260,22 @@ export class Config {
                 stopHookCount = stopResult.allOutputs.length;
                 break;
               }
+              case 'MessageDisplay': {
+                const messageDisplayResult =
+                  await hookSystem.fireMessageDisplayEvent(
+                    (input['message_id'] as string) || '',
+                    (input['displayed_text'] as string) || '',
+                    (input['is_final'] as boolean) || false,
+                    signal,
+                  );
+                result = messageDisplayResult.finalOutput
+                  ? createHookOutput(
+                      'MessageDisplay',
+                      messageDisplayResult.finalOutput,
+                    )
+                  : undefined;
+                break;
+              }
               case 'PreToolUse': {
                 result = await hookSystem.firePreToolUseEvent(
                   (input['tool_name'] as string) || '',
