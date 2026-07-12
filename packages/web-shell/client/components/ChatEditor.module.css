@@ -955,6 +955,23 @@
   .toolbarLeft .toolBtnText {
     display: none;
   }
+
+  /* Keep the leading controls on a single row on narrow screens. The branch
+     chip yields space first — truncating via its ellipsis, down to just the
+     icon if needed — instead of pushing the mode/model buttons onto a second
+     line and making the composer taller. */
+  .toolbarLeft {
+    flex-wrap: nowrap;
+  }
+
+  .toolbarLeft .dropdownWrapper {
+    flex: 0 0 auto;
+  }
+
+  .gitBranchChip {
+    max-width: 140px;
+    flex-shrink: 1;
+  }
 }
 
 .dropdownWrapper {
