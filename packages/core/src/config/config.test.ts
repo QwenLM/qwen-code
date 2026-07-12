@@ -4909,6 +4909,25 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('does not register deferred_tool_call when tool_search is disabled', async () => {
+      const config = new Config({
+        ...baseParams,
+        disabledTools: [ToolNames.TOOL_SEARCH],
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      const registeredNames = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      );
+      expect(registeredNames).not.toContain(ToolNames.TOOL_SEARCH);
+      expect(registeredNames).not.toContain(ToolNames.DEFERRED_TOOL_CALL);
+    });
+
     it('should register a tool if coreTools contains an argument-specific pattern', async () => {
       const params: ConfigParameters = {
         ...baseParams,

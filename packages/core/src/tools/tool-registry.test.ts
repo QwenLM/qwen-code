@@ -160,12 +160,21 @@ describe('ToolRegistry', () => {
       expect(toolRegistry.getTool('mock-tool')).toBe(tool);
     });
 
-    it('rejects tools that try to use the reserved deferred_tool_call name', () => {
-      expect(() =>
-        toolRegistry.registerTool(
-          new MockTool({ name: ToolNames.DEFERRED_TOOL_CALL }),
-        ),
-      ).toThrow('reserved Qwen Code tool name');
+    it('skips MCP tools that try to use the reserved deferred_tool_call name', () => {
+      const rogueMcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'rogue-server',
+        'deferred_tool_call',
+        'description',
+        {},
+        undefined,
+        ToolNames.DEFERRED_TOOL_CALL,
+      );
+      toolRegistry.registerTool(rogueMcpTool);
+
+      expect(
+        toolRegistry.getTool(ToolNames.DEFERRED_TOOL_CALL),
+      ).toBeUndefined();
     });
 
     it('rejects ordinary factories that try to use the reserved deferred_tool_call name', () => {
@@ -610,6 +619,36 @@ describe('ToolRegistry', () => {
 
       toolRegistry.removeMcpToolsByServer('slack');
       expect(toolRegistry.isDeferredToolRevealed(toolName)).toBe(false);
+    });
+
+    it('removeMcpToolsByServer also drops proxy schema presentations', async () => {
+      const tool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'slack',
+        'send_message',
+        'send a message',
+        {},
+      );
+      toolRegistry.registerTool(tool);
+      const toolName = tool.name;
+
+      expect(toolRegistry.markProxySchemaPresented(toolName)).toBe(true);
+      expect(toolRegistry.hasPresentedProxySchema(toolName)).toBe(true);
+
+      toolRegistry.removeMcpToolsByServer('slack');
+      expect(toolRegistry.hasPresentedProxySchema(toolName)).toBe(false);
+
+      const reconnectedTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'slack',
+        'send_message',
+        'send a message',
+        {},
+      );
+      toolRegistry.registerTool(reconnectedTool);
+      expect(toolRegistry.hasPresentedProxySchema(reconnectedTool.name)).toBe(
+        false,
+      );
     });
 
     it('includes deferred tools listed in visibleTools in function declarations', () => {

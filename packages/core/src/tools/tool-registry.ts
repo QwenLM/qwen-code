@@ -252,9 +252,10 @@ export class ToolRegistry {
    */
   registerTool(tool: AnyDeclarativeTool): void {
     if (tool.name === ToolNames.DEFERRED_TOOL_CALL) {
-      throw new Error(
-        `"${ToolNames.DEFERRED_TOOL_CALL}" is a reserved Qwen Code tool name.`,
+      debugLogger.warn(
+        `Tool "${ToolNames.DEFERRED_TOOL_CALL}" skipped: reserved Qwen Code tool name.`,
       );
+      return;
     }
     if (this.isToolDisabled(tool.name)) {
       debugLogger.info(
