@@ -12,6 +12,7 @@ import {
   tokenizeArgs,
   type ParsedReviewArgs,
 } from './parse-args.js';
+import { reviewCommand } from '../review.js';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 
 // The handler reads the raw string from fd 0 (`--stdin`) and writes the
@@ -349,6 +350,26 @@ describe('parseReviewArgs — repeated --effort warnings state what is actually 
   });
 });
 
+describe('parseReviewArgs — case and single-dash disposal (bug: guessed where one meaning was plausible)', () => {
+  it('accepts --effort High and --effort=HIGH, keeping the verdict lowercase', () => {
+    const spaced = parseReviewArgs('6711 --effort High');
+    expect(spaced.effort).toBe('high');
+    expect(spaced.effortSource).toBe('explicit');
+    expect(spaced.warnings).toHaveLength(0);
+
+    const eq = parseReviewArgs('src/foo.ts --effort=MEDIUM');
+    expect(eq.effort).toBe('medium');
+    expect(eq.effortSource).toBe('explicit');
+  });
+
+  it('a single-dash token is an unknown flag, never the target (bug: -c became a file target and demoted the PR number)', () => {
+    const got = parseReviewArgs('-c 6711');
+    expect(got.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(got.unknownFlags).toEqual(['-c']);
+    expect(got.extraTokens).toEqual([]);
+  });
+});
+
 /**
  * Wiring-level tests: the real yargs command, not the pure function. The
  * pure-function table cannot see transport failures — the documented
@@ -431,5 +452,37 @@ describe('parseArgsCommand wiring', () => {
     expect(got.target).toEqual({ type: 'pr-number', number: 6711 });
     expect(got.comment).toEqual({ requested: true, effective: true });
     expect(written).toBe(String(vi.mocked(writeStdoutLine).mock.calls[0][0]));
+  });
+
+  // The real CLI nests this command under `review`, which changes what
+  // yargs puts in argv._ (['review', 'parse-args'] instead of
+  // ['parse-args']) — the smuggle guard once read that command path as
+  // extra arguments and rejected every real invocation, while these
+  // top-level tests kept passing.
+  describe('nested under the real review command', () => {
+    async function runNested(tokens: string[]): Promise<void> {
+      await yargs(tokens)
+        .command(reviewCommand)
+        .strict()
+        .exitProcess(false)
+        .fail((msg, err) => {
+          throw err ?? new Error(msg ?? 'yargs failure');
+        })
+        .parseAsync();
+    }
+
+    it('the documented stdin invocation works through `review parse-args`', async () => {
+      fsState.stdin = '6711 --comment\n';
+      await runNested(['review', 'parse-args', '--stdin']);
+      const got = printedVerdict();
+      expect(got.target).toEqual({ type: 'pr-number', number: 6711 });
+      expect(got.effort).toBe('high');
+    });
+
+    it('the post--- smuggle is still refused when nested', async () => {
+      await expect(
+        runNested(['review', 'parse-args', '--', '--effort low']),
+      ).rejects.toThrow(/--stdin/);
+    });
   });
 });

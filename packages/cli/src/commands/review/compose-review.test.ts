@@ -398,6 +398,70 @@ describe('composeReview — input validation (the producer is a model that omits
     expect(() => composeReview({} as ComposeReviewInput)).toThrow(/modelId/);
     expect(() => composeReview({ modelId: '  ' })).toThrow(/modelId/);
   });
+
+  it('rejects stringified booleans — "false" is truthy and once flipped events and published false warnings', () => {
+    expect(() =>
+      composeReview(
+        base({
+          criticalsInline: 1,
+          presubmit: {
+            downgradeRequestChanges: 'false' as unknown as boolean,
+          },
+        }),
+      ),
+    ).toThrow(/presubmit\.downgradeRequestChanges/);
+    expect(() =>
+      composeReview(
+        base({
+          presubmit: { downgradeApprove: 'false' as unknown as boolean },
+        }),
+      ),
+    ).toThrow(/presubmit\.downgradeApprove/);
+    expect(() =>
+      composeReview(
+        base({ contextUnavailable: 'false' as unknown as boolean }),
+      ),
+    ).toThrow(/contextUnavailable/);
+  });
+
+  it('rejects a scalar downgradeReasons and a non-object presubmit with the field name (was a raw .join TypeError)', () => {
+    expect(() =>
+      composeReview(
+        base({
+          presubmit: {
+            downgradeApprove: true,
+            downgradeReasons: 'self-PR' as unknown as string[],
+          },
+        }),
+      ),
+    ).toThrow(/presubmit\.downgradeReasons/);
+    expect(() =>
+      composeReview(
+        base({
+          presubmit: ['x'] as unknown as ComposeReviewInput['presubmit'],
+        }),
+      ),
+    ).toThrow(/presubmit/);
+  });
+});
+
+describe('composeReview — presubmit permission gates certification even when no event changed', () => {
+  it('a Suggestion-only review under downgradeApprove never certifies "no blockers" (the event was already COMMENT)', () => {
+    const r = composeReview(
+      base({
+        suggestionsInline: 1,
+        presubmit: {
+          downgradeApprove: true,
+          downgradeReasons: ['CI failing'],
+        },
+      }),
+    );
+    expect(r.event).toBe('COMMENT');
+    expect(r.downgraded).toBe(false);
+    expect(r.body).not.toContain('Downgraded');
+    expect(r.body).toContain('Reviewed.');
+    expect(r.body).not.toContain('no blockers');
+  });
 });
 
 describe('composeReviewCommand handler (the CLI glue)', () => {

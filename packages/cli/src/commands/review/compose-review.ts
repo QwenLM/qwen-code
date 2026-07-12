@@ -108,6 +108,20 @@ function toStringList(value: unknown, field: string): string[] {
   return value as string[];
 }
 
+// Booleans get the same boundary treatment as the counts: the JSON is
+// model-written, and a stringified `"false"` is truthy — it once stood to
+// fire the downgrade sentence on a review that was never downgraded, and to
+// publish the diff-only warning on a run that fetched its context fine.
+function toBool(value: unknown, field: string): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value !== 'boolean') {
+    throw new TypeError(
+      `compose-review: ${field} must be a boolean, got ${JSON.stringify(value)}`,
+    );
+  }
+  return value;
+}
+
 export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   const criticalsInline = toCount(input.criticalsInline, 'criticalsInline');
   const suggestionsInline = toCount(
@@ -131,8 +145,29 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     input.unreviewedDimensions,
     'unreviewedDimensions',
   );
-  const contextUnavailable = input.contextUnavailable ?? false;
-  const presubmit = input.presubmit ?? {};
+  const contextUnavailable = toBool(
+    input.contextUnavailable,
+    'contextUnavailable',
+  );
+  const presubmitRaw: unknown = input.presubmit ?? {};
+  if (typeof presubmitRaw !== 'object' || Array.isArray(presubmitRaw)) {
+    throw new TypeError(
+      `compose-review: presubmit must be an object, got ${JSON.stringify(presubmitRaw)}`,
+    );
+  }
+  const presubmitObj = presubmitRaw as Record<string, unknown>;
+  const downgradeApprove = toBool(
+    presubmitObj['downgradeApprove'],
+    'presubmit.downgradeApprove',
+  );
+  const downgradeRequestChanges = toBool(
+    presubmitObj['downgradeRequestChanges'],
+    'presubmit.downgradeRequestChanges',
+  );
+  const downgradeReasons = toStringList(
+    presubmitObj['downgradeReasons'],
+    'presubmit.downgradeReasons',
+  );
   const modelId: unknown = input.modelId;
   if (typeof modelId !== 'string' || modelId.trim() === '') {
     throw new TypeError(
@@ -167,11 +202,11 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // they name is the one on the table.
   let downgraded = false;
   let downgradedFrom: 'Approve' | 'Request changes' | null = null;
-  if (event === 'APPROVE' && presubmit.downgradeApprove) {
+  if (event === 'APPROVE' && downgradeApprove) {
     event = 'COMMENT';
     downgraded = true;
     downgradedFrom = 'Approve';
-  } else if (event === 'REQUEST_CHANGES' && presubmit.downgradeRequestChanges) {
+  } else if (event === 'REQUEST_CHANGES' && downgradeRequestChanges) {
     event = 'COMMENT';
     downgraded = true;
     downgradedFrom = 'Request changes';
@@ -257,7 +292,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
 
   // 1. Downgrade sentence (only when a presubmit flag changed the event).
   if (downgraded && downgradedFrom) {
-    const reasons = (presubmit.downgradeReasons ?? []).join('; ');
+    const reasons = downgradeReasons.join('; ');
     clauses.push(
       `⚠️ Downgraded from ${downgradedFrom} to Comment${reasons ? `: ${reasons}` : ''}.`,
     );
@@ -269,11 +304,15 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     clauses.push(contextUnavailableClause);
   } else {
     // 3. Opener — certifying only when the review can actually certify it.
-    // A downgraded event never certifies: the downgrade sentence names a
-    // reason (failing CI, self-PR) that sits in the same body, and
-    // "Downgraded: CI failing. Reviewed — no blockers." contradicts itself.
+    // Certification is keyed to whether presubmit PERMITS it, not to
+    // whether presubmit changed the event: a Suggestion-only review is
+    // already COMMENT, so failing CI or a self-PR flips no event — but a
+    // body that certifies "no blockers" over failing CI, or a self-review
+    // certifying its own PR, misstates authority all the same.
     const canCertify =
       !downgraded &&
+      !downgradeApprove &&
+      !downgradeRequestChanges &&
       c === 0 &&
       cannotTell.length === 0 &&
       uncoverable.length === 0 &&

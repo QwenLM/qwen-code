@@ -290,6 +290,87 @@ describe('buildMarkdown — review bodies and replied Criticals', () => {
   });
 });
 
+describe('buildMarkdown — truncation refs are copy-runnable with real coordinates', () => {
+  const meta = {
+    title: 'T',
+    body: '',
+    author: { login: 'a' },
+    baseRefName: 'main',
+    headRefName: 'b',
+    headRefOid: 'sha',
+    additions: 1,
+    deletions: 1,
+    changedFiles: 1,
+    state: 'OPEN',
+  } as PrMetadata;
+
+  it('a cut open-root snippet and a cut issue comment name their exact fetch (no {owner}/{n} placeholders)', () => {
+    const inline = [
+      {
+        id: 21,
+        user: { login: 'r' },
+        path: 'a.ts',
+        line: 1,
+        body: `Must fix: ${'x'.repeat(400)}`,
+      },
+    ];
+    const issue = [{ id: 31, user: { login: 'r' }, body: 'y'.repeat(400) }];
+    const md = buildMarkdown(
+      '6711',
+      'QwenLM/qwen-code',
+      meta,
+      inline,
+      issue,
+      [],
+    );
+    // A markerless blocker past the snippet cap is recoverable only through
+    // the named fetch — and the emitted command must not need filling in.
+    expect(md).toContain('gh api repos/QwenLM/qwen-code/pulls/comments/21');
+    expect(md).toContain('gh api repos/QwenLM/qwen-code/issues/comments/31');
+    expect(md).not.toContain('{owner}');
+  });
+
+  it('a capped review body names the filled-in review fetch', () => {
+    const md = buildMarkdown(
+      '6711',
+      'QwenLM/qwen-code',
+      meta,
+      [],
+      [],
+      [
+        {
+          id: 7,
+          user: { login: 'rev' },
+          state: 'CHANGES_REQUESTED',
+          body: `**[Critical]** ${'z'.repeat(9000)}`,
+        },
+      ],
+    );
+    expect(md).toContain('gh api repos/QwenLM/qwen-code/pulls/6711/reviews/7');
+  });
+
+  it('a settled replied thread cut past the snippet cap names both comment ids', () => {
+    const inline = [
+      {
+        id: 41,
+        user: { login: 'r' },
+        path: 'b.ts',
+        line: 2,
+        body: `**[Suggestion]** ${'w'.repeat(400)}`,
+      },
+      {
+        id: 42,
+        user: { login: 'a' },
+        in_reply_to_id: 41,
+        body: `ok ${'v'.repeat(400)}`,
+      },
+    ];
+    const md = buildMarkdown('1', 'o/r', meta, inline, [], []);
+    expect(md).toContain('gh api repos/o/r/pulls/comments/41');
+    expect(md).toContain('gh api repos/o/r/pulls/comments/42');
+  });
+});
+
 describe('classifyInlineThreads', () => {
   it('is the single walk both the markdown and the stdout count use', () => {
     const inline: RawComment[] = [

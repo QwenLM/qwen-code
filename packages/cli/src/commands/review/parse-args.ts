@@ -66,12 +66,24 @@ const EFFORT_LEVELS: ReadonlySet<string> = new Set(['low', 'medium', 'high']);
 const PR_URL_RE =
   /^(https?):\/\/([A-Za-z0-9.-]+(?::\d+)?)\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/(\d+)(?=$|[/?#])/i;
 
-function isEffort(value: string): value is ReviewEffort {
-  return EFFORT_LEVELS.has(value);
+/**
+ * Case-insensitive: `--effort High` has exactly one plausible meaning, and
+ * classifying `High` as a file-path target (as a case-sensitive match once
+ * did) sends the caller off to stat a file that does not exist. The verdict
+ * always carries the lowercase form.
+ */
+function asEffort(value: string): ReviewEffort | null {
+  const lower = value.toLowerCase();
+  return EFFORT_LEVELS.has(lower) ? (lower as ReviewEffort) : null;
 }
 
+/**
+ * Single-dash tokens count as flags too: `-c` is never a plausible review
+ * target, and classifying it as a file path demoted the real target the
+ * user typed right after it into `extraTokens`.
+ */
 function isFlag(token: string): boolean {
-  return token.startsWith('--');
+  return token.length > 1 && token.startsWith('-');
 }
 
 function isPureInteger(token: string): boolean {
@@ -185,16 +197,18 @@ export function parseReviewArgs(raw: string): ParsedReviewArgs {
       if (token.includes('=')) {
         // `--effort=<value>`: self-contained; never consumes a second token.
         const value = token.slice(token.indexOf('=') + 1);
-        if (isEffort(value)) {
-          explicitEffort = value;
+        const effortValue = asEffort(value);
+        if (effortValue !== null) {
+          explicitEffort = effortValue;
         } else {
           effortIssues.push({ kind: 'invalid-eq', value });
         }
         continue;
       }
       const next = i + 1 < tokens.length ? tokens[i + 1] : undefined;
-      if (next !== undefined && isEffort(next)) {
-        explicitEffort = next;
+      const nextEffort = next !== undefined ? asEffort(next) : null;
+      if (nextEffort !== null) {
+        explicitEffort = nextEffort;
         i++;
         continue;
       }
@@ -375,10 +389,23 @@ export const parseArgsCommand: CommandModule = {
     // Tokens after a `--` separator never bind to the [raw] positional —
     // they stay in argv._ — so `parse-args -- '--effort low'` used to
     // return a silently wrong local/default verdict. Refuse instead.
-    const unbound = (argv['_'] as unknown[]).slice(1);
+    // argv._ also carries the command path itself, whose shape depends on
+    // nesting (`['parse-args']` standalone, `['review', 'parse-args']`
+    // under the real CLI) — skip that prefix, or the guard rejects every
+    // real nested invocation.
+    const positionals = (argv['_'] as unknown[]).map(String);
+    let commandPrefix = 0;
+    while (
+      commandPrefix < positionals.length &&
+      (positionals[commandPrefix] === 'review' ||
+        positionals[commandPrefix] === 'parse-args')
+    ) {
+      commandPrefix++;
+    }
+    const unbound = positionals.slice(commandPrefix);
     if (unbound.length > 0) {
       throw new Error(
-        `parse-args: unexpected extra argument(s) ${JSON.stringify(unbound)} — a raw string that begins with a flag must be passed via --stdin (heredoc), not after --`,
+        `parse-args: unexpected extra argument(s) ${JSON.stringify(unbound)} — a raw string that begins with a flag must be passed via --stdin, not after --`,
       );
     }
     const rawStr = stdin
