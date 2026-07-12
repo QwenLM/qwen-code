@@ -7538,4 +7538,25 @@ describe('parallel subAgent text interleaving fix', () => {
 
     expect(events).toEqual([]);
   });
+
+  it('normalizes malformed recording snapshots as debug events', () => {
+    for (const data of [
+      { recordingDegraded: false },
+      { sessionId: 's-1', recordingDegraded: 'yes' },
+    ]) {
+      expect(
+        normalizeDaemonEvent({
+          id: 83,
+          v: 1,
+          type: 'session_snapshot',
+          data,
+        }),
+      ).toMatchObject([
+        {
+          type: 'debug',
+          text: expect.stringContaining('malformed recording snapshot'),
+        },
+      ]);
+    }
+  });
 });

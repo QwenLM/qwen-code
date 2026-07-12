@@ -7572,6 +7572,45 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it('clears a degraded notice after an authoritative healthy snapshot', async () => {
+    const session = createMockSession({
+      events: async function* recordingRecoveredEvents() {
+        yield {
+          id: 14,
+          v: 1,
+          type: 'session_recording_degraded',
+          data: { sessionId: 'recording-session', reason: 'write_failed' },
+        };
+        yield {
+          id: 15,
+          v: 1,
+          type: 'session_snapshot',
+          data: {
+            sessionId: 'recording-session',
+            recordingDegraded: false,
+          },
+        };
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let notices: readonly DaemonSessionNotice[] = [];
+
+    function Harness() {
+      notices = useDaemonSessionNotices().notices;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(notices).toEqual([]);
+  });
+
   it('allows a later degraded snapshot to restore a dismissed notice', async () => {
     const releaseSnapshot = createDeferred<void>();
     const session = createMockSession({

@@ -94,6 +94,42 @@ function makeClient(fileSystem?: BridgeFileSystem): BridgeClient {
   );
 }
 
+describe('BridgeClient — recording degradation ownership', () => {
+  it('drops a stale channel notification for another channel session', async () => {
+    const sessionId = 'session-owned-by-new-channel';
+    const publish = vi.fn();
+    const foreignEntry = {
+      sessionId,
+      events: { publish },
+      recordingDegraded: false,
+    };
+    const noPermissionFlow = () => {
+      throw new Error('test: permission flow should not run');
+    };
+    const client = new BridgeClient(
+      ((id: string) => (id === sessionId ? foreignEntry : undefined)) as never,
+      (() => undefined) as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => false,
+    );
+
+    await client.extNotification('qwen/notify/session/recording-degraded', {
+      v: 1,
+      sessionId,
+      reason: 'write_failed',
+    });
+
+    expect(foreignEntry.recordingDegraded).toBe(false);
+    expect(publish).not.toHaveBeenCalled();
+  });
+});
+
 describe('BridgeClient — BridgeFileSystem injection seam (F1 step 5)', () => {
   describe('writeTextFile', () => {
     it('delegates to the injected fileSystem.writeText, bypassing the inline fs proxy', async () => {

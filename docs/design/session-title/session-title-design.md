@@ -49,7 +49,7 @@ reason-specific error on failure.
 │  │  recordAssistantTurn()   │                                           │
 │  │     │                    │                                           │
 │  │     ↓                    │                                           │
-│  │  maybeTriggerAutoTitle() │── 6 guards ──→ IIFE(autoTitleController)  │
+│  │  maybeTriggerAutoTitle() │── guards ────→ IIFE(autoTitleController)  │
 │  │     │                    │                       │                   │
 │  │     └── resume hydrate   │                       ↓                   │
 │  │         via              │          tryGenerateSessionTitle          │

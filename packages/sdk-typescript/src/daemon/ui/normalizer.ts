@@ -143,11 +143,17 @@ export function normalizeDaemonEvent(
       ];
     }
     case 'session_snapshot': {
+      if (!isRecord(event.data) || !getString(event.data, 'sessionId')) {
+        return fallbackDebug(event, base, 'malformed recording snapshot');
+      }
+      const recordingDegraded = event.data['recordingDegraded'];
       if (
-        isRecord(event.data) &&
-        event.data['recordingDegraded'] === true &&
-        getString(event.data, 'sessionId')
+        recordingDegraded !== undefined &&
+        typeof recordingDegraded !== 'boolean'
       ) {
+        return fallbackDebug(event, base, 'malformed recording snapshot');
+      }
+      if (recordingDegraded === true) {
         return [
           {
             ...base,

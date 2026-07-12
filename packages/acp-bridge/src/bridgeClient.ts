@@ -1223,6 +1223,12 @@ export class BridgeClient implements Client {
         return;
       }
       const entry = this.resolveEntry(sessionId);
+      if (entry && !this.ownsSession(sessionId)) {
+        writeStderrLine(
+          `[demux] session=${sessionId} type=session_recording_degraded action=dropped reason=session_not_owned`,
+        );
+        return;
+      }
       if (entry) entry.recordingDegraded = true;
       this.publishExtNotification(sessionId, 'session_recording_degraded', {
         sessionId,

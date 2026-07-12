@@ -8647,8 +8647,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   it('marks the artifact snapshot unavailable when rewind flush fails', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
+    const privateError =
+      "EACCES: permission denied, open '/private/transcripts/session.jsonl'";
     innerConfig.getChatRecordingService = vi.fn().mockReturnValue({
-      flush: vi.fn().mockRejectedValue(new Error('flush failed')),
+      flush: vi.fn().mockRejectedValue(new Error(privateError)),
     });
 
     const agentPromise = runAcpAgent(
@@ -8672,9 +8674,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     expect(response).toMatchObject({
       success: true,
-      artifactSnapshotUnavailable: 'flush failed',
+      artifactSnapshotUnavailable: 'artifact snapshot unavailable after rewind',
     });
     expect(response).not.toHaveProperty('artifactSnapshot');
+    expect(JSON.stringify(response)).not.toContain('/private/transcripts');
+    expect(JSON.stringify(response)).not.toContain('EACCES');
 
     mockConnectionState.resolve();
     await agentPromise;

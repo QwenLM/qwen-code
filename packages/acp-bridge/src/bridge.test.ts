@@ -10883,12 +10883,23 @@ describe('createAcpSessionBridge', () => {
       const abort = new AbortController();
       const iter = bridge.subscribeEvents(session.sessionId, {
         signal: abort.signal,
+        lastEventId: 0,
         snapshot: true,
       });
-      const first = await iter[Symbol.asyncIterator]().next();
-      expect(first.value?.type).toBe('session_snapshot');
+      const collected: BridgeEvent[] = [];
+      for await (const event of iter) {
+        collected.push(event);
+        if (event.type === 'session_snapshot') break;
+      }
       expect(
-        (first.value?.data as { recordingDegraded: boolean }).recordingDegraded,
+        collected.some((event) => event.type === 'session_recording_degraded'),
+      ).toBe(false);
+      const snapshot = collected.find(
+        (event) => event.type === 'session_snapshot',
+      );
+      expect(snapshot?.type).toBe('session_snapshot');
+      expect(
+        (snapshot?.data as { recordingDegraded: boolean }).recordingDegraded,
       ).toBe(false);
       abort.abort();
       await bridge.shutdown();

@@ -757,6 +757,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     replayEvent,
                     replayUiEvents,
                     addNotice,
+                    dismissNotice,
                   ),
                 );
                 if (replayEvent.type === 'turn_complete') {
@@ -1042,6 +1043,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 event,
                 normalizedUiEvents,
                 addNotice,
+                dismissNotice,
               );
               if (event.type === 'state_resync_required') {
                 const reason =
@@ -1526,6 +1528,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     shouldDeferInitialSessionCreation,
     clearNotices,
     addNotice,
+    dismissNotice,
   ]);
 
   useEffect(() => {
@@ -1910,7 +1913,18 @@ function filterDaemonUiEventsForTranscript(
   sourceEvent: DaemonEvent,
   events: DaemonUiEvent[],
   addNotice: AddDaemonSessionNotice,
+  dismissNotice: (id: string) => void,
 ): DaemonUiEvent[] {
+  if (
+    sourceEvent.type === 'session_snapshot' &&
+    isRecord(sourceEvent.data) &&
+    sourceEvent.data['recordingDegraded'] === false
+  ) {
+    const sessionId = getString(sourceEvent.data, 'sessionId');
+    if (sessionId) {
+      dismissNotice(`daemon.session_recording_degraded:${sessionId}`);
+    }
+  }
   const filtered: DaemonUiEvent[] = [];
   for (const event of events) {
     if (event.type !== 'error') {

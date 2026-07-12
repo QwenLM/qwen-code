@@ -7979,12 +7979,11 @@ class QwenAgent implements Agent {
             };
           }
         } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
           artifactSnapshotUnavailable =
-            err instanceof Error ? err.message : String(err);
+            'artifact snapshot unavailable after rewind';
           debugLogger.warn(
-            `[ACP] Failed to rebuild artifact snapshot after rewind for session=${sessionId}: ${
-              artifactSnapshotUnavailable
-            }`,
+            `[ACP] Failed to rebuild artifact snapshot after rewind for session=${sessionId}: ${reason}`,
           );
         }
 

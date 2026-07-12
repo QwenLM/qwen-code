@@ -79,7 +79,6 @@ export async function settleChatRecording(
       debugLogger.debug('Timed out waiting for chat recording to flush');
       resolve('timeout');
     }, CHAT_RECORDING_SETTLE_TIMEOUT_MS);
-    timer.unref?.();
   });
   const settled = recorder.flush().then(
     () => 'settled' as const,

@@ -75,6 +75,7 @@ import { SkillManager } from '../skills/skill-manager.js';
 import { HookSystem } from '../hooks/index.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 import type { ChatRecordingFailureEvent } from '../services/chatRecordingService.js';
+import * as jsonl from '../utils/jsonl-utils.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -2049,6 +2050,29 @@ describe('Server Config (config.ts)', () => {
 
       expect(first).toHaveBeenCalledTimes(1);
       expect(second).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps a subscription wired to a replacement session recorder', async () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const listener = vi.fn();
+      config.onChatRecordingFailure(listener);
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      config.startNewSession(sessionId);
+      const error = new Error('replacement write failed');
+      const writeLine = vi
+        .spyOn(jsonl, 'writeLine')
+        .mockRejectedValueOnce(error);
+
+      try {
+        const recorder = config.getChatRecordingService()!;
+        recorder.recordUserMessage([{ text: 'new session' }]);
+        await expect(recorder.flush()).rejects.toBe(error);
+
+        expect(listener).toHaveBeenCalledOnce();
+        expect(listener).toHaveBeenCalledWith({ sessionId, error });
+      } finally {
+        writeLine.mockRestore();
+      }
     });
 
     it('isolates synchronous throws and asynchronous listener rejections', async () => {
