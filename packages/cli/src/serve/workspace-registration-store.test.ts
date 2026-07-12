@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { tmpdir } from 'node:os';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   WorkspaceRegistrationStore,
   WorkspaceRegistrationStoreError,
@@ -240,5 +240,45 @@ describe('WorkspaceRegistrationStore', () => {
 
     await expect(store.add('/work/secondary')).resolves.toBe(true);
     await expect(fs.stat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('does not report failure after a committed write when lock release fails', async () => {
+    const home = await tempHome();
+    vi.resetModules();
+    vi.doMock('proper-lockfile', () => ({
+      default: {
+        lock: vi.fn(async () => async () => {
+          throw new Error('release failed');
+        }),
+      },
+    }));
+    try {
+      const storeModule = await import('./workspace-registration-store.js');
+      const store = new storeModule.WorkspaceRegistrationStore(
+        '/work/primary',
+        home,
+      );
+      await fs.mkdir(path.dirname(store.filePath), { recursive: true });
+      await fs.writeFile(
+        store.filePath,
+        JSON.stringify({
+          schemaVersion: 1,
+          primaryWorkspace: '/work/primary',
+          workspaces: ['/work/secondary'],
+        }),
+      );
+
+      await expect(
+        store.removeByIds([
+          storeModule.workspaceRegistrationId('/work/secondary'),
+        ]),
+      ).resolves.toBe(1);
+      expect(
+        JSON.parse(await fs.readFile(store.filePath, 'utf8')),
+      ).toMatchObject({ workspaces: [] });
+    } finally {
+      vi.doUnmock('proper-lockfile');
+      vi.resetModules();
+    }
   });
 });

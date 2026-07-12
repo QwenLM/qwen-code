@@ -343,4 +343,51 @@ describe('createWorkspaceRegistry', () => {
     registry.add(replacement);
     expect(registry.getByWorkspaceCwd('/work/secondary')).toBe(replacement);
   });
+
+  it('excludes draining owners from indexed and fallback session resolution', () => {
+    const primary = makeRuntime('/work/primary', {
+      workspaceId: 'ws-primary',
+      primary: true,
+      bridge: bridgeWithSummary((sessionId: string) => {
+        throw new SessionNotFoundError(sessionId);
+      }),
+    });
+    const secondary = makeRuntime('/work/secondary', {
+      workspaceId: 'ws-secondary',
+      removable: true,
+      bridge: bridgeWithSummary((sessionId: string) => ({
+        sessionId,
+        workspaceCwd: '/work/secondary',
+      })),
+    });
+    const sessionOwnerIndex = createWorkspaceSessionOwnerIndex();
+    sessionOwnerIndex.register('indexed', secondary.workspaceCwd);
+    const registry = createWorkspaceRegistry([primary, secondary], {
+      sessionOwnerIndex,
+    });
+
+    expect(registry.beginDrain(secondary)).toBe(true);
+    expect(registry.resolveLiveSessionOwner('indexed')).toEqual({
+      kind: 'not_found',
+    });
+    expect(registry.resolveLiveSessionOwner('fallback')).toEqual({
+      kind: 'not_found',
+    });
+
+    registry.cancelDrain(secondary);
+    expect(registry.resolveLiveSessionOwner('indexed')).toEqual({
+      kind: 'found',
+      runtime: secondary,
+    });
+    expect(registry.resolveLiveSessionOwner('fallback')).toEqual({
+      kind: 'found',
+      runtime: secondary,
+    });
+    expect(sessionOwnerIndex.getWorkspaceCwds('indexed')).toEqual([
+      secondary.workspaceCwd,
+    ]);
+    expect(sessionOwnerIndex.getWorkspaceCwds('fallback')).toEqual([
+      secondary.workspaceCwd,
+    ]);
+  });
 });

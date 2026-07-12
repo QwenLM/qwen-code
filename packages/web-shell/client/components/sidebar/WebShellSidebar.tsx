@@ -1031,7 +1031,13 @@ export function WebShellSidebar({
     const candidate = workspaceRemovalCandidate;
     if (!candidate || workspaceRemovalSubmitting) return;
     const force = workspaceRemovalActivity !== null;
-    if (force && connection.workspaceCwd === candidate.cwd) return;
+    if (
+      force &&
+      connection.sessionId &&
+      connection.workspaceCwd === candidate.cwd
+    ) {
+      return;
+    }
     setWorkspaceRemovalSubmitting(true);
     try {
       await workspaceActions.removeWorkspace(candidate.id, { force });
@@ -1071,44 +1077,9 @@ export function WebShellSidebar({
                 return;
               }
             } catch {
-              // Retry the authoritative mutation below.
+              // Keep polling; the original removal continues server-side.
             }
             await new Promise((resolve) => window.setTimeout(resolve, 250));
-            try {
-              await workspaceActions.removeWorkspace(candidate.id, { force });
-              await reconcileRemovedWorkspace(candidate);
-              return;
-            } catch (retryError) {
-              if (!(retryError instanceof DaemonHttpError)) {
-                setWorkspaceRemovalRemoteInProgress(false);
-                onError(retryError, t('sidebar.removeWorkspaceError'));
-                return;
-              }
-              const retryBody = retryError.body as
-                | {
-                    code?: unknown;
-                    activity?: DaemonWorkspaceRemovalActivity;
-                  }
-                | undefined;
-              if (retryBody?.code === 'workspace_mismatch') {
-                await reconcileRemovedWorkspace(candidate);
-                return;
-              }
-              if (
-                retryError.status === 409 &&
-                retryBody?.code === 'workspace_busy' &&
-                retryBody.activity
-              ) {
-                setWorkspaceRemovalRemoteInProgress(false);
-                setWorkspaceRemovalActivity(retryBody.activity);
-                return;
-              }
-              if (retryBody?.code !== 'workspace_removal_in_progress') {
-                setWorkspaceRemovalRemoteInProgress(false);
-                onError(retryError, t('sidebar.removeWorkspaceError'));
-                return;
-              }
-            }
           }
           setWorkspaceRemovalRemoteInProgress(false);
           onError(
@@ -1123,6 +1094,7 @@ export function WebShellSidebar({
       setWorkspaceRemovalSubmitting(false);
     }
   }, [
+    connection.sessionId,
     connection.workspaceCwd,
     onError,
     reconcileRemovedWorkspace,
@@ -2710,6 +2682,7 @@ export function WebShellSidebar({
                 </ul>
               )}
               {workspaceRemovalActivity &&
+                connection.sessionId &&
                 connection.workspaceCwd === workspaceRemovalCandidate.cwd && (
                   <p className={styles.confirmDescription}>
                     {t('sidebar.removeWorkspaceCurrentSession')}
@@ -2740,6 +2713,7 @@ export function WebShellSidebar({
                     workspaceRemovalSubmitting ||
                     workspaceRemovalRemoteInProgress ||
                     (workspaceRemovalActivity !== null &&
+                      Boolean(connection.sessionId) &&
                       connection.workspaceCwd === workspaceRemovalCandidate.cwd)
                   }
                   onClick={() => void confirmWorkspaceRemoval()}

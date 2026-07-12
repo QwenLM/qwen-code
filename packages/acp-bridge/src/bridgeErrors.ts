@@ -532,6 +532,7 @@ export class SessionBusyError extends Error {
 }
 
 export class WorkspaceDrainingError extends Error {
+  readonly code = 'workspace_draining';
   readonly workspaceCwd: string;
   constructor(workspaceCwd: string) {
     super(`Workspace ${JSON.stringify(workspaceCwd)} is being removed`);

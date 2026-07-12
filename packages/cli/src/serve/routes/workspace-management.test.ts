@@ -218,6 +218,50 @@ describe('POST /workspaces', () => {
     expect(res.body).not.toHaveProperty('persisted');
   });
 
+  it('does not double-count a runtime while its addition hook is pending', async () => {
+    const firstDir = await mkdtemp(join(REAL_DIR, 'qws-capacity-a-'));
+    const secondDir = await mkdtemp(join(REAL_DIR, 'qws-capacity-b-'));
+    try {
+      const registry = createMockRegistry(
+        Array.from({ length: 23 }, (_, index) =>
+          makeRuntime(`/registered-${index}`),
+        ),
+      );
+      let releaseAddition!: () => void;
+      const additionPending = new Promise<void>((resolve) => {
+        releaseAddition = resolve;
+      });
+      const runtimeRemoval = createRemovalController();
+      runtimeRemoval.runtimeAdded = vi
+        .fn()
+        .mockReturnValueOnce(additionPending)
+        .mockResolvedValue(undefined);
+      const { app } = createApp({
+        workspaceRegistry: registry,
+        runtimeRemoval,
+      });
+
+      const first = request(app).post('/workspaces').send({ cwd: firstDir });
+      const firstResult = first.then((response) => response);
+      await vi.waitFor(() => {
+        expect(runtimeRemoval.runtimeAdded).toHaveBeenCalledOnce();
+      });
+      const second = await request(app)
+        .post('/workspaces')
+        .send({ cwd: secondDir });
+      releaseAddition();
+
+      expect((await firstResult).status).toBe(201);
+      expect(second.status).toBe(201);
+      expect(registry.listManaged()).toHaveLength(25);
+    } finally {
+      await Promise.all([
+        rm(firstDir, { recursive: true, force: true }),
+        rm(secondDir, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
   it('keeps a registered runtime when an optional adapter fails to attach', async () => {
     const registry = createMockRegistry([makeRuntime('/some-other-dir')]);
     const runtimeRemoval = createRemovalController();
@@ -688,6 +732,7 @@ describe('DELETE /workspaces/:workspace', () => {
       'workspace_removed',
     );
     expect(runtimeRemoval.cancelDrain).not.toHaveBeenCalled();
+    expect(acpHandle.cancelWorkspaceDrain).not.toHaveBeenCalled();
     expect(runtime.bridge.killAllSync).toHaveBeenCalledOnce();
     expect(deps.workspaceRegistry.cancelDrain).not.toHaveBeenCalled();
     expect(

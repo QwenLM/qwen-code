@@ -170,6 +170,9 @@ export function publicErrorMessage(
       ? 'Workspace memory remember queue is full.'
       : 'Workspace memory task queue is full.';
   }
+  if (code === 'workspace_draining') {
+    return 'Workspace runtime is being removed.';
+  }
   if (
     code === 'remember_timeout' ||
     code === 'forget_timeout' ||
@@ -181,6 +184,7 @@ export function publicErrorMessage(
 }
 
 export function publicErrorStatus(code: string): number {
+  if (code === 'workspace_draining') return 503;
   if (code === 'remember_queue_full') return 429;
   if (code === 'managed_memory_unavailable') return 409;
   return 500;
@@ -254,7 +258,7 @@ export class WorkspaceRememberTaskLane {
   }
 
   private failRunningTaskAfterRemoval(task: WorkspaceMemoryTaskRecord): void {
-    if (!this.disposed || task.status === 'failed') return;
+    if (!this.disposed) return;
     task.status = 'failed';
     delete task.result;
     task.updatedAt = nowIso();

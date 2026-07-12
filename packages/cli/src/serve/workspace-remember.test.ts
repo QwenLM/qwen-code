@@ -687,7 +687,7 @@ describe('workspace memory remember routes', () => {
     });
     expect(lane.pendingCount()).toBe(1);
 
-    first.resolve({ filesTouched: [], touchedScopes: [] });
+    first.reject(new Error('bridge closed'));
     await waitFor(() => lane.get(running.taskId)?.status === 'failed');
     expect(lane.get(running.taskId)).toMatchObject({
       error: { code: 'workspace_removed' },
@@ -984,6 +984,24 @@ describe('workspace memory remember routes', () => {
       'Failed to extract workspace memory error code:',
       { extractionError: 'code getter failed' },
     );
+  });
+
+  it('maps a draining workspace to a stable 503 response', async () => {
+    const bridge = buildBridgeStub({});
+    const lane = new WorkspaceRememberTaskLane(bridge, '/work/draining');
+    lane.beginDrain();
+    const app = buildApp(bridge, undefined, lane);
+
+    await request(app)
+      .post('/workspace/memory/remember')
+      .send({ content: 'remember me' })
+      .expect(503)
+      .expect((res) => {
+        expect(res.body).toEqual({
+          error: 'Workspace runtime is being removed.',
+          code: 'workspace_draining',
+        });
+      });
   });
 
   it('records bridge failures with stable public error codes', async () => {

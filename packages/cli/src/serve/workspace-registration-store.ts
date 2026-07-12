@@ -366,21 +366,34 @@ export class WorkspaceRegistrationStore {
     const { atomicWriteFile } = await import('@qwen-code/qwen-code-core');
     return withInProcessLock(this.filePath, async () => {
       const lock = await acquireFileLock(this.filePath);
+      let committed = false;
+      let changed = false;
+      let workError: unknown;
       try {
         const snapshot = await this.read();
         lock.assertOwned();
-        const changed = mutate(snapshot);
-        if (!changed) return false;
-        lock.assertOwned();
-        await atomicWriteFile(
-          this.filePath,
-          `${JSON.stringify(snapshot, null, 2)}\n`,
-          { mode: 0o600, forceMode: true, noFollow: true },
-        );
-        return true;
-      } finally {
-        await lock.release();
+        changed = mutate(snapshot);
+        if (changed) {
+          lock.assertOwned();
+          await atomicWriteFile(
+            this.filePath,
+            `${JSON.stringify(snapshot, null, 2)}\n`,
+            { mode: 0o600, forceMode: true, noFollow: true },
+          );
+          committed = true;
+        }
+      } catch (err) {
+        workError = err;
       }
+      let releaseError: unknown;
+      try {
+        await lock.release();
+      } catch (err) {
+        if (!committed) releaseError = err;
+      }
+      if (releaseError) throw releaseError;
+      if (workError) throw workError;
+      return changed;
     });
   }
 }

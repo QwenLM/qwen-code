@@ -341,12 +341,13 @@ export function registerWorkspaceManagementRoutes(
         }
       }
 
-      if (
-        workspaceRegistry.listManaged().length +
-          [...inFlight.values()].filter((operation) => operation === 'addition')
-            .length >=
-        MAX_REGISTERED_WORKSPACES
-      ) {
+      const projectedWorkspaceCwds = new Set(
+        workspaceRegistry.listManaged().map((runtime) => runtime.workspaceCwd),
+      );
+      for (const [cwd, operation] of inFlight) {
+        if (operation === 'addition') projectedWorkspaceCwds.add(cwd);
+      }
+      if (projectedWorkspaceCwds.size >= MAX_REGISTERED_WORKSPACES) {
         res.status(409).json({
           error: 'Workspace registration limit reached',
           code: 'workspace_limit_reached',

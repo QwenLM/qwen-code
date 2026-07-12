@@ -25,7 +25,7 @@ import type {
 } from '../workspace-registry.js';
 import {
   resolveManagedWorkspaceRuntimeFromParam,
-  resolveRegisteredWorkspaceRuntimeByPathSelector,
+  resolveManagedWorkspaceRuntimeByPathSelector,
 } from '../workspace-route-runtime.js';
 import {
   ConnectionRegistry,
@@ -40,6 +40,7 @@ import {
   RPC,
   error as rpcError,
   isRequest,
+  isResponse,
   logSafe,
   parseInbound,
 } from './json-rpc.js';
@@ -432,13 +433,14 @@ interface RuntimeAcpMount {
   /** Whether this mount is the daemon's primary runtime. CDP-tunnel claims and
    *  chrome-devtools MCP wiring are primary-only. */
   readonly primary: boolean;
-  readonly workspaceId: string | null;
   readonly workspaceCwd: string;
   readonly routeLabel: string;
   readonly rateLimitScope: string;
   readonly registry: ConnectionRegistry;
   readonly dispatcher: AcpDispatcher;
   readonly workspaceRememberLane: WorkspaceRememberTaskLane;
+  readonly webSockets: Set<WebSocket>;
+  readonly pendingWebSockets: Set<WebSocket>;
   draining: boolean;
   readonly ensureChromeDevToolsMcpRegistered: (
     localPort: number | undefined,
@@ -722,13 +724,14 @@ export function mountAcpHttp(
   // by URL path and delegate to these same helpers.
   const primaryMount: RuntimeAcpMount = {
     primary: true,
-    workspaceId: opts.workspaceRegistry?.primary.workspaceId ?? null,
     workspaceCwd: opts.boundWorkspace,
     routeLabel: logSafe(path),
     rateLimitScope: opts.workspaceRegistry?.primary.workspaceId ?? 'primary',
     registry,
     dispatcher,
     workspaceRememberLane: opts.workspaceRememberLane,
+    webSockets: new Set(),
+    pendingWebSockets: new Set(),
     draining: false,
     ensureChromeDevToolsMcpRegistered,
     removeChromeDevToolsMcpIfUnused,
@@ -1153,13 +1156,14 @@ export function mountAcpHttp(
     secondaryDispatcherRef.current = secondaryDispatcher;
     return {
       primary: false,
-      workspaceId: rt.workspaceId,
       workspaceCwd: rt.workspaceCwd,
       routeLabel: `/workspaces/${logSafe(rt.workspaceId)}/acp`,
       rateLimitScope: rt.workspaceId,
       registry: secondaryRegistry,
       dispatcher: secondaryDispatcher,
       workspaceRememberLane,
+      webSockets: new Set(),
+      pendingWebSockets: new Set(),
       draining: false,
       ensureChromeDevToolsMcpRegistered: () => {},
       removeChromeDevToolsMcpIfUnused: () => {},
@@ -1466,11 +1470,8 @@ export function mountAcpHttp(
         }
         const wsRegistry = opts.workspaceRegistry;
         const rt = wsRegistry
-          ? (wsRegistry.getByWorkspaceId(selector) ??
-            resolveRegisteredWorkspaceRuntimeByPathSelector(
-              wsRegistry,
-              selector,
-            ))
+          ? (wsRegistry.getManagedByWorkspaceId(selector) ??
+            resolveManagedWorkspaceRuntimeByPathSelector(wsRegistry, selector))
           : undefined;
         if (!rt) {
           logReject(`workspace-mismatch ${logSafe(selector)}`);
@@ -1507,6 +1508,8 @@ export function mountAcpHttp(
           extraRoute.onConnection(ws, req);
           return;
         }
+        activeMount.webSockets.add(ws);
+        activeMount.pendingWebSockets.add(ws);
         let initialized = false;
         const initTimer = setTimeout(() => {
           if (!initialized) {
@@ -1547,6 +1550,8 @@ export function mountAcpHttp(
         // the socket goes away. WsStream's onClose handles ACP teardown.
         ws.on('close', () => {
           clearTimeout(initTimer);
+          activeMount.webSockets.delete(ws);
+          activeMount.pendingWebSockets.delete(ws);
           if (clientMcp) {
             void clientMcp.dispose('WS closed').catch(() => {});
             clientMcp = undefined;
@@ -1605,7 +1610,15 @@ export function mountAcpHttp(
             return;
           }
 
-          if (activeMount.draining) {
+          const frameType =
+            parsed !== null && typeof parsed === 'object'
+              ? (parsed as { type?: unknown }).type
+              : undefined;
+          const correlationOnly =
+            isResponse(parsed) ||
+            frameType === 'mcp_message' ||
+            isCdpInboundFrameType(frameType);
+          if (activeMount.draining && !correlationOnly) {
             ws.send(
               JSON.stringify(
                 rpcError(
@@ -1881,6 +1894,7 @@ export function mountAcpHttp(
             );
 
             initialized = true;
+            activeMount.pendingWebSockets.delete(ws);
             clearTimeout(initTimer);
             connRef = conn;
             writeStderrLine(
@@ -2074,7 +2088,8 @@ export function mountAcpHttp(
     getWorkspaceActivity: (workspaceId) => {
       const mount = secondaryMounts.get(workspaceId);
       return {
-        acpConnections: mount?.registry.size ?? 0,
+        acpConnections:
+          (mount?.registry.size ?? 0) + (mount?.pendingWebSockets.size ?? 0),
         memoryTasks: mount?.workspaceRememberLane.pendingCount() ?? 0,
       };
     },
@@ -2086,6 +2101,9 @@ export function mountAcpHttp(
       const mount = secondaryMounts.get(workspaceId);
       if (!mount) return;
       mount.workspaceRememberLane.dispose();
+      for (const ws of mount.webSockets) {
+        ws.close(1012, 'Workspace removed');
+      }
       mount.registry.dispose();
       secondaryMounts.delete(workspaceId);
     },

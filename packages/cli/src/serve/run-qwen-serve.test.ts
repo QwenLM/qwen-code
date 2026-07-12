@@ -592,14 +592,52 @@ describe('runQwenServe telemetry validation', () => {
         reason: 'workspace_removed',
       });
 
-      const after = (await (
-        await fetch(`${handle.url}/capabilities`, { headers })
-      ).json()) as { workspaces?: Array<{ id: string }> };
+      const afterResponse = await fetch(`${handle.url}/capabilities`, {
+        headers,
+      });
+      expect(afterResponse.status).toBe(200);
+      const after = (await afterResponse.json()) as {
+        workspaces?: Array<{ id: string }>;
+      };
       expect(
         (after.workspaces ?? []).some(
           (workspace) => workspace.id === removable!.id,
         ),
       ).toBe(false);
+
+      const readded = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ cwd: secondary, persist: true }),
+      });
+      expect(readded.status).toBe(201);
+      let releaseRemoval!: (count: number) => void;
+      removeByIds.mockImplementationOnce(
+        () =>
+          new Promise<number>((resolve) => {
+            releaseRemoval = resolve;
+          }),
+      );
+      const pendingRemoval = fetch(
+        `${handle.url}/workspaces/${encodeURIComponent(removable!.id)}`,
+        {
+          method: 'DELETE',
+          headers,
+          body: JSON.stringify({ force: true }),
+        },
+      );
+      await vi.waitFor(() => expect(removeByIds).toHaveBeenCalledTimes(2));
+      let closeSettled = false;
+      const closing = handle.close().then(() => {
+        closeSettled = true;
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(closeSettled).toBe(false);
+
+      releaseRemoval(1);
+      expect((await pendingRemoval).status).toBe(200);
+      await closing;
+      expect(closeSettled).toBe(true);
     } finally {
       await handle.close();
     }
