@@ -3589,6 +3589,44 @@ describe('DaemonClient', () => {
       expect(pollSignal?.aborted).toBe(true);
     });
 
+    it('supports an unbounded operation timeout', async () => {
+      let pollSignal: AbortSignal | null | undefined;
+      const { fetch } = recordingFetch(
+        (request) =>
+          new Promise<Response>((_resolve, reject) => {
+            pollSignal = request.signal;
+            request.signal?.addEventListener(
+              'abort',
+              () => reject(request.signal?.reason),
+              { once: true },
+            );
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 0,
+      });
+      const controller = new AbortController();
+      const reason = new Error('stop unbounded wait');
+      const outcome = client
+        .waitForExtensionOperation(
+          { accepted: true, operationId: 'op-1' },
+          { timeoutMs: Number.POSITIVE_INFINITY, signal: controller.signal },
+        )
+        .catch((error: unknown) => error);
+
+      try {
+        await vi.waitFor(() => expect(pollSignal).toBeDefined());
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(pollSignal?.aborted).toBe(false);
+        controller.abort(reason);
+        await expect(outcome).resolves.toBe(reason);
+      } finally {
+        controller.abort(reason);
+      }
+    });
+
     it('routes global extension methods through /extensions/*', async () => {
       const { fetch, calls } = recordingFetch((req) => {
         if (req.url === 'http://daemon/extensions') {

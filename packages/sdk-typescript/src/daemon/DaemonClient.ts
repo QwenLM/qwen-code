@@ -211,6 +211,7 @@ const DEFAULT_SESSION_LIST_PAGE_SIZE = 20;
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
 const VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS = 65_000;
 const GITHUB_SETUP_DEFAULT_TIMEOUT_MS = 90_000;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 // Keep in sync with acp-bridge bridge.ts and CLI serve/server.ts.
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 // Server deadline + headroom so the client never races the daemon's own budget.
@@ -1125,6 +1126,7 @@ export class DaemonClient {
   ): Promise<ExtensionOperationStatus> {
     const pollIntervalMs = options.pollIntervalMs ?? 1_000;
     const timeoutMs = options.timeoutMs ?? 10 * 60_000;
+    const hasDeadline = timeoutMs !== Number.POSITIVE_INFINITY;
     const deadline = Date.now() + timeoutMs;
     const timeoutError = () =>
       new Error(
@@ -1133,29 +1135,54 @@ export class DaemonClient {
     for (;;) {
       options.signal?.throwIfAborted();
       const pollBudgetMs = deadline - Date.now();
-      if (pollBudgetMs <= 0) {
+      if (pollBudgetMs <= 0 || Number.isNaN(pollBudgetMs)) {
         throw timeoutError();
       }
-      const deadlineController = new AbortController();
-      const pollSignal = options.signal
-        ? composeAbortSignals([options.signal, deadlineController.signal])
-        : deadlineController.signal;
-      let deadlineTimer: ReturnType<typeof setTimeout>;
-      const deadlinePromise = new Promise<never>((_, reject) => {
-        deadlineTimer = setTimeout(() => {
-          const error = timeoutError();
-          reject(error);
-          deadlineController.abort(error);
-        }, pollBudgetMs);
-      });
       let operation: ExtensionOperationStatus;
-      try {
-        operation = await Promise.race([
-          this.extensionOperation(handle.operationId, pollSignal),
-          deadlinePromise,
-        ]);
-      } finally {
-        clearTimeout(deadlineTimer!);
+      if (!hasDeadline) {
+        operation = await this.extensionOperation(
+          handle.operationId,
+          options.signal,
+        );
+      } else {
+        const deadlineController = new AbortController();
+        const pollSignal = options.signal
+          ? composeAbortSignals([options.signal, deadlineController.signal])
+          : deadlineController.signal;
+        let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+        const deadlinePromise = new Promise<never>((_, reject) => {
+          const expire = () => {
+            const error = timeoutError();
+            reject(error);
+            deadlineController.abort(error);
+          };
+          const schedule = () => {
+            const remainingMs = deadline - Date.now();
+            if (remainingMs <= 0) {
+              expire();
+              return;
+            }
+            deadlineTimer = setTimeout(
+              () => {
+                if (Date.now() >= deadline) {
+                  expire();
+                } else {
+                  schedule();
+                }
+              },
+              Math.min(remainingMs, MAX_TIMER_DELAY_MS),
+            );
+          };
+          schedule();
+        });
+        try {
+          operation = await Promise.race([
+            this.extensionOperation(handle.operationId, pollSignal),
+            deadlinePromise,
+          ]);
+        } finally {
+          if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+        }
       }
       if (operation.status !== 'queued' && operation.status !== 'running') {
         return operation;
