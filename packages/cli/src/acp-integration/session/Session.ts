@@ -246,6 +246,7 @@ type RunToolResult = {
   repeatedDuplicateProviderToolCall?: boolean;
   loopDetected?: boolean;
   memoryWriteCandidates?: MemoryWriteCandidate[];
+  deferredToolPresentations?: string[];
 };
 
 type DaemonToolLoopState = {
@@ -4232,9 +4233,16 @@ export class Session implements SessionContext {
       }
     };
     const memoryWriteCandidates: MemoryWriteCandidate[] = [];
+    const deferredToolPresentations: string[] = [];
     const collectMemoryWriteCandidates = (result: RunToolResult): void => {
       if (result.memoryWriteCandidates) {
         memoryWriteCandidates.push(...result.memoryWriteCandidates);
+      }
+    };
+    const collectToolResultMetadata = (result: RunToolResult): void => {
+      collectMemoryWriteCandidates(result);
+      if (result.deferredToolPresentations) {
+        deferredToolPresentations.push(...result.deferredToolPresentations);
       }
     };
     const refreshMemoryIfNeeded = async (): Promise<void> => {
@@ -4374,8 +4382,8 @@ export class Session implements SessionContext {
       return results;
     };
 
-    const parts: Part[] = [];
-    try {
+    const buildRunToolResult = async (): Promise<RunToolResult> => {
+      const parts: Part[] = [];
       for (const batch of batches) {
         if (batch.kind === 'duplicate') {
           await emitDuplicateBatch(batch);
@@ -4415,7 +4423,7 @@ export class Session implements SessionContext {
           let shouldStopForLoop = false;
           for (const r of results) {
             parts.push(...r.parts);
-            collectMemoryWriteCandidates(r);
+            collectToolResultMetadata(r);
             shouldStop ||= r.stopAfterPermissionCancel;
             shouldStopForLoop ||= r.loopDetected === true;
           }
@@ -4430,6 +4438,7 @@ export class Session implements SessionContext {
               stopAfterPermissionCancel: false,
               loopDetected: true,
               memoryWriteCandidates,
+              deferredToolPresentations,
             };
           }
           if (shouldStop) {
@@ -4442,6 +4451,7 @@ export class Session implements SessionContext {
               stopAfterPermissionCancel: true,
               repeatedDuplicateProviderToolCall: false,
               memoryWriteCandidates,
+              deferredToolPresentations,
             };
           }
         } else {
@@ -4455,7 +4465,7 @@ export class Session implements SessionContext {
               recordSkippedToolCall,
             );
             parts.push(...r.parts);
-            collectMemoryWriteCandidates(r);
+            collectToolResultMetadata(r);
             if (r.loopDetected) {
               await appendSkippedAfter(parts, fc, LOOP_DETECTED_SKIP_MESSAGE);
               return {
@@ -4463,6 +4473,7 @@ export class Session implements SessionContext {
                 stopAfterPermissionCancel: false,
                 loopDetected: true,
                 memoryWriteCandidates,
+                deferredToolPresentations,
               };
             }
             if (r.stopAfterPermissionCancel) {
@@ -4472,6 +4483,7 @@ export class Session implements SessionContext {
                 stopAfterPermissionCancel: true,
                 repeatedDuplicateProviderToolCall: false,
                 memoryWriteCandidates,
+                deferredToolPresentations,
               };
             }
           }
@@ -4482,9 +4494,28 @@ export class Session implements SessionContext {
         stopAfterPermissionCancel: false,
         repeatedDuplicateProviderToolCall: false,
         memoryWriteCandidates,
+        deferredToolPresentations,
       };
-    } finally {
+    };
+
+    let result: RunToolResult;
+    try {
+      result = await buildRunToolResult();
+    } catch (error) {
       await refreshMemoryIfNeeded();
+      throw error;
+    }
+    await refreshMemoryIfNeeded();
+    this.commitDeferredToolPresentations(
+      result.deferredToolPresentations ?? [],
+    );
+    return result;
+  }
+
+  private commitDeferredToolPresentations(names: readonly string[]): void {
+    const toolRegistry = this.config.getToolRegistry();
+    for (const name of names) {
+      toolRegistry.markProxySchemaPresented(name);
     }
   }
 
@@ -5458,12 +5489,6 @@ export class Session implements SessionContext {
                 : undefined,
               errorType: toolResult.error?.type,
             });
-          if (succeeded) {
-            for (const name of toolResult.deferredToolPresentations ?? []) {
-              toolRegistry.markProxySchemaPresented(name);
-            }
-          }
-
           spanSuccess = succeeded;
           if (toolResult.error) {
             spanError = toolResult.error.message;
@@ -5483,6 +5508,9 @@ export class Session implements SessionContext {
                     },
                   ]
                 : undefined,
+            deferredToolPresentations: succeeded
+              ? toolResult.deferredToolPresentations
+              : undefined,
           };
         } catch (e) {
           // Ensure cleanup on error

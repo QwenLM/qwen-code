@@ -1192,6 +1192,96 @@ describe('CoreToolScheduler', () => {
     expect(presentedProxySchemas.has(ToolNames.CRON_CREATE)).toBe(true);
   });
 
+  it('does not let same-batch tool_search self-authorize deferred_tool_call', async () => {
+    const presentedProxySchemas = new Set<string>();
+    const cronExecute = vi.fn().mockResolvedValue({
+      llmContent: 'cron created',
+      returnDisplay: 'cron created',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.TOOL_SEARCH,
+        new MockTool({
+          name: ToolNames.TOOL_SEARCH,
+          execute: vi.fn().mockResolvedValue({
+            llmContent: '<functions>...</functions>',
+            returnDisplay: 'Loaded 1 tool(s)',
+            deferredToolPresentations: [ToolNames.CRON_CREATE],
+          }),
+        }),
+      ],
+      [
+        ToolNames.CRON_CREATE,
+        new MockTool({
+          name: ToolNames.CRON_CREATE,
+          shouldDefer: true,
+          execute: cronExecute,
+        }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        presentedProxySchemas,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'tool-search',
+          name: ToolNames.TOOL_SEARCH,
+          args: { query: 'cron' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-search',
+        },
+        {
+          callId: 'proxy-same-batch',
+          name: ToolNames.DEFERRED_TOOL_CALL,
+          args: {
+            name: ToolNames.CRON_CREATE,
+            arguments: { schedule: '0 9 * * *' },
+          },
+          isClientInitiated: false,
+          prompt_id: 'prompt-proxy',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(cronExecute).not.toHaveBeenCalled();
+    const firstBatchCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    const proxyCall = firstBatchCalls.find(
+      (call) => call.request.callId === 'proxy-same-batch',
+    );
+    expect(proxyCall?.status).toBe('error');
+    if (proxyCall?.status === 'error') {
+      expect(proxyCall.response.error?.message).toContain(
+        'has not been fetched',
+      );
+      expect(proxyCall.response.responseParts[0].functionResponse?.name).toBe(
+        ToolNames.DEFERRED_TOOL_CALL,
+      );
+    }
+    expect(presentedProxySchemas.has(ToolNames.CRON_CREATE)).toBe(true);
+
+    await scheduler.schedule(
+      {
+        callId: 'proxy-next-turn',
+        name: ToolNames.DEFERRED_TOOL_CALL,
+        args: {
+          name: ToolNames.CRON_CREATE,
+          arguments: { schedule: '0 9 * * *' },
+        },
+        isClientInitiated: false,
+        prompt_id: 'prompt-proxy-next',
+      },
+      new AbortController().signal,
+    );
+
+    expect(cronExecute).toHaveBeenCalledWith({ schedule: '0 9 * * *' });
+  });
+
   it('aborts and fails a tool call that exceeds the execution timeout', async () => {
     const previousTimeout = process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'];
     process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'] = '30';
