@@ -280,6 +280,8 @@ export interface PreparedExtensionMutation {
   /** @internal */
   readonly cleanupPaths: readonly string[];
   /** @internal */
+  readonly commitSettings?: () => Promise<void>;
+  /** @internal */
   consumed: boolean;
   /** @internal */
   disposed: boolean;
@@ -1705,6 +1707,7 @@ export class ExtensionManager {
           );
         }
         let previousSettings: Record<string, string> | undefined;
+        let commitSettings: (() => Promise<void>) | undefined;
         if (isUpdate) {
           previousSettings = await getEnvContents(
             previousExtensionConfig,
@@ -1718,22 +1721,24 @@ export class ExtensionManager {
         }
 
         if (isUpdate) {
-          await maybePromptForSettings(
+          commitSettings = await maybePromptForSettings(
             newExtensionConfig,
             extensionId,
             requestSetting || this.requestSetting || promptForSetting,
             previousExtensionConfig,
             previousSettings,
             path.join(stagingPath, EXTENSION_SETTINGS_FILENAME),
+            prepareOnly,
           );
         } else {
-          await maybePromptForSettings(
+          commitSettings = await maybePromptForSettings(
             newExtensionConfig,
             extensionId,
             requestSetting || this.requestSetting || promptForSetting,
             undefined,
             undefined,
             path.join(stagingPath, EXTENSION_SETTINGS_FILENAME),
+            prepareOnly,
           );
         }
 
@@ -1792,6 +1797,7 @@ export class ExtensionManager {
             destinationDirectory: destinationPath,
             currentDir,
             cleanupPaths,
+            ...(commitSettings ? { commitSettings } : {}),
             consumed: false,
             disposed: false,
           };
@@ -2038,6 +2044,14 @@ export class ExtensionManager {
         throw error;
       }
       const warnings: NonNullable<CommittedExtensionMutation['warnings']> = [];
+      try {
+        await prepared.commitSettings?.();
+      } catch (error) {
+        warnings.push({
+          code: 'extension_settings_commit_failed',
+          error: getErrorMessage(error),
+        });
+      }
       let extension: Extension | undefined;
       try {
         extension =

@@ -137,6 +137,71 @@ describe('extensionSettings', () => {
       expect(mockRequestSetting).not.toHaveBeenCalled();
     });
 
+    it('defers adding sensitive settings until commit', async () => {
+      const config: ExtensionConfig = {
+        name: 'test-ext',
+        version: '1.0.0',
+        settings: [
+          {
+            name: 'API key',
+            description: 'API key',
+            envVar: 'API_KEY',
+            sensitive: true,
+          },
+        ],
+      };
+      const keychain = new KeychainTokenStorage(
+        'Qwen Code Extensions test-ext 12345',
+      );
+
+      const commit = await maybePromptForSettings(
+        config,
+        '12345',
+        mockRequestSetting,
+        undefined,
+        undefined,
+        path.join(tempWorkspaceDir, 'staged.env'),
+        true,
+      );
+
+      expect(await keychain.getSecret('API_KEY')).toBeNull();
+      await commit?.();
+      expect(await keychain.getSecret('API_KEY')).toBe('mock-API_KEY');
+    });
+
+    it('defers clearing sensitive settings until commit', async () => {
+      const previousConfig: ExtensionConfig = {
+        name: 'test-ext',
+        version: '1.0.0',
+        settings: [
+          {
+            name: 'API key',
+            description: 'API key',
+            envVar: 'API_KEY',
+            sensitive: true,
+          },
+        ],
+      };
+      const keychain = new KeychainTokenStorage(
+        'Qwen Code Extensions test-ext 12345',
+      );
+      await keychain.setSecret('API_KEY', 'old-secret');
+
+      const commit = await maybePromptForSettings(
+        { name: 'test-ext', version: '2.0.0', settings: [] },
+        '12345',
+        mockRequestSetting,
+        previousConfig,
+        { API_KEY: 'old-secret' },
+        path.join(tempWorkspaceDir, 'staged.env'),
+        true,
+      );
+
+      expect(await keychain.getSecret('API_KEY')).toBe('old-secret');
+      await commit?.();
+      expect(await keychain.getSecret('API_KEY')).toBeNull();
+    });
+
     it('rejects invalid environment variable names before prompting', async () => {
       const config: ExtensionConfig = {
         name: 'test-ext',

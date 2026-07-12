@@ -353,6 +353,33 @@ describe('extension tests', () => {
       expect(fs.existsSync(cleanupPath)).toBe(false);
     });
 
+    it('reports deferred settings failure as a post-commit warning', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'settings-warning.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          writeExtractedExtension(destination, 'settings-warning');
+        },
+      );
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const prepared = await manager.prepareExtensionInstall({
+        installMetadata: { type: 'local', source: archivePath },
+        initialActivation: { scope: 'user' },
+        requestConsent: async () => {},
+      });
+      Object.defineProperty(prepared, 'commitSettings', {
+        value: vi.fn().mockRejectedValue(new Error('keychain unavailable')),
+      });
+
+      const committed = await manager.commitPreparedExtension(prepared);
+
+      expect(committed.warnings).toContainEqual({
+        code: 'extension_settings_commit_failed',
+        error: 'keychain unavailable',
+      });
+    });
+
     it('surfaces committed runtime refresh warnings after install reloads', async () => {
       const archivePath = path.join(tempWorkspaceDir, 'refresh-warning.zip');
       fs.writeFileSync(archivePath, 'archive');
@@ -400,6 +427,10 @@ describe('extension tests', () => {
         initialActivation: { scope: 'user' },
         requestConsent: async () => {},
       });
+      const commitSettings = vi.fn();
+      Object.defineProperty(prepared, 'commitSettings', {
+        value: commitSettings,
+      });
       vi.spyOn(
         ExtensionStore.prototype,
         'commitArtifact',
@@ -416,6 +447,7 @@ describe('extension tests', () => {
           status: 'error',
         }),
       );
+      expect(commitSettings).not.toHaveBeenCalled();
       await manager.disposePreparedExtension(prepared);
     });
 

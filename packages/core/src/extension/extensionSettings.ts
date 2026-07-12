@@ -85,7 +85,8 @@ export async function maybePromptForSettings(
   previousExtensionConfig?: ExtensionConfig,
   previousSettings?: Record<string, string>,
   envFilePathOverride?: string,
-): Promise<void> {
+  deferKeychainMutations = false,
+): Promise<(() => Promise<void>) | undefined> {
   const { name: extensionName, settings } = extensionConfig;
   validateExtensionSettingEnvVars(settings);
   validateExtensionSettingEnvVars(previousExtensionConfig?.settings);
@@ -104,10 +105,17 @@ export async function maybePromptForSettings(
   const keychain = new HybridTokenStorage(
     getKeychainStorageName(extensionName, extensionId, scope),
   );
+  const keychainMutations: Array<() => Promise<void>> = [];
 
   if (!settings || settings.length === 0) {
-    await clearSettings(envFilePath, keychain);
-    return;
+    if (fsSync.existsSync(envFilePath)) {
+      await fs.writeFile(envFilePath, '');
+    }
+    keychainMutations.push(async () => await clearKeychainSettings(keychain));
+    return await applyOrDeferKeychainMutations(
+      keychainMutations,
+      deferKeychainMutations,
+    );
   }
 
   const settingsChanges = getSettingsChanges(
@@ -122,7 +130,9 @@ export async function maybePromptForSettings(
   }
 
   for (const removedSensitiveSetting of settingsChanges.removeSensitive) {
-    await keychain.deleteSecret(removedSensitiveSetting.envVar);
+    keychainMutations.push(
+      async () => await keychain.deleteSecret(removedSensitiveSetting.envVar),
+    );
   }
 
   for (const setting of settingsChanges.promptForSensitive.concat(
@@ -139,7 +149,9 @@ export async function maybePromptForSettings(
       continue;
     }
     if (setting.sensitive) {
-      await keychain.setSecret(setting.envVar, value);
+      keychainMutations.push(
+        async () => await keychain.setSecret(setting.envVar, value),
+      );
     } else {
       nonSensitiveSettings[setting.envVar] = value;
     }
@@ -148,6 +160,23 @@ export async function maybePromptForSettings(
   const envContent = formatEnvContent(nonSensitiveSettings);
 
   await fs.writeFile(envFilePath, envContent);
+  return await applyOrDeferKeychainMutations(
+    keychainMutations,
+    deferKeychainMutations,
+  );
+}
+
+async function applyOrDeferKeychainMutations(
+  mutations: ReadonlyArray<() => Promise<void>>,
+  defer: boolean,
+): Promise<(() => Promise<void>) | undefined> {
+  if (mutations.length === 0) return undefined;
+  const apply = async () => {
+    for (const mutation of mutations) await mutation();
+  };
+  if (defer) return apply;
+  await apply();
+  return undefined;
 }
 
 function formatEnvContent(settings: Record<string, string>): string {
@@ -317,13 +346,7 @@ function getSettingsChanges(
   };
 }
 
-async function clearSettings(
-  envFilePath: string,
-  keychain: HybridTokenStorage,
-) {
-  if (fsSync.existsSync(envFilePath)) {
-    await fs.writeFile(envFilePath, '');
-  }
+async function clearKeychainSettings(keychain: HybridTokenStorage) {
   if (!(await keychain.isAvailable())) {
     return;
   }
