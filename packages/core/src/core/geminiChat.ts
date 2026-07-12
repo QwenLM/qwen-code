@@ -102,9 +102,6 @@ import {
   collectToolCallIdsFromHistory,
   normalizeModelToolCallIds,
 } from './toolCallIdUtils.js';
-import { InvalidStreamError } from './invalid-stream-error.js';
-
-export { InvalidStreamError };
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
 
@@ -346,7 +343,10 @@ const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
 // reason. All are retried with an independent budget (similar to rate-limit
 // retries) so they do not consume each other's retry budgets.
 const INVALID_STREAM_RETRY_CONFIG = {
-  maxRetries: 4,
+  transientMaxRetries: 4,
+  // Protocol-tag leaks are model-output validation failures, not the
+  // provider-side empty/truncated streams covered by issue #6670.
+  protocolTagLeakMaxRetries: 2,
   initialDelayMs: 2000,
 };
 
@@ -1039,6 +1039,23 @@ function stripThoughtPartsFromContent(content: Content): Content | null {
     ...content,
     parts,
   };
+}
+
+/**
+ * Custom error to signal that a stream completed with invalid content,
+ * which should trigger a retry.
+ */
+export class InvalidStreamError extends Error {
+  readonly type: 'NO_FINISH_REASON' | 'NO_RESPONSE_TEXT' | 'PROTOCOL_TAG_LEAK';
+
+  constructor(
+    message: string,
+    type: 'NO_FINISH_REASON' | 'NO_RESPONSE_TEXT' | 'PROTOCOL_TAG_LEAK',
+  ) {
+    super(message);
+    this.name = 'InvalidStreamError';
+    this.type = type;
+  }
 }
 
 const PROTOCOL_TAG_PREFIXES = [
@@ -2505,7 +2522,9 @@ export class GeminiChat {
             // not consume the content retry budget.
             const isInvalidStreamError = error instanceof InvalidStreamError;
             const maxInvalidStreamRetries =
-              INVALID_STREAM_RETRY_CONFIG.maxRetries;
+              isInvalidStreamError && error.type === 'PROTOCOL_TAG_LEAK'
+                ? INVALID_STREAM_RETRY_CONFIG.protocolTagLeakMaxRetries
+                : INVALID_STREAM_RETRY_CONFIG.transientMaxRetries;
             const invalidStreamRetryCount =
               isInvalidStreamError && error.type === 'PROTOCOL_TAG_LEAK'
                 ? protocolTagLeakRetryCount
@@ -2662,7 +2681,9 @@ export class GeminiChat {
 
               attemptState.rollback();
               const maxContinuationRetries =
-                INVALID_STREAM_RETRY_CONFIG.maxRetries;
+                error.type === 'PROTOCOL_TAG_LEAK'
+                  ? INVALID_STREAM_RETRY_CONFIG.protocolTagLeakMaxRetries
+                  : INVALID_STREAM_RETRY_CONFIG.transientMaxRetries;
               const continuationRetryCount =
                 error.type === 'PROTOCOL_TAG_LEAK'
                   ? protocolTagLeakRetryCount

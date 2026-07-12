@@ -4729,7 +4729,7 @@ describe('GeminiChat', async () => {
       }
     });
 
-    it('should retry protocol tag leaks four times', async () => {
+    it('should keep protocol tag leak retries at the existing budget', async () => {
       vi.useFakeTimers();
       try {
         vi.mocked(
@@ -4762,12 +4762,12 @@ describe('GeminiChat', async () => {
 
         expect(
           mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledTimes(5);
-        expect(mockLogContentRetry).toHaveBeenCalledTimes(4);
+        ).toHaveBeenCalledTimes(3);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(2);
         expect(mockLogContentRetryFailure).toHaveBeenCalledWith(
           mockConfig,
           expect.objectContaining({
-            total_attempts: 5,
+            total_attempts: 3,
             final_error_type: 'PROTOCOL_TAG_LEAK',
             model: 'test-model',
           }),
@@ -9925,12 +9925,12 @@ describe('GeminiChat', async () => {
 
         expect(
           mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledTimes(7);
-        expect(mockLogContentRetry).toHaveBeenCalledTimes(4);
+        ).toHaveBeenCalledTimes(5);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(2);
         expect(mockLogContentRetry).toHaveBeenLastCalledWith(
           mockConfig,
           expect.objectContaining({
-            attempt_number: 3,
+            attempt_number: 1,
             error_type: 'PROTOCOL_TAG_LEAK',
           }),
         );

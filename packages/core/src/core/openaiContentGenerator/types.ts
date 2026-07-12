@@ -79,8 +79,6 @@ export interface RequestContext {
    * emitted after the reasoning thought if no tagged thought appears.
    */
   pendingContentParts?: Part[];
-  pendingUntrustedResponseParts?: Part[];
-  hasStructuredReasoningContent?: boolean;
 }
 
 export interface ErrorHandler {
