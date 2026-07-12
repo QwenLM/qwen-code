@@ -489,6 +489,7 @@ describe('multi-workspace session dispatch', () => {
     expect(res.status).toBe(200);
     expect(res.body.workspaceCwd).toBe(PRIMARY_CWD);
     expect(res.body.features).toContain('multi_workspace_sessions');
+    expect(res.body.features).toContain('workspace_persisted_transcript');
     expect(res.body.workspaces).toEqual([
       { id: 'primary-id', cwd: PRIMARY_CWD, primary: true, trusted: true },
       {
@@ -1455,6 +1456,310 @@ describe('multi-workspace session dispatch', () => {
       expect(secondaryBridge.listCalls).toEqual([]);
       expect(await fsp.readdir(chatsDir)).toEqual(beforeEntries);
       expect(await fsp.readFile(storedPath, 'utf8')).toBe(beforeContent);
+    });
+  });
+
+  it('chains untrusted transcript pages without bridge or cursor-key writes', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440270';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'first page',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const transcriptPath = path.join(
+        new Storage(SECONDARY_CWD).getProjectDir(),
+        'chats',
+        `${sessionId}.jsonl`,
+      );
+      await fsp.appendFile(
+        transcriptPath,
+        [
+          {
+            uuid: `${sessionId}-assistant-1`,
+            parentUuid: `${sessionId}-user-1`,
+            sessionId,
+            timestamp: '2026-07-08T00:01:00.000Z',
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: 'first answer' }] },
+            cwd: SECONDARY_CWD,
+          },
+          {
+            uuid: `${sessionId}-user-2`,
+            parentUuid: `${sessionId}-assistant-1`,
+            sessionId,
+            timestamp: '2026-07-08T00:02:00.000Z',
+            type: 'user',
+            message: { role: 'user', parts: [{ text: 'second question' }] },
+            cwd: SECONDARY_CWD,
+          },
+          {
+            uuid: `${sessionId}-assistant-2`,
+            parentUuid: `${sessionId}-user-2`,
+            sessionId,
+            timestamp: '2026-07-08T00:03:00.000Z',
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: 'second answer' }] },
+            cwd: SECONDARY_CWD,
+          },
+        ]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+        'utf8',
+      );
+      await writeStoredSession({
+        sessionId,
+        cwd: PRIMARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'same id in primary',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const chatsDir = path.dirname(transcriptPath);
+      const beforeEntries = await fsp.readdir(chatsDir);
+      const beforeContent = await fsp.readFile(transcriptPath);
+      const beforeMtimeMs = (await fsp.stat(transcriptPath)).mtimeMs;
+      const { app, primaryBridge, secondaryBridge } = makeHarness({
+        secondaryTrusted: false,
+      });
+
+      const first = await request(app)
+        .get(`/workspaces/secondary-id/session/${sessionId}/transcript?limit=2`)
+        .set('Host', host())
+        .expect(200);
+      expect(
+        first.body.events.map(
+          (event: {
+            data: { sessionUpdate: string; content?: { text?: string } };
+          }) => [event.data.sessionUpdate, event.data.content?.text],
+        ),
+      ).toEqual([
+        ['user_message_chunk', 'first page'],
+        ['agent_message_chunk', 'first answer'],
+      ]);
+      expect(first.body.hasMore).toBe(true);
+      expect(first.body.nextCursor).toEqual(expect.any(String));
+
+      const crossWorkspace = await request(app)
+        .get(
+          `/workspaces/primary-id/session/${sessionId}/transcript?cursor=${encodeURIComponent(
+            first.body.nextCursor as string,
+          )}`,
+        )
+        .set('Host', host());
+      expect(crossWorkspace.status).toBe(400);
+      expect(crossWorkspace.body.code).toBe('invalid_transcript_cursor');
+      expect(crossWorkspace.body.sessionId).toBe(sessionId);
+
+      const second = await request(app)
+        .get(
+          `/workspaces/${encodeURIComponent(SECONDARY_CWD)}/session/${sessionId}/transcript?limit=2&cursor=${encodeURIComponent(
+            first.body.nextCursor as string,
+          )}`,
+        )
+        .set('Host', host())
+        .expect(200);
+      expect(
+        second.body.events.map(
+          (event: {
+            data: { sessionUpdate: string; content?: { text?: string } };
+          }) => [event.data.sessionUpdate, event.data.content?.text],
+        ),
+      ).toEqual([
+        ['user_message_chunk', 'second question'],
+        ['agent_message_chunk', 'second answer'],
+      ]);
+      expect(second.body.hasMore).toBe(false);
+      expect(second.body.nextCursor).toBeUndefined();
+      expect(primaryBridge.spawnCalls).toEqual([]);
+      expect(primaryBridge.restoreCalls).toEqual([]);
+      expect(secondaryBridge.spawnCalls).toEqual([]);
+      expect(secondaryBridge.restoreCalls).toEqual([]);
+      await expect(
+        fsp.stat(
+          path.join(
+            new Storage(SECONDARY_CWD).getProjectDir(),
+            'session-transcript-cursor-key',
+          ),
+        ),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await fsp.readdir(chatsDir)).toEqual(beforeEntries);
+      expect(await fsp.readFile(transcriptPath)).toEqual(beforeContent);
+      expect((await fsp.stat(transcriptPath)).mtimeMs).toBe(beforeMtimeMs);
+
+      const restarted = makeHarness({ secondaryTrusted: false });
+      const expired = await request(restarted.app)
+        .get(
+          `/workspaces/secondary-id/session/${sessionId}/transcript?cursor=${encodeURIComponent(
+            first.body.nextCursor as string,
+          )}`,
+        )
+        .set('Host', host());
+      expect(expired.status).toBe(400);
+      expect(expired.body.code).toBe('invalid_transcript_cursor');
+      expect(expired.body.sessionId).toBe(sessionId);
+    });
+  });
+
+  it('fails closed for mismatched persisted transcript records', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440271';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'wrong owner',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const transcriptPath = path.join(
+        new Storage(SECONDARY_CWD).getProjectDir(),
+        'chats',
+        `${sessionId}.jsonl`,
+      );
+      const content = await fsp.readFile(transcriptPath, 'utf8');
+      await fsp.writeFile(
+        transcriptPath,
+        content.replace(
+          `"sessionId":"${sessionId}"`,
+          '"sessionId":"550e8400-e29b-41d4-a716-446655440999"',
+        ),
+        'utf8',
+      );
+      const { app } = makeHarness({ secondaryTrusted: false });
+
+      const res = await request(app)
+        .get(`/workspaces/secondary-id/session/${sessionId}/transcript`)
+        .set('Host', host());
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('transcript_snapshot_unavailable');
+    });
+  });
+
+  it('suppresses file-backed debug logging during untrusted transcript reads', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440274';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'no debug writes',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const previousDebugLogFile = process.env['QWEN_DEBUG_LOG_FILE'];
+      const debugSessionId = '550e8400-e29b-41d4-a716-446655440275';
+      const debugLogPath = Storage.getDebugLogPath(debugSessionId);
+      process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+      resetDebugLoggingState();
+      setDebugLogSession({ getSessionId: () => debugSessionId });
+      try {
+        const { app } = makeHarness({ secondaryTrusted: false });
+        await request(app)
+          .get(`/workspaces/secondary-id/session/${sessionId}/transcript`)
+          .set('Host', host())
+          .expect(200);
+        await expect(fsp.stat(debugLogPath)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+      } finally {
+        setDebugLogSession(null);
+        resetDebugLoggingState();
+        if (previousDebugLogFile === undefined) {
+          delete process.env['QWEN_DEBUG_LOG_FILE'];
+        } else {
+          process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFile;
+        }
+      }
+    });
+  });
+
+  it('keeps archived and untrusted-primary transcript boundaries', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440272';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'archived',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      await archiveStoredSession(SECONDARY_CWD, sessionId);
+      const secondary = makeHarness({ secondaryTrusted: false });
+      const archived = await request(secondary.app)
+        .get(`/workspaces/secondary-id/session/${sessionId}/transcript`)
+        .set('Host', host());
+      expect(archived.status).toBe(409);
+      expect(archived.body.code).toBe('session_archived');
+
+      const primary = makeHarness({ primaryTrusted: false });
+      const forbidden = await request(primary.app)
+        .get(`/workspaces/primary-id/session/${sessionId}/transcript`)
+        .set('Host', host());
+      expect(forbidden.status).toBe(403);
+      expect(forbidden.body.code).toBe('untrusted_workspace');
+    });
+  });
+
+  it('serves trusted runtimes and rejects missing or unknown transcript targets', async () => {
+    await withRuntimeDir(async () => {
+      const primarySessionId = '550e8400-e29b-41d4-a716-446655440276';
+      const secondarySessionId = '550e8400-e29b-41d4-a716-446655440277';
+      for (const [sessionId, cwd] of [
+        [primarySessionId, PRIMARY_CWD],
+        [secondarySessionId, SECONDARY_CWD],
+      ] as const) {
+        await writeStoredSession({
+          sessionId,
+          cwd,
+          timestamp: '2026-07-08T00:00:00.000Z',
+          prompt: `trusted ${sessionId}`,
+          mtime: new Date('2026-07-08T00:00:00.000Z'),
+        });
+      }
+      const { app } = makeHarness();
+
+      await request(app)
+        .get(`/workspaces/primary-id/session/${primarySessionId}/transcript`)
+        .set('Host', host())
+        .expect(200);
+      await request(app)
+        .get(
+          `/workspaces/secondary-id/session/${secondarySessionId}/transcript`,
+        )
+        .set('Host', host())
+        .expect(200);
+
+      const missing = await request(app)
+        .get(
+          '/workspaces/secondary-id/session/550e8400-e29b-41d4-a716-446655440278/transcript',
+        )
+        .set('Host', host());
+      expect(missing.status).toBe(404);
+
+      const unknown = await request(app)
+        .get(
+          `/workspaces/${encodeURIComponent(UNKNOWN_CWD)}/session/${secondarySessionId}/transcript`,
+        )
+        .set('Host', host());
+      expect(unknown.status).toBe(400);
+      expect(unknown.body.code).toBe('workspace_mismatch');
+
+      const unknownWithInvalidLimit = await request(app)
+        .get(
+          `/workspaces/${encodeURIComponent(UNKNOWN_CWD)}/session/${secondarySessionId}/transcript?limit=501`,
+        )
+        .set('Host', host());
+      expect(unknownWithInvalidLimit.status).toBe(400);
+      expect(unknownWithInvalidLimit.body.code).toBe('workspace_mismatch');
+
+      const invalidLimit = await request(app)
+        .get(
+          `/workspaces/secondary-id/session/${secondarySessionId}/transcript?limit=501`,
+        )
+        .set('Host', host());
+      expect(invalidLimit.status).toBe(400);
+      expect(invalidLimit.body.code).toBe('invalid_transcript_limit');
     });
   });
 

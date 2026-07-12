@@ -2,9 +2,15 @@ export { App as WebShell } from './App';
 export type {
   WebShellApi,
   WebShellProps,
+  WebShellSidebarOptions,
   BugReportInfo,
   SessionChangeEvent,
 } from './App';
+export type {
+  WebShellSidebarBranding,
+  WebShellSidebarFooterItem,
+  WebShellSidebarFooterOptions,
+} from './components/sidebar/WebShellSidebar';
 export type {
   TurnOutputKind,
   TurnOutputOpenRequest,

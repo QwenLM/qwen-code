@@ -30,6 +30,7 @@ import {
   SESSION_TRANSCRIPT_MAX_LIMIT,
   resetSessionTranscriptIndexCacheForTest,
   setSessionTranscriptIndexCacheMaxBytesForTest,
+  SessionTranscriptCursorCodec,
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptReader,
 } from './session-transcript-reader.js';
@@ -379,6 +380,62 @@ describe('SessionTranscriptReader', () => {
 
     expect(second.records.map((r) => r.uuid)).toEqual(['a1']);
     expect(second.hasMore).toBe(true);
+  });
+
+  it('uses an injected in-memory codec without creating a cursor key file', async () => {
+    await writeRecords([
+      record('u1', null, 'hello'),
+      record('a1', 'u1', 'reply'),
+    ]);
+    const key = Buffer.alloc(32, 7);
+    const codec = new SessionTranscriptCursorCodec(key);
+    key.fill(9);
+    const sameOriginalKey = new SessionTranscriptCursorCodec(
+      Buffer.alloc(32, 7),
+    );
+    const reader = new SessionTranscriptReader(workspaceDir, codec);
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    const cursor = codec.encode(first.nextCursorState!);
+    expect(sameOriginalKey.decode(cursor).sessionId).toBe(sessionId);
+    const second = await reader.readPage(sessionId, { cursor, limit: 1 });
+
+    expect(second.records.map((item) => item.uuid)).toEqual(['a1']);
+    await expect(
+      fs.stat(
+        path.join(
+          new Storage(workspaceDir).getProjectDir(),
+          'session-transcript-cursor-key',
+        ),
+      ),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('rejects in-memory cursors signed with another key or tampered', () => {
+    const first = new SessionTranscriptCursorCodec(Buffer.alloc(32, 1));
+    const second = new SessionTranscriptCursorCodec(Buffer.alloc(32, 2));
+    const cursor = first.encode({
+      v: 1,
+      sessionId,
+      fileIdentity: { dev: 1, ino: 2 },
+      snapshotSize: 3,
+      position: 1,
+      leafUuid: 'leaf',
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+
+    expect(() => second.decode(cursor)).toThrow(
+      InvalidSessionTranscriptCursorError,
+    );
+    expect(() => first.decode(`${cursor.slice(0, -1)}A`)).toThrow(
+      InvalidSessionTranscriptCursorError,
+    );
+  });
+
+  it('rejects an invalid in-memory cursor key length', () => {
+    expect(() => new SessionTranscriptCursorCodec(Buffer.alloc(31))).toThrow(
+      /must be 32 bytes/,
+    );
   });
 
   it('warns and replaces a corrupt persisted cursor signing key', async () => {

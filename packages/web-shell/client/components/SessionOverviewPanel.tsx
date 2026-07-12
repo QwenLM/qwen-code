@@ -11,7 +11,7 @@ import {
   useStatusReport,
 } from '@qwen-code/webui/daemon-react-sdk';
 import type {
-  DaemonSessionGroupColor,
+  DaemonSessionGroupPresetColor,
   DaemonSessionSummary,
   DaemonStatusReportSession,
 } from '@qwen-code/sdk/daemon';
@@ -54,7 +54,7 @@ export interface SessionCard {
   clientCount: number;
   model?: string;
   updatedAt?: string;
-  color?: DaemonSessionGroupColor | null;
+  color?: DaemonSessionGroupPresetColor | null;
   isCurrent: boolean;
   /** The workspace the session lives in. */
   workspaceCwd: string;
@@ -119,7 +119,9 @@ function cx(...classes: Array<string | false | undefined>): string {
   return classes.filter(Boolean).join(' ');
 }
 
-function colorDotClass(color: DaemonSessionGroupColor): string | undefined {
+function colorDotClass(
+  color: DaemonSessionGroupPresetColor,
+): string | undefined {
   switch (color) {
     case 'red':
       return styles.colorRed;

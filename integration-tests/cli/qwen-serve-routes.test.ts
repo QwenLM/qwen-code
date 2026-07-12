@@ -373,6 +373,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_branch',
       'workspace_reload',
       'workspace_qualified_rest_core',
+      'workspace_persisted_transcript',
       'voice_transcribe',
     ]);
   });

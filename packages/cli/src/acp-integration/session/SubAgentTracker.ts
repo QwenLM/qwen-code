@@ -22,7 +22,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { z } from 'zod';
 import type { SessionContext } from './types.js';
-import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
+import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import type {
   AgentSideConnection,
