@@ -36,6 +36,16 @@ interface NpmPackageMetadata {
   >;
 }
 
+function resolveNpmRedirectUrl(currentUrl: string, location: string): URL {
+  try {
+    return new URL(location, currentUrl);
+  } catch {
+    throw new Error(
+      `Invalid npm redirect URL: ${redactUrlCredentials(location)}`,
+    );
+  }
+}
+
 /**
  * Parse a scoped npm package source string into name and optional version.
  * Examples:
@@ -187,6 +197,7 @@ function fetchNpmJson<T>(
   authToken?: string,
   signal?: AbortSignal,
 ): Promise<T> {
+  signal?.throwIfAborted();
   const headers: Record<string, string> = {
     Accept: 'application/json',
   };
@@ -201,12 +212,19 @@ function fetchNpmJson<T>(
       .get(url, { headers, signal }, (res) => {
         if (res.statusCode === 301 || res.statusCode === 302) {
           if (res.headers.location) {
-            // Strip auth token when redirected to a different host
-            const originalHost = new URL(url).host;
-            const redirectHost = new URL(res.headers.location).host;
+            let redirectUrl: URL;
+            try {
+              redirectUrl = resolveNpmRedirectUrl(url, res.headers.location);
+            } catch (error) {
+              res.resume();
+              reject(error);
+              return;
+            }
+            res.resume();
+            const originalOrigin = new URL(url).origin;
             const redirectToken =
-              redirectHost === originalHost ? authToken : undefined;
-            fetchNpmJson<T>(res.headers.location, redirectToken, signal)
+              redirectUrl.origin === originalOrigin ? authToken : undefined;
+            fetchNpmJson<T>(redirectUrl.toString(), redirectToken, signal)
               .then(resolve)
               .catch(reject);
             return;
@@ -229,7 +247,9 @@ function fetchNpmJson<T>(
           }
         });
       })
-      .on('error', reject);
+      .on('error', (error) => {
+        reject(signal?.aborted ? signal.reason : error);
+      });
   });
 }
 
@@ -270,15 +290,22 @@ function downloadNpmFileRedirect(
         context.activeResponse = res;
         if (res.statusCode === 301 || res.statusCode === 302) {
           if (res.headers.location) {
-            // Strip auth token when redirected to a different host
-            const originalHost = new URL(url).host;
-            const redirectHost = new URL(res.headers.location).host;
+            let redirectUrl: URL;
+            try {
+              redirectUrl = resolveNpmRedirectUrl(url, res.headers.location);
+            } catch (error) {
+              res.destroy();
+              context.activeResponse = undefined;
+              reject(error);
+              return;
+            }
+            const originalOrigin = new URL(url).origin;
             const redirectToken =
-              redirectHost === originalHost ? authToken : undefined;
+              redirectUrl.origin === originalOrigin ? authToken : undefined;
             res.destroy();
             context.activeResponse = undefined;
             downloadNpmFileRedirect(
-              res.headers.location,
+              redirectUrl.toString(),
               dest,
               context,
               redirectToken,
@@ -322,7 +349,9 @@ function downloadNpmFileRedirect(
         res.pipe(file);
         file.on('finish', () => file.close(() => resolve()));
       })
-      .on('error', reject);
+      .on('error', (error) => {
+        reject(signal?.aborted ? signal.reason : error);
+      });
     if (requestGeneration === context.requestGeneration) {
       context.activeRequest = req;
     }
