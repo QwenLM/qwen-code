@@ -2413,11 +2413,18 @@ export async function runQwenServe(
   };
   const resolveChannelWebhookConfigSource = (
     channelName: string,
-  ): ChannelWebhookConfigSource =>
-    getChannelWebhookConfigSources().find(
+  ): ChannelWebhookConfigSource => {
+    const source = getChannelWebhookConfigSources().find(
       (source) =>
         !source.channelNames || source.channelNames.includes(channelName),
-    ) ?? { workspaceCwd: boundWorkspace };
+    );
+    if (source) return source;
+    const env = channelWebhookEnvByWorkspace.get(boundWorkspace);
+    return {
+      workspaceCwd: boundWorkspace,
+      ...(env ? { env } : {}),
+    };
+  };
   let closeServerAfterChannelWorkerStartupFailure = false;
   let runtimeFailureListenerClose: Promise<void> | undefined;
   const getChannelWorkerSnapshot = (): ChannelWorkerSnapshot =>

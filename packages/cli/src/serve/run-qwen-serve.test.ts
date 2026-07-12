@@ -2892,10 +2892,12 @@ describe('runQwenServe runtime startup failures', () => {
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-webhook-start-')),
     );
     const previousQwenHome = process.env['QWEN_HOME'];
+    const previousWebhookSecret = process.env['QWEN_DEFERRED_WEBHOOK_SECRET'];
     const tempHome = fs.mkdtempSync(
       path.join(os.tmpdir(), 'qws-runtime-webhook-home-'),
     );
     process.env['QWEN_HOME'] = tempHome;
+    process.env['QWEN_DEFERRED_WEBHOOK_SECRET'] = 'global-secret';
     settingsRuntime.resetHomeEnvBootstrapForTesting();
     fs.writeFileSync(
       path.join(tempHome, 'settings.json'),
@@ -2906,7 +2908,7 @@ describe('runQwenServe runtime startup failures', () => {
             webhooks: {
               sources: {
                 'github ci': {
-                  secret: 'webhook-secret',
+                  secretEnv: 'QWEN_DEFERRED_WEBHOOK_SECRET',
                   targets: {
                     default: {
                       chatId: 'group-1',
@@ -2925,20 +2927,24 @@ describe('runQwenServe runtime startup failures', () => {
       enabled: false,
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
     });
+    vi.spyOn(environmentRuntime, 'buildRuntimeEnvironment').mockImplementation(
+      (_settings, _workspace, baseEnv) => ({
+        effectiveEnv: Object.freeze({
+          ...baseEnv,
+          QWEN_DEFERRED_WEBHOOK_SECRET: 'workspace-secret',
+        }),
+        overlayKeys: Object.freeze(['QWEN_DEFERRED_WEBHOOK_SECRET']),
+        envFilePaths: Object.freeze([]),
+        envFileReadFailed: false,
+        envFileReadFailures: Object.freeze([]),
+      }),
+    );
     const bridge = makeRuntimeBridge();
     const createBridge = vi
       .spyOn(acpBridge, 'createAcpSessionBridge')
       .mockReturnValue(
         bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
       );
-    vi.spyOn(serverModule, 'createServeApp').mockImplementation(() => {
-      const app = express();
-      app.post('/channels/:channelName/webhooks/:source', (_req, res) => {
-        res.status(202).json({ accepted: true });
-      });
-      return app;
-    });
-
     const handle = await runQwenServe(
       {
         port: 0,
@@ -2948,11 +2954,43 @@ describe('runQwenServe runtime startup failures', () => {
         maxSessions: 1,
         serveWebShell: false,
         token: 'secret-token',
+        channelSelection: {
+          mode: 'names',
+          names: ['dingtalk-main'],
+        },
       },
       {
         resolveOnListen: true,
         deferRuntimeUntilFirstHealth: true,
         runtimeStartupTimeoutMs: 0,
+        trustedWorkspace: true,
+        channelWorkerSupervisorFactory: (options) => {
+          const workerSnapshot: ChannelWorkerSnapshot = {
+            enabled: true,
+            state: 'running',
+            pid: 1234,
+            channels: ['dingtalk-main'],
+          };
+          return {
+            start: vi.fn(async () => {
+              options.onReady?.(workerSnapshot);
+            }),
+            stop: vi.fn(async () => {}),
+            restart: vi.fn(async () => workerSnapshot),
+            killAllSync: vi.fn(),
+            snapshot: vi.fn(() => workerSnapshot),
+            enqueueWebhookTask: vi.fn(async () => ({
+              accepted: true as const,
+            })),
+          };
+        },
+        channelServicePidfile: {
+          readServiceInfo: vi.fn(() => null),
+          writeServeServiceInfo: vi.fn(),
+          reserveServeServiceInfo: vi.fn(),
+          removeServiceInfo: vi.fn(),
+          removeServeServiceInfo: vi.fn(() => true),
+        },
       },
     );
 
@@ -2964,7 +3002,7 @@ describe('runQwenServe runtime startup failures', () => {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
-            'x-qwen-webhook-secret': 'webhook-secret',
+            'x-qwen-webhook-secret': 'workspace-secret',
           },
           body: JSON.stringify({
             eventType: 'ci_failed',
@@ -2984,6 +3022,11 @@ describe('runQwenServe runtime startup failures', () => {
         delete process.env['QWEN_HOME'];
       } else {
         process.env['QWEN_HOME'] = previousQwenHome;
+      }
+      if (previousWebhookSecret === undefined) {
+        delete process.env['QWEN_DEFERRED_WEBHOOK_SECRET'];
+      } else {
+        process.env['QWEN_DEFERRED_WEBHOOK_SECRET'] = previousWebhookSecret;
       }
       settingsRuntime.resetHomeEnvBootstrapForTesting();
     }
