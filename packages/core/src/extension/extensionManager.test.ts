@@ -1080,14 +1080,18 @@ describe('extension tests', () => {
       await manager.refreshCache();
       const extension = manager.getLoadedExtensions()[0]!;
 
-      await manager.setExtensionActivationScope(extension.id, {
-        scope: 'workspace',
-        workspacePath: tempWorkspaceDir,
-      });
+      const workspaceSnapshot = await manager.setExtensionActivationScope(
+        extension.id,
+        {
+          scope: 'workspace',
+          workspacePath: tempWorkspaceDir,
+        },
+      );
       const snapshot = await manager.setExtensionActivationScope(extension.id, {
         scope: 'user',
       });
 
+      expect(snapshot.generation).toBe(workspaceSnapshot.generation + 1);
       expect(snapshot.extensions[extension.id]).toMatchObject({
         defaultActivation: 'enabled',
         workspaceOverrides: {},
