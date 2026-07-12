@@ -735,6 +735,23 @@ describe('extension tests', () => {
         { id: 1, phase: 'end', operation: 'uninstallExtension' },
       ]);
     });
+
+    it('uninstalls a committed extension by id when it cannot be loaded', async () => {
+      const identity = { id: 'a9'.repeat(32), name: 'broken-extension' };
+      const extensionStore = new ExtensionStore({
+        extensionsDir: userExtensionsDir,
+      });
+      await extensionStore.ensureInitialized([identity]);
+      const destination = path.join(userExtensionsDir, identity.name);
+      fs.mkdirSync(destination, { recursive: true });
+      fs.writeFileSync(path.join(destination, 'qwen-extension.json'), '{');
+      const manager = createExtensionManager({ extensionStore });
+
+      const snapshot = await manager.uninstallExtensionById(identity.id, true);
+
+      expect(snapshot.extensions[identity.id]).toBeUndefined();
+      expect(fs.existsSync(destination)).toBe(false);
+    });
   });
 
   describe('loadExtension', () => {

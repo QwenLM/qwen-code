@@ -881,6 +881,29 @@ describe('ExtensionStore', () => {
     expect(snapshot.extensions[identity.id]).toBeUndefined();
   });
 
+  it('idempotently handles concurrent uninstalls when the artifact is absent', async () => {
+    const store = makeStore();
+    const identity = { id: 'b4'.repeat(32), name: 'demo' };
+    const destination = path.join(extensionsDir, 'demo');
+    await store.ensureInitialized([identity]);
+
+    const [uninstalled, repeated] = await Promise.all([
+      store.commitArtifact({
+        operation: 'uninstall',
+        identity,
+        destinationDirectory: destination,
+      }),
+      store.commitArtifact({
+        operation: 'uninstall',
+        identity,
+        destinationDirectory: destination,
+      }),
+    ]);
+
+    expect(uninstalled.extensions[identity.id]).toBeUndefined();
+    expect(repeated).toEqual(uninstalled);
+  });
+
   it('allows uninstalling an extension from a snapshot with duplicate names', async () => {
     const store = makeStore();
     const identity = { id: 'b2'.repeat(32), name: 'demo' };

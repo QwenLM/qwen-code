@@ -2171,45 +2171,72 @@ export class ExtensionManager {
       if (!extension) {
         throw new Error(`Extension not found.`);
       }
-      const storage = new ExtensionStorage(
-        extension.installMetadata?.type === 'link'
-          ? extension.name
-          : path.basename(extension.path),
-      );
-
-      const snapshot = await this.extensionStore.commitArtifact({
-        operation: 'uninstall',
-        identity: { id: extension.id, name: extension.name },
-        destinationDirectory: storage.getExtensionDir(),
-      });
-
-      if (this.extensionCache) {
-        this.extensionCache.delete(extension.name);
-      }
-
-      if (isUpdate) return snapshot;
-
-      try {
-        this.preferencesStore.clear(extension.name);
-      } catch (error) {
-        debugLogger.warn(
-          `Extension "${extension.name}" was uninstalled, but preference cleanup failed: ${getErrorMessage(error)}`,
-        );
-      }
-      await this.refreshTools().catch((error) => {
-        debugLogger.warn(
-          `Extension "${extension.name}" was uninstalled, but runtime refresh failed: ${getErrorMessage(error)}`,
-        );
-      });
-
-      logExtensionUninstall(
+      return await this.uninstallExtensionPolicy(
+        { id: extension.id, name: extension.name },
+        new ExtensionStorage(
+          extension.installMetadata?.type === 'link'
+            ? extension.name
+            : path.basename(extension.path),
+        ).getExtensionDir(),
+        isUpdate,
         telemetryConfig,
-        new ExtensionUninstallEvent(extension.name, 'success'),
       );
-      return snapshot;
     } finally {
       endMutation();
     }
+  }
+
+  async uninstallExtensionById(
+    extensionId: string,
+    isUpdate: boolean,
+    cwd?: string,
+  ): Promise<ExtensionStoreSnapshot> {
+    const endMutation = this.beginMutation('uninstallExtension');
+    try {
+      const snapshot = await this.extensionStore.readSnapshot();
+      const policy = snapshot.extensions[extensionId];
+      if (!policy) return snapshot;
+      return await this.uninstallExtensionPolicy(
+        { id: extensionId, name: policy.name },
+        new ExtensionStorage(policy.name).getExtensionDir(),
+        isUpdate,
+        getTelemetryConfig(cwd ?? this.workspaceDir, this.telemetrySettings),
+      );
+    } finally {
+      endMutation();
+    }
+  }
+
+  private async uninstallExtensionPolicy(
+    identity: { id: string; name: string },
+    destinationDirectory: string,
+    isUpdate: boolean,
+    telemetryConfig: Config,
+  ): Promise<ExtensionStoreSnapshot> {
+    const snapshot = await this.extensionStore.commitArtifact({
+      operation: 'uninstall',
+      identity,
+      destinationDirectory,
+    });
+    this.extensionCache?.delete(identity.name);
+    if (isUpdate) return snapshot;
+    try {
+      this.preferencesStore.clear(identity.name);
+    } catch (error) {
+      debugLogger.warn(
+        `Extension "${identity.name}" was uninstalled, but preference cleanup failed: ${getErrorMessage(error)}`,
+      );
+    }
+    await this.refreshTools().catch((error) => {
+      debugLogger.warn(
+        `Extension "${identity.name}" was uninstalled, but runtime refresh failed: ${getErrorMessage(error)}`,
+      );
+    });
+    logExtensionUninstall(
+      telemetryConfig,
+      new ExtensionUninstallEvent(identity.name, 'success'),
+    );
+    return snapshot;
   }
 
   async performWorkspaceExtensionMigration(

@@ -400,7 +400,7 @@ export class ExtensionStore {
           `Extension "${input.identity.name}" is installed.`,
         );
       }
-      if (input.operation !== 'install' && !destinationExists) {
+      if (input.operation === 'update' && !destinationExists) {
         throw new ExtensionConflictError(
           `Extension "${input.identity.name}" is not installed.`,
         );
@@ -422,6 +422,12 @@ export class ExtensionStore {
       }
 
       const currentPolicy = snapshot.extensions[input.identity.id];
+      if (input.operation === 'uninstall' && !currentPolicy) {
+        if (!destinationExists) return snapshot;
+        throw new ExtensionConflictError(
+          `Extension "${input.identity.name}" has no matching policy.`,
+        );
+      }
       if (input.operation === 'update' && !currentPolicy) {
         throw new ExtensionConflictError(
           `Extension "${input.identity.name}" is not installed.`,

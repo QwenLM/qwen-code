@@ -1326,9 +1326,9 @@ export function registerWorkspaceExtensionRoutes(
           boundWorkspace,
           true,
         );
-        await manager.refreshCache();
-        const extension = extensionById(manager, extensionId);
-        if (!extension) {
+        const snapshot = await manager.getExtensionStoreSnapshot();
+        const policy = snapshot.extensions[extensionId];
+        if (!policy) {
           res.status(204).end();
           return;
         }
@@ -1338,16 +1338,16 @@ export function registerWorkspaceExtensionRoutes(
           route,
           manager,
           'uninstall',
-          { name: extension.name },
+          { name: policy.name },
           async (extensionManager, _signal, context) => {
             await context!.commit(
               async () =>
-                await extensionManager.uninstallExtension(
-                  extension.name,
+                await extensionManager.uninstallExtensionById(
+                  extensionId,
                   false,
                 ),
             );
-            return { status: 'uninstalled', name: extension.name };
+            return { status: 'uninstalled', name: policy.name };
           },
           {
             ...(workspaceRegistry

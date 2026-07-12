@@ -207,6 +207,10 @@ function mockExtensionManager(
     ExtensionManager.prototype,
     'clearExtensionWorkspaceActivation',
   ).mockResolvedValue(snapshot);
+  vi.spyOn(
+    ExtensionManager.prototype,
+    'uninstallExtensionById',
+  ).mockResolvedValue(snapshot);
   return extension;
 }
 
@@ -1152,12 +1156,12 @@ describe('extension management v2 REST', () => {
     }
   });
 
-  it('routes uninstall lookup failures through the bridge error handler', async () => {
+  it('routes uninstall store lookup failures through the bridge error handler', async () => {
     const h = await makeHarness();
     mockExtensionManager();
-    vi.mocked(ExtensionManager.prototype.refreshCache).mockRejectedValueOnce(
-      new Error('extension lookup failed'),
-    );
+    vi.mocked(
+      ExtensionManager.prototype.getExtensionStoreSnapshot,
+    ).mockRejectedValueOnce(new Error('extension lookup failed'));
     const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     try {
       const response = await auth(
@@ -1173,6 +1177,32 @@ describe('extension management v2 REST', () => {
       expect(stderr).not.toHaveBeenCalledWith(
         expect.stringContaining('unhandled error'),
       );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('uninstalls by store identity when the extension is not loadable', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.mocked(ExtensionManager.prototype.getLoadedExtensions).mockReturnValue(
+      [],
+    );
+    try {
+      const started = await auth(
+        request(h.app).delete(`/extensions/${extensionId}`),
+      );
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({
+        status: 'succeeded',
+        result: { status: 'uninstalled', name: 'demo' },
+      });
+      expect(
+        ExtensionManager.prototype.uninstallExtensionById,
+      ).toHaveBeenCalledWith(extensionId, false);
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
