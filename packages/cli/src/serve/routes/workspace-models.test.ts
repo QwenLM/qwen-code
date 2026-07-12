@@ -12,6 +12,7 @@ import express from 'express';
 import request from 'supertest';
 import { registerWorkspaceModelsRoutes } from './workspace-models.js';
 import { loadSettings } from '../../config/settings.js';
+import { WorkspaceSettingsPartialPersistError } from '../workspace-service/types.js';
 
 let home: string;
 let workspace: string;
@@ -192,5 +193,35 @@ describe('DELETE /workspace/models', () => {
     expect(res.status).toBe(500);
     expect(res.body).toMatchObject({ code: 'internal_error' });
     expect(broadcastSettingsChanged).not.toHaveBeenCalled();
+  });
+
+  it('broadcasts committed writes on a partial persistence failure', async () => {
+    writeUserSettings({
+      modelProviders: { openai: [{ id: 'gpt-4o' }] },
+      model: { name: 'gpt-4o' },
+    });
+    const { app, persistSettings, broadcastSettingsChanged } = makeApp();
+    persistSettings.mockImplementationOnce(async (_ws, writes) => {
+      // modelProviders committed, model.name/baseUrl did not.
+      throw new WorkspaceSettingsPartialPersistError(
+        'partial',
+        [writes[0]],
+        new Error('disk full'),
+      );
+    });
+
+    const res = await request(app)
+      .delete('/workspace/models')
+      .send({ authType: 'openai', modelId: 'gpt-4o' });
+
+    expect(res.status).toBe(500);
+    // The committed modelProviders write is broadcast; the uncommitted ones are not.
+    expect(broadcastSettingsChanged).toHaveBeenCalledTimes(1);
+    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+      'modelProviders',
+      { openai: [] },
+      'user',
+      undefined,
+    );
   });
 });

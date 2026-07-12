@@ -140,6 +140,17 @@ describe('isActiveModelSelection', () => {
     ).toBe(true);
   });
 
+  it('does not clear a pinned active selection on an id-only delete', () => {
+    // Active model is pinned to a baseUrl but the delete target has none — the
+    // id-only delete may have removed a different variant, so don't clear it.
+    expect(
+      isActiveModelSelection('gpt-4o', 'https://a.example', {
+        authType: 'openai',
+        modelId: 'gpt-4o',
+      }),
+    ).toBe(false);
+  });
+
   it('does not match a different active model', () => {
     expect(
       isActiveModelSelection('other', undefined, {

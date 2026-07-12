@@ -13,7 +13,10 @@ import {
   removeModelFromProviders,
   type RemoveModelTarget,
 } from '../model-providers-edit.js';
-import type { WorkspaceSettingsWrite } from '../workspace-service/types.js';
+import {
+  WorkspaceSettingsPartialPersistError,
+  type WorkspaceSettingsWrite,
+} from '../workspace-service/types.js';
 
 type PersistSettings = (
   workspace: string,
@@ -106,6 +109,23 @@ export function registerWorkspaceModelsRoutes(
       const clientId = parseAndValidateClientId(req, res);
       if (clientId === null) return;
 
+      const broadcastWrite = (write: WorkspaceSettingsWrite) => {
+        try {
+          broadcastSettingsChanged(
+            write.key,
+            write.value,
+            scopeToWire(write.scope),
+            clientId,
+          );
+        } catch (err) {
+          writeStderrLine(
+            `qwen serve: DELETE /workspace/models broadcast error (key=${write.key}): ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+      };
+
       let writes: WorkspaceSettingsWrite[];
       try {
         const loaded = loadSettings(boundWorkspace);
@@ -137,7 +157,16 @@ export function registerWorkspaceModelsRoutes(
           writes.push({ scope, key: 'model.baseUrl', value: '' });
         }
 
-        await persistSettings(boundWorkspace, writes);
+        try {
+          await persistSettings(boundWorkspace, writes);
+        } catch (err) {
+          // A multi-key write can fail after committing some keys — surface the
+          // committed ones to live clients before reporting the failure.
+          if (err instanceof WorkspaceSettingsPartialPersistError) {
+            for (const write of err.committedWrites) broadcastWrite(write);
+          }
+          throw err;
+        }
       } catch (err) {
         writeStderrLine(
           `qwen serve: DELETE /workspace/models error (authType=${parsed.authType}, modelId=${parsed.modelId}): ${
@@ -151,22 +180,7 @@ export function registerWorkspaceModelsRoutes(
         return;
       }
 
-      for (const write of writes) {
-        try {
-          broadcastSettingsChanged(
-            write.key,
-            write.value,
-            scopeToWire(write.scope),
-            clientId,
-          );
-        } catch (err) {
-          writeStderrLine(
-            `qwen serve: DELETE /workspace/models broadcast error (key=${write.key}): ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-        }
-      }
+      for (const write of writes) broadcastWrite(write);
 
       const clearedActiveModel = writes.some((w) => w.key === 'model.name');
       res.status(200).json({ removed: true, clearedActiveModel });

@@ -920,6 +920,27 @@ function translateCopyMessage(
   return message;
 }
 
+/**
+ * Read a model setting's value for the scope currently being edited, falling
+ * back to the merged/effective value. Model pickers persist to
+ * `modelSettingScope`, so their "current" value must reflect that same scope —
+ * otherwise editing the User tab shows (and appears to clear) workspace values.
+ */
+function readScopedModelSetting(
+  settings: ReadonlyArray<{
+    key: string;
+    values: { effective: unknown; user?: unknown; workspace?: unknown };
+  }>,
+  scope: 'workspace' | 'user',
+  key: string,
+): unknown {
+  const setting = settings.find((s) => s.key === key);
+  if (!setting) return undefined;
+  const scoped =
+    scope === 'user' ? setting.values.user : setting.values.workspace;
+  return scoped ?? setting.values.effective;
+}
+
 export function App({
   onSessionIdChange,
   theme: providedTheme,
@@ -2885,35 +2906,43 @@ export function App({
     (setting) => setting.key === LANGUAGE_SETTING_KEY,
   );
   const currentVoiceModel = (() => {
-    const value = workspaceSettings.find(
-      (setting) => setting.key === 'voiceModel',
-    )?.values.effective;
+    const value = readScopedModelSetting(
+      workspaceSettings,
+      modelSettingScope,
+      'voiceModel',
+    );
     return typeof value === 'string' && value.trim() ? value.trim() : undefined;
   })();
   const currentVisionModel = (() => {
-    const value = workspaceSettings.find(
-      (setting) => setting.key === 'visionModel',
-    )?.values.effective;
+    const value = readScopedModelSetting(
+      workspaceSettings,
+      modelSettingScope,
+      'visionModel',
+    );
     if (typeof value !== 'string' || !value.trim()) return undefined;
     return decodeVisionModelForPicker(value.trim());
   })();
   const currentFastModel = (() => {
-    const value = workspaceSettings.find(
-      (setting) => setting.key === 'fastModel',
-    )?.values.effective;
+    const value = readScopedModelSetting(
+      workspaceSettings,
+      modelSettingScope,
+      'fastModel',
+    );
     return typeof value === 'string' && value.trim() ? value.trim() : undefined;
   })();
   const currentModelFallbacks = useMemo(() => {
-    const value = workspaceSettings.find(
-      (setting) => setting.key === 'modelFallbacks',
-    )?.values.effective;
+    const value = readScopedModelSetting(
+      workspaceSettings,
+      modelSettingScope,
+      'modelFallbacks',
+    );
     return typeof value === 'string'
       ? value
           .split(',')
           .map((entry) => entry.trim())
           .filter(Boolean)
       : [];
-  }, [workspaceSettings]);
+  }, [workspaceSettings, modelSettingScope]);
   // Fallback candidates are the selectable (non-runtime) models, keyed by their
   // base id — the same value shape the modelFallbacks setting stores.
   const fallbackModelOptions = useMemo(
@@ -5671,7 +5700,11 @@ export function App({
                               .loadProviders()
                               .then((status) => {
                                 setVoiceModels(extractVoiceModels(status));
-                                setModelDialogMode('voice');
+                                // Don't clobber a picker the user opened while
+                                // loadProviders was still in flight.
+                                setModelDialogMode((prev) =>
+                                  prev === null ? 'voice' : prev,
+                                );
                               })
                               .catch((error: unknown) =>
                                 reportError(error, t('model.setVoice')),

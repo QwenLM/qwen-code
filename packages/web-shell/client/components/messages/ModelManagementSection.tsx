@@ -138,6 +138,7 @@ export function ModelManagementSection({
                           <button
                             type="button"
                             className={styles.actionButton}
+                            disabled={busy}
                             onClick={() => setConfirmKey(null)}
                           >
                             {t('settings.models.cancel')}
