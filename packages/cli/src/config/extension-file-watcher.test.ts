@@ -76,6 +76,7 @@ function createRefreshState(): ExtensionRefreshState {
     markExtensionContentChanged: vi.fn(),
     markExtensionsChanged: vi.fn().mockReturnValue(true),
     needsExtensionRefresh: vi.fn().mockReturnValue(false),
+    isSuppressed: vi.fn().mockReturnValue(false),
     beginSuppression: vi.fn((onSettle?: () => void) => () => onSettle?.()),
   } as unknown as ExtensionRefreshState;
 }
@@ -231,6 +232,35 @@ describe('ExtensionFileWatcher', () => {
         'change',
         path.join(path.dirname(extensionsDir), 'extension-store', 'state.json'),
       );
+      expect(refreshState.needsExtensionRefresh()).toBe(false);
+
+      vi.advanceTimersByTime(30_000);
+
+      expect(refreshState.needsExtensionRefresh()).toBe(true);
+    } finally {
+      watcher.stopWatching();
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries a suppressed generation after an active reload completes', () => {
+    vi.useFakeTimers();
+    const refreshState = new ExtensionRefreshState();
+    const watcher = new ExtensionFileWatcher(
+      configWithExtensions([]),
+      extensionsDir,
+      refreshState,
+    );
+    try {
+      watcher.startWatching();
+      refreshState.markExtensionsChanged('reload pending');
+      refreshState.notifyExtensionsReloadStarted();
+      const endSuppression = refreshState.beginSuppression();
+      mockReadFileSync.mockReturnValue('{"generation":2}');
+
+      vi.advanceTimersByTime(30_000);
+      endSuppression();
+      refreshState.clearExtensionsChanged();
       expect(refreshState.needsExtensionRefresh()).toBe(false);
 
       vi.advanceTimersByTime(30_000);

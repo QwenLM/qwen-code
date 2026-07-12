@@ -390,6 +390,7 @@ export class ExtensionFileWatcher {
   private markStoreGenerationChanged(generation: number, force = false): void {
     const previous = this.observedStoreGeneration;
     if (!force && previous === generation) return;
+    if (this.refreshState.isSuppressed()) return;
     const marked = this.refreshState.markExtensionsChanged(
       'extension store generation changed',
     );
