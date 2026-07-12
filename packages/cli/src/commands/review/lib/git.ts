@@ -35,6 +35,19 @@ export function git(...args: string[]): string {
 }
 
 /**
+ * Run `git` with `input` on its stdin. Returns stdout, trimmed.
+ *
+ * Exists so a command can be fed an empty stdin without naming a null device:
+ * `/dev/null` and `NUL` are special-cased only on git's *diff* code path, so
+ * every other subcommand would try to open the name as an ordinary file.
+ */
+export function gitWithInput(input: Buffer, args: string[]): string {
+  return execFileSync('git', args, { ...GIT_OPTS, encoding: 'utf8', input })
+    .replace(/\r\n/g, '\n')
+    .trim();
+}
+
+/**
  * Run `git`, return null on non-zero exit (e.g. ref / file does not exist).
  *
  * Unlike `git`, this swallows the child's stderr too — callers use it to

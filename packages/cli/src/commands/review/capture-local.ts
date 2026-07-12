@@ -46,6 +46,22 @@ type CaptureLocalResult = PlanReport & {
   skippedFiles: SkippedFile[];
 };
 
+/**
+ * Render a repo path for a terminal.
+ *
+ * A filename is workspace-controlled data, and git permits almost any byte in
+ * one — including newlines and ESC. Printed raw, a path can forge a second
+ * warning line ("...was NOT reviewed\nIncluded 3 untracked files") or emit an
+ * OSC/CSI sequence at the user's terminal. `JSON.stringify` escapes the control
+ * characters and quotes the result; the machine-readable report keeps the real
+ * bytes.
+ */
+function display(path: string): string {
+  // eslint-disable-next-line no-control-regex
+  const CONTROL = /[\u0000-\u001f\u007f]/;
+  return CONTROL.test(path) ? JSON.stringify(path) : path;
+}
+
 function runCaptureLocal(args: CaptureLocalArgs): void {
   const { out, file, target } = args;
 
@@ -85,22 +101,30 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   if (capture.untracked.length > 0) {
     writeStderrLine(
       `Included ${capture.untracked.length} untracked file(s) that no ` +
-        `\`git diff\` would show: ${capture.untracked.join(', ')}`,
+        `\`git diff\` would show: ${capture.untracked.map(display).join(', ')}`,
     );
   }
   for (const s of capture.skipped) {
     writeStderrLine(
-      `WARNING: untracked file ${s.path} was NOT reviewed — ${s.reason}. ` +
-        `List it under "Not reviewed" in the review output.`,
+      `WARNING: untracked file ${display(s.path)} was NOT reviewed — ` +
+        `${s.reason}. List it under "Not reviewed" in the review output.`,
     );
   }
   if (plan.diffLines === 0) {
-    // The genuinely-empty case: nothing staged, nothing unstaged, nothing
-    // untracked. An empty plan gives the agents nothing to read, and a review
-    // over nothing returns a clean verdict.
+    // "Nothing to review" and "nothing was reviewable" are different sentences,
+    // and only one of them is a clean tree. An oversized blob or an embedded repo
+    // as the *only* change lands here with an empty diff and a non-empty skip
+    // list, and calling that clean would hand the review a green verdict over
+    // work it explicitly could not read — the whole failure this command exists
+    // to end, arriving through the front door.
     writeStderrLine(
-      'WARNING: the working tree is clean — 0 chunks. There is nothing to ' +
-        'review; do not run the review agents.',
+      capture.skipped.length > 0
+        ? `WARNING: 0 chunks — nothing reviewable was captured, but ` +
+            `${capture.skipped.length} untracked file(s) were SKIPPED (above). ` +
+            `This is not a clean tree: report them under "Not reviewed" and do ` +
+            `not certify the working tree as reviewed.`
+        : 'WARNING: the working tree is clean — 0 chunks. There is nothing to ' +
+            'review; do not run the review agents.',
     );
   }
   writeStderrLine(

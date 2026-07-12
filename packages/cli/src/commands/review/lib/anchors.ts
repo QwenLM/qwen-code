@@ -236,19 +236,64 @@ function matchRuns(
   return starts;
 }
 
-const TIERS: ReadonlyArray<{
-  tier: MatchTier;
-  addedOnly: boolean;
-  norm: (s: string) => string;
-}> = [
-  // Exact beats loose, and added beats context: strongest evidence first. An
-  // anchor is *supposed* to quote added code, so a byte-identical hit on a `+`
-  // line is the intended path and every later tier is a concession.
-  { tier: 'exact-added', addedOnly: true, norm: normalizeExact },
-  { tier: 'exact-context', addedOnly: false, norm: normalizeExact },
-  { tier: 'loose-added', addedOnly: true, norm: normalizeLoose },
-  { tier: 'loose-context', addedOnly: false, norm: normalizeLoose },
-];
+/** One place the snippet could go. */
+interface Candidate {
+  startLine: number;
+  line: number;
+  /** True when every line of the run is a `+` line. */
+  added: boolean;
+}
+
+/**
+ * Every place `needle` fits, under one normalisation, across the whole hunk.
+ *
+ * Added and context lines are searched **together**, not in separate passes.
+ * Searching added-only first and returning on the first hit reports
+ * `matchCount: 1, ambiguous: false` for a snippet that also sits on a context
+ * line elsewhere — which is not a tie broken, it is a tie the resolver never
+ * saw. When the agent's claim points at the context copy, that "unambiguous"
+ * answer is the wrong line, reported with full confidence.
+ */
+function candidatesFor(
+  hay: NewSideLine[],
+  needle: string[],
+  norm: (s: string) => string,
+): Candidate[] {
+  return matchRuns(hay, needle, norm).map((i) => {
+    const run = hay.slice(i, i + needle.length);
+    return {
+      startLine: run[0].newLine,
+      line: run[run.length - 1].newLine,
+      added: run.every((l) => l.added),
+    };
+  });
+}
+
+/**
+ * Pick one candidate, or null when the choice cannot be made honestly.
+ *
+ * With a claimed line, nearest-to-the-claim wins: the claim and the snippet are
+ * independent signals, and together they are far stronger than either alone.
+ *
+ * With **no** claim and more than one candidate, an added line beats a context
+ * line — an anchor is supposed to quote added code. If that still leaves more
+ * than one, there is nothing left to choose with, and guessing would post a
+ * comment on code the finding is not about. Return null and let the caller
+ * report it unmatched: an unmatched finding is loud and recoverable, a
+ * confidently wrong anchor is neither.
+ */
+function pick(cands: Candidate[], claimedLine?: number): Candidate | null {
+  if (cands.length === 1) return cands[0];
+  if (claimedLine !== undefined) {
+    return cands.reduce((a, b) =>
+      Math.abs(a.startLine - claimedLine) <= Math.abs(b.startLine - claimedLine)
+        ? a
+        : b,
+    );
+  }
+  const added = cands.filter((c) => c.added);
+  return added.length === 1 ? added[0] : null;
+}
 
 /**
  * Resolve one anchor snippet to a line range in the post-change file.
@@ -268,39 +313,66 @@ export function resolveAnchor(
     return { status: 'unmatched', reason: 'anchor is empty' };
   }
 
-  for (const needle of variants) {
-    for (const { tier, addedOnly, norm } of TIERS) {
-      const hay = addedOnly
-        ? newSideLines.filter((l) => l.added)
-        : newSideLines;
-      const starts = matchRuns(hay, needle, norm);
-      if (starts.length === 0) continue;
+  let ambiguousUnpickable = false;
 
-      // More than one hit: prefer the one closest to where the agent thought it
-      // was. With no claim to go on, first-wins — and say it was ambiguous.
-      let best = starts[0];
-      if (starts.length > 1 && claimedLine !== undefined) {
-        best = starts.reduce((a, b) =>
-          Math.abs(hay[a].newLine - claimedLine) <=
-          Math.abs(hay[b].newLine - claimedLine)
-            ? a
-            : b,
-        );
+  for (const [vi, needle] of variants.entries()) {
+    // Indentation-insensitive matching is offered only to the **faithful**
+    // reading of the snippet. The marker interpretations below it (`vi > 0`) are
+    // already a guess about what the agent meant to type; letting a guess match
+    // loosely stacks two of them, and the result — a statement matched at the
+    // wrong nesting level in Python or YAML, then posted as a blocker — looks
+    // exactly like a confident answer.
+    const norms: Array<[boolean, (s: string) => string]> =
+      vi === 0
+        ? [
+            [true, normalizeExact],
+            [false, normalizeLoose],
+          ]
+        : [[true, normalizeExact]];
+
+    for (const [exact, norm] of norms) {
+      const cands = candidatesFor(newSideLines, needle, norm);
+      if (cands.length === 0) continue;
+
+      // A loose match earns its place only when it is the *only* place the
+      // snippet could go. Choosing between several indentation-stripped
+      // candidates is choosing which nesting level the agent meant, and the
+      // resolver has no way to know.
+      if (!exact && cands.length > 1) {
+        ambiguousUnpickable = true;
+        continue;
       }
-      const startLine = hay[best].newLine;
-      const line = hay[best + needle.length - 1].newLine;
+
+      const best = pick(cands, claimedLine);
+      if (!best) {
+        ambiguousUnpickable = true;
+        continue;
+      }
+
+      const { startLine, line } = best;
       return {
         status: 'resolved',
         line,
         startLine,
-        matchCount: starts.length,
-        tier,
-        ambiguous: starts.length > 1,
+        matchCount: cands.length,
+        tier:
+          (exact ? 'exact' : 'loose') + (best.added ? '-added' : '-context'),
+        ambiguous: cands.length > 1,
         ...(claimedLine !== undefined
           ? { drift: Math.abs(startLine - claimedLine) }
           : {}),
-      };
+      } as AnchorResolution;
     }
+  }
+
+  if (ambiguousUnpickable) {
+    return {
+      status: 'unmatched',
+      reason:
+        'the snippet appears in more than one place and nothing distinguishes ' +
+        'them — quote more lines so it is unique, or give the line number you ' +
+        'mean so the nearest match can be chosen',
+    };
   }
 
   return {

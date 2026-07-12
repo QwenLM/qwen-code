@@ -29,7 +29,9 @@ import {
 import { parseDiff, buildDiffPlan, chunksCoverDiff } from './diff-plan.js';
 
 let repo: string;
+let home: string;
 let cwd: string;
+let savedEnv: NodeJS.ProcessEnv;
 
 function git(...args: string[]): string {
   return execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
@@ -56,21 +58,48 @@ beforeEach(() => {
   repo = realpathSync(mkdtempSync(join(tmpdir(), 'review-loc-')));
   cwd = process.cwd();
   process.chdir(repo);
+
+  // `captureLocalDiff` shells out to git through `process.env`, so the fixture
+  // has to isolate the *process* environment, not just its own git calls. Left
+  // inheriting the developer's setup, a global `core.hooksPath` runs during the
+  // test and a global `commit.gpgsign=true` fails it outright for want of a key
+  // — and a stray `~/.gitconfig` silently redefines what the "clean" baseline
+  // is. Matches the neighbouring diff-plan fixture.
+  savedEnv = { ...process.env };
+  // The config lives OUTSIDE the repo. Written inside it, the fixture's own
+  // isolation file becomes an untracked file — and this suite's whole subject is
+  // what the capture does with untracked files.
+  home = realpathSync(mkdtempSync(join(tmpdir(), 'review-home-')));
+  const emptyConfig = join(home, '.gitconfig');
+  writeFileSync(emptyConfig, '');
+  process.env['GIT_CONFIG_NOSYSTEM'] = '1';
+  process.env['GIT_CONFIG_GLOBAL'] = emptyConfig;
+  process.env['HOME'] = home; // belt and braces where the above is unsupported
 });
 
 afterEach(() => {
   process.chdir(cwd);
+  process.env = savedEnv;
   rmSync(repo, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true });
 });
+
+/** Init a repo with hooks and signing off, so a fixture cannot run either. */
+function initRepo(): void {
+  git('init', '-q', '--template=', '.');
+  git('config', 'user.email', 'a@b');
+  git('config', 'user.name', 'a');
+  git('config', 'commit.gpgsign', 'false');
+  git('config', 'core.hooksPath', join(repo, '.no-such-hooks'));
+  git('config', 'core.autocrlf', 'false');
+}
 
 /** A repo with one commit. Most tests want this. */
 function seedRepo(): void {
-  git('init', '-q', '.');
-  git('config', 'user.email', 'a@b');
-  git('config', 'user.name', 'a');
+  initRepo();
   write('tracked.ts', 'export const a = 1;\n');
   git('add', '-A');
-  git('commit', '-q', '-m', 'init');
+  git('commit', '-q', '--no-verify', '-m', 'init');
 }
 
 describe('captureLocalDiff — untracked files', () => {
@@ -273,6 +302,56 @@ describe('captureLocalDiff — untracked files', () => {
     const res = capture({ file: 'a.ts' });
     expect(res.untracked).toEqual(['a.ts']);
     expect(res.files.map((f) => f.path)).toEqual(['a.ts']);
+  });
+
+  it('resolves `file` against the caller’s directory, not the repo root', () => {
+    // Every git call runs with `-C <repoRoot>`, so a path the user typed in a
+    // subdirectory means a different file to git than it did to them. Asking for
+    // `new.ts` from `sub/` used to search `<repo>/new.ts` and report no changes —
+    // the file review would silently review nothing.
+    write('sub/new.ts', 'export const n = 1;\n');
+    process.chdir(join(repo, 'sub'));
+
+    const res = capture({ file: 'new.ts' });
+    expect(res.untracked).toEqual(['sub/new.ts']);
+    expect(res.files.map((f) => f.path)).toEqual(['sub/new.ts']);
+  });
+
+  it('refuses a `file` outside the repository', () => {
+    expect(() => capture({ file: '../../etc/passwd' })).toThrow(
+      /outside the repository/,
+    );
+  });
+
+  it('reads a glob-shaped filename as a name, not as a pathspec', () => {
+    // `--` ends option parsing; it does not disable pathspec magic. `a[bc].ts` is
+    // a *glob*, so scoping the review to that one file also dragged in `ab.ts`
+    // and `ac.ts` — a review that says it looked at one file and looked at three.
+    write('a[bc].ts', 'export const target = 1;\n');
+    write('ab.ts', 'export const other = 1;\n');
+    write('ac.ts', 'export const alsoOther = 1;\n');
+
+    const res = capture({ file: 'a[bc].ts' });
+    expect(res.untracked).toEqual(['a[bc].ts']);
+    expect(res.files.map((f) => f.path)).toEqual(['a[bc].ts']);
+  });
+
+  it('never claims to have reviewed a binary file', () => {
+    // Git renders a binary file as the single line `Binary files ... differ`.
+    // The section is well-formed and parses; it contains not one byte an agent
+    // could read. Recording the path among the files "whose contents are in the
+    // diff" is the directory bug again, one octave quieter — a `.png` or a
+    // `.pyc` certified as reviewed by a review that could not see it.
+    writeFileSync(join(repo, 'logo.png'), Buffer.from([0, 1, 2, 3, 0, 255]));
+    write('real.ts', 'export const r = 1;\n');
+
+    const res = capture();
+
+    expect(res.untracked).toEqual(['real.ts']);
+    expect(res.skipped).toHaveLength(1);
+    expect(res.skipped[0].path).toBe('logo.png');
+    expect(res.skipped[0].reason).toContain('binary');
+    expect(res.text).not.toContain('logo.png');
   });
 
   it('produces a diff the chunk planner can tile', () => {

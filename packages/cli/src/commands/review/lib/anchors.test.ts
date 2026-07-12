@@ -228,6 +228,39 @@ describe('resolveAnchor', () => {
     });
   });
 
+  it('sees a context twin of an added line instead of hiding it', () => {
+    // Searching added lines first and returning on the first hit reported
+    // `matchCount: 1, ambiguous: false` for a snippet that also sits on a
+    // context line — a tie the resolver never saw rather than a tie it broke.
+    // When the agent's claim points at the context copy, that "unambiguous"
+    // answer is the wrong line, delivered with full confidence.
+    const diff = [
+      'diff --git a/t.ts b/t.ts',
+      '--- a/t.ts',
+      '+++ b/t.ts',
+      '@@ -10,2 +10,3 @@',
+      ' flush();', // context, line 10
+      ' other();', // context, line 11
+      '+flush();', // added,   line 12
+      '',
+    ].join('\n');
+    const hayT = lines(diff, 't.ts');
+
+    // The agent said 10 — it means the context copy, and gets it.
+    expect(resolveAnchor(hayT, 'flush();', 10)).toMatchObject({
+      line: 10,
+      matchCount: 2,
+      ambiguous: true,
+      tier: 'exact-context',
+    });
+    // It said 12 — it means the added copy.
+    expect(resolveAnchor(hayT, 'flush();', 12)).toMatchObject({
+      line: 12,
+      matchCount: 2,
+      tier: 'exact-added',
+    });
+  });
+
   it('prefers an exact added match over an exact context match', () => {
     // The same text on both a context line (earlier) and an added line. An
     // anchor is meant to quote added code, so the added hit must win even
@@ -265,9 +298,78 @@ describe('resolveAnchor', () => {
     const near = resolveAnchor(hayR, 'await tick();', 5);
     expect(near).toMatchObject({ line: 4, matchCount: 2, ambiguous: true });
 
-    // With no claim to steer by, first-wins — and it admits the ambiguity.
+    // With no claim to steer by, there is nothing left to choose with — and
+    // first-wins is not a choice, it is a coin flip with a confident face. It
+    // used to return line 1 as `resolved`. Refuse instead: an unmatched finding
+    // is loud and recoverable (a Critical still reaches the body), while a
+    // comment posted on the wrong one of two identical lines is neither.
     const blind = resolveAnchor(hayR, 'await tick();');
-    expect(blind).toMatchObject({ line: 1, matchCount: 2, ambiguous: true });
+    expect(blind.status).toBe('unmatched');
+    expect(blind.reason).toContain('more than one place');
+  });
+
+  it('will not choose between two indentation-stripped candidates', () => {
+    // Loose matching exists so a mangled indent does not lose a finding. It must
+    // not become a way to *choose* an indent: in Python or YAML the nesting level
+    // IS the semantics, and picking one of several stripped candidates is picking
+    // which block the finding is about.
+    //
+    // A claimed line does NOT rescue this, which is why the refusal is its own
+    // guard rather than a consequence of having nothing to tie-break with. For an
+    // *exact* snippet the claim is a second independent signal and is trusted
+    // (see the tie-break test above). For a loose one the snippet has already
+    // been shown not to be verbatim, so the claim would be the only signal left —
+    // and it would be deciding a semantic question it has no view of. Quote more
+    // lines instead.
+    const diff = [
+      'diff --git a/y.py b/y.py',
+      '--- a/y.py',
+      '+++ b/y.py',
+      '@@ -10,0 +10,4 @@',
+      '+    if a:',
+      '+        log()', // line 11
+      '+    else:',
+      '+        log()', // line 13
+      '',
+    ].join('\n');
+    const hayY = lines(diff, 'y.py');
+
+    const blind = resolveAnchor(hayY, 'log()');
+    expect(blind.status).toBe('unmatched');
+    expect(blind.reason).toContain('more than one place');
+
+    // And with a claim landing exactly on one of them — still refused.
+    const claimed = resolveAnchor(hayY, 'log()', 11);
+    expect(claimed.status).toBe('unmatched');
+    expect(claimed.reason).toContain('more than one place');
+  });
+
+  it('does not let a marker guess also be an indentation guess', () => {
+    // Stripping a `+` column is already an inference about what the agent meant
+    // to type. Allowing that inference to *then* match loosely stacks two
+    // guesses, and the result looks exactly like a confident answer. A snippet
+    // that is neither verbatim nor correctly marked is not resolvable; say so.
+    const diff = [
+      'diff --git a/z.ts b/z.ts',
+      '--- a/z.ts',
+      '+++ b/z.ts',
+      '@@ -1,0 +1,2 @@',
+      '+    const deep = compute();',
+      '+    return deep;',
+      '',
+    ].join('\n');
+    // Markers copied, AND the indentation mangled. Either alone resolves; both
+    // together must not.
+    const r = resolveAnchor(lines(diff, 'z.ts'), '+const deep = compute();');
+    expect(r.status).toBe('unmatched');
+
+    // The same snippet with its real indentation resolves through the marker
+    // reading, which is what keeps that reading worth having.
+    const ok = resolveAnchor(
+      lines(diff, 'z.ts'),
+      '+    const deep = compute();',
+    );
+    expect(ok).toMatchObject({ status: 'resolved', line: 1 });
   });
 
   it('will not join two lines that are not consecutive in the file', () => {

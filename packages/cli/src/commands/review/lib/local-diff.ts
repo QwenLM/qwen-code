@@ -25,13 +25,20 @@
 // any other.
 
 import { lstatSync, statSync, type Stats } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative, resolve, isAbsolute, sep } from 'node:path';
 import {
+  LITERAL_PATHSPECS,
   NULL_DEVICE,
   PINNED_DIFF_CONFIG,
   PINNED_DIFF_FLAGS,
 } from './diff-flags.js';
-import { git, gitRaw, gitRawTolerateDiff, refExists } from './git.js';
+import {
+  git,
+  gitRaw,
+  gitRawTolerateDiff,
+  gitWithInput,
+  refExists,
+} from './git.js';
 
 /**
  * Untracked files above this size are named but not diffed.
@@ -98,7 +105,20 @@ export interface LocalDiffCapture {
  * nothing.
  */
 function emptyTree(repoRoot: string): string {
-  return git('-C', repoRoot, 'hash-object', '-t', 'tree', NULL_DEVICE);
+  // `--stdin` with nothing on it, rather than naming the null device. Git's
+  // special-casing of `/dev/null` and `NUL` lives in `diff-no-index.c`'s
+  // `get_mode()` — it is on the *diff* code path only. `hash-object` reaches the
+  // file through `hash_fd()`, which has no such case, so on Windows it would try
+  // to open `NUL` as an ordinary file. An empty stdin needs no device name and
+  // no platform branch at all.
+  return gitWithInput(Buffer.alloc(0), [
+    '-C',
+    repoRoot,
+    'hash-object',
+    '-t',
+    'tree',
+    '--stdin',
+  ]);
 }
 
 /**
@@ -144,11 +164,57 @@ function describeUndiffable(abs: string, st: Stats): string | null {
   return null;
 }
 
+/**
+ * Turn a user-supplied `--file` into a pathspec git will read as **this one
+ * file**, from the repo root.
+ *
+ * Two things are wrong with passing it through untouched.
+ *
+ * It is relative to where the *user* typed it, and every git call below runs
+ * with `-C <repoRoot>`. `qwen review capture-local --file src/foo.ts` from
+ * `packages/cli` would therefore look for `<repo>/src/foo.ts` — a different
+ * file, usually a nonexistent one — and report no changes.
+ *
+ * And `--` ends option parsing without disabling **pathspec magic**. A filename
+ * is not a pathspec: `a[bc].ts` is a *glob*, and asking git to diff it returns
+ * `ab.ts` and `ac.ts` as well, so a review scoped to one file silently reviews
+ * others. `--literal-pathspecs` (applied at every call site below) turns the
+ * whole argument back into a plain name.
+ */
+function toRepoPathspec(repoRoot: string, file: string): string {
+  const abs = resolve(process.cwd(), file);
+  const rel = relative(repoRoot, abs);
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
+    throw new Error(
+      `--file ${file} resolves to ${abs}, which is outside the repository ` +
+        `at ${repoRoot}.`,
+    );
+  }
+  // git speaks forward slashes even on Windows.
+  return rel.split(sep).join('/');
+}
+
+/**
+ * True when git rendered this file as a binary blob rather than as text.
+ *
+ * `Binary files /dev/null and b/logo.png differ` — that is the entire body. The
+ * section parses, and it contains nothing to review.
+ */
+function isBinarySection(section: Buffer): boolean {
+  // Only the header matters, and a binary section is a few hundred bytes; do not
+  // decode a megabyte of payload to answer this.
+  const head = section.subarray(0, 4096).toString('utf8');
+  return (
+    /^Binary files .* differ$/m.test(head) || head.includes('GIT binary patch')
+  );
+}
+
 /** Repo-root-relative paths of untracked, non-ignored files. */
-function listUntracked(repoRoot: string, file?: string): string[] {
+function listUntracked(repoRoot: string, pathspec?: string): string[] {
   const args = [
     '-C',
     repoRoot,
+    LITERAL_PATHSPECS,
     'ls-files',
     '--others',
     '--exclude-standard',
@@ -156,8 +222,9 @@ function listUntracked(repoRoot: string, file?: string): string[] {
     '-z',
   ];
   // `--` separates paths from options, so a file named `--cached` cannot be
-  // read as a flag.
-  if (file) args.push('--', file);
+  // read as a flag. It does not stop git reading the name as a glob; that is
+  // what `--literal-pathspecs` above is for.
+  if (pathspec) args.push('--', pathspec);
   const out = gitRaw(...args).toString('utf8');
   // `-z` because a filename may legally contain a newline. Splitting on '\n'
   // would turn one such file into two nonexistent ones.
@@ -177,6 +244,7 @@ function diffUntracked(repoRoot: string, path: string): Buffer {
   return gitRawTolerateDiff(
     '-C',
     repoRoot,
+    LITERAL_PATHSPECS,
     ...PINNED_DIFF_CONFIG,
     'diff',
     '--no-index',
@@ -212,24 +280,29 @@ export function captureLocalDiff(opts: {
   const unbornHead = !refExists('HEAD');
   const base = unbornHead ? emptyTree(repoRoot) : 'HEAD';
 
+  // The user typed `--file` relative to *their* directory; every git call here
+  // runs with `-C <repoRoot>`. Re-base it, and strip it of pathspec magic.
+  const pathspec = file ? toRepoPathspec(repoRoot, file) : undefined;
+
   // `git diff HEAD` is what covers the whole tracked scope: a bare `git diff`
   // omits staged changes.
   const trackedArgs = [
     '-C',
     repoRoot,
+    LITERAL_PATHSPECS,
     ...PINNED_DIFF_CONFIG,
     'diff',
     ...PINNED_DIFF_FLAGS,
     base,
   ];
-  if (file) trackedArgs.push('--', file);
+  if (pathspec) trackedArgs.push('--', pathspec);
   const parts: Buffer[] = [gitRaw(...trackedArgs)];
 
   const untracked: string[] = [];
   const skipped: SkippedFile[] = [];
 
   if (includeUntracked) {
-    const candidates = listUntracked(repoRoot, file);
+    const candidates = listUntracked(repoRoot, pathspec);
 
     if (candidates.length > MAX_UNTRACKED_FILES) {
       // Checked before the loop: the whole point is to spend zero spawns on a
@@ -318,6 +391,23 @@ export function captureLocalDiff(opts: {
             path,
             bytes,
             reason: `git could not diff it (${(err as Error).message.trim()})`,
+          });
+          continue;
+        }
+
+        if (isBinarySection(section)) {
+          // Git renders a binary file as the single line `Binary files ... differ`
+          // and nothing else. The section is well-formed and parses, but it holds
+          // not one byte an agent could read — so recording the path among the
+          // files "whose contents are in the diff" is the same lie the directory
+          // entries told, just quieter: a small PNG or a `.pyc` would be certified
+          // as reviewed by a review that could not see it.
+          skipped.push({
+            path,
+            bytes,
+            reason:
+              'is a binary file — git emits only a "Binary files differ" ' +
+              'marker, so there is nothing for a reviewer to read',
           });
           continue;
         }

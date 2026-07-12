@@ -61,3 +61,13 @@ export const PINNED_DIFF_FLAGS: readonly string[] = [
  * betting the Windows CI leg on which branch of that function is compiled in.
  */
 export const NULL_DEVICE = process.platform === 'win32' ? 'NUL' : '/dev/null';
+
+/**
+ * Read every pathspec as a plain name.
+ *
+ * `--` ends option parsing; it does not turn off **pathspec magic**. A filename
+ * is not a pathspec — `a[bc].ts` is a glob — so scoping a review to that one
+ * file also pulls in `ab.ts` and `ac.ts`, and a leading `:` opens the magic
+ * syntax outright. Every command that takes a user-supplied path pins this.
+ */
+export const LITERAL_PATHSPECS = '--literal-pathspecs';
