@@ -44,7 +44,11 @@ const TUI_ONLY_SETTINGS = new Set([
 // `/voice/stream` then reads it back via `loadSettings`.
 const WEB_SHELL_SETTINGS = new Set(['ui.compactMode', 'voiceModel']);
 
+// The primary /workspace/settings route may write the global user scope
+// (~/.qwen/settings.json). The trust-gated workspace-qualified route stays
+// workspace-only by design.
 const VALID_WRITE_SCOPES = new Set(['workspace', 'user']);
+const QUALIFIED_WRITE_SCOPES = new Set(['workspace']);
 
 interface SettingDescriptor {
   key: string;
@@ -360,9 +364,9 @@ export function registerWorkspaceQualifiedSettingsRoutes(
       const key = body['key'];
       const value = body['value'];
 
-      if (typeof scope !== 'string' || !VALID_WRITE_SCOPES.has(scope)) {
+      if (typeof scope !== 'string' || !QUALIFIED_WRITE_SCOPES.has(scope)) {
         res.status(400).json({
-          error: `scope must be one of: ${[...VALID_WRITE_SCOPES].join(', ')}`,
+          error: `scope must be one of: ${[...QUALIFIED_WRITE_SCOPES].join(', ')}`,
           code: 'invalid_scope',
         });
         return;
@@ -411,10 +415,12 @@ export function registerWorkspaceQualifiedSettingsRoutes(
       );
       if (clientId === null) return;
 
-      const settingScope = SCOPE_MAP[scope];
+      const settingScope = QUALIFIED_WRITE_SCOPES.has(scope)
+        ? SCOPE_MAP[scope]
+        : undefined;
       if (!settingScope) {
         res.status(400).json({
-          error: `scope must be one of: ${[...VALID_WRITE_SCOPES].join(', ')}`,
+          error: `scope must be one of: ${[...QUALIFIED_WRITE_SCOPES].join(', ')}`,
           code: 'invalid_scope',
         });
         return;
