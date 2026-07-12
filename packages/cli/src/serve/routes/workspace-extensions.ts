@@ -200,6 +200,25 @@ export function registerWorkspaceExtensionRoutes(
     controllerDeps(boundWorkspace, bridge, workspace),
   );
   const appliedGenerationByWorkspaceId = new Map<string, number>();
+  const onRuntimeReconciled = (
+    runtime: WorkspaceRuntime,
+    generation: number,
+  ): void => {
+    appliedGenerationByWorkspaceId.set(
+      runtime.workspaceId,
+      Math.max(
+        appliedGenerationByWorkspaceId.get(runtime.workspaceId) ?? 0,
+        generation,
+      ),
+    );
+  };
+  const globalReconciliationOptions = () =>
+    workspaceRegistry
+      ? {
+          refreshRuntimes: workspaceRegistry.list(),
+          onRuntimeReconciled,
+        }
+      : {};
 
   if (workspaceRegistry) {
     let observedGeneration: number | undefined;
@@ -488,9 +507,7 @@ export function registerWorkspaceExtensionRoutes(
           },
           {
             deadlineMs: EXTENSION_PREPARE_DEADLINE_MS,
-            ...(workspaceRegistry
-              ? { refreshRuntimes: workspaceRegistry.list() }
-              : {}),
+            ...globalReconciliationOptions(),
           },
         );
       } catch (err) {
@@ -609,8 +626,8 @@ export function registerWorkspaceExtensionRoutes(
               return { status: 'enabled', name: extension.name };
             },
             {
-              ...(scope === SettingScope.User && workspaceRegistry
-                ? { refreshRuntimes: workspaceRegistry.list() }
+              ...(scope === SettingScope.User
+                ? globalReconciliationOptions()
                 : {}),
             },
           );
@@ -661,8 +678,8 @@ export function registerWorkspaceExtensionRoutes(
               return { status: 'disabled', name: extension.name };
             },
             {
-              ...(scope === SettingScope.User && workspaceRegistry
-                ? { refreshRuntimes: workspaceRegistry.list() }
+              ...(scope === SettingScope.User
+                ? globalReconciliationOptions()
                 : {}),
             },
           );
@@ -746,9 +763,7 @@ export function registerWorkspaceExtensionRoutes(
             },
             {
               deadlineMs: EXTENSION_PREPARE_DEADLINE_MS,
-              ...(workspaceRegistry
-                ? { refreshRuntimes: workspaceRegistry.list() }
-                : {}),
+              ...globalReconciliationOptions(),
             },
           );
         } catch (err) {
@@ -789,9 +804,7 @@ export function registerWorkspaceExtensionRoutes(
             return { status: 'uninstalled', name: extension.name };
           },
           {
-            ...(workspaceRegistry
-              ? { refreshRuntimes: workspaceRegistry.list() }
-              : {}),
+            ...globalReconciliationOptions(),
           },
         );
       } catch (err) {
@@ -886,15 +899,7 @@ export function registerWorkspaceExtensionRoutes(
       {
         manager,
         operationBasePath: '/extensions/operations',
-        onRuntimeReconciled: (runtime, generation) => {
-          appliedGenerationByWorkspaceId.set(
-            runtime.workspaceId,
-            Math.max(
-              appliedGenerationByWorkspaceId.get(runtime.workspaceId) ?? 0,
-              generation,
-            ),
-          );
-        },
+        onRuntimeReconciled,
         ...options,
       },
     );

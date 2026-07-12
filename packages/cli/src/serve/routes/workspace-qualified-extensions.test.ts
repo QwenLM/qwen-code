@@ -209,11 +209,12 @@ function mockExtensionManager(
 async function pollOperation(
   app: ReturnType<typeof createServeApp>,
   operationId: string,
+  operationBasePath = '/extensions/operations',
 ) {
   for (let i = 0; i < 100; i++) {
     const response = await auth(
       request(app).get(
-        `/extensions/operations/${encodeURIComponent(operationId)}`,
+        `${operationBasePath}/${encodeURIComponent(operationId)}`,
       ),
     );
     if (
@@ -690,6 +691,58 @@ describe('extension management v2 REST', () => {
         result: { status: 'installed', name: 'demo' },
       });
     } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('reports legacy global mutations as applied after runtime reconciliation', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'prepareExtensionInstall',
+    ).mockResolvedValue({} as never);
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'commitPreparedExtension',
+    ).mockResolvedValue({
+      identity: { id: extensionId, name: 'demo' },
+      version: '1.0.0',
+      generation: 7,
+    } as never);
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'disposePreparedExtension',
+    ).mockResolvedValue();
+    try {
+      const started = await auth(
+        request(h.app)
+          .post('/workspace/extensions/install')
+          .send({ source: '@scope/demo', consent: true }),
+      );
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(
+          h.app,
+          started.body.operationId,
+          '/workspace/extensions/operations',
+        ),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+
+      const projection = await auth(
+        request(h.app).get(
+          `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions`,
+        ),
+      );
+      expect(projection.body).toMatchObject({
+        desiredGeneration: 7,
+        appliedGeneration: 7,
+      });
+    } finally {
+      (
+        h.app.locals as { stopExtensionGenerationReconciler?: () => void }
+      ).stopExtensionGenerationReconciler?.();
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
   });
