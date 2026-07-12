@@ -6239,9 +6239,7 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
       expect(responseJson).toContain('"error"');
       expect(responseJson).toContain('Tool blocked by plan mode');
       expect(responseJson).toContain('write_file');
-      // Plan-required teammates get pivot-to-read-only then exit_plan_mode hint
-      expect(responseJson).toContain('Do NOT retry');
-      expect(responseJson).toContain('Pivot to read-only');
+      // Plan-required teammates get exit_plan_mode hint
       expect(responseJson).toContain('exit_plan_mode');
       expect(completedCalls[0].response.error).toBeInstanceOf(Error);
       expect(completedCalls[0].response.errorType).toBe(
@@ -6314,14 +6312,12 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
       expect(completedCalls[0].status).toBe('error');
       if (completedCalls[0].status === 'error') {
         // SDK, subagent, and teammate paths all get the same error format
-        // but different guidance: SDK/subagents get "present your plan directly"
+        // but different guidance: SDK/subagents get "Present your plan directly"
         const responseParts = completedCalls[0].response.responseParts;
         const responseJson = JSON.stringify(responseParts);
         expect(responseJson).toContain('"error"');
         expect(responseJson).toContain('Tool blocked by plan mode');
-        expect(responseJson).toContain('Do NOT retry');
-        expect(responseJson).toContain('Pivot to read-only');
-        expect(responseJson).toContain('present your plan directly');
+        expect(responseJson).toContain('Present your plan directly');
         expect(responseJson).not.toContain('exit_plan_mode');
         expect(completedCalls[0].response.error).toBeInstanceOf(Error);
         expect(completedCalls[0].response.errorType).toBe(
