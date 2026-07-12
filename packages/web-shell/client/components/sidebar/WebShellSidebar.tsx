@@ -694,6 +694,14 @@ function SidebarFooterMenu({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
+    const animationFrame = window.requestAnimationFrame(() => {
+      ref.current
+        ?.querySelector<HTMLButtonElement>('button:not(:disabled)')
+        ?.focus();
+    });
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, [items]);
+  useEffect(() => {
     const closeOnOutsidePointer = (event: PointerEvent) => {
       const target = event.target as Node | null;
       if (
@@ -722,6 +730,39 @@ function SidebarFooterMenu({
     };
   }, [anchorEl, onClose]);
 
+  const handleKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      const menuItems = Array.from(
+        ref.current?.querySelectorAll<HTMLButtonElement>(
+          'button:not(:disabled)',
+        ) ?? [],
+      );
+      if (menuItems.length === 0) return;
+      const activeIndex = menuItems.indexOf(
+        document.activeElement as HTMLButtonElement,
+      );
+      const currentIndex = activeIndex >= 0 ? activeIndex : -1;
+      let nextIndex: number | undefined;
+      if (event.key === 'ArrowDown') {
+        nextIndex = (currentIndex + 1) % menuItems.length;
+      } else if (event.key === 'ArrowUp') {
+        nextIndex = (currentIndex - 1 + menuItems.length) % menuItems.length;
+      } else if (event.key === 'Home') {
+        nextIndex = 0;
+      } else if (event.key === 'End') {
+        nextIndex = menuItems.length - 1;
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (nextIndex === undefined) return;
+      event.preventDefault();
+      menuItems[nextIndex]?.focus();
+    },
+    [onClose],
+  );
+
   const anchor = anchorEl.getBoundingClientRect();
   const style: CSSProperties = {
     bottom: Math.max(
@@ -734,7 +775,13 @@ function SidebarFooterMenu({
     ),
   };
   return (
-    <div ref={ref} className={styles.footerMenu} role="menu" style={style}>
+    <div
+      ref={ref}
+      className={styles.footerMenu}
+      role="menu"
+      style={style}
+      onKeyDown={handleKeyDown}
+    >
       {items.map((item) =>
         item.onSelect ? (
           <button

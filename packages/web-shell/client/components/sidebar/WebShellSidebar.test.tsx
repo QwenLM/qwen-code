@@ -793,6 +793,53 @@ describe('WebShellSidebar — version footer', () => {
     expect(container.querySelector('[role="menu"]')).toBeNull();
   });
 
+  it('focuses and navigates the actionable items in More', async () => {
+    setStoredSidebarWidth(220);
+    const { container } = renderSidebar(false, {
+      canOpenSessionsOverview: true,
+      canOpenSplitView: true,
+    });
+    click(container.querySelector('[aria-label="More actions"]'));
+    const menu = container.querySelector<HTMLElement>('[role="menu"]');
+    const menuItems = Array.from(
+      menu?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [],
+    );
+    expect(menuItems.length).toBeGreaterThan(0);
+
+    await act(async () => {
+      await new Promise((resolve) => window.requestAnimationFrame(resolve));
+    });
+    expect(document.activeElement).toBe(menuItems[0]);
+
+    act(() => {
+      menu?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+      );
+    });
+    expect(document.activeElement).toBe(menuItems[0]);
+
+    act(() => {
+      menu?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'End', bubbles: true }),
+      );
+    });
+    expect(document.activeElement).toBe(menuItems.at(-1));
+
+    act(() => {
+      menu?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Home', bubbles: true }),
+      );
+    });
+    expect(document.activeElement).toBe(menuItems[0]);
+
+    act(() => {
+      menu?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }),
+      );
+    });
+    expect(document.activeElement).toBe(menuItems.at(-1));
+  });
+
   it('renders a non-semver fallback (e.g. "unknown") without a bogus "v" prefix', () => {
     mockConnection.capabilities = { qwenCodeVersion: 'unknown' };
     setStoredSidebarWidth(420);
@@ -902,6 +949,14 @@ describe('WebShellSidebar — brand logo', () => {
     ).toBeNull();
   });
 
+  it('allows a host to keep branding visible in the compact drawer', () => {
+    const { container } = renderSidebar(false, {
+      mobileOpen: true,
+      branding: { hideWhenCompact: false },
+    });
+    expect(container.querySelector('svg path[fill="#6D44E8"]')).not.toBeNull();
+  });
+
   it('uses host-provided branding in place of the default mark', () => {
     const { container } = renderSidebar(false, {
       branding: {
@@ -960,6 +1015,16 @@ describe('WebShellSidebar — configuration and tooltip placement', () => {
     expect(position.placement).toBe('left');
     expect(position.left).toBeGreaterThanOrEqual(8);
     expect(position.left + position.maxWidth).toBeLessThanOrEqual(312);
+  });
+
+  it('places a tooltip on the right when the viewport has room', () => {
+    const position = getSidebarTooltipPosition(
+      { top: 100, left: 20, right: 60, height: 30 },
+      { width: 480, height: 600 },
+    );
+    expect(position.placement).toBe('right');
+    expect(position.left).toBe(68);
+    expect(position.maxWidth).toBe(320);
   });
 });
 
