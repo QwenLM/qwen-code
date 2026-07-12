@@ -503,6 +503,30 @@ describe('SplitView', () => {
     ).toBe('/wsB');
   });
 
+  it('remounts a deep-linked pane under its workspace once the session list resolves', async () => {
+    connectionState.capabilities = MULTI_WORKSPACE_CAPS;
+    otherWorkspaceSessions['/wsB'] = [
+      { sessionId: 'b1', workspaceCwd: '/wsB', displayName: 'Beta' },
+    ];
+    // Deep-link straight to an other-workspace session (b1) — the pane mounts
+    // before the other-workspace fan-out has resolved, so its workspace is not
+    // yet known.
+    render({ sessionIds: ['b1'] });
+    const workspaceOf = () =>
+      container!
+        .querySelector('[data-session="b1"]')
+        ?.getAttribute('data-workspace');
+    // Before the fan-out resolves the pane can't be pinned to a workspace.
+    expect(workspaceOf()).toBeNull();
+
+    await flushAsync();
+
+    // Once `workspaceCwdById` populates, the pane key flips from `b1:` to
+    // `b1:/wsB`, so the pane remounts bound to /wsB (never left on the primary
+    // cwd, which would 409 the attach).
+    expect(workspaceOf()).toBe('/wsB');
+  });
+
   it('never fans out to other workspaces on a single-workspace daemon', async () => {
     // Default capabilities carry no `workspaces`, so the other-workspace hook
     // must not touch the daemon and the picker stays untagged.

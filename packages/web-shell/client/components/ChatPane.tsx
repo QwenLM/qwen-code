@@ -377,9 +377,15 @@ export function ChatPane({
   const paneWorkspaceCwd = workspaceCwd ?? connection.workspaceCwd;
   const showWorkspaceChip =
     hasMultipleWorkspaces(workspace.capabilities) && !!paneWorkspaceCwd;
-  const paneToolbarActions = showWorkspaceChip
-    ? [...PANE_TOOLBAR_ACTIONS, 'workspace' as const]
-    : PANE_TOOLBAR_ACTIONS;
+  // Memoized so the array identity is stable across renders — `ChatEditor` is
+  // `React.memo`, and a fresh `[...]` each render would defeat it.
+  const paneToolbarActions = useMemo(
+    () =>
+      showWorkspaceChip
+        ? [...PANE_TOOLBAR_ACTIONS, 'workspace' as const]
+        : PANE_TOOLBAR_ACTIONS,
+    [showWorkspaceChip],
+  );
 
   return (
     <section

@@ -178,6 +178,19 @@ describe('ChatEditor workspace toolbar integration', () => {
     ).not.toBeNull();
   });
 
+  it('falls back to the workspace name for the tooltip when no title is given', () => {
+    const container = renderChatEditor({
+      workspaceName: 'api',
+      visibleToolbarActions: ['workspace'],
+    });
+    // No `workspaceTitle` → the chip's tooltip uses the name itself.
+    expect(
+      container
+        .querySelector('[data-web-shell-workspace]')
+        ?.getAttribute('title'),
+    ).toBe('api');
+  });
+
   it('hides the workspace indicator without a name or visible action', () => {
     expect(
       renderChatEditor({
