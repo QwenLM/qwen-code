@@ -248,6 +248,67 @@ describe('extension tests', () => {
       ]);
     });
 
+    it('fully validates the staged extension before commit', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'invalid-context.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          fs.mkdirSync(destination, { recursive: true });
+          fs.writeFileSync(
+            path.join(destination, EXTENSIONS_CONFIG_FILENAME),
+            JSON.stringify({
+              name: 'invalid-context',
+              version: '1.0.0',
+              contextFileName: 42,
+            }),
+          );
+        },
+      );
+      const manager = createExtensionManager();
+      const before = await manager.getExtensionStoreSnapshot();
+
+      await expect(
+        manager.prepareExtensionInstall({
+          installMetadata: { type: 'local', source: archivePath },
+          initialActivation: { scope: 'user' },
+          requestConsent: async () => {},
+        }),
+      ).rejects.toThrow();
+
+      expect(await manager.getExtensionStoreSnapshot()).toEqual(before);
+      expect(
+        fs.existsSync(path.join(userExtensionsDir, 'invalid-context')),
+      ).toBe(false);
+    });
+
+    it('commits a fully validated extension without an explicit version', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'default-version.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          fs.mkdirSync(destination, { recursive: true });
+          fs.writeFileSync(
+            path.join(destination, EXTENSIONS_CONFIG_FILENAME),
+            JSON.stringify({ name: 'default-version' }),
+          );
+        },
+      );
+      const manager = createExtensionManager();
+      const prepared = await manager.prepareExtensionInstall({
+        installMetadata: { type: 'local', source: archivePath },
+        initialActivation: { scope: 'user' },
+        requestConsent: async () => {},
+      });
+
+      try {
+        const committed = await manager.commitPreparedExtension(prepared);
+        expect(committed.version).toBe('1.0.0');
+        expect(committed.extension?.version).toBe('1.0.0');
+      } finally {
+        await manager.disposePreparedExtension(prepared);
+      }
+    });
+
     it('stops archive preparation when cancellation follows download', async () => {
       const controller = new AbortController();
       const reason = new Error('preparation expired');
@@ -1714,7 +1775,14 @@ describe('extension tests', () => {
       const manager = createExtensionManager();
       await manager.refreshCache();
       const extension = manager.getLoadedExtensions()[0]!;
-      vi.spyOn(manager, 'loadExtension').mockResolvedValue(null);
+      const updatedExtension = {
+        ...extension,
+        version: '2.0.0',
+        config: { ...extension.config, version: '2.0.0' },
+      };
+      vi.spyOn(manager, 'loadExtension')
+        .mockResolvedValueOnce(updatedExtension)
+        .mockResolvedValueOnce(null);
 
       await expect(
         manager.installExtension(
@@ -1738,7 +1806,7 @@ describe('extension tests', () => {
       ).toMatchObject({ version: '2.0.0' });
     });
 
-    it('preserves reload failure diagnostics after a prepared install commits', async () => {
+    it('rejects an invalid staged extension before commit', async () => {
       const archivePath = path.join(tempWorkspaceDir, 'install-reload.zip');
       fs.writeFileSync(archivePath, 'archive');
       mockExtractArchiveFile.mockImplementation(
@@ -1760,21 +1828,54 @@ describe('extension tests', () => {
         path.join(prepared.stagingDirectory, EXTENSIONS_CONFIG_FILENAME),
         '{ invalid json',
       );
+      const before = await manager.getExtensionStoreSnapshot();
 
-      let committed: Awaited<
-        ReturnType<ExtensionManager['commitPreparedExtension']>
-      >;
       try {
-        committed = await manager.commitPreparedExtension(prepared);
+        await expect(manager.commitPreparedExtension(prepared)).rejects.toThrow(
+          'Failed to load extension config',
+        );
       } finally {
         await manager.disposePreparedExtension(prepared);
       }
 
-      expect(committed.warnings).toContainEqual({
-        code: 'extension_reload_failed',
-        error: expect.stringContaining('Failed to load extension config'),
+      expect(await manager.getExtensionStoreSnapshot()).toEqual(before);
+      expect(fs.existsSync(prepared.destinationDirectory)).toBe(false);
+    });
+
+    it('rejects staged identity changes before commit', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'identity-change.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          fs.mkdirSync(destination, { recursive: true });
+          fs.writeFileSync(
+            path.join(destination, EXTENSIONS_CONFIG_FILENAME),
+            JSON.stringify({ name: 'original-name', version: '1.0.0' }),
+          );
+        },
+      );
+      const manager = createExtensionManager();
+      const prepared = await manager.prepareExtensionInstall({
+        installMetadata: { type: 'local', source: archivePath },
+        initialActivation: { scope: 'user' },
+        requestConsent: async () => {},
       });
-      expect(committed.extension).toBeUndefined();
+      fs.writeFileSync(
+        path.join(prepared.stagingDirectory, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({ name: 'changed-name', version: '1.0.0' }),
+      );
+      const before = await manager.getExtensionStoreSnapshot();
+
+      try {
+        await expect(manager.commitPreparedExtension(prepared)).rejects.toThrow(
+          'Prepared extension identity changed before commit.',
+        );
+      } finally {
+        await manager.disposePreparedExtension(prepared);
+      }
+
+      expect(await manager.getExtensionStoreSnapshot()).toEqual(before);
+      expect(fs.existsSync(prepared.destinationDirectory)).toBe(false);
     });
 
     it('reports a committed update reload failure as needing restart', async () => {
@@ -1802,7 +1903,15 @@ describe('extension tests', () => {
       const manager = createExtensionManager();
       await manager.refreshCache();
       const extension = manager.getLoadedExtensions()[0]!;
-      vi.spyOn(manager, 'loadExtension').mockResolvedValue(null);
+      const updatedExtension = {
+        ...extension,
+        version: '2.0.0',
+        config: { ...extension.config, version: '2.0.0' },
+      };
+      vi.spyOn(manager, 'loadExtension')
+        .mockResolvedValueOnce(updatedExtension)
+        .mockResolvedValueOnce(updatedExtension)
+        .mockResolvedValueOnce(null);
       const callback = vi.fn();
 
       await expect(

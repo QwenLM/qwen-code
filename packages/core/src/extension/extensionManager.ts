@@ -1768,6 +1768,14 @@ export class ExtensionManager {
         const metadataPath = path.join(stagingPath, INSTALL_METADATA_FILENAME);
         await atomicWriteFile(metadataPath, metadataString);
 
+        const stagedExtension = await this.loadExtension(
+          { extensionDir: stagingPath, workspaceDir: currentDir },
+          { throwOnError: true },
+        );
+        if (!stagedExtension) {
+          throw new Error('Prepared extension could not be loaded.');
+        }
+
         signal?.throwIfAborted();
         if (prepareOnly) {
           const cleanupPaths = [
@@ -1783,7 +1791,7 @@ export class ExtensionManager {
           const prepared: PreparedExtensionMutation = {
             operation: isUpdate ? 'update' : 'install',
             identity: { id: extensionId, name: newExtensionName },
-            version: newExtensionConfig.version,
+            version: stagedExtension.version,
             ...(expectedArtifactGeneration === undefined
               ? {}
               : { expectedArtifactGeneration }),
@@ -2001,6 +2009,23 @@ export class ExtensionManager {
     try {
       let snapshot: ExtensionStoreSnapshot;
       try {
+        const stagedExtension = await this.loadExtension(
+          {
+            extensionDir: prepared.stagingDirectory,
+            workspaceDir: prepared.currentDir,
+          },
+          { throwOnError: true },
+        );
+        if (!stagedExtension) {
+          throw new Error('Prepared extension could not be loaded.');
+        }
+        if (
+          stagedExtension.id !== prepared.identity.id ||
+          stagedExtension.name !== prepared.identity.name ||
+          stagedExtension.version !== prepared.version
+        ) {
+          throw new Error('Prepared extension identity changed before commit.');
+        }
         snapshot = await this.extensionStore.commitArtifact({
           operation: prepared.operation,
           identity: prepared.identity,
