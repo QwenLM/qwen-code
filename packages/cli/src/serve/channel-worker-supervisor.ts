@@ -15,6 +15,11 @@ import { sanitizeLogText } from '@qwen-code/channel-base';
 import type { ChannelWebhookTask } from '@qwen-code/channel-base';
 import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 import {
+  CHANNEL_WORKER_KILL_GRACE_MS,
+  CHANNEL_WORKER_STARTUP_TIMEOUT_MS,
+  CHANNEL_WORKER_STOP_GRACE_MS,
+} from '@qwen-code/acp-bridge/channelControlTimeouts';
+import {
   CHANNEL_WEBHOOK_TASK_IPC_TIMEOUT_MS,
   ChannelWebhookEnqueueError,
   createChannelWebhookTaskMessage,
@@ -24,9 +29,7 @@ import {
   type ChannelWebhookEnqueueErrorCode,
 } from './channel-webhook-ipc.js';
 
-const DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS = 30_000;
 const DEFAULT_CHANNEL_WORKER_HEARTBEAT_TIMEOUT_MS = 45_000;
-const CHANNEL_WORKER_STOP_GRACE_MS = 10_000;
 const MAX_WORKER_LOG_LINE_LENGTH = 4096;
 const MAX_WORKER_LOG_BUFFER_LENGTH = 64 * 1024;
 const MAX_WORKER_LOG_DISCARDED_REMAINDER_LENGTH = MAX_WORKER_LOG_BUFFER_LENGTH;
@@ -767,11 +770,14 @@ export function createChannelWorkerSupervisor(
         cleanupLaunch();
         if (terminatingBeforeReady) return;
         terminatingBeforeReady = true;
-        const exited = waitForExit(startedChild, 2_000);
+        const exited = waitForExit(startedChild, CHANNEL_WORKER_KILL_GRACE_MS);
         startedChild.kill('SIGTERM');
         void exited.then(async (didExit) => {
           if (!didExit && child === startedChild && !exitObserved) {
-            const killed = waitForExit(startedChild, 2_000);
+            const killed = waitForExit(
+              startedChild,
+              CHANNEL_WORKER_KILL_GRACE_MS,
+            );
             startedChild.kill('SIGKILL');
             if (!(await killed) && child === startedChild && !exitObserved) {
               stopping = true;
@@ -900,7 +906,7 @@ export function createChannelWorkerSupervisor(
       }
       startupTimer = setTimeout(() => {
         const timeoutMs =
-          opts.startupTimeoutMs ?? DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS;
+          opts.startupTimeoutMs ?? CHANNEL_WORKER_STARTUP_TIMEOUT_MS;
         const error = `Channel worker did not become ready within ${timeoutMs}ms.`;
         snapshot = {
           ...snapshot,
@@ -911,7 +917,7 @@ export function createChannelWorkerSupervisor(
         if (child === startedChild) {
           terminateBeforeReady();
         }
-      }, opts.startupTimeoutMs ?? DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS);
+      }, opts.startupTimeoutMs ?? CHANNEL_WORKER_STARTUP_TIMEOUT_MS);
       startupTimer.unref();
       startedChild.on('message', handleMessage);
       startedChild.once('exit', settleExit);
@@ -960,7 +966,7 @@ export function createChannelWorkerSupervisor(
       stopping = true;
       stoppingChild.kill('SIGTERM');
       if (!(await exited) && child === stoppingChild) {
-        const killed = waitForExit(stoppingChild, 2_000);
+        const killed = waitForExit(stoppingChild, CHANNEL_WORKER_KILL_GRACE_MS);
         stoppingChild.kill('SIGKILL');
         if (!(await killed)) {
           snapshot = {

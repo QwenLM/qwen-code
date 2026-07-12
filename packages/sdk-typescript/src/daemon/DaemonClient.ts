@@ -8,6 +8,7 @@ import {
   MCP_RESTART_SERVER_DEADLINE_MS,
   MCP_RESTART_CLIENT_HEADROOM_MS,
 } from '@qwen-code/acp-bridge/mcpTimeouts';
+import { CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS } from '@qwen-code/acp-bridge/channelControlTimeouts';
 import { DaemonAuthFlow } from './DaemonAuthFlow.js';
 import { DaemonHttpError } from './DaemonHttpError.js';
 import type { DaemonTransport } from './DaemonTransport.js';
@@ -2596,7 +2597,7 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonChannelReloadResult;
       },
-      opts?.timeoutMs,
+      opts?.timeoutMs ?? CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS,
     );
   }
 
@@ -2640,7 +2641,7 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonChannelSetResult;
       },
-      opts?.timeoutMs,
+      opts?.timeoutMs ?? CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS,
     );
   }
 
@@ -2660,7 +2661,7 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonChannelStopResult;
       },
-      opts?.timeoutMs,
+      opts?.timeoutMs ?? CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS,
     );
   }
 

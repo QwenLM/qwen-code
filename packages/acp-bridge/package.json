@@ -91,6 +91,10 @@
       "types": "./dist/mcpTimeouts.d.ts",
       "import": "./dist/mcpTimeouts.js"
     },
+    "./channelControlTimeouts": {
+      "types": "./dist/channel-control-timeouts.d.ts",
+      "import": "./dist/channel-control-timeouts.js"
+    },
     "./internal/testUtils": {
       "types": "./dist/internal/testUtils.d.ts",
       "import": "./dist/internal/testUtils.js"
