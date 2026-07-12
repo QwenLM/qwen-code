@@ -96,6 +96,18 @@ describe('OpenAIContentConverter', () => {
   }
 
   describe('stream-local parser state', () => {
+    const streamChunk = (
+      id: string,
+      delta: Record<string, unknown>,
+      finishReason: string | null = null,
+    ) =>
+      ({
+        id,
+        created: 1,
+        model: 'test',
+        choices: [{ index: 0, delta, finish_reason: finishReason }],
+      }) as unknown as OpenAI.Chat.ChatCompletionChunk;
+
     it('creates fresh parser instances', () => {
       const ctx1 = new StreamingToolCallParser();
       const ctx2 = new StreamingToolCallParser();
@@ -389,6 +401,94 @@ describe('OpenAIContentConverter', () => {
           ?.content?.parts,
       ).toEqual([]);
       const result = converter.convertOpenAIChunkToGemini(finish, stream);
+      expect(result.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(result.candidates?.[0]?.finishReason).toBeUndefined();
+    });
+
+    it('preserves literal thinking tags when no nameless tool call appears', () => {
+      const stream = withStreamParser(new StreamingToolCallParser());
+
+      expect(
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('literal-think', {
+            content: 'Use <think>literal</think> text.',
+          }),
+          stream,
+        ).candidates?.[0]?.content?.parts,
+      ).toEqual([]);
+
+      const result = converter.convertOpenAIChunkToGemini(
+        streamChunk('literal-think-finish', {}, 'stop'),
+        stream,
+      );
+
+      expect(result.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'Use <think>literal</think> text.' },
+      ]);
+      expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+    });
+
+    it('drops buffered thinking tags when a later tool call has no name', () => {
+      const stream = withStreamParser(new StreamingToolCallParser());
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('late-think', {
+          content: 'late <think>payload</think>',
+        }),
+        stream,
+      );
+      const malformed = converter.convertOpenAIChunkToGemini(
+        streamChunk('late-tool-call', {
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_without_name',
+              type: 'function',
+              function: { arguments: '' },
+            },
+          ],
+        }),
+        stream,
+      );
+      const result = converter.convertOpenAIChunkToGemini(
+        streamChunk('late-finish', {}, 'stop'),
+        stream,
+      );
+
+      expect(malformed.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(result.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(result.candidates?.[0]?.finishReason).toBeUndefined();
+    });
+
+    it('holds nameless tool-call content after prior reasoning output', () => {
+      const stream = withStreamParser(new StreamingToolCallParser());
+      const reasoning = converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'ordinary reasoning' }),
+        stream,
+      );
+      const malformed = converter.convertOpenAIChunkToGemini(
+        streamChunk('same-chunk-tool-call', {
+          content: 'bad <think>payload</think>',
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_without_name',
+              type: 'function',
+              function: { arguments: '' },
+            },
+          ],
+        }),
+        stream,
+      );
+      const result = converter.convertOpenAIChunkToGemini(
+        streamChunk('same-chunk-finish', {}, 'stop'),
+        stream,
+      );
+
+      expect(reasoning.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'ordinary reasoning' },
+      ]);
+      expect(malformed.candidates?.[0]?.content?.parts).toEqual([]);
       expect(result.candidates?.[0]?.content?.parts).toEqual([]);
       expect(result.candidates?.[0]?.finishReason).toBeUndefined();
     });

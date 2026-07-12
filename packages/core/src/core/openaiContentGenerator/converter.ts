@@ -1366,23 +1366,29 @@ export function convertOpenAIChunkToGemini(
       }
     }
 
+    // Hold risky protocol-looking text until the stream proves it was not
+    // paired with a malformed nameless tool call.
+    const hasUntrustedProtocolText = parts.some(
+      (part) =>
+        typeof part.text === 'string' &&
+        part.text.toLowerCase().includes('<think'),
+    );
     const toolCallWithoutName = toolCallParser.hasNamelessToolCall();
-    const bufferingNamelessToolCall =
-      toolCallWithoutName && !requestContext.hasEmittedResponseParts;
     const malformedNamelessToolCall =
-      Boolean(choice.finish_reason) &&
-      bufferingNamelessToolCall &&
-      toolCallWithoutName;
+      Boolean(choice.finish_reason) && toolCallWithoutName;
+    const shouldHoldUntrustedParts =
+      toolCallWithoutName ||
+      (!choice.finish_reason && hasUntrustedProtocolText);
 
     if (malformedNamelessToolCall) {
       parts.length = 0;
-      requestContext.pendingNamelessToolCallParts = undefined;
-    } else if (bufferingNamelessToolCall) {
-      (requestContext.pendingNamelessToolCallParts ??= []).push(...parts);
+      requestContext.pendingUntrustedResponseParts = undefined;
+    } else if (shouldHoldUntrustedParts) {
+      (requestContext.pendingUntrustedResponseParts ??= []).push(...parts);
       parts.length = 0;
-    } else if (requestContext.pendingNamelessToolCallParts) {
-      parts.unshift(...requestContext.pendingNamelessToolCallParts);
-      requestContext.pendingNamelessToolCallParts = undefined;
+    } else if (requestContext.pendingUntrustedResponseParts) {
+      parts.unshift(...requestContext.pendingUntrustedResponseParts);
+      requestContext.pendingUntrustedResponseParts = undefined;
     }
 
     // Only emit function calls when streaming is complete (finish_reason is present)
@@ -1434,7 +1440,6 @@ export function convertOpenAIChunkToGemini(
         effectiveFinishReason,
       );
     }
-    requestContext.hasEmittedResponseParts ||= parts.length > 0;
     response.candidates = [candidate];
   } else {
     response.candidates = [];
