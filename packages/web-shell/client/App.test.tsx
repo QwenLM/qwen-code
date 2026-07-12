@@ -74,6 +74,7 @@ const {
       attachSession: vi.fn().mockResolvedValue(undefined),
       closeSession: vi.fn().mockResolvedValue(undefined),
       clearSession: vi.fn().mockResolvedValue(undefined),
+      releaseSession: vi.fn().mockResolvedValue(undefined),
       refreshCommands: vi.fn().mockResolvedValue(undefined),
       setModel: vi.fn().mockResolvedValue(undefined),
       setApprovalMode: vi.fn().mockResolvedValue(undefined),
@@ -603,6 +604,17 @@ async function clickSubmit(container: HTMLElement): Promise<void> {
   });
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value?: T | PromiseLike<T>) => void;
+} {
+  let resolve!: (value?: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = (value) => res(value as T | PromiseLike<T>);
+  });
+  return { promise, resolve };
+}
+
 // A transcript block shaped like extractPendingPermission() expects. Defaults to
 // a non-AskUserQuestion tool (→ pendingToolApproval); pass toolName
 // 'ask_user_question' to exercise the pendingAskUserApproval branch instead.
@@ -681,6 +693,7 @@ beforeEach(() => {
   mockSessionActions.attachSession.mockResolvedValue(undefined);
   mockSessionActions.closeSession.mockResolvedValue(undefined);
   mockSessionActions.clearSession.mockResolvedValue(undefined);
+  mockSessionActions.releaseSession.mockResolvedValue(undefined);
   mockSessionActions.loadSession.mockResolvedValue(undefined);
   mockSessionActions.refreshCommands.mockResolvedValue(undefined);
   mockSessionActions.setModel.mockResolvedValue(undefined);
@@ -914,6 +927,43 @@ describe('App session callbacks', () => {
       vi.advanceTimersByTime(2000);
     });
     expect(sidebarTokens.at(-1)).not.toBe(tokenAfterSubmit);
+  });
+
+  it('keeps concurrent programmatic submissions behind session preparation', async () => {
+    mockConnection.sessionId = undefined;
+    const callbackStarted = deferred<void>();
+    const callbackFinished = deferred<void>();
+    mockSessionActions.createSession.mockImplementation(async () => {
+      mockConnection.sessionId = 'session-created';
+      return { sessionId: 'session-created' };
+    });
+    const onSessionCreated = vi.fn(async () => {
+      callbackStarted.resolve();
+      await callbackFinished.promise;
+    });
+    renderApp({ onSessionCreated });
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('first');
+      await callbackStarted.promise;
+    });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('second');
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
+    expect(mockSessionActions.attachSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+
+    await act(async () => {
+      callbackFinished.resolve();
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+      });
+    });
+    expect(mockSessionActions.attachSession).toHaveBeenCalledOnce();
   });
 
   it('cancels direct submissions when onSubmitBefore rejects and preserves retry state', async () => {

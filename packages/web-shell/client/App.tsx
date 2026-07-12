@@ -558,8 +558,8 @@ type SessionActionsWithCreate = {
     workspaceCwd?: string;
   }) => Promise<{ sessionId: string }>;
   attachSession: () => Promise<void>;
-  closeSession: () => Promise<void>;
   clearSession: () => Promise<void>;
+  releaseSession: (sessionId: string) => Promise<void>;
 };
 
 const emptyComposerApi: WebShellComposerApi = {
@@ -2304,37 +2304,44 @@ export function App({
   const createSessionPromiseRef = useRef<Promise<void> | null>(null);
   const onSessionCreatedRef = useRef(onSessionCreated);
   onSessionCreatedRef.current = onSessionCreated;
-  useEffect(() => {
-    if (connection.sessionId) {
-      createSessionPromiseRef.current = null;
-    }
-  }, [connection.sessionId]);
   const ensureSessionForPrompt = useCallback(() => {
-    if (connectionRef.current.sessionId) return Promise.resolve();
-    if (!createSessionPromiseRef.current) {
-      createSessionPromiseRef.current = (async () => {
-        const modelId =
-          currentModelRef.current || connectionRef.current.currentModel;
-        const modeId =
-          currentModeRef.current || connectionRef.current.currentMode;
-        await createAndAttachSessionForPrompt({
-          sessionActions: sessionActions as typeof sessionActions &
-            SessionActionsWithCreate,
-          modelId,
-          modeId,
-          workspaceCwd: selectedWorkspaceCwdRef.current,
-          onSessionCreated: onSessionCreatedRef.current,
-        });
-        // One-shot: the picker targets only the *next* new session, so clear
-        // it after creation. The next new chat defaults back to the primary
-        // workspace unless the user picks one again.
-        setSelectedWorkspaceCwd(undefined);
-      })().catch((error: unknown) => {
-        createSessionPromiseRef.current = null;
-        throw error;
-      });
+    if (createSessionPromiseRef.current) {
+      return createSessionPromiseRef.current;
     }
-    return createSessionPromiseRef.current;
+    if (connectionRef.current.sessionId) return Promise.resolve();
+    const promise = (async () => {
+      const modelId =
+        currentModelRef.current || connectionRef.current.currentModel;
+      const modeId =
+        currentModeRef.current || connectionRef.current.currentMode;
+      await createAndAttachSessionForPrompt({
+        sessionActions: sessionActions as typeof sessionActions &
+          SessionActionsWithCreate,
+        modelId,
+        modeId,
+        workspaceCwd: selectedWorkspaceCwdRef.current,
+        onSessionCreated: onSessionCreatedRef.current,
+        getCurrentSessionId: () => connectionRef.current.sessionId,
+      });
+      // One-shot: the picker targets only the *next* new session, so clear
+      // it after creation. The next new chat defaults back to the primary
+      // workspace unless the user picks one again.
+      setSelectedWorkspaceCwd(undefined);
+    })();
+    createSessionPromiseRef.current = promise;
+    void promise.then(
+      () => {
+        if (createSessionPromiseRef.current === promise) {
+          createSessionPromiseRef.current = null;
+        }
+      },
+      () => {
+        if (createSessionPromiseRef.current === promise) {
+          createSessionPromiseRef.current = null;
+        }
+      },
+    );
+    return promise;
   }, [sessionActions]);
   const onSubmitBeforeRef = useRef(onSubmitBefore);
   onSubmitBeforeRef.current = onSubmitBefore;

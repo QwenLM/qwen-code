@@ -11,8 +11,8 @@ type PromptSessionActions = {
     approvalMode?: DaemonApprovalMode;
   }) => Promise<{ sessionId: string }>;
   attachSession: () => Promise<void>;
-  closeSession: () => Promise<void>;
   clearSession: () => Promise<void>;
+  releaseSession: (sessionId: string) => Promise<void>;
   setModel: (modelId: string) => Promise<unknown>;
 };
 
@@ -26,6 +26,7 @@ export async function createAndAttachSessionForPrompt({
   modeId,
   workspaceCwd,
   onSessionCreated,
+  getCurrentSessionId,
   warn = console.warn,
 }: {
   sessionActions: PromptSessionActions;
@@ -33,6 +34,7 @@ export async function createAndAttachSessionForPrompt({
   modeId?: string;
   workspaceCwd?: string;
   onSessionCreated?: (sessionId: string) => Promise<void>;
+  getCurrentSessionId: () => string | undefined;
   warn?: (message?: unknown, ...optionalParams: unknown[]) => void;
 }): Promise<void> {
   // Seed the approval mode in the create request itself so the daemon applies
@@ -65,16 +67,26 @@ export async function createAndAttachSessionForPrompt({
         clearTimeout(timeout);
       }
     }
+    if (getCurrentSessionId() !== sessionId) {
+      throw new Error('Session changed while onSessionCreated was pending');
+    }
     preparationStep = 'attach new session';
     await sessionActions.attachSession();
+    if (getCurrentSessionId() !== sessionId) {
+      throw new Error('Session changed while attaching the new session');
+    }
   } catch (error) {
     warn(`[WebShell] failed to ${preparationStep}:`, error);
-    await sessionActions.closeSession().catch((closeError: unknown) => {
-      warn('[WebShell] failed to close unattached session:', closeError);
-    });
-    await sessionActions.clearSession().catch((clearError: unknown) => {
-      warn('[WebShell] failed to clear unattached session:', clearError);
-    });
+    await sessionActions
+      .releaseSession(sessionId)
+      .catch((releaseError: unknown) => {
+        warn('[WebShell] failed to release unattached session:', releaseError);
+      });
+    if (getCurrentSessionId() === sessionId) {
+      await sessionActions.clearSession().catch((clearError: unknown) => {
+        warn('[WebShell] failed to clear unattached session:', clearError);
+      });
+    }
     throw error;
   }
   // The model still needs a post-create call: `POST /session` only accepts a
