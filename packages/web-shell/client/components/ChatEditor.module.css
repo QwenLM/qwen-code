@@ -4,6 +4,10 @@
   margin: 0 0 14px;
 }
 
+.editorShellDropdownOpen {
+  z-index: 7;
+}
+
 .container {
   position: relative;
   container-type: inline-size;
@@ -885,6 +889,7 @@
 
 .toolbarLeading {
   margin-left: -5px;
+  min-width: 0;
 }
 
 .toolbarStart {
@@ -897,7 +902,7 @@
 
 .toolbarLeft {
   min-width: 0;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
 
 .gitBranchChip {
@@ -945,17 +950,18 @@
   align-items: center;
 }
 
+.toolbarMeasurements {
+  position: fixed;
+  top: -10000px;
+  left: -10000px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  visibility: hidden;
+  pointer-events: none;
+}
+
 @container (max-width: 699px) {
-  .toolbarLeft .toolBtn {
-    width: auto;
-    padding: 0 6px;
-    justify-content: center;
-  }
-
-  .toolbarLeft .toolBtnText {
-    display: none;
-  }
-
   /* Keep the leading controls on a single row on narrow screens. The branch
      chip yields space first — truncating via its ellipsis, down to just the
      icon if needed — instead of pushing the mode/model buttons onto a second
@@ -979,33 +985,65 @@
 }
 
 .dropdown {
-  position: absolute;
-  bottom: calc(100% + 4px);
-  left: 0;
-  min-width: 160px;
+  position: fixed;
+  z-index: 100;
+  display: flex;
+  min-width: 0;
   padding: 4px;
+  overflow: hidden;
   background: var(--background);
   border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow:
     0 2px 4px -2px rgba(0, 0, 0, 0.1),
     0 4px 6px -1px rgba(0, 0, 0, 0.1);
-  z-index: 100;
-  display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
 .dropdownRich {
-  min-width: min(360px, calc(100vw - 32px));
   padding: 6px;
   gap: 2px;
 }
 
 .dropdownCheck {
-  min-width: min(300px, calc(100vw - 32px));
   padding: 6px;
   gap: 2px;
+}
+
+.dropdownSearch {
+  width: 100%;
+  min-height: 30px;
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  outline: none;
+  background: var(--chat-editor-bg-tertiary);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 13px;
+}
+
+.dropdownSearch:focus-visible {
+  border-color: var(--agent-blue-500);
+}
+
+.dropdownList {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.dropdownEmpty {
+  padding: 8px 9px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 18px;
 }
 
 .dropdownItem {
@@ -1118,6 +1156,10 @@
   white-space: nowrap;
 }
 
+.modelToolBtn {
+  min-width: 0;
+}
+
 .toolBtn:hover {
   background: var(--chat-editor-bg-tertiary);
   color: var(--chat-editor-text-primary);
@@ -1200,10 +1242,14 @@
 }
 
 .toolBtnText {
+  min-width: 0;
+  overflow: hidden;
   display: inline-flex;
   align-items: center;
   color: var(--agent-gray-500);
   line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .toolBtnArrow {
