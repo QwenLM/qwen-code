@@ -44,7 +44,7 @@ const TUI_ONLY_SETTINGS = new Set([
 // `/voice/stream` then reads it back via `loadSettings`.
 const WEB_SHELL_SETTINGS = new Set(['ui.compactMode', 'voiceModel']);
 
-const VALID_WRITE_SCOPES = new Set(['workspace']);
+const VALID_WRITE_SCOPES = new Set(['workspace', 'user']);
 
 interface SettingDescriptor {
   key: string;
@@ -145,6 +145,7 @@ function buildSettingsResponse(
 
 const SCOPE_MAP: Record<string, SettingScope> = {
   workspace: SettingScope.Workspace,
+  user: SettingScope.User,
 };
 
 export interface WorkspaceSettingsRouteDeps {

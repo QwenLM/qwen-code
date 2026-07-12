@@ -521,7 +521,7 @@ async function handleDaemonRoute(
   if (method === 'POST' && path === '/workspace/settings') {
     await json(route, {
       key: getRecordValue(body, 'key') ?? 'unknown',
-      scope: 'workspace',
+      scope: getRecordValue(body, 'scope') ?? 'workspace',
       value: getRecordValue(body, 'value'),
       requiresRestart: false,
     });

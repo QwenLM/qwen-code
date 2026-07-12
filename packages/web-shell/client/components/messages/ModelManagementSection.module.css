@@ -1,0 +1,151 @@
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--background);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.title {
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.addButton {
+  padding: 4px 12px;
+  border: 1px solid var(--agent-blue-500);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--agent-blue-500);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.addButton:hover {
+  background: color-mix(in srgb, var(--agent-blue-500) 12%, transparent);
+}
+
+.hint,
+.empty {
+  font-size: 13px;
+  color: var(--muted-foreground);
+  padding: 4px 0;
+}
+
+.provider {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.providerName {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted-foreground);
+  margin-top: 4px;
+}
+
+.modelRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--secondary);
+}
+
+.modelInfo {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.modelName {
+  font-weight: 500;
+  color: var(--foreground);
+  word-break: break-all;
+}
+
+.modelBaseUrl {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted-foreground);
+  word-break: break-all;
+}
+
+.currentBadge {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--agent-blue-500);
+  color: #fff;
+}
+
+.runtimeBadge {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted-foreground);
+}
+
+.modelActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.actionButton,
+.deleteButton,
+.confirmButton {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.actionButton:hover {
+  border-color: var(--agent-blue-500);
+}
+
+.deleteButton {
+  color: #d64545;
+  border-color: color-mix(in srgb, #d64545 40%, var(--border));
+}
+
+.deleteButton:hover {
+  background: color-mix(in srgb, #d64545 12%, transparent);
+}
+
+.confirmButton {
+  color: #fff;
+  background: #d64545;
+  border-color: #d64545;
+}
+
+.actionButton:disabled,
+.deleteButton:disabled,
+.confirmButton:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

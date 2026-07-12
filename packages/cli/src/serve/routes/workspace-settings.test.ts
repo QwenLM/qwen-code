@@ -81,6 +81,51 @@ describe('POST /workspace/settings', () => {
     );
   });
 
+  it('persists to the user scope (~/.qwen/settings.json)', async () => {
+    const { app, persistSetting, broadcastSettingsChanged } = makeApp();
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'general.cleanupPeriodDays',
+      value: 7,
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      key: 'general.cleanupPeriodDays',
+      scope: 'user',
+      value: 7,
+    });
+    // 'user' must map to SettingScope.User ('User') so the value lands in
+    // ~/.qwen/settings.json rather than the workspace file.
+    expect(persistSetting).toHaveBeenCalledWith(
+      '/workspace',
+      'User',
+      'general.cleanupPeriodDays',
+      7,
+    );
+    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+      'general.cleanupPeriodDays',
+      7,
+      'user',
+      undefined,
+    );
+  });
+
+  it('rejects scopes other than workspace/user', async () => {
+    const { app, persistSetting } = makeApp();
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'system',
+      key: 'general.cleanupPeriodDays',
+      value: 7,
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ code: 'invalid_scope' });
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
+
   it('rejects non-positive general.sessionRecapAwayThresholdMinutes values', async () => {
     const { app, persistSetting, broadcastSettingsChanged } = makeApp();
 

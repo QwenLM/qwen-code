@@ -20,6 +20,10 @@ import {
   webShellThemeToSettingValue,
   type WebShellTheme,
 } from '../../themeContext';
+import {
+  ModelManagementSection,
+  type ModelManagementProps,
+} from './ModelManagementSection';
 import styles from './SettingsMessage.module.css';
 
 type ChatWidthMode = '1000' | 'wide';
@@ -27,10 +31,12 @@ type ChatWidthMode = '1000' | 'wide';
 interface SettingsMessageProps {
   settingsState: SettingsMessageSettingsState;
   onLanguageChange: (language: WebShellLanguage) => void;
-  onSubDialog: (settingKey: string) => void;
+  onSubDialog: (settingKey: string, scope: Scope) => void;
   onThemeChange: (theme: WebShellTheme) => void;
   chatWidthMode: ChatWidthMode;
   onChatWidthModeChange: (mode: ChatWidthMode) => void;
+  /** Model list/add/delete/select, rendered inside the Model category. */
+  modelManagement?: ModelManagementProps;
   embedded?: boolean;
 }
 
@@ -41,13 +47,18 @@ export interface SettingsMessageSettingsState {
   error: Error | undefined;
   reload: () => Promise<DaemonWorkspaceSettingsStatus | undefined>;
   setValue: (
-    scope: 'workspace',
+    scope: 'workspace' | 'user',
     key: string,
     value: unknown,
   ) => Promise<DaemonSettingUpdateResult>;
 }
 
-const SUB_DIALOG_KEYS = new Set(['fastModel', 'visionModel']);
+const SUB_DIALOG_KEYS = new Set([
+  'fastModel',
+  'visionModel',
+  'voiceModel',
+  'modelFallbacks',
+]);
 const HIDDEN_SETTING_KEYS = new Set([
   'ui.hideTips',
   'ui.enableUserFeedback',
@@ -234,6 +245,7 @@ export function SettingsMessage({
   onThemeChange,
   chatWidthMode,
   onChatWidthModeChange,
+  modelManagement,
   embedded = false,
 }: SettingsMessageProps) {
   const { t } = useI18n();
@@ -332,7 +344,7 @@ export function SettingsMessage({
     (key: string, value: unknown) => {
       if (!restartPending) setMessage(null);
       setBusyKey(key);
-      setValue('workspace', key, value)
+      setValue(scope, key, value)
         .then(async (result) => {
           try {
             await reload();
@@ -349,7 +361,7 @@ export function SettingsMessage({
         })
         .finally(() => setBusyKey(null));
     },
-    [reload, restartPending, setValue, t],
+    [reload, restartPending, scope, setValue, t],
   );
 
   const handleEditSubmit = useCallback(() => {
@@ -378,6 +390,12 @@ export function SettingsMessage({
     categories.find((category) => category.id === activeCategory) ??
     categories[0];
 
+  // The model-management block is surfaced inside the "Model" category, which
+  // is detectable by the raw category of its dialog settings (fastModel etc.).
+  const isModelCategory = activeGroup?.items.some(
+    (item) => item.type === 'setting' && item.setting.category === 'Model',
+  );
+
   const renderSelect = (
     value: string,
     onChange: (value: string) => void,
@@ -402,20 +420,6 @@ export function SettingsMessage({
     const value = resolveValue(setting, scope);
     const isBusy = busyKey === setting.key;
     const isEditing = editMode?.key === setting.key;
-    const readOnly = scope !== 'workspace';
-
-    if (readOnly) {
-      return (
-        <button
-          type="button"
-          className={styles.actionButton}
-          disabled
-          title={t('settings.readOnly')}
-        >
-          {formatValue(setting, scope, t) || t('settings.readOnly')}
-        </button>
-      );
-    }
 
     if (setting.key === THEME_SETTING_KEY) {
       return renderSelect(
@@ -450,7 +454,7 @@ export function SettingsMessage({
         <button
           type="button"
           className={styles.actionButton}
-          onClick={() => onSubDialog(setting.key)}
+          onClick={() => onSubDialog(setting.key, scope)}
         >
           {formatValue(setting, scope, t) || t('settings.action.edit')}
         </button>
@@ -608,6 +612,9 @@ export function SettingsMessage({
         </nav>
 
         <section className={styles.content}>
+          {isModelCategory && modelManagement && (
+            <ModelManagementSection {...modelManagement} />
+          )}
           {!loading && !activeGroup && (
             <div className={styles.empty}>{t('settings.empty')}</div>
           )}

@@ -16,6 +16,7 @@ import {
   useConnection,
   useDaemonFollowupSuggestion,
   useSettings,
+  useProviders,
   useSessionNotices,
   useStreamingState,
   useTranscriptBlocks,
@@ -61,6 +62,7 @@ import {
   ModelDialog,
   type ModelDialogMode,
 } from './components/dialogs/ModelDialog';
+import { ModelFallbacksDialog } from './components/dialogs/ModelFallbacksDialog';
 import {
   AgentsMessage,
   type AgentsInitialMode,
@@ -1926,6 +1928,14 @@ export function App({
 
   const [modelDialogMode, setModelDialogMode] =
     useState<ModelDialogMode | null>(null);
+  // Scope a model sub-dialog opened from the Settings panel persists to. Set
+  // when opening from the User/Workspace settings tab; reset to 'workspace'
+  // whenever the model dialog closes (any path) so command-launched pickers
+  // (/model --vision, etc.) always write workspace.
+  const [modelSettingScope, setModelSettingScope] = useState<
+    'workspace' | 'user'
+  >('workspace');
+  const [showFallbacksDialog, setShowFallbacksDialog] = useState(false);
   const [voiceModels, setVoiceModels] = useState<VoiceModelOption[]>([]);
   const [showApprovalModeDialog, setShowApprovalModeDialog] = useState(false);
   const [showResumeDialog, setShowResumeDialog] = useState(false);
@@ -2858,6 +2868,8 @@ export function App({
   const workspaceSettingsState = useSettings({
     autoLoad: true,
   });
+  const providersState = useProviders({ autoLoad: true });
+  const [modelActionBusy, setModelActionBusy] = useState(false);
   const {
     settings: workspaceSettings,
     setValue: setWorkspaceSetting,
@@ -2891,6 +2903,30 @@ export function App({
     )?.values.effective;
     return typeof value === 'string' && value.trim() ? value.trim() : undefined;
   })();
+  const currentModelFallbacks = useMemo(() => {
+    const value = workspaceSettings.find(
+      (setting) => setting.key === 'modelFallbacks',
+    )?.values.effective;
+    return typeof value === 'string'
+      ? value
+          .split(',')
+          .map((entry) => entry.trim())
+          .filter(Boolean)
+      : [];
+  }, [workspaceSettings]);
+  // Fallback candidates are the selectable (non-runtime) models, keyed by their
+  // base id — the same value shape the modelFallbacks setting stores.
+  const fallbackModelOptions = useMemo(
+    () =>
+      (connection.models ?? [])
+        .filter(isVisibleComposerModel)
+        .filter((m) => !m.isRuntime)
+        .map((m) => ({
+          baseId: m.baseModelId ?? extractBareModelId(m.id),
+          label: getModelDisplayName(m.label || m.baseModelId || m.id),
+        })),
+    [connection.models],
+  );
   const [compactMode, setCompactMode] = useState(false);
   const compactModeRef = useRef(compactMode);
   compactModeRef.current = compactMode;
@@ -4912,6 +4948,49 @@ export function App({
     [sessionActions, store, reportError, t, setPendingModel],
   );
 
+  const handleDeleteModel = useCallback(
+    (target: { authType: string; modelId: string; baseUrl?: string }) => {
+      setModelActionBusy(true);
+      workspaceActions
+        .deleteModel(target)
+        .then(() => providersState.reload())
+        .catch((error: unknown) => {
+          reportError(error, t('settings.models.deleteFailed'));
+        })
+        .finally(() => setModelActionBusy(false));
+    },
+    [workspaceActions, providersState, reportError, t],
+  );
+
+  const handleCloseAuthDialog = useCallback(() => {
+    setShowAuthDialog(false);
+    // The provider install flow doesn't broadcast a settings change, so refresh
+    // the model list on close to surface any newly added models.
+    providersState.reload().catch(() => null);
+  }, [providersState]);
+
+  const handleFallbacksConfirm = useCallback(
+    (baseIds: string[]) => {
+      setShowFallbacksDialog(false);
+      setWorkspaceSetting(
+        modelSettingScope,
+        'modelFallbacks',
+        baseIds.join(','),
+      )
+        .then(() => reloadWorkspaceSettings())
+        .catch((error: unknown) =>
+          reportError(error, t('settings.models.fallbacks.saveFailed')),
+        );
+    },
+    [
+      modelSettingScope,
+      setWorkspaceSetting,
+      reloadWorkspaceSettings,
+      reportError,
+      t,
+    ],
+  );
+
   const handleFastModelSelect = useCallback(
     (modelId: string) => {
       if (streamingState !== 'idle') {
@@ -4965,11 +5044,11 @@ export function App({
       // Model IDs from the voice picker arrive as bare model IDs (baseModelId),
       // not ACP format. extractVoiceModels() sets id to the baseModelId.
       const bareModelId = extractBareModelId(modelId);
-      setWorkspaceSetting('workspace', 'voiceModel', bareModelId).catch(
+      setWorkspaceSetting(modelSettingScope, 'voiceModel', bareModelId).catch(
         (error: unknown) => reportError(error, t('model.setVoice')),
       );
     },
-    [reportError, setWorkspaceSetting, t],
+    [modelSettingScope, reportError, setWorkspaceSetting, t],
   );
 
   const handleVisionModelSelect = useCallback(
@@ -4977,11 +5056,11 @@ export function App({
       // Model IDs from the picker arrive in ACP format: `modelId(authType)`.
       // Core's resolveVisionModelSelection() expects `authType:modelId`.
       const encoded = encodeVisionModelForSetting(modelId);
-      setWorkspaceSetting('workspace', 'visionModel', encoded).catch(
+      setWorkspaceSetting(modelSettingScope, 'visionModel', encoded).catch(
         (error: unknown) => reportError(error, t('model.setVision')),
       );
     },
-    [reportError, setWorkspaceSetting, t],
+    [modelSettingScope, reportError, setWorkspaceSetting, t],
   );
 
   const modelHandlers: Record<ModelDialogMode, (id: string) => void> = {
@@ -4990,6 +5069,15 @@ export function App({
     voice: handleVoiceModelSelect,
     vision: handleVisionModelSelect,
   };
+
+  // Once every settings-launched model surface is closed (the model picker via
+  // modelDialogMode, or the fallbacks dialog), reset the persist scope so a
+  // later command-launched picker defaults back to workspace.
+  useEffect(() => {
+    if (!modelDialogMode && !showFallbacksDialog) {
+      setModelSettingScope('workspace');
+    }
+  }, [modelDialogMode, showFallbacksDialog]);
 
   const commands = useMemo(() => {
     return localizeBuiltinDescriptions(
@@ -5288,7 +5376,7 @@ export function App({
             <DialogShell
               title={t('auth.title')}
               size="lg"
-              onClose={() => setShowAuthDialog(false)}
+              onClose={handleCloseAuthDialog}
             >
               <AuthMessage
                 onMessage={(text, type = 'status') => {
@@ -5298,7 +5386,22 @@ export function App({
                       : { type: 'status', text },
                   ]);
                 }}
-                onClose={() => setShowAuthDialog(false)}
+                onClose={handleCloseAuthDialog}
+              />
+            </DialogShell>
+          )}
+          {showFallbacksDialog && (
+            <DialogShell
+              title={t('settings.models.fallbacks.title')}
+              size="md"
+              onClose={() => setShowFallbacksDialog(false)}
+            >
+              <ModelFallbacksDialog
+                models={fallbackModelOptions}
+                current={currentModelFallbacks}
+                max={3}
+                onConfirm={handleFallbacksConfirm}
+                onClose={() => setShowFallbacksDialog(false)}
               />
             </DialogShell>
           )}
@@ -5537,10 +5640,34 @@ export function App({
                         onThemeChange={handleThemeChange}
                         chatWidthMode={chatWidthMode}
                         onChatWidthModeChange={handleChatWidthModeChange}
-                        onSubDialog={(key) => {
+                        modelManagement={{
+                          providers: providersState.providers,
+                          currentModelId:
+                            connection.currentModel ?? undefined,
+                          loading: providersState.loading,
+                          error: providersState.error,
+                          busy: modelActionBusy,
+                          onSelectModel: handleModelSelect,
+                          onDeleteModel: handleDeleteModel,
+                          onAddModel: () => setShowAuthDialog(true),
+                        }}
+                        onSubDialog={(key, scope) => {
+                          setModelSettingScope(scope);
                           if (key === 'fastModel') setModelDialogMode('fast');
                           else if (key === 'visionModel')
                             setModelDialogMode('vision');
+                          else if (key === 'voiceModel') {
+                            workspaceActions
+                              .loadProviders()
+                              .then((status) => {
+                                setVoiceModels(extractVoiceModels(status));
+                                setModelDialogMode('voice');
+                              })
+                              .catch((error: unknown) =>
+                                reportError(error, t('model.setVoice')),
+                              );
+                          } else if (key === 'modelFallbacks')
+                            setShowFallbacksDialog(true);
                           else if (key === 'tools.approvalMode')
                             setShowApprovalModeDialog(true);
                         }}

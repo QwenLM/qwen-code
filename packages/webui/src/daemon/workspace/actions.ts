@@ -287,7 +287,11 @@ export function createDaemonWorkspaceActions({
       );
     },
 
-    async setWorkspaceSetting(scope: 'workspace', key: string, value: unknown) {
+    async setWorkspaceSetting(
+      scope: 'workspace' | 'user',
+      key: string,
+      value: unknown,
+    ) {
       const client = requireClient(getClient, 'Set setting failed');
       return withActionTimeout(
         client.setWorkspaceSetting(scope, key, value),
@@ -704,6 +708,14 @@ export function createDaemonWorkspaceActions({
       return withActionTimeout(
         client.installAuthProvider(req),
         'Install auth provider timed out',
+      );
+    },
+
+    async deleteModel(target) {
+      const client = requireClient(getClient, 'Delete model failed');
+      return withActionTimeout(
+        client.deleteModel(target),
+        'Delete model timed out',
       );
     },
 

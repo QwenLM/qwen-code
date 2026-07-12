@@ -1991,6 +1991,18 @@ export interface DaemonSettingUpdateResult {
   requiresRestart: boolean;
 }
 
+/** Identifies a configured model to remove from `modelProviders`. */
+export interface DaemonModelDeleteRequest {
+  authType: string;
+  modelId: string;
+  baseUrl?: string;
+}
+
+export interface DaemonModelDeleteResult {
+  removed: boolean;
+  clearedActiveModel: boolean;
+}
+
 export type DaemonVoiceMode = 'hold' | 'tap';
 
 export type DaemonVoiceTransport =

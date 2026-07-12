@@ -149,6 +149,13 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
     reload: settingsReload,
     loading: false,
   }),
+  useProviders: () => ({
+    providers: [],
+    current: undefined,
+    loading: false,
+    error: undefined,
+    reload: vi.fn().mockResolvedValue(undefined),
+  }),
   useStreamingState: () => testState.streamingState,
   useTranscriptBlocks: () => testState.blocks,
   useTranscriptStore: () => mockStore,

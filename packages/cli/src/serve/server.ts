@@ -121,6 +121,7 @@ import {
   registerWorkspaceVoiceRoutes,
   type WorkspaceVoiceRouteDeps,
 } from './routes/workspace-voice.js';
+import { registerWorkspaceModelsRoutes } from './routes/workspace-models.js';
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
 import { setRateLimiter } from './rate-limit.js';
 import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
@@ -1193,6 +1194,17 @@ export function createServeApp(
     parseAndValidateClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
+  if (deps.persistSettings) {
+    registerWorkspaceModelsRoutes(app, {
+      boundWorkspace: primaryBoundWorkspace,
+      mutate,
+      safeBody,
+      persistSettings: deps.persistSettings,
+      broadcastSettingsChanged,
+      parseAndValidateClientId: (req, res) =>
+        parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+    });
+  }
 
   // A2UI action inbound (the upstream half of A2UI-over-MCP): user
   // interactions from web clients are proxied to the UI MCP server's
