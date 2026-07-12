@@ -36,7 +36,7 @@ import {
 const MAX_UNFINISHED_EXTENSION_OPERATIONS = 10;
 
 const sanitizeDaemonMessage = (message: string): string =>
-  stripAnsiAndControl(redactUrlCredentials(message));
+  redactUrlCredentials(stripAnsiAndControl(message));
 const EXTENSION_PREPARATION_CONCURRENCY = 2;
 const EXTENSION_REFRESH_TIMEOUT_MS = 30_000;
 const RECONCILE_SLOW_MS = 30_000;
