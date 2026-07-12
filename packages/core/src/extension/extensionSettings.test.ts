@@ -164,6 +164,46 @@ describe('extensionSettings', () => {
       expect(mockRequestSetting).not.toHaveBeenCalled();
     });
 
+    it('rejects invalid previous environment variable names before mutation', async () => {
+      const config: ExtensionConfig = {
+        name: 'test-ext',
+        version: '2.0.0',
+        settings: [
+          {
+            name: 'Current key',
+            description: 'Current key',
+            envVar: 'API_KEY',
+          },
+        ],
+      };
+      const previousConfig: ExtensionConfig = {
+        name: 'test-ext',
+        version: '1.0.0',
+        settings: [
+          {
+            name: 'Previous key',
+            description: 'Previous key',
+            envVar: 'OLD_KEY\nforged',
+          },
+        ],
+      };
+
+      await expect(
+        maybePromptForSettings(
+          config,
+          '12345',
+          mockRequestSetting,
+          previousConfig,
+          { OLD_KEY: 'previous' },
+        ),
+      ).rejects.toThrow(
+        'Extension setting "envVar" must be a valid environment variable name.',
+      );
+      expect(mockRequestSetting).not.toHaveBeenCalled();
+      expect(KeychainTokenStorage).not.toHaveBeenCalled();
+      expect(fs.existsSync(path.join(extensionDir, '.env'))).toBe(false);
+    });
+
     it('should prompt for all settings if there is no previous config', async () => {
       const config: ExtensionConfig = {
         name: 'test-ext',
