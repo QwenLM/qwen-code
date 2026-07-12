@@ -28,6 +28,7 @@ import {
   convertSchema,
   type SchemaComplianceMode,
 } from '../../utils/schemaConverter.js';
+import { InvalidStreamError } from '../invalid-stream-error.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
 const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
@@ -1403,27 +1404,35 @@ export function convertOpenAIChunkToGemini(
       }
     }
 
-    // Hold protocol-looking text until the stream proves it was not part of a
-    // malformed attempt.
+    // The recorded leak starts with a tag in the thought part, so all parts
+    // participate in holding while only visible parts decide rejection.
     const pendingAndCurrentParts = [
       ...(requestContext.pendingUntrustedResponseParts ?? []),
       ...parts,
     ];
     const hasUntrustedProtocolText =
-      hasThinkingTagPart(parts) ||
-      (requestContext.hasStructuredReasoningContent &&
-        (hasThinkingTagPart(pendingAndCurrentParts, true) ||
-          endsWithThinkingTagPrefix(pendingAndCurrentParts, true)));
+      requestContext.hasStructuredReasoningContent &&
+      (hasThinkingTagPart(parts) ||
+        hasThinkingTagPart(pendingAndCurrentParts, true) ||
+        endsWithThinkingTagPrefix(pendingAndCurrentParts, true));
     const hasVisibleThinkingTagLeak =
       requestContext.hasStructuredReasoningContent &&
-      hasThinkingTagPart(pendingAndCurrentParts, true);
+      (hasThinkingTagPart(pendingAndCurrentParts, true) ||
+        (Boolean(choice.finish_reason) &&
+          endsWithThinkingTagPrefix(pendingAndCurrentParts, true)));
     const toolCallWithoutName = toolCallParser.hasNamelessToolCall();
     const malformedNamelessToolCall =
       Boolean(choice.finish_reason) && toolCallWithoutName;
     const malformedThinkingTagLeak =
       Boolean(choice.finish_reason) && hasVisibleThinkingTagLeak;
-    const shouldDropMalformedAttempt =
-      malformedNamelessToolCall || malformedThinkingTagLeak;
+    if (malformedThinkingTagLeak) {
+      requestContext.pendingUntrustedResponseParts = undefined;
+      throw new InvalidStreamError(
+        'Model response leaked thinking tags into visible content.',
+        'PROTOCOL_TAG_LEAK',
+      );
+    }
+    const shouldDropMalformedAttempt = malformedNamelessToolCall;
     const shouldHoldUntrustedParts =
       toolCallWithoutName ||
       (!choice.finish_reason &&
