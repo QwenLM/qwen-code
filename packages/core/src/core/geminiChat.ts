@@ -1065,6 +1065,129 @@ const PROTOCOL_TAG_PREFIXES = [
   '</summary',
 ] as const;
 
+const THINKING_TAGS = [
+  { text: '<thinking>', name: 'thinking', kind: 'open' },
+  { text: '</thinking>', name: 'thinking', kind: 'close' },
+  { text: '<thinking/>', name: 'thinking', kind: 'self' },
+  { text: '<thinking />', name: 'thinking', kind: 'self' },
+  { text: '<think>', name: 'think', kind: 'open' },
+  { text: '</think>', name: 'think', kind: 'close' },
+  { text: '<think/>', name: 'think', kind: 'self' },
+  { text: '<think />', name: 'think', kind: 'self' },
+] as const;
+
+class ThinkingTagLeakDetector {
+  private buffer = '';
+  private held = '';
+  private openTag: 'think' | 'thinking' | undefined;
+  private invalid = false;
+
+  accept(text: string, final = false): string {
+    if (this.invalid) return '';
+    this.buffer += text;
+    const lower = this.buffer.toLowerCase();
+    let output = '';
+    let index = 0;
+
+    while (index < this.buffer.length) {
+      const tag = THINKING_TAGS.find(({ text: value }) =>
+        lower.startsWith(value, index),
+      );
+      if (tag) {
+        const raw = this.buffer.slice(index, index + tag.text.length);
+        if (tag.kind === 'open') {
+          if (this.openTag) return this.markInvalid();
+          this.openTag = tag.name;
+          this.held += output + raw;
+          output = '';
+        } else if (tag.kind === 'close') {
+          if (this.openTag !== tag.name) return this.markInvalid();
+          this.held += raw;
+          output += this.held;
+          this.held = '';
+          this.openTag = undefined;
+        } else if (this.openTag) {
+          this.held += raw;
+        } else {
+          output += this.held + raw;
+          this.held = '';
+        }
+        index += tag.text.length;
+        continue;
+      }
+
+      const remaining = lower.slice(index);
+      const partialTag = THINKING_TAGS.some(({ text: value }) =>
+        value.startsWith(remaining),
+      );
+      if (partialTag) {
+        if (final) {
+          if (
+            this.openTag ||
+            /^(?:<think|<thinking|<\/think|<\/thinking)/.test(remaining)
+          ) {
+            return this.markInvalid();
+          }
+          output += this.held + this.buffer.slice(index);
+          this.held = '';
+          index = this.buffer.length;
+          break;
+        }
+        if (!this.openTag) {
+          this.held += output;
+          output = '';
+        }
+        break;
+      }
+
+      if (this.openTag) this.held += this.buffer[index];
+      else {
+        output += this.held + this.buffer[index];
+        this.held = '';
+      }
+      index++;
+    }
+
+    this.buffer = this.buffer.slice(index);
+    if (final && this.openTag) return this.markInvalid();
+    return output;
+  }
+
+  finish(): string {
+    return this.accept('', true);
+  }
+
+  get leaked(): boolean {
+    return this.invalid;
+  }
+
+  get blockingOutput(): boolean {
+    return (
+      this.invalid ||
+      this.openTag !== undefined ||
+      this.buffer.length > 0 ||
+      this.held.length > 0
+    );
+  }
+
+  reject(): void {
+    this.markInvalid();
+  }
+
+  private markInvalid(): string {
+    this.invalid = true;
+    this.buffer = '';
+    this.held = '';
+    return '';
+  }
+}
+
+function hasInvalidThinkingTagStructure(text: string): boolean {
+  const detector = new ThinkingTagLeakDetector();
+  detector.accept(text, true);
+  return detector.leaked;
+}
+
 class LeadingProtocolTagLeakDetector {
   private state: 'detecting' | 'clean' | 'leaked' = 'detecting';
   private buffer = '';
@@ -3657,7 +3780,9 @@ export class GeminiChat {
     let hasToolCall = false;
     let hasFinishReason = false;
     const protocolTagDetector = new LeadingProtocolTagLeakDetector();
+    const thinkingTagDetector = new ThinkingTagLeakDetector();
     let protocolTextWasSuppressed = false;
+    let thinkingTagLeakDetected = false;
     // Captured if the upstream stream throws mid-iteration (typical on weak
     // networks: SSE drops between `content_block_stop` of a tool_use and the
     // terminal `message_stop`). We still build / record / push a partial
@@ -3688,10 +3813,22 @@ export class GeminiChat {
                 ? [rest]
                 : [];
             });
-            if (candidate?.finishReason) {
-              const text = protocolTagDetector.finish();
-              if (text) content.parts.push({ text });
+            content.parts = content.parts.flatMap((part) => {
+              if (typeof part.text !== 'string' || part.thought) return [part];
+              const text = thinkingTagDetector.accept(part.text);
+              if (text) return [{ ...part, text }];
+              const { text: _text, ...rest } = part;
+              return Object.values(rest).some((value) => value !== undefined)
+                ? [rest]
+                : [];
+            });
+            if (
+              thinkingTagDetector.blockingOutput &&
+              content.parts.some((part) => part.functionCall)
+            ) {
+              thinkingTagDetector.reject();
             }
+            thinkingTagLeakDetected ||= thinkingTagDetector.leaked;
             content.parts = normalizeModelToolCallIds(
               content.parts,
               usedToolCallIds,
@@ -3705,6 +3842,20 @@ export class GeminiChat {
 
             // Collect all parts for recording
             allModelParts.push(...content.parts);
+          }
+          if (candidate?.finishReason) {
+            const text = thinkingTagDetector.accept(
+              protocolTagDetector.finish(),
+              true,
+            );
+            if (text) {
+              const part = { text };
+              candidate.content ??= { role: 'model', parts: [] };
+              candidate.content.parts ??= [];
+              candidate.content.parts.push(part);
+              allModelParts.push(part);
+            }
+            thinkingTagLeakDetected ||= thinkingTagDetector.leaked;
           }
         }
 
@@ -3781,7 +3932,10 @@ export class GeminiChat {
           }
         }
 
-        if (!protocolTextWasSuppressed || !protocolTagDetector.blockingOutput) {
+        if (
+          !thinkingTagDetector.blockingOutput &&
+          (!protocolTextWasSuppressed || !protocolTagDetector.blockingOutput)
+        ) {
           yield chunk;
         }
       }
@@ -3835,6 +3989,15 @@ export class GeminiChat {
     if (streamError === null && protocolTagDetector.leaked) {
       throw new InvalidStreamError(
         'Model response started with leaked protocol tags.',
+        'PROTOCOL_TAG_LEAK',
+      );
+    }
+    if (
+      streamError === null &&
+      (thinkingTagLeakDetected || hasInvalidThinkingTagStructure(contentText))
+    ) {
+      throw new InvalidStreamError(
+        'Model response contained malformed thinking tags in visible content.',
         'PROTOCOL_TAG_LEAK',
       );
     }

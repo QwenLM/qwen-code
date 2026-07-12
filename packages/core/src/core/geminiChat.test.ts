@@ -7455,6 +7455,214 @@ describe('GeminiChat', async () => {
     ]);
   });
 
+  it('retries visible think tags when the same response has separate reasoning', async () => {
+    vi.useFakeTimers();
+    try {
+      const recordAssistantTurn = vi.fn();
+      const chatWithRecording = new GeminiChat(
+        mockConfig,
+        config,
+        [],
+        {
+          recordAssistantTurn,
+          recordChatCompression: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockImplementationOnce(async () =>
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        text: '1\n\n<thi',
+                      },
+                      {
+                        functionCall: {
+                          id: 'call_thinking_leak_should_not_run',
+                          name: 'read_file',
+                          args: { path: '/tmp/should-not-run' },
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        text: '\n\n<think>\n\n01/configs/37.yaml.yaml',
+                        thought: true,
+                      },
+                    ],
+                  },
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        text: 'nk>0<think>/' + 'ocpx-pipeline/config.yaml (',
+                      },
+                    ],
+                  },
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+            yield {
+              candidates: [{ finishReason: 'STOP' }],
+            } as unknown as GenerateContentResponse;
+          })(),
+        )
+        .mockImplementationOnce(async () =>
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [{ text: 'Recovered final answer' }],
+                  },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })(),
+        );
+
+      const stream = await chatWithRecording.sendMessageStream(
+        'qwen3.7-max',
+        { message: 'test' },
+        'prompt-id-thinking-tag-leak',
+      );
+      const events = await collectStreamWithFakeTimers(stream);
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+        true,
+      );
+      const emittedText = events
+        .filter((event) => event.type === StreamEventType.CHUNK)
+        .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? [])
+        .filter((part) => !part.thought)
+        .map((part) => part.text ?? '')
+        .join('');
+      expect(emittedText).toBe('Recovered final answer');
+      const emittedFunctionCalls = events
+        .filter((event) => event.type === StreamEventType.CHUNK)
+        .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? [])
+        .filter((part) => part.functionCall);
+      expect(emittedFunctionCalls).toEqual([]);
+      expect(chatWithRecording.getLastModelMessageText()).toBe(
+        'Recovered final answer',
+      );
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordAssistantTurn.mock.calls[0]?.[0].message).toEqual([
+        { text: 'Recovered final answer' },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('preserves balanced literal think tags alongside separate reasoning', async () => {
+    const response =
+      'Use the literal <think/> and <think>example</think> tags, then <';
+    vi.mocked(
+      mockContentGenerator.generateContentStream,
+    ).mockImplementationOnce(async () =>
+      (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  { text: 'Reasoning stays separate.', thought: true },
+                  { text: response },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })(),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'qwen3.7-max',
+      { message: 'test' },
+      'prompt-id-thinking-tag-literal',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
+    );
+    expect(chat.getLastModelMessageText()).toBe(response);
+  });
+
+  it('streams healthy separate reasoning without waiting for the final answer', async () => {
+    vi.mocked(
+      mockContentGenerator.generateContentStream,
+    ).mockImplementationOnce(async () =>
+      (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: 'Reasoning in progress', thought: true }],
+              },
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+        yield {
+          candidates: [
+            {
+              content: { parts: [{ text: 'Healthy final answer' }] },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })(),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'qwen3.7-max',
+      { message: 'test' },
+      'prompt-id-healthy-separate-reasoning',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    const chunks = events.filter(
+      (event) => event.type === StreamEventType.CHUNK,
+    );
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]?.value.candidates?.[0]?.content?.parts).toEqual([
+      { text: 'Reasoning in progress', thought: true },
+    ]);
+    expect(chunks[1]?.value.candidates?.[0]?.content?.parts).toEqual([
+      { text: 'Healthy final answer' },
+    ]);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
+    );
+  });
+
   it('does not reject normal HTML or protocol tag names in prose', async () => {
     const response =
       '<details><summary>Title</summary></details> ' +
