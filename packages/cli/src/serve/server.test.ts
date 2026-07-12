@@ -3535,6 +3535,9 @@ describe('createServeApp', () => {
       commitPreparedExtension?: (
         prepared: PreparedExtensionMutation,
       ) => Promise<CommittedExtensionMutation>;
+      disposePreparedExtension?: (
+        prepared: PreparedExtensionMutation,
+      ) => Promise<void>;
       getLoadedExtensions?: () => Extension[];
       enableExtension?: () => Promise<unknown>;
       disableExtension?: () => Promise<unknown>;
@@ -3620,7 +3623,9 @@ describe('createServeApp', () => {
           ),
         vi
           .spyOn(ExtensionManager.prototype, 'disposePreparedExtension')
-          .mockResolvedValue(undefined),
+          .mockImplementation(
+            overrides?.disposePreparedExtension ?? (async () => undefined),
+          ),
         vi
           .spyOn(ExtensionManager.prototype, 'getLoadedExtensions')
           .mockImplementation(
@@ -4067,6 +4072,48 @@ describe('createServeApp', () => {
               },
             ],
           });
+        });
+      } finally {
+        restore();
+      }
+    });
+
+    it('maps resultless committed warnings to a legacy top-level error', async () => {
+      const restore = mockExtensionManagerMethods({
+        commitPreparedExtension: async (prepared) => ({
+          identity: prepared.identity,
+          version: prepared.version,
+          generation: 3,
+        }),
+        disposePreparedExtension: async () => {
+          throw new Error('cleanup exploded');
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge({ knownClientIds: ['client-1'] }) },
+        );
+        const started = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source: 'https://example.com/warning-ext', consent: true });
+
+        await vi.waitFor(async () => {
+          const operation = await request(app)
+            .get(`/workspace/extensions/operations/${started.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(operation.body).toMatchObject({
+            status: 'succeeded_with_refresh_error',
+            error:
+              'Commit succeeded but post-commit work failed: cleanup exploded',
+          });
+          expect(operation.body).not.toHaveProperty('result');
         });
       } finally {
         restore();
