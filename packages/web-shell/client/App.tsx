@@ -1922,6 +1922,10 @@ export function App({
   );
   // Sessions to seed the split view with (e.g. the selection from the overview).
   const [splitSessionIds, setSplitSessionIds] = useState<string[]>([]);
+  // Latest pane list, readable from the shrink-close effect without making it a
+  // dependency (it changes on every pane add/remove).
+  const splitSessionIdsRef = useRef<string[]>(splitSessionIds);
+  splitSessionIdsRef.current = splitSessionIds;
   const [showExtensionsDialog, setShowExtensionsDialog] = useState(false);
   const [mcpDialogMessage, setMcpDialogMessage] =
     useState<SerializedMcpStatusMessage | null>(null);
@@ -2076,8 +2080,29 @@ export function App({
       notifyControlledSplitClose();
       setMainView('chat');
       focusComposerAfterSplitCloseRef.current = true;
+      // If the chat we fall back to has no session of its own — the common case
+      // when the split was entered straight from the Session Overview or a
+      // `?split=a,b` link — land on the split's first pane instead of stranding
+      // the user on an empty "new chat". Best-effort: a load failure (e.g. a
+      // non-primary-workspace session the single connection can't own) just
+      // leaves the empty chat, i.e. the previous behavior.
+      const firstPane = splitSessionIdsRef.current[0];
+      if (
+        firstPane &&
+        !currentSessionIdRef.current &&
+        !externalSplitControlled
+      ) {
+        void sessionActions.loadSession(firstPane).catch(() => undefined);
+      }
     }
-  }, [isLargeScreen, activePanel, mainView, notifyControlledSplitClose]);
+  }, [
+    isLargeScreen,
+    activePanel,
+    mainView,
+    notifyControlledSplitClose,
+    sessionActions,
+    externalSplitControlled,
+  ]);
   // Land focus on the composer after a shrink-driven split close so keyboard
   // users aren't dropped onto <body> — but not when the chat now shows an
   // approval overlay (it owns the keyboard) or a panel (its Back self-focuses).

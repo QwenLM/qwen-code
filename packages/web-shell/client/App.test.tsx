@@ -1895,6 +1895,54 @@ describe('App session callbacks', () => {
     ).toBeNull();
   });
 
+  it('lands on the first pane, not an empty new chat, when a shrink closes a URL-driven split', async () => {
+    let large = true;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('min-width')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    // The single chat has no session of its own — the split was entered from a
+    // `?split=` deep link — so a naive close would strand on an empty new chat.
+    mockConnection.sessionId = undefined;
+    window.history.replaceState(null, '', '/?split=s1,s2');
+
+    try {
+      const { container } = renderApp();
+      await flush();
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).not.toBeNull();
+
+      await act(async () => {
+        large = false;
+        changeHandler?.({ matches: false });
+        await Promise.resolve();
+      });
+
+      // The split folds back to chat and re-attaches to the first pane's
+      // session instead of stranding the user on an empty new chat.
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).toBeNull();
+      expect(mockSessionActions.loadSession).toHaveBeenCalledWith('s1');
+    } finally {
+      window.history.replaceState(null, '', '/');
+    }
+  });
+
   it('auto-closes the Session Overview when the screen shrinks below the breakpoint', async () => {
     // Drive isLargeScreen through a controllable media query: open the panel on
     // a large screen, then flip below the breakpoint and confirm it closes.
