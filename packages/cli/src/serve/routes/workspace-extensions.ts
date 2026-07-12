@@ -249,12 +249,6 @@ export function registerWorkspaceExtensionRoutes(
         );
         const generation = (await manager.getExtensionStoreSnapshot())
           .generation;
-        if (
-          observedGeneration !== undefined &&
-          generation === observedGeneration
-        ) {
-          return;
-        }
         const runtimes = workspaceRegistry
           .list()
           .filter(
@@ -262,6 +256,7 @@ export function registerWorkspaceExtensionRoutes(
               (appliedGenerationByWorkspaceId.get(runtime.workspaceId) ?? 0) <
               generation,
           );
+        if (generation === observedGeneration && runtimes.length === 0) return;
         const results = await Promise.allSettled(
           runtimes.map(async (runtime) => {
             runtime.workspaceService.invalidateWorkspaceSkillsStatus();

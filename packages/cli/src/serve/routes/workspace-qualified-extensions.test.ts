@@ -510,6 +510,40 @@ describe('extension management v2 REST', () => {
     }
   });
 
+  it('reconciles a runtime added after the generation stabilizes', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness();
+    mockExtensionManager();
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      const lateCwd = path.join(h.scratch, 'late-stable');
+      await fsp.mkdir(lateCwd, { recursive: true });
+      const late = makeRuntime(canonicalizeWorkspace(lateCwd), {
+        primary: false,
+        trusted: true,
+        workspaceId: 'late-stable-id',
+      });
+      h.registry.add(late);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(
+        late.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+      const projection = await auth(
+        request(h.app).get('/workspaces/late-stable-id/extensions'),
+      );
+      expect(projection.body).toMatchObject({
+        desiredGeneration: 7,
+        appliedGeneration: 7,
+      });
+    } finally {
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('advances applied generation only after the workspace reconciles', async () => {
     const h = await makeHarness();
     mockExtensionManager();
