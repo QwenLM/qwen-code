@@ -30,6 +30,7 @@ import {
   type WebShellAssistantTurnFooterRenderInfo,
 } from '../customization';
 import { useI18n } from '../i18n';
+import { useWebShellPortalRoot } from '../portalRoot';
 import { MessageItem } from './MessageItem';
 import { MessageTimestamp } from './MessageTimestamp';
 import {
@@ -1814,6 +1815,7 @@ const SessionTimeline = memo(function SessionTimeline({
   hidden: boolean;
   onSelect: (turnId: string) => void;
 }) {
+  const portalRoot = useWebShellPortalRoot();
   const { t } = useI18n();
   const panelRef = useRef<HTMLElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -2106,7 +2108,7 @@ const SessionTimeline = memo(function SessionTimeline({
                 {tooltip.entry.detail}
               </span>
             </div>,
-            document.body,
+            portalRoot ?? document.body,
           )}
       </nav>
     </div>
