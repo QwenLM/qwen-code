@@ -278,6 +278,32 @@ describe('createChannelWorkerManager', () => {
     );
   });
 
+  it('does not reconcile after forced shutdown interrupts reload resolution', async () => {
+    const test = setup();
+    const selection: ServeChannelSelection = {
+      mode: 'names',
+      names: ['telegram'],
+    };
+    await test.manager.setSelection(selection);
+    let releaseGroups!: () => void;
+    test.resolveGroups.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseGroups = () => resolve(workspaceGroups(selection));
+        }),
+    );
+
+    const reloading = test.manager.reload();
+    await vi.waitFor(() =>
+      expect(test.resolveGroups).toHaveBeenLastCalledWith(selection, 'reload'),
+    );
+    test.manager.killAllSync();
+    releaseGroups();
+
+    await expect(reloading).rejects.toMatchObject({ code: 'daemon_draining' });
+    expect(test.group.reconcile).not.toHaveBeenCalled();
+  });
+
   it('keeps the old committed selection when reconcile rolls back', async () => {
     const group = fakeGroup();
     const test = setup(group);
