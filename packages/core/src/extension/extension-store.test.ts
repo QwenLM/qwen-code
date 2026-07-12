@@ -1047,51 +1047,103 @@ describe('ExtensionStore', () => {
     },
   );
 
-  it('recovers committed state from a journal when state.json is corrupt', async () => {
+  it.each(['corrupt', 'missing'] as const)(
+    'recovers committed state from a journal when state.json is %s',
+    async (stateCondition) => {
+      const store = makeStore();
+      const identity = { id: 'f1'.repeat(32), name: 'demo' };
+      await store.ensureInitialized([identity]);
+      const targetSnapshot = await store.setDefaultActivation(
+        identity,
+        'disabled',
+      );
+      const transactionId = 'recover-corrupt-commit';
+      const destination = path.join(extensionsDir, 'demo');
+      const backup = path.join(storeDir, 'rollback', transactionId);
+      const journal = path.join(
+        storeDir,
+        'transactions',
+        `${transactionId}.json`,
+      );
+      await fsp.mkdir(destination);
+      await fsp.mkdir(backup);
+      await fsp.writeFile(
+        journal,
+        JSON.stringify({
+          version: 1,
+          transactionId,
+          operation: 'update',
+          phase: 'state_committed',
+          destinationDirectory: destination,
+          stagingDirectory: path.join(
+            storeDir,
+            'staging',
+            'recover-corrupt-commit',
+          ),
+          backupDirectory: backup,
+          previousGeneration: 0,
+          targetGeneration: 1,
+          targetSnapshot,
+        }),
+      );
+      if (stateCondition === 'corrupt') {
+        await fsp.writeFile(path.join(storeDir, 'state.json'), '{broken');
+      } else {
+        await fsp.rm(path.join(storeDir, 'state.json'));
+      }
+
+      const recovered = await store.ensureInitialized([identity]);
+
+      expect(recovered.generation).toBe(1);
+      expect(recovered.extensions[identity.id]?.defaultActivation).toBe(
+        'disabled',
+      );
+      expect(fs.existsSync(journal)).toBe(false);
+    },
+  );
+
+  it.each(['corrupt', 'missing'] as const)(
+    'recovers state and projection from state.previous.json when state.json is %s',
+    async (stateCondition) => {
+      const store = makeStore();
+      const identity = { id: 'f2'.repeat(32), name: 'demo' };
+      await store.ensureInitialized([identity]);
+      await store.setDefaultActivation(identity, 'disabled');
+      if (stateCondition === 'corrupt') {
+        await fsp.writeFile(path.join(storeDir, 'state.json'), '{broken');
+      } else {
+        await fsp.rm(path.join(storeDir, 'state.json'));
+      }
+      await fsp.writeFile(
+        enablementPath,
+        JSON.stringify({ demo: { overrides: ['!/*'] } }),
+      );
+
+      const recovered = await store.ensureInitialized([identity]);
+
+      expect(recovered.generation).toBe(1);
+      expect(recovered.extensions[identity.id]?.defaultActivation).toBe(
+        'enabled',
+      );
+      expect(JSON.parse(await fsp.readFile(enablementPath, 'utf8'))).toEqual(
+        {},
+      );
+    },
+  );
+
+  it('fails closed when current and previous state are corrupt', async () => {
     const store = makeStore();
-    const identity = { id: 'f1'.repeat(32), name: 'demo' };
+    const identity = { id: 'f3'.repeat(32), name: 'demo' };
     await store.ensureInitialized([identity]);
-    const targetSnapshot = await store.setDefaultActivation(
-      identity,
-      'disabled',
-    );
-    const transactionId = 'recover-corrupt-commit';
-    const destination = path.join(extensionsDir, 'demo');
-    const backup = path.join(storeDir, 'rollback', transactionId);
-    const journal = path.join(
-      storeDir,
-      'transactions',
-      `${transactionId}.json`,
-    );
-    await fsp.mkdir(destination);
-    await fsp.mkdir(backup);
-    await fsp.writeFile(
-      journal,
-      JSON.stringify({
-        version: 1,
-        transactionId,
-        operation: 'update',
-        phase: 'state_committed',
-        destinationDirectory: destination,
-        stagingDirectory: path.join(
-          storeDir,
-          'staging',
-          'recover-corrupt-commit',
-        ),
-        backupDirectory: backup,
-        previousGeneration: 0,
-        targetGeneration: 1,
-        targetSnapshot,
-      }),
-    );
+    await store.setDefaultActivation(identity, 'disabled');
     await fsp.writeFile(path.join(storeDir, 'state.json'), '{broken');
-
-    const recovered = await store.ensureInitialized([identity]);
-
-    expect(recovered.generation).toBe(1);
-    expect(recovered.extensions[identity.id]?.defaultActivation).toBe(
-      'disabled',
+    await fsp.writeFile(
+      path.join(storeDir, 'state.previous.json'),
+      '{also-broken',
     );
-    expect(fs.existsSync(journal)).toBe(false);
+
+    await expect(store.ensureInitialized([identity])).rejects.toBeInstanceOf(
+      ExtensionStoreCorruptError,
+    );
   });
 });

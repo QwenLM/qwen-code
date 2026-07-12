@@ -967,51 +967,73 @@ export class ExtensionStore {
   }
 
   private async recoverCorruptStateUnlocked(): Promise<void> {
+    let stateMissing = false;
     try {
-      await this.readSnapshotUnlocked();
-      return;
+      const snapshot = await this.readSnapshotUnlocked();
+      if (snapshot) return;
+      stateMissing = true;
     } catch (error) {
       if (!(error instanceof ExtensionStoreCorruptError)) throw error;
-      const transactionsDir = path.join(this.storeDir, 'transactions');
-      const committed: ExtensionTransactionJournal[] = [];
-      for (const name of await fsp.readdir(transactionsDir)) {
-        if (!name.endsWith('.json')) continue;
-        const journal = await this.readRecoverableJournalUnlocked(
-          path.join(transactionsDir, name),
-        );
-        if (!journal) continue;
-        if (journal.phase === 'state_committed') committed.push(journal);
-      }
-      const latest = committed.sort(
-        (left, right) => right.targetGeneration - left.targetGeneration,
-      )[0];
-      if (latest) {
-        await atomicWriteJSON(this.statePath, latest.targetSnapshot, {
-          mode: 0o600,
-          forceMode: true,
-          noFollow: true,
+    }
+
+    const candidates: Array<{
+      snapshot: ExtensionStoreSnapshot;
+      recoveryGeneration: number;
+    }> = [];
+    const transactionsDir = path.join(this.storeDir, 'transactions');
+    for (const name of await fsp.readdir(transactionsDir)) {
+      if (!name.endsWith('.json')) continue;
+      const journal = await this.readRecoverableJournalUnlocked(
+        path.join(transactionsDir, name),
+      );
+      if (journal?.phase === 'state_committed') {
+        candidates.push({
+          snapshot: journal.targetSnapshot,
+          recoveryGeneration: journal.targetGeneration,
         });
-        await this.writeLegacyProjectionUnlocked(latest.targetSnapshot);
-        return;
-      }
-      try {
-        const previous = parseState(
-          await fsp.readFile(this.previousStatePath, 'utf8'),
-          this.previousStatePath,
-        );
-        await atomicWriteJSON(this.statePath, previous, {
-          mode: 0o600,
-          forceMode: true,
-          noFollow: true,
-        });
-        await this.writeLegacyProjectionUnlocked(previous);
-      } catch (backupError) {
-        throw new ExtensionStoreCorruptError(
-          `Extension store state and recovery data are corrupt at ${this.storeDir}.`,
-          { cause: backupError },
-        );
       }
     }
+
+    let backupError: unknown;
+    try {
+      const previous = parseState(
+        await fsp.readFile(this.previousStatePath, 'utf8'),
+        this.previousStatePath,
+      );
+      candidates.push({
+        snapshot: previous,
+        recoveryGeneration: previous.generation + 1,
+      });
+    } catch (error) {
+      backupError = error;
+    }
+
+    const latest = candidates.sort(
+      (left, right) => right.recoveryGeneration - left.recoveryGeneration,
+    )[0];
+    if (latest) {
+      const recovered = {
+        ...latest.snapshot,
+        generation: latest.recoveryGeneration,
+      };
+      await atomicWriteJSON(this.statePath, recovered, {
+        mode: 0o600,
+        forceMode: true,
+        noFollow: true,
+      });
+      await this.writeLegacyProjectionUnlocked(recovered);
+      return;
+    }
+    if (
+      stateMissing &&
+      (backupError as NodeJS.ErrnoException | undefined)?.code === 'ENOENT'
+    ) {
+      return;
+    }
+    throw new ExtensionStoreCorruptError(
+      `Extension store state and recovery data are corrupt at ${this.storeDir}.`,
+      { cause: backupError },
+    );
   }
 
   private async readJournalUnlocked(
