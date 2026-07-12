@@ -5801,7 +5801,9 @@ describe('runQwenServe channel worker supervisor', () => {
         removed: true,
         activity: { channelWorkers: 1 },
       });
-      expect(removeByIds).toHaveBeenCalled();
+      expect(removeByIds).toHaveBeenCalledWith([
+        workspaceRegistrationId(secondaryCwd),
+      ]);
       const removedSupervisor = workerSupervisors.get(secondaryCwd)!;
       const removedWorkerOptions = workerOptions.get(secondaryCwd)!;
       expect(removedSupervisor.stop).toHaveBeenCalledOnce();

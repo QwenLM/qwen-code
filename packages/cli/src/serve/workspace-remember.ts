@@ -258,7 +258,7 @@ export class WorkspaceRememberTaskLane {
   }
 
   private failRunningTaskAfterRemoval(task: WorkspaceMemoryTaskRecord): void {
-    if (!this.disposed) return;
+    if (!this.disposed || task.status === 'completed') return;
     task.status = 'failed';
     delete task.result;
     task.updatedAt = nowIso();
@@ -402,16 +402,18 @@ export class WorkspaceRememberTaskLane {
           content: params.content,
           contextMode: params.contextMode,
         });
-        task.status = 'completed';
-        task.result = {
-          summary:
-            result.filesTouched.length > 0
-              ? 'Memory update completed.'
-              : 'No memory files updated.',
-          filesTouched: result.filesTouched,
-          touchedScopes: result.touchedScopes,
-        };
-        task.updatedAt = nowIso();
+        if (!this.disposed) {
+          task.status = 'completed';
+          task.result = {
+            summary:
+              result.filesTouched.length > 0
+                ? 'Memory update completed.'
+                : 'No memory files updated.',
+            filesTouched: result.filesTouched,
+            touchedScopes: result.touchedScopes,
+          };
+          task.updatedAt = nowIso();
+        }
       } catch (err) {
         const code = workspaceMemoryFailureCode(
           err,
@@ -475,16 +477,18 @@ export class WorkspaceRememberTaskLane {
         const result = await this.bridge.runWorkspaceMemoryForget({
           query: params.query,
         });
-        task.status = 'completed';
-        task.result = {
-          summary:
-            result.summary ??
-            formatWorkspaceMemoryForgetSummary(result.removedEntries.length),
-          removedEntries: result.removedEntries,
-          touchedTopics: result.touchedTopics,
-          touchedScopes: result.touchedScopes,
-        };
-        task.updatedAt = nowIso();
+        if (!this.disposed) {
+          task.status = 'completed';
+          task.result = {
+            summary:
+              result.summary ??
+              formatWorkspaceMemoryForgetSummary(result.removedEntries.length),
+            removedEntries: result.removedEntries,
+            touchedTopics: result.touchedTopics,
+            touchedScopes: result.touchedScopes,
+          };
+          task.updatedAt = nowIso();
+        }
       } catch (err) {
         const code = workspaceMemoryFailureCode(
           err,
@@ -545,15 +549,17 @@ export class WorkspaceRememberTaskLane {
       task.updatedAt = nowIso();
       try {
         const result = await this.bridge.runWorkspaceMemoryDream();
-        task.status = 'completed';
-        task.result = {
-          summary:
-            result.summary ??
-            formatWorkspaceMemoryDreamSummary(result.touchedTopics.length),
-          touchedTopics: result.touchedTopics,
-          dedupedEntries: result.dedupedEntries,
-        };
-        task.updatedAt = nowIso();
+        if (!this.disposed) {
+          task.status = 'completed';
+          task.result = {
+            summary:
+              result.summary ??
+              formatWorkspaceMemoryDreamSummary(result.touchedTopics.length),
+            touchedTopics: result.touchedTopics,
+            dedupedEntries: result.dedupedEntries,
+          };
+          task.updatedAt = nowIso();
+        }
       } catch (err) {
         const code = workspaceMemoryFailureCode(
           err,

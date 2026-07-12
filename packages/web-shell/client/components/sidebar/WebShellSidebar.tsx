@@ -517,6 +517,7 @@ export function WebShellSidebar({
     useState<DaemonWorkspaceRemovalActivity | null>(null);
   const [workspaceRemovalSubmitting, setWorkspaceRemovalSubmitting] =
     useState(false);
+  const workspaceRemovalDismissedRef = useRef(false);
   const [
     workspaceRemovalRemoteInProgress,
     setWorkspaceRemovalRemoteInProgress,
@@ -1020,6 +1021,7 @@ export function WebShellSidebar({
   const requestWorkspaceRemoval = useCallback(
     (candidate: DaemonWorkspaceCapability) => {
       if (workspaceRemovalSubmitting) return;
+      workspaceRemovalDismissedRef.current = false;
       setWorkspaceRemovalActivity(null);
       setWorkspaceRemovalRemoteInProgress(false);
       setWorkspaceRemovalCandidate(candidate);
@@ -1065,6 +1067,7 @@ export function WebShellSidebar({
         if (body?.code === 'workspace_removal_in_progress') {
           setWorkspaceRemovalRemoteInProgress(true);
           for (let attempt = 0; attempt < 20; attempt++) {
+            if (workspaceRemovalDismissedRef.current) return;
             try {
               const capabilities = await workspace.refreshCapabilities?.();
               if (
@@ -1081,6 +1084,7 @@ export function WebShellSidebar({
             }
             await new Promise((resolve) => window.setTimeout(resolve, 250));
           }
+          if (workspaceRemovalDismissedRef.current) return;
           setWorkspaceRemovalRemoteInProgress(false);
           onError(
             new Error('Workspace removal remained in progress after retries.'),
@@ -2630,7 +2634,11 @@ export function WebShellSidebar({
             title={t('sidebar.removeWorkspaceTitle')}
             size="sm"
             onClose={() => {
-              if (!workspaceRemovalSubmitting) {
+              if (
+                !workspaceRemovalSubmitting ||
+                workspaceRemovalRemoteInProgress
+              ) {
+                workspaceRemovalDismissedRef.current = true;
                 setWorkspaceRemovalCandidate(null);
                 setWorkspaceRemovalActivity(null);
                 setWorkspaceRemovalRemoteInProgress(false);
@@ -2697,8 +2705,12 @@ export function WebShellSidebar({
                 <button
                   className={styles.secondaryButton}
                   type="button"
-                  disabled={workspaceRemovalSubmitting}
+                  disabled={
+                    workspaceRemovalSubmitting &&
+                    !workspaceRemovalRemoteInProgress
+                  }
                   onClick={() => {
+                    workspaceRemovalDismissedRef.current = true;
                     setWorkspaceRemovalCandidate(null);
                     setWorkspaceRemovalActivity(null);
                     setWorkspaceRemovalRemoteInProgress(false);

@@ -281,4 +281,48 @@ describe('WorkspaceRegistrationStore', () => {
       vi.resetModules();
     }
   });
+
+  it('preserves the write failure when lock release also fails', async () => {
+    const home = await tempHome();
+    const writeError = new Error('write failed');
+    const releaseError = new Error('release failed');
+    vi.resetModules();
+    vi.doMock('proper-lockfile', () => ({
+      default: {
+        lock: vi.fn(async () => async () => {
+          throw releaseError;
+        }),
+      },
+    }));
+    vi.doMock('@qwen-code/qwen-code-core', () => ({
+      atomicWriteFile: vi.fn().mockRejectedValue(writeError),
+    }));
+    try {
+      const storeModule = await import('./workspace-registration-store.js');
+      const store = new storeModule.WorkspaceRegistrationStore(
+        '/work/primary',
+        home,
+      );
+      await fs.mkdir(path.dirname(store.filePath), { recursive: true });
+      await fs.writeFile(
+        store.filePath,
+        JSON.stringify({
+          schemaVersion: 1,
+          primaryWorkspace: '/work/primary',
+          workspaces: ['/work/secondary'],
+        }),
+      );
+
+      await expect(
+        store.removeByIds([
+          storeModule.workspaceRegistrationId('/work/secondary'),
+        ]),
+      ).rejects.toBe(writeError);
+      expect(writeError.cause).toBe(releaseError);
+    } finally {
+      vi.doUnmock('proper-lockfile');
+      vi.doUnmock('@qwen-code/qwen-code-core');
+      vi.resetModules();
+    }
+  });
 });

@@ -391,8 +391,15 @@ export class WorkspaceRegistrationStore {
       } catch (err) {
         if (!committed) releaseError = err;
       }
-      if (releaseError) throw releaseError;
-      if (workError) throw workError;
+      if (
+        workError instanceof Error &&
+        releaseError !== undefined &&
+        workError.cause === undefined
+      ) {
+        workError.cause = releaseError;
+      }
+      if (workError !== undefined) throw workError;
+      if (releaseError !== undefined) throw releaseError;
       return changed;
     });
   }
