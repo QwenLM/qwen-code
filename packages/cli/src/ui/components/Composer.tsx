@@ -5,7 +5,7 @@
  */
 
 import { Box, Text, useIsScreenReaderEnabled } from 'ink';
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { LoadingIndicator } from './LoadingIndicator.js';
 import { InputPrompt } from './InputPrompt.js';
 import { Footer } from './Footer.js';
@@ -61,6 +61,7 @@ export const Composer = () => {
   // local to Composer because nothing outside this component needs the
   // narrow signal.
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const clipboardUnavailableShownRef = useRef(false);
 
   // Broad signal — any input-area Tab consumer. Forwarded to AppContainer
   // via UIActionsContext so useAutoAcceptIndicator's `shouldBlockTab` can
@@ -142,6 +143,7 @@ export const Composer = () => {
           }
           promptSuggestion={uiState.promptSuggestion}
           onPromptSuggestionDismiss={uiState.abortPromptSuggestion}
+          clipboardUnavailableShownRef={clipboardUnavailableShownRef}
         />
       )}
 

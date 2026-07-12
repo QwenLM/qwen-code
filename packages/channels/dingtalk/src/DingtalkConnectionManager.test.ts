@@ -60,11 +60,10 @@ describe('DingtalkConnectionManager', () => {
     expect(initialClient.disconnect).toHaveBeenCalledOnce();
   });
 
-  it('does not publish a client before its stream is registered', async () => {
+  it('does not publish a client before its socket is open', async () => {
     vi.useFakeTimers();
     const initialClient = new FakeClient();
     initialClient.connected = false;
-    initialClient.registered = false;
     initialClient.socket.readyState = 0;
     const onClientChanged = vi.fn();
     const manager = createManager(initialClient, { onClientChanged });
@@ -75,11 +74,25 @@ describe('DingtalkConnectionManager', () => {
     expect(onClientChanged).not.toHaveBeenCalled();
 
     initialClient.connected = true;
-    initialClient.registered = true;
     initialClient.socket.readyState = 1;
     await vi.advanceTimersByTimeAsync(100);
     await start;
 
+    expect(onClientChanged).toHaveBeenCalledWith(initialClient);
+    manager.stop();
+  });
+
+  it('accepts an open connected socket without a REGISTERED frame', async () => {
+    vi.useFakeTimers();
+    const initialClient = new FakeClient();
+    initialClient.registered = false;
+    const onClientChanged = vi.fn();
+    const manager = createManager(initialClient, { onClientChanged });
+
+    const start = manager.start();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    await expect(start).resolves.toBeUndefined();
     expect(onClientChanged).toHaveBeenCalledWith(initialClient);
     manager.stop();
   });
@@ -328,11 +341,10 @@ describe('DingtalkConnectionManager', () => {
     manager.stop();
   });
 
-  it('does not start a parallel replacement while startup is registering', async () => {
+  it('does not start a parallel replacement while startup is opening', async () => {
     vi.useFakeTimers();
     const initialClient = new FakeClient();
     initialClient.connected = false;
-    initialClient.registered = false;
     initialClient.socket.readyState = 0;
     const createClient = vi.fn(() => new FakeClient());
     const manager = createManager(initialClient, { createClient });
@@ -343,7 +355,6 @@ describe('DingtalkConnectionManager', () => {
 
     expect(createClient).not.toHaveBeenCalled();
     initialClient.connected = true;
-    initialClient.registered = true;
     initialClient.socket.readyState = 1;
     await vi.advanceTimersByTimeAsync(100);
     await start;
@@ -480,7 +491,6 @@ describe('DingtalkConnectionManager', () => {
     const manager = createManager(initialClient, { createClient });
     await manager.start();
     initialClient.connected = false;
-    initialClient.registered = false;
 
     for (let tick = 0; tick < 6; tick++) {
       manager.noteActivity(initialClient);
@@ -488,6 +498,23 @@ describe('DingtalkConnectionManager', () => {
     }
 
     expect(createClient).toHaveBeenCalledOnce();
+    manager.stop();
+  });
+
+  it('keeps an open connected client without a REGISTERED frame', async () => {
+    vi.useFakeTimers();
+    const initialClient = new FakeClient();
+    const createClient = vi.fn(() => new FakeClient());
+    const manager = createManager(initialClient, { createClient });
+    await manager.start();
+    initialClient.registered = false;
+
+    for (let tick = 0; tick < 6; tick++) {
+      manager.noteActivity(initialClient);
+      await vi.advanceTimersByTimeAsync(20_000);
+    }
+
+    expect(createClient).not.toHaveBeenCalled();
     manager.stop();
   });
 

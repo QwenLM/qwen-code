@@ -175,6 +175,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // Anthropic Claude
   // -------------------
+  [/^claude-opus-4-(?:6|7|8)/, LIMITS['1m']], // Opus 4.6-4.8: 1M
   [/^claude-/, LIMITS['200k']], // All Claude models: 200K
 
   // -------------------
@@ -191,7 +192,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^qwen3-max/, LIMITS['256k']],
   // Open-source Qwen3 variants: 256K native
   [/^qwen3-coder-/, LIMITS['256k']],
-  // Qwen fallback (VL, turbo, plus, 2.5, etc.): 128K
+  // Qwen fallback (VL, turbo, plus, 2.5, etc.): 256K
   [/^qwen/, LIMITS['256k']],
 
   // -------------------
@@ -244,7 +245,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^o\d/, LIMITS['128k']], // o-series: 128K
 
   // Anthropic Claude
-  [/^claude-opus-4-6/, LIMITS['128k']], // Opus 4.6: 128K
+  [/^claude-opus-4-(?:6|7|8)/, 128_000 as TokenCount], // Opus 4.6-4.8: 128K
   [/^claude-sonnet-4-6/, LIMITS['64k']], // Sonnet 4.6: 64K
   [/^claude-/, LIMITS['64k']], // Claude fallback: 64K
 
@@ -338,7 +339,11 @@ export function tokenLimit(
  * so a model advertising >64K output is clamped consistently everywhere.
  */
 export function defaultOutputCeiling(model: Model): TokenCount {
-  return Math.min(tokenLimit(model, 'output'), OUTPUT_TOKEN_CEILING);
+  const outputLimit = tokenLimit(model, 'output');
+  if (/^claude-opus-4-(?:6|7|8)/.test(normalize(model))) {
+    return outputLimit;
+  }
+  return Math.min(outputLimit, OUTPUT_TOKEN_CEILING);
 }
 
 /**

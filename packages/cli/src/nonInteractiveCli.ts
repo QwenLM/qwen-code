@@ -31,9 +31,7 @@ import {
   detectAutonomousSentinel,
   detectLoopSentinel,
   SendMessageType,
-  buildSyntheticToolResponseParts,
-  detectTurnInterruption,
-  ORPHAN_TOOL_USE_REPAIR_REASON,
+  buildSessionRecoveryPlanFromApiHistory,
   restoreWorktreeContext,
   TeamEventType,
   ApprovalMode,
@@ -587,21 +585,16 @@ export async function runNonInteractive(
         // client.ts strips the ENTIRE trailing user run, so detection must
         // re-submit exactly that run or the oldest orphans get dropped. This
         // runs once per (rare) continue request, so the full clone is fine.
-        const detection = detectTurnInterruption(
-          geminiClient.getChat().getHistory(),
-        );
-        debugLogger.info('[runNonInteractive] continueInterrupted detection', {
-          kind: detection.kind,
-          partsCount:
-            detection.kind === 'interrupted_prompt'
-              ? detection.parts.length
-              : 0,
-          danglingCallCount:
-            detection.kind === 'interrupted_turn'
-              ? detection.danglingCalls.length
-              : 0,
+        const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
+          sessionId,
+          apiHistory: geminiClient.getChat().getHistory(),
         });
-        if (detection.kind === 'none') {
+        debugLogger.info('[runNonInteractive] continueInterrupted recovery', {
+          kind: recoveryPlan.kind,
+          repairs: recoveryPlan.repairs,
+          hasContinuation: recoveryPlan.continuation !== undefined,
+        });
+        if (!recoveryPlan.continuation) {
           await emitNonInteractiveFinalMessage({
             message: 'No interrupted turn to continue.',
             isError: false,
@@ -611,18 +604,11 @@ export async function runNonInteractive(
           });
           return 0;
         }
-        if (detection.kind === 'interrupted_prompt') {
-          // Re-submit the orphaned user content under Retry semantics. The
-          // Retry send path strips the orphaned original from history and
-          // restores it if the send never starts, so history is neither
-          // duplicated nor lost — no separate strip/restore needed here.
-          initialPartList = detection.parts;
+
+        initialPartList = recoveryPlan.continuation.parts;
+        if (recoveryPlan.continuation.mode === 'retry_user_parts') {
           continueSendType = SendMessageType.Retry;
         } else {
-          initialPartList = buildSyntheticToolResponseParts(
-            detection.danglingCalls,
-            ORPHAN_TOOL_USE_REPAIR_REASON,
-          );
           continueSendType = SendMessageType.ToolResult;
         }
 

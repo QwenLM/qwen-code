@@ -23,6 +23,7 @@ import {
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
 import type {
+  DaemonInputAnnotation,
   DaemonPendingPromptSummary,
   DaemonTranscriptStore,
 } from '@qwen-code/sdk/daemon';
@@ -74,7 +75,9 @@ function areQueuedPromptsEqual(
       prompt.serverState === other.serverState &&
       prompt.isEditing === other.isEditing &&
       prompt.isRemoving === other.isRemoving &&
-      (prompt.images?.length ?? 0) === (other.images?.length ?? 0)
+      (prompt.images?.length ?? 0) === (other.images?.length ?? 0) &&
+      (prompt.inputAnnotations?.length ?? 0) ===
+        (other.inputAnnotations?.length ?? 0)
     );
   });
 }
@@ -96,6 +99,7 @@ export interface UseQueuedPromptsResult {
     text: string,
     images?: PromptImage[],
     onComplete?: () => void,
+    inputAnnotations?: DaemonInputAnnotation[],
   ) => boolean;
   removeQueuedPrompt: (id: number) => void;
   insertQueuedPrompt: (id: number) => Promise<void>;
@@ -359,7 +363,13 @@ export function useQueuedPrompts({
           const text = prompt?.text ?? '';
           if (text) {
             displayedServerPromptIdsRef.current.add(promptId);
-            store.appendLocalUserMessage(text, toStoreImages(prompt?.images));
+            store.appendLocalUserMessage(
+              text,
+              toStoreImages(prompt?.images),
+              prompt?.inputAnnotations?.length
+                ? { inputAnnotations: prompt.inputAnnotations }
+                : undefined,
+            );
           }
         }
         void refreshPendingPrompts();
@@ -415,7 +425,12 @@ export function useQueuedPrompts({
   );
 
   const enqueuePrompt = useCallback(
-    (text: string, images?: PromptImage[], onComplete?: () => void) => {
+    (
+      text: string,
+      images?: PromptImage[],
+      onComplete?: () => void,
+      inputAnnotations?: DaemonInputAnnotation[],
+    ) => {
       const trimmed = text.trim();
       if (!trimmed) return true;
       const localId = nextQueuedPromptIdRef.current++;
@@ -423,11 +438,15 @@ export function useQueuedPrompts({
       const submitAbort = new AbortController();
       submitAbortControllersRef.current.add(submitAbort);
       const queuedImages = images ? [...images] : undefined;
+      const queuedAnnotations = inputAnnotations
+        ? [...inputAnnotations]
+        : undefined;
       const nextPrompt: QueuedPrompt = {
         id: localId,
         sessionId: targetSessionId,
         text: trimmed,
         images: queuedImages,
+        inputAnnotations: queuedAnnotations,
         onComplete,
         serverState: 'submitting',
       };
@@ -437,6 +456,7 @@ export function useQueuedPrompts({
       sessionActions
         .submitPrompt(trimmed, {
           images,
+          inputAnnotations: queuedAnnotations,
           optimisticUserMessage: false,
           sessionId: targetSessionId,
           signal: submitAbort.signal,
@@ -462,6 +482,9 @@ export function useQueuedPrompts({
               store.appendLocalUserMessage(
                 trimmed,
                 toStoreImages(queuedImages),
+                queuedAnnotations?.length
+                  ? { inputAnnotations: queuedAnnotations }
+                  : undefined,
               );
             }
             const next = queuedPromptsRef.current.filter(

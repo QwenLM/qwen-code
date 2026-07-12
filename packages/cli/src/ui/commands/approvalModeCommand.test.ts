@@ -91,7 +91,7 @@ describe('approvalModeCommand', () => {
 
       expect(result.type).toBe('message');
       expect(result.messageType).toBe('info');
-      expect(result.content).toContain('auto-edit');
+      expect(result.content).toContain('auto-accept edits');
       expect(mockSetApprovalMode).toHaveBeenCalledWith('auto-edit');
     });
 

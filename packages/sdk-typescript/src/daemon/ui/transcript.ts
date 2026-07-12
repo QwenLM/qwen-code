@@ -8,6 +8,7 @@ import type {
   DaemonPromptCancelledTranscriptBlock,
   DaemonShellTranscriptBlock,
   DaemonStatusTranscriptBlock,
+  DaemonTextDeltaMeta,
   DaemonTextTranscriptBlock,
   DaemonToolTranscriptBlock,
   DaemonTranscriptBlock,
@@ -96,11 +97,19 @@ export function appendLocalUserTranscriptMessage(
   text: string,
   opts: DaemonTranscriptReducerOptions & {
     images?: Array<{ data: string; mimeType: string }>;
+    meta?: DaemonTextDeltaMeta;
   } = {},
 ): DaemonTranscriptState {
   const next = cloneTranscriptState(state, opts);
   finishAssistant(next);
-  const block = createTextBlock(next, 'user', text);
+  const block = createTextBlock(
+    next,
+    'user',
+    text,
+    undefined,
+    undefined,
+    opts.meta,
+  );
   if (opts.images && opts.images.length > 0) {
     (block as DaemonTextTranscriptBlock).images = [...opts.images];
   }
@@ -293,6 +302,7 @@ function applyDaemonTranscriptEvent(
       next.approvalMode = event.next;
       break;
     case 'session.metadata.changed':
+    case 'session.artifact.changed':
     case 'session.available_commands':
       // Intentional no-op against `blocks[]`.
       break;

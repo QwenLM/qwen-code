@@ -14,7 +14,11 @@ import { PNG } from './png';
 import { isScalingAvailable, Image } from './image-utils';
 import { Mobilecli } from './mobilecli';
 import { MobileDevice } from './mobile-device';
-import { validateOutputPath, validateFileExtension } from './utils';
+import {
+  validateOutputPath,
+  validateFileExtension,
+  stripUiBounds,
+} from './utils';
 import {
   isNormalized,
   coordinateScale,
@@ -1246,7 +1250,7 @@ export const createMcpServer = (): McpServer => {
     async ({ device, compressed, output_path }) => {
       const robot = getAndroidRobotFromDevice(device, 'mobile_ui_dump');
       let xml = await robot.dumpUiHierarchy(compressed ?? false);
-      xml = xml.replace(/ bounds="\[[0-9,]+\]\[[0-9,]+\]"/g, '');
+      xml = stripUiBounds(xml);
       if (output_path) {
         validateOutputPath(output_path);
         fs.writeFileSync(output_path, xml, 'utf-8');

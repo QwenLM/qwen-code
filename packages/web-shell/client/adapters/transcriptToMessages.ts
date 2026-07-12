@@ -5,6 +5,7 @@
  */
 
 import type {
+  DaemonInputAnnotation,
   DaemonTranscriptBlock,
   DaemonTextTranscriptBlock,
   DaemonToolTranscriptBlock,
@@ -36,6 +37,7 @@ type DaemonPermissionTranscriptBlock = Extract<
 type ExtendedDaemonTextTranscriptBlock = DaemonTextTranscriptBlock & {
   meta?: {
     source?: unknown;
+    inputAnnotations?: unknown;
     qwenDiscreteMessage?: boolean;
     backgroundTask?: unknown;
   };
@@ -224,12 +226,16 @@ export function transcriptBlocksToDaemonMessages(
           (textBlock as ExtendedDaemonTextTranscriptBlock).meta,
         );
         const source = getString(meta, 'source');
+        const inputAnnotations = Array.isArray(meta?.inputAnnotations)
+          ? (meta.inputAnnotations as DaemonInputAnnotation[])
+          : undefined;
         const msg: DaemonUserMessage = {
           id: block.id,
           role: 'user',
           content: textBlock.text,
           timestamp: blockTime,
           ...(source ? { source } : {}),
+          ...(inputAnnotations ? { inputAnnotations } : {}),
         };
         // Attach images if present
         if (textBlock.images && textBlock.images.length > 0) {

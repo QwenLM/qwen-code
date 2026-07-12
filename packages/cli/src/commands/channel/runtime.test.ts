@@ -1,9 +1,17 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { parseConfiguredChannels, registerPermissionRelay } from './runtime.js';
+import {
+  daemonSessionRoutesPath,
+  parseConfiguredChannels,
+  registerPermissionRelay,
+  registerSessionCleanup,
+  sessionsPath,
+} from './runtime.js';
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   Storage: { getGlobalQwenDir: () => '/tmp/qwen' },
+  hashDaemonWorkspace: (workspace: string) =>
+    workspace === '/workspace' ? 'workspace-hash' : 'other-hash',
 }));
 
 vi.mock('../../config/settings.js', () => ({
@@ -23,6 +31,16 @@ vi.mock('./channel-registry.js', () => ({
       : undefined,
   supportedTypes: async () => ['telegram'],
 }));
+
+it('isolates daemon route stores by workspace hash', () => {
+  expect(daemonSessionRoutesPath('/workspace')).toBe(
+    '/tmp/qwen/channels/daemon/workspace-hash/routes.json',
+  );
+  expect(daemonSessionRoutesPath('/other')).toBe(
+    '/tmp/qwen/channels/daemon/other-hash/routes.json',
+  );
+  expect(daemonSessionRoutesPath('/workspace')).not.toBe(sessionsPath());
+});
 
 describe('parseConfiguredChannels', () => {
   beforeEach(() => {
@@ -276,5 +294,21 @@ describe('registerPermissionRelay', () => {
       requestId: 'req-1',
       outcome: { outcome: 'cancelled' },
     });
+  });
+});
+
+describe('registerSessionCleanup', () => {
+  it('updates routing state when no channel matches the dead session', () => {
+    const bridge = new EventEmitter();
+    const router = {
+      getTarget: vi.fn(),
+      handleSessionDied: vi.fn(),
+    };
+
+    registerSessionCleanup(bridge as never, router as never, new Map());
+    bridge.emit('sessionDied', { sessionId: 'session-1' });
+
+    expect(router.handleSessionDied).toHaveBeenCalledTimes(1);
+    expect(router.handleSessionDied).toHaveBeenCalledWith('session-1');
   });
 });

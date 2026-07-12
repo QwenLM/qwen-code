@@ -1,13 +1,20 @@
 import {
+  Fragment,
   memo,
-  useMemo,
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
 } from 'react';
+import {
+  getComposerTagIconUrl,
+  getComposerTagViewModel,
+  splitComposerTagContentByAnnotations,
+} from '../../utils/composerTag';
+import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import { isSafeImageSrc } from './Markdown';
 import { useWebShellCustomization } from '../../customization';
 import type {
@@ -24,7 +31,6 @@ import {
 } from '../../hooks/useComposerCore';
 import { useI18n } from '../../i18n';
 import { cssUrlVar } from '../../utils/cssUrlVar';
-import { getComposerTagIconUrl } from '../composerTagIcons';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './UserMessage.module.css';
 
@@ -36,12 +42,57 @@ interface UserMessageImage {
 interface UserMessageProps {
   content: string;
   images?: UserMessageImage[];
+  inputAnnotations?: readonly DaemonInputAnnotation[];
   isLocateFlashing?: boolean;
+}
+
+function DefaultUserMessageContent({
+  composerTagIcons,
+  content,
+  inputAnnotations,
+  onComposerTagClick,
+  renderComposerTag,
+  renderComposerTagTooltip,
+}: {
+  composerTagIcons?: WebShellComposerTagIconMap;
+  content: string;
+  inputAnnotations?: readonly DaemonInputAnnotation[];
+  onComposerTagClick?: ComposerTagClickHandler;
+  renderComposerTag?: ComposerTagRenderer;
+  renderComposerTagTooltip?: ComposerTagRenderer;
+}) {
+  // Submit-time annotations are the source of truth for reference chips.
+  // Unannotated serialized text stays plain text.
+  const segments = useMemo(
+    () => splitComposerTagContentByAnnotations(content, inputAnnotations),
+    [content, inputAnnotations],
+  );
+  return (
+    <>
+      {segments.map((segment, index) =>
+        segment.type === 'text' ? (
+          <Fragment key={index}>{segment.text}</Fragment>
+        ) : (
+          <UserMessageTag
+            composerTagIcons={composerTagIcons}
+            key={`${segment.tag.id}:${index}`}
+            onComposerTagClick={onComposerTagClick}
+            renderComposerTag={renderComposerTag}
+            renderComposerTagTooltip={renderComposerTagTooltip}
+            tag={segment.tag}
+            title={segment.tag.serialized}
+            preserveCustomKindLabel
+          />
+        ),
+      )}
+    </>
+  );
 }
 
 export const UserMessage = memo(function UserMessage({
   content,
   images,
+  inputAnnotations,
   isLocateFlashing = false,
 }: UserMessageProps) {
   const { t } = useI18n();
@@ -57,8 +108,24 @@ export const UserMessage = memo(function UserMessage({
   const [expanded, setExpanded] = useState(false);
   const [heightOverflowing, setHeightOverflowing] = useState(false);
   const renderedContent = useMemo(() => {
-    const explicit = renderUserMessageContent?.({ content, images });
+    const explicit = renderUserMessageContent?.({
+      content,
+      images,
+      inputAnnotations,
+    });
     if (explicit !== undefined && explicit !== null) return explicit;
+    if (inputAnnotations && inputAnnotations.length > 0) {
+      return (
+        <DefaultUserMessageContent
+          composerTagIcons={composerTagIcons}
+          content={content}
+          inputAnnotations={inputAnnotations}
+          onComposerTagClick={onComposerTagClick}
+          renderComposerTag={renderComposerTag}
+          renderComposerTagTooltip={renderComposerTagTooltip}
+        />
+      );
+    }
     let parts: readonly WebShellUserMessagePart[] | undefined | null;
     try {
       parts = parseUserMessageContent?.(content);
@@ -83,6 +150,7 @@ export const UserMessage = memo(function UserMessage({
   }, [
     content,
     images,
+    inputAnnotations,
     onComposerTagClick,
     parseUserMessageContent,
     composerTagIcons,
@@ -185,12 +253,16 @@ function UserMessageTag({
   renderComposerTag,
   renderComposerTagTooltip,
   onComposerTagClick,
+  title,
+  preserveCustomKindLabel = false,
 }: {
   tag: WebShellComposerTag;
   composerTagIcons: WebShellComposerTagIconMap | undefined;
   renderComposerTag: ComposerTagRenderer | undefined;
   renderComposerTagTooltip: ComposerTagRenderer | undefined;
   onComposerTagClick: ComposerTagClickHandler | undefined;
+  title?: string;
+  preserveCustomKindLabel?: boolean;
 }) {
   const info = { tag, placement: 'user-message' as const, readonly: true };
   let custom: ReactNode | null | undefined;
@@ -206,10 +278,17 @@ function UserMessageTag({
     console.warn('[WebShell] user message tag tooltip render failed', error);
   }
   const clickable = Boolean(onComposerTagClick);
+  const viewModel = preserveCustomKindLabel
+    ? getComposerTagViewModel(tag, composerTagIcons)
+    : null;
   const rawTagLabel = getComposerTagLabel(tag);
-  const tagValue = getComposerTagValue(tag);
-  const tagLabel = tag.kind ? '' : rawTagLabel;
-  const iconUrl = tag.icon ?? getComposerTagIconUrl(tag.kind, composerTagIcons);
+  const tagValue = viewModel?.tagValue ?? getComposerTagValue(tag);
+  const tagLabel = viewModel?.tagLabel ?? (tag.kind ? '' : rawTagLabel);
+  const fallback = viewModel?.fallback ?? tag.id;
+  const iconUrl =
+    tag.icon ??
+    viewModel?.iconUrl ??
+    getComposerTagIconUrl(tag.kind, composerTagIcons);
   const safeIconUrl = iconUrl && isSafeImageSrc(iconUrl) ? iconUrl : undefined;
   return (
     <span
@@ -218,7 +297,7 @@ function UserMessageTag({
       }`}
       role={clickable ? 'button' : undefined}
       tabIndex={clickable ? 0 : undefined}
-      title={getTagText(tag)}
+      title={title ?? getTagText(tag)}
       onClick={(event) => {
         if (!clickable) return;
         event.stopPropagation();
@@ -252,7 +331,7 @@ function UserMessageTag({
           {tagValue ? (
             <span className={styles.messageTagValue}>{tagValue}</span>
           ) : !tagLabel ? (
-            <span className={styles.messageTagLabel}>{tag.id}</span>
+            <span className={styles.messageTagLabel}>{fallback}</span>
           ) : null}
         </>
       )}

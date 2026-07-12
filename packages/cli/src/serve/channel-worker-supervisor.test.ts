@@ -64,6 +64,7 @@ describe('createChannelWorkerSupervisor', () => {
       daemonToken: 'secret-token',
       workspace: '/workspace',
       selection: { mode: 'names', names: ['telegram', 'feishu'] },
+      workerBaseEnv: { ...process.env, CUSTOM: 'value' },
       spawnWorker,
     });
 
@@ -102,6 +103,7 @@ describe('createChannelWorkerSupervisor', () => {
     const env = (spawnWorker.mock.calls[0]![2] as { env: NodeJS.ProcessEnv })
       .env;
     expect(env).not.toHaveProperty('QWEN_SERVER_TOKEN');
+    expect(env).toHaveProperty('CUSTOM', 'value');
     expect(env).toHaveProperty('QWEN_DAEMON_TOKEN', 'secret-token');
     expect(env).toHaveProperty('OPENAI_API_KEY', 'openai-secret');
     expect(env).toHaveProperty('ANTHROPIC_API_KEY', 'anthropic-secret');
