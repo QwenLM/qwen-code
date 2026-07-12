@@ -23,7 +23,7 @@ import type {
   DaemonWorkspaceSkillStatus,
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
-import { getComposerTagIconUrl } from '../composerTagIcons';
+import { getComposerTagIconUrl } from '../../utils/composerTag';
 import { cssUrlValue } from '../../utils/cssUrlVar';
 import { DialogShell } from './DialogShell';
 import {
