@@ -4,7 +4,7 @@ name: 'Main CI Failure Issue'
 
 on:
   workflow_run:
-    workflows: ['Qwen Code CI', 'E2E Tests', 'SDK Python']
+    workflows: ['E2E Tests', 'SDK Python']
     types: ['completed']
 
 permissions:

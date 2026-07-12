@@ -11,7 +11,7 @@ import { writeFileSync } from 'node:fs';
 import { isMainModule, parseArgs } from './release-script-utils.js';
 
 const GENERATED_ENTRY_RE =
-  /^[*-]\s+(.+)\s+by\s+@([A-Za-z0-9-]+(?:\[bot\])?)(?:\s+with\s+@[A-Za-z0-9-]+(?:\[bot\])?)*\s+in\s+(https?:\/\/\S+\/pull\/(\d+))\s*$/;
+  /^[*-]\s+(.+)\s+by\s+@([A-Za-z0-9-]+(?:\[bot\])?)((?:\s+with\s+@[A-Za-z0-9-]+(?:\[bot\])?)*)\s+in\s+(https?:\/\/\S+\/pull\/(\d+))\s*$/;
 const GENERATED_ENTRY_WITHOUT_AUTHOR_RE =
   /^[*-]\s+(.+?)\s+in\s+(https?:\/\/\S+\/pull\/(\d+))\s*$/;
 const NEW_CONTRIBUTOR_RE =
@@ -69,11 +69,15 @@ export function parseGeneratedEntries(body) {
 
     const match = GENERATED_ENTRY_RE.exec(line);
     if (match) {
+      const coAuthors = [
+        ...match[3].matchAll(/@([A-Za-z0-9-]+(?:\[bot\])?)/g),
+      ].map((coAuthor) => coAuthor[1]);
       entries.push({
-        number: Number(match[4]),
+        number: Number(match[5]),
         title: match[1].trim(),
-        url: match[3],
+        url: match[4],
         author: match[2],
+        ...(coAuthors.length > 0 ? { coAuthors } : {}),
       });
       continue;
     }
@@ -188,8 +192,11 @@ function validateModelText(value, label, maxLength) {
   const text = value.trim();
   if (
     /[<>]/.test(text) ||
+    /&(?:#\d+|#x[0-9a-f]+|[a-z][a-z0-9]+);/i.test(text) ||
     /\[[^\]]*\]\([^)]*\)/.test(text) ||
     /https?:\/\//i.test(text) ||
+    /\bwww\.[^\s]+/i.test(text) ||
+    /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i.test(text) ||
     /(^|[^\w/])@[A-Za-z0-9-]+(?:\/[A-Za-z0-9_.-]+)?/.test(text) ||
     /(^|[^\w])#\d+\b/.test(text) ||
     /(\*\*|__|`)/.test(text)
@@ -546,7 +553,10 @@ export function renderReleaseNotes({
 
 function renderChangeLine(entry, text) {
   const author = entry.author ? ` by @${entry.author}` : '';
-  return `- ${text} ([#${entry.number}](${entry.url}))${author}`;
+  const coAuthors = (entry.coAuthors || [])
+    .map((coAuthor) => ` with @${coAuthor}`)
+    .join('');
+  return `- ${text} ([#${entry.number}](${entry.url}))${author}${coAuthors}`;
 }
 
 function validateRepo(repo) {

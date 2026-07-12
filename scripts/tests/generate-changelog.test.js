@@ -274,6 +274,26 @@ describe('formatRelease', () => {
     expect(block).toContain('### Added');
     expect(block).not.toContain("### What's Changed");
   });
+
+  it('preserves curated release notes from the raw GitHub release model', () => {
+    const block = formatRelease(
+      toReleaseModel({
+        tag: 'v1.2.3',
+        date: '2026-01-02T00:00:00Z',
+        url: 'https://example.com/v1.2.3',
+        body: [
+          '<!-- qwen-release-notes:v1 -->',
+          '',
+          '## Highlights',
+          '',
+          '- Easier session recovery. ([#1](https://example.com/pr/1))',
+        ].join('\n'),
+      }),
+    );
+
+    expect(block).toContain('### Highlights');
+    expect(block).toContain('Easier session recovery.');
+  });
 });
 
 describe('selectStableReleases', () => {

@@ -26,6 +26,7 @@ describe('stable release notes workflow', () => {
     expect(step).toContain(
       "needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false'",
     );
+    expect(step).toContain('timeout-minutes: 5');
     expect(step).toContain('node scripts/generate-release-notes.js');
     expect(step).toContain("OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'");
     expect(step).toContain("OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'");

@@ -15,9 +15,8 @@ describe('main CI failure issue workflow', () => {
 
   it('opens an autofix-ready issue only for failed main CI runs', () => {
     expect(workflow).toContain('workflow_run:');
-    expect(workflow).toContain(
-      "workflows: ['Qwen Code CI', 'E2E Tests', 'SDK Python']",
-    );
+    expect(workflow).toContain("workflows: ['E2E Tests', 'SDK Python']");
+    expect(workflow).not.toContain("'Qwen Code CI'");
     expect(workflow).toContain("types: ['completed']");
     expect(workflow).toContain("github.repository == 'QwenLM/qwen-code'");
     expect(workflow).toContain(

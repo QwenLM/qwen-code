@@ -4,6 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { execFileSync } from 'node:child_process';
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   buildPullRequestQuery,
@@ -60,6 +70,7 @@ describe('parseGeneratedEntries', () => {
         title: 'fix(ci): retry publishing',
         url: PR(6574),
         author: 'carol',
+        coAuthors: ['Copilot'],
       },
     ]);
   });
@@ -137,7 +148,10 @@ describe('classifyChange', () => {
 describe('renderReleaseNotes', () => {
   it('renders highlights and every PR exactly once in the complete list', () => {
     const entries = [
-      entry(1, 'feat(cli): add session search'),
+      {
+        ...entry(1, 'feat(cli): add session search'),
+        coAuthors: ['Copilot'],
+      },
       entry(2, 'fix(core): preserve tool results'),
       entry(3, 'docs: explain session search'),
     ];
@@ -171,7 +185,7 @@ describe('renderReleaseNotes', () => {
     expect(markdown).toContain('### Bug Fixes');
     expect(markdown).toContain('### Documentation');
     expect(markdown).toContain(
-      `Adds session search to the CLI. ([#1](${PR(1)})) by @alice`,
+      `Adds session search to the CLI. ([#1](${PR(1)})) by @alice with @Copilot`,
     );
     for (const number of [1, 2, 3]) {
       expect(markdown.match(new RegExp(`\\[#${number}\\]`, 'g'))).toHaveLength(
@@ -281,6 +295,35 @@ describe('generateAiContent', () => {
     expect(result.warnings).toEqual([
       'Summary fallback for #2: Summary for pull request 2 must be plain text without links or HTML.',
     ]);
+  });
+
+  it('rejects GFM autolinks and encoded mentions from model text', async () => {
+    const entries = [
+      entry(1, 'feat: original one'),
+      entry(2, 'fix: original two'),
+      entry(3, 'docs: original three'),
+    ];
+    const complete = async (request) =>
+      request.kind === 'summaries'
+        ? JSON.stringify({
+            summaries: [
+              { pr: 1, summary: 'Visit www.example.com for details.' },
+              { pr: 2, summary: 'Contact security@example.com.' },
+              { pr: 3, summary: 'Ping &#x40;octocat for details.' },
+            ],
+          })
+        : JSON.stringify({ highlights: [] });
+
+    const result = await generateAiContent(entries, complete);
+
+    expect(result.summaries).toEqual(
+      new Map([
+        [1, 'feat: original one'],
+        [2, 'fix: original two'],
+        [3, 'docs: original three'],
+      ]),
+    );
+    expect(result.warnings).toHaveLength(3);
   });
 
   it('drops invalid highlights without losing the complete list', async () => {
@@ -413,5 +456,58 @@ describe('generateReleaseNotes', () => {
     );
     expect(result.usedAi).toBe(false);
     expect(result.warnings).toEqual(['Model configuration is unavailable.']);
+  });
+
+  it('runs the CLI path with fake gh data and writes fallback notes', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'release-notes-cli-'));
+    try {
+      const gh = join(dir, 'gh');
+      const output = join(dir, 'notes.md');
+      writeFileSync(
+        gh,
+        [
+          '#!/usr/bin/env node',
+          'const args = process.argv.slice(2);',
+          "if (args[0] === 'api' && args.includes('repos/QwenLM/qwen-code/releases/generate-notes')) {",
+          "  process.stdout.write([\"## What's Changed\", '* feat: add cli path by @alice in https://github.com/QwenLM/qwen-code/pull/1'].join('\\n'));",
+          '  process.exit(0);',
+          '}',
+          "if (args[0] === 'api' && args[1] === 'graphql') {",
+          "  process.stdout.write(JSON.stringify({ data: { repository: { pr0: { number: 1, body: 'Body.', additions: 1, deletions: 0, changedFiles: 1, labels: { nodes: [] }, files: { nodes: [] } } } } }));",
+          '  process.exit(0);',
+          '}',
+          'process.exit(1);',
+        ].join('\n'),
+      );
+      chmodSync(gh, 0o755);
+
+      execFileSync(
+        process.execPath,
+        [
+          'scripts/generate-release-notes.js',
+          '--tag=v1.0.1',
+          '--previous-tag=v1.0.0',
+          `--output=${output}`,
+        ],
+        {
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH}`,
+            GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+            OPENAI_API_KEY: '',
+            OPENAI_BASE_URL: '',
+            OPENAI_MODEL: '',
+          },
+        },
+      );
+
+      const markdown = readFileSync(output, 'utf8');
+      expect(markdown).toContain('### Features');
+      expect(markdown).toContain(
+        `feat: add cli path ([#1](${PR(1)})) by @alice`,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
