@@ -12,7 +12,10 @@ import lockfile from 'proper-lockfile';
 import { Mutex } from 'async-mutex';
 import { Storage } from '../config/storage.js';
 import { atomicWriteJSON, renameWithRetry } from '../utils/atomicFileWrite.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { Override, type AllExtensionsEnablementConfig } from './override.js';
+
+const debugLogger = createDebugLogger('EXTENSION_STORE');
 
 export type ExtensionActivation = 'enabled' | 'disabled';
 export type WorkspaceActivation = ExtensionActivation | 'inherit';
@@ -890,7 +893,11 @@ export class ExtensionStore {
         await this.recoverTransactionsUnlocked();
         return await run();
       } finally {
-        await release();
+        try {
+          await release();
+        } catch (error) {
+          debugLogger.warn('Failed to release extension store lock:', error);
+        }
       }
     });
   }

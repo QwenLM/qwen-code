@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
+import lockfile from 'proper-lockfile';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ExtensionConflictError,
@@ -139,6 +140,37 @@ describe('ExtensionStore', () => {
     expect(snapshot.extensions[id]?.workspaceOverrides).toEqual({
       '/workspace/a': 'enabled',
       '/workspace/b': 'disabled',
+    });
+  });
+
+  it('preserves a committed result when lock release reports an error', async () => {
+    const store = makeStore();
+    const identity = { id: 'd3'.repeat(32), name: 'demo' };
+    await store.ensureInitialized([identity]);
+    const lock = lockfile.lock.bind(lockfile);
+    const lockSpy = vi
+      .spyOn(lockfile, 'lock')
+      .mockImplementation(async (...args) => {
+        const release = await lock(...args);
+        return async () => {
+          await release();
+          throw new Error('release failed');
+        };
+      });
+
+    try {
+      await expect(
+        store.setDefaultActivation(identity, 'disabled'),
+      ).resolves.toMatchObject({ generation: 1 });
+    } finally {
+      lockSpy.mockRestore();
+    }
+
+    await expect(store.readSnapshot()).resolves.toMatchObject({
+      generation: 1,
+      extensions: {
+        [identity.id]: { defaultActivation: 'disabled' },
+      },
     });
   });
 
