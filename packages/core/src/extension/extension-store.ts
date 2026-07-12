@@ -583,10 +583,17 @@ export class ExtensionStore {
     }
     let effective = policy.defaultActivation;
     let matched = false;
-    const candidate = normalizeRulePath(canonicalWorkspace);
+    const legacyCandidates = [
+      normalizeRulePath(workspacePath),
+      normalizeRulePath(canonicalWorkspace),
+    ];
     for (const rule of policy.legacyPathRules ?? []) {
       const override = Override.fromFileRule(rule);
-      if (!override.matchesPath(candidate)) continue;
+      if (
+        !legacyCandidates.some((candidate) => override.matchesPath(candidate))
+      ) {
+        continue;
+      }
       effective = override.isDisable ? 'disabled' : 'enabled';
       matched = true;
     }
@@ -641,10 +648,16 @@ export class ExtensionStore {
   ): Promise<ExtensionStoreSnapshot> {
     return await this.mutate(identity, (policy) => {
       const canonicalWorkspace = canonicalizeWorkspacePath(workspacePath);
-      const candidate = normalizeRulePath(canonicalWorkspace);
-      const legacyMatches = (policy.legacyPathRules ?? []).some((rule) =>
-        Override.fromFileRule(rule).matchesPath(candidate),
-      );
+      const legacyCandidates = [
+        normalizeRulePath(workspacePath),
+        normalizeRulePath(canonicalWorkspace),
+      ];
+      const legacyMatches = (policy.legacyPathRules ?? []).some((rule) => {
+        const override = Override.fromFileRule(rule);
+        return legacyCandidates.some((candidate) =>
+          override.matchesPath(candidate),
+        );
+      });
       if (legacyMatches) {
         policy.workspaceOverrides[canonicalWorkspace] = 'inherit';
       } else {

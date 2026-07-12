@@ -290,6 +290,70 @@ describe('ExtensionStore', () => {
     },
   );
 
+  it.runIf(process.platform !== 'win32')(
+    'matches legacy rules against symlink and canonical workspace paths',
+    async () => {
+      const realWorkspace = path.join(root, 'legacy-real-workspace');
+      const linkedWorkspace = path.join(root, 'legacy-linked-workspace');
+      await fsp.mkdir(realWorkspace);
+      await fsp.symlink(realWorkspace, linkedWorkspace);
+      await fsp.writeFile(
+        enablementPath,
+        JSON.stringify({
+          demo: { overrides: [`!${linkedWorkspace}/*`] },
+        }),
+      );
+      const store = makeStore();
+      const identity = { id: 'd2'.repeat(32), name: 'demo' };
+      let snapshot = await store.ensureInitialized([identity]);
+
+      expect(
+        store.getActivation(
+          snapshot,
+          identity.id,
+          identity.name,
+          linkedWorkspace,
+        ),
+      ).toMatchObject({
+        effective: 'disabled',
+        source: 'legacy_path_rule',
+      });
+
+      snapshot = await store.setWorkspaceActivation(
+        identity,
+        linkedWorkspace,
+        'enabled',
+      );
+      expect(
+        store.getActivation(
+          snapshot,
+          identity.id,
+          identity.name,
+          linkedWorkspace,
+        ),
+      ).toMatchObject({
+        effective: 'enabled',
+        source: 'workspace_override',
+      });
+
+      snapshot = await store.clearWorkspaceActivation(
+        identity,
+        linkedWorkspace,
+      );
+      expect(
+        store.getActivation(
+          snapshot,
+          identity.id,
+          identity.name,
+          linkedWorkspace,
+        ),
+      ).toMatchObject({
+        effective: 'enabled',
+        source: 'default',
+      });
+    },
+  );
+
   it('writes a V1 projection after every policy mutation', async () => {
     const store = makeStore();
     const id = 'e'.repeat(64);
