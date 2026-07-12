@@ -60,8 +60,8 @@ Step 3A: high, <=500 src AND <=3200 total: 12 agents       [12+ LLM calls]
            |-- Agent 8: Diff-specialized finders (0-2, only when
            |     the diff's domain calls for them)
            '-- Agent 7: Build & Test (runs shell commands)
-Step 3B: high, >500 src OR >3200 total: territory x dim.   [N+4..6+3H calls]
-           (N chunks, 4-6 whole-diff agents, 3 invariant
+Step 3B: high, >500 src OR >3200 total: territory x dim.   [N+5..7+3H calls]
+           (N chunks, 5-7 whole-diff agents, 3 invariant
             agents per heavy file H)
            |-- 1 chunk agent per ~400 diff lines (all dimensions,
            |     its territory only, returns a coverage receipt)
@@ -70,6 +70,8 @@ Step 3B: high, >500 src OR >3200 total: territory x dim.   [N+4..6+3H calls]
            |      returns/errors, config/early-returns)
            |-- Agent 0: Issue Fidelity      (whole diff)
            |-- Agent 7: Build & Test        (whole repo)
+           |-- Agent 1b: Removed-behavior   (whole diff — the
+           |     cross-chunk half; chunks keep the local half)
            |-- Agent 1c: Cross-file tracer  (whole diff)
            |-- Agent 8: Specialized finders (whole diff, 0-2)
            '-- Test coverage matrix         (whole diff)
@@ -87,19 +89,19 @@ Steps 3A/3B/4/5 are the high-effort pipeline; at `--effort low|medium` a single 
 
 ### Review Agents
 
-| Agent                             | Focus                                                                                                                                                      |
-| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Agent 0: Issue Fidelity           | Linked issue evidence, root-cause ownership, and whether the PR solves the reported problem                                                                |
-| Agent 1a: Line-by-line scan       | Walks every hunk plus its enclosing function: wrong conditions, off-by-one, missing `await`, language-specific pitfalls, wrapper/proxy routing             |
-| Agent 1b: Removed-behavior audit  | Walks every deleted/replaced line: names the invariant it enforced and hunts for where the new code re-establishes it                                      |
-| Agent 1c: Cross-file tracer       | Walks every changed symbol's callers (consumer direction) and every added field's read sites (producer direction), plus same-PR callee changes             |
-| Agent 2: Security                 | Injection, XSS, SSRF, auth bypass, sensitive data exposure                                                                                                 |
-| Agent 3: Code Quality             | Style consistency, naming, duplication/reuse, altitude (fix at the right depth, not a bandaid on shared infrastructure), dead code                         |
-| Agent 4: Performance & Efficiency | N+1 queries, memory leaks, unnecessary re-renders, bundle size                                                                                             |
-| Agent 5: Test Coverage            | Untested code paths in the diff, missing branch coverage, weak assertions                                                                                  |
-| Agent 6: Undirected Audit         | 3 parallel personas (attacker / 3am-oncall / maintainer) — catches cross-dimensional issues                                                                |
-| Agent 7: Build & Test             | Runs build and test commands, reports failures                                                                                                             |
-| Agent 8: Diff-specialized finders | 0-2 extra finders written per-review when the diff concentrates in a domain with known failure modes (reconnect logic, module loaders, schedulers, codecs) |
+| Agent                             | Focus                                                                                                                                                                                                                                                                                           |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Agent 0: Issue Fidelity           | Linked issue evidence, root-cause ownership, and whether the PR solves the reported problem                                                                                                                                                                                                     |
+| Agent 1a: Line-by-line scan       | Walks every hunk plus its enclosing function: wrong conditions, off-by-one, missing `await`, language-specific pitfalls, wrapper/proxy routing                                                                                                                                                  |
+| Agent 1b: Removed-behavior audit  | Walks every deleted/replaced line: names the invariant it enforced and hunts for where the new code re-establishes it — including removed **exports**, whose replacement often lives in another file and quietly changed a default. In 3B it runs whole-diff (chunk agents keep the local half) |
+| Agent 1c: Cross-file tracer       | Walks every changed symbol's callers (consumer direction) and every added field's read sites (producer direction), plus same-PR callee changes                                                                                                                                                  |
+| Agent 2: Security                 | Injection, XSS, SSRF, auth bypass, sensitive data exposure                                                                                                                                                                                                                                      |
+| Agent 3: Code Quality             | Style consistency, naming, duplication/reuse, altitude (fix at the right depth, not a bandaid on shared infrastructure), dead code                                                                                                                                                              |
+| Agent 4: Performance & Efficiency | N+1 queries, memory leaks, unnecessary re-renders, bundle size                                                                                                                                                                                                                                  |
+| Agent 5: Test Coverage            | Untested code paths in the diff, missing branch coverage, weak assertions                                                                                                                                                                                                                       |
+| Agent 6: Undirected Audit         | 3 parallel personas (attacker / 3am-oncall / maintainer) — catches cross-dimensional issues                                                                                                                                                                                                     |
+| Agent 7: Build & Test             | Runs build and test commands, reports failures                                                                                                                                                                                                                                                  |
+| Agent 8: Diff-specialized finders | 0-2 extra finders written per-review when the diff concentrates in a domain with known failure modes (reconnect logic, module loaders, schedulers, codecs)                                                                                                                                      |
 
 The three Correctness agents are **procedural**: each is defined by how it walks the diff (line-by-line / deleted lines / cross-file edges), not by a bug taxonomy — so their coverage is complementary instead of overlapping. All agents run in parallel (Agent 1 launches 3 procedural variants and Agent 6 launches 3 persona variants concurrently, totaling 12 parallel tasks for same-repo PR reviews; Agent 0 is skipped for local-diff and file-path reviews, which run 11; cross-repo lightweight mode also skips Agents 1c and 7, running 10).
 
