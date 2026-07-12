@@ -380,6 +380,30 @@ describe('downloadFromNpmRegistry', () => {
     expect(message.endsWith('...')).toBe(true);
   });
 
+  it('rejects tar links whose sanitized path is empty', async () => {
+    mockNpmDownload('https://registry.example.com/pkg.tgz');
+    vi.mocked(tar.t).mockImplementationOnce(async (options) => {
+      options.onReadEntry?.({
+        type: 'SymbolicLink',
+        path: '\u001b[31m\u001b[0m\u0007',
+      } as never);
+    });
+
+    await expect(
+      downloadFromNpmRegistry(
+        {
+          source: '@scope/pkg',
+          type: 'npm',
+          registryUrl: 'https://registry.example.com',
+        },
+        '/tmp/qwen-extension',
+      ),
+    ).rejects.toThrow(
+      'Tar archive contains unsupported link entry: <sanitized empty path>',
+    );
+    expect(tar.x).not.toHaveBeenCalled();
+  });
+
   it('rejects npm tarballs larger than 100 MB', async () => {
     mockNpmDownload(
       'https://registry.example.com/pkg.tgz',

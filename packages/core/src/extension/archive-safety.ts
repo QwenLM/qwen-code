@@ -24,7 +24,8 @@ export async function assertTarArchiveHasNoLinks(file: string): Promise<void> {
         !unsupportedLinkPath &&
         (entry.type === 'SymbolicLink' || entry.type === 'Link')
       ) {
-        unsupportedLinkPath = formatEntryPath(entry.path);
+        unsupportedLinkPath =
+          formatEntryPath(entry.path) || '<sanitized empty path>';
       }
     },
   });

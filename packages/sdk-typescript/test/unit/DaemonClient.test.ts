@@ -3557,32 +3557,36 @@ describe('DaemonClient', () => {
       expect(pollSignal?.aborted).toBe(true);
     });
 
-    it('stops polling when the caller aborts', async () => {
-      let polls = 0;
-      const { fetch } = recordingFetch(() => {
-        polls += 1;
-        return jsonResponse(200, {
-          v: 1,
-          operationId: 'op-1',
-          operation: 'install',
-          status: 'running',
-          createdAt: 1,
-          updatedAt: 2,
-        });
+    it('aborts an in-flight poll when the caller aborts', async () => {
+      let pollSignal: AbortSignal | null | undefined;
+      const { fetch } = recordingFetch(
+        (request) =>
+          new Promise<Response>((_resolve, reject) => {
+            pollSignal = request.signal;
+            request.signal?.addEventListener(
+              'abort',
+              () => reject(request.signal?.reason),
+              { once: true },
+            );
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 0,
       });
-      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       const controller = new AbortController();
       const reason = new Error('navigation cancelled');
 
       const waiting = client.waitForExtensionOperation(
         { accepted: true, operationId: 'op-1' },
-        { pollIntervalMs: 60_000, signal: controller.signal },
+        { signal: controller.signal },
       );
-      await vi.waitFor(() => expect(polls).toBe(1));
+      await vi.waitFor(() => expect(pollSignal).toBeDefined());
       controller.abort(reason);
 
       await expect(waiting).rejects.toBe(reason);
-      expect(polls).toBe(1);
+      expect(pollSignal?.aborted).toBe(true);
     });
 
     it('routes global extension methods through /extensions/*', async () => {
