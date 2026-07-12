@@ -219,6 +219,13 @@ export function registerWorkspaceExtensionRoutes(
           onRuntimeReconciled,
         }
       : {};
+  const workspaceReconciliationOptions = () =>
+    workspaceRegistry
+      ? {
+          refreshRuntimes: [workspaceRegistry.primary],
+          onRuntimeReconciled,
+        }
+      : {};
   const mutationClientBridges = (
     runtimes?: readonly WorkspaceRuntime[],
   ): readonly AcpSessionBridge[] =>
@@ -634,7 +641,7 @@ export function registerWorkspaceExtensionRoutes(
             {
               ...(scope === SettingScope.User
                 ? globalReconciliationOptions()
-                : {}),
+                : workspaceReconciliationOptions()),
             },
           );
         } catch (err) {
@@ -686,7 +693,7 @@ export function registerWorkspaceExtensionRoutes(
             {
               ...(scope === SettingScope.User
                 ? globalReconciliationOptions()
-                : {}),
+                : workspaceReconciliationOptions()),
             },
           );
         } catch (err) {

@@ -802,6 +802,79 @@ describe('extension management v2 REST', () => {
     }
   });
 
+  it('reports legacy workspace activation mutations as applied immediately', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(ExtensionManager.prototype, 'enableExtension').mockResolvedValue({
+      generation: 7,
+    } as never);
+    vi.spyOn(ExtensionManager.prototype, 'disableExtension').mockResolvedValue({
+      generation: 8,
+    } as never);
+    try {
+      const enable = await auth(
+        request(h.app)
+          .post('/workspace/extensions/demo/enable')
+          .send({ scope: 'workspace' }),
+      );
+      expect(enable.status).toBe(202);
+      await expect(
+        pollOperation(
+          h.app,
+          enable.body.operationId,
+          '/workspace/extensions/operations',
+        ),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+
+      const enabledProjection = await auth(
+        request(h.app).get(
+          `/workspaces/${encodeURIComponent(h.primary.workspaceId)}/extensions`,
+        ),
+      );
+      expect(enabledProjection.body).toMatchObject({
+        desiredGeneration: 7,
+        appliedGeneration: 7,
+      });
+
+      vi.mocked(
+        ExtensionManager.prototype.getExtensionStoreSnapshot,
+      ).mockResolvedValue({
+        version: 2,
+        generation: 8,
+        legacyProjectionHash: 'hash',
+        extensions: {},
+      });
+      const disable = await auth(
+        request(h.app)
+          .post('/workspace/extensions/demo/disable')
+          .send({ scope: 'workspace' }),
+      );
+      expect(disable.status).toBe(202);
+      await expect(
+        pollOperation(
+          h.app,
+          disable.body.operationId,
+          '/workspace/extensions/operations',
+        ),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+
+      const disabledProjection = await auth(
+        request(h.app).get(
+          `/workspaces/${encodeURIComponent(h.primary.workspaceId)}/extensions`,
+        ),
+      );
+      expect(disabledProjection.body).toMatchObject({
+        desiredGeneration: 8,
+        appliedGeneration: 8,
+      });
+    } finally {
+      (
+        h.app.locals as { stopExtensionGenerationReconciler?: () => void }
+      ).stopExtensionGenerationReconciler?.();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('updates archive URL extensions through the global V2 route', async () => {
     const h = await makeHarness();
     mockExtensionManager();
