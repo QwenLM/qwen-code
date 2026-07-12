@@ -1506,6 +1506,74 @@ describe('App session callbacks', () => {
     expect(panel?.getAttribute('aria-label')).toBe('Session Overview');
   });
 
+  it('forces the compact session drawer from the external shell ref', async () => {
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+
+    const drawer = container.querySelector(
+      '[data-sidebar-shell][role="dialog"]',
+    );
+    expect(drawer).not.toBeNull();
+    expect(drawer?.className).toContain('mobileDrawerForced');
+  });
+
+  it('clears a forced compact drawer after crossing to a wide viewport', async () => {
+    let mobileChangeHandler:
+      | ((event: { matches: boolean }) => void)
+      | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: query.includes('min-width'),
+        media: query,
+        addEventListener: (
+          _type: string,
+          handler: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('max-width')) mobileChangeHandler = handler;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-sidebar-shell]')?.className,
+    ).toContain('mobileDrawerForced');
+
+    await act(async () => {
+      mobileChangeHandler?.({ matches: false });
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-sidebar-shell]')?.className,
+    ).not.toContain('mobileDrawerForced');
+    expect(
+      container.querySelector('[data-sidebar-shell][role="dialog"]'),
+    ).toBeNull();
+  });
+
+  it('lets a host hide the built-in compact sidebar toggle', async () => {
+    const { container } = renderApp({
+      sidebar: { enabled: true, showCompactToggle: false },
+    });
+    await flush();
+
+    expect(container.querySelector('[aria-label="Toggle menu"]')).toBeNull();
+  });
+
   it('returns to the Session Overview when leaving the split view', async () => {
     const { container } = renderApp();
     await flush();
