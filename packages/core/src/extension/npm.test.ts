@@ -480,6 +480,77 @@ describe('downloadFromNpmRegistry', () => {
     });
     expect(destroy).toHaveBeenCalledOnce();
   });
+
+  it('times out the active request across npm tarball redirects', async () => {
+    vi.useFakeTimers();
+    let requestCount = 0;
+    const childDestroy = vi.fn();
+    vi.mocked(https.get).mockImplementation(
+      (_url: unknown, _options: unknown, callback: unknown) => {
+        requestCount += 1;
+        if (requestCount === 1 && typeof callback === 'function') {
+          callback({
+            statusCode: 200,
+            headers: {},
+            on: vi.fn((event: string, handler: (data?: Buffer) => void) => {
+              if (event === 'data') {
+                handler(
+                  Buffer.from(
+                    JSON.stringify({
+                      'dist-tags': { latest: '1.0.0' },
+                      versions: {
+                        '1.0.0': {
+                          dist: {
+                            tarball: 'https://registry.example.com/pkg.tgz',
+                          },
+                        },
+                      },
+                    }),
+                  ),
+                );
+              }
+              if (event === 'end') handler();
+            }),
+          } as never);
+        } else if (requestCount === 2 && typeof callback === 'function') {
+          setTimeout(
+            () =>
+              callback({
+                statusCode: 302,
+                headers: {
+                  location: 'https://cdn.example.com/pkg.tgz',
+                },
+                on: vi.fn(),
+                destroy: vi.fn(),
+              } as never),
+            119_999,
+          );
+        }
+        return {
+          on: vi.fn().mockReturnThis(),
+          setTimeout: vi.fn(),
+          destroy: requestCount === 3 ? childDestroy : vi.fn(),
+        } as never;
+      },
+    );
+
+    const outcome = downloadFromNpmRegistry(
+      {
+        source: '@scope/pkg',
+        type: 'npm',
+        registryUrl: 'https://registry.example.com',
+      },
+      '/tmp/qwen-extension',
+    ).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(120_000);
+
+    await expect(outcome).resolves.toMatchObject({
+      message: 'npm tarball download timed out after 120000ms',
+    });
+    expect(childDestroy).toHaveBeenCalledOnce();
+    expect(tar.t).not.toHaveBeenCalled();
+    expect(tar.x).not.toHaveBeenCalled();
+  });
 });
 
 describe('checkNpmUpdate', () => {

@@ -3,6 +3,7 @@
  */
 
 import * as fs from 'node:fs';
+import type { ClientRequest, IncomingMessage } from 'node:http';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as tar from 'tar';
@@ -235,9 +236,18 @@ function fetchNpmJson<T>(
 /**
  * Download a file from a URL, following redirects.
  */
-function downloadNpmFile(
+interface NpmDownloadContext {
+  activeRequest?: ClientRequest;
+  activeResponse?: IncomingMessage;
+  activeFile?: fs.WriteStream;
+  requestGeneration: number;
+  timedOut: boolean;
+}
+
+function downloadNpmFileRedirect(
   url: string,
   dest: string,
+  context: NpmDownloadContext,
   authToken?: string,
   signal?: AbortSignal,
 ): Promise<void> {
@@ -249,25 +259,15 @@ function downloadNpmFile(
   const client = clientForUrl(url);
 
   return new Promise((resolve, reject) => {
-    let settled = false;
-    let hardDeadline: ReturnType<typeof setTimeout> | undefined;
-    const cleanup = () => {
-      if (hardDeadline) clearTimeout(hardDeadline);
-    };
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolve();
-    };
-    const fail = (error: Error) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(error);
-    };
+    signal?.throwIfAborted();
+    const requestGeneration = ++context.requestGeneration;
     const req = client
       .get(url, { headers, signal }, (res) => {
+        if (context.timedOut) {
+          res.destroy();
+          return;
+        }
+        context.activeResponse = res;
         if (res.statusCode === 301 || res.statusCode === 302) {
           if (res.headers.location) {
             // Strip auth token when redirected to a different host
@@ -275,27 +275,36 @@ function downloadNpmFile(
             const redirectHost = new URL(res.headers.location).host;
             const redirectToken =
               redirectHost === originalHost ? authToken : undefined;
-            downloadNpmFile(res.headers.location, dest, redirectToken, signal)
-              .then(finish)
-              .catch(fail);
+            res.destroy();
+            context.activeResponse = undefined;
+            downloadNpmFileRedirect(
+              res.headers.location,
+              dest,
+              context,
+              redirectToken,
+              signal,
+            )
+              .then(resolve)
+              .catch(reject);
             return;
           }
         }
         if (res.statusCode !== 200) {
-          return fail(
+          return reject(
             new Error(
               `Failed to download npm tarball: status ${res.statusCode}`,
             ),
           );
         }
         const file = fs.createWriteStream(dest);
+        context.activeFile = file;
         let bytesWritten = 0;
         res.on('data', (chunk: Buffer) => {
           bytesWritten += chunk.length;
           if (bytesWritten > NPM_ARCHIVE_DOWNLOAD_MAX_BYTES) {
             res.destroy();
             file.destroy();
-            fail(
+            reject(
               new Error(
                 `npm extension archive download exceeded maximum size of ${NPM_ARCHIVE_DOWNLOAD_MAX_BYTES} bytes`,
               ),
@@ -304,29 +313,60 @@ function downloadNpmFile(
         });
         res.on('error', (error) => {
           file.destroy();
-          fail(error);
+          reject(error);
         });
         file.on('error', (error) => {
           res.destroy();
-          fail(error);
+          reject(error);
         });
         res.pipe(file);
-        file.on('finish', () => file.close(finish));
+        file.on('finish', () => file.close(() => resolve()));
       })
-      .on('error', fail);
-    if (!settled) {
-      const timeout = () => {
-        req.destroy();
-        fail(
-          new Error(
-            `npm tarball download timed out after ${NPM_ARCHIVE_DOWNLOAD_TIMEOUT_MS}ms`,
-          ),
-        );
-      };
-      hardDeadline = setTimeout(timeout, NPM_ARCHIVE_DOWNLOAD_TIMEOUT_MS);
-      hardDeadline.unref();
-      req.setTimeout(NPM_ARCHIVE_DOWNLOAD_TIMEOUT_MS, timeout);
+      .on('error', reject);
+    if (requestGeneration === context.requestGeneration) {
+      context.activeRequest = req;
     }
+  });
+}
+
+function downloadNpmFile(
+  url: string,
+  dest: string,
+  authToken?: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const context: NpmDownloadContext = {
+    requestGeneration: 0,
+    timedOut: false,
+  };
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(hardDeadline);
+      resolve();
+    };
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(hardDeadline);
+      reject(error);
+    };
+    const hardDeadline = setTimeout(() => {
+      context.timedOut = true;
+      const error = new Error(
+        `npm tarball download timed out after ${NPM_ARCHIVE_DOWNLOAD_TIMEOUT_MS}ms`,
+      );
+      fail(error);
+      context.activeRequest?.destroy();
+      context.activeResponse?.destroy();
+      context.activeFile?.destroy();
+    }, NPM_ARCHIVE_DOWNLOAD_TIMEOUT_MS);
+    hardDeadline.unref();
+    downloadNpmFileRedirect(url, dest, context, authToken, signal)
+      .then(finish)
+      .catch(fail);
   });
 }
 
