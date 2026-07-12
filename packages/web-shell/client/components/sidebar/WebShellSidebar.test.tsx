@@ -3,6 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
+import type {
+  WebShellSidebarBranding,
+  WebShellSidebarFooterItem,
+} from './WebShellSidebar';
 
 const {
   mockConnection,
@@ -120,7 +124,9 @@ function makeSession(
 }
 
 const { I18nProvider } = await import('../../i18n');
-const { WebShellSidebar } = await import('./WebShellSidebar');
+const { WebShellSidebar, getSidebarTooltipPosition } = await import(
+  './WebShellSidebar'
+);
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -156,17 +162,23 @@ function renderSidebar(
     sessionListReloadToken: number;
     selectedWorkspaceCwd: string;
     onSelectWorkspace: (workspaceCwd: string | undefined) => void;
+    mobileOpen: boolean;
+    branding: false | WebShellSidebarBranding;
+    footer: false | { items: readonly WebShellSidebarFooterItem[] };
   }> = {},
-): { container: HTMLElement; rerender: (props: typeof overrides) => void } {
+): {
+  container: HTMLElement;
+  rerender: (props: typeof overrides, nextCollapsed?: boolean) => void;
+} {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
-  const doRender = (props: typeof overrides) => {
+  const doRender = (props: typeof overrides, nextCollapsed = collapsed) => {
     act(() => {
       root.render(
         <I18nProvider language="en">
           <WebShellSidebar
-            collapsed={collapsed}
+            collapsed={nextCollapsed}
             onCollapsedChange={noop}
             onOpenSettings={noop}
             onOpenDaemonStatus={noop}
@@ -511,8 +523,10 @@ describe('WebShellSidebar — workspace picker', () => {
   }
 
   const moreActionButtons = (container: HTMLElement): HTMLButtonElement[] =>
-    Array.from(container.querySelectorAll<HTMLButtonElement>('button')).filter(
-      (b) => b.getAttribute('aria-label') === 'More actions',
+    Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        'div[role="button"] button[aria-label="More actions"]',
+      ),
     );
 
   it('gives primary-workspace sessions full actions but keeps non-primary rows read-only', async () => {
@@ -701,8 +715,8 @@ describe('WebShellSidebar — workspace picker', () => {
 });
 
 describe('WebShellSidebar — version footer', () => {
-  it('shows the settings label and qwen-code version at full footer width', () => {
-    setStoredSidebarWidth(360);
+  it('shows the settings label and current version at full footer width', () => {
+    setStoredSidebarWidth(420);
     const { container } = renderSidebar(false, {
       canOpenSessionsOverview: true,
       canOpenSplitView: true,
@@ -710,71 +724,221 @@ describe('WebShellSidebar — version footer', () => {
     const settingsButton = container.querySelector<HTMLButtonElement>(
       '[aria-label="Settings"]',
     );
-    const badge = container.querySelector('[title="Qwen Code v1.2.3"]');
+    const badge = container.querySelector('[title="Current version: v1.2.3"]');
     expect(settingsButton).not.toBeNull();
     expect(settingsButton?.textContent).toContain('Settings');
     expect(badge).not.toBeNull();
     expect(badge?.textContent).toBe('v1.2.3');
   });
 
-  it('shows the qwen-code version in the footer when expanded', () => {
+  it('shows the current version in the footer when expanded', () => {
+    setStoredSidebarWidth(420);
     const { container } = renderSidebar(false);
-    const badge = container.querySelector('[title="Qwen Code v1.2.3"]');
+    const badge = container.querySelector('[title="Current version: v1.2.3"]');
     expect(badge).not.toBeNull();
     expect(badge?.textContent).toBe('v1.2.3');
   });
 
-  it('hides the settings label first while keeping the settings button accessible', () => {
+  it('moves lower-priority entries into More at compact footer width', () => {
     setStoredSidebarWidth(260);
     const { container } = renderSidebar(false, {
       canOpenSessionsOverview: true,
       canOpenSplitView: true,
     });
-    const settingsButton = container.querySelector<HTMLButtonElement>(
-      '[aria-label="Settings"]',
+    expect(
+      container.querySelector('[title="Current version: v1.2.3"]'),
+    ).toBeNull();
+    const moreButton = container.querySelector<HTMLButtonElement>(
+      '[aria-label="More actions"]',
     );
-    const badge = container.querySelector('[title="Qwen Code v1.2.3"]');
-    expect(settingsButton).not.toBeNull();
-    expect(settingsButton?.title).toBe('Settings');
-    expect(settingsButton?.textContent).not.toContain('Settings');
-    expect(settingsButton?.querySelector('svg')).not.toBeNull();
-    expect(badge).not.toBeNull();
+    expect(moreButton).not.toBeNull();
+    act(() => {
+      moreButton?.click();
+    });
+    const menu = container.querySelector('[role="menu"]');
+    expect(menu?.textContent).toContain('Current version: v1.2.3');
+    expect(menu?.lastElementChild?.getAttribute('role')).toBe('menuitem');
+    expect(menu?.lastElementChild?.getAttribute('aria-disabled')).toBe('true');
   });
 
-  it('hides the version at tight footer width', () => {
+  it.each([
+    [
+      'Escape',
+      () =>
+        document.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+        ),
+    ],
+    [
+      'an outside pointer event',
+      () =>
+        document.body.dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true }),
+        ),
+    ],
+    ['scroll', () => window.dispatchEvent(new Event('scroll'))],
+    ['resize', () => window.dispatchEvent(new Event('resize'))],
+  ])('closes More on %s', (_trigger, dismiss) => {
+    setStoredSidebarWidth(260);
+    const { container } = renderSidebar(false, {
+      canOpenSessionsOverview: true,
+      canOpenSplitView: true,
+    });
+    click(container.querySelector('[aria-label="More actions"]'));
+    expect(container.querySelector('[role="menu"]')).not.toBeNull();
+
+    act(() => {
+      dismiss();
+    });
+    expect(container.querySelector('[role="menu"]')).toBeNull();
+  });
+
+  it('returns focus to More when Escape closes its menu', () => {
+    setStoredSidebarWidth(260);
+    const { container } = renderSidebar(false, {
+      canOpenSessionsOverview: true,
+      canOpenSplitView: true,
+    });
+    const moreButton = container.querySelector<HTMLButtonElement>(
+      '[aria-label="More actions"]',
+    );
+    click(moreButton);
+    expect(container.querySelector('[role="menu"]')).not.toBeNull();
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+    });
+    expect(container.querySelector('[role="menu"]')).toBeNull();
+    expect(document.activeElement).toBe(moreButton);
+  });
+
+  it('focuses and navigates the actionable items in More', async () => {
     setStoredSidebarWidth(220);
     const { container } = renderSidebar(false, {
       canOpenSessionsOverview: true,
       canOpenSplitView: true,
     });
-    const settingsButton = container.querySelector<HTMLButtonElement>(
-      '[aria-label="Settings"]',
+    click(container.querySelector('[aria-label="More actions"]'));
+    const menu = container.querySelector<HTMLElement>('[role="menu"]');
+    const menuItems = Array.from(
+      menu?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [],
     );
-    expect(settingsButton).not.toBeNull();
-    expect(settingsButton?.textContent).not.toContain('Settings');
-    expect(container.querySelector('[title="Qwen Code v1.2.3"]')).toBeNull();
-    expect(container.textContent ?? '').not.toContain('v1.2.3');
+    expect(menuItems.length).toBeGreaterThan(0);
+
+    await act(async () => {
+      await new Promise((resolve) => window.requestAnimationFrame(resolve));
+    });
+    expect(document.activeElement).toBe(menuItems[0]);
+
+    act(() => {
+      menu?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+      );
+    });
+    expect(document.activeElement).toBe(menuItems[0]);
+
+    act(() => {
+      menu?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'End', bubbles: true }),
+      );
+    });
+    expect(document.activeElement).toBe(menuItems.at(-1));
+
+    act(() => {
+      menu?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Home', bubbles: true }),
+      );
+    });
+    expect(document.activeElement).toBe(menuItems[0]);
+
+    act(() => {
+      menu?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }),
+      );
+    });
+    expect(document.activeElement).toBe(menuItems.at(-1));
   });
 
   it('renders a non-semver fallback (e.g. "unknown") without a bogus "v" prefix', () => {
     mockConnection.capabilities = { qwenCodeVersion: 'unknown' };
+    setStoredSidebarWidth(420);
     const { container } = renderSidebar(false);
-    const badge = container.querySelector('[title="Qwen Code unknown"]');
+    const badge = container.querySelector('[title="Current version: unknown"]');
     expect(badge).not.toBeNull();
     expect(badge?.textContent).toBe('unknown');
     expect(container.textContent ?? '').not.toContain('vunknown');
   });
 
-  it('hides the version when the sidebar is collapsed', () => {
+  it('hides Version without adding More when the sidebar is collapsed', () => {
     const { container } = renderSidebar(true);
-    expect(container.querySelector('[title="Qwen Code v1.2.3"]')).toBeNull();
-    expect(container.textContent ?? '').not.toContain('v1.2.3');
+    expect(
+      container.querySelector('[title="Current version: v1.2.3"]'),
+    ).toBeNull();
+    expect(container.querySelector('[aria-label="More actions"]')).toBeNull();
+    expect(container.textContent ?? '').not.toContain(
+      'Current version: v1.2.3',
+    );
   });
 
   it('renders no version badge when the daemon reports none', () => {
     mockConnection.capabilities = undefined;
     const { container } = renderSidebar(false);
     expect(container.textContent ?? '').not.toMatch(/v\d/);
+  });
+
+  it('uses compact footer room for Settings once Version moves into More', () => {
+    setStoredSidebarWidth(260);
+    const { container } = renderSidebar(false, {
+      footer: {
+        items: [
+          'settings',
+          'version',
+          'scheduledTasks',
+          'daemonStatus',
+          'collapse',
+        ],
+      },
+    });
+    const settingsButton = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Settings"]',
+    );
+    expect(settingsButton?.textContent).toContain('Settings');
+    const moreButton = container.querySelector<HTMLButtonElement>(
+      '[aria-label="More actions"]',
+    );
+    act(() => {
+      moreButton?.click();
+    });
+    const versionItem = container.querySelector(
+      '[role="menu"] [role="menuitem"][aria-disabled="true"]',
+    );
+    expect(versionItem?.textContent).toBe('Current version: v1.2.3');
+  });
+
+  it('closes More when collapse changes its overflow layout', () => {
+    setStoredSidebarWidth(260);
+    const footer = {
+      footer: {
+        items: [
+          'settings',
+          'version',
+          'scheduledTasks',
+          'daemonStatus',
+          'collapse',
+        ] as const,
+      },
+    };
+    const { container, rerender } = renderSidebar(false, footer);
+    click(container.querySelector('[aria-label="More actions"]'));
+    expect(container.querySelector('[role="menu"]')).not.toBeNull();
+
+    rerender(footer, true);
+    expect(container.querySelector('[role="menu"]')).toBeNull();
+
+    rerender(footer, false);
+    expect(container.querySelector('[role="menu"]')).toBeNull();
   });
 });
 
@@ -793,6 +957,95 @@ describe('WebShellSidebar — brand logo', () => {
     const { container } = renderSidebar(true);
     expect(container.querySelector('svg path[fill="#6D44E8"]')).toBeNull();
     expect(container.querySelector('[aria-label="New chat"]')).not.toBeNull();
+  });
+
+  it('hides the default brand in the compact drawer and supports host hiding', () => {
+    const compact = renderSidebar(false, { mobileOpen: true });
+    expect(
+      compact.container.querySelector('svg path[fill="#6D44E8"]'),
+    ).toBeNull();
+    const hostHidden = renderSidebar(false, { branding: false });
+    expect(
+      hostHidden.container.querySelector('svg path[fill="#6D44E8"]'),
+    ).toBeNull();
+  });
+
+  it('allows a host to keep branding visible in the compact drawer', () => {
+    const { container } = renderSidebar(false, {
+      mobileOpen: true,
+      branding: { hideWhenCompact: false },
+    });
+    expect(container.querySelector('svg path[fill="#6D44E8"]')).not.toBeNull();
+  });
+
+  it('uses host-provided branding in place of the default mark', () => {
+    const { container } = renderSidebar(false, {
+      branding: {
+        render: () => <span data-testid="custom-brand">Host brand</span>,
+      },
+    });
+    expect(
+      container.querySelector('[data-testid="custom-brand"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('svg path[fill="#6D44E8"]')).toBeNull();
+  });
+});
+
+describe('WebShellSidebar — configuration and tooltip placement', () => {
+  it('can hide every built-in footer entry', () => {
+    const { container } = renderSidebar(false, { footer: false });
+    expect(container.querySelector('[aria-label="Settings"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Daemon Status"]')).toBeNull();
+  });
+
+  it('keeps all enabled actions direct in the collapsed rail', () => {
+    const { container } = renderSidebar(true, {
+      canOpenSessionsOverview: true,
+      canOpenSplitView: true,
+      footer: {
+        items: [
+          'settings',
+          'version',
+          'scheduledTasks',
+          'sessionsOverview',
+          'splitView',
+          'daemonStatus',
+          'collapse',
+        ],
+      },
+    });
+    expect(container.querySelector('[aria-label="Expand"]')).not.toBeNull();
+    expect(
+      container.querySelector('[aria-label="Scheduled Tasks"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[aria-label="Session Overview"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[aria-label="Split View"]')).not.toBeNull();
+    expect(
+      container.querySelector('[aria-label="Daemon Status"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[aria-label="More actions"]')).toBeNull();
+  });
+
+  it('places a tooltip on the left when the right edge has no room', () => {
+    const position = getSidebarTooltipPosition(
+      { top: 100, left: 260, right: 300, height: 30 },
+      { width: 320, height: 600 },
+    );
+    expect(position.placement).toBe('left');
+    expect(position.left).toBeGreaterThanOrEqual(8);
+    expect(position.left + position.maxWidth).toBeLessThanOrEqual(312);
+  });
+
+  it('places a tooltip on the right when the viewport has room', () => {
+    const position = getSidebarTooltipPosition(
+      { top: 100, left: 20, right: 60, height: 30 },
+      { width: 480, height: 600 },
+    );
+    expect(position.placement).toBe('right');
+    expect(position.left).toBe(68);
+    expect(position.maxWidth).toBe(320);
   });
 });
 

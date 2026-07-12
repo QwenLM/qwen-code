@@ -14,7 +14,7 @@
  *   4. `extractCommandRules()`  – extract minimum-scope wildcard permission rules
  */
 
-import Parser from 'web-tree-sitter';
+import type Parser from 'web-tree-sitter';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -619,18 +619,23 @@ export async function initParser(): Promise<void> {
   if (initPromise) return initPromise;
 
   initPromise = (async () => {
+    // Dynamically import the web-tree-sitter runtime to minimize synchronous bundle size.
+    const { default: ParserClass } = (await import(
+      'web-tree-sitter'
+    )) as unknown as { default: typeof Parser };
+
     const treeSitterWasm = await loadWasmBinary(
       () => import('web-tree-sitter/tree-sitter.wasm?binary' as string),
       'web-tree-sitter/tree-sitter.wasm',
     );
-    await Parser.init({ wasmBinary: treeSitterWasm });
-    parserInstance = new Parser();
+    await ParserClass.init({ wasmBinary: treeSitterWasm });
+    parserInstance = new ParserClass();
     const bashWasm = await loadWasmBinary(
       () =>
         import('tree-sitter-wasms/out/tree-sitter-bash.wasm?binary' as string),
       'tree-sitter-wasms/out/tree-sitter-bash.wasm',
     );
-    bashLanguage = await Parser.Language.load(bashWasm);
+    bashLanguage = await ParserClass.Language.load(bashWasm);
     parserInstance.setLanguage(bashLanguage);
   })().catch((err: unknown) => {
     // Mark as permanently failed so callers can use the regex fallback

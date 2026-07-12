@@ -100,7 +100,11 @@ import { ThemeDialog } from './components/dialogs/ThemeDialog';
 import { DeleteSessionDialog } from './components/dialogs/DeleteSessionDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
 import { RewindDialog } from './components/dialogs/RewindDialog';
-import { WebShellSidebar } from './components/sidebar/WebShellSidebar';
+import {
+  WebShellSidebar,
+  type WebShellSidebarBranding,
+  type WebShellSidebarFooterOptions,
+} from './components/sidebar/WebShellSidebar';
 import {
   getLocalCommands,
   localizeBuiltinDescriptions,
@@ -401,6 +405,12 @@ export interface BugReportInfo {
 export interface WebShellSidebarOptions {
   enabled?: boolean;
   defaultCollapsed?: boolean;
+  /** Whether to show WebShell's built-in compact drawer toggle. Defaults to true. */
+  showCompactToggle?: boolean;
+  /** Hide or replace the leading New Chat brand mark. */
+  branding?: false | WebShellSidebarBranding;
+  /** Hide the footer completely or select the built-in entries it exposes. */
+  footer?: false | WebShellSidebarFooterOptions;
 }
 
 export type SessionChangeEvent =
@@ -413,6 +423,8 @@ export interface WebShellApi {
   openSplitView: () => void;
   /** Open the Session Overview panel, matching the built-in sidebar button. */
   openSessionOverview: () => void;
+  /** Open the compact session drawer, matching the hamburger control. */
+  openSessionDrawer: () => void;
 }
 
 export interface WebShellProps {
@@ -579,18 +591,25 @@ const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
 const CHAT_SHELL_HORIZONTAL_PADDING = 40;
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'qwen-code-web-shell-sidebar-collapsed';
 
-function resolveSidebarOptions(
-  sidebar: WebShellProps['sidebar'],
-): Required<WebShellSidebarOptions> {
+function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
+  enabled: boolean;
+  defaultCollapsed: boolean;
+  showCompactToggle: boolean;
+  branding?: false | WebShellSidebarBranding;
+  footer?: false | WebShellSidebarFooterOptions;
+} {
   if (sidebar === true) {
-    return { enabled: true, defaultCollapsed: false };
+    return { enabled: true, defaultCollapsed: false, showCompactToggle: true };
   }
   if (!sidebar) {
-    return { enabled: false, defaultCollapsed: false };
+    return { enabled: false, defaultCollapsed: false, showCompactToggle: true };
   }
   return {
     enabled: sidebar.enabled ?? true,
     defaultCollapsed: sidebar.defaultCollapsed ?? false,
+    showCompactToggle: sidebar.showCompactToggle ?? true,
+    branding: sidebar.branding,
+    footer: sidebar.footer,
   };
 }
 
@@ -975,7 +994,11 @@ export function App({
     string | null
   >(null);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
-  const closeMobileDrawer = useCallback(() => setMobileDrawerOpen(false), []);
+  const [forceMobileDrawer, setForceMobileDrawer] = useState(false);
+  const closeMobileDrawer = useCallback(() => {
+    setMobileDrawerOpen(false);
+    setForceMobileDrawer(false);
+  }, []);
   // The Session Overview panel (mission control for managing many sessions at
   // once) is only offered on large screens; below that there is no room for it
   // to be useful.
@@ -984,11 +1007,11 @@ export function App({
   useEffect(() => {
     const mql = window.matchMedia('(max-width: 760px)');
     const handler = (e: MediaQueryListEvent) => {
-      if (!e.matches) setMobileDrawerOpen(false);
+      if (!e.matches) closeMobileDrawer();
     };
     mql.addEventListener('change', handler);
     return () => mql.removeEventListener('change', handler);
-  }, []);
+  }, [closeMobileDrawer]);
 
   useEffect(() => {
     if (!mobileDrawerOpen) return;
@@ -1999,6 +2022,12 @@ export function App({
     () => ({
       openSplitView: () => requestOpenSplitView(),
       openSessionOverview: () => openPanel('sessions'),
+      openSessionDrawer: () => {
+        setActivePanel(null);
+        setMainView('chat');
+        setForceMobileDrawer(true);
+        setMobileDrawerOpen(true);
+      },
     }),
     [openPanel, requestOpenSplitView],
   );
@@ -5356,6 +5385,7 @@ export function App({
                 className={[
                   styles.mobileDrawer,
                   mobileDrawerOpen ? styles.mobileDrawerOpen : undefined,
+                  forceMobileDrawer ? styles.mobileDrawerForced : undefined,
                 ]
                   .filter(Boolean)
                   .join(' ')}
@@ -5403,6 +5433,8 @@ export function App({
                   sessionListReloadToken={sessionListReloadToken}
                   selectedWorkspaceCwd={selectedWorkspaceCwd}
                   onSelectWorkspace={setSelectedWorkspaceCwd}
+                  branding={sidebarOptions.branding}
+                  footer={sidebarOptions.footer}
                 />
               </div>
             )}
@@ -5419,6 +5451,7 @@ export function App({
                 .join(' ')}
             >
               {sidebarOptions.enabled &&
+                sidebarOptions.showCompactToggle &&
                 !activePanel &&
                 mainView === 'chat' && (
                   <button
@@ -5431,7 +5464,10 @@ export function App({
                     ]
                       .filter(Boolean)
                       .join(' ')}
-                    onClick={() => setMobileDrawerOpen((open) => !open)}
+                    onClick={() => {
+                      setForceMobileDrawer(false);
+                      setMobileDrawerOpen((open) => !open);
+                    }}
                     aria-label={t('sidebar.toggleMenu')}
                     aria-expanded={mobileDrawerOpen}
                   >
@@ -5932,6 +5968,7 @@ export function App({
                           onClearQueuedMessages={clearQueuedPrompts}
                           currentMode={currentMode}
                           currentModel={currentModel}
+                          gitBranch={connection.gitBranch}
                           chatWidthMode={chatWidthMode}
                           showChatWidthToggle={!isChatEmptyState}
                           chatWidthToggleMin={chatWidthToggleMin}

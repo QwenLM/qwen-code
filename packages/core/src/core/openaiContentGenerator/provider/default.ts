@@ -3,6 +3,7 @@ import type { GenerateContentConfig } from '@google/genai';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { DEFAULT_MAX_RETRIES, resolveRequestTimeout } from '../constants.js';
+import type { OpenAIResponseParsingOptions } from '../responseParsingOptions.js';
 import type { OpenAICompatibleProvider } from './types.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import {
@@ -121,6 +122,14 @@ export class DefaultOpenAICompatibleProvider
 
   getDefaultGenerationConfig(): GenerateContentConfig {
     return {};
+  }
+
+  getResponseParsingOptions(): OpenAIResponseParsingOptions {
+    return {
+      taggedThinkingTags: shouldMirrorReasoningContentForQwen3(
+        this.contentGeneratorConfig.model ?? '',
+      ),
+    };
   }
 
   /**

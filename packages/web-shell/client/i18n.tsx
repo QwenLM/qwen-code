@@ -16,6 +16,7 @@ type MessageValue =
 type Messages = Record<string, MessageValue>;
 
 const EN: Messages = {
+  'git.currentBranch': (v) => `Current Git branch: ${v?.branch ?? ''}`,
   'about.auth': 'Auth',
   'about.baseUrl': 'Base URL',
   'about.fastModel': 'Fast Model',
@@ -826,6 +827,7 @@ const EN: Messages = {
   'sidebar.archive': 'Archive',
   'sidebar.unarchive': 'Restore',
   'sidebar.moreActions': 'More actions',
+  'sidebar.currentVersion': (v) => `Current version: ${v?.version ?? ''}`,
   'sidebar.archiveCurrentDisabled': 'The current session cannot be archived',
   'sidebar.archivedTitle': 'Archived',
   'sidebar.archivedEmpty': 'No archived sessions.',
@@ -1762,6 +1764,7 @@ const EN: Messages = {
 
 const ZH: Messages = {
   ...EN,
+  'git.currentBranch': (v) => `当前 Git 分支：${v?.branch ?? ''}`,
   // Tool display names (chat-stream badge labels). Keyed by `toolName.<wire>`;
   // a wire name with no entry here falls back to the English display name via
   // `localizeToolDisplayName`. Proper tool names / acronyms stay in English
@@ -2581,6 +2584,7 @@ const ZH: Messages = {
   'sidebar.archive': '归档',
   'sidebar.unarchive': '恢复',
   'sidebar.moreActions': '更多操作',
+  'sidebar.currentVersion': (v) => `当前版本：${v?.version ?? ''}`,
   'sidebar.archiveCurrentDisabled': '不能归档当前会话',
   'sidebar.archivedTitle': '已归档',
   'sidebar.archivedEmpty': '没有已归档的会话。',

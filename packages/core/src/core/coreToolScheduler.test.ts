@@ -13843,7 +13843,9 @@ describe('CoreToolScheduler shell-tool promote integration (#3831 PR-2)', () => 
       }
     }
 
-    const tool = new TestShellTool({} as Config);
+    const tool = new TestShellTool({
+      getShellDefaultTimeoutMs: () => undefined,
+    } as unknown as Config);
     const mockToolRegistry = {
       getTool: () => tool,
       ensureTool: async () => tool,

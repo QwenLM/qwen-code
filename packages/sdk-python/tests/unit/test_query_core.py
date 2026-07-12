@@ -755,3 +755,67 @@ def test_sync_next_after_exhaustion_raises_stop_iteration() -> None:
     # Third call must raise immediately, not block.
     with pytest.raises(StopIteration):
         next(sq)
+
+
+def test_fork_session_generates_new_session_id() -> None:
+    """fork_session=True should produce a session ID different from resume."""
+    from qwen_code_sdk.query import query as query_factory
+
+    resume_id = VALID_UUID
+    q = query_factory(
+        prompt="hello",
+        options=QueryOptions(fork_session=True, resume=resume_id),
+    )
+
+    assert q.get_session_id() != resume_id
+    import re
+
+    assert re.match(
+        r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        q.get_session_id(),
+    )
+
+
+def test_fork_session_uses_explicit_session_id() -> None:
+    """fork_session=True with session_id should use the explicit ID."""
+    from qwen_code_sdk.query import query as query_factory
+
+    resume_id = VALID_UUID
+    fork_id = "234e5678-e89b-12d3-a456-426614174001"
+    q = query_factory(
+        prompt="hello",
+        options=QueryOptions(
+            fork_session=True,
+            resume=resume_id,
+            session_id=fork_id,
+        ),
+    )
+
+    assert q.get_session_id() == fork_id
+    assert q.get_session_id() != resume_id
+
+
+def test_fork_session_unlocks_session_id() -> None:
+    """fork_session=True should not lock the session ID, allowing CLI to correct it."""
+    transport = FakeTransport()
+    query = Query(
+        transport=transport,  # type: ignore[arg-type]
+        options=QueryOptions(fork_session=True, resume=VALID_UUID),
+        prompt="hello",
+        session_id="234e5678-e89b-12d3-a456-426614174001",
+    )
+
+    assert query._session_id_locked is False
+
+
+def test_resume_locks_session_id() -> None:
+    """resume without fork_session should lock the session ID."""
+    transport = FakeTransport()
+    query = Query(
+        transport=transport,  # type: ignore[arg-type]
+        options=QueryOptions(resume=VALID_UUID),
+        prompt="hello",
+        session_id=VALID_UUID,
+    )
+
+    assert query._session_id_locked is True
