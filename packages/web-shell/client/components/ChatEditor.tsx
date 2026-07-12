@@ -567,6 +567,7 @@ function ToolbarDropdown({
         getToolbarDropdownGeometry({
           anchor: anchor.getBoundingClientRect(),
           boundary: boundary.getBoundingClientRect(),
+          viewportWidth: window.innerWidth,
           viewportHeight: window.innerHeight,
           preferredWidth,
           maxHeight,
@@ -616,11 +617,12 @@ function ToolbarDropdown({
         e.preventDefault();
         e.stopPropagation();
         onClose();
+        window.requestAnimationFrame(() => anchorRef.current?.focus());
       }
     };
     window.addEventListener('keydown', onEscape);
     return () => window.removeEventListener('keydown', onEscape);
-  }, [open, onClose]);
+  }, [open, onClose, anchorRef]);
 
   if (!open) return null;
 
@@ -658,16 +660,15 @@ function ToolbarDropdown({
           value={searchQuery}
           aria-label={searchLabel}
           placeholder={searchLabel}
+          autoComplete="off"
           onChange={(event) => setSearchQuery(event.target.value)}
         />
       )}
-      <div className={styles.dropdownList} role="listbox">
+      <div className={styles.dropdownList}>
         {visibleItems.map((item) => (
           <button
             key={item.id}
             type="button"
-            role="option"
-            aria-selected={item.id === activeId}
             className={`${styles.dropdownItem} ${
               item.id === activeId ? styles.dropdownItemActive : ''
             }`}
@@ -1198,6 +1199,8 @@ export const ChatEditor = memo(
       if (!visibleActionSet) return true;
       return visibleActionSet.has(action);
     };
+    const showModeAction = showToolbarAction('approvalMode');
+    const showModelAction = showToolbarAction('model');
     const commandNames = useMemo(
       () =>
         new Set(commands.map((command) => command.name.replace(/^\/+/, ''))),
@@ -1511,6 +1514,8 @@ export const ChatEditor = memo(
           modelLabelWidth,
           modeLabelWidth,
           modelLabelReady,
+          modelActionVisible: showModelAction,
+          modeActionVisible: showModeAction,
         });
         setToolbarLabelVisibility((current) =>
           current.showModelLabel === next.showModelLabel &&
@@ -1530,7 +1535,15 @@ export const ChatEditor = memo(
       resizeObserver.observe(modelCollapsed);
       resizeObserver.observe(modelExpanded);
       return () => resizeObserver.disconnect();
-    }, [modelLabel, modelLabelReady, modeLabel, showModelLabel, showModeLabel]);
+    }, [
+      modelLabel,
+      modelLabelReady,
+      modeLabel,
+      showModelAction,
+      showModeAction,
+      showModelLabel,
+      showModeLabel,
+    ]);
 
     return (
       <div
@@ -1765,7 +1778,7 @@ export const ChatEditor = memo(
                       ariaLabel={t('git.currentBranch', { branch: gitBranch })}
                     />
                   )}
-                  {showToolbarAction('approvalMode') && (
+                  {showModeAction && (
                     <div className={styles.dropdownWrapper}>
                       <ToolbarDropdown
                         open={modeDropdownOpen}
@@ -1804,7 +1817,7 @@ export const ChatEditor = memo(
                       </button>
                     </div>
                   )}
-                  {showToolbarAction('model') && (
+                  {showModelAction && (
                     <div className={styles.dropdownWrapper}>
                       <ToolbarDropdown
                         open={modelDropdownOpen}

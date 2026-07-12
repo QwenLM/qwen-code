@@ -1156,6 +1156,7 @@
   white-space: nowrap;
 }
 
+.modeToolBtn,
 .modelToolBtn {
   min-width: 0;
 }

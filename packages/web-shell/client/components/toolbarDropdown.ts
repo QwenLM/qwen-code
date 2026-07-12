@@ -45,21 +45,20 @@ export function filterToolbarDropdownItems<T extends ToolbarDropdownItem>(
 export function getToolbarDropdownGeometry({
   anchor,
   boundary,
+  viewportWidth,
   viewportHeight,
   preferredWidth,
   maxHeight,
 }: {
   anchor: ToolbarDropdownRect;
   boundary: ToolbarDropdownRect;
+  viewportWidth: number;
   viewportHeight: number;
   preferredWidth: number;
   maxHeight?: number;
 }): ToolbarDropdownGeometry {
   const boundaryLeft = Math.max(0, boundary.left);
-  const boundaryRight = Math.min(
-    typeof window === 'undefined' ? boundary.right : window.innerWidth,
-    boundary.right,
-  );
+  const boundaryRight = Math.min(viewportWidth, boundary.right);
   const availableWidth = Math.max(
     0,
     boundaryRight - boundaryLeft - MENU_INSET * 2,
@@ -100,22 +99,32 @@ export function getToolbarLabelVisibility({
   modelLabelWidth,
   modeLabelWidth,
   modelLabelReady,
+  modelActionVisible = true,
+  modeActionVisible = true,
 }: {
   availableWidth: number;
   modelLabelWidth: number;
   modeLabelWidth: number;
   modelLabelReady: boolean;
+  modelActionVisible?: boolean;
+  modeActionVisible?: boolean;
 }): {
   showModelLabel: boolean;
   showModeLabel: boolean;
 } {
+  if (!modelActionVisible) {
+    return {
+      showModelLabel: false,
+      showModeLabel: modeActionVisible && availableWidth >= modeLabelWidth,
+    };
+  }
   if (!modelLabelReady || availableWidth < modelLabelWidth) {
     return { showModelLabel: false, showModeLabel: false };
   }
   if (availableWidth < modelLabelWidth + modeLabelWidth) {
     return { showModelLabel: true, showModeLabel: false };
   }
-  return { showModelLabel: true, showModeLabel: true };
+  return { showModelLabel: true, showModeLabel: modeActionVisible };
 }
 
 export function resolveToolbarModelLabel({
