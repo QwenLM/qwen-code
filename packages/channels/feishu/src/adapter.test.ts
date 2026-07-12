@@ -1,4 +1,29 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+const wsMock = vi.hoisted(() => ({
+  close: vi.fn(),
+  options: undefined as
+    | { onReady?: () => void; onError?: (error: Error) => void }
+    | undefined,
+  start: vi.fn<() => Promise<void>>(),
+}));
+
+vi.mock('@larksuiteoapi/node-sdk', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@larksuiteoapi/node-sdk')>();
+  return {
+    ...actual,
+    WSClient: class {
+      constructor(options: typeof wsMock.options) {
+        wsMock.options = options;
+      }
+
+      start = wsMock.start;
+      close = wsMock.close;
+    },
+  };
+});
+
 import { FeishuChannel } from './FeishuAdapter.js';
 import type {
   ChannelAgentBridge,
@@ -862,6 +887,104 @@ describe('FeishuChannel', () => {
       });
 
       expect(result).toBe(false);
+    });
+  });
+
+  describe('connect: WebSocket', () => {
+    beforeEach(() => {
+      wsMock.close.mockReset();
+      wsMock.options = undefined;
+      wsMock.start.mockReset().mockResolvedValue(undefined);
+    });
+
+    function mockSuccessfulTokenFetch(): void {
+      vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+        if (String(input).includes('/tenant_access_token/internal')) {
+          return new Response(
+            JSON.stringify({
+              tenant_access_token: 'test_token',
+              expire: 3600,
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({ bot: { open_id: 'bot_id' } }), {
+          status: 200,
+        });
+      });
+    }
+
+    it('rejects invalid credentials before starting WebSocket', async () => {
+      const channel = createChannel();
+      vi.spyOn(global, 'fetch').mockResolvedValue(
+        new Response(null, { status: 401 }),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'failed to authenticate Feishu credentials',
+      );
+      expect(wsMock.start).not.toHaveBeenCalled();
+    });
+
+    it('waits for the initial WebSocket handshake', async () => {
+      const channel = createChannel();
+      mockSuccessfulTokenFetch();
+      let settled = false;
+
+      const connectPromise = channel.connect();
+      void connectPromise.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      await vi.waitFor(() => expect(wsMock.start).toHaveBeenCalledOnce());
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(settled).toBe(false);
+
+      wsMock.options?.onReady?.();
+      await connectPromise;
+      expect(settled).toBe(true);
+      channel.disconnect();
+    });
+
+    it('rejects and closes when the initial WebSocket handshake fails', async () => {
+      const channel = createChannel();
+      mockSuccessfulTokenFetch();
+
+      const connectPromise = channel.connect();
+      await vi.waitFor(() => expect(wsMock.start).toHaveBeenCalledOnce());
+      wsMock.options?.onError?.(new Error('credential rejected'));
+
+      await expect(connectPromise).rejects.toThrow(
+        'Feishu WebSocket connection failed: credential rejected',
+      );
+      expect(wsMock.close).toHaveBeenCalledOnce();
+    });
+
+    it('rejects and closes when the initial WebSocket handshake times out', async () => {
+      vi.useFakeTimers();
+      try {
+        const channel = createChannel();
+        mockSuccessfulTokenFetch();
+
+        const connectPromise = channel.connect();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(wsMock.start).toHaveBeenCalledOnce();
+        const rejection = expect(connectPromise).rejects.toThrow(
+          'WebSocket handshake did not complete within 15000ms',
+        );
+
+        await vi.advanceTimersByTimeAsync(15_000);
+
+        await rejection;
+        expect(wsMock.close).toHaveBeenCalledOnce();
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 
