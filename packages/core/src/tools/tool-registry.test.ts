@@ -177,6 +177,30 @@ describe('ToolRegistry', () => {
       ).toThrow('reserved Qwen Code tool name');
     });
 
+    it('invalidates a proxy presentation when the tool schema fingerprint changes', () => {
+      const tool = new MockTool({
+        name: 'deferred_tool',
+        shouldDefer: true,
+        params: {
+          type: 'object',
+          properties: { before: { type: 'string' } },
+        },
+      });
+      toolRegistry.registerTool(tool);
+
+      expect(toolRegistry.markProxySchemaPresented('deferred_tool')).toBe(true);
+      expect(toolRegistry.hasPresentedProxySchema('deferred_tool')).toBe(true);
+
+      Object.defineProperty(tool, 'parameterSchema', {
+        value: {
+          type: 'object',
+          properties: { after: { type: 'string' } },
+        },
+      });
+
+      expect(toolRegistry.hasPresentedProxySchema('deferred_tool')).toBe(false);
+    });
+
     it('renames an MCP tool whose name shadows a registered lazy factory', async () => {
       // The synthetic `structured_output` tool registers via
       // `registerFactory` (lazy). Without this guard, an MCP server

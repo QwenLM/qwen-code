@@ -1852,7 +1852,6 @@ export class CoreToolScheduler {
       // target remains internal because hidden deferred tools are intentionally
       // absent from the provider's function-declaration list.
       providerName: ToolNames.DEFERRED_TOOL_CALL,
-      providerArgs: request.args,
     };
   }
 
@@ -2091,7 +2090,7 @@ export class CoreToolScheduler {
           const ruleInfo = matchingRule
             ? ` Matching deny rule: "${matchingRule}".`
             : '';
-          const permissionErrorMessage = `Qwen Code requires permission to use "${effectiveReqInfo.name}", but that permission was declined.${ruleInfo}`;
+          const permissionErrorMessage = `Qwen Code requires permission to use "${providerToolName(effectiveReqInfo)}", but that permission was declined.${ruleInfo}`;
           newToolCalls.push({
             status: 'error',
             request: effectiveReqInfo,
@@ -2115,7 +2114,9 @@ export class CoreToolScheduler {
                 excludedTool.toLowerCase().trim() === normalizedToolName,
             );
             if (excludedMatch) {
-              const permissionErrorMessage = `Qwen Code requires permission to use ${excludedMatch}, but that permission was declined.`;
+              const deniedToolName =
+                effectiveReqInfo.providerName ?? excludedMatch;
+              const permissionErrorMessage = `Qwen Code requires permission to use ${deniedToolName}, but that permission was declined.`;
               newToolCalls.push({
                 status: 'error',
                 request: effectiveReqInfo,
@@ -2134,7 +2135,9 @@ export class CoreToolScheduler {
         const toolInstance = await this.toolRegistry.ensureTool(canonicalName);
         if (!toolInstance) {
           // Tool is not in registry and not excluded - likely hallucinated or typo
-          const errorMessage = await this.getToolNotFoundMessage(reqInfo.name);
+          const errorMessage = await this.getToolNotFoundMessage(
+            effectiveReqInfo.name,
+          );
           newToolCalls.push({
             status: 'error',
             request: effectiveReqInfo,

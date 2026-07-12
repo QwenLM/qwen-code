@@ -976,6 +976,127 @@ describe('CoreToolScheduler', () => {
     }
   });
 
+  it.each([
+    [
+      'missing name',
+      { arguments: { schedule: '0 9 * * *' } },
+      'must be the exact deferred tool name',
+    ],
+    [
+      'empty name',
+      { name: '   ', arguments: { schedule: '0 9 * * *' } },
+      'must be the exact deferred tool name',
+    ],
+    [
+      'non-object arguments',
+      { name: ToolNames.CRON_CREATE, arguments: 'not-an-object' },
+      'must be an object',
+    ],
+    [
+      'array arguments',
+      { name: ToolNames.CRON_CREATE, arguments: [] },
+      'must be an object',
+    ],
+    [
+      'null arguments',
+      { name: ToolNames.CRON_CREATE, arguments: null },
+      'must be an object',
+    ],
+  ])(
+    'rejects malformed deferred_tool_call envelope: %s',
+    async (_caseName, args, expectedMessage) => {
+      const execute = vi.fn();
+      const toolsByName = new Map<string, MockTool>([
+        [
+          ToolNames.CRON_CREATE,
+          new MockTool({
+            name: ToolNames.CRON_CREATE,
+            shouldDefer: true,
+            execute,
+          }),
+        ],
+      ]);
+      const { scheduler, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({
+          toolsByName,
+          presentedProxySchemas: new Set([ToolNames.CRON_CREATE]),
+        });
+
+      await scheduler.schedule(
+        {
+          callId: 'proxy-malformed',
+          name: ToolNames.DEFERRED_TOOL_CALL,
+          args: args as Record<string, unknown>,
+          isClientInitiated: false,
+          prompt_id: 'prompt-proxy',
+        },
+        new AbortController().signal,
+      );
+
+      expect(execute).not.toHaveBeenCalled();
+      const completedCall = (
+        onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+      )[0];
+      expect(completedCall.status).toBe('error');
+      if (completedCall.status === 'error') {
+        expect(
+          completedCall.response.responseParts[0].functionResponse?.name,
+        ).toBe(ToolNames.DEFERRED_TOOL_CALL);
+        expect(completedCall.response.error?.message).toContain(
+          expectedMessage,
+        );
+      }
+    },
+  );
+
+  it('uses the provider-facing proxy name in deferred permission denial text', async () => {
+    const execute = vi.fn();
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.CRON_CREATE,
+        new MockTool({
+          name: ToolNames.CRON_CREATE,
+          shouldDefer: true,
+          execute,
+        }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        presentedProxySchemas: new Set([ToolNames.CRON_CREATE]),
+        getPermissionsDeny: () => [ToolNames.CRON_CREATE],
+      });
+
+    await scheduler.schedule(
+      {
+        callId: 'proxy-denied',
+        name: ToolNames.DEFERRED_TOOL_CALL,
+        args: {
+          name: ToolNames.CRON_CREATE,
+          arguments: { schedule: '0 9 * * *' },
+        },
+        isClientInitiated: false,
+        prompt_id: 'prompt-proxy',
+      },
+      new AbortController().signal,
+    );
+
+    expect(execute).not.toHaveBeenCalled();
+    const completedCall = (
+      onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+    )[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.error?.message).toBe(
+        'Qwen Code requires permission to use deferred_tool_call, but that permission was declined.',
+      );
+      expect(
+        completedCall.response.responseParts[0].functionResponse?.name,
+      ).toBe(ToolNames.DEFERRED_TOOL_CALL);
+    }
+  });
+
   it('commits deferred tool presentations only after successful completion callback', async () => {
     const presentedProxySchemas = new Set<string>();
     const toolsByName = new Map<string, MockTool>([

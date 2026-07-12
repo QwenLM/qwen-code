@@ -4879,6 +4879,36 @@ describe('Server Config (config.ts)', () => {
       ]);
     });
 
+    it('registers deferred_tool_call only for the main session registry', async () => {
+      const config = new Config(baseParams);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      const mainRegisteredNames = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      );
+      expect(mainRegisteredNames).toContain(ToolNames.TOOL_SEARCH);
+      expect(mainRegisteredNames).toContain(ToolNames.DEFERRED_TOOL_CALL);
+
+      (registerToolMock as Mock).mockClear();
+      await config.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+
+      const subagentRegisteredNames = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      );
+      expect(subagentRegisteredNames).toContain(ToolNames.TOOL_SEARCH);
+      expect(subagentRegisteredNames).not.toContain(
+        ToolNames.DEFERRED_TOOL_CALL,
+      );
+    });
+
     it('should register a tool if coreTools contains an argument-specific pattern', async () => {
       const params: ConfigParameters = {
         ...baseParams,

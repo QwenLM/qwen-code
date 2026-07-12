@@ -1035,6 +1035,7 @@ describe('ToolSearchTool', () => {
 
     // Schema returned (model can inspect it)
     expect(content).toContain('"name":"web_fetch"');
+    expect(content).not.toContain('deferred_tool_call');
     // But no reveal happened — tool is already visible
     expect(visibleRegistry.isDeferredToolRevealed('web_fetch')).toBe(false);
     // And setTools was NOT called — no KV-cache invalidation

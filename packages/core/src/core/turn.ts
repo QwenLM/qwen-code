@@ -131,7 +131,6 @@ export interface ToolCallRequestInfo {
    * `name`/`args`; model-facing function responses use this field when set.
    */
   providerName?: string;
-  providerArgs?: Record<string, unknown>;
   isClientInitiated: boolean;
   prompt_id: string;
   response_id?: string;

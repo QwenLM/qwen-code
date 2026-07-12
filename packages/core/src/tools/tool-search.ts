@@ -344,6 +344,8 @@ class ToolSearchInvocation extends BaseToolInvocation<
     let llmContent = '';
     if (schemaBlocks.length > 0) {
       llmContent += `<functions>\n${schemaBlocks.join('\n')}\n</functions>`;
+    }
+    if (deferredToolPresentations.length > 0) {
       llmContent +=
         '\n\nTo call a fetched deferred tool on a later turn, use `deferred_tool_call` with `name` set to the exact function name above and `arguments` matching that function schema.';
     }
