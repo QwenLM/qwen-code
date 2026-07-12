@@ -1076,20 +1076,34 @@ const THINKING_TAGS = [
   { text: '<think />', name: 'think', kind: 'self' },
 ] as const;
 
+const THINKING_TAG_LEADING_GUARD_LENGTH = 16;
+
 class ThinkingTagLeakDetector {
   private buffer = '';
   private held = '';
   private openTag: 'think' | 'thinking' | undefined;
   private invalid = false;
+  private clean = false;
+  private inspectedLength = 0;
 
   accept(text: string, final = false): string {
     if (this.invalid) return '';
+    if (this.clean) return text;
     this.buffer += text;
     const lower = this.buffer.toLowerCase();
-    let output = '';
+    const held: string[] = [];
     let index = 0;
 
     while (index < this.buffer.length) {
+      if (
+        !this.openTag &&
+        this.inspectedLength >= THINKING_TAG_LEADING_GUARD_LENGTH
+      ) {
+        this.held += held.join('');
+        this.buffer = this.buffer.slice(index);
+        return this.releaseAsLiteral();
+      }
+
       const tag = THINKING_TAGS.find(({ text: value }) =>
         lower.startsWith(value, index),
       );
@@ -1098,59 +1112,66 @@ class ThinkingTagLeakDetector {
         if (tag.kind === 'open') {
           if (this.openTag) return this.markInvalid();
           this.openTag = tag.name;
-          this.held += output + raw;
-          output = '';
         } else if (tag.kind === 'close') {
           if (this.openTag !== tag.name) return this.markInvalid();
-          this.held += raw;
-          output += this.held;
-          this.held = '';
           this.openTag = undefined;
-        } else if (this.openTag) {
-          this.held += raw;
-        } else {
-          output += this.held + raw;
-          this.held = '';
         }
+        held.push(raw);
         index += tag.text.length;
+        this.inspectedLength += tag.text.length;
         continue;
       }
 
-      const remaining = lower.slice(index);
-      const partialTag = THINKING_TAGS.some(({ text: value }) =>
-        value.startsWith(remaining),
+      const remainingLength = this.buffer.length - index;
+      const partialTag = THINKING_TAGS.some(
+        ({ text: value }) =>
+          remainingLength < value.length &&
+          value.startsWith(lower.slice(index, index + value.length)),
       );
       if (partialTag) {
+        if (
+          final &&
+          (this.openTag ||
+            /^(?:<think|<thinking|<\/think|<\/thinking)/.test(
+              lower.slice(index),
+            ))
+        ) {
+          return this.markInvalid();
+        }
         if (final) {
-          if (
-            this.openTag ||
-            /^(?:<think|<thinking|<\/think|<\/thinking)/.test(remaining)
-          ) {
-            return this.markInvalid();
-          }
-          output += this.held + this.buffer.slice(index);
-          this.held = '';
+          held.push(this.buffer.slice(index));
           index = this.buffer.length;
           break;
         }
-        if (!this.openTag) {
-          this.held += output;
-          output = '';
-        }
-        break;
+        this.held += held.join('');
+        this.buffer = this.buffer.slice(index);
+        return '';
       }
 
-      if (this.openTag) this.held += this.buffer[index];
-      else {
-        output += this.held + this.buffer[index];
-        this.held = '';
+      const nextTag = lower.indexOf('<', index + 1);
+      let end = nextTag === -1 ? this.buffer.length : nextTag;
+      if (!this.openTag) {
+        end = Math.min(
+          end,
+          index + THINKING_TAG_LEADING_GUARD_LENGTH - this.inspectedLength,
+        );
       }
-      index++;
+      held.push(this.buffer.slice(index, end));
+      this.inspectedLength += end - index;
+      index = end;
     }
 
-    this.buffer = this.buffer.slice(index);
+    this.held += held.join('');
+    this.buffer = '';
     if (final && this.openTag) return this.markInvalid();
-    return output;
+    if (
+      final ||
+      (!this.openTag &&
+        this.inspectedLength >= THINKING_TAG_LEADING_GUARD_LENGTH)
+    ) {
+      return this.releaseAsLiteral();
+    }
+    return '';
   }
 
   finish(): string {
@@ -1162,12 +1183,32 @@ class ThinkingTagLeakDetector {
   }
 
   get blockingOutput(): boolean {
-    return (
-      this.invalid ||
-      this.openTag !== undefined ||
-      this.buffer.length > 0 ||
-      this.held.length > 0
-    );
+    return !this.clean && (this.hasPendingTag || this.held.length > 0);
+  }
+
+  get hasPendingTag(): boolean {
+    return this.invalid || this.openTag !== undefined || this.buffer.length > 0;
+  }
+
+  get active(): boolean {
+    return !this.invalid && !this.clean;
+  }
+
+  releaseAsLiteral(): string {
+    if (this.invalid) return '';
+    const text = this.held + this.buffer;
+    this.held = '';
+    this.buffer = '';
+    this.openTag = undefined;
+    this.clean = true;
+    return text;
+  }
+
+  takeGuardedOutput(): string {
+    if (this.hasPendingTag) return '';
+    const text = this.held;
+    this.held = '';
+    return text;
   }
 
   reject(): void {
@@ -1180,12 +1221,6 @@ class ThinkingTagLeakDetector {
     this.held = '';
     return '';
   }
-}
-
-function hasInvalidThinkingTagStructure(text: string): boolean {
-  const detector = new ThinkingTagLeakDetector();
-  detector.accept(text, true);
-  return detector.leaked;
 }
 
 class LeadingProtocolTagLeakDetector {
@@ -3783,6 +3818,8 @@ export class GeminiChat {
     const thinkingTagDetector = new ThinkingTagLeakDetector();
     let protocolTextWasSuppressed = false;
     let thinkingTagLeakDetected = false;
+    let thinkingTagDetectionEnabled = true;
+    const pendingThinkingTagParts: Part[] = [];
     // Captured if the upstream stream throws mid-iteration (typical on weak
     // networks: SSE drops between `content_block_stop` of a tool_use and the
     // terminal `message_stop`). We still build / record / push a partial
@@ -3813,22 +3850,87 @@ export class GeminiChat {
                 ? [rest]
                 : [];
             });
-            content.parts = content.parts.flatMap((part) => {
-              if (typeof part.text !== 'string' || part.thought) return [part];
-              const text = thinkingTagDetector.accept(part.text);
-              if (text) return [{ ...part, text }];
-              const { text: _text, ...rest } = part;
-              return Object.values(rest).some((value) => value !== undefined)
-                ? [rest]
-                : [];
-            });
-            if (
-              thinkingTagDetector.blockingOutput &&
-              content.parts.some((part) => part.functionCall)
-            ) {
-              thinkingTagDetector.reject();
+            if (thinkingTagDetectionEnabled) {
+              const detectedParts: Part[] = [];
+              for (const part of content.parts) {
+                if (!thinkingTagDetectionEnabled) {
+                  detectedParts.push(part);
+                  continue;
+                }
+
+                if (typeof part.text === 'string' && !part.thought) {
+                  const text = thinkingTagDetector.accept(part.text);
+                  if (text) {
+                    detectedParts.push(...pendingThinkingTagParts);
+                    pendingThinkingTagParts.length = 0;
+                    detectedParts.push({ ...part, text });
+                  } else {
+                    const { text: _text, ...rest } = part;
+                    const hasMetadata = Object.entries(rest).some(
+                      ([key, value]) =>
+                        key !== 'thought' && value !== undefined,
+                    );
+                    if (hasMetadata && !thinkingTagDetector.leaked) {
+                      const literalText =
+                        thinkingTagDetector.releaseAsLiteral();
+                      detectedParts.push(...pendingThinkingTagParts);
+                      pendingThinkingTagParts.length = 0;
+                      detectedParts.push({
+                        ...part,
+                        text: literalText,
+                      });
+                      thinkingTagDetectionEnabled = false;
+                    } else if (hasMetadata) {
+                      detectedParts.push(rest);
+                    }
+                  }
+                  if (
+                    !thinkingTagDetector.active &&
+                    !thinkingTagDetector.leaked
+                  ) {
+                    thinkingTagDetectionEnabled = false;
+                  }
+                  continue;
+                }
+
+                if (part.functionCall) {
+                  if (thinkingTagDetector.hasPendingTag) {
+                    thinkingTagDetector.reject();
+                  } else {
+                    const text = thinkingTagDetector.takeGuardedOutput();
+                    if (text) detectedParts.push({ text });
+                  }
+                } else if (!part.thought) {
+                  const text = thinkingTagDetector.releaseAsLiteral();
+                  detectedParts.push(...pendingThinkingTagParts);
+                  pendingThinkingTagParts.length = 0;
+                  if (text) detectedParts.push({ text });
+                  thinkingTagDetectionEnabled = false;
+                }
+                detectedParts.push(part);
+              }
+
+              if (
+                detectedParts.some((part) => part.functionCall) &&
+                thinkingTagDetector.hasPendingTag
+              ) {
+                thinkingTagDetector.reject();
+              } else if (detectedParts.some((part) => part.functionCall)) {
+                const text = thinkingTagDetector.takeGuardedOutput();
+                if (text) detectedParts.push({ text });
+              }
+
+              if (thinkingTagDetector.hasPendingTag) {
+                pendingThinkingTagParts.push(
+                  ...detectedParts.filter((part) => part.thought),
+                );
+                content.parts = detectedParts.filter((part) => !part.thought);
+              } else {
+                content.parts = [...pendingThinkingTagParts, ...detectedParts];
+                pendingThinkingTagParts.length = 0;
+              }
+              thinkingTagLeakDetected ||= thinkingTagDetector.leaked;
             }
-            thinkingTagLeakDetected ||= thinkingTagDetector.leaked;
             content.parts = normalizeModelToolCallIds(
               content.parts,
               usedToolCallIds,
@@ -3844,10 +3946,17 @@ export class GeminiChat {
             allModelParts.push(...content.parts);
           }
           if (candidate?.finishReason) {
-            const text = thinkingTagDetector.accept(
-              protocolTagDetector.finish(),
-              true,
-            );
+            const protocolText = protocolTagDetector.finish();
+            const text = thinkingTagDetectionEnabled
+              ? thinkingTagDetector.accept(protocolText, true)
+              : protocolText;
+            if (!thinkingTagDetector.leaked && pendingThinkingTagParts.length) {
+              candidate.content ??= { role: 'model', parts: [] };
+              candidate.content.parts ??= [];
+              candidate.content.parts.push(...pendingThinkingTagParts);
+              allModelParts.push(...pendingThinkingTagParts);
+              pendingThinkingTagParts.length = 0;
+            }
             if (text) {
               const part = { text };
               candidate.content ??= { role: 'model', parts: [] };
@@ -3855,7 +3964,9 @@ export class GeminiChat {
               candidate.content.parts.push(part);
               allModelParts.push(part);
             }
-            thinkingTagLeakDetected ||= thinkingTagDetector.leaked;
+            if (thinkingTagDetectionEnabled) {
+              thinkingTagLeakDetected ||= thinkingTagDetector.leaked;
+            }
           }
         }
 
@@ -3932,11 +4043,37 @@ export class GeminiChat {
           }
         }
 
-        if (
-          !thinkingTagDetector.blockingOutput &&
-          (!protocolTextWasSuppressed || !protocolTagDetector.blockingOutput)
-        ) {
-          yield chunk;
+        if (!protocolTextWasSuppressed || !protocolTagDetector.blockingOutput) {
+          if (
+            thinkingTagDetectionEnabled &&
+            thinkingTagDetector.blockingOutput
+          ) {
+            if (!thinkingTagDetector.leaked) {
+              const candidate = chunk.candidates?.[0];
+              const thoughtParts = candidate?.content?.parts?.filter(
+                (part) => part.thought,
+              );
+              if (candidate?.content && thoughtParts?.length) {
+                candidate.content.parts = thoughtParts;
+                syncFunctionCallsField(chunk, thoughtParts);
+                yield chunk;
+              }
+            }
+          } else {
+            yield chunk;
+            const committedParts = chunk.candidates?.[0]?.content?.parts ?? [];
+            if (
+              committedParts.some(
+                (part) =>
+                  !part.thought &&
+                  Object.keys(part).some(
+                    (key) => key !== 'thought' && key !== 'thoughtSignature',
+                  ),
+              )
+            ) {
+              thinkingTagDetectionEnabled = false;
+            }
+          }
         }
       }
     } catch (e) {
@@ -3992,10 +4129,7 @@ export class GeminiChat {
         'PROTOCOL_TAG_LEAK',
       );
     }
-    if (
-      streamError === null &&
-      (thinkingTagLeakDetected || hasInvalidThinkingTagStructure(contentText))
-    ) {
+    if (streamError === null && thinkingTagLeakDetected) {
       throw new InvalidStreamError(
         'Model response contained malformed thinking tags in visible content.',
         'PROTOCOL_TAG_LEAK',

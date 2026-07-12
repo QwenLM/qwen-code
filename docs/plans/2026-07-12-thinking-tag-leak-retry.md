@@ -2,9 +2,9 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Retry Qwen responses that mix a separate reasoning channel with leaked `<think>` tags in visible content, without enabling tagged parsing or delaying healthy reasoning streams.
+**Goal:** Retry Qwen responses that start with structurally malformed thinking tags in visible content, without enabling tagged parsing, replaying committed output, or delaying healthy reasoning streams.
 
-**Architecture:** Extend `GeminiChat`'s existing protocol-turn validation and retry path from #6683. A response is invalid when visible text contains nested, mismatched, orphaned, or truncated think-family tags; balanced and self-closing literal tags remain visible. A streaming detector buffers only a potentially tagged block, so healthy reasoning and visible text continue streaming immediately.
+**Architecture:** Extend `GeminiChat`'s existing protocol-turn validation and retry path from #6683. A strictly bounded leading window checks exact `<think>` / `<thinking>` protocol tags for nested, mismatched, orphaned, or truncated structure before visible content or a tool call is emitted. Balanced and self-closing literal tags remain visible. Separate reasoning streams immediately unless an exact tag is structurally unresolved, in which case it is held until the attempt is known to be safe. Detection is disabled after externally visible output is committed so a later anomaly cannot replay text or tool side effects.
 
 **Tech Stack:** TypeScript, Vitest, Qwen Code streaming pipeline, tmux CLI E2E with a deterministic local OpenAI-compatible SSE server.
 
@@ -14,9 +14,10 @@
 
 - Modify: `packages/core/src/core/geminiChat.test.ts`
 
-1. Add an end-to-end `GeminiChat` stream test whose first attempt contains the recorded thought text, visible malformed nested `<think>` content, and malformed tool-call shape, followed by a healthy second attempt.
+1. Add an end-to-end `GeminiChat` stream test whose first attempt contains a short visible prefix in one chunk, followed by the recorded thought text and visible malformed nested `<think>` content in later chunks, then a healthy second attempt.
 2. Assert the first attempt is discarded, a retry event is emitted, only the healthy answer reaches history/recording, and the API is called twice.
 3. Run the focused Vitest case and confirm it fails because only one API call occurs and leaked content is accepted.
+4. Add separate coverage proving a tool call is suppressed in either part order while a tag prefix is unresolved, and that no replay occurs after visible content or a tool call has already been emitted.
 
 ### Task 2: Preserve the literal-tag boundary
 
@@ -24,7 +25,7 @@
 
 - Modify: `packages/core/src/core/geminiChat.test.ts`
 
-1. Add a test showing `<think>example</think>` remains visible when the response has no thought part.
+1. Add tests showing balanced and self-closing literal tags remain visible, including when reasoning is present and the literal tag spans stream chunks; verify unresolved-tag reasoning and non-text parts are released without loss once the response is safe.
 2. Run the test and confirm the current behavior remains green.
 
 ### Task 3: Implement minimal response validation
@@ -33,8 +34,8 @@
 
 - Modify: `packages/core/src/core/geminiChat.ts`
 
-1. Add a small case-insensitive think-family tag recognizer.
-2. Before recording/history persistence, throw the existing retryable `PROTOCOL_TAG_LEAK` error when consolidated visible text contains such a tag and the same turn has non-empty thought text.
+1. Add a small case-insensitive recognizer for the exact thinking protocol tag forms.
+2. Hold only a strictly bounded response-leading visible prefix while exact tags are structurally unresolved, throw the existing retryable `PROTOCOL_TAG_LEAK` error only while the turn is still safe to replay, and stop detecting after visible content, non-text content, or a tool call is emitted.
 3. Run the focused tests and confirm both the production retry case and literal boundary pass.
 
 ### Task 4: Verify regressions and real CLI behavior
