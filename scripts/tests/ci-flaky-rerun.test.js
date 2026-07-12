@@ -8,11 +8,14 @@ import { describe, expect, it } from 'vitest';
 
 import {
   actOnDecision,
+  actOnDecisions,
   selectCandidateTargets,
   selectTarget,
   writeSkillInput,
+  writeSkillInputs,
 } from '../../.github/scripts/ci-flaky-rerun.mjs';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -74,6 +77,14 @@ function runner() {
 }
 
 describe('ci flaky rerun patrol', () => {
+  it('runs when invoked through the workflow relative script path', () => {
+    expect(() =>
+      execFileSync('node', ['.github/scripts/ci-flaky-rerun.mjs', 'invalid'], {
+        encoding: 'utf8',
+      }),
+    ).toThrow(/command must be scan or act/);
+  });
+
   it('selects the newest stale failed PR run', () => {
     expect(selectTarget([pr()], { now: NOW, staleMinutes: 30 })).toMatchObject({
       prNumber: 42,
@@ -132,6 +143,22 @@ describe('ci flaky rerun patrol', () => {
     ).toBeNull();
   });
 
+  it('does not trust a hidden marker posted by an unrecognized account', () => {
+    const marker =
+      '<!-- qwen-ci-flaky-rerun v=1 pr=42 head=abc123 run=123 action=comment count=1 -->';
+
+    expect(
+      selectTarget(
+        [
+          pr({
+            comments: [{ body: marker, author: { login: 'untrusted-user' } }],
+          }),
+        ],
+        { now: NOW, trustedMarkerLogins: ['qwen-code-ci-bot'] },
+      ),
+    ).toMatchObject({ prNumber: 42, runId: 123 });
+  });
+
   it('skips PRs that were not active during the patrol window', () => {
     expect(
       selectTarget([pr({ updatedAt: '2026-07-05T07:59:00.000Z' })], {
@@ -172,12 +199,46 @@ describe('ci flaky rerun patrol', () => {
     expect(script).toContain('`updated:>=${activeSince} status:failure`');
   });
 
+  it('collects every eligible failed PR before handing judgment to the skill', () => {
+    expect(script).toContain('const targets = []');
+    expect(script).toContain('targets.push({');
+    expect(script).toContain('await writeSkillInputs(client, targets,');
+    expect(script).not.toContain('target = {\n      ...candidate,');
+  });
+
   it('can rank candidates before fetching comments', () => {
     expect(selectCandidateTargets([pr()], { now: NOW })).toMatchObject([
       {
         prNumber: 42,
         runId: 123,
       },
+    ]);
+  });
+
+  it('keeps one newest failed run per PR while retaining every failed PR', () => {
+    expect(
+      selectCandidateTargets([
+        pr({
+          number: 41,
+          headRefOid: 'first',
+          statusCheckRollup: [
+            run({
+              completedAt: '2026-07-12T07:00:00.000Z',
+              detailsUrl:
+                'https://github.com/QwenLM/qwen-code/actions/runs/121/jobs/1',
+            }),
+            run({
+              completedAt: '2026-07-12T07:10:00.000Z',
+              detailsUrl:
+                'https://github.com/QwenLM/qwen-code/actions/runs/122/jobs/1',
+            }),
+          ],
+        }),
+        pr(),
+      ]).map((target) => [target.prNumber, target.runId]),
+    ).toEqual([
+      [42, 123],
+      [41, 122],
     ]);
   });
 
@@ -202,6 +263,55 @@ describe('ci flaky rerun patrol', () => {
         ),
       ],
     ]);
+    expect(client.calls[1][2]).toContain('action=rerun count=1');
+  });
+
+  it('applies only decisions that match an input target', async () => {
+    const client = runner();
+    const targets = [
+      selectTarget([pr()], { now: NOW }),
+      selectTarget(
+        [
+          pr({
+            number: 43,
+            headRefOid: 'def456',
+            statusCheckRollup: [
+              run({
+                detailsUrl:
+                  'https://github.com/QwenLM/qwen-code/actions/runs/124/jobs/2',
+              }),
+            ],
+          }),
+        ],
+        { now: NOW },
+      ),
+    ];
+    client.currentHeadSha = async (prNumber) =>
+      prNumber === 42 ? 'abc123' : 'def456';
+
+    await actOnDecisions(client, targets, [
+      {
+        prNumber: 42,
+        headSha: 'abc123',
+        runId: 123,
+        action: 'rerun',
+        confidence: 'high',
+        reason_en: 'runner timeout',
+        reason_zh: 'runner 超时。',
+      },
+      {
+        prNumber: 99,
+        headSha: 'unknown',
+        runId: 999,
+        action: 'rerun',
+        confidence: 'high',
+        reason_en: 'must not run',
+        reason_zh: '不得执行。',
+      },
+    ]);
+
+    expect(client.calls).toHaveLength(2);
+    expect(client.calls[0]).toEqual(['rerunFailedJobs', 123]);
   });
 
   it('does not act when the failed run is no longer current', async () => {
@@ -355,6 +465,51 @@ describe('ci flaky rerun patrol', () => {
       expect(readFileSync(join(dir, 'ci-log.txt'), 'utf8')).toContain(
         'network timeout',
       );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('writes a single batch input with each target and its sanitized log', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ci-flaky-rerun-'));
+    const targets = [
+      selectTarget([pr()], { now: NOW }),
+      {
+        ...selectTarget([pr()], { now: NOW }),
+        prNumber: 43,
+        headSha: 'def456',
+        runId: 124,
+        jobId: 2,
+      },
+    ];
+    try {
+      await writeSkillInputs(
+        {
+          async jobLog(jobId) {
+            return jobId === 1
+              ? 'network timeout while downloading package'
+              : 'AssertionError: expected generated schema';
+          },
+        },
+        targets,
+        dir,
+      );
+
+      const input = JSON.parse(
+        readFileSync(join(dir, 'ci-flaky-input.json'), 'utf8'),
+      );
+      expect(input.candidates).toMatchObject([
+        {
+          prNumber: 42,
+          runId: 123,
+          log: 'network timeout while downloading package',
+        },
+        {
+          prNumber: 43,
+          runId: 124,
+          log: 'AssertionError: expected generated schema',
+        },
+      ]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

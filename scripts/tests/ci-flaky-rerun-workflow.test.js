@@ -32,12 +32,13 @@ describe('ci flaky rerun workflow', () => {
 
   it('delegates PR failure judgment to the project skill', () => {
     expect(workflow).toContain('.qwen/skills/ci-flaky-patrol/SKILL.md');
-    expect(workflow).toContain('ci-flaky-decision.json');
+    expect(workflow).toContain('ci-flaky-input.json');
+    expect(workflow).toContain('ci-flaky-decisions.json');
     expect(workflow).toContain(
       "OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'",
     );
     expect(workflow).toContain('"sandbox": true');
-    expect(workflow).toContain('target_sha');
+    expect(workflow).toContain('input_sha');
     expect(workflow).toContain('node .github/scripts/ci-flaky-rerun.mjs act');
     expect(workflow).toContain('actions/upload-artifact@');
     expect(workflow).toContain('actions/download-artifact@');
@@ -50,6 +51,9 @@ describe('ci flaky rerun workflow', () => {
     expect(skill).toContain('Workflow contract');
     expect(skill).toContain('JavaScript driver owns');
     expect(skill).toContain('This skill chooses');
+    expect(skill).toContain('every candidate');
+    expect(skill).toContain('ci-flaky-input.json');
+    expect(skill).toContain('ci-flaky-decisions.json');
     expect(skill).toContain('`rerun`');
     expect(skill).toContain('`update_branch`');
     expect(skill).toContain('`comment`');

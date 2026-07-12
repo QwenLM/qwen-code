@@ -32,19 +32,29 @@ function jobIdFromUrl(url) {
   return match ? Number(match[1]) : null;
 }
 
-function markerFor(target) {
-  return `<!-- ${MARKER} v=1 pr=${target.prNumber} head=${target.headSha} run=${target.runId} -->`;
+function markerFor(target, action) {
+  const count = (target.actionCount ?? 0) + 1;
+  return `<!-- ${MARKER} v=1 pr=${target.prNumber} head=${target.headSha} run=${target.runId} action=${action} count=${count} -->`;
 }
 
-function alreadyHandled(pr, target) {
-  return (pr?.comments ?? []).some((comment) =>
-    String(comment.body ?? '').includes(markerFor(target)),
+function markerComments(pr, options = {}) {
+  const logins = options.trustedMarkerLogins;
+  return (pr?.comments ?? []).filter(
+    (comment) =>
+      !logins || logins.includes(String(comment.author?.login ?? '')),
   );
 }
 
-function actionCountForHead(pr, target) {
+function alreadyHandled(pr, target, options) {
+  const prefix = `<!-- ${MARKER} v=1 pr=${target.prNumber} head=${target.headSha} run=${target.runId}`;
+  return markerComments(pr, options).some((comment) =>
+    String(comment.body ?? '').includes(prefix),
+  );
+}
+
+function actionCountForHead(pr, target, options) {
   const prefix = `<!-- ${MARKER} v=1 pr=${target.prNumber} head=${target.headSha} `;
-  return (pr?.comments ?? []).filter((comment) =>
+  return markerComments(pr, options).filter((comment) =>
     String(comment.body ?? '').includes(prefix),
   ).length;
 }
@@ -55,8 +65,8 @@ function isRecentlyActive(pr, now, activeDays) {
 
 function canAct(pr, target, options) {
   return (
-    !alreadyHandled(pr, target) &&
-    actionCountForHead(pr, target) <
+    !alreadyHandled(pr, target, options) &&
+    actionCountForHead(pr, target, options) <
       (options.maxActions ?? MAX_ACTIONS_PER_HEAD)
   );
 }
@@ -139,7 +149,14 @@ export function selectCandidateTargets(prs, options = {}) {
     }
   }
 
-  return targets.sort((a, b) => timeMs(b.completedAt) - timeMs(a.completedAt));
+  const seenPrs = new Set();
+  return targets
+    .sort((a, b) => timeMs(b.completedAt) - timeMs(a.completedAt))
+    .filter((target) => {
+      if (seenPrs.has(target.prNumber)) return false;
+      seenPrs.add(target.prNumber);
+      return true;
+    });
 }
 
 export function selectTarget(prs, options = {}) {
@@ -165,7 +182,7 @@ export async function actOnDecision(client, target, decision) {
       [
         `Rerunning failed jobs because this failure looks flaky: ${decision.reason_en}`,
         '',
-        markerFor(target),
+        markerFor(target, 'rerun'),
       ].join('\n'),
     );
     return;
@@ -181,7 +198,7 @@ export async function actOnDecision(client, target, decision) {
       [
         'Requesting an update from main because this failure needs current main.',
         '',
-        markerFor(target),
+        markerFor(target, 'update_branch'),
       ].join('\n'),
     );
     return;
@@ -200,9 +217,24 @@ export async function actOnDecision(client, target, decision) {
         '',
         '</details>',
         '',
-        markerFor(target),
+        markerFor(target, 'comment'),
       ].join('\n'),
     );
+  }
+}
+
+export async function actOnDecisions(client, targets, decisions) {
+  const targetsById = new Map(
+    targets.map((target) => [
+      `${target.prNumber}:${target.headSha}:${target.runId}`,
+      target,
+    ]),
+  );
+  for (const decision of decisions ?? []) {
+    const target = targetsById.get(
+      `${decision.prNumber}:${decision.headSha}:${decision.runId}`,
+    );
+    if (target) await actOnDecision(client, target, decision);
   }
 }
 
@@ -210,6 +242,17 @@ export async function writeSkillInput(client, target, workdir) {
   writeJson(workdir, 'ci-target.json', target);
   const log = target.jobId === null ? '' : await client.jobLog(target.jobId);
   writeFileSync(resolve(workdir, 'ci-log.txt'), skillLog(log));
+}
+
+export async function writeSkillInputs(client, targets, workdir) {
+  const candidates = await Promise.all(
+    targets.map(async (target) => ({
+      ...target,
+      log:
+        target.jobId === null ? '' : skillLog(await client.jobLog(target.jobId)),
+    })),
+  );
+  writeJson(workdir, 'ci-flaky-input.json', { candidates });
 }
 
 class GhClient {
@@ -380,28 +423,36 @@ async function scan(args) {
     staleMinutes: Number(args.get('stale-minutes') ?? DEFAULT_STALE_MINUTES),
     activeDays,
   });
-  let target = null;
+  const trustedMarkerLogins = (args.get('trusted-marker-logins') ?? '')
+    .split(',')
+    .filter(Boolean);
+  const options = { trustedMarkerLogins };
+  const targets = [];
   for (const candidate of candidates) {
     const pr = prs.find((item) => item.number === candidate.prNumber);
     const comments = await client.comments(candidate.prNumber);
-    if (!canAct({ ...pr, comments }, candidate, {})) continue;
-    target = {
+    if (!canAct({ ...pr, comments }, candidate, options)) continue;
+    targets.push({
       ...candidate,
       behindBy: await client.behindBy(candidate.headSha),
-    };
-    break;
+      actionCount: actionCountForHead({ ...pr, comments }, candidate, options),
+    });
   }
-  if (target) await writeSkillInput(client, target, args.get('workdir'));
-  process.stdout.write(`target_found=${target ? 'true' : 'false'}\n`);
+  if (targets.length > 0)
+    await writeSkillInputs(client, targets, args.get('workdir'));
+  process.stdout.write(`target_found=${targets.length > 0 ? 'true' : 'false'}\n`);
+  process.stdout.write(`target_count=${targets.length}\n`);
 }
 
 async function act(args) {
   const workdir = args.get('workdir');
-  const target = JSON.parse(readFileSync(resolve(workdir, 'ci-target.json')));
-  const decision = JSON.parse(
-    readFileSync(resolve(workdir, 'ci-flaky-decision.json')),
+  const { candidates } = JSON.parse(
+    readFileSync(resolve(workdir, 'ci-flaky-input.json')),
   );
-  await actOnDecision(new GhClient(args.get('repo')), target, decision);
+  const { decisions } = JSON.parse(
+    readFileSync(resolve(workdir, 'ci-flaky-decisions.json')),
+  );
+  await actOnDecisions(new GhClient(args.get('repo')), candidates, decisions);
 }
 
 async function main() {
