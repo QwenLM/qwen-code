@@ -215,7 +215,7 @@ export function registerWorkspaceExtensionRoutes(
   const globalReconciliationOptions = () =>
     workspaceRegistry
       ? {
-          refreshRuntimes: workspaceRegistry.list(),
+          refreshRuntimes: () => workspaceRegistry.list(),
           onRuntimeReconciled,
         }
       : {};
@@ -227,11 +227,14 @@ export function registerWorkspaceExtensionRoutes(
         }
       : {};
   const mutationClientBridges = (
-    runtimes?: readonly WorkspaceRuntime[],
+    runtimes?:
+      | readonly WorkspaceRuntime[]
+      | (() => readonly WorkspaceRuntime[]),
   ): readonly AcpSessionBridge[] =>
-    (runtimes ?? workspaceRegistry?.list())?.map(
-      (runtime) => runtime.bridge,
-    ) ?? [bridge];
+    (typeof runtimes === 'function'
+      ? runtimes()
+      : (runtimes ?? workspaceRegistry?.list())
+    )?.map((runtime) => runtime.bridge) ?? [bridge];
 
   if (workspaceRegistry) {
     let observedGeneration: number | undefined;
@@ -892,7 +895,9 @@ export function registerWorkspaceExtensionRoutes(
       states?: Record<string, string>;
     }>,
     options: {
-      refreshRuntimes?: readonly WorkspaceRuntime[];
+      refreshRuntimes?:
+        | readonly WorkspaceRuntime[]
+        | (() => readonly WorkspaceRuntime[]);
       skipRefresh?: boolean;
       deadlineMs?: number;
     } = {},
@@ -1006,7 +1011,7 @@ export function registerWorkspaceExtensionRoutes(
         },
         {
           ...(workspaceRegistry
-            ? { refreshRuntimes: workspaceRegistry.list() }
+            ? { refreshRuntimes: () => workspaceRegistry.list() }
             : {}),
         },
       );
@@ -1161,7 +1166,7 @@ export function registerWorkspaceExtensionRoutes(
       {
         deadlineMs: EXTENSION_PREPARE_DEADLINE_MS,
         ...(workspaceRegistry
-          ? { refreshRuntimes: workspaceRegistry.list() }
+          ? { refreshRuntimes: () => workspaceRegistry.list() }
           : {}),
       },
     );
@@ -1269,7 +1274,7 @@ export function registerWorkspaceExtensionRoutes(
         {
           deadlineMs: EXTENSION_PREPARE_DEADLINE_MS,
           ...(workspaceRegistry
-            ? { refreshRuntimes: workspaceRegistry.list() }
+            ? { refreshRuntimes: () => workspaceRegistry.list() }
             : {}),
         },
       );
@@ -1321,7 +1326,7 @@ export function registerWorkspaceExtensionRoutes(
           },
           {
             ...(workspaceRegistry
-              ? { refreshRuntimes: workspaceRegistry.list() }
+              ? { refreshRuntimes: () => workspaceRegistry.list() }
               : {}),
           },
         );

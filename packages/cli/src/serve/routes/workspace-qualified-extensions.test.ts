@@ -128,15 +128,16 @@ async function makeHarness(opts?: { secondaryTrusted?: boolean }) {
     trusted: opts?.secondaryTrusted ?? true,
     workspaceId: hashDaemonWorkspace(canonicalSecondary),
   });
+  const registry = createWorkspaceRegistry([primary, secondary]);
   const app = createServeApp(
     { ...baseOpts, workspace: canonicalPrimary, token: 'secret' },
     undefined,
     {
-      workspaceRegistry: createWorkspaceRegistry([primary, secondary]),
+      workspaceRegistry: registry,
     },
   );
   activeApps.add(app);
-  return { app, scratch, primary, secondary };
+  return { app, scratch, primary, secondary, registry };
 }
 
 function auth(pending: request.Test): request.Test {
@@ -654,6 +655,70 @@ describe('extension management v2 REST', () => {
         h.secondary.bridge.refreshExtensionsForAllSessions,
       ).toHaveBeenCalledOnce();
     } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('includes runtimes registered while a global mutation is committing', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    let commitStarted = false;
+    let releaseCommit = () => {};
+    const commitGate = new Promise<void>((resolve) => {
+      releaseCommit = resolve;
+    });
+    vi.mocked(
+      ExtensionManager.prototype.setExtensionDefaultActivation,
+    ).mockImplementation(async () => {
+      commitStarted = true;
+      await commitGate;
+      return {
+        version: 2,
+        generation: 7,
+        legacyProjectionHash: 'hash',
+        extensions: {
+          [extensionId]: {
+            name: 'demo',
+            defaultActivation: 'disabled',
+            workspaceOverrides: {},
+          },
+        },
+      };
+    });
+    try {
+      const started = await auth(
+        request(h.app)
+          .put(`/extensions/${extensionId}/activation`)
+          .send({ state: 'disabled' }),
+      );
+      expect(started.status).toBe(202);
+      await vi.waitFor(() => expect(commitStarted).toBe(true));
+
+      const lateCwd = path.join(h.scratch, 'late');
+      await fsp.mkdir(lateCwd, { recursive: true });
+      const late = makeRuntime(canonicalizeWorkspace(lateCwd), {
+        primary: false,
+        trusted: true,
+        workspaceId: 'late-id',
+      });
+      h.registry.add(late);
+      releaseCommit();
+
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+      expect(
+        late.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+      const projection = await auth(
+        request(h.app).get('/workspaces/late-id/extensions'),
+      );
+      expect(projection.body).toMatchObject({
+        desiredGeneration: 7,
+        appliedGeneration: 7,
+      });
+    } finally {
+      releaseCommit();
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
   });

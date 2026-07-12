@@ -150,7 +150,9 @@ export interface ExtensionsController {
     ) => Promise<ExtensionMutationEvent>,
     options?: {
       manager?: ExtensionManager;
-      refreshRuntimes?: readonly WorkspaceRuntime[];
+      refreshRuntimes?:
+        | readonly WorkspaceRuntime[]
+        | (() => readonly WorkspaceRuntime[]);
       operationBasePath?: string;
       skipRefresh?: boolean;
       deadlineMs?: number;
@@ -344,7 +346,9 @@ export function createExtensionsController(
     ) => Promise<ExtensionMutationEvent>,
     options: {
       manager?: ExtensionManager;
-      refreshRuntimes?: readonly WorkspaceRuntime[];
+      refreshRuntimes?:
+        | readonly WorkspaceRuntime[]
+        | (() => readonly WorkspaceRuntime[]);
       operationBasePath?: string;
       skipRefresh?: boolean;
       deadlineMs?: number;
@@ -481,7 +485,10 @@ export function createExtensionsController(
           status: 'running',
           phase: 'reconciling',
         });
-        const refreshTargets = options.refreshRuntimes;
+        const refreshTargets =
+          typeof options.refreshRuntimes === 'function'
+            ? options.refreshRuntimes()
+            : options.refreshRuntimes;
         if (refreshTargets) {
           const results = await Promise.all(
             refreshTargets.map(async (runtime) => {
