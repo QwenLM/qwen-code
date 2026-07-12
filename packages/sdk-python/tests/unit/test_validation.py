@@ -224,8 +224,23 @@ def test_rejects_extra_args_with_reserved_flags() -> None:
         "--no-sandbox",
         "--no-insecure",
         "--no-safe-mode",
-        "--no-worktree",
         "--sandbox-image",
+        "--fork-session",
+        "--max-tool-calls",
+        "--max-subagent-depth",
+        "--max-session-turns",
+        "--system-prompt",
+        "--append-system-prompt",
+        "--include-directories",
+        "--allowed-mcp-server-names",
+        "--disabled-slash-commands",
+        "--include-partial-messages",
+        "--chat-recording",
+        "--openai-logging",
+        "--openai-logging-dir",
+        "--json-schema",
+        "--json-fd",
+        "--json-file",
     ],
 )
 def test_rejects_extra_args_with_security_sensitive_flags(flag: str) -> None:
@@ -285,3 +300,76 @@ def test_rejects_invalid_effort() -> None:
 def test_accepts_valid_effort() -> None:
     for effort in ("low", "medium", "high", "xhigh", "max"):
         validate_query_options(QueryOptions(effort=effort))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "include_directories",
+        "extensions",
+        "allowed_mcp_server_names",
+        "disabled_slash_commands",
+        "fallback_model",
+    ],
+)
+def test_rejects_comma_in_list_fields(field_name: str) -> None:
+    with pytest.raises(ValidationError, match="cannot contain commas"):
+        validate_query_options(QueryOptions(**{field_name: ["valid", "invalid,comma"]}))
+
+
+def test_from_mapping_parses_all_new_fields() -> None:
+    opts = QueryOptions.from_mapping(
+        {
+            "fork_session": True,
+            "resume": VALID_UUID,
+            "max_tool_calls": 50,
+            "max_subagent_depth": 3,
+            "include_directories": ["/dir1", "/dir2"],
+            "extra_args": ["--verbose"],
+            "extensions": ["ext1"],
+            "allowed_mcp_server_names": ["server1"],
+            "fallback_model": ["model-a", "model-b"],
+            "proxy": "http://proxy:8080",
+            "sandbox": True,
+            "safe_mode": True,
+            "insecure": True,
+            "worktree": True,
+            "disabled_slash_commands": ["/cmd1"],
+            "agents": [{"name": "a", "description": "b", "systemPrompt": "c"}],
+        }
+    )
+    assert opts.fork_session is True
+    assert opts.resume == VALID_UUID
+    assert opts.max_tool_calls == 50
+    assert opts.max_subagent_depth == 3
+    assert opts.include_directories == ["/dir1", "/dir2"]
+    assert opts.extra_args == ["--verbose"]
+    assert opts.extensions == ["ext1"]
+    assert opts.allowed_mcp_server_names == ["server1"]
+    assert opts.fallback_model == ["model-a", "model-b"]
+    assert opts.proxy == "http://proxy:8080"
+    assert opts.sandbox is True
+    assert opts.safe_mode is True
+    assert opts.insecure is True
+    assert opts.worktree is True
+    assert opts.disabled_slash_commands == ["/cmd1"]
+    assert opts.agents == [{"name": "a", "description": "b", "systemPrompt": "c"}]
+
+
+def test_from_mapping_defaults_new_fields_to_none() -> None:
+    opts = QueryOptions.from_mapping({})
+    assert opts.fork_session is False
+    assert opts.max_tool_calls is None
+    assert opts.max_subagent_depth is None
+    assert opts.include_directories is None
+    assert opts.extra_args is None
+    assert opts.extensions is None
+    assert opts.allowed_mcp_server_names is None
+    assert opts.fallback_model is None
+    assert opts.proxy is None
+    assert opts.sandbox is False
+    assert opts.safe_mode is False
+    assert opts.insecure is False
+    assert opts.worktree is False
+    assert opts.disabled_slash_commands is None
+    assert opts.agents is None

@@ -617,6 +617,48 @@ describe('ProcessTransport', () => {
       );
     });
 
+    it('should not emit optional flags when options are unset', () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+      };
+
+      new ProcessTransport(options);
+
+      const spawnCall = mockSpawn.mock.calls[0];
+      const args = spawnCall?.[1] as string[];
+
+      const absentFlags = [
+        '--sandbox',
+        '--safe-mode',
+        '--insecure',
+        '--worktree',
+        '--fork-session',
+        '--max-tool-calls',
+        '--max-subagent-depth',
+        '--include-directories',
+        '--extensions',
+        '--allowed-mcp-server-names',
+        '--fallback-model',
+        '--proxy',
+        '--disabled-slash-commands',
+        '--resume',
+        '--session-id',
+        '--continue',
+      ];
+
+      for (const flag of absentFlags) {
+        expect(args).not.toContain(flag);
+      }
+    });
+
     it('should throw if aborted before initialization', () => {
       mockPrepareSpawnInfo.mockReturnValue({
         command: 'qwen',

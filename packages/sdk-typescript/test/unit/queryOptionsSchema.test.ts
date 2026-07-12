@@ -71,8 +71,17 @@ describe('QueryOptionsSchema', () => {
     '--no-sandbox',
     '--no-insecure',
     '--no-safe-mode',
-    '--no-worktree',
     '--sandbox-image',
+    '--fork-session',
+    '--max-tool-calls',
+    '--max-subagent-depth',
+    '--max-session-turns',
+    '--system-prompt',
+    '--append-system-prompt',
+    '--include-directories',
+    '--allowed-mcp-server-names',
+    '--disabled-slash-commands',
+    '--include-partial-messages',
   ])('rejects extraArgs containing reserved flag %s', (flag) => {
     const result = QueryOptionsSchema.safeParse({ extraArgs: [flag] });
     expect(result.success).toBe(false);
@@ -102,14 +111,59 @@ describe('QueryOptionsSchema', () => {
     expect(result.success).toBe(true);
   });
 
-  it('rejects forkSession without resume', () => {
+  it('rejects forkSession without resume or continue', () => {
     const result = QueryOptionsSchema.safeParse({ forkSession: true });
     expect(result.success).toBe(false);
     if (!result.success) {
       expect(result.error.issues[0]?.message).toContain(
-        'forkSession requires resume',
+        'forkSession requires resume or continue',
       );
     }
+  });
+
+  it('accepts forkSession with continue', () => {
+    const result = QueryOptionsSchema.safeParse({
+      forkSession: true,
+      continue: true,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it.each([
+    'includeDirectories',
+    'extensions',
+    'allowedMcpServerNames',
+    'fallbackModel',
+    'disabledSlashCommands',
+  ])('rejects %s items containing commas', (field) => {
+    const result = QueryOptionsSchema.safeParse({
+      [field]: ['valid', 'invalid,comma'],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects maxSubagentDepth of 0', () => {
+    const result = QueryOptionsSchema.safeParse({ maxSubagentDepth: 0 });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects maxSubagentDepth of 101', () => {
+    const result = QueryOptionsSchema.safeParse({ maxSubagentDepth: 101 });
+    expect(result.success).toBe(false);
+  });
+
+  it('accepts maxSubagentDepth boundary values 1 and 100', () => {
+    expect(QueryOptionsSchema.safeParse({ maxSubagentDepth: 1 }).success).toBe(
+      true,
+    );
+    expect(
+      QueryOptionsSchema.safeParse({ maxSubagentDepth: 100 }).success,
+    ).toBe(true);
+  });
+
+  it('accepts continue field', () => {
+    const result = QueryOptionsSchema.safeParse({ continue: true });
+    expect(result.success).toBe(true);
   });
 
   it.each([

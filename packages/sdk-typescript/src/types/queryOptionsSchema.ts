@@ -44,7 +44,6 @@ const RESERVED_CLI_FLAGS = new Set([
   '--safe-mode',
   '--no-safe-mode',
   '--worktree',
-  '--no-worktree',
   '--disabled-slash-commands',
   '--include-partial-messages',
   '--chat-recording',
@@ -245,6 +244,7 @@ export const QueryOptionsSchema = z
       .optional(),
     effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
     includePartialMessages: z.boolean().optional(),
+    continue: z.boolean().optional(),
     resume: z.string().optional(),
     sessionId: z.string().optional(),
     forkSession: z.boolean().optional(),
@@ -252,11 +252,9 @@ export const QueryOptionsSchema = z
     maxSubagentDepth: z.number().int().min(1).max(100).optional(),
     includeDirectories: z
       .array(
-        z
-          .string()
-          .refine((s) => !s.includes(','), {
-            message: 'includeDirectories items cannot contain commas',
-          }),
+        z.string().refine((s) => !s.includes(','), {
+          message: 'includeDirectories items cannot contain commas',
+        }),
       )
       .optional(),
     extraArgs: z
@@ -276,29 +274,23 @@ export const QueryOptionsSchema = z
       .optional(),
     extensions: z
       .array(
-        z
-          .string()
-          .refine((s) => !s.includes(','), {
-            message: 'extensions items cannot contain commas',
-          }),
+        z.string().refine((s) => !s.includes(','), {
+          message: 'extensions items cannot contain commas',
+        }),
       )
       .optional(),
     allowedMcpServerNames: z
       .array(
-        z
-          .string()
-          .refine((s) => !s.includes(','), {
-            message: 'allowedMcpServerNames items cannot contain commas',
-          }),
+        z.string().refine((s) => !s.includes(','), {
+          message: 'allowedMcpServerNames items cannot contain commas',
+        }),
       )
       .optional(),
     fallbackModel: z
       .array(
-        z
-          .string()
-          .refine((s) => !s.includes(','), {
-            message: 'fallbackModel items cannot contain commas',
-          }),
+        z.string().refine((s) => !s.includes(','), {
+          message: 'fallbackModel items cannot contain commas',
+        }),
       )
       .max(3, 'fallbackModel supports a maximum of 3 models')
       .optional(),
@@ -309,16 +301,14 @@ export const QueryOptionsSchema = z
     worktree: z.boolean().optional(),
     disabledSlashCommands: z
       .array(
-        z
-          .string()
-          .refine((s) => !s.includes(','), {
-            message: 'disabledSlashCommands items cannot contain commas',
-          }),
+        z.string().refine((s) => !s.includes(','), {
+          message: 'disabledSlashCommands items cannot contain commas',
+        }),
       )
       .optional(),
     timeout: TimeoutConfigSchema.optional(),
   })
   .strict()
-  .refine((data) => !data.forkSession || data.resume, {
-    message: 'forkSession requires resume to be set',
+  .refine((data) => !data.forkSession || data.resume || data.continue, {
+    message: 'forkSession requires resume or continue to be set',
   });

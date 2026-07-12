@@ -60,7 +60,6 @@ _RESERVED_CLI_FLAGS = frozenset(
         "--safe-mode",
         "--no-safe-mode",
         "--worktree",
-        "--no-worktree",
         "--disabled-slash-commands",
         "--include-partial-messages",
         "--chat-recording",
