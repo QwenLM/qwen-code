@@ -456,7 +456,7 @@ export function SettingsMessage({
           className={styles.actionButton}
           onClick={() => onSubDialog(setting.key, scope)}
         >
-          {formatValue(setting, scope, t) || t('settings.action.edit')}
+          {formatValue(setting, scope, t) || t('settings.action.select')}
         </button>
       );
     }
