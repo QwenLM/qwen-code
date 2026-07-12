@@ -147,7 +147,7 @@ export function performVariableReplacement(
         // Replace ${CLAUDE_PLUGIN_ROOT} with the actual extension path
         const updatedContent = content.replace(
           /\$\{CLAUDE_PLUGIN_ROOT\}/g,
-          pluginRoot,
+          () => pluginRoot,
         );
 
         // Replace Markdown shell syntax ```! ... ``` with system-recognized !{...} syntax
