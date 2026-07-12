@@ -5764,7 +5764,9 @@ describe('runQwenServe channel worker supervisor', () => {
         activity: { channelWorkers: 1 },
       });
       expect(removeByIds).toHaveBeenCalled();
-      expect(workerSupervisors.get(secondaryCwd)!.stop).toHaveBeenCalledOnce();
+      const removedSupervisor = workerSupervisors.get(secondaryCwd)!;
+      const removedWorkerOptions = workerOptions.get(secondaryCwd)!;
+      expect(removedSupervisor.stop).toHaveBeenCalledOnce();
       expect(workerSupervisors.get(primaryCwd)!.stop).not.toHaveBeenCalled();
       expect(pidfile.writeServeServiceInfo).toHaveBeenLastCalledWith({
         channels: ['telegram'],
@@ -5786,7 +5788,7 @@ describe('runQwenServe channel worker supervisor', () => {
         error: 'worker stopped',
       };
       snapshots.set(secondaryCwd, failedSecondary);
-      workerOptions.get(secondaryCwd)!.onExit?.(failedSecondary);
+      removedWorkerOptions.onExit?.(failedSecondary);
       expect(pidfile.writeServeServiceInfo).toHaveBeenLastCalledWith(
         expect.objectContaining({
           workerPid: 1234,
@@ -5805,6 +5807,75 @@ describe('runQwenServe channel worker supervisor', () => {
             (worker: ServiceInfoWorker) => worker.workspaceCwd === secondaryCwd,
           ),
       ).toBeUndefined();
+
+      snapshots.set(secondaryCwd, {
+        enabled: true,
+        state: 'running',
+        pid: 6789,
+        channels: ['feishu'],
+      });
+      const readded = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer worker-remove-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ cwd: secondaryCwd }),
+      });
+      expect(readded.status).toBe(201);
+      expect(supervisorFactory).toHaveBeenCalledTimes(3);
+      const replacementSupervisor = workerSupervisors.get(secondaryCwd)!;
+      expect(replacementSupervisor).not.toBe(removedSupervisor);
+      expect(replacementSupervisor.start).toHaveBeenCalledOnce();
+
+      const readdedWebhook = await fetch(
+        `${handle.url}/channels/feishu/webhooks/github-ci`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer worker-remove-token',
+            'content-type': 'application/json',
+            'x-qwen-webhook-secret': 'secondary-secret',
+          },
+          body: JSON.stringify({
+            eventType: 'check_failed',
+            targetRef: 'default',
+            title: 'CI failed again',
+          }),
+        },
+      );
+      expect(readdedWebhook.status).toBe(202);
+      expect(webhookEnqueues.get(secondaryCwd)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channelName: 'feishu',
+          title: 'CI failed again',
+        }),
+      );
+
+      snapshots.set(secondaryCwd, failedSecondary);
+      workerOptions.get(secondaryCwd)!.onExit?.(failedSecondary);
+      const failedWorkerPidfile =
+        pidfile.writeServeServiceInfo.mock.calls.at(-1)?.[0];
+      expect(
+        failedWorkerPidfile?.workers?.find(
+          (worker: ServiceInfoWorker) => worker.workspaceCwd === secondaryCwd,
+        ),
+      ).toMatchObject({
+        workspaceCwd: secondaryCwd,
+        channels: ['feishu'],
+      });
+      expect(
+        failedWorkerPidfile?.workers?.find(
+          (worker: ServiceInfoWorker) => worker.workspaceCwd === secondaryCwd,
+        )?.workerPid,
+      ).toBeUndefined();
+
+      const removeReplacement = await fetch(removalUrl, {
+        method: 'DELETE',
+        headers: { Authorization: 'Bearer worker-remove-token' },
+      });
+      expect(removeReplacement.status).toBe(200);
+      expect(replacementSupervisor.stop).toHaveBeenCalledOnce();
     } finally {
       await handle.close();
       if (previousSharedSecret === undefined) {

@@ -52,6 +52,7 @@ export interface WorkspaceRemovalActivity {
 }
 
 export interface WorkspaceRuntimeRemovalController {
+  runtimeAdded?(runtime: WorkspaceRuntime): Promise<void>;
   beginDrain(runtime: WorkspaceRuntime): void;
   cancelDrain(runtime: WorkspaceRuntime): void;
   completeDrain(runtime: WorkspaceRuntime): void;
@@ -370,6 +371,15 @@ export function registerWorkspaceManagementRoutes(
             }
           }
           workspaceRegistry.add(runtime);
+          try {
+            await runtimeRemoval?.runtimeAdded?.(runtime);
+          } catch (err) {
+            writeStderrLine(
+              `qwen serve: workspace runtime registered without optional runtime adapter: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
         } catch (err) {
           if (persistedRecordAdded) {
             try {
@@ -478,7 +488,6 @@ export function registerWorkspaceManagementRoutes(
       error:
         'Workspace mismatch: the requested workspace is not registered with this daemon.',
       code: 'workspace_mismatch',
-      workspaceCount: workspaceRegistry.list().length,
     });
     return undefined;
   };
@@ -697,6 +706,7 @@ export function registerWorkspaceManagementRoutes(
         if (!res.headersSent) {
           res.status(500).json({
             error: 'Failed to remove workspace runtime',
+            code: 'workspace_runtime_removal_failed',
           });
         }
       } finally {
@@ -707,7 +717,7 @@ export function registerWorkspaceManagementRoutes(
   );
 
   const registrationIsActive = (registrationId: string): boolean =>
-    workspaceRegistry.list().some((runtime) => {
+    workspaceRegistry.listManaged().some((runtime) => {
       if (workspaceRegistrationId(runtime.workspaceCwd) === registrationId) {
         return true;
       }
@@ -763,6 +773,11 @@ export function registerWorkspaceManagementRoutes(
         });
         return;
       }
+      if (sealed) {
+        sendSealed(res);
+        return;
+      }
+      operationStarted();
       try {
         const registrationId = String(req.params['id']);
         const active = registrationIsActive(registrationId);
@@ -790,6 +805,8 @@ export function registerWorkspaceManagementRoutes(
           error: 'Failed to forget workspace registration',
           code: 'workspace_registration_store_error',
         });
+      } finally {
+        operationFinished();
       }
     },
   );

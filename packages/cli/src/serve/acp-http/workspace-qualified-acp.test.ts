@@ -702,6 +702,13 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
 
     expect(workspaceRegistry.beginDrain(secondaryRuntime)).toBe(true);
     handle!.beginWorkspaceDrain('secondary-id');
+    const registryDraining = await postInitialize(
+      '/workspaces/secondary-id/acp',
+    );
+    expect(registryDraining.status).toBe(503);
+    await expect(registryDraining.json()).resolves.toMatchObject({
+      code: 'workspace_draining',
+    });
     handle!.commitWorkspaceRemoval('secondary-id');
     handle!.disposeWorkspace('secondary-id');
     workspaceRegistry.completeDrain(secondaryRuntime);

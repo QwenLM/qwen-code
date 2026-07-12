@@ -131,6 +131,39 @@ export function resolveWorkspaceRuntimeFromParam(
   return runtime;
 }
 
+export function resolveManagedWorkspaceRuntimeFromParam(
+  registry: WorkspaceRegistry,
+  req: Request,
+  res: Response,
+  paramName = 'workspace',
+): WorkspaceRuntime | null {
+  const selector = req.params[paramName] ?? '';
+  const byId = registry.getManagedByWorkspaceId(selector);
+  if (byId) return byId;
+
+  if (!isPortableAbsolutePath(selector)) {
+    res.status(400).json({
+      error: `\`:${paramName}\` must decode to a workspace id or absolute path`,
+      code: 'workspace_mismatch',
+    });
+    return null;
+  }
+
+  const runtime = resolveManagedWorkspaceRuntimeByPathSelector(
+    registry,
+    selector,
+  );
+  if (!runtime) {
+    res.status(400).json({
+      error:
+        'Workspace mismatch: the requested workspace is not registered with this daemon.',
+      code: 'workspace_mismatch',
+    });
+    return null;
+  }
+  return runtime;
+}
+
 export function requireTrustedWorkspaceRuntime(
   runtime: WorkspaceRuntime,
   res: Response,

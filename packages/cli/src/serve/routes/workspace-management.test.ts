@@ -218,6 +218,24 @@ describe('POST /workspaces', () => {
     expect(res.body).not.toHaveProperty('persisted');
   });
 
+  it('keeps a registered runtime when an optional adapter fails to attach', async () => {
+    const registry = createMockRegistry([makeRuntime('/some-other-dir')]);
+    const runtimeRemoval = createRemovalController();
+    runtimeRemoval.runtimeAdded = vi
+      .fn()
+      .mockRejectedValue(new Error('worker unavailable'));
+    const { app } = createApp({
+      workspaceRegistry: registry,
+      runtimeRemoval,
+    });
+
+    const res = await request(app).post('/workspaces').send({ cwd: REAL_DIR });
+
+    expect(res.status).toBe(201);
+    expect(registry.getByWorkspaceCwd(REAL_DIR)).toBeDefined();
+    expect(runtimeRemoval.disposeRuntime).not.toHaveBeenCalled();
+  });
+
   it('does not echo resolved paths in 409 error messages', async () => {
     const { app } = createApp();
     const res = await request(app).post('/workspaces').send({ cwd: REAL_DIR });
@@ -465,6 +483,18 @@ describe('DELETE /workspaces/:workspace', () => {
     expect(staticResult.body.code).toBe('static_workspace_removal_forbidden');
   });
 
+  it('does not expose workspace counts for an unknown removal selector', async () => {
+    const { app } = createApp({
+      runtimeRemoval: createRemovalController(),
+    });
+
+    const res = await request(app).delete('/workspaces/unknown-workspace');
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('workspace_mismatch');
+    expect(res.body).not.toHaveProperty('workspaceCount');
+  });
+
   it('returns the fast busy snapshot without disturbing runtime gates', async () => {
     const runtime = makeRuntime(REAL_DIR);
     Object.assign(runtime.bridge, { sessionCount: 1, activePromptCount: 1 });
@@ -621,6 +651,9 @@ describe('DELETE /workspaces/:workspace', () => {
     const runtime = makeRuntime(REAL_DIR);
     Object.assign(runtime.bridge, { sessionCount: 1 });
     const runtimeRemoval = createRemovalController();
+    vi.mocked(runtimeRemoval.disposeRuntime).mockRejectedValueOnce(
+      new Error('bridge cleanup failed'),
+    );
     const acpHandle = {
       beginWorkspaceDrain: vi.fn(),
       cancelWorkspaceDrain: vi.fn(),
@@ -655,6 +688,7 @@ describe('DELETE /workspaces/:workspace', () => {
       'workspace_removed',
     );
     expect(runtimeRemoval.cancelDrain).not.toHaveBeenCalled();
+    expect(runtime.bridge.killAllSync).toHaveBeenCalledOnce();
     expect(deps.workspaceRegistry.cancelDrain).not.toHaveBeenCalled();
     expect(
       deps.workspaceRegistry.getManagedByWorkspaceId(runtime.workspaceId),
@@ -742,6 +776,101 @@ describe('DELETE /workspaces/:workspace', () => {
 
     finishCleanup();
     expect((await firstResult).status).toBe(200);
+    const replacement = await request(app)
+      .post('/workspaces')
+      .send({ cwd: runtime.workspaceCwd });
+    expect(replacement.status).toBe(201);
+  });
+
+  it('waits for an in-flight removal after sealing and rejects new work', async () => {
+    const runtime = makeRuntime(REAL_DIR);
+    let finishCleanup!: () => void;
+    const cleanup = new Promise<void>((resolve) => {
+      finishCleanup = resolve;
+    });
+    const runtimeRemoval = createRemovalController();
+    vi.mocked(runtimeRemoval.disposeRuntime).mockReturnValue(cleanup);
+    const { app, handle } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      runtimeRemoval,
+    });
+    const removal = request(app).delete(
+      `/workspaces/${encodeURIComponent(runtime.workspaceId)}`,
+    );
+    const removalResult = removal.then((res) => res);
+    await vi.waitFor(() => {
+      expect(runtimeRemoval.disposeRuntime).toHaveBeenCalled();
+    });
+
+    let sealed = false;
+    const seal = handle.sealAndWait().then(() => {
+      sealed = true;
+    });
+    await Promise.resolve();
+    expect(sealed).toBe(false);
+    const rejected = await request(app)
+      .post('/workspaces')
+      .send({ cwd: runtime.workspaceCwd });
+    expect(rejected.status).toBe(503);
+
+    finishCleanup();
+    expect((await removalResult).status).toBe(200);
+    await seal;
+    expect(sealed).toBe(true);
+  });
+
+  it('finishes sealing when an in-flight removal fails', async () => {
+    const runtime = makeRuntime(REAL_DIR);
+    let failPersistence!: (error: Error) => void;
+    const persistence = new Promise<number>((_resolve, reject) => {
+      failPersistence = reject;
+    });
+    const removeByIds = vi.fn().mockReturnValue(persistence);
+    const { app, handle } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      runtimeRemoval: createRemovalController(),
+      workspaceRegistrationStore: {
+        removeByIds,
+      } as unknown as WorkspaceRegistrationStore,
+    });
+    const removal = request(app).delete(
+      `/workspaces/${encodeURIComponent(runtime.workspaceId)}`,
+    );
+    const removalResult = removal.then((res) => res);
+    await vi.waitFor(() => expect(removeByIds).toHaveBeenCalledOnce());
+
+    let sealed = false;
+    const seal = handle.sealAndWait().then(() => {
+      sealed = true;
+    });
+    await Promise.resolve();
+    expect(sealed).toBe(false);
+
+    failPersistence(new Error('disk full'));
+    const result = await removalResult;
+    expect(result.status).toBe(500);
+    expect(result.body.code).toBe('workspace_persist_failed');
+    await seal;
+    expect(sealed).toBe(true);
+  });
+
+  it('returns a coded error when removal fails before persistence commits', async () => {
+    const runtime = makeRuntime(REAL_DIR);
+    const registry = createMockRegistry([runtime]);
+    vi.mocked(registry.beginDrain).mockImplementationOnce(() => {
+      throw new Error('drain failed');
+    });
+    const { app } = createApp({
+      workspaceRegistry: registry,
+      runtimeRemoval: createRemovalController(),
+    });
+
+    const res = await request(app).delete(
+      `/workspaces/${encodeURIComponent(runtime.workspaceId)}`,
+    );
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('workspace_runtime_removal_failed');
   });
 
   it('rejects removal after workspace management is sealed', async () => {
@@ -852,6 +981,28 @@ describe('persistent workspace registrations', () => {
     });
   });
 
+  it('treats a draining runtime registration as active', async () => {
+    const active = makeRuntime(REAL_DIR);
+    const registry = createMockRegistry([active]);
+    expect(registry.beginDrain(active)).toBe(true);
+    const { app } = createApp({
+      workspaceRegistry: registry,
+      workspaceRegistrationStore: {
+        removeById: vi.fn().mockResolvedValue(true),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app).delete(
+      `/workspace-registrations/${workspaceRegistrationId(REAL_DIR)}`,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      active: true,
+      restartRequired: true,
+    });
+  });
+
   it('returns 404 when a registration does not exist', async () => {
     const { app } = createApp({
       workspaceRegistrationStore: {
@@ -889,5 +1040,36 @@ describe('persistent workspace registrations', () => {
 
     expect(res.status).toBe(500);
     expect(res.body.code).toBe('workspace_registration_store_error');
+  });
+
+  it('waits for an in-flight forget after sealing and rejects another one', async () => {
+    let finishForget!: () => void;
+    const forgetting = new Promise<boolean>((resolve) => {
+      finishForget = () => resolve(true);
+    });
+    const removeById = vi.fn().mockReturnValueOnce(forgetting);
+    const { app, handle } = createApp({
+      workspaceRegistrationStore: {
+        removeById,
+      } as unknown as WorkspaceRegistrationStore,
+    });
+    const first = request(app).delete('/workspace-registrations/first');
+    const firstResult = first.then((res) => res);
+    await vi.waitFor(() => expect(removeById).toHaveBeenCalledOnce());
+
+    let sealed = false;
+    const seal = handle.sealAndWait().then(() => {
+      sealed = true;
+    });
+    await Promise.resolve();
+    expect(sealed).toBe(false);
+    const second = await request(app).delete('/workspace-registrations/second');
+    expect(second.status).toBe(503);
+    expect(second.body.code).toBe('daemon_shutting_down');
+
+    finishForget();
+    expect((await firstResult).status).toBe(200);
+    await seal;
+    expect(sealed).toBe(true);
   });
 });

@@ -16,7 +16,7 @@ Runtime workspace registration and persistent registration are already available
 
 Production daemons advertise `workspace_runtime_removal` when the removal controller is installed. Capability workspace rows add optional `removable`; old clients and daemons remain compatible.
 
-`DELETE /workspaces/:workspace` uses the existing workspace-id-or-canonical-cwd selector and accepts an optional JSON body containing a boolean `force`. Success returns the removed identity, whether force was requested, whether any persistent alias was removed, and the frozen activity snapshot. Existing `DELETE /workspace-registrations/:id` remains forget-only.
+`DELETE /workspaces/:workspace` uses the existing workspace-id-or-canonical-cwd selector and accepts an optional JSON body containing a boolean `force`. Success returns the removed identity, whether force was requested, whether any persistent alias was removed, and the final post-drain activity snapshot. A non-force request that is already observably busy may return an earlier pre-drain snapshot without briefly gating the runtime. Existing `DELETE /workspace-registrations/:id` remains forget-only.
 
 ## Lifecycle
 

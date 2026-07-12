@@ -151,7 +151,6 @@ export function createChannelWorkerGroup(
     workspaceCwd: entry.workspaceCwd,
     primary: entry.primary,
   });
-
   const createEntry = (
     group: ChannelWorkspaceGroup,
   ): ChannelWorkerGroupEntry => {

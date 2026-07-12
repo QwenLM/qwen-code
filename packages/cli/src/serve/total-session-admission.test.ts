@@ -122,4 +122,28 @@ describe('createTotalSessionAdmissionController', () => {
     });
     afterCompletion?.release();
   });
+
+  it('does not let an old reservation erase a replacement runtime count', () => {
+    const admission = createTotalSessionAdmissionController({
+      getBridges: () => [],
+    });
+    const oldReservation = admission.admit({
+      operation: 'resume',
+      workspaceCwd: '/work/a',
+    });
+    admission.beginWorkspaceDrain('/work/a');
+    admission.completeWorkspaceDrain('/work/a');
+    const replacementReservation = admission.admit({
+      operation: 'spawn',
+      workspaceCwd: '/work/a',
+    });
+    if (!oldReservation || !replacementReservation) {
+      throw new Error('expected reservations');
+    }
+
+    oldReservation.release();
+    expect(admission.snapshotForWorkspace('/work/a').inFlight).toBe(1);
+    replacementReservation.release();
+    expect(admission.snapshotForWorkspace('/work/a').inFlight).toBe(0);
+  });
 });

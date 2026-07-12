@@ -3837,6 +3837,19 @@ export async function runQwenServe(
     };
 
     const workspaceRuntimeRemoval = {
+      async runtimeAdded(runtimeAdded: WorkspaceRuntime): Promise<void> {
+        if (!channelWorkerGroup) return;
+        try {
+          await channelWorkerGroup.restoreWorkspace(runtimeAdded.workspaceCwd);
+        } catch (err) {
+          daemonLog.error(
+            'workspace channel worker startup error',
+            err instanceof Error ? err : null,
+          );
+        } finally {
+          writeChannelWorkerPidfile();
+        }
+      },
       beginDrain(runtimeToDrain: WorkspaceRuntime): void {
         totalSessionAdmission.beginWorkspaceDrain(runtimeToDrain.workspaceCwd);
         channelWorkerGroup?.beginWorkspaceDrain(runtimeToDrain.workspaceCwd);

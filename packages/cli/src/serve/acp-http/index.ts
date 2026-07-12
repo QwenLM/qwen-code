@@ -24,8 +24,8 @@ import type {
   WorkspaceRuntime,
 } from '../workspace-registry.js';
 import {
+  resolveManagedWorkspaceRuntimeFromParam,
   resolveRegisteredWorkspaceRuntimeByPathSelector,
-  resolveWorkspaceRuntimeFromParam,
 } from '../workspace-route-runtime.js';
 import {
   ConnectionRegistry,
@@ -1216,7 +1216,11 @@ export function mountAcpHttp(
       });
       return null;
     }
-    const rt = resolveWorkspaceRuntimeFromParam(workspaceRegistry, req, res);
+    const rt = resolveManagedWorkspaceRuntimeFromParam(
+      workspaceRegistry,
+      req,
+      res,
+    );
     if (!rt) return null;
     if (!rt.primary && !rt.trusted) {
       res.status(403).json({

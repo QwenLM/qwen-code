@@ -633,7 +633,7 @@ Non-force removal returns `409 workspace_busy` with an `activity` snapshot when 
 }
 ```
 
-The activity object is the snapshot taken after admission and ACP drain gates close and before cleanup begins. Errors include `400 invalid_force_flag` / `workspace_mismatch`, `409 workspace_busy` / `primary_workspace_removal_forbidden` / `static_workspace_removal_forbidden` / `workspace_removal_in_progress` / `workspace_registration_in_progress`, `500 workspace_persist_failed`, `501 workspace_runtime_removal_unsupported`, and `503 daemon_shutting_down`.
+An immediately busy non-force request returns a fast pre-drain activity snapshot. Once drain starts, the busy or success response contains the final snapshot taken after admission and ACP drain gates close and before cleanup begins. Errors include `400 invalid_force_flag` / `workspace_mismatch`, `409 workspace_busy` / `primary_workspace_removal_forbidden` / `static_workspace_removal_forbidden` / `workspace_removal_in_progress` / `workspace_registration_in_progress`, `500 workspace_persist_failed` / `workspace_runtime_removal_failed`, `501 workspace_runtime_removal_unsupported`, and `503 daemon_shutting_down`.
 
 ### `GET /workspace-registrations`
 

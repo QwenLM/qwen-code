@@ -1058,11 +1058,59 @@ export function WebShellSidebar({
         }
         if (body?.code === 'workspace_removal_in_progress') {
           setWorkspaceRemovalRemoteInProgress(true);
-          try {
-            await workspace.refreshCapabilities?.();
-          } catch {
-            // The other removal operation remains authoritative.
+          for (let attempt = 0; attempt < 20; attempt++) {
+            try {
+              const capabilities = await workspace.refreshCapabilities?.();
+              if (
+                capabilities?.workspaces &&
+                !capabilities.workspaces.some(
+                  (entry) => entry.id === candidate.id,
+                )
+              ) {
+                await reconcileRemovedWorkspace(candidate);
+                return;
+              }
+            } catch {
+              // Retry the authoritative mutation below.
+            }
+            await new Promise((resolve) => window.setTimeout(resolve, 250));
+            try {
+              await workspaceActions.removeWorkspace(candidate.id, { force });
+              await reconcileRemovedWorkspace(candidate);
+              return;
+            } catch (retryError) {
+              if (!(retryError instanceof DaemonHttpError)) {
+                setWorkspaceRemovalRemoteInProgress(false);
+                onError(retryError, t('sidebar.removeWorkspaceError'));
+                return;
+              }
+              const retryBody = retryError.body as
+                | {
+                    code?: unknown;
+                    activity?: DaemonWorkspaceRemovalActivity;
+                  }
+                | undefined;
+              if (retryBody?.code === 'workspace_mismatch') {
+                await reconcileRemovedWorkspace(candidate);
+                return;
+              }
+              if (
+                retryError.status === 409 &&
+                retryBody?.code === 'workspace_busy' &&
+                retryBody.activity
+              ) {
+                setWorkspaceRemovalRemoteInProgress(false);
+                setWorkspaceRemovalActivity(retryBody.activity);
+                return;
+              }
+              if (retryBody?.code !== 'workspace_removal_in_progress') {
+                setWorkspaceRemovalRemoteInProgress(false);
+                onError(retryError, t('sidebar.removeWorkspaceError'));
+                return;
+              }
+            }
           }
+          setWorkspaceRemovalRemoteInProgress(false);
           return;
         }
       }

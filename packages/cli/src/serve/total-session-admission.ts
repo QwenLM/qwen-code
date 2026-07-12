@@ -112,7 +112,6 @@ export function createTotalSessionAdmissionController({
     },
     completeWorkspaceDrain(workspaceCwd) {
       drainingWorkspaces.delete(workspaceCwd);
-      inFlightByWorkspace.delete(workspaceCwd);
     },
   };
 }

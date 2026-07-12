@@ -393,6 +393,64 @@ describe('createChannelWorkerGroup', () => {
     expect(onStateChange).toHaveBeenCalledTimes(2);
   });
 
+  it('stops supervisors again after the group is restarted', async () => {
+    const registry = fakeRegistry([fakeRuntime(PRIMARY, true)]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [{ workspaceCwd: PRIMARY, selection: { mode: 'all' } }],
+      registry,
+      createSupervisor,
+      shared,
+    });
+
+    await group.start();
+    await group.stop();
+    await group.start();
+    await group.stop();
+
+    expect(recorded[0]!.supervisor.start).toHaveBeenCalledTimes(2);
+    expect(recorded[0]!.supervisor.stop).toHaveBeenCalledTimes(2);
+  });
+
+  it('creates a fresh worker and restores webhook routing after re-add', async () => {
+    const runtimes = [
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false, { VERSION: 'old' }),
+    ];
+    const registry = fakeRegistry(runtimes);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+        { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    await group.start();
+    await group.removeWorkspace(SECONDARY);
+    runtimes.splice(1, 1, fakeRuntime(SECONDARY, false, { VERSION: 'new' }));
+
+    await group.restoreWorkspace(SECONDARY);
+    recorded[2]!.supervisor.enqueueWebhookTask.mockResolvedValueOnce({
+      accepted: true,
+    });
+
+    expect(recorded).toHaveLength(3);
+    expect(recorded[2]!.opts.workerBaseEnv).toEqual({ VERSION: 'new' });
+    expect(recorded[2]!.supervisor.start).toHaveBeenCalledOnce();
+    await expect(group.enqueueWebhookTask(webhookTask)).resolves.toEqual({
+      accepted: true,
+    });
+    await group.removeWorkspace(SECONDARY);
+    expect(recorded[2]!.supervisor.stop).toHaveBeenCalledOnce();
+  });
+
   it('does not start later supervisors when the first start fails', async () => {
     const registry = fakeRegistry([
       fakeRuntime(PRIMARY, true),
