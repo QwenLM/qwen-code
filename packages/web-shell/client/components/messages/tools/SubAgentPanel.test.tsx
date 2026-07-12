@@ -152,8 +152,43 @@ describe('SubAgentPanel sub-tool timestamps', () => {
     });
     expect(container.textContent).toContain('Grep');
     expect(container.textContent).toContain('scanning for usages…');
+    // The live stream renders as a <pre>; while running it must be present.
+    expect(container.querySelector('[class*="stream"]')).not.toBeNull();
     // The running flow is uncaptioned — no conclusion exists yet.
     expect(container.textContent).not.toContain('Result');
+  });
+
+  it('renders a completed agent stream text as the conclusion, not the live stream', () => {
+    // The conclusion-first invariant: once complete, subContent is the
+    // conclusion (assistant markdown), never the running <pre> stream.
+    const container = renderPanel({
+      callId: 'agent-1',
+      toolName: 'Task',
+      status: 'completed',
+      subContent: 'the final answer',
+    });
+    const conclusion = container.querySelector(
+      '[data-markdown-source="assistant"]',
+    );
+    expect(conclusion).not.toBeNull();
+    expect(conclusion?.textContent).toContain('the final answer');
+    expect(container.querySelector('[class*="stream"]')).toBeNull();
+  });
+
+  it('always scroll-caps the step list, regardless of compactThinking', () => {
+    // The tabs are gone, so the conclusion renders above the steps; the step
+    // list carries the scroll cap unconditionally (previously compact-only)
+    // so a long list can never push the conclusion off-screen. The test runs
+    // with the default (non-compact) customization.
+    const container = renderPanel({
+      callId: 'agent-1',
+      toolName: 'Task',
+      status: 'completed',
+      subTools: [{ callId: 'sub-1', toolName: 'Grep', status: 'completed' }],
+    });
+    const stepWindow = container.querySelector('[class*="scrollWindow"]');
+    expect(stepWindow).not.toBeNull();
+    expect(stepWindow?.className).toContain('tools');
   });
 
   it('hides non-standard sub-tool summaries until the row is expanded', () => {
