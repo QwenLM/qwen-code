@@ -836,6 +836,11 @@ export class ExtensionStore {
         fsp.stat(this.statePath, { bigint: true }),
         fsp.stat(this.enablementPath, { bigint: true }),
       ]);
+      if (projection.mtimeNs === state.mtimeNs) {
+        throw new ExtensionStoreCorruptError(
+          `Extension store state and projection disagree at the same timestamp in ${this.storeDir}.`,
+        );
+      }
       return projection.mtimeNs > state.mtimeNs;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;

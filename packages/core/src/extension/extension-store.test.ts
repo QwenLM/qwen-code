@@ -329,6 +329,24 @@ describe('ExtensionStore', () => {
     });
   });
 
+  it('fails closed when state and a different V1 projection have equal mtimes', async () => {
+    const store = makeStore();
+    const id = 'e6'.repeat(32);
+    await store.ensureInitialized([{ id, name: 'demo' }]);
+    await store.setDefaultActivation({ id, name: 'demo' }, 'disabled');
+    await fsp.writeFile(enablementPath, '{}');
+    const sameTime = new Date(Math.floor(Date.now() / 1_000) * 1_000);
+    await Promise.all([
+      fsp.utimes(path.join(storeDir, 'state.json'), sameTime, sameTime),
+      fsp.utimes(enablementPath, sameTime, sameTime),
+    ]);
+
+    await expect(
+      store.ensureInitialized([{ id, name: 'demo' }]),
+    ).rejects.toBeInstanceOf(ExtensionStoreCorruptError);
+    expect(JSON.parse(await fsp.readFile(enablementPath, 'utf8'))).toEqual({});
+  });
+
   it('keeps V2 reads available when an older V1 projection cannot be repaired', async () => {
     const store = makeStore();
     const id = 'e5'.repeat(32);
