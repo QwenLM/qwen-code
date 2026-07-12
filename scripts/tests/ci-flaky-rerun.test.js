@@ -71,6 +71,9 @@ function runner() {
     async mainRunSucceeded() {
       return true;
     },
+    async mainHeadSha() {
+      return 'main-head';
+    },
     async failureActionCount() {
       return 0;
     },
@@ -187,6 +190,23 @@ describe('ci flaky rerun patrol', () => {
     ).toMatchObject({ headSha: 'new-head' });
   });
 
+  it('allows the next rerun attempt of the same workflow run', () => {
+    const prior = {
+      body: '<!-- qwen-ci-flaky-rerun v=2 pr=42 head=abc123 run=123 attempt=1 action=rerun key=runner-network-timeout check=E2E%20Tests count=1 -->',
+    };
+    expect(
+      selectTarget(
+        [
+          pr({
+            comments: [prior],
+            statusCheckRollup: [run({ runAttempt: 2 })],
+          }),
+        ],
+        { now: NOW },
+      ),
+    ).toMatchObject({ runId: 123 });
+  });
+
   it('keeps bulk PR scanning light and checks comments after selection', () => {
     expect(script).toContain(
       "'number,isDraft,baseRefName,headRefOid,updatedAt,statusCheckRollup'",
@@ -210,7 +230,6 @@ describe('ci flaky rerun patrol', () => {
     expect(script).toContain('maxCandidates = Infinity');
     expect(script).toContain('if (candidates.length >= maxCandidates) break;');
     expect(script).toContain('const inputs = await writeSkillInputs(');
-    expect(script).not.toContain('target = {\n      ...candidate,');
   });
 
   it('can rank candidates before fetching comments', () => {
@@ -277,7 +296,10 @@ describe('ci flaky rerun patrol', () => {
   it('counts matching failures across PR head changes', async () => {
     const client = runner();
     client.failureActionCount = async () => 2;
-    const target = selectTarget([pr()], { now: NOW });
+    const target = {
+      ...selectTarget([pr()], { now: NOW }),
+      failureKey: 'runner-network-timeout',
+    };
 
     await actOnDecision(client, target, {
       action: 'rerun',
@@ -310,7 +332,7 @@ describe('ci flaky rerun patrol', () => {
     const client = runner();
     const target = selectTarget([pr()], { now: NOW });
     const marker =
-      '<!-- qwen-ci-flaky-rerun v=2 pr=42 head=abc123 run=120 action=rerun key=runner-network-timeout check=E2E%20Tests count=2 -->';
+      '<!-- qwen-ci-flaky-rerun v=2 pr=42 head=abc123 run=120 attempt=1 action=rerun key=runner-network-timeout check=E2E%20Tests count=2 -->';
     const resetPr = pr({
       statusCheckRollup: [
         run({
@@ -454,6 +476,26 @@ describe('ci flaky rerun patrol', () => {
       confidence: 'high',
       reason_en: 'This branch needs current main CI configuration.',
       reason_zh: '该分支需要同步 main 的 CI 配置。',
+    });
+
+    expect(client.calls).toEqual([]);
+  });
+
+  it('does not update a branch when main advanced after classification', async () => {
+    const client = runner();
+    client.mainHeadSha = async () => 'new-main-head';
+    const target = {
+      ...selectTarget([pr()], { now: NOW }),
+      mainHeadSha: 'main-head',
+      mainRunId: 456,
+    };
+
+    await actOnDecision(client, target, {
+      action: 'update_branch',
+      confidence: 'high',
+      mainRunId: 456,
+      reason_en: 'main contains the needed CI fix',
+      reason_zh: 'main 包含所需的 CI 修复。',
     });
 
     expect(client.calls).toEqual([]);

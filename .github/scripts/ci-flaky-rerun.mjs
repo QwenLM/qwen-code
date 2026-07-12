@@ -10,6 +10,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
+import { createHash } from 'node:crypto';
 
 const execFile = promisify(execFileCallback);
 const DEFAULT_STALE_MINUTES = 30;
@@ -35,7 +36,7 @@ function jobIdFromUrl(url) {
 
 function markerFor(target, action, failureKey, count) {
   const check = encodeURIComponent(target.workflowName);
-  return `<!-- ${MARKER} v=2 pr=${target.prNumber} head=${target.headSha} run=${target.runId} action=${action} key=${failureKey} check=${check} count=${count} -->`;
+  return `<!-- ${MARKER} v=2 pr=${target.prNumber} head=${target.headSha} run=${target.runId} attempt=${target.runAttempt ?? 1} action=${action} key=${failureKey} check=${check} count=${count} -->`;
 }
 
 function markerComments(pr, options = {}) {
@@ -47,11 +48,15 @@ function markerComments(pr, options = {}) {
 }
 
 function alreadyHandled(pr, target, options) {
-  const pattern = new RegExp(
-    `<!-- ${MARKER} v=\\d+ pr=${target.prNumber} head=${target.headSha} run=${target.runId}(?: | )`,
+  const attemptPattern = new RegExp(
+    `<!-- ${MARKER} v=2 pr=${target.prNumber} head=${target.headSha} run=${target.runId} attempt=${target.runAttempt ?? 1}(?: | )`,
+  );
+  const legacyPattern = new RegExp(
+    `<!-- ${MARKER} v=1 pr=${target.prNumber} head=${target.headSha} run=${target.runId}(?: | )`,
   );
   return markerComments(pr, options).some((comment) =>
-    pattern.test(String(comment.body ?? '')),
+    attemptPattern.test(String(comment.body ?? '')) ||
+    legacyPattern.test(String(comment.body ?? '')),
   );
 }
 
@@ -63,15 +68,23 @@ function canAct(pr, target, options) {
   return !alreadyHandled(pr, target, options);
 }
 
-function failureKey(decision) {
-  return /^[a-z0-9][a-z0-9._-]{0,79}$/.test(decision?.failureKey ?? '')
-    ? decision.failureKey
-    : 'unknown';
+function failureKey(target, decision) {
+  if (!target.failureKey) return 'unknown';
+  return decision?.failureKey === target.failureKey ? target.failureKey : null;
+}
+
+function fingerprint(target, log) {
+  const normalized = log
+    .toLowerCase()
+    .replace(/\d+/g, '#')
+    .replace(/[a-f0-9]{8,}/g, '#')
+    .slice(0, 1000);
+  return `check-${createHash('sha256').update(`${target.workflowName}\n${normalized}`).digest('hex').slice(0, 16)}`;
 }
 
 function stateMarkers(comments, prNumber) {
   const marker = new RegExp(
-    `<!-- ${MARKER} v=2 pr=${prNumber} head=(\\S+) run=(\\d+) action=(\\S+) key=([a-z0-9._-]+) check=(\\S+) count=(\\d+) -->`,
+    `<!-- ${MARKER} v=2 pr=${prNumber} head=(\\S+) run=(\\d+) attempt=(\\d+) action=(\\S+) key=([a-z0-9._-]+) check=(\\S+) count=(\\d+) -->`,
   );
   return comments
     .filter((comment) =>
@@ -85,10 +98,11 @@ function stateMarkers(comments, prNumber) {
       return {
         headSha: match[1],
         runId: Number(match[2]),
-        action: match[3],
-        key: match[4],
-        check: decodeURIComponent(match[5]),
-        count: Number(match[6]),
+        runAttempt: Number(match[3]),
+        action: match[4],
+        key: match[5],
+        check: decodeURIComponent(match[6]),
+        count: Number(match[7]),
         createdAt: comment.createdAt,
       };
     })
@@ -149,6 +163,7 @@ function toTarget(pr, run) {
     prNumber: pr.number,
     headSha: pr.headRefOid,
     runId,
+    runAttempt: run.runAttempt ?? 1,
     jobId: jobIdFromUrl(run.detailsUrl),
     workflowName: run.name,
     detailsUrl: run.detailsUrl,
@@ -200,7 +215,8 @@ export async function actOnDecision(client, target, decision) {
   if (!['rerun', 'update_branch', 'comment'].includes(decision.action)) return;
   if ((await client.currentHeadSha(target.prNumber)) !== target.headSha) return;
   if (!(await client.isCurrentFailure(target))) return;
-  const key = failureKey(decision);
+  const key = failureKey(target, decision);
+  if (!key) return;
   const actionCount = await client.failureActionCount(target.prNumber, key);
   if (actionCount >= MAX_ACTIONS_PER_HEAD) return;
   const nextTarget = { ...target, actionCount };
@@ -221,6 +237,12 @@ export async function actOnDecision(client, target, decision) {
   if (decision.action === 'update_branch') {
     if ((await client.behindBy(target.headSha)) <= 0) return;
     if (!Number.isSafeInteger(decision.mainRunId)) return;
+    if (
+      target.mainHeadSha &&
+      (decision.mainRunId !== target.mainRunId ||
+        (await client.mainHeadSha()) !== target.mainHeadSha)
+    )
+      return;
     if (!(await client.mainRunSucceeded(decision.mainRunId))) return;
     await client.updateBranch(target.prNumber, target.headSha);
     await client.comment(
@@ -313,6 +335,10 @@ export async function writeSkillInputs(
             ? ''
             : skillLog(await client.jobLog(target.jobId)),
       });
+      candidates.at(-1).failureKey = fingerprint(
+        target,
+        candidates.at(-1).log,
+      );
       if (candidates.length >= maxCandidates) break;
     } catch {
       // Expired Actions logs cannot be classified safely; try the next PR.
@@ -438,7 +464,21 @@ class GhClient {
     return (
       run.status === 'completed' &&
       run.conclusion === 'failure' &&
-      run.head_sha === target.headSha
+      run.head_sha === target.headSha &&
+      run.run_attempt === target.runAttempt
+    );
+  }
+
+  async runAttempt(runId) {
+    return Number(
+      (
+        await this.gh([
+          'api',
+          `repos/${this.repo}/actions/runs/${runId}`,
+          '--jq',
+          '.run_attempt',
+        ])
+      ).trim(),
     );
   }
 
@@ -451,6 +491,42 @@ class GhClient {
       run.status === 'completed' &&
       run.conclusion === 'success'
     );
+  }
+
+  async mainHeadSha() {
+    return (
+      await this.gh([
+        'api',
+        `repos/${this.repo}/commits/main`,
+        '--jq',
+        '.sha',
+      ])
+    ).trim();
+  }
+
+  async mainEvidence() {
+    const headSha = await this.mainHeadSha();
+    const runs = JSON.parse(
+      await this.gh([
+        'run',
+        'list',
+        '--repo',
+        this.repo,
+        '--branch',
+        'main',
+        '--status',
+        'success',
+        '--limit',
+        '30',
+        '--json',
+        'databaseId,headSha,conclusion',
+      ]),
+    );
+    const run = runs.find(
+      (candidate) =>
+        candidate.headSha === headSha && candidate.conclusion === 'success',
+    );
+    return run ? { mainHeadSha: headSha, mainRunId: run.databaseId } : {};
   }
 
   async behindBy(headSha) {
@@ -525,15 +601,21 @@ async function scan(args) {
   const maxCandidates =
     Number.isSafeInteger(requestedMax) && requestedMax > 0
       ? requestedMax
-      : DEFAULT_MAX_CANDIDATES_PER_RUN;
+       : DEFAULT_MAX_CANDIDATES_PER_RUN;
+  const mainEvidence = await client.mainEvidence();
   const targets = [];
   for (const candidate of candidates) {
     const pr = prs.find((item) => item.number === candidate.prNumber);
-    const comments = await client.comments(candidate.prNumber);
-    if (!canAct({ ...pr, comments }, candidate, options)) continue;
-    targets.push({
+    const target = {
       ...candidate,
-      behindBy: await client.behindBy(candidate.headSha),
+      runAttempt: await client.runAttempt(candidate.runId),
+    };
+    const comments = await client.comments(candidate.prNumber);
+    if (!canAct({ ...pr, comments }, target, options)) continue;
+    targets.push({
+      ...target,
+      behindBy: await client.behindBy(target.headSha),
+      ...mainEvidence,
     });
   }
   const inputs = await writeSkillInputs(
