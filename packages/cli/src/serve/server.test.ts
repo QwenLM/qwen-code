@@ -10351,6 +10351,7 @@ describe('createServeApp', () => {
           replaced: false,
           partial: false,
           state,
+          created: true,
         };
       });
       const app = createServeApp(tokenOpts, undefined, {
@@ -10376,6 +10377,7 @@ describe('createServeApp', () => {
         },
       });
       expect(response.status).toBe(201);
+      expect(response.body).not.toHaveProperty('created');
       expect(setSelection).toHaveBeenCalledWith({
         mode: 'names',
         names: ['discord', 'telegram'],

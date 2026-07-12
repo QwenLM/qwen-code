@@ -36,6 +36,8 @@ export interface ChannelWorkerSetResult {
   replaced: boolean;
   partial: boolean;
   state: ChannelWorkerControlState;
+  /** Internal HTTP status hint; omitted from the response body. */
+  created?: boolean;
 }
 
 export interface ChannelWorkerStopResult {
@@ -238,6 +240,7 @@ export function createChannelWorkerManager(
     selection: ServeChannelSelection,
     initial: boolean,
   ): Promise<ChannelWorkerSetResult> => {
+    const enabling = !snapshot().enabled;
     const replacing = committedSelection !== undefined;
     const sameSelection = selectionsEqual(committedSelection, selection);
     if (sameSelection && group?.isHealthy()) {
@@ -246,6 +249,7 @@ export function createChannelWorkerManager(
         replaced: false,
         partial: isPartial(group.snapshots()),
         state: snapshot(),
+        created: false,
       };
     }
 
@@ -320,6 +324,7 @@ export function createChannelWorkerManager(
         replaced: false,
         partial: isPartial(candidate.snapshots()),
         state: snapshot(),
+        created: enabling,
       };
     }
 
@@ -333,6 +338,7 @@ export function createChannelWorkerManager(
         replaced: !sameSelection,
         partial: isPartial(result.workers),
         state: snapshot(),
+        created: enabling,
       };
     } catch (error) {
       setTransition('idle');

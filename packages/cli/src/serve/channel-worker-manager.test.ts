@@ -47,7 +47,6 @@ function fakeGroup(
   return {
     start: vi.fn(async () => {}),
     stop: vi.fn(async () => {}),
-    restart: vi.fn(async () => snapshots),
     reconcile: vi.fn(async () => ({ changed: true, workers: snapshots })),
     isHealthy: vi.fn(() =>
       snapshots.every((worker) => worker.state === 'running'),
@@ -97,8 +96,16 @@ describe('createChannelWorkerManager', () => {
     const enabled = await test.manager.setSelection(selection);
     const unchanged = await test.manager.setSelection(selection);
 
-    expect(enabled).toMatchObject({ changed: true, replaced: false });
-    expect(unchanged).toMatchObject({ changed: false, replaced: false });
+    expect(enabled).toMatchObject({
+      changed: true,
+      replaced: false,
+      created: true,
+    });
+    expect(unchanged).toMatchObject({
+      changed: false,
+      replaced: false,
+      created: false,
+    });
     expect(test.reserveLease).toHaveBeenCalledTimes(1);
     expect(test.group.start).toHaveBeenCalledTimes(1);
     expect(test.group.reconcile).not.toHaveBeenCalled();
@@ -107,6 +114,31 @@ describe('createChannelWorkerManager', () => {
       selection,
       transition: 'idle',
     });
+  });
+
+  it('marks only the first concurrent enable as created', async () => {
+    let releaseStart!: () => void;
+    const group = fakeGroup({
+      start: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseStart = resolve;
+          }),
+      ),
+    });
+    const test = setup(group);
+    const selection: ServeChannelSelection = {
+      mode: 'names',
+      names: ['telegram'],
+    };
+
+    const first = test.manager.setSelection(selection);
+    const second = test.manager.setSelection(selection);
+    await vi.waitFor(() => expect(group.start).toHaveBeenCalledTimes(1));
+    releaseStart();
+
+    await expect(first).resolves.toMatchObject({ created: true });
+    await expect(second).resolves.toMatchObject({ created: false });
   });
 
   it('reports partial readiness without treating it as a failed enable', async () => {

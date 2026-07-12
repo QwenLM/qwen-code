@@ -55,8 +55,6 @@ export class ChannelWorkerReconcileError extends Error {
 export interface ChannelWorkerGroup {
   start(): Promise<void>;
   stop(): Promise<void>;
-  /** On rejection, all supervisors are stopped; call again to retry. */
-  restart(): Promise<ChannelWorkerGroupSnapshot[]>;
   reconcile(
     groups: readonly ChannelWorkspaceGroup[],
     options?: { force?: boolean; onRollingBack?: () => void },
@@ -128,7 +126,6 @@ export function createChannelWorkerGroup(
   let generation = 0;
   let entries = new Map<string, ChannelWorkerGroupEntry>();
   const pendingGenerations = new Map<string, number>();
-  let restartInFlight: Promise<ChannelWorkerGroupSnapshot[]> | undefined;
   let reconciling: Promise<ChannelWorkerGroupReconcileResult> | undefined;
   let stopping = false;
 
@@ -268,14 +265,6 @@ export function createChannelWorkerGroup(
     }
   };
 
-  const stopEntries = async (
-    entriesToStop: readonly ChannelWorkerGroupEntry[],
-  ): Promise<void> => {
-    for (const entry of entriesToStop) {
-      await stopEntry(entry);
-    }
-  };
-
   const startEntries = async (
     entriesToStart: readonly ChannelWorkerGroupEntry[],
   ): Promise<void> => {
@@ -288,6 +277,18 @@ export function createChannelWorkerGroup(
     entriesToStop: readonly ChannelWorkerGroupEntry[],
   ): Promise<void> => {
     await Promise.allSettled(entriesToStop.map((entry) => stopEntry(entry)));
+  };
+
+  const stopAllEntries = async (
+    entriesToStop: readonly ChannelWorkerGroupEntry[],
+  ): Promise<void> => {
+    const results = await Promise.allSettled(
+      entriesToStop.map((entry) => stopEntry(entry)),
+    );
+    const failure = results.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (failure) throw failure.reason;
   };
 
   const stopEntriesForRollback = async (
@@ -361,28 +362,8 @@ export function createChannelWorkerGroup(
     },
     async stop() {
       stopping = true;
-      await restartInFlight?.catch(() => {});
       await reconciling?.catch(() => {});
-      await stopEntries([...entries.values()]);
-    },
-    restart() {
-      if (stopping) {
-        return Promise.reject(new Error('Channel worker group is stopping.'));
-      }
-      restartInFlight ??= (async () => {
-        try {
-          for (const entry of entries.values()) {
-            await entry.supervisor.restart();
-          }
-          return entrySnapshots();
-        } catch (error) {
-          await stopEntriesBestEffort([...entries.values()]);
-          throw error;
-        } finally {
-          restartInFlight = undefined;
-        }
-      })();
-      return restartInFlight;
+      await stopAllEntries([...entries.values()]);
     },
     reconcile(targetGroups, reconcileOptions) {
       if (stopping) {

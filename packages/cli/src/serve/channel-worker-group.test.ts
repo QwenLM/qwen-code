@@ -390,7 +390,7 @@ describe('createChannelWorkerGroup', () => {
     expect(recorded[0]!.supervisor.stop).toHaveBeenCalledTimes(1);
   });
 
-  it('coalesces concurrent group restarts', async () => {
+  it('attempts to stop every supervisor before reporting a stop failure', async () => {
     const registry = fakeRegistry([
       fakeRuntime(PRIMARY, true),
       fakeRuntime(SECONDARY, false),
@@ -407,87 +407,14 @@ describe('createChannelWorkerGroup', () => {
       createSupervisor,
       shared,
     });
-    let release!: () => void;
-    recorded[0]!.supervisor.restart.mockImplementationOnce(
-      () =>
-        new Promise<ChannelWorkerSnapshot>((resolve) => {
-          release = () => resolve(snapshot({ channels: ['a'] }));
-        }),
+    recorded[0]!.supervisor.stop.mockRejectedValueOnce(
+      new Error('primary stop failed'),
     );
 
-    const first = group.restart();
-    const second = group.restart();
-    release();
-    const [firstResult, secondResult] = await Promise.all([first, second]);
-
-    expect(firstResult).toBe(secondResult);
-
-    for (const entry of recorded) {
-      expect(entry.supervisor.restart).toHaveBeenCalledTimes(1);
-    }
-  });
-
-  it('waits for an in-flight restart before stopping supervisors', async () => {
-    const registry = fakeRegistry([fakeRuntime(PRIMARY, true)]);
-    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
-      snapshot({}),
-    );
-    const group = createChannelWorkerGroup({
-      groups: [
-        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
-      ],
-      registry,
-      createSupervisor,
-      shared,
-    });
-    let release!: () => void;
-    recorded[0]!.supervisor.restart.mockImplementationOnce(
-      () =>
-        new Promise<ChannelWorkerSnapshot>((resolve) => {
-          release = () => resolve(snapshot({ channels: ['a'] }));
-        }),
-    );
-
-    const restart = group.restart();
-    const stop = group.stop();
-    await Promise.resolve();
-    expect(recorded[0]!.supervisor.stop).not.toHaveBeenCalled();
-
-    release();
-    await Promise.all([restart, stop]);
-    expect(recorded[0]!.supervisor.stop).toHaveBeenCalledTimes(1);
-  });
-
-  it('stops every supervisor on partial restart failure and later recovers', async () => {
-    const registry = fakeRegistry([
-      fakeRuntime(PRIMARY, true),
-      fakeRuntime(SECONDARY, false),
-    ]);
-    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
-      snapshot({}),
-    );
-    const group = createChannelWorkerGroup({
-      groups: [
-        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
-        { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
-      ],
-      registry,
-      createSupervisor,
-      shared,
-    });
-    recorded[1]!.supervisor.restart.mockRejectedValueOnce(
-      new Error('secondary reload failed'),
-    );
-
-    await expect(group.restart()).rejects.toThrow('secondary reload failed');
+    await expect(group.stop()).rejects.toThrow('primary stop failed');
 
     for (const entry of recorded) {
       expect(entry.supervisor.stop).toHaveBeenCalledTimes(1);
-    }
-
-    await expect(group.restart()).resolves.toHaveLength(2);
-    for (const entry of recorded) {
-      expect(entry.supervisor.restart).toHaveBeenCalledTimes(2);
     }
   });
 

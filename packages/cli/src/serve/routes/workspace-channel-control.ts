@@ -180,14 +180,10 @@ export function registerWorkspaceChannelControlRoutes(
         if (!parseClient(req, res)) return;
         const selection = parseSelection(deps.safeBody(req), res);
         if (!selection) return;
-        const wasEnabled = deps.getChannelWorkerControl().enabled;
         try {
           const result = await deps.setChannelWorkerSelection!(selection);
-          res
-            .status(
-              !wasEnabled && result.changed && !result.replaced ? 201 : 200,
-            )
-            .json(result);
+          const { created, ...response } = result;
+          res.status(created === true ? 201 : 200).json(response);
         } catch (error) {
           if (
             sendChannelControlError(res, error, deps.getChannelWorkerControl)
