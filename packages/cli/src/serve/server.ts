@@ -169,6 +169,11 @@ import {
 import { registerWorkspaceManagementRoutes } from './routes/workspace-management.js';
 import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
 import {
+  registerWorkspaceGitRoutes,
+  registerWorkspaceQualifiedGitRoutes,
+} from './routes/workspace-git.js';
+import { WorkspaceGitState } from './workspace-git-state.js';
+import {
   registerWorkspaceMcpControlRoutes,
   registerWorkspaceQualifiedMcpControlRoutes,
 } from './routes/workspace-mcp-control.js';
@@ -803,6 +808,9 @@ export function createServeApp(
   const primaryBridge = primaryRuntime.bridge;
   const primaryWorkspace = primaryRuntime.workspaceService;
   const primaryRouteFileSystemFactory = primaryRuntime.routeFileSystemFactory;
+  const workspaceGitState = new WorkspaceGitState();
+  (app.locals as { stopWorkspaceGitState?: () => void }).stopWorkspaceGitState =
+    () => workspaceGitState.dispose();
   const workspaceQualifiedAcpEnabled = resolveAcpHttpEnabled();
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
@@ -1000,6 +1008,17 @@ export function createServeApp(
   });
   registerWorkspaceQualifiedStatusRoutes(app, {
     workspaceRegistry,
+    sendBridgeError,
+  });
+  registerWorkspaceGitRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
+    gitState: workspaceGitState,
+    sendBridgeError,
+  });
+  registerWorkspaceQualifiedGitRoutes(app, {
+    workspaceRegistry,
+    gitState: workspaceGitState,
     sendBridgeError,
   });
 
