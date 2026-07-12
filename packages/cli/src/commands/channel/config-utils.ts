@@ -4,7 +4,7 @@ import type {
   ChannelWebhookSourceConfig,
   ChannelWebhookTargetConfig,
 } from '@qwen-code/channel-base';
-import { resolvePath } from '@qwen-code/channel-base';
+import { resolveChannelCwd } from './channel-cwd.js';
 import { getPlugin, supportedTypes } from './channel-registry.js';
 
 const ENV_VAR_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
@@ -450,7 +450,7 @@ export async function parseChannelConfig(
     allowedUsers: (rawConfig['allowedUsers'] as string[]) || [],
     sessionScope:
       (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) || 'user',
-    cwd: resolvePath((rawConfig['cwd'] as string) || defaultCwd),
+    cwd: resolveChannelCwd(rawConfig['cwd'] as string | undefined, defaultCwd),
     approvalMode: parseApprovalModeConfig(name, rawConfig),
     instructions: rawConfig['instructions'] as string | undefined,
     identity: parseObjectStringFields(name, rawConfig, 'identity', [

@@ -7,6 +7,7 @@
 import { useState, useCallback } from 'react';
 import {
   SessionService,
+  buildSessionRecoveryPlan,
   type Config,
   type SessionListItem,
 } from '@qwen-code/qwen-code-core';
@@ -120,6 +121,11 @@ export function useResumeCommand(
         const customTitle = sessionService.getSessionTitle(sessionId);
 
         // Build UI history items.
+        const recoveryPlan = buildSessionRecoveryPlan({
+          sessionId,
+          conversation: sessionData.conversation,
+          historyGaps: sessionData.historyGaps,
+        });
         const rawItems = buildResumedHistoryItems(sessionData, config);
         const collapseOnResume =
           settings.merged.ui?.history?.collapseOnResume ?? false;
@@ -131,6 +137,18 @@ export function useResumeCommand(
           collapseOnResume,
           collapsePreviewCount,
         );
+        if (
+          recoveryPlan.kind !== 'clean' &&
+          recoveryPlan.kind !== 'degraded_history' &&
+          recoveryPlan.visibleNotice
+        ) {
+          const nextId = (uiHistoryItems.at(-1)?.id ?? 0) + 1;
+          uiHistoryItems.push({
+            id: nextId,
+            type: MessageType.INFO,
+            text: recoveryPlan.visibleNotice,
+          });
+        }
 
         // 1. Swap core first. Matches useBranchCommand's core-before-UI
         //    pattern: if anything fails between core swap and UI swap,

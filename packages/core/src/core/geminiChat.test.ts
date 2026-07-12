@@ -238,6 +238,25 @@ describe('GeminiChat', async () => {
     return collecting;
   }
 
+  function streamResponse(
+    response: GenerateContentResponse,
+  ): AsyncGenerator<GenerateContentResponse> {
+    return (async function* () {
+      yield response;
+    })();
+  }
+
+  function stopResponse(parts: Part[]): GenerateContentResponse {
+    return {
+      candidates: [
+        {
+          content: { parts },
+          finishReason: 'STOP',
+        },
+      ],
+    } as unknown as GenerateContentResponse;
+  }
+
   describe('system instruction helpers', () => {
     it('replaces prior session-start context instead of appending indefinitely', () => {
       const isolatedChat = new GeminiChat(
@@ -4607,12 +4626,20 @@ describe('GeminiChat', async () => {
         );
         await expectStreamExhaustion(stream);
 
-        // Should be called 3 times (1 initial + 2 transient retries)
+        // Should be called 5 times (1 initial + 4 transient retries)
         expect(
           mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledTimes(3);
-        expect(mockLogContentRetry).toHaveBeenCalledTimes(2);
+        ).toHaveBeenCalledTimes(5);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(4);
         expect(mockLogContentRetryFailure).toHaveBeenCalledTimes(1);
+        expect(mockLogContentRetryFailure).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            total_attempts: 5,
+            final_error_type: 'NO_FINISH_REASON',
+            model: 'test-model',
+          }),
+        );
 
         // History should still contain the user message.
         const history = chat.getHistory();
@@ -4626,9 +4653,237 @@ describe('GeminiChat', async () => {
       }
     });
 
-    it('should retry usage-only empty streams and succeed on a later attempt', async () => {
+    it('should recover after four consecutive invalid streams', async () => {
       vi.useFakeTimers();
       try {
+        let callCount = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => {
+          callCount++;
+          if (callCount <= 4) {
+            return (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: { parts: [] },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })();
+          }
+
+          return (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: { parts: [{ text: 'Recovered response' }] },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })();
+        });
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-four-invalid-streams',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 25_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(5);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(4);
+        for (const [index, retryDelayMs] of [
+          2000, 4000, 6000, 8000,
+        ].entries()) {
+          expect(mockLogContentRetry).toHaveBeenNthCalledWith(
+            index + 1,
+            mockConfig,
+            expect.objectContaining({
+              attempt_number: index,
+              error_type: 'NO_RESPONSE_TEXT',
+              retry_delay_ms: retryDelayMs,
+              model: 'test-model',
+            }),
+          );
+        }
+        expect(mockLogContentRetryFailure).not.toHaveBeenCalled();
+        expect(
+          events.some(
+            (event) =>
+              event.type === StreamEventType.CHUNK &&
+              event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Recovered response',
+          ),
+        ).toBe(true);
+        expect(chat.getHistory()).toEqual([
+          { role: 'user', parts: [{ text: 'test' }] },
+          { role: 'model', parts: [{ text: 'Recovered response' }] },
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should keep protocol tag leak retries at the existing budget', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () =>
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        text: '<analysis>hidden</analysis><summary>leaked</summary>',
+                      },
+                    ],
+                  },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })(),
+        );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-protocol-leak-budget',
+        );
+        await expectStreamExhaustion(stream);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(3);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(2);
+        expect(mockLogContentRetryFailure).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            total_attempts: 3,
+            final_error_type: 'PROTOCOL_TAG_LEAK',
+            model: 'test-model',
+          }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps invalid stream retry budgets independent across error types', async () => {
+      vi.useFakeTimers();
+      try {
+        let callCount = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => {
+          callCount++;
+          if (callCount <= 2) {
+            return streamResponse(stopResponse([]));
+          }
+          if (callCount === 3) {
+            return streamResponse(
+              stopResponse([
+                {
+                  text: '<analysis>hidden</analysis><summary>leaked</summary>',
+                },
+              ]),
+            );
+          }
+
+          return streamResponse(stopResponse([{ text: 'Recovered response' }]));
+        });
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-mixed-invalid-streams',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 15_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(4);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(3);
+        expect(mockLogContentRetry).toHaveBeenLastCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            attempt_number: 0,
+            error_type: 'PROTOCOL_TAG_LEAK',
+            retry_delay_ms: 2000,
+            model: 'test-model',
+          }),
+        );
+        expect(
+          events.some(
+            (event) =>
+              event.type === StreamEventType.CHUNK &&
+              event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Recovered response',
+          ),
+        ).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('surfaces an abort fired during the invalid-stream retry delay without retrying again', async () => {
+      vi.useFakeTimers();
+      try {
+        const abortController = new AbortController();
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => streamResponse(stopResponse([])));
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test', config: { abortSignal: abortController.signal } },
+          'prompt-id-invalid-stream-abort-delay',
+        );
+
+        const iterator = stream[Symbol.asyncIterator]();
+        let next = await iterator.next();
+        while (!next.done && next.value.type !== StreamEventType.RETRY) {
+          next = await iterator.next();
+        }
+        if (next.done) {
+          throw new Error('Expected invalid stream retry event.');
+        }
+        expect(next.value.type).toBe(StreamEventType.RETRY);
+
+        const nextPromise = iterator.next();
+        abortController.abort();
+        await expect(nextPromise).rejects.toThrow();
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should retry usage-only empty streams without recording failed attempts', async () => {
+      vi.useFakeTimers();
+      try {
+        const recordAssistantTurn = vi.fn();
+        const chatWithRecording = new GeminiChat(
+          mockConfig,
+          config,
+          [],
+          {
+            recordAssistantTurn,
+            recordChatCompression: vi.fn(),
+          } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+          uiTelemetryService,
+        );
         vi.mocked(mockContentGenerator.generateContentStream)
           .mockImplementationOnce(async () =>
             (async function* () {
@@ -4656,7 +4911,7 @@ describe('GeminiChat', async () => {
             })(),
           );
 
-        const stream = await chat.sendMessageStream(
+        const stream = await chatWithRecording.sendMessageStream(
           'test-model',
           { message: 'test' },
           'prompt-id-empty-usage-retry',
@@ -4667,6 +4922,10 @@ describe('GeminiChat', async () => {
           mockContentGenerator.generateContentStream,
         ).toHaveBeenCalledTimes(2);
         expect(mockLogContentRetry).toHaveBeenCalledTimes(1);
+        expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+        expect(recordAssistantTurn.mock.calls[0]?.[0].message).toEqual([
+          { text: 'Recovered after empty stream' },
+        ]);
         expect(
           events.some(
             (e) =>
@@ -7229,6 +7488,128 @@ describe('GeminiChat', async () => {
     expect(chat.getLastModelMessageText()).toBe(response);
   });
 
+  it('retries a protocol-tagged turn even when the leaked attempt also contains a tool call', async () => {
+    vi.useFakeTimers();
+    try {
+      const recordAssistantTurn = vi.fn();
+      const chatWithRecording = new GeminiChat(
+        mockConfig,
+        config,
+        [],
+        {
+          recordAssistantTurn,
+          recordChatCompression: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      chatWithRecording.setHistory([
+        { role: 'user', parts: [{ text: 'earlier user turn' }] },
+        { role: 'model', parts: [{ text: 'earlier model turn' }] },
+      ]);
+
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockImplementationOnce(async () =>
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [{ text: '<ana' }],
+                  },
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        text:
+                          'lysis>failed scratch</analysis>' +
+                          '<summary>FAILED_ATTEMPT_SHOULD_BE_DISCARDED</summary>',
+                      },
+                      {
+                        functionCall: {
+                          id: 'call_protocol_leak_should_retry',
+                          name: 'read_file',
+                          args: { path: '/tmp/leaked.txt' },
+                        },
+                      },
+                    ],
+                  },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })(),
+        )
+        .mockImplementationOnce(async () =>
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [{ text: 'Successful final response' }],
+                  },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })(),
+        );
+
+      const stream = await chatWithRecording.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-protocol-leak-tool-call',
+      );
+      const events: StreamEvent[] = [];
+      const iterator = stream[Symbol.asyncIterator]();
+      for (;;) {
+        const next = iterator.next();
+        await vi.advanceTimersByTimeAsync(5_000);
+        const result = await next;
+        if (result.done) break;
+        events.push(result.value);
+      }
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+        true,
+      );
+      const emittedParts = events
+        .filter((event) => event.type === StreamEventType.CHUNK)
+        .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? []);
+      expect(emittedParts.some((part) => part.functionCall)).toBe(false);
+      const emittedText = emittedParts.map((part) => part.text ?? '').join('');
+      expect(emittedText).toBe('Successful final response');
+      expect(chatWithRecording.getLastModelMessageText()).toBe(
+        'Successful final response',
+      );
+
+      const history = chatWithRecording.getHistory();
+      expect(history).toEqual([
+        { role: 'user', parts: [{ text: 'earlier user turn' }] },
+        { role: 'model', parts: [{ text: 'earlier model turn' }] },
+        { role: 'user', parts: [{ text: 'test' }] },
+        { role: 'model', parts: [{ text: 'Successful final response' }] },
+      ]);
+      expect(
+        history.some((turn) => turn.parts?.some((part) => part.functionCall)),
+      ).toBe(false);
+
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordAssistantTurn.mock.calls[0]?.[0].message).toEqual([
+        { text: 'Successful final response' },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   describe('stripThoughtsFromHistory', () => {
     it('should strip thought parts from history and drop thought-only entries', () => {
       chat.setHistory([
@@ -8213,6 +8594,25 @@ describe('GeminiChat', async () => {
       })();
     }
 
+    function invalidStream(
+      type: 'NO_FINISH_REASON' | 'PROTOCOL_TAG_LEAK',
+    ): AsyncGenerator<GenerateContentResponse> {
+      return {
+        [Symbol.asyncIterator]() {
+          return this;
+        },
+        async next() {
+          throw new InvalidStreamError('Invalid continuation stream.', type);
+        },
+        async return() {
+          return { done: true, value: undefined };
+        },
+        async throw(error?: unknown) {
+          throw error;
+        },
+      } as AsyncGenerator<GenerateContentResponse>;
+    }
+
     it('re-clamps maxOutputTokens on each recovery send as the prompt grows (window invariant)', async () => {
       // The #5950 shape at recovery time: 131,072 window, 71,349 prompt,
       // 64K-ceiling model. Initial clamp grants 49,722. The response
@@ -8408,6 +8808,77 @@ describe('GeminiChat', async () => {
       );
     });
 
+    it('retries protocol-tag leaks during max-tokens escalation', async () => {
+      vi.useFakeTimers();
+      try {
+        const streams = [
+          makeStream([makeChunk([{ text: 'Hello' }], 'MAX_TOKENS')]),
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [{ text: '<ana' }],
+                  },
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        text:
+                          'lysis>discard escalated attempt</analysis>' +
+                          '<summary>DISCARD_ESCALATED_ATTEMPT</summary>',
+                      },
+                    ],
+                  },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })(),
+          makeStream([makeChunk([{ text: 'Hello world' }], 'STOP')]),
+        ];
+        let callIndex = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => streams[callIndex++]!);
+
+        const stream = await chat.sendMessageStream(
+          'gemini-pro',
+          { message: 'write a long essay' },
+          'prompt-escalation-protocol-retry',
+        );
+        const events: StreamEvent[] = [];
+        const iterator = stream[Symbol.asyncIterator]();
+        for (;;) {
+          const next = iterator.next();
+          await vi.advanceTimersByTimeAsync(5_000);
+          const result = await next;
+          if (result.done) break;
+          events.push(result.value);
+        }
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(3);
+        expect(
+          events.filter((event) => event.type === StreamEventType.RETRY).length,
+        ).toBe(2);
+        expect(chat.getLastModelMessageText()).toBe('Hello world');
+        expect(
+          JSON.stringify(chat.getHistory()).includes(
+            'DISCARD_ESCALATED_ATTEMPT',
+          ),
+        ).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('preserves current user image bytes during output recovery', async () => {
       vi.mocked(mockConfig.getChatCompression).mockReturnValue({
         maxRecentImagesToRetain: 0,
@@ -8486,6 +8957,82 @@ describe('GeminiChat', async () => {
         ?.map((part) => ('text' in part ? part.text : ''))
         .join('');
       expect(text).toBe('Hello ending.');
+    });
+
+    it('retries protocol-tag leaks during direct output recovery', async () => {
+      vi.useFakeTimers();
+      try {
+        const streams = [
+          makeStream([makeChunk([{ text: 'Hello' }], 'MAX_TOKENS')]),
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [{ text: '<ana' }],
+                  },
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        text:
+                          'lysis>discard recovery attempt</analysis>' +
+                          '<summary>DISCARD_RECOVERY_ATTEMPT</summary>',
+                      },
+                    ],
+                  },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })(),
+          makeStream([makeChunk([{ text: ' world' }], 'STOP')]),
+        ];
+        let callIndex = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => streams[callIndex++]!);
+
+        const stream = await chat.sendMessageStream(
+          'gemini-3-pro',
+          { message: 'write a long essay' },
+          'prompt-direct-recovery-protocol-retry',
+        );
+        const events: StreamEvent[] = [];
+        const iterator = stream[Symbol.asyncIterator]();
+        for (;;) {
+          const next = iterator.next();
+          await vi.advanceTimersByTimeAsync(5_000);
+          const result = await next;
+          if (result.done) break;
+          events.push(result.value);
+        }
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(3);
+        const retries = events.filter(
+          (event) => event.type === StreamEventType.RETRY,
+        );
+        expect(retries).toHaveLength(2);
+        expect(
+          retries.map(
+            (event) => (event as { isContinuation?: boolean }).isContinuation,
+          ),
+        ).toEqual([true, true]);
+        expect(chat.getLastModelMessageText()).toBe('Hello world');
+        expect(chat.getHistory()).toEqual([
+          { role: 'user', parts: [{ text: 'write a long essay' }] },
+          { role: 'model', parts: [{ text: 'Hello world' }] },
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('should coalesce overlapping recovery continuation text', async () => {
@@ -9349,6 +9896,96 @@ describe('GeminiChat', async () => {
       expect(
         lastEntry.parts?.some((p) => 'functionCall' in p && p.functionCall),
       ).toBe(true);
+    });
+
+    it('keeps protocol tag leak budget during output continuation', async () => {
+      vi.useFakeTimers();
+      try {
+        const streams = [
+          makeStream([makeChunk([{ text: 'initial' }], 'MAX_TOKENS')]),
+          makeStream([makeChunk([{ text: 'escalated' }], 'MAX_TOKENS')]),
+          invalidStream('PROTOCOL_TAG_LEAK'),
+          invalidStream('PROTOCOL_TAG_LEAK'),
+          invalidStream('PROTOCOL_TAG_LEAK'),
+          invalidStream('PROTOCOL_TAG_LEAK'),
+          invalidStream('PROTOCOL_TAG_LEAK'),
+        ];
+        let callIndex = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => streams[callIndex++]!);
+
+        const stream = await chat.sendMessageStream(
+          'gemini-pro',
+          { message: 'essay' },
+          'prompt-recovery-protocol-leak-budget',
+        );
+
+        await collectStreamWithFakeTimers(stream, 35_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(5);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(2);
+        expect(mockLogContentRetry).toHaveBeenLastCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            attempt_number: 1,
+            error_type: 'PROTOCOL_TAG_LEAK',
+          }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps continuation retry budgets independent across error types', async () => {
+      vi.useFakeTimers();
+      try {
+        const streams = [
+          makeStream([makeChunk([{ text: 'initial' }], 'MAX_TOKENS')]),
+          makeStream([makeChunk([{ text: 'escalated' }], 'MAX_TOKENS')]),
+          invalidStream('NO_FINISH_REASON'),
+          invalidStream('NO_FINISH_REASON'),
+          invalidStream('PROTOCOL_TAG_LEAK'),
+          makeStream([makeChunk([{ text: ' recovered' }], 'STOP')]),
+        ];
+        let callIndex = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => streams[callIndex++]!);
+
+        const stream = await chat.sendMessageStream(
+          'gemini-pro',
+          { message: 'essay' },
+          'prompt-recovery-mixed-invalid-streams',
+        );
+
+        const events = await collectStreamWithFakeTimers(stream, 15_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(6);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(3);
+        expect(mockLogContentRetry).toHaveBeenLastCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            attempt_number: 0,
+            error_type: 'PROTOCOL_TAG_LEAK',
+            retry_delay_ms: 2000,
+          }),
+        );
+        expect(
+          events.some(
+            (e) =>
+              e.type === StreamEventType.CHUNK &&
+              e.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                ' recovered',
+          ),
+        ).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('should cap recovery attempts at MAX_OUTPUT_RECOVERY_ATTEMPTS (3)', async () => {

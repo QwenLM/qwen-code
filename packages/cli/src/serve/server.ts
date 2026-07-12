@@ -18,6 +18,7 @@ import type {
   ChannelWorkerSnapshot,
   ChannelWorkerSupervisor,
 } from './channel-worker-supervisor.js';
+import type { ChannelWorkerGroupSnapshot } from './channel-worker-group.js';
 import {
   allowOriginCors,
   bearerAuth,
@@ -166,6 +167,7 @@ import {
   registerWorkspaceQualifiedLifecycleRoutes,
 } from './routes/workspace-lifecycle.js';
 import { registerWorkspaceManagementRoutes } from './routes/workspace-management.js';
+import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
 import {
   registerWorkspaceMcpControlRoutes,
   registerWorkspaceQualifiedMcpControlRoutes,
@@ -199,6 +201,7 @@ export {
 } from './server/session-list.js';
 export type {
   ListWorkspaceSessionsOptions,
+  ListWorkspaceSessionsReadOptions,
   ListWorkspaceSessionsResult,
 } from './server/session-list.js';
 export { getActiveSseCount } from './routes/sse-events.js';
@@ -211,42 +214,51 @@ export { getActiveSseCount } from './routes/sse-events.js';
 let warnedDefaultTrust = false;
 
 function loadServeChannelWebhookConfigs(
-  workspace: string,
+  sources: readonly ChannelWebhookConfigSource[],
 ): Record<string, { webhooks?: ReturnType<typeof parseChannelWebhookConfig> }> {
-  const channelsConfig = loadChannelsConfig(workspace);
   const parsed: Record<
     string,
     { webhooks?: ReturnType<typeof parseChannelWebhookConfig> }
   > = {};
 
-  for (const [channelName, rawConfig] of Object.entries(channelsConfig)) {
-    if (typeof rawConfig !== 'object' || rawConfig === null) {
-      continue;
-    }
-    let webhooks: ReturnType<typeof parseChannelWebhookConfig>;
-    try {
-      webhooks = parseChannelWebhookConfigLenient(
-        channelName,
-        rawConfig as Record<string, unknown>,
-        (source, sourceError) => {
-          const sourceMessage =
-            sourceError instanceof Error
-              ? sourceError.message
-              : String(sourceError);
-          writeStderrLine(
-            `[daemon] Skipping malformed webhook source "${source}" for channel "${channelName}": ${sourceMessage}`,
-          );
-        },
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      writeStderrLine(
-        `[daemon] Skipping malformed webhook config for channel "${channelName}": ${message}`,
-      );
-      continue;
-    }
-    if (webhooks) {
-      parsed[channelName] = { webhooks };
+  for (const source of sources) {
+    const channelsConfig = loadChannelsConfig(source.workspaceCwd);
+    const selectedChannels = source.channelNames
+      ? new Set(source.channelNames)
+      : undefined;
+    for (const [channelName, rawConfig] of Object.entries(channelsConfig)) {
+      if (
+        (selectedChannels && !selectedChannels.has(channelName)) ||
+        typeof rawConfig !== 'object' ||
+        rawConfig === null
+      ) {
+        continue;
+      }
+      let webhooks: ReturnType<typeof parseChannelWebhookConfig>;
+      try {
+        webhooks = parseChannelWebhookConfigLenient(
+          channelName,
+          rawConfig as Record<string, unknown>,
+          (webhookSource, sourceError) => {
+            const sourceMessage =
+              sourceError instanceof Error
+                ? sourceError.message
+                : String(sourceError);
+            writeStderrLine(
+              `[daemon] Skipping malformed webhook source "${webhookSource}" for channel "${channelName}": ${sourceMessage}`,
+            );
+          },
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        writeStderrLine(
+          `[daemon] Skipping malformed webhook config for channel "${channelName}": ${message}`,
+        );
+        continue;
+      }
+      if (webhooks) {
+        parsed[channelName] = { webhooks };
+      }
     }
   }
 
@@ -266,6 +278,11 @@ function getRuntimeEffectiveEnv(
   metadata: WorkspaceRuntimeEnvMetadata | undefined,
 ): Readonly<Record<string, string | undefined>> | undefined {
   return metadata?.effectiveEnv;
+}
+
+export interface ChannelWebhookConfigSource {
+  workspaceCwd: string;
+  channelNames?: readonly string[];
 }
 
 export interface ServeAppDeps {
@@ -349,7 +366,9 @@ export interface ServeAppDeps {
   daemonLog?: DaemonLogger;
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
+  getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
   enqueueChannelWebhookTask?: ChannelWorkerSupervisor['enqueueWebhookTask'];
+  channelWebhookConfigSources?: readonly ChannelWebhookConfigSource[];
   /**
    * Stop and relaunch the daemon-managed channel worker so it re-reads
    * settings.json. Wired only when the daemon owns a channel worker; its
@@ -402,6 +421,7 @@ export interface ServeAppDeps {
   clientMcpSenderRegistry?: ClientMcpSenderRegistry;
   workspaceRegistry?: WorkspaceRegistry;
   createWorkspaceRuntime?: (cwd: string) => Promise<WorkspaceRuntime>;
+  workspaceRegistrationStore?: WorkspaceRegistrationStore;
   primaryWorkspaceTrusted?: boolean;
   primaryRuntimeEnv?: WorkspaceRuntimeEnvMetadata;
   voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
@@ -615,8 +635,9 @@ export function createServeApp(
         deps.getChannelWorkerSnapshot !== undefined &&
         deps.reloadChannelWorker !== undefined,
       sessionShellCommandEnabled,
-      multiWorkspaceSessionsEnabled:
-        (injectedWorkspaceRegistry?.list().length ?? 1) > 1,
+      multiWorkspaceSessionsEnabled: () => workspaceRegistry.list().length > 1,
+      persistentWorkspaceRegistrationAvailable:
+        deps.workspaceRegistrationStore !== undefined,
       ...(primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {}),
     });
   const statusProvider =
@@ -782,8 +803,7 @@ export function createServeApp(
   const primaryBridge = primaryRuntime.bridge;
   const primaryWorkspace = primaryRuntime.workspaceService;
   const primaryRouteFileSystemFactory = primaryRuntime.routeFileSystemFactory;
-  const workspaceQualifiedAcpEnabled =
-    resolveAcpHttpEnabled() && workspaceRegistry.list().length > 1;
+  const workspaceQualifiedAcpEnabled = resolveAcpHttpEnabled();
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST
@@ -861,7 +881,11 @@ export function createServeApp(
 
   if (deps.enqueueChannelWebhookTask) {
     registerChannelWebhookRoutes(app, {
-      channelsConfig: loadServeChannelWebhookConfigs(primaryBoundWorkspace),
+      channelsConfig: loadServeChannelWebhookConfigs(
+        deps.channelWebhookConfigSources ?? [
+          { workspaceCwd: primaryBoundWorkspace },
+        ],
+      ),
       safeBody,
       enqueueWebhookTask: deps.enqueueChannelWebhookTask,
       rateLimiter,
@@ -947,6 +971,7 @@ export function createServeApp(
     deviceFlowRegistry,
     sessionShellCommandEnabled,
     getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
+    getChannelWorkerSnapshots: deps.getChannelWorkerSnapshots,
     getPerfSnapshot: deps.getPerfSnapshot,
     getMetricsSeries: deps.getMetricsSeries,
     getTotalSessionAdmissionSnapshot:
@@ -1085,6 +1110,7 @@ export function createServeApp(
     mutate,
     safeBody,
     createWorkspaceRuntime: deps.createWorkspaceRuntime,
+    workspaceRegistrationStore: deps.workspaceRegistrationStore,
   });
 
   const broadcastSettingsChanged = (
@@ -1214,6 +1240,9 @@ export function createServeApp(
     const reloadChannelWorker = deps.reloadChannelWorker;
     registerWorkspaceChannelControlRoutes(app, {
       getChannelWorkerSnapshot,
+      ...(deps.getChannelWorkerSnapshots
+        ? { getChannelWorkerSnapshots: deps.getChannelWorkerSnapshots }
+        : {}),
       reloadChannelWorker,
       mutate,
       sendBridgeError,

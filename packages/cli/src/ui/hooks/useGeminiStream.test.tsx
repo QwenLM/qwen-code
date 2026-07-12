@@ -94,6 +94,7 @@ const mockGetActiveGoal = vi.hoisted(() => vi.fn());
 const mockActiveGoalEquals = vi.hoisted(() => vi.fn());
 const mockSetActiveGoal = vi.hoisted(() => vi.fn());
 const mockClearActiveGoal = vi.hoisted(() => vi.fn());
+const mockRefreshMemoryAfterManagedWrite = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actualCoreModule = (await importOriginal()) as any;
@@ -109,6 +110,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     setActiveGoal: mockSetActiveGoal,
     clearActiveGoal: mockClearActiveGoal,
     runVisionBridge: mockRunVisionBridge,
+    refreshMemoryAfterManagedWrite: mockRefreshMemoryAfterManagedWrite,
   };
 });
 
@@ -172,6 +174,7 @@ describe('useGeminiStream', () => {
 
   beforeEach(() => {
     vi.clearAllMocks(); // Clear mocks before each test
+    mockRefreshMemoryAfterManagedWrite.mockResolvedValue(false);
     mockGetActiveGoal.mockReturnValue(undefined);
     mockActiveGoalEquals.mockReturnValue(false);
     vi.mocked(findLastSafeSplitPoint).mockImplementation(
@@ -5854,7 +5857,7 @@ describe('useGeminiStream', () => {
 
   describe('Memory Refresh on save_memory', () => {
     it('should call performMemoryRefresh when a save_memory tool call completes successfully', async () => {
-      const mockPerformMemoryRefresh = vi.fn();
+      const mockPerformMemoryRefresh = vi.fn().mockResolvedValue(undefined);
       const completedToolCall: TrackedCompletedToolCall = {
         request: {
           callId: 'save-mem-call-1',
@@ -5927,6 +5930,203 @@ describe('useGeminiStream', () => {
       await waitFor(() => {
         expect(mockPerformMemoryRefresh).toHaveBeenCalledTimes(1);
       });
+    });
+
+    it('refreshes managed-memory instructions after interactive memory file writes', async () => {
+      const completedToolCall: TrackedCompletedToolCall = {
+        request: {
+          callId: 'write-memory-call-1',
+          name: 'write_file',
+          args: { file_path: '/workspace/.qwen/memory/project.md' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-memory-write',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'write-memory-call-1',
+          responseParts: [{ text: 'Wrote memory' }],
+          resultDisplay: 'Wrote memory',
+          error: undefined,
+          errorType: undefined,
+        },
+        tool: {
+          name: 'write_file',
+          displayName: 'write_file',
+          description: 'Writes files',
+          build: vi.fn(),
+        } as any,
+        invocation: {
+          getDescription: () => `Mock description`,
+        } as unknown as AnyToolInvocation,
+      };
+
+      let capturedOnComplete:
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | null = null;
+
+      mockUseReactToolScheduler.mockImplementation((onComplete) => {
+        capturedOnComplete = onComplete;
+        return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+      });
+
+      renderHook(() =>
+        useGeminiStream(
+          new MockedGeminiClientClass(mockConfig),
+          [],
+          mockAddItem,
+          mockConfig,
+          true,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+      await act(async () => {
+        if (capturedOnComplete) {
+          await capturedOnComplete([completedToolCall]);
+        }
+      });
+
+      expect(mockRefreshMemoryAfterManagedWrite).toHaveBeenCalledWith(
+        mockConfig,
+        [
+          {
+            toolName: 'write_file',
+            args: { file_path: '/workspace/.qwen/memory/project.md' },
+            status: 'success',
+          },
+        ],
+        { logContext: 'interactive memory tool batch' },
+      );
+    });
+
+    it('does not run the legacy save_memory refresh when managed-memory writes refresh the batch', async () => {
+      mockRefreshMemoryAfterManagedWrite.mockResolvedValueOnce(true);
+      const mockPerformMemoryRefresh = vi.fn();
+      const saveMemoryToolCall: TrackedCompletedToolCall = {
+        request: {
+          callId: 'save-mem-call-1',
+          name: 'save_memory',
+          args: { fact: 'test' },
+          isClientInitiated: true,
+          prompt_id: 'prompt-id-save-memory',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'save-mem-call-1',
+          responseParts: [{ text: 'Memory saved' }],
+          resultDisplay: 'Success: Memory saved',
+          error: undefined,
+          errorType: undefined,
+        },
+        tool: {
+          name: 'save_memory',
+          displayName: 'save_memory',
+          description: 'Saves memory',
+          build: vi.fn(),
+        } as any,
+        invocation: {
+          getDescription: () => `Mock description`,
+        } as unknown as AnyToolInvocation,
+      };
+      const writeMemoryToolCall: TrackedCompletedToolCall = {
+        request: {
+          callId: 'write-memory-call-1',
+          name: 'write_file',
+          args: { file_path: '/workspace/.qwen/memory/project.md' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-memory-write',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'write-memory-call-1',
+          responseParts: [{ text: 'Wrote memory' }],
+          resultDisplay: 'Wrote memory',
+          error: undefined,
+          errorType: undefined,
+        },
+        tool: {
+          name: 'write_file',
+          displayName: 'write_file',
+          description: 'Writes files',
+          build: vi.fn(),
+        } as any,
+        invocation: {
+          getDescription: () => `Mock description`,
+        } as unknown as AnyToolInvocation,
+      };
+
+      let capturedOnComplete:
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | null = null;
+
+      mockUseReactToolScheduler.mockImplementation((onComplete) => {
+        capturedOnComplete = onComplete;
+        return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+      });
+
+      renderHook(() =>
+        useGeminiStream(
+          new MockedGeminiClientClass(mockConfig),
+          [],
+          mockAddItem,
+          mockConfig,
+          true,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          mockPerformMemoryRefresh,
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+      await act(async () => {
+        if (capturedOnComplete) {
+          await capturedOnComplete([saveMemoryToolCall, writeMemoryToolCall]);
+        }
+      });
+
+      expect(mockRefreshMemoryAfterManagedWrite).toHaveBeenCalledWith(
+        mockConfig,
+        [
+          {
+            toolName: 'save_memory',
+            args: { fact: 'test' },
+            status: 'success',
+          },
+          {
+            toolName: 'write_file',
+            args: { file_path: '/workspace/.qwen/memory/project.md' },
+            status: 'success',
+          },
+        ],
+        { logContext: 'interactive memory tool batch' },
+      );
+      expect(mockPerformMemoryRefresh).not.toHaveBeenCalled();
     });
   });
 
