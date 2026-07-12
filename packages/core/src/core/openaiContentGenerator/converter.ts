@@ -1086,6 +1086,17 @@ function hasThoughtPart(parts: Part[]): boolean {
   return parts.some((part) => part.thought === true);
 }
 
+const THINKING_TAG_PATTERN = /<\/?think(?:ing)?\b/i;
+
+function hasThinkingTagPart(parts: Part[], visibleOnly = false): boolean {
+  return parts.some(
+    (part) =>
+      (!visibleOnly || part.thought !== true) &&
+      typeof part.text === 'string' &&
+      THINKING_TAG_PATTERN.test(part.text),
+  );
+}
+
 /**
  * Convert OpenAI response to Gemini format.
  */
@@ -1289,11 +1300,13 @@ export function convertOpenAIChunkToGemini(
         normalizedReasoningText &&
         !requestContext.responseParsingOptions?.taggedThinkingTags
       ) {
+        requestContext.hasStructuredReasoningContent = true;
         parts.push(createOpenAIReasoningThoughtPart(normalizedReasoningText));
       } else if (
         normalizedReasoningText &&
         !requestContext.hasTaggedThinkingThought
       ) {
+        requestContext.hasStructuredReasoningContent = true;
         requestContext.pendingReasoningText =
           (requestContext.pendingReasoningText ?? '') + normalizedReasoningText;
         debugLogger.debug(
@@ -1368,19 +1381,24 @@ export function convertOpenAIChunkToGemini(
 
     // Hold risky protocol-looking text until the stream proves it was not
     // paired with a malformed nameless tool call.
-    const hasUntrustedProtocolText = parts.some(
-      (part) =>
-        typeof part.text === 'string' &&
-        part.text.toLowerCase().includes('<think'),
-    );
+    const hasUntrustedProtocolText = hasThinkingTagPart(parts);
+    const hasVisibleThinkingTagLeak =
+      requestContext.hasStructuredReasoningContent &&
+      (hasThinkingTagPart(parts, true) ||
+        hasThinkingTagPart(
+          requestContext.pendingUntrustedResponseParts ?? [],
+          true,
+        ));
     const toolCallWithoutName = toolCallParser.hasNamelessToolCall();
     const malformedNamelessToolCall =
       Boolean(choice.finish_reason) && toolCallWithoutName;
+    const malformedThinkingTagLeak =
+      Boolean(choice.finish_reason) && hasVisibleThinkingTagLeak;
     const shouldHoldUntrustedParts =
       toolCallWithoutName ||
       (!choice.finish_reason && hasUntrustedProtocolText);
 
-    if (malformedNamelessToolCall) {
+    if (malformedNamelessToolCall || malformedThinkingTagLeak) {
       parts.length = 0;
       requestContext.pendingUntrustedResponseParts = undefined;
     } else if (shouldHoldUntrustedParts) {
@@ -1420,7 +1438,8 @@ export function convertOpenAIChunkToGemini(
     // (turn.ts) correctly sets wasOutputTruncated=true.
     // Withhold the finish signal so the existing invalid-stream retry drops
     // the buffered attempt instead of accepting a silently lost tool call.
-    const effectiveFinishReason = malformedNamelessToolCall
+    const effectiveFinishReason =
+      malformedNamelessToolCall || malformedThinkingTagLeak
       ? undefined
       : toolCallsTruncated && choice.finish_reason !== 'length'
         ? 'length'

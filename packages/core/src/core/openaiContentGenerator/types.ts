@@ -80,6 +80,7 @@ export interface RequestContext {
    */
   pendingContentParts?: Part[];
   pendingUntrustedResponseParts?: Part[];
+  hasStructuredReasoningContent?: boolean;
 }
 
 export interface ErrorHandler {
