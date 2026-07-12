@@ -157,6 +157,39 @@ describe('resolveAnchor', () => {
     expect(r).toMatchObject({ status: 'resolved', startLine: 11, line: 12 });
   });
 
+  it('accepts a whole hunk region copied verbatim, markers and all', () => {
+    // "Copy VERBATIM from the diff" invites an agent to bring the marker column
+    // with it — `+` lines interleaved with ` ` context and `-` deletions. That
+    // is not an all-`+` snippet, so the marker-stripped reading above did not
+    // fire, and the raw one cannot match because the markers survive even the
+    // loose trim. The region used to resolve as unmatched.
+    //
+    // The new side of a diff region IS its `+` and ` ` lines with the marker
+    // column dropped and the `-` lines removed, and those are consecutive in the
+    // post-change file — so this is an exact reconstruction, not a fuzzy one.
+    const r = resolveAnchor(
+      hay(),
+      ' function pay(amt) {\n-  charge(amt);\n+  if (amt < 0) return;\n+  charge(amt);',
+    );
+    expect(r).toMatchObject({
+      status: 'resolved',
+      startLine: 10, // ` function pay(amt) {`
+      line: 12, // `+  charge(amt);`
+    });
+  });
+
+  it('does not eat the first character of ordinary indented code', () => {
+    // Every line of indented code begins with a space, which is also a diff
+    // marker. The hunk-region reading must not fire on it — requiring at least
+    // one `+` line is what keeps `  const a = 1;` from becoming ` const a = 1;`.
+    const r = resolveAnchor(hay(), '  if (amt < 0) return;\n  charge(amt);');
+    expect(r).toMatchObject({
+      status: 'resolved',
+      startLine: 11,
+      tier: 'exact-added',
+    });
+  });
+
   it('does not strip a leading `+` that is real code', () => {
     // `+x` as a line of code must not be read as a diff marker. Only a snippet
     // whose every line carries one gets the marker-stripped reading.

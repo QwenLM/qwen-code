@@ -20,7 +20,12 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { captureLocalDiff, MAX_UNTRACKED_BYTES } from './local-diff.js';
+import {
+  captureLocalDiff,
+  MAX_UNTRACKED_BYTES,
+  MAX_UNTRACKED_FILES,
+  MAX_UNTRACKED_TOTAL_BYTES,
+} from './local-diff.js';
 import { parseDiff, buildDiffPlan, chunksCoverDiff } from './diff-plan.js';
 
 let repo: string;
@@ -149,22 +154,91 @@ describe('captureLocalDiff — untracked files', () => {
     expect(res.text).not.toContain('huge.csv');
   });
 
-  it('names an unreadable untracked file rather than dropping it silently', () => {
-    // A file `ls-files` named but `stat` cannot reach — removed underneath us,
-    // or a name whose bytes do not survive a JS string on this platform. The
-    // capture must survive it, and must still say the file went unreviewed:
-    // dropping a file in silence is the exact bug this module exists to fix,
-    // and doing it for a subtler reason is the same bug wearing a hat.
-    write('vanishes.ts', 'export const v = 1;\n');
-    write('survives.ts', 'export const s = 1;\n');
-    // A dangling symlink is listed by `ls-files --others` and cannot be stat-ed.
+  it('never claims to have reviewed a directory-shaped untracked entry', () => {
+    // `ls-files --others` does not only name files. An **embedded git repo** (a
+    // scratch clone, a vendored checkout) comes out as `nested/`, and a symlink
+    // to a directory as a plain name. `stat` follows both and reports a size, so
+    // they sailed through the size gate; `git diff --no-index` then failed on
+    // them by exiting 1 with **empty stdout**, and an empty Buffer is a truthy
+    // object, so the exit-1 tolerance accepted it as "a diff of nothing".
+    //
+    // The path landed in `untracked` — documented as "files whose contents are
+    // in the diff" — contributed zero bytes, and never reached `skipped`. The
+    // capture reported a file as reviewed that nobody had looked at: the exact
+    // invariant this module exists to protect, and strictly worse than the bug
+    // it replaced, which at least never claimed to have read anything.
+    mkdirSync(join(repo, 'nested'));
+    execFileSync('git', ['init', '-q', '.'], { cwd: join(repo, 'nested') });
+    write('nested/inner.ts', 'export const hidden = 1;\n');
+    mkdirSync(join(repo, 'realdir'));
+    write('realdir/seen.ts', 'export const seen = 1;\n');
+    symlinkSync(join(repo, 'realdir'), join(repo, 'dirlink'));
+
+    const res = capture();
+
+    // Every path claimed as reviewed must actually BE in the diff.
+    for (const path of res.untracked) {
+      expect(res.text).toContain(`+++ b/${path}`);
+    }
+    expect(res.untracked).toEqual(['realdir/seen.ts']);
+    expect(res.skipped.map((s) => s.path).sort()).toEqual([
+      'dirlink',
+      'nested/',
+    ]);
+    // Both are named as directories, which is the actionable thing to say — the
+    // symlink is followed before judging, because git decides from the resolved
+    // type too.
+    for (const s of res.skipped) expect(s.reason).toContain('directory');
+    // The embedded repo's contents are not smuggled in either.
+    expect(res.text).not.toContain('hidden');
+  });
+
+  it('reviews a dangling symlink instead of skipping it', () => {
+    // Git renders a symlink as its **link text** at mode 120000, and the link
+    // text does not depend on the target existing. A symlink pointing nowhere is
+    // diffable, and it is exactly the sort of thing a reviewer should see — so
+    // a failed `stat` on a symlink means "let git have it", not "skip".
     symlinkSync(join(repo, 'no-such-target.ts'), join(repo, 'dangling.ts'));
 
     const res = capture();
-    expect(res.untracked.sort()).toEqual(['survives.ts', 'vanishes.ts']);
+    expect(res.untracked).toEqual(['dangling.ts']);
+    expect(res.skipped).toEqual([]);
+    expect(res.text).toContain('new file mode 120000');
+  });
+
+  it('abandons the untracked pass when the tree has too many, and says so', () => {
+    // A `.gitignore` that does not cover `node_modules` — `git init` then
+    // `npm install` — offers tens of thousands of untracked files, and each one
+    // costs a synchronous `git` spawn. Unbounded, the fix for "shows nothing"
+    // becomes "hangs for minutes before the review starts". The count is checked
+    // before the loop, so the pathological tree costs zero spawns.
+    for (let i = 0; i <= MAX_UNTRACKED_FILES; i++) {
+      write(`node_modules/pkg${i}/index.js`, `module.exports = ${i};\n`);
+    }
+
+    const res = capture();
+
+    expect(res.untracked).toEqual([]);
     expect(res.skipped).toHaveLength(1);
-    expect(res.skipped[0]).toMatchObject({ path: 'dangling.ts', bytes: null });
-    expect(res.skipped[0].reason).toContain('could not be read');
+    expect(res.skipped[0].reason).toContain('exceeds the');
+    expect(res.skipped[0].reason).toContain('NONE of them were reviewed');
+    // The tracked half of the capture is unaffected — it never depended on this.
+    expect(res.text).toBe('');
+  });
+
+  it('stops inlining untracked files once the total budget is spent', () => {
+    // Per-file caps do not bound a set. Twelve 900 kB files each pass the 1 MB
+    // per-file cap and together blow past the 10 MB total.
+    const big = 'x'.repeat(900_000);
+    for (let i = 0; i < 12; i++) write(`blob${i}.txt`, big);
+
+    const res = capture();
+
+    expect(res.untracked.length).toBeGreaterThan(0);
+    expect(res.skipped.length).toBeGreaterThan(0);
+    expect(res.untracked.length + res.skipped.length).toBe(12);
+    expect(res.skipped.some((s) => s.reason.includes('total cap'))).toBe(true);
+    expect(res.diff.length).toBeLessThan(MAX_UNTRACKED_TOTAL_BYTES * 1.2);
   });
 
   it('can be turned off, restoring the tracked-only scope', () => {

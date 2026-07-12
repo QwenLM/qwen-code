@@ -169,10 +169,35 @@ function anchorVariants(anchor: string): string[][] {
   while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop();
   if (lines.length === 0) return [];
 
+  // The faithful reading always goes first, so a snippet that IS in the diff
+  // verbatim can never be mangled by a marker interpretation below it.
   const variants = [lines];
+
   const meaningful = lines.filter((l) => l.trim() !== '');
-  if (meaningful.length > 0 && meaningful.every((l) => /^[+]/.test(l))) {
+  if (meaningful.length > 0 && meaningful.every((l) => /^\+/.test(l))) {
     variants.push(lines.map((l) => (l.startsWith('+') ? l.slice(1) : l)));
+  }
+
+  // A whole hunk region copied verbatim: `+` lines interleaved with ` ` context
+  // and `-` deletions. "Copy VERBATIM from the diff" invites exactly this, and
+  // the reading above rejects it (not every line starts with `+`), so it used to
+  // match no tier at all — the marker column survives even the loose trim.
+  //
+  // The new side of a diff region *is* its `+` and ` ` lines with the marker
+  // column removed and the `-` lines dropped, and those lines are consecutive in
+  // the post-change file by construction, so this reconstruction is exact rather
+  // than fuzzy. Requiring one `+` keeps it away from ordinary indented code,
+  // every line of which begins with a space and would otherwise have its first
+  // character eaten.
+  const nonBlank = lines.filter((l) => l !== '');
+  if (
+    nonBlank.length > 0 &&
+    nonBlank.every((l) => /^[+\- ]/.test(l)) &&
+    nonBlank.some((l) => l.startsWith('+'))
+  ) {
+    variants.push(
+      lines.filter((l) => !l.startsWith('-')).map((l) => l.slice(1)),
+    );
   }
   return variants;
 }

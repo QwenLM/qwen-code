@@ -106,22 +106,31 @@ export function gitRaw(...args: string[]): Buffer {
 }
 
 /**
- * Like `gitRaw`, but treats exit code 1 as success and returns the stdout the
- * child produced anyway.
+ * Like `gitRaw`, but treats "the inputs differ" — exit 1 **with output** — as
+ * success and returns the diff the child produced anyway.
  *
- * `git diff --no-index` — the only way to diff a file git does not track
- * without first writing to the index — reports "the two inputs differ" by
- * **exiting 1**. For an untracked file against `/dev/null` that is the only
- * outcome there is, so `gitRaw` would throw on every single capture and the
- * whole point (seeing brand-new files) would be lost. Exit codes above 1 are
- * real errors and still throw.
+ * `git diff --no-index` is the only way to diff a file git does not track
+ * without first writing to the index, and it reports "the two inputs differ" by
+ * **exiting 1**. Against the null device that is the only outcome a real file
+ * has, so plain `gitRaw` would throw on every single capture and the whole point
+ * (seeing brand-new files) would be lost.
+ *
+ * The `length > 0` half is not belt-and-braces; it is the difference between a
+ * diff and a lie. `git diff --no-index -- <null> <dir>` — which is what an
+ * embedded git repo or a symlink to a directory looks like coming out of
+ * `ls-files --others` — also exits 1, with **empty stdout** and an error on
+ * stderr. An empty `Buffer` is a truthy object, so a bare `&& e.stdout` accepted
+ * that as a successful diff of nothing, and the caller went on to report the
+ * path as reviewed. Exit 1 with no output is a failure, not an empty diff; a
+ * genuinely differing pair always produces output. Exit codes above 1 were
+ * always, and remain, real errors.
  */
 export function gitRawTolerateDiff(...args: string[]): Buffer {
   try {
     return gitRaw(...args);
   } catch (err) {
     const e = err as { status?: number; stdout?: Buffer };
-    if (e.status === 1 && e.stdout) return e.stdout;
+    if (e.status === 1 && e.stdout && e.stdout.length > 0) return e.stdout;
     throw err;
   }
 }

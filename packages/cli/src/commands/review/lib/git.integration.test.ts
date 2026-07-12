@@ -9,10 +9,17 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import {
+  mkdtempSync,
+  rmSync,
+  existsSync,
+  writeFileSync,
+  mkdirSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { releaseWorktree } from './git.js';
+import { gitRawTolerateDiff, releaseWorktree } from './git.js';
+import { NULL_DEVICE } from './diff-flags.js';
 
 let repo: string;
 let cwd: string;
@@ -97,5 +104,46 @@ describe('releaseWorktree', () => {
     // mask the error that got us there.
     process.chdir(tmpdir()); // not a repo
     expect(() => releaseWorktree('/nonexistent/wt')).not.toThrow();
+  });
+});
+
+describe('gitRawTolerateDiff', () => {
+  it('returns the diff when git exits 1 because the inputs differ', () => {
+    writeFileSync(join(repo, 'new.ts'), 'export const a = 1;\n');
+    const out = gitRawTolerateDiff(
+      '-C',
+      repo,
+      'diff',
+      '--no-index',
+      '--',
+      NULL_DEVICE,
+      'new.ts',
+    );
+    expect(out.toString('utf8')).toContain('+++ b/new.ts');
+  });
+
+  it('throws when git exits 1 with NO output — that is a failure, not a diff', () => {
+    // The distinction this whole helper turns on. `git diff --no-index` against
+    // a **directory** — which is what an embedded git repo or a symlink to one
+    // looks like coming out of `ls-files --others` — also exits 1, but with
+    // empty stdout and an error on stderr.
+    //
+    // An empty `Buffer` is a truthy object. A guard of `e.status === 1 &&
+    // e.stdout` therefore accepted that as a successful diff of nothing, and the
+    // caller went on to record the path as reviewed. Exit 1 with no output must
+    // fail loudly so the caller can record the truth instead.
+    mkdirSync(join(repo, 'subdir'));
+    writeFileSync(join(repo, 'subdir', 'inner.ts'), 'export const b = 2;\n');
+    expect(() =>
+      gitRawTolerateDiff(
+        '-C',
+        repo,
+        'diff',
+        '--no-index',
+        '--',
+        NULL_DEVICE,
+        'subdir',
+      ),
+    ).toThrow();
   });
 });

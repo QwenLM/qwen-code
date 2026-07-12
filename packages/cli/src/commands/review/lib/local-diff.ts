@@ -24,7 +24,7 @@
 // diff is a concatenation of per-file sections; the result parses exactly like
 // any other.
 
-import { statSync } from 'node:fs';
+import { lstatSync, statSync, type Stats } from 'node:fs';
 import { join } from 'node:path';
 import {
   NULL_DEVICE,
@@ -45,6 +45,27 @@ import { git, gitRaw, gitRawTolerateDiff, refExists } from './git.js';
  * to fix, and re-introducing it one size class up would be a poor trade.
  */
 export const MAX_UNTRACKED_BYTES = 1_000_000;
+
+/**
+ * Ceilings on the untracked pass as a whole.
+ *
+ * `MAX_UNTRACKED_BYTES` bounds any one file; nothing bounded the *set*, and each
+ * untracked file costs one synchronous `git` spawn. A working tree whose
+ * `.gitignore` does not yet cover `node_modules` — `git init` followed by
+ * `npm install`, which is a normal Tuesday — offers tens of thousands of
+ * untracked files, and the capture would sit there spawning `git` once per file
+ * for minutes before the review began. The old bug made `/review` show nothing;
+ * an unbounded fix would make it hang, which is not obviously an improvement.
+ *
+ * A count this far above any real change (500 new files in one review is already
+ * extraordinary; `node_modules` is a hundred times that) means the tree's ignore
+ * rules are broken, not that the user wrote a lot of code. So the pass is
+ * abandoned wholesale rather than reviewing an arbitrary alphabetical prefix of
+ * a build directory — and, being checked before the loop, it costs zero spawns.
+ * The user is told, loudly, in the one place that can act on it.
+ */
+export const MAX_UNTRACKED_FILES = 500;
+export const MAX_UNTRACKED_TOTAL_BYTES = 10_000_000;
 
 /** An untracked file the capture did not review, and why. Never dropped mutely. */
 export interface SkippedFile {
@@ -78,6 +99,49 @@ export interface LocalDiffCapture {
  */
 function emptyTree(repoRoot: string): string {
   return git('-C', repoRoot, 'hash-object', '-t', 'tree', NULL_DEVICE);
+}
+
+/**
+ * Why git will not be able to diff this entry as a file, or null if it will.
+ *
+ * `ls-files --others` names three kinds of thing — regular files, symlinks, and
+ * directories (it silently ignores FIFOs, sockets and device nodes, so those
+ * never arrive here). Directories are the problem, and git's `--no-index`
+ * decides what an argument *is* from its **resolved** type:
+ *
+ * - An **embedded git repository** arrives as `nested/`. Git will not recurse
+ *   into another repo, so it hands back the directory itself; `--no-index` then
+ *   switches to directory-diff semantics and joins the other operand into it
+ *   (`error: Could not access 'nested/null'`).
+ * - A **symlink to a directory** arrives as a plain name and resolves the same
+ *   way, which is why `lstat` alone cannot judge it and this follows the link
+ *   before deciding.
+ * - A **symlink to a file** is diffable and must pass: git renders the *link
+ *   text* at mode 120000. A **dangling** symlink is diffable for the same reason
+ *   — the link text does not depend on the target existing — and it is worth
+ *   reviewing precisely *because* it points nowhere, so a failed `stat` here
+ *   means "let git have it", not "skip".
+ *
+ * Anything unforeseen still fails closed: git either errors or produces nothing,
+ * and the caller records it as unreviewed rather than as reviewed.
+ */
+function describeUndiffable(abs: string, st: Stats): string | null {
+  if (st.isDirectory()) {
+    return (
+      'is a directory (an embedded git repository, most likely) — git cannot ' +
+      'diff it as a file'
+    );
+  }
+  if (st.isSymbolicLink()) {
+    try {
+      return statSync(abs).isDirectory()
+        ? 'is a symlink to a directory — git cannot diff it as a file'
+        : null;
+    } catch {
+      return null; // Dangling. Git diffs the link text; let it.
+    }
+  }
+  return null;
 }
 
 /** Repo-root-relative paths of untracked, non-ignored files. */
@@ -165,37 +229,103 @@ export function captureLocalDiff(opts: {
   const skipped: SkippedFile[] = [];
 
   if (includeUntracked) {
-    for (const path of listUntracked(repoRoot, file)) {
-      let bytes: number;
-      try {
-        bytes = statSync(join(repoRoot, path)).size;
-      } catch (err) {
-        // A path `ls-files` just named can still be unreachable: a build
-        // script's scratch file removed underneath us, or a name whose bytes do
-        // not survive the round-trip through a JS string on this platform.
-        // Skipping it must not take the whole capture down — but it must not be
-        // silent either. A quietly-dropped file is precisely the bug this
-        // module exists to fix; dropping one for a subtler reason is the same
-        // bug wearing a different hat.
-        skipped.push({
-          path,
-          bytes: null,
-          reason: `could not be read (${(err as Error).message})`,
-        });
-        continue;
+    const candidates = listUntracked(repoRoot, file);
+
+    if (candidates.length > MAX_UNTRACKED_FILES) {
+      // Checked before the loop: the whole point is to spend zero spawns on a
+      // tree whose ignore rules are broken.
+      skipped.push({
+        path: `${candidates.length} untracked files`,
+        bytes: null,
+        reason:
+          `${candidates.length} untracked files exceeds the ` +
+          `${MAX_UNTRACKED_FILES}-file cap, so NONE of them were reviewed. ` +
+          `A count this size usually means .gitignore does not cover a build ` +
+          `or dependency directory. Ignore them, or stage the ones you want ` +
+          `reviewed, or re-run with untracked capture off.`,
+      });
+    } else {
+      let budget = MAX_UNTRACKED_TOTAL_BYTES;
+      for (const path of candidates) {
+        let bytes: number;
+        try {
+          // `lstat`, not `stat`. Two things turn on it.
+          //
+          // `ls-files --others` names directory-shaped entries: an embedded git
+          // repo comes out as `nested/`, and a symlink to a directory as a plain
+          // name. `stat` follows the link and succeeds on both, and git then
+          // fails to diff them — quietly, because it fails by exiting 1 with no
+          // output, which used to read as "an empty diff". The path was recorded
+          // as reviewed and nobody had looked at it: the exact lie this module
+          // exists to prevent, and worse than the old bug, which at least never
+          // claimed otherwise. A FIFO is worse still — git *blocks* reading it,
+          // and the review hangs until the git timeout fires.
+          //
+          // And a symlink to a 5 MB file is 20 bytes of link text to git, not
+          // 5 MB, so `stat`'s size would skip it against the wrong number.
+          const abs = join(repoRoot, path);
+          const st = lstatSync(abs);
+          const kind = describeUndiffable(abs, st);
+          if (kind) {
+            skipped.push({ path, bytes: null, reason: kind });
+            continue;
+          }
+          bytes = st.size;
+        } catch (err) {
+          // A path `ls-files` just named can still be unreachable: a build
+          // script's scratch file removed underneath us, or a name whose bytes
+          // do not survive the round-trip through a JS string on this platform.
+          // Skipping it must not take the whole capture down — but it must not
+          // be silent either.
+          skipped.push({
+            path,
+            bytes: null,
+            reason: `could not be read (${(err as Error).message})`,
+          });
+          continue;
+        }
+
+        if (bytes > MAX_UNTRACKED_BYTES) {
+          skipped.push({
+            path,
+            bytes,
+            reason: `${Math.round(bytes / 1000)} kB exceeds the ${Math.round(
+              MAX_UNTRACKED_BYTES / 1000,
+            )} kB untracked-file cap`,
+          });
+          continue;
+        }
+        if (bytes > budget) {
+          skipped.push({
+            path,
+            bytes,
+            reason:
+              `the untracked capture reached its ` +
+              `${Math.round(MAX_UNTRACKED_TOTAL_BYTES / 1_000_000)} MB total cap`,
+          });
+          continue;
+        }
+
+        let section: Buffer;
+        try {
+          section = diffUntracked(repoRoot, path);
+        } catch (err) {
+          // Fail closed. Whatever git could not render — a special file that
+          // slipped the lstat gate, a permissions wall, a name it will not take
+          // — is a file nobody reviewed, and it says so rather than joining
+          // `untracked`, which claims the opposite.
+          skipped.push({
+            path,
+            bytes,
+            reason: `git could not diff it (${(err as Error).message.trim()})`,
+          });
+          continue;
+        }
+
+        budget -= bytes;
+        parts.push(section);
+        untracked.push(path);
       }
-      if (bytes > MAX_UNTRACKED_BYTES) {
-        skipped.push({
-          path,
-          bytes,
-          reason: `${Math.round(bytes / 1000)} kB exceeds the ${Math.round(
-            MAX_UNTRACKED_BYTES / 1000,
-          )} kB untracked-file cap`,
-        });
-        continue;
-      }
-      parts.push(diffUntracked(repoRoot, path));
-      untracked.push(path);
     }
   }
 

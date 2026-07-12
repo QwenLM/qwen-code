@@ -32,11 +32,11 @@ interface ResolveAnchorsArgs {
 }
 
 /** Every request carries an id, a path and a snippet; the rest is optional. */
-function validateRequests(raw: unknown): AnchorRequest[] {
+export function validateRequests(raw: unknown): AnchorRequest[] {
   if (!Array.isArray(raw)) {
     throw new Error('Input must be a JSON array of findings.');
   }
-  return raw.map((r, i) => {
+  const requests = raw.map((r, i) => {
     const o = r as Record<string, unknown>;
     for (const key of ['id', 'path', 'anchor'] as const) {
       if (typeof o[key] !== 'string' || o[key] === '') {
@@ -56,6 +56,25 @@ function validateRequests(raw: unknown): AnchorRequest[] {
       ...(o['line'] !== undefined ? { line: o['line'] as number } : {}),
     };
   });
+
+  // The report splits into `resolved` and `unmatched`, so the caller cannot
+  // re-join by position — it joins by id. A duplicate id therefore pairs some
+  // finding with another finding's line, and posts a comment on code it is not
+  // about. Refuse it here rather than let it resolve into a plausible wrong
+  // answer.
+  const seen = new Set<string>();
+  const dupes = new Set<string>();
+  for (const r of requests) {
+    if (seen.has(r.id)) dupes.add(r.id);
+    seen.add(r.id);
+  }
+  if (dupes.size > 0) {
+    throw new Error(
+      `Duplicate finding id(s): ${[...dupes].join(', ')}. Ids are how each ` +
+        `resolution is matched back to its finding, so they must be unique.`,
+    );
+  }
+  return requests;
 }
 
 function runResolveAnchors(args: ResolveAnchorsArgs): void {

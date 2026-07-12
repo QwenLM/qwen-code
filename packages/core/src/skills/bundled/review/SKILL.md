@@ -150,7 +150,10 @@ qwen review capture-local --file <file> --target <filename> \
   --out .qwen/tmp/qwen-review-<filename>-plan.json
 ```
 
-It writes the diff to `.qwen/tmp/qwen-review-<target>-diff.txt` and emits the same report `fetch-pr` does (`diffPathAbsolute`, `chunks[]`, `files[]`, the topology counts), plus two fields of its own: `untrackedFiles` (brand-new files, whose contents no `git diff` would have shown) and `skippedFiles` (untracked files too large to inline — **name these under "Not reviewed" in Step 6**; a capture that quietly dropped a file is the bug this command exists to fix, and re-introducing it one size class up would be no better).
+It writes the diff to `.qwen/tmp/qwen-review-<target>-diff.txt` and emits the same report `fetch-pr` does (`diffPathAbsolute`, `chunks[]`, `files[]`, the topology counts), plus two fields of its own:
+
+- **`untrackedFiles`** — brand-new files, whose contents no `git diff` would have shown. **Name them in the review's summary.** A local review now reads files the user never staged, and the most common untracked-but-unignored file in the wild is a credentials file (`.env`, a key dump). Nothing is filtered — a hardcoded skip-list would reintroduce exactly the silent-skipping this command exists to end — so the user is told instead, and can re-run with `--no-untracked` or fix their `.gitignore`.
+- **`skippedFiles`** — untracked files that were **not** reviewed, each with a reason: too large, an embedded git repository, a symlink to a directory, a total-budget or file-count cap. **List these under "Not reviewed" in Step 6.** A capture that quietly dropped a file is the bug this command exists to fix; dropping one for a subtler reason would be the same bug wearing a hat.
 
 Do **not** hand-type a `git diff` here. Two reasons, and the second is why this is a command and not a prose recipe:
 
