@@ -2,9 +2,6 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const wsMock = vi.hoisted(() => ({
   close: vi.fn(),
-  options: undefined as
-    | { onReady?: () => void; onError?: (error: Error) => void }
-    | undefined,
   start: vi.fn<() => Promise<void>>(),
 }));
 
@@ -14,10 +11,6 @@ vi.mock('@larksuiteoapi/node-sdk', async (importOriginal) => {
   return {
     ...actual,
     WSClient: class {
-      constructor(options: typeof wsMock.options) {
-        wsMock.options = options;
-      }
-
       start = wsMock.start;
       close = wsMock.close;
     },
@@ -893,7 +886,6 @@ describe('FeishuChannel', () => {
   describe('connect: WebSocket', () => {
     beforeEach(() => {
       wsMock.close.mockReset();
-      wsMock.options = undefined;
       wsMock.start.mockReset().mockResolvedValue(undefined);
     });
 
@@ -926,68 +918,14 @@ describe('FeishuChannel', () => {
       expect(wsMock.start).not.toHaveBeenCalled();
     });
 
-    it('waits for the initial WebSocket handshake', async () => {
+    it('resolves after the SDK start promise without waiting for onReady', async () => {
       const channel = createChannel();
       mockSuccessfulTokenFetch();
-      let settled = false;
 
-      const connectPromise = channel.connect();
-      void connectPromise.then(
-        () => {
-          settled = true;
-        },
-        () => {
-          settled = true;
-        },
-      );
-      await vi.waitFor(() => expect(wsMock.start).toHaveBeenCalledOnce());
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      await channel.connect();
 
-      expect(settled).toBe(false);
-
-      wsMock.options?.onReady?.();
-      await connectPromise;
-      expect(settled).toBe(true);
+      expect(wsMock.start).toHaveBeenCalledOnce();
       channel.disconnect();
-    });
-
-    it('rejects and closes when the initial WebSocket handshake fails', async () => {
-      const channel = createChannel();
-      mockSuccessfulTokenFetch();
-
-      const connectPromise = channel.connect();
-      await vi.waitFor(() => expect(wsMock.start).toHaveBeenCalledOnce());
-      wsMock.options?.onError?.(new Error('credential rejected'));
-
-      await expect(connectPromise).rejects.toThrow(
-        'Feishu WebSocket connection failed: credential rejected',
-      );
-      expect(wsMock.close).toHaveBeenCalledOnce();
-    });
-
-    it('rejects and closes when the initial WebSocket handshake times out', async () => {
-      vi.useFakeTimers();
-      try {
-        const channel = createChannel();
-        mockSuccessfulTokenFetch();
-
-        const connectPromise = channel.connect();
-        await vi.advanceTimersByTimeAsync(0);
-        expect(wsMock.start).toHaveBeenCalledOnce();
-        const rejection = expect(connectPromise).rejects.toThrow(
-          'WebSocket handshake did not complete within 15000ms',
-        );
-
-        await vi.advanceTimersByTimeAsync(15_000);
-
-        await rejection;
-        expect(wsMock.close).toHaveBeenCalledOnce();
-
-        wsMock.options?.onReady?.();
-        expect(wsMock.close).toHaveBeenCalledTimes(2);
-      } finally {
-        vi.useRealTimers();
-      }
     });
   });
 

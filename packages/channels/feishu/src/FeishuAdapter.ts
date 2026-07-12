@@ -85,8 +85,6 @@ const DEDUP_TTL_MS = 5 * 60 * 1000;
 /** Minimum interval between card updates (ms) to avoid API rate limiting. */
 const CARD_UPDATE_INTERVAL_MS = 1500;
 
-const FEISHU_WS_STARTUP_TIMEOUT_MS = 15_000;
-
 const FEISHU_RUNNING_STATUS_LABEL = '运行中...';
 const FEISHU_STOPPED_STATUS_LABEL = '已停止生成';
 const FEISHU_STOP_FAILED_STATUS_LABEL = '停止失败，请重试';
@@ -284,53 +282,13 @@ export class FeishuChannel extends ChannelBase {
   }
 
   private async connectWebSocket(): Promise<void> {
-    await new Promise<void>((resolve, reject) => {
-      let settled = false;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      let client: lark.WSClient;
-
-      const settle = (error?: Error) => {
-        if (settled) return;
-        settled = true;
-        if (timer) clearTimeout(timer);
-        if (error) {
-          client.close();
-          this.wsClient = undefined;
-          reject(error);
-        } else {
-          resolve();
-        }
-      };
-      const fail = (error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error);
-        settle(new Error(`Feishu WebSocket connection failed: ${message}`));
-      };
-
-      client = new lark.WSClient({
-        appId: this.config.clientId!,
-        appSecret: this.config.clientSecret!,
-        loggerLevel: lark.LoggerLevel.warn,
-        autoReconnect: true,
-        onReady: () => {
-          if (settled) {
-            client.close();
-            return;
-          }
-          settle();
-        },
-        onError: fail,
-      });
-      this.wsClient = client;
-      timer = setTimeout(() => {
-        settle(
-          new Error(
-            `Feishu WebSocket handshake did not complete within ${FEISHU_WS_STARTUP_TIMEOUT_MS}ms.`,
-          ),
-        );
-      }, FEISHU_WS_STARTUP_TIMEOUT_MS);
-
-      void client.start({ eventDispatcher: this.eventDispatcher }).catch(fail);
+    this.wsClient = new lark.WSClient({
+      appId: this.config.clientId!,
+      appSecret: this.config.clientSecret!,
+      loggerLevel: lark.LoggerLevel.warn,
     });
+
+    await this.wsClient.start({ eventDispatcher: this.eventDispatcher });
   }
 
   private async connectWebhook(
