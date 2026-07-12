@@ -1111,6 +1111,10 @@ export function WebShellSidebar({
             }
           }
           setWorkspaceRemovalRemoteInProgress(false);
+          onError(
+            new Error('Workspace removal remained in progress after retries.'),
+            t('sidebar.removeWorkspaceError'),
+          );
           return;
         }
       }

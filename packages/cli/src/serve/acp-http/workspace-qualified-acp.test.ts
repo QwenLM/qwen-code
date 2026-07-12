@@ -534,6 +534,21 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
           bridge: makeBridge(),
         }),
       );
+      singleHandle.beginWorkspaceDrain('dynamic-id');
+      const drainingDynamic = await fetch(
+        `http://127.0.0.1:${singlePort}/workspaces/dynamic-id/acp`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: INITIALIZE,
+        },
+      );
+      expect(drainingDynamic.status).toBe(503);
+      await expect(drainingDynamic.json()).resolves.toMatchObject({
+        code: 'workspace_draining',
+      });
+
+      singleHandle.cancelWorkspaceDrain('dynamic-id');
       const dynamic = await fetch(
         `http://127.0.0.1:${singlePort}/workspaces/dynamic-id/acp`,
         {

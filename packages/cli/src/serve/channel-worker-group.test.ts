@@ -451,6 +451,50 @@ describe('createChannelWorkerGroup', () => {
     expect(recorded[2]!.supervisor.stop).toHaveBeenCalledOnce();
   });
 
+  it('removes a restored worker from routing when startup fails', async () => {
+    const runtimes = [
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ];
+    const registry = fakeRegistry(runtimes);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const createSupervisorWithRestoreFailure = (
+      opts: CreateChannelWorkerSupervisorOptions,
+    ) => {
+      const supervisor = createSupervisor(opts);
+      if (recorded.length === 3) {
+        supervisor.start.mockRejectedValueOnce(new Error('restore failed'));
+      }
+      return supervisor;
+    };
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+        { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
+      ],
+      registry,
+      createSupervisor: createSupervisorWithRestoreFailure,
+      shared,
+    });
+    await group.start();
+    await group.removeWorkspace(SECONDARY);
+
+    await expect(group.restoreWorkspace(SECONDARY)).rejects.toThrow(
+      'restore failed',
+    );
+
+    expect(group.workspaceActivity(SECONDARY)).toBe(0);
+    await expect(group.enqueueWebhookTask(webhookTask)).rejects.toMatchObject({
+      code: 'channel_worker_unavailable',
+    });
+
+    await group.restoreWorkspace(SECONDARY);
+    expect(recorded).toHaveLength(4);
+    expect(recorded[3]!.supervisor.start).toHaveBeenCalledOnce();
+  });
+
   it('does not start later supervisors when the first start fails', async () => {
     const registry = fakeRegistry([
       fakeRuntime(PRIMARY, true),

@@ -1180,6 +1180,7 @@ export function mountAcpHttp(
   };
 
   const secondaryMounts = new Map<string, RuntimeAcpMount>();
+  const drainingWorkspaceIds = new Set<string>();
   const getOrCreateSecondaryMount = (
     rt: WorkspaceRuntime,
   ): RuntimeAcpMount | undefined => {
@@ -1187,6 +1188,10 @@ export function mountAcpHttp(
     const existing = secondaryMounts.get(rt.workspaceId);
     if (existing) return existing;
     const mount = createSecondaryAcpMount(rt);
+    if (drainingWorkspaceIds.has(rt.workspaceId)) {
+      mount.draining = true;
+      mount.workspaceRememberLane.beginDrain();
+    }
     secondaryMounts.set(rt.workspaceId, mount);
     return mount;
   };
@@ -2042,6 +2047,7 @@ export function mountAcpHttp(
         mount.workspaceRememberLane.dispose();
         mount.registry.dispose();
       }
+      drainingWorkspaceIds.clear();
       if (wss) {
         for (const client of wss.clients) {
           client.close(1012, 'Server shutting down');
@@ -2052,12 +2058,14 @@ export function mountAcpHttp(
     },
     registry,
     beginWorkspaceDrain: (workspaceId) => {
+      drainingWorkspaceIds.add(workspaceId);
       const mount = secondaryMounts.get(workspaceId);
       if (!mount) return;
       mount.draining = true;
       mount.workspaceRememberLane.beginDrain();
     },
     cancelWorkspaceDrain: (workspaceId) => {
+      drainingWorkspaceIds.delete(workspaceId);
       const mount = secondaryMounts.get(workspaceId);
       if (!mount) return;
       mount.draining = false;
@@ -2074,6 +2082,7 @@ export function mountAcpHttp(
       secondaryMounts.get(workspaceId)?.workspaceRememberLane.dispose();
     },
     disposeWorkspace: (workspaceId) => {
+      drainingWorkspaceIds.delete(workspaceId);
       const mount = secondaryMounts.get(workspaceId);
       if (!mount) return;
       mount.workspaceRememberLane.dispose();
