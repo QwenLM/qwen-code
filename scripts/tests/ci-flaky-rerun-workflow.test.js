@@ -11,6 +11,7 @@ const workflow = readFileSync(
   '.github/workflows/qwen-ci-flaky-rerun.yml',
   'utf8',
 );
+const skill = readFileSync('.qwen/skills/ci-flaky-patrol/SKILL.md', 'utf8');
 
 describe('ci flaky rerun workflow', () => {
   it('runs every ten minutes and only needs PR/action write permissions', () => {
@@ -31,5 +32,12 @@ describe('ci flaky rerun workflow', () => {
     expect(workflow).toContain('"read_file"');
     expect(workflow).toContain('"write_file"');
     expect(workflow).toContain('ci-flaky-rerun.mjs act');
+  });
+
+  it('keeps the skill responsible for judgment and JS responsible for GitHub writes', () => {
+    expect(skill).toContain('Workflow contract');
+    expect(skill).toContain('JavaScript driver owns');
+    expect(skill).toContain('This skill owns');
+    expect(skill).toContain('Never rerun jobs, comment, update branches');
   });
 });

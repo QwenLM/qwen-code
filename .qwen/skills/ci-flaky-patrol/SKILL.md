@@ -5,7 +5,13 @@ description: Classify one stale PR CI failure as high-confidence flaky or not fo
 
 # CI Flaky Patrol
 
-Classify exactly one stale PR CI failure. This skill is read-only.
+Classify exactly one stale PR CI failure. This skill is read-only and owns the judgment step in the scheduled flaky rerun workflow.
+
+## Workflow contract
+
+- JavaScript driver owns deterministic GitHub work: scan open PRs, select one stale failed run, fetch the failed job log, rerun failed jobs once, and write the hidden handled marker.
+- This skill owns only the flaky judgment: read the prepared input files and write the decision JSON.
+- Low confidence means no action. Prefer `flaky: false` when evidence is ambiguous.
 
 Inputs live in the current workdir:
 
