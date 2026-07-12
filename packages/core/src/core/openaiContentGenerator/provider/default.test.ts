@@ -568,5 +568,29 @@ describe('DefaultOpenAICompatibleProvider', () => {
       expect(assistant.reasoning_content).toBe('Preserved chain of thought');
       expect(assistant.reasoning).toBeUndefined();
     });
+
+    it('enables tagged thinking parsing for Qwen3 models', () => {
+      mockContentGeneratorConfig.model = 'Qwen/Qwen3.7-Max';
+      provider = new DefaultOpenAICompatibleProvider(
+        mockContentGeneratorConfig,
+        mockCliConfig,
+      );
+
+      expect(provider.getResponseParsingOptions()).toEqual({
+        taggedThinkingTags: true,
+      });
+    });
+
+    it('keeps tagged thinking parsing disabled for non-Qwen3 models', () => {
+      mockContentGeneratorConfig.model = 'gpt-4o';
+      provider = new DefaultOpenAICompatibleProvider(
+        mockContentGeneratorConfig,
+        mockCliConfig,
+      );
+
+      expect(provider.getResponseParsingOptions()).toEqual({
+        taggedThinkingTags: false,
+      });
+    });
   });
 });
