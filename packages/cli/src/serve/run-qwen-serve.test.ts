@@ -5556,9 +5556,9 @@ describe('runQwenServe channel worker supervisor', () => {
     vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
       effective: { state: 'trusted' },
     } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
-    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
-      makeFakeBridge(),
-    );
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => makeFakeBridge());
 
     const snapshots = new Map<string, ChannelWorkerSnapshot>();
     const workerOptions = new Map<
@@ -5824,6 +5824,7 @@ describe('runQwenServe channel worker supervisor', () => {
       });
       expect(readded.status).toBe(201);
       expect(supervisorFactory).toHaveBeenCalledTimes(3);
+      expect(createBridge).toHaveBeenCalledTimes(3);
       const replacementSupervisor = workerSupervisors.get(secondaryCwd)!;
       expect(replacementSupervisor).not.toBe(removedSupervisor);
       expect(replacementSupervisor.start).toHaveBeenCalledOnce();
