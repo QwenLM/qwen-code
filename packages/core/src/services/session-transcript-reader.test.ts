@@ -31,6 +31,7 @@ import {
   resetSessionTranscriptIndexCacheForTest,
   setSessionTranscriptIndexCacheMaxBytesForTest,
   SessionTranscriptCursorCodec,
+  SessionTranscriptPageTooLargeError,
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptReader,
 } from './session-transcript-reader.js';
@@ -155,6 +156,67 @@ describe('SessionTranscriptReader', () => {
       ).rejects.toBeInstanceOf(RangeError);
     },
   );
+
+  it.each([0, -1, 1.5])(
+    'rejects invalid page byte limit %s',
+    async (maxBytes) => {
+      await expect(
+        new SessionTranscriptReader(workspaceDir).readPage(sessionId, {
+          maxBytes,
+        }),
+      ).rejects.toBeInstanceOf(RangeError);
+    },
+  );
+
+  it('stops at a record boundary when the page byte budget is reached', async () => {
+    const records = [
+      record('u1', null, 'first'),
+      record('a1', 'u1', 'second'),
+      record('u2', 'a1', 'third'),
+    ];
+    await writeRecords(records);
+    const firstTwoBytes =
+      Buffer.byteLength(JSON.stringify(records[0])) +
+      Buffer.byteLength(JSON.stringify(records[1]));
+    const reader = new SessionTranscriptReader(workspaceDir);
+
+    const first = await reader.readPage(sessionId, {
+      limit: 3,
+      maxBytes: firstTwoBytes,
+    });
+    const second = await reader.readPage(sessionId, {
+      cursor: encodeCursor(first.nextCursorState!),
+      limit: 3,
+      maxBytes: firstTwoBytes,
+    });
+
+    expect(first.records.map((item) => item.uuid)).toEqual(['u1', 'a1']);
+    expect(first.hasMore).toBe(true);
+    expect(first.nextCursorState?.position).toBe(2);
+    expect(second.records.map((item) => item.uuid)).toEqual(['u2']);
+    expect(second.hasMore).toBe(false);
+  });
+
+  it('rejects a single aggregate record over the page byte budget', async () => {
+    const first = record('u1', null, 'first');
+    const second = record('u1', null, 'second fragment');
+    await writeRecords([first, second, record('a1', 'u1', 'reply')]);
+    const aggregateBytes =
+      Buffer.byteLength(JSON.stringify(first)) +
+      Buffer.byteLength(JSON.stringify(second));
+
+    await expect(
+      new SessionTranscriptReader(workspaceDir).readPage(sessionId, {
+        limit: 1,
+        maxBytes: aggregateBytes - 1,
+      }),
+    ).rejects.toMatchObject({
+      name: 'SessionTranscriptPageTooLargeError',
+      sessionId,
+      pageBytes: aggregateBytes,
+      maxBytes: aggregateBytes - 1,
+    } satisfies Partial<SessionTranscriptPageTooLargeError>);
+  });
 
   it('pages only the active parentUuid chain and skips abandoned branches', async () => {
     await writeRecords([
@@ -500,6 +562,22 @@ describe('SessionTranscriptReader', () => {
       { text: 'hello' },
       { text: ' world' },
     ]);
+  });
+
+  it('counts glued-line fragments conservatively against the byte budget', async () => {
+    const first = record('u1', null, 'hello');
+    const second = record('u1', null, ' world');
+    const gluedLine = `${JSON.stringify(first)}${JSON.stringify(second)}`;
+    await writeRawTranscript(
+      `${gluedLine}\n${JSON.stringify(record('a1', 'u1', 'reply'))}\n`,
+    );
+
+    await expect(
+      new SessionTranscriptReader(workspaceDir).readPage(sessionId, {
+        limit: 1,
+        maxBytes: Buffer.byteLength(gluedLine) * 2 - 1,
+      }),
+    ).rejects.toBeInstanceOf(SessionTranscriptPageTooLargeError);
   });
 
   it('skips non-ChatRecord JSON lines while indexing', async () => {

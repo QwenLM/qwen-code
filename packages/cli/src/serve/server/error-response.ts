@@ -9,6 +9,7 @@ import {
   InvalidSessionTranscriptCursorError,
   recordDaemonBridgeError,
   recordDaemonError,
+  SessionTranscriptPageTooLargeError,
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
   TrustGateError,
@@ -164,6 +165,16 @@ export function sendBridgeError(
       error: err.message,
       code: 'transcript_snapshot_unavailable',
       ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+    });
+    return;
+  }
+  if (err instanceof SessionTranscriptPageTooLargeError) {
+    res.status(413).json({
+      error: err.message,
+      code: 'transcript_page_too_large',
+      sessionId: err.sessionId,
+      pageBytes: err.pageBytes,
+      maxBytes: err.maxBytes,
     });
     return;
   }
