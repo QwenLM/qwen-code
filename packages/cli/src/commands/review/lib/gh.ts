@@ -10,6 +10,43 @@
 
 import { execFileSync } from 'node:child_process';
 
+let ghHost: string | undefined;
+
+const HOSTNAME_RE = /^[A-Za-z0-9.-]+(?::\d+)?$/;
+
+/**
+ * Route every subsequent `gh` invocation in this process at a GitHub host
+ * other than github.com (GitHub Enterprise). The subcommands thread their
+ * `--host` option here before making any call, so host targeting is code,
+ * not a prose instruction the orchestrating model must remember per call —
+ * a dropped host silently reads from and posts to github.com's same-named
+ * `owner/repo`.
+ *
+ * `undefined` (or `''`) restores the default: the child then inherits the
+ * parent env untouched, so an operator-exported GH_HOST stays in effect.
+ */
+export function setGhHost(host: string | undefined): void {
+  if (host === undefined || host === '') {
+    ghHost = undefined;
+    return;
+  }
+  if (!HOSTNAME_RE.test(host)) {
+    throw new TypeError(
+      `--host must be a hostname (optionally :port), got ${JSON.stringify(host)}`,
+    );
+  }
+  ghHost = host;
+}
+
+/**
+ * Environment for `gh` child processes. `undefined` means "inherit the
+ * parent env untouched"; with a host set, the inherited env is extended
+ * with GH_HOST, which `gh` honours on every command.
+ */
+export function ghEnv(): NodeJS.ProcessEnv | undefined {
+  return ghHost ? { ...process.env, GH_HOST: ghHost } : undefined;
+}
+
 /**
  * Run `gh` with args. Returns stdout, trimmed and CRLF-normalised.
  *
@@ -23,6 +60,7 @@ export function gh(...args: string[]): string {
   return execFileSync('gh', args, {
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
+    env: ghEnv(),
   })
     .replace(/\r\n/g, '\n')
     .trim();
@@ -71,7 +109,7 @@ export function currentUser(): string {
  */
 export function ensureAuthenticated(): void {
   try {
-    execFileSync('gh', ['auth', 'status'], { stdio: 'pipe' });
+    execFileSync('gh', ['auth', 'status'], { stdio: 'pipe', env: ghEnv() });
   } catch {
     throw new Error(
       'gh CLI is not authenticated. Run `gh auth login` and retry.',

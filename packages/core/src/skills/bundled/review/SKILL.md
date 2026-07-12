@@ -62,7 +62,9 @@ The parser already classified the target, so there is nothing to disambiguate by
 1. Check if any git remote matches the URL's **host and owner/repo — by exact segment equality, never substring**: run `git remote -v` and parse each remote URL structurally (`git@<host>:<owner>/<repo>.git` and `https://<host>/<owner>/<repo>(.git)` are the two shapes). A remote matches only when its host equals the verdict's `host` AND its `<owner>/<repo>` (with any `.git` suffix stripped) equals the verdict's `owner/repo`, both compared case-insensitively as whole segments — `shao/qwen-code` does NOT match a `wenshao/qwen-code` remote, and a `github.com` PR does not match a same-named repo on another host. Substring "contains" matching once allowed exactly those, which is reviewing one repository and posting to another. This still handles forks — a local clone of `wenshao/jdk` with an `upstream` remote pointing to `openjdk/jdk` still matches `openjdk/jdk` PRs exactly.
 2. If a matching remote is found, proceed with the **normal worktree flow** — use that remote name (instead of hardcoded `origin`) for `git fetch <remote> pull/<number>/head:qwen-review/pr-<number>`. In Step 7, use the owner/repo from the URL for posting comments.
 
-For a `pr-url` whose `host` is not `github.com` (GitHub Enterprise), **every `gh` call for this PR — `fetch-pr`, `pr-context`, `presubmit`, Agent 0's `gh pr view`/`gh issue view`, Step 6's residual fetch, and the Step 7 submission — must carry the host**: prefix the command with `GH_HOST=<host>` (e.g. `GH_HOST=github.example.com gh api ...`). `gh` defaults to `github.com`, so a dropped host makes every one of those calls read from and post to the wrong site's `owner/repo`. 3. If **no remote matches**, use **lightweight mode**: run `gh pr diff <url>` to get the diff directly. Skip Step 2 (no local rules) and Step 8 (no local reports or cache). In Step 9, skip worktree removal (none was created) but still clean up temp files (`.qwen/tmp/qwen-review-{target}-*`). Also run `qwen review pr-context <number> <owner>/<repo> --out .qwen/tmp/qwen-review-pr-<number>-context.md` — it is pure GitHub API and works cross-repo. Agent 0 and Step 6's open-Critical re-check depend on it: a `Refs #123`-style target issue is only discoverable from the PR body, and open Critical threads only from the context file, so skipping it lets a wrong-root fix sail through blocker-free. If `pr-context` fails here (auth, network), warn and continue with the diff alone — but skip Agent 0 (it has nothing to work from) and treat every open-Critical re-check verdict as "cannot tell", which forbids an Approve. Carry this forward as the **context-unavailable** state: Step 7's invariant caps **every** `C=0` outcome of such a run at `COMMENT` with a diff-only body (both the would-be APPROVE and the Suggestion-only "no blockers" sentence), so a run that could not see the PR's existing discussion can post findings but never certify the absence of blockers. In Step 7, use the owner/repo from the URL. Inform the user: "Cross-repo review: running in lightweight mode (no build/test)."
+For a `pr-url` whose `host` is not `github.com` (GitHub Enterprise), **pass `--host <host>` to every review subcommand that talks to GitHub — `fetch-pr`, `pr-context`, and `presubmit`** — which routes all of their `gh` calls via GH_HOST in code; a forgotten host cannot silently retarget them at github.com. The `gh` commands you run directly are still yours to route: prefix Agent 0's `gh pr view`/`gh issue view`, Step 6's residual body fetch, and the Step 7 submission with `GH_HOST=<host> ` (e.g. `GH_HOST=github.example.com gh api ...`). `gh` defaults to `github.com`, so a dropped host makes a call read from and post to the wrong site's `owner/repo`.
+
+3. If **no remote matches**, use **lightweight mode**: run `gh pr diff <url>` to get the diff directly. Skip Step 2 (no local rules) and Step 8 (no local reports or cache). In Step 9, skip worktree removal (none was created) but still clean up temp files (`.qwen/tmp/qwen-review-{target}-*`). Also run `qwen review pr-context <number> <owner>/<repo> --out .qwen/tmp/qwen-review-pr-<number>-context.md` — it is pure GitHub API and works cross-repo. Agent 0 and Step 6's open-Critical re-check depend on it: a `Refs #123`-style target issue is only discoverable from the PR body, and open Critical threads only from the context file, so skipping it lets a wrong-root fix sail through blocker-free. If `pr-context` fails here (auth, network), warn and continue with the diff alone — but skip Agent 0 (it has nothing to work from) and treat every open-Critical re-check verdict as "cannot tell", which forbids an Approve. Carry this forward as the **context-unavailable** state: Step 7's invariant caps **every** `C=0` outcome of such a run at `COMMENT` with a diff-only body (both the would-be APPROVE and the Suggestion-only "no blockers" sentence), so a run that could not see the PR's existing discussion can post findings but never certify the absence of blockers. In Step 7, use the owner/repo from the URL. Inform the user: "Cross-repo review: running in lightweight mode (no build/test)."
 
 Based on the parsed `target.type`:
 
@@ -800,13 +802,13 @@ Read `.qwen/tmp/qwen-review-{target}-presubmit.json`. Schema:
   downgradeApprove: boolean;        // submit COMMENT instead of APPROVE
   downgradeRequestChanges: boolean; // submit COMMENT instead of REQUEST_CHANGES (self-PR only)
   downgradeReasons: string[];       // human-readable; join with '; ' for body
-  blockOnExistingComments: boolean; // inform user and ask before submit
+  blockOnExistingComments: boolean; // one or more overlaps — drop those findings
 }
 ```
 
 **Apply the report:**
 
-- `blockOnExistingComments=true` → list `existingComments.overlap` to the user, ask whether to proceed. If they decline, stop.
+- `blockOnExistingComments=true` → **an overlap is a duplicate; the disposal is deterministic — do not ask the user.** Drop each finding whose `(path, line)` appears in `existingComments.overlap` from your `comments` array (adjusting the counts you hand to `compose-review`: a dropped Critical was already reported on the PR, so it is neither `criticalsInline` nor `bodyCriticals`; a dropped Suggestion joins neither count), list the dropped findings in the terminal summary as "already reported at <path>:<line>", and submit the remainder without pausing. Dogfooding measured this exact decision point improvised as an interactive question in 2 of 6 runs — which stalls a headless run forever — while the other 4 runs proceeded; the Exclusion Criteria already forbid re-reporting discussed issues, so there is nothing to ask. (If dropping overlaps leaves zero findings, that is still not a question: run `compose-review` with the remaining counts like any other submission.)
 - `downgradeApprove` / `downgradeRequestChanges` / `downgradeReasons` → **do not apply these by hand.** Copy them into the `presubmit` field of the `compose-review` input (below); the subcommand owns the semantics its tests pin — a downgrade fires only when the verdict it names is the one on the table (a Suggestion-only review is already Comment, so nothing is downgraded and no "Downgraded" sentence is emitted), the downgrade sentence carries the reasons, and a downgraded Request changes keeps its body Criticals after the sentence so the self-PR downgrade never erases the only copy of a blocker.
 - For `stale` / `resolved` / `noConflict` buckets, log to terminal but do not block.
 
@@ -814,7 +816,7 @@ Read `.qwen/tmp/qwen-review-{target}-presubmit.json`. Schema:
 
 - **Self-PR**: GitHub rejects both `APPROVE` and `REQUEST_CHANGES` on your own PR (HTTP 422); `COMMENT` is the only accepted event. Critical and Suggestion findings still appear as inline `comments` regardless, so substantive feedback is preserved.
 - **CI failure / pending**: the LLM review reads code statically and cannot see runtime test failures. Approving on red CI is misleading; pending CI means the verdict is premature.
-- **Overlap with existing comments**: posting on the same `(path, line)` as an existing Qwen comment produces visual duplicates. Stale-commit and replied-to comments are skipped silently — they're false-positive overlap from line-based matching.
+- **Overlap with existing comments**: posting on the same `(path, line)` as an existing Qwen comment produces visual duplicates, so overlapping findings are dropped rather than re-posted. Stale-commit and replied-to comments are skipped silently — they're false-positive overlap from line-based matching.
 
 ⚠️ **Severity routing — high-confidence Critical AND Suggestion findings both go inline, pinned to the exact code line.** They are distinguished by the `**[Critical]**` / `**[Suggestion]**` prefix in the comment body, not by where they are posted.
 
@@ -971,6 +973,20 @@ qwen review cleanup <target>
 `<target>` is the same suffix used throughout (`pr-<n>`, `local`, or filename). The command removes the worktree at `.qwen/tmp/review-pr-<n>` (PR targets only), deletes the local branch ref `qwen-review/pr-<n>`, and clears any `.qwen/tmp/qwen-review-<target>-*` side files (review JSON, PR context, presubmit / findings reports). It is idempotent — missing files are silent OK. Also remove `.qwen/tmp/qwen-review-args-input.txt` (written before the target suffix was known, so the pattern above misses it).
 
 This step runs **after** Step 7 and Step 8 to ensure all review outputs are saved before cleanup.
+
+**End the run with exactly one machine-readable line.** The very last line of your final message MUST match this shape, byte-for-byte in its fixed parts:
+
+```
+Review complete: <target> — <disposition>
+```
+
+where `<target>` is the same suffix as above (`pr-6740`, `local`, a filename) and `<disposition>` is exactly one of:
+
+- `APPROVE posted` | `REQUEST_CHANGES posted (<C> Critical, <S> Suggestion inline)` | `COMMENT posted (<C> Critical, <S> Suggestion inline)` — a Step 7 submission happened; use the event actually sent.
+- `<verdict>, not posted (<C> Critical, <S> Suggestion)` — high effort without `--comment`/publish authorization; `<verdict>` is Approve / Request changes / Comment.
+- `quick pass, not posted (<N> unverified findings)` — low/medium effort.
+
+Everything before this line is for the human; this line is for machines — batch drivers, CI wrappers, and log scrapers detect run completion by `^Review complete: `, and dogfooding measured three different ad-hoc completion phrasings across one batch, each needing its own regex. Do not reword it, translate it, wrap it in markdown emphasis, or put text after it.
 
 ## Exclusion Criteria
 

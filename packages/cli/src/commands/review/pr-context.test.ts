@@ -5,7 +5,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import type { Argv, CommandModule } from 'yargs';
 import {
+  prContextCommand,
   isLegacySuggestionSummary,
   isReviewWorthShowing,
   SUMMARY_MARKER,
@@ -385,5 +387,20 @@ describe('classifyInlineThreads', () => {
     expect(t.repliedRoots.map((c) => c.id)).toEqual([3]);
     expect(t.openRoots.map((c) => c.id)).toEqual([5]);
     expect(t.repliesByRoot.get(1)!.map((c) => c.id)).toEqual([2]);
+  });
+});
+
+describe('prContextCommand builder', () => {
+  it('registers --host so Enterprise routing is a flag, not a prose instruction', () => {
+    const opts: string[] = [];
+    const stub = {
+      positional: () => stub,
+      option: (name: string) => {
+        opts.push(name);
+        return stub;
+      },
+    } as unknown as Argv;
+    ((prContextCommand as CommandModule).builder as (y: Argv) => Argv)(stub);
+    expect(opts).toContain('host');
   });
 });

@@ -18,7 +18,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { ensureAuthenticated, gh, ghApiAll } from './lib/gh.js';
+import { ensureAuthenticated, gh, ghApiAll, setGhHost } from './lib/gh.js';
 
 /**
  * Marker embedded in the "suggestion summary" issue comment that /review used
@@ -583,8 +583,14 @@ export const prContextCommand: CommandModule = {
         type: 'string',
         demandOption: true,
         describe: 'Output Markdown path (will be overwritten)',
+      })
+      .option('host', {
+        type: 'string',
+        describe:
+          'GitHub host for this PR (GitHub Enterprise). Routes every gh call in this command via GH_HOST; omit for github.com.',
       }),
   handler: async (argv) => {
+    setGhHost((argv as { host?: string }).host);
     await runPrContext(argv as unknown as PrContextArgs);
   },
 };

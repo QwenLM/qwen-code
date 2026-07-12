@@ -297,6 +297,14 @@ The resolution is the same one this document already records for presubmit and c
 
 What deliberately stays prose: everything judgment-shaped — what counts as a Critical, verification, the posting gate's authorization semantics, the angles. A truth table cannot decide whether a finding is real; it can guarantee that a real finding is never mislabeled, dropped by a downgrade, or approved past.
 
+## What the first dogfood batch changed
+
+Six concurrent real-PR runs (batch 3) produced three targeted changes, each fixing something the batch measured rather than predicted:
+
+- **Overlap disposal is deterministic.** presubmit's overlap report used to end in "ask the user whether to proceed" — 2 of 6 runs stalled on an improvised interactive question (fatal for a headless run) while the other 4 proceeded, the signature of an under-specified decision point. An overlap is a duplicate by the Exclusion Criteria; the rule is now drop, note in the terminal, continue — and the counts handed to `compose-review` shrink accordingly, so a dropped finding can never flip the verdict.
+- **Host routing is a flag, not prose.** The GH_HOST-by-prefix instruction survived exactly one review round before a reviewer noted the model must remember it per call. `--host` on `fetch-pr` / `pr-context` / `presubmit` routes every wrapped `gh` call in code (`lib/gh.ts` `setGhHost`/`ghEnv`), leaving the prose rule only for the handful of `gh` commands the orchestrating model runs directly.
+- **A fixed completion line.** Three different completion phrasings across one batch each needed their own detection regex in the batch driver. Step 9 now ends every run with `Review complete: <target> — <disposition>`, greppable by `^Review complete: `.
+
 ## Why Step 7 opens with a hard posting gate
 
 Posting is the only irreversible, public, outward-facing action the skill takes, and it must never happen as a side effect of a confident verdict. The skip condition existed from the start, but it was phrased as one clause among several ("skip if … or if BOTH `--comment` absent AND no post request"), which a model evaluates as a judgment call at the end of a long run — exactly when it is reasoning about what it wants to say rather than about what it was authorized to do.

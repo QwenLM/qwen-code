@@ -273,6 +273,10 @@ Reports include: timestamp, diff stats, build/test results, all findings with ve
 
 The deterministic halves of the pipeline — argument parsing (`qwen review parse-args`) and the event/body decision (`qwen review compose-review`) — are tested subcommands rather than prompt text, so `--effort` grammar, `--comment` forcing, verdict caps, and downgrade behavior are pinned by unit tests and cannot drift with the model.
 
+**GitHub Enterprise:** reviewing a PR URL on a non-`github.com` host routes every GitHub call at that host — the review subcommands (`fetch-pr`, `pr-context`, `presubmit`) accept `--host` and set it in code, so a forgotten host cannot silently retarget the review at `github.com`.
+
+Every run ends with one machine-readable line (`Review complete: <target> — <disposition>`), so scripts and CI wrappers can detect completion and outcome with a single `^Review complete: ` match.
+
 ## Cross-file Impact Analysis
 
 A dedicated cross-file tracer (Agent 1c) owns this walk end-to-end. When code changes modify exported functions, classes, or interfaces, it searches for all callers and checks compatibility:
