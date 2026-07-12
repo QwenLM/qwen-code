@@ -81,6 +81,12 @@ export interface RequestContext {
   pendingContentParts?: Part[];
   pendingUntrustedResponseParts?: Part[];
   hasStructuredReasoningContent?: boolean;
+  visibleThinkingTagState?: {
+    pendingTag: string;
+    openTagCount: number;
+    atVisibleStart: boolean;
+    leaked: boolean;
+  };
 }
 
 export interface ErrorHandler {
