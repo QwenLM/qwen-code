@@ -60,6 +60,7 @@ export * from './core/client.js';
 export * from './core/contentGenerator.js';
 export * from './core/reasoning-effort.js';
 export * from './core/coreToolScheduler.js';
+export * from './core/deferred-tool-call-normalization.js';
 export * from './core/permissionFlow.js';
 export * from './core/permission-helpers.js';
 export * from './core/geminiChat.js';

@@ -46,6 +46,8 @@ import {
   LoopTickResolver,
   convertToFunctionResponse,
   createDuplicateProviderToolCallResponse,
+  normalizeDeferredToolCallRequest,
+  providerToolName,
   findRepeatedDuplicateProviderToolCall,
   markDuplicateProviderToolCallResponseSent,
   createDebugLogger,
@@ -4535,6 +4537,8 @@ export class Session implements SessionContext {
   ): Promise<RunToolResult> {
     const callId = fc.id ?? `${fc.name}-${Date.now()}`;
     let args = (fc.args ?? {}) as Record<string, unknown>;
+    let responseToolName = fc.name ?? 'unknown_tool';
+    let telemetryToolName = fc.name ?? '';
     if (toolLoopState?.loopDetected) {
       return {
         parts: [
@@ -4543,7 +4547,7 @@ export class Session implements SessionContext {
             : {
                 functionResponse: {
                   id: callId,
-                  name: fc.name ?? 'unknown_tool',
+                  name: responseToolName,
                   response: { error: LOOP_DETECTED_SKIP_MESSAGE },
                 },
               },
@@ -4560,6 +4564,7 @@ export class Session implements SessionContext {
     let agentToolAbortController: AbortController | undefined;
     let removeAgentToolAbortPropagation: (() => void) | undefined;
     let subAgentCleanupFunctions: Array<() => void> = [];
+    let isMcpTool = false;
 
     const cleanupAgentToolResources = () => {
       subAgentCleanupFunctions.forEach((cleanup) => cleanup());
@@ -4574,24 +4579,21 @@ export class Session implements SessionContext {
         'event.name': 'tool_call',
         'event.timestamp': new Date().toISOString(),
         prompt_id: promptId,
-        function_name: fc.name ?? '',
+        function_name: telemetryToolName,
         function_args: args,
         duration_ms: durationMs,
         // An aborted signal means the call was cancelled, not a genuine error.
         status: activeToolAbortSignal.aborted ? 'cancelled' : 'error',
         success: false,
         error: error.message,
-        tool_type:
-          typeof tool !== 'undefined' && tool instanceof DiscoveredMCPTool
-            ? 'mcp'
-            : 'native',
+        tool_type: isMcpTool ? 'mcp' : 'native',
       });
 
       return [
         {
           functionResponse: {
             id: callId,
-            name: fc.name ?? '',
+            name: responseToolName,
             response: { error: error.message },
           },
         },
@@ -4644,9 +4646,32 @@ export class Session implements SessionContext {
       });
     }
 
-    const toolName = fc.name;
     const toolRegistry = this.config.getToolRegistry();
+    const requestInfo: ToolCallRequestInfo = {
+      callId,
+      name: fc.name,
+      args,
+      isClientInitiated: false,
+      prompt_id: promptId,
+    };
+    const normalizedRequest = await normalizeDeferredToolCallRequest(
+      requestInfo,
+      toolRegistry,
+    );
+    if (!normalizedRequest.ok) {
+      responseToolName = normalizedRequest.providerName;
+      return earlyErrorResponse(normalizedRequest.error, responseToolName, {
+        recordInvalidToolParams: true,
+      });
+    }
+
+    const effectiveRequest = normalizedRequest.request;
+    const toolName = effectiveRequest.name;
+    args = effectiveRequest.args;
+    responseToolName = providerToolName(effectiveRequest);
+    telemetryToolName = toolName;
     const tool = toolRegistry.getTool(toolName);
+    isMcpTool = tool instanceof DiscoveredMCPTool;
 
     if (!tool) {
       return earlyErrorResponse(
@@ -5270,7 +5295,7 @@ export class Session implements SessionContext {
 
           // Create response parts first (needed for emitResult and recordToolResult)
           const responseParts = convertToFunctionResponse(
-            toolName,
+            responseToolName,
             callId,
             toolResult.llmContent,
           );
@@ -5433,6 +5458,11 @@ export class Session implements SessionContext {
                 : undefined,
               errorType: toolResult.error?.type,
             });
+          if (succeeded) {
+            for (const name of toolResult.deferredToolPresentations ?? []) {
+              toolRegistry.markProxySchemaPresented(name);
+            }
+          }
 
           spanSuccess = succeeded;
           if (toolResult.error) {
@@ -5501,7 +5531,7 @@ export class Session implements SessionContext {
             {
               functionResponse: {
                 id: callId,
-                name: toolName,
+                name: responseToolName,
                 response: { error: error.message },
               },
             },

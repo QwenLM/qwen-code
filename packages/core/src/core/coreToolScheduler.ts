@@ -55,7 +55,12 @@ import type {
   PartListUnion,
 } from '@google/genai';
 import { fileURLToPath } from 'node:url';
-import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
+import { ToolNames } from '../tools/tool-names.js';
+import {
+  canonicalToolName,
+  normalizeDeferredToolCallRequest,
+  providerToolName,
+} from './deferred-tool-call-normalization.js';
 import {
   collectAvailableSkillEntries,
   renderAvailableSkillsBlock,
@@ -473,14 +478,6 @@ const FS_PATH_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   ToolNames.LSP,
   ToolNames.NOTEBOOK_EDIT,
 ]);
-
-function canonicalToolName(toolName: string): string {
-  return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
-}
-
-function providerToolName(request: ToolCallRequestInfo): string {
-  return request.providerName ?? request.name;
-}
 
 function isFilesystemPathTool(toolName: string): boolean {
   return FS_PATH_TOOL_NAMES.has(canonicalToolName(toolName));
@@ -1787,75 +1784,6 @@ export class CoreToolScheduler {
   }
 
   /**
-   * Convert the stable provider-facing `deferred_tool_call` wrapper into the
-   * real deferred tool request used internally. The scheduler should run
-   * permissions, validation, hooks, execution, and telemetry against the real
-   * target, while function responses still use `providerName` so the provider
-   * sees the declared wrapper tool name.
-   */
-  private async normalizeDeferredToolCall(
-    request: ToolCallRequestInfo,
-  ): Promise<ToolCallRequestInfo | Error> {
-    if (request.name !== ToolNames.DEFERRED_TOOL_CALL) {
-      return request;
-    }
-
-    const targetName = request.args['name'];
-    const targetArgs = request.args['arguments'];
-    if (typeof targetName !== 'string' || targetName.trim().length === 0) {
-      return new Error(
-        '`deferred_tool_call.name` must be the exact deferred tool name returned by tool_search.',
-      );
-    }
-    if (
-      !targetArgs ||
-      typeof targetArgs !== 'object' ||
-      Array.isArray(targetArgs)
-    ) {
-      return new Error(
-        '`deferred_tool_call.arguments` must be an object matching the target tool schema returned by tool_search.',
-      );
-    }
-
-    const canonicalTarget = canonicalToolName(targetName);
-    if (canonicalTarget === ToolNames.DEFERRED_TOOL_CALL) {
-      return new Error(
-        '`deferred_tool_call` cannot target itself. Use tool_search to fetch the real deferred tool schema, then call deferred_tool_call with that real target name.',
-      );
-    }
-
-    const targetTool = await this.toolRegistry.ensureTool(canonicalTarget);
-    if (!targetTool) {
-      return new Error(
-        `Deferred tool "${targetName}" is not available. Use tool_search to find the current deferred tool name and schema.`,
-      );
-    }
-    if (!this.toolRegistry.isProxyEligibleDeferredTool(canonicalTarget)) {
-      return new Error(
-        `Tool "${canonicalTarget}" is not eligible for deferred_tool_call. Call directly if it is visible, or use tool_search for deferred tools.`,
-      );
-    }
-    // The proxy may only route to schemas already shown in this active context.
-    // This prevents the model from guessing hidden tool names/params and also
-    // invalidates stale presentations when a tool's schema fingerprint changes.
-    if (!this.toolRegistry.hasPresentedProxySchema(canonicalTarget)) {
-      return new Error(
-        `Schema for deferred tool "${canonicalTarget}" has not been fetched in the active context. Use tool_search first, then call deferred_tool_call on a later turn.`,
-      );
-    }
-
-    return {
-      ...request,
-      name: canonicalTarget,
-      args: targetArgs as Record<string, unknown>,
-      // Function responses must match the declared provider tool name. The real
-      // target remains internal because hidden deferred tools are intentionally
-      // absent from the provider's function-declaration list.
-      providerName: ToolNames.DEFERRED_TOOL_CALL,
-    };
-  }
-
-  /**
    * For an `mcp__<server>__<tool>` name whose tool is not registered, explains
    * *why* in MCP terms — the server was removed this session, is not (or no
    * longer) configured, or is configured but lacks that tool — instead of
@@ -2063,21 +1991,28 @@ export class CoreToolScheduler {
 
       const newToolCalls: ToolCall[] = [];
       for (const reqInfo of requestsToProcess) {
-        const normalizedRequest = await this.normalizeDeferredToolCall(reqInfo);
-        if (normalizedRequest instanceof Error) {
+        const normalizedRequest = await normalizeDeferredToolCallRequest(
+          reqInfo,
+          this.toolRegistry,
+        );
+        if (!normalizedRequest.ok) {
+          const errorRequest: ToolCallRequestInfo = {
+            ...reqInfo,
+            providerName: normalizedRequest.providerName,
+          };
           newToolCalls.push({
             status: 'error',
-            request: reqInfo,
+            request: errorRequest,
             response: createErrorResponse(
-              reqInfo,
-              normalizedRequest,
-              ToolErrorType.INVALID_TOOL_PARAMS,
+              errorRequest,
+              normalizedRequest.error,
+              normalizedRequest.errorType,
             ),
             durationMs: 0,
           });
           continue;
         }
-        const effectiveReqInfo = normalizedRequest;
+        const effectiveReqInfo = normalizedRequest.request;
         const canonicalName = canonicalToolName(effectiveReqInfo.name);
 
         // Check if the tool is excluded due to permissions/environment restrictions

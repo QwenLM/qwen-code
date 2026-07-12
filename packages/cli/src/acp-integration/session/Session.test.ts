@@ -291,6 +291,9 @@ describe('Session', () => {
   let mockToolRegistry: {
     getTool: ReturnType<typeof vi.fn>;
     ensureTool: ReturnType<typeof vi.fn>;
+    isProxyEligibleDeferredTool: ReturnType<typeof vi.fn>;
+    hasPresentedProxySchema: ReturnType<typeof vi.fn>;
+    markProxySchemaPresented: ReturnType<typeof vi.fn>;
   };
 
   function mockConfirmingTool(
@@ -450,6 +453,9 @@ describe('Session', () => {
     mockToolRegistry = {
       getTool: vi.fn(),
       ensureTool: vi.fn().mockResolvedValue(true),
+      isProxyEligibleDeferredTool: vi.fn().mockReturnValue(false),
+      hasPresentedProxySchema: vi.fn().mockReturnValue(false),
+      markProxySchemaPresented: vi.fn().mockReturnValue(false),
     };
     const fileService = { shouldGitIgnoreFile: vi.fn().mockReturnValue(false) };
 
@@ -10886,6 +10892,20 @@ describe('Session', () => {
         },
       );
     });
+    function mockAllowedToolWithBuild(
+      name: string,
+      build: ReturnType<typeof vi.fn>,
+    ) {
+      return {
+        name,
+        kind: core.Kind.Read,
+        displayName: name,
+        description: name,
+        build,
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      };
+    }
 
     it('does not fire PostToolBatch hooks from the ACP session path', async () => {
       const messageBus = {
@@ -10931,6 +10951,178 @@ describe('Session', () => {
         'qwen/notify/session/artifact-event',
         expect.objectContaining({ hookEventName: 'PostToolBatch' }),
       );
+    });
+
+    it('commits tool_search presentations and routes deferred_tool_call to the target', async () => {
+      const presented = new Set<string>();
+      const toolSearchBuild = vi.fn().mockReturnValue({
+        params: {},
+        execute: vi.fn().mockResolvedValue({
+          llmContent: '<functions>cron_create</functions>',
+          returnDisplay: 'Loaded cron_create',
+          deferredToolPresentations: [core.ToolNames.CRON_CREATE],
+        }),
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getDescription: vi.fn().mockReturnValue(core.ToolNames.TOOL_SEARCH),
+        toolLocations: vi.fn().mockReturnValue([]),
+      });
+      const cronBuild = vi.fn((params: Record<string, unknown>) => ({
+        params,
+        execute: vi.fn().mockResolvedValue({
+          llmContent: 'cron created',
+          returnDisplay: 'cron created',
+        }),
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getDescription: vi.fn().mockReturnValue(core.ToolNames.CRON_CREATE),
+        toolLocations: vi.fn().mockReturnValue([]),
+      }));
+      const toolsByName = new Map<
+        string,
+        ReturnType<typeof mockAllowedToolWithBuild>
+      >([
+        [
+          core.ToolNames.TOOL_SEARCH,
+          mockAllowedToolWithBuild(core.ToolNames.TOOL_SEARCH, toolSearchBuild),
+        ],
+        [
+          core.ToolNames.CRON_CREATE,
+          mockAllowedToolWithBuild(core.ToolNames.CRON_CREATE, cronBuild),
+        ],
+      ]);
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        toolsByName.get(name),
+      );
+      mockToolRegistry.ensureTool.mockImplementation(async (name: string) =>
+        toolsByName.get(name),
+      );
+      mockToolRegistry.isProxyEligibleDeferredTool.mockImplementation(
+        (name: string) => name === core.ToolNames.CRON_CREATE,
+      );
+      mockToolRegistry.hasPresentedProxySchema.mockImplementation(
+        (name: string) => presented.has(name),
+      );
+      mockToolRegistry.markProxySchemaPresented.mockImplementation(
+        (name: string) => {
+          presented.add(name);
+          return true;
+        },
+      );
+
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        new AbortController().signal,
+        'prompt-search',
+        [
+          {
+            id: 'search_call',
+            name: core.ToolNames.TOOL_SEARCH,
+            args: { query: 'cron' },
+          },
+        ],
+      );
+      const proxyResult = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-proxy', [
+        {
+          id: 'proxy_call',
+          name: core.ToolNames.DEFERRED_TOOL_CALL,
+          args: {
+            name: core.ToolNames.CRON_CREATE,
+            arguments: { schedule: '0 9 * * *' },
+          },
+        },
+      ]);
+
+      expect(mockToolRegistry.markProxySchemaPresented).toHaveBeenCalledWith(
+        core.ToolNames.CRON_CREATE,
+      );
+      expect(cronBuild).toHaveBeenCalledWith({ schedule: '0 9 * * *' });
+      expect(proxyResult.parts[0]?.functionResponse?.name).toBe(
+        core.ToolNames.DEFERRED_TOOL_CALL,
+      );
+      expect(
+        mockChatRecordingService.recordToolResult,
+      ).toHaveBeenLastCalledWith(
+        proxyResult.parts,
+        expect.objectContaining({ status: 'success' }),
+      );
+    });
+
+    it('does not commit failed tool_search presentations before proxy routing', async () => {
+      const presented = new Set<string>();
+      const toolSearchBuild = vi.fn().mockReturnValue({
+        params: {},
+        execute: vi.fn().mockResolvedValue({
+          llmContent: 'failed search',
+          returnDisplay: 'failed search',
+          error: {
+            message: 'search failed',
+            type: core.ToolErrorType.EXECUTION_FAILED,
+          },
+          deferredToolPresentations: [core.ToolNames.CRON_CREATE],
+        }),
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getDescription: vi.fn().mockReturnValue(core.ToolNames.TOOL_SEARCH),
+        toolLocations: vi.fn().mockReturnValue([]),
+      });
+      const cronBuild = vi.fn();
+      const toolsByName = new Map<
+        string,
+        ReturnType<typeof mockAllowedToolWithBuild>
+      >([
+        [
+          core.ToolNames.TOOL_SEARCH,
+          mockAllowedToolWithBuild(core.ToolNames.TOOL_SEARCH, toolSearchBuild),
+        ],
+        [
+          core.ToolNames.CRON_CREATE,
+          mockAllowedToolWithBuild(core.ToolNames.CRON_CREATE, cronBuild),
+        ],
+      ]);
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        toolsByName.get(name),
+      );
+      mockToolRegistry.ensureTool.mockImplementation(async (name: string) =>
+        toolsByName.get(name),
+      );
+      mockToolRegistry.isProxyEligibleDeferredTool.mockImplementation(
+        (name: string) => name === core.ToolNames.CRON_CREATE,
+      );
+      mockToolRegistry.hasPresentedProxySchema.mockImplementation(
+        (name: string) => presented.has(name),
+      );
+
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        new AbortController().signal,
+        'prompt-search-failed',
+        [
+          {
+            id: 'search_call',
+            name: core.ToolNames.TOOL_SEARCH,
+            args: { query: 'cron' },
+          },
+        ],
+      );
+      const proxyResult = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-proxy-blocked', [
+        {
+          id: 'proxy_call',
+          name: core.ToolNames.DEFERRED_TOOL_CALL,
+          args: {
+            name: core.ToolNames.CRON_CREATE,
+            arguments: { schedule: '0 9 * * *' },
+          },
+        },
+      ]);
+
+      expect(mockToolRegistry.markProxySchemaPresented).not.toHaveBeenCalled();
+      expect(cronBuild).not.toHaveBeenCalled();
+      expect(proxyResult.parts[0]?.functionResponse?.name).toBe(
+        core.ToolNames.DEFERRED_TOOL_CALL,
+      );
+      expect(proxyResult.parts[0]?.functionResponse?.response).toEqual({
+        error: expect.stringContaining('has not been fetched'),
+      });
     });
 
     it('marks cancelled ask_user_question as a turn stop', async () => {

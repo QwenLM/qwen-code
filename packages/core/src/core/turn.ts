@@ -37,6 +37,7 @@ import {
 import type { LoopType } from '../telemetry/types.js';
 import type { ActiveGoal } from '../goals/activeGoalStore.js';
 import { getProviderToolCallId } from './toolCallIdUtils.js';
+import { providerToolName } from './deferred-tool-call-normalization.js';
 
 const ERROR_REPORT_HISTORY_TAIL_COUNT = 8;
 const ERROR_REPORT_TEXT_PREVIEW_CHARS = 200;
@@ -227,7 +228,7 @@ export function createDuplicateProviderToolCallResponse(
       {
         functionResponse: {
           id: request.callId,
-          name: request.name,
+          name: providerToolName(request),
           response: { error: message },
         },
       },

@@ -245,6 +245,15 @@ args         = {...}
 All model-facing response builders use `providerName ?? name`. All internal
 consumers use `name` and `args`.
 
+Normalization is shared core routing semantics, not private
+`CoreToolScheduler` behavior. Both the main scheduler and ACP/daemon
+`Session.runTool()` must call the same pure helper before tool lookup,
+permissions, hooks, telemetry, and execution. This keeps the ACP execution path
+from executing the `deferred_tool_call` wrapper fallback or bypassing the
+presentation gate. All provider/model-facing function responses still use
+`providerName ?? name`, so hidden target names are not written back to the
+provider.
+
 ## Stable Provider Tool
 
 The main session adds an always-visible declaration:
@@ -375,6 +384,11 @@ Detailed behavior:
 - Commit presentation state only after the successful result containing the
   schema has been appended to active chat history. Cancellation, result delivery
   failure, or history rollback must discard the pending metadata.
+- ACP/daemon does not have the core chat-append lifecycle, so it commits
+  `deferredToolPresentations` after successfully constructing and recording the
+  `tool_search` response that will be returned to the model. Tool execution
+  failure, cancellation, PostToolUse stop, or a response that is not returned to
+  the model must not unlock the proxy.
 - Remove `setTools()` and its reveal/API-sync rollback. If result construction
   or history commit fails, do not record the fingerprint.
 - Explicitly tell the model to use `deferred_tool_call` on a later turn.
@@ -618,9 +632,11 @@ instead of assuming that stable schema necessarily yields a net benefit.
 | `packages/core/src/config/config.ts`                             | Register the proxy only for the main registry when `tool_search` is available; keep it out of `forSubAgent` registries.                                                                        |
 | `packages/core/src/tools/tool-registry.ts`                       | Separate committed proxy presentations from direct declaration visibility, preserve `includeDeferred` behavior, reserve the proxy name, and invalidate fingerprints on tool lifecycle changes. |
 | `packages/core/src/tools/tool-search.ts`                         | Return escaped schemas and pending presentation metadata without calling `setTools()`.                                                                                                         |
+| `packages/core/src/core/deferred-tool-call-normalization.ts`     | Provide the shared normalization helper for proxy envelope validation, target resolution, presentation gating, and provider-facing response naming.                                            |
 | `packages/core/src/core/turn.ts`                                 | Explicitly represent provider identity and execution identity.                                                                                                                                 |
-| `packages/core/src/core/coreToolScheduler.ts`                    | Normalize proxy calls before target authorization, execute the real target, centralize provider response naming, and forward pending presentation metadata.                                    |
+| `packages/core/src/core/coreToolScheduler.ts`                    | Reuse the shared helper to normalize proxy calls before target authorization, execute the real target, centralize provider response naming, and forward pending presentation metadata.         |
 | `packages/core/src/core/client.ts`                               | Commit presentation metadata after history append; handle disabled search, compression, resume, and clear.                                                                                     |
+| `packages/cli/src/acp-integration/session/Session.ts`            | Reuse the shared helper in ACP's independent `runTool()` path; commit presentations after successful `tool_search` responses; keep all function response names provider-facing.                |
 | `packages/core/src/tools/enterPlanMode.ts` and `exitPlanMode.ts` | Remove dynamic exit-tool reveal and keep the exit tool on the stable direct main-session surface.                                                                                              |
 | `packages/core/src/agents/runtime/agent-core.ts`                 | Preserve real-name agent filtering and defensively reject hallucinated proxy names.                                                                                                            |
 | Provider converter tests                                         | Verify Gemini, OpenAI, and Anthropic call/result pairing; if scheduler response normalization is complete, converter production code does not need proxy-specific routing.                     |
@@ -634,16 +650,19 @@ instead of assuming that stable schema necessarily yields a net benefit.
 3. Update `tool_search` so it returns schemas and pending fingerprints without
    calling `setTools()`; then commit those fingerprints only after active-history
    append.
-4. Add provider/execution identities and proxy normalization before target
-   permission evaluation in `CoreToolScheduler`.
+4. Add a shared core normalization helper and reuse it from both
+   `CoreToolScheduler` and ACP `Session.runTool()` before target permission
+   evaluation.
 5. Centralize provider response naming in every terminal path.
-6. Make `exit_plan_mode` part of the stable direct main-session surface and
+6. Commit `deferredToolPresentations` at the core chat-append lifecycle point
+   and at the ACP point where a successful response is returned to the model.
+7. Make `exit_plan_mode` part of the stable direct main-session surface and
    remove its dynamic reveal/setTools path.
-7. Add integration for disabled `tool_search`, subagents, compression, resume,
+8. Add integration for disabled `tool_search`, subagents, compression, resume,
    clear, and MCP lifecycle.
-8. Run provider conversion tests, scheduler tests, targeted integration tests,
-   build, and typecheck.
-9. Collect cache/quality A/B reports before rollout.
+9. Run provider conversion tests, scheduler tests, ACP targeted tests, build,
+   and typecheck.
+10. Collect cache/quality A/B reports before rollout.
 
 ## Test Plan
 
@@ -683,6 +702,9 @@ instead of assuming that stable schema necessarily yields a net benefit.
   provider name.
 - A parallel first `tool_search` plus proxy invocation is rejected; a later turn
   succeeds.
+- ACP `Session.runTool()` success, soft error, thrown error, normalization
+  failure, permission denial, duplicate/skip response, and chat recording all
+  use the provider-facing function response name.
 
 ### Lifecycle and compatibility
 
@@ -690,6 +712,9 @@ instead of assuming that stable schema necessarily yields a net benefit.
   directly callable.
 - When `tool_search` is disabled, deferred tools are exposed directly and the
   proxy is omitted.
+- ACP unlocks the proxy only after a successful `tool_search` result is returned
+  to the model; failure, cancellation, PostToolUse stop, or non-delivery does
+  not unlock it.
 - Subagents preserve their direct effective tool declarations.
 - Compression restores current schemas before restoring proxy eligibility.
 - New proxy transcripts and old direct-call transcripts both resume correctly.
