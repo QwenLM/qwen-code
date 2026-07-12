@@ -938,7 +938,13 @@ export class ExtensionStore {
         journal.phase === 'state_committed' ||
         (snapshot?.generation ?? -1) >= journal.targetGeneration
       ) {
-        await this.cleanupCommittedJournal(journal, journalPath);
+        try {
+          await this.cleanupCommittedJournal(journal, journalPath);
+        } catch {
+          // The authoritative state is already committed. Keep the journal so
+          // a later store operation can retry cleanup without blocking reads
+          // or unrelated mutations.
+        }
       } else {
         await this.rollbackJournal(journal);
         await fsp.rm(journalPath, { force: true });

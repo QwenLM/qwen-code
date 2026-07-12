@@ -10,7 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ExtensionConflictError,
   ExtensionStore,
@@ -788,6 +788,64 @@ describe('ExtensionStore', () => {
     expect(await fsp.readFile(path.join(destination, 'version'), 'utf8')).toBe(
       'new',
     );
+    expect(fs.existsSync(backup)).toBe(false);
+    expect(fs.existsSync(journal)).toBe(false);
+  });
+
+  it('keeps committed cleanup failures from blocking store operations', async () => {
+    const store = makeStore();
+    const identity = { id: 'd2'.repeat(32), name: 'demo' };
+    await store.ensureInitialized([identity]);
+    const targetSnapshot = await store.setDefaultActivation(
+      identity,
+      'disabled',
+    );
+    const transactionId = 'recover-cleanup-failure';
+    const destination = path.join(extensionsDir, 'demo');
+    const backup = path.join(storeDir, 'rollback', transactionId);
+    const journal = path.join(
+      storeDir,
+      'transactions',
+      `${transactionId}.json`,
+    );
+    await fsp.mkdir(destination);
+    await fsp.mkdir(backup);
+    await fsp.writeFile(
+      journal,
+      JSON.stringify({
+        version: 1,
+        transactionId,
+        operation: 'update',
+        phase: 'state_committed',
+        destinationDirectory: destination,
+        stagingDirectory: path.join(storeDir, 'staging', transactionId),
+        backupDirectory: backup,
+        previousGeneration: 0,
+        targetGeneration: 1,
+        targetSnapshot,
+      }),
+    );
+    const rm = fsp.rm.bind(fsp);
+    const rmSpy = vi
+      .spyOn(fsp, 'rm')
+      .mockImplementation(async (target, opts) => {
+        if (target === backup) throw new Error('cleanup denied');
+        return await rm(target, opts);
+      });
+
+    try {
+      await expect(store.readSnapshot()).resolves.toMatchObject({
+        generation: 1,
+      });
+      await expect(
+        store.setDefaultActivation(identity, 'enabled'),
+      ).resolves.toMatchObject({ generation: 2 });
+      expect(fs.existsSync(journal)).toBe(true);
+    } finally {
+      rmSpy.mockRestore();
+    }
+
+    await store.readSnapshot();
     expect(fs.existsSync(backup)).toBe(false);
     expect(fs.existsSync(journal)).toBe(false);
   });
