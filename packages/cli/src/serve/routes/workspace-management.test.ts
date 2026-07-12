@@ -732,6 +732,7 @@ describe('DELETE /workspaces/:workspace', () => {
       'workspace_removed',
     );
     expect(runtimeRemoval.cancelDrain).not.toHaveBeenCalled();
+    expect(runtimeRemoval.completeDrain).toHaveBeenCalledWith(runtime);
     expect(acpHandle.cancelWorkspaceDrain).not.toHaveBeenCalled();
     expect(runtime.bridge.killAllSync).toHaveBeenCalledOnce();
     expect(deps.workspaceRegistry.cancelDrain).not.toHaveBeenCalled();
