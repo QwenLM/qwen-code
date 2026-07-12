@@ -12,6 +12,7 @@ import { Config, ApprovalMode } from '../config/config.js';
 import { ToolRegistry, DiscoveredTool } from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { ExitPlanModeTool } from './exitPlanMode.js';
+import { DeferredToolCallTool } from './deferred-tool-call.js';
 import type { FunctionDeclaration, CallableTool } from '@google/genai';
 import { mcpToTool } from '@google/genai';
 import { spawn } from 'node:child_process';
@@ -208,6 +209,23 @@ describe('ToolRegistry', () => {
       });
 
       expect(toolRegistry.hasPresentedProxySchema('deferred_tool')).toBe(false);
+    });
+
+    it('excludes alwaysLoad deferred tools from proxy eligibility', () => {
+      toolRegistry.registerTool(
+        new MockTool({
+          name: 'always_loaded_deferred',
+          shouldDefer: true,
+          alwaysLoad: true,
+        }),
+      );
+
+      expect(
+        toolRegistry.isProxyEligibleDeferredTool('always_loaded_deferred'),
+      ).toBe(false);
+      expect(
+        toolRegistry.markProxySchemaPresented('always_loaded_deferred'),
+      ).toBe(false);
     });
 
     it('renames an MCP tool whose name shadows a registered lazy factory', async () => {
@@ -451,6 +469,18 @@ describe('ToolRegistry', () => {
 
       const names = toolRegistry.getFunctionDeclarations().map((d) => d.name);
       expect(names).toEqual(['a', 'z']);
+    });
+
+    it('includes deferred_tool_call in function declarations', async () => {
+      toolRegistry.registerFactory(
+        ToolNames.DEFERRED_TOOL_CALL,
+        async () => new DeferredToolCallTool(),
+        { allowReservedName: true },
+      );
+      await toolRegistry.warmAll();
+
+      const names = toolRegistry.getFunctionDeclarations().map((d) => d.name);
+      expect(names).toContain(ToolNames.DEFERRED_TOOL_CALL);
     });
 
     // Regression for #5210: the real exit_plan_mode is deferred-category but

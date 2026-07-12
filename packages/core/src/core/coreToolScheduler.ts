@@ -4547,11 +4547,11 @@ export class CoreToolScheduler {
 
         // Record tool results before notifying completion
         this.recordToolResults(completedCalls);
+        this.commitDeferredToolPresentations(completedCalls);
 
         if (this.onAllToolCallsComplete) {
           await this.onAllToolCallsComplete(completedCalls);
         }
-        this.commitDeferredToolPresentations(completedCalls);
       } finally {
         try {
           this.notifyToolCallsUpdate();

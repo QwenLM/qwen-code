@@ -72,7 +72,16 @@ export async function normalizeDeferredToolCallRequest(
     );
   }
 
-  const targetTool = await toolRegistry.ensureTool(canonicalTarget);
+  let targetTool;
+  try {
+    targetTool = await toolRegistry.ensureTool(canonicalTarget);
+  } catch (error) {
+    return fail(
+      `Failed to load deferred tool "${targetName}": ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
   if (!targetTool) {
     return fail(
       `Deferred tool "${targetName}" is not available. Use tool_search to find the current deferred tool name and schema.`,

@@ -39,6 +39,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   monitor: 'Monitor',
   notebook_edit: 'NotebookEdit',
   tool_search: 'ToolSearch',
+  deferred_tool_call: 'DeferredToolCall',
   read_mcp_resource: 'ReadMcpResource',
   enter_worktree: 'EnterWorktree',
   exit_worktree: 'ExitWorktree',

@@ -138,6 +138,29 @@ describe('normalizeDeferredToolCallRequest', () => {
     }
   });
 
+  it('rejects a target tool that fails to load', async () => {
+    const registry = createRegistry();
+    vi.spyOn(registry, 'ensureTool').mockRejectedValueOnce(
+      new Error('factory exploded'),
+    );
+
+    const result = await normalizeDeferredToolCallRequest(
+      request(ToolNames.DEFERRED_TOOL_CALL, {
+        name: ToolNames.CRON_CREATE,
+        arguments: {},
+      }),
+      registry,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.providerName).toBe(ToolNames.DEFERRED_TOOL_CALL);
+      expect(result.error.message).toContain(
+        'Failed to load deferred tool "cron_create": factory exploded',
+      );
+    }
+  });
+
   it('rejects a target that is not proxy-eligible deferred', async () => {
     const registry = createRegistry();
     registry.registerTool(new MockTool({ name: ToolNames.READ_FILE }));

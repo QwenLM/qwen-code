@@ -1261,6 +1261,38 @@ export class GeminiClient {
           const deferredNames = new Set(
             toolRegistry.getDeferredToolSummary().map((t) => t.name),
           );
+          const successfulDeferredProxyTargets = new Set<string>();
+          const pendingProxyTargetsById = new Map<string, string>();
+          const pendingProxyTargetsWithoutId: string[] = [];
+          for (const entry of extraHistory) {
+            for (const part of entry.parts ?? []) {
+              const call = part.functionCall;
+              if (call?.name === ToolNames.DEFERRED_TOOL_CALL) {
+                const targetName = call.args?.['name'];
+                if (typeof targetName === 'string') {
+                  if (call.id) {
+                    pendingProxyTargetsById.set(call.id, targetName);
+                  } else {
+                    pendingProxyTargetsWithoutId.push(targetName);
+                  }
+                }
+              }
+              const response = part.functionResponse;
+              if (response?.name === ToolNames.DEFERRED_TOOL_CALL) {
+                const responseBody = response.response as
+                  | { error?: unknown }
+                  | undefined;
+                if (responseBody?.error) continue;
+                const targetName =
+                  response.id && pendingProxyTargetsById.has(response.id)
+                    ? pendingProxyTargetsById.get(response.id)
+                    : pendingProxyTargetsWithoutId.shift();
+                if (targetName) {
+                  successfulDeferredProxyTargets.add(targetName);
+                }
+              }
+            }
+          }
           if (deferredNames.size > 0) {
             for (const entry of extraHistory) {
               for (const part of entry.parts ?? []) {
@@ -1271,7 +1303,11 @@ export class GeminiClient {
                 }
                 if (callName === ToolNames.DEFERRED_TOOL_CALL) {
                   const targetName = part.functionCall?.args?.['name'];
-                  if (typeof targetName === 'string') {
+                  if (
+                    typeof targetName === 'string' &&
+                    deferredNames.has(targetName) &&
+                    successfulDeferredProxyTargets.has(targetName)
+                  ) {
                     toolRegistry.markProxySchemaPresented(targetName);
                   }
                 }

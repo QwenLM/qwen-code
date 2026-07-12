@@ -1236,6 +1236,7 @@ describe('Gemini Client (client.ts)', () => {
           parts: [
             {
               functionCall: {
+                id: 'proxy-success',
                 name: ToolNames.DEFERRED_TOOL_CALL,
                 args: {
                   name: 'cron_create',
@@ -1245,11 +1246,113 @@ describe('Gemini Client (client.ts)', () => {
             } as never,
           ],
         },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'proxy-success',
+                name: ToolNames.DEFERRED_TOOL_CALL,
+                response: { output: 'cron created' },
+              },
+            } as never,
+          ],
+        },
       ]);
 
       expect(reg.markProxySchemaPresented).toHaveBeenCalledWith('cron_create');
       expect(reg.markProxySchemaPresented).not.toHaveBeenCalledWith(
         'cron_list',
+      );
+    });
+
+    it('does not restore proxy presentations from failed deferred_tool_call history', async () => {
+      const reg = getRegistryMock();
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'cron_create', description: 'schedule' },
+      ]);
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      reg.markProxySchemaPresented.mockClear();
+
+      await client.startChat([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'proxy-failed',
+                name: ToolNames.DEFERRED_TOOL_CALL,
+                args: {
+                  name: 'cron_create',
+                  arguments: { schedule: '0 9 * * *' },
+                },
+              },
+            } as never,
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'proxy-failed',
+                name: ToolNames.DEFERRED_TOOL_CALL,
+                response: { error: 'has not been fetched' },
+              },
+            } as never,
+          ],
+        },
+      ]);
+
+      expect(reg.markProxySchemaPresented).not.toHaveBeenCalledWith(
+        'cron_create',
+      );
+    });
+
+    it('gracefully ignores stale proxy presentations for removed deferred targets', async () => {
+      const reg = getRegistryMock();
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'cron_list', description: 'list' },
+      ]);
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      reg.markProxySchemaPresented.mockClear();
+
+      await client.startChat([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'proxy-stale',
+                name: ToolNames.DEFERRED_TOOL_CALL,
+                args: {
+                  name: 'cron_create',
+                  arguments: { schedule: '0 9 * * *' },
+                },
+              },
+            } as never,
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'proxy-stale',
+                name: ToolNames.DEFERRED_TOOL_CALL,
+                response: { output: 'cron created' },
+              },
+            } as never,
+          ],
+        },
+      ]);
+
+      expect(reg.markProxySchemaPresented).not.toHaveBeenCalledWith(
+        'cron_create',
       );
     });
 
