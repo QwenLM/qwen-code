@@ -3538,6 +3538,53 @@ describe('runQwenServe runtime startup failures', () => {
     );
   });
 
+  it('stops the deferred runtime extension reconciler during close', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-reconciler-close-')),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const bridge = makeRuntimeBridge();
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockReturnValue(
+      bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+    const stopExtensionGenerationReconciler = vi.fn();
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(() => {
+      const runtimeApp = express();
+      runtimeApp.locals['stopExtensionGenerationReconciler'] =
+        stopExtensionGenerationReconciler;
+      return runtimeApp;
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      const healthRes = await fetch(`${handle.url}/health`);
+      expect(healthRes.status).toBe(200);
+      await handle.runtimeReady;
+    } finally {
+      await handle.close();
+    }
+
+    expect(stopExtensionGenerationReconciler).toHaveBeenCalledOnce();
+  });
+
   it('does not cancel deferred runtime once startup is already running', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-close-running-')),

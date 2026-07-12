@@ -4430,11 +4430,6 @@ export async function runQwenServe(
             (
               app.locals as { stopScheduledTaskKeepalive?: () => void }
             ).stopScheduledTaskKeepalive?.();
-            (
-              app.locals as {
-                stopExtensionGenerationReconciler?: () => void;
-              }
-            ).stopExtensionGenerationReconciler?.();
             // Same rationale for the create_sub_session launchers: stop accepting
             // new sub-session spawns before the bridges are torn down. Calls
             // every workspace's launcher stop (primary + secondaries).
@@ -4535,6 +4530,11 @@ export async function runQwenServe(
                   daemonLog,
                 );
                 const appForCleanup = runtimeApp ?? runtimeAppForCleanup;
+                const stopExtensionGenerationReconciler = appForCleanup
+                  ?.locals?.['stopExtensionGenerationReconciler'] as
+                  | (() => void)
+                  | undefined;
+                stopExtensionGenerationReconciler?.();
                 // Dispose the device-flow registry FIRST so any
                 // in-flight IdP poll is cancelled and timers are cleared
                 // before the bridge tear-down (which would otherwise race
