@@ -324,9 +324,12 @@ describe('extension tests', () => {
       });
       const cleanupPath = prepared.cleanupPaths[0]!;
       const rm = fs.promises.rm.bind(fs.promises);
+      let cleanupAttempts = 0;
       vi.spyOn(fs.promises, 'rm').mockImplementation(
         async (target, options) => {
-          if (target === cleanupPath) throw new Error('cleanup denied');
+          if (target === cleanupPath && cleanupAttempts++ === 0) {
+            throw new Error('cleanup denied');
+          }
           return await rm(target, options);
         },
       );
@@ -338,9 +341,13 @@ describe('extension tests', () => {
         code: 'extension_temp_cleanup_failed',
         error: 'cleanup denied',
       });
+      expect(prepared.disposed).toBe(false);
       await expect(
         manager.disposePreparedExtension(prepared),
       ).resolves.toBeUndefined();
+      expect(cleanupAttempts).toBe(2);
+      expect(prepared.disposed).toBe(true);
+      expect(fs.existsSync(cleanupPath)).toBe(false);
     });
 
     it('records error telemetry when a prepared install commit fails', async () => {

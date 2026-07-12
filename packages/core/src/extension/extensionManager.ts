@@ -2108,7 +2108,6 @@ export class ExtensionManager {
     prepared: PreparedExtensionMutation,
   ): Promise<unknown[]> {
     if (prepared.disposed) return [];
-    prepared.disposed = true;
     const results = await Promise.allSettled([
       fs.promises.rm(prepared.stagingDirectory, {
         recursive: true,
@@ -2118,9 +2117,11 @@ export class ExtensionManager {
         fs.promises.rm(cleanupPath, { recursive: true, force: true }),
       ),
     ]);
-    return results.flatMap((result) =>
+    const errors = results.flatMap((result) =>
       result.status === 'rejected' ? [result.reason] : [],
     );
+    prepared.disposed = errors.length === 0;
+    return errors;
   }
 
   /**
