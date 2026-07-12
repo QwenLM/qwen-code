@@ -1111,6 +1111,34 @@ describe('extension tests', () => {
       expect(refreshTools).toHaveBeenCalledTimes(4);
     });
 
+    it('derives activation from the supplied store snapshot', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'my-extension',
+        version: '1.0.0',
+      });
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extension = manager.getLoadedExtensions()[0]!;
+
+      const disabledSnapshot = await manager.setExtensionDefaultActivation(
+        extension.id,
+        'disabled',
+      );
+      await manager.setExtensionDefaultActivation(extension.id, 'enabled');
+
+      expect(
+        manager.getExtensionActivationFromSnapshot(
+          extension.id,
+          disabledSnapshot,
+          tempWorkspaceDir,
+        ),
+      ).toMatchObject({ effective: 'disabled', source: 'default' });
+      await expect(
+        manager.getExtensionActivation(extension.id, tempWorkspaceDir),
+      ).resolves.toMatchObject({ effective: 'enabled', source: 'default' });
+    });
+
     it('changes activation scope in one policy mutation', async () => {
       createExtension({
         extensionsDir: userExtensionsDir,

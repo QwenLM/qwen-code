@@ -366,6 +366,14 @@ describe('extension management v2 REST', () => {
   it('returns the effective activation after clearing a workspace override', async () => {
     const h = await makeHarness();
     mockExtensionManager();
+    vi.mocked(
+      ExtensionManager.prototype.getExtensionActivation,
+    ).mockResolvedValue({
+      default: 'enabled',
+      workspace: 'inherit',
+      effective: 'enabled',
+      source: 'default',
+    });
     try {
       const started = await auth(
         request(h.app).delete(
@@ -382,7 +390,7 @@ describe('extension management v2 REST', () => {
       });
       expect(
         ExtensionManager.prototype.getExtensionActivation,
-      ).toHaveBeenCalledWith(extensionId, h.secondary.workspaceCwd);
+      ).not.toHaveBeenCalled();
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
@@ -392,9 +400,6 @@ describe('extension management v2 REST', () => {
     const h = await makeHarness();
     mockExtensionManager();
     vi.spyOn(process.stderr, 'write').mockReturnValue(true);
-    vi.mocked(
-      ExtensionManager.prototype.getExtensionActivation,
-    ).mockRejectedValueOnce(new Error('activation read failed'));
     vi.mocked(
       h.primary.workspaceService.invalidateWorkspaceSkillsStatus,
     ).mockImplementationOnce(() => {
@@ -414,11 +419,8 @@ describe('extension management v2 REST', () => {
         status: 'succeeded_with_warnings',
         warnings: [
           expect.objectContaining({
-            error: expect.stringMatching(/activation read failed/),
-          }),
-          expect.objectContaining({
-            code: 'status_invalidation_failed',
-            error: 'status invalidation failed',
+            code: 'post_commit_failed',
+            error: expect.stringMatching(/status invalidation failed/),
           }),
         ],
       });

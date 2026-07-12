@@ -1413,17 +1413,19 @@ export function registerWorkspaceExtensionRoutes(
             if (!extension) {
               throw new Error(`Extension "${extensionId}" not found`);
             }
-            await context!.commit(
+            const snapshot = await context!.commit(
               async () =>
                 await extensionManager.clearExtensionWorkspaceActivation(
                   extensionId,
                   runtime.workspaceCwd,
                 ),
             );
-            const activation = await extensionManager.getExtensionActivation(
-              extensionId,
-              runtime.workspaceCwd,
-            );
+            const activation =
+              extensionManager.getExtensionActivationFromSnapshot(
+                extensionId,
+                snapshot,
+                runtime.workspaceCwd,
+              );
             return { status: activation.effective, name: extension.name };
           },
           { refreshRuntimes: [runtime] },

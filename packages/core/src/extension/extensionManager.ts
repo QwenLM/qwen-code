@@ -677,8 +677,20 @@ export class ExtensionManager {
     extensionId: string,
     workspacePath: string = this.workspaceDir,
   ): Promise<ExtensionActivationResult> {
-    const extension = this.findExtensionById(extensionId);
     const snapshot = await this.extensionStore.readSnapshot();
+    return this.getExtensionActivationFromSnapshot(
+      extensionId,
+      snapshot,
+      workspacePath,
+    );
+  }
+
+  getExtensionActivationFromSnapshot(
+    extensionId: string,
+    snapshot: ExtensionStoreSnapshot,
+    workspacePath: string = this.workspaceDir,
+  ): ExtensionActivationResult {
+    const extension = this.findExtensionById(extensionId);
     const activation = this.extensionStore.getActivation(
       snapshot,
       extension.id,
