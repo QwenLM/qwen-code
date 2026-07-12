@@ -20,7 +20,7 @@ import {
 function caps(workspaces?: DaemonWorkspaceCapability[]): DaemonCapabilities {
   return {
     v: 1,
-    mode: 'workspace',
+    mode: 'native',
     features: [],
     modelServices: [],
     ...(workspaces ? { workspaces } : {}),

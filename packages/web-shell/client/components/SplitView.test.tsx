@@ -63,7 +63,7 @@ vi.mock('./ChatPane', () => ({
     // Let a test force a render crash to exercise the per-pane ErrorBoundary.
     if (props.title === 'BOOM') throw new Error('pane exploded');
     return (
-      <div data-testid="chat-pane">
+      <div data-testid="chat-pane" data-pane-workspace={props.workspaceCwd}>
         <span data-testid="pane-title">{props.title}</span>
         {props.onClose && (
           <button data-testid="pane-close" onClick={props.onClose}>
@@ -494,6 +494,13 @@ describe('SplitView', () => {
     expect(providerFor('b1')?.getAttribute('data-workspace')).toBe('/wsB');
     // The primary seed pane still binds the primary cwd.
     expect(providerFor('s3')?.getAttribute('data-workspace')).toBe('/w');
+    // The pane also receives its workspace as a prop (for the composer chip),
+    // not just through the provider — so dropping that pass-through fails here.
+    expect(
+      providerFor('b1')
+        ?.querySelector('[data-testid="chat-pane"]')
+        ?.getAttribute('data-pane-workspace'),
+    ).toBe('/wsB');
   });
 
   it('never fans out to other workspaces on a single-workspace daemon', async () => {
