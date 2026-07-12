@@ -337,6 +337,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
   return {
     WebShellSidebar: (props: {
       sessionListReloadToken?: number;
+      collapsed?: boolean;
       onOpenDaemonStatus?: () => void;
       onOpenSessions?: () => void;
       onOpenSplitView?: () => void;
@@ -346,7 +347,10 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
       // exercise those activePanel branches (neither has a slash command).
       return React.createElement(
         'div',
-        { 'data-testid': 'sidebar' },
+        {
+          'data-testid': 'sidebar',
+          'data-collapsed': String(Boolean(props.collapsed)),
+        },
         React.createElement(
           'button',
           {
@@ -1822,7 +1826,7 @@ describe('App session callbacks', () => {
           _type: string,
           cb: (event: { matches: boolean }) => void,
         ) => {
-          if (query.includes('min-width')) changeHandler = cb;
+          if (query.includes('1024')) changeHandler = cb;
         },
         removeEventListener: vi.fn(),
       })),
@@ -1866,7 +1870,7 @@ describe('App session callbacks', () => {
           _type: string,
           cb: (event: { matches: boolean }) => void,
         ) => {
-          if (query.includes('min-width')) changeHandler = cb;
+          if (query.includes('1024')) changeHandler = cb;
         },
         removeEventListener: vi.fn(),
       })),
@@ -1909,7 +1913,7 @@ describe('App session callbacks', () => {
           _type: string,
           cb: (event: { matches: boolean }) => void,
         ) => {
-          if (query.includes('min-width')) changeHandler = cb;
+          if (query.includes('1024')) changeHandler = cb;
         },
         removeEventListener: vi.fn(),
       })),
@@ -1956,7 +1960,7 @@ describe('App session callbacks', () => {
           _type: string,
           cb: (event: { matches: boolean }) => void,
         ) => {
-          if (query.includes('min-width')) changeHandler = cb;
+          if (query.includes('1024')) changeHandler = cb;
         },
         removeEventListener: vi.fn(),
       })),
@@ -1995,6 +1999,49 @@ describe('App session callbacks', () => {
     }
   });
 
+  it('auto-collapses the sidebar in a narrow split and expands it when wide', async () => {
+    let wide = false;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          // Keep the large-screen (>=1024) query true so the split renders;
+          // the >=1200 "sidebar has room" query is the one under test.
+          if (query.includes('1200')) return wide;
+          return query.includes('min-width');
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('1200')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    window.history.replaceState(null, '', '/?split=s1,s2');
+
+    try {
+      const { container } = renderApp();
+      await flush();
+      const sidebar = () => container.querySelector('[data-testid="sidebar"]');
+      // Narrow split (< 1200px): the sidebar collapses to free room for panes.
+      expect(sidebar()?.getAttribute('data-collapsed')).toBe('true');
+
+      // Grow past 1200px: the sidebar expands again.
+      await act(async () => {
+        wide = true;
+        changeHandler?.({ matches: true });
+        await Promise.resolve();
+      });
+      expect(sidebar()?.getAttribute('data-collapsed')).toBe('false');
+    } finally {
+      window.history.replaceState(null, '', '/');
+    }
+  });
+
   it('auto-closes the Session Overview when the screen shrinks below the breakpoint', async () => {
     // Drive isLargeScreen through a controllable media query: open the panel on
     // a large screen, then flip below the breakpoint and confirm it closes.
@@ -2011,7 +2058,7 @@ describe('App session callbacks', () => {
           _type: string,
           cb: (event: { matches: boolean }) => void,
         ) => {
-          if (query.includes('min-width')) changeHandler = cb;
+          if (query.includes('1024')) changeHandler = cb;
         },
         removeEventListener: vi.fn(),
       })),

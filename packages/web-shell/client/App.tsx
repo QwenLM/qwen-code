@@ -981,6 +981,11 @@ export function App({
   // once) is only offered on large screens; below that there is no room for it
   // to be useful.
   const isLargeScreen = useIsLargeScreen();
+  // In split view the session sidebar competes with the panes for width. Below
+  // this width it auto-collapses to its icon rail so the panes get the room, and
+  // expands again once the window grows back. A wide split keeps the full
+  // sidebar (and the user's own collapse preference).
+  const splitSidebarHasRoom = useIsLargeScreen('(min-width: 1200px)');
 
   useEffect(() => {
     const mql = window.matchMedia('(max-width: 760px)');
@@ -5401,7 +5406,11 @@ export function App({
                   aria-hidden="true"
                 />
                 <WebShellSidebar
-                  collapsed={sidebarCollapsed && !mobileDrawerOpen}
+                  collapsed={
+                    (sidebarCollapsed ||
+                      (mainView === 'split' && !splitSidebarHasRoom)) &&
+                    !mobileDrawerOpen
+                  }
                   onCollapsedChange={handleSidebarCollapsedChange}
                   onOpenSettings={() => {
                     closeMobileDrawer();
