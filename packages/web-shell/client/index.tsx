@@ -99,7 +99,13 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
 /** Alias for consumers who prefer a standalone naming style. */
 export const StandaloneWebShell = WebShellWithProviders;
 
-export type { WebShellApi, WebShellProps, WebShellSidebarOptions } from './App';
+export type {
+  WebShellApi,
+  WebShellComposerPlaceholders,
+  WebShellComposerPlaceholderState,
+  WebShellProps,
+  WebShellSidebarOptions,
+} from './App';
 export type { ToastTone } from './components/ToastHost';
 export type { WebShellLanguage } from './i18n';
 export type {
