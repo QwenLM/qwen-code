@@ -4024,7 +4024,7 @@ describe('createServeApp', () => {
       }
     });
 
-    it('keeps a committed install successful when cleanup warns', async () => {
+    it('maps coded commit warnings to the legacy refresh-error status', async () => {
       const restore = mockExtensionManagerMethods({
         commitPreparedExtension: async (prepared) => ({
           identity: prepared.identity,
@@ -4058,7 +4058,8 @@ describe('createServeApp', () => {
             .set('Host', `127.0.0.1:${tokenOpts.port}`)
             .set('Authorization', 'Bearer secret');
           expect(operation.body).toMatchObject({
-            status: 'succeeded_with_warnings',
+            status: 'succeeded_with_refresh_error',
+            result: { error: 'cleanup denied' },
             warnings: [
               {
                 code: 'extension_temp_cleanup_failed',
@@ -4066,7 +4067,6 @@ describe('createServeApp', () => {
               },
             ],
           });
-          expect(operation.body.result).not.toHaveProperty('error');
         });
       } finally {
         restore();

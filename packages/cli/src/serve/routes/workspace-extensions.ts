@@ -327,25 +327,31 @@ export function registerWorkspaceExtensionRoutes(
           });
           return;
         }
-        const legacyRefreshFailure =
+        if (
           base === '/workspace/extensions' &&
-          operation.status === 'succeeded_with_warnings' &&
-          (operation.result?.failed ?? 0) > 0;
-        const legacyRefreshError =
-          operation.warnings?.find((warning) => warning.code === undefined)
-            ?.error ?? operation.result?.error;
-        res.status(200).json(
-          legacyRefreshFailure && operation.result
-            ? {
-                ...operation,
-                status: 'succeeded_with_refresh_error',
-                result: {
-                  ...operation.result,
-                  ...(legacyRefreshError ? { error: legacyRefreshError } : {}),
-                },
-              }
-            : operation,
-        );
+          operation.status === 'succeeded_with_warnings'
+        ) {
+          const warningError =
+            operation.warnings?.find((warning) => warning.code === undefined)
+              ?.error ??
+            operation.warnings?.[0]?.error ??
+            operation.result?.error;
+          const legacyOperation = {
+            ...operation,
+            status: 'succeeded_with_refresh_error' as const,
+          };
+          if (operation.result && warningError) {
+            legacyOperation.result = {
+              ...operation.result,
+              error: warningError,
+            };
+          } else if (warningError) {
+            legacyOperation.error = warningError;
+          }
+          res.status(200).json(legacyOperation);
+          return;
+        }
+        res.status(200).json(operation);
       } catch (err) {
         sendBridgeError(res, err, {
           route: `GET ${base}/operations/:operationId`,
