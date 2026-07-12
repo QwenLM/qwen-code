@@ -17,7 +17,12 @@ let connectionState: any;
 let streamingStateValue: string;
 let pendingPermission: any;
 let latestOnSubmit:
-  | ((text: string, images?: unknown, commit?: () => void) => boolean)
+  | ((
+      text: string,
+      images?: unknown,
+      commit?: () => void,
+      metadata?: unknown,
+    ) => boolean)
   | undefined;
 let latestChatEditorProps: any;
 let latestFollowupAccept: ((suggestion: string) => void) | undefined;
@@ -30,6 +35,15 @@ const submitPermission = vi.fn(async () => {});
 const cancel = vi.fn(async () => {});
 const setApprovalMode = vi.fn(async (mode: string) => ({ mode }));
 const setModel = vi.fn(async () => ({}) as any);
+const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
+const daemonActions = {
+  sendPrompt,
+  submitPermission,
+  cancel,
+  setApprovalMode,
+  setModel,
+  loadArtifacts,
+};
 const enqueuePrompt = vi.fn(() => true);
 const removeQueuedPrompt = vi.fn();
 const insertQueuedPrompt = vi.fn();
@@ -41,13 +55,7 @@ let queuedTextsMock: string[] = [];
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
-  useActions: () => ({
-    sendPrompt,
-    submitPermission,
-    cancel,
-    setApprovalMode,
-    setModel,
-  }),
+  useActions: () => daemonActions,
   useConnection: () => connectionState,
   useDaemonFollowupSuggestion: (options: any) => {
     latestFollowupAccept = options?.onAccept;
@@ -63,6 +71,9 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useTranscriptStore: () => ({
     dispatch: transcriptDispatch,
   }),
+  usePromptStatus: () => 'idle',
+  useWorkspaceActions: () => ({}),
+  useWorkspaceEventSignals: () => ({ artifactsVersion: 0 }),
 }));
 
 vi.mock('../hooks/useQueuedPrompts', () => ({
@@ -218,6 +229,8 @@ beforeEach(() => {
   queuedPromptsMock = [];
   queuedTextsMock = [];
   sendPrompt.mockReset();
+  loadArtifacts.mockReset();
+  loadArtifacts.mockResolvedValue({ artifacts: [] });
   sendPrompt.mockImplementation(async (_text: string, options?: any) => {
     sendPromptAdmit = options?.onAdmitted;
     return {} as any;
@@ -269,6 +282,32 @@ describe('ChatPane', () => {
     expect(container!.textContent).toContain('Refactor core');
   });
 
+  it('reports loaded pane artifacts to the outer panel owner', async () => {
+    const onPaneArtifactsChange = vi.fn();
+    connectionState.capabilities = { features: ['session_artifacts'] };
+    const artifact = {
+      id: 'artifact-1',
+      title: 'Report',
+      kind: 'html',
+      storage: 'workspace',
+      workspacePath: 'reports/a.html',
+      updatedAt: '2026-07-10T00:00:00Z',
+    };
+    loadArtifacts.mockResolvedValueOnce({ artifacts: [artifact] });
+
+    render({ onPaneArtifactsChange });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onPaneArtifactsChange).toHaveBeenLastCalledWith(
+      'sess-1',
+      [artifact],
+      expect.any(Object),
+    );
+  });
+
   it('suppresses the rotating loading phrase in its compact status', () => {
     render();
     expect(testid('pane-streaming')?.getAttribute('data-show-phrase')).toBe(
@@ -317,6 +356,28 @@ describe('ChatPane', () => {
     });
   });
 
+  it('forwards composer annotations with an idle prompt', () => {
+    const inputAnnotations = [
+      {
+        start: 6,
+        end: 14,
+        text: '@.husky/',
+        type: 'file',
+        data: { path: '.husky/' },
+      },
+    ];
+    render();
+    act(() => {
+      latestOnSubmit!('check @.husky/', undefined, undefined, {
+        inputAnnotations,
+      });
+    });
+    expect(sendPrompt).toHaveBeenCalledWith('check @.husky/', {
+      inputAnnotations,
+      onAdmitted: expect.any(Function),
+    });
+  });
+
   it('queues a prompt while the pane is already running', () => {
     streamingStateValue = 'responding';
     render();
@@ -327,6 +388,32 @@ describe('ChatPane', () => {
     });
     expect(returned).toBe(true);
     expect(enqueuePrompt).toHaveBeenCalledWith('queued next', undefined);
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('forwards composer annotations with a queued prompt', () => {
+    streamingStateValue = 'responding';
+    const inputAnnotations = [
+      {
+        start: 6,
+        end: 14,
+        text: '@.husky/',
+        type: 'file',
+        data: { path: '.husky/' },
+      },
+    ];
+    render();
+    act(() => {
+      latestOnSubmit!('queue @.husky/', undefined, undefined, {
+        inputAnnotations,
+      });
+    });
+    expect(enqueuePrompt).toHaveBeenCalledWith(
+      'queue @.husky/',
+      undefined,
+      undefined,
+      inputAnnotations,
+    );
     expect(sendPrompt).not.toHaveBeenCalled();
   });
 

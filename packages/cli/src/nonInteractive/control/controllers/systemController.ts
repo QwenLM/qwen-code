@@ -18,6 +18,8 @@ import type {
   ControlRequestPayload,
   CLIControlInitializeRequest,
   CLIControlSetModelRequest,
+  CLIControlSetEffortRequest,
+  CLIControlGetUsageInfoRequest,
   CLIMcpServerConfig,
   CLIControlGetContextUsageRequest,
 } from '../../types.js';
@@ -26,6 +28,8 @@ import {
   createDebugLogger,
   MCPServerConfig,
   AuthProviderType,
+  normalizeReasoningEffort,
+  loadUsageDashboard,
   type MCPOAuthConfig,
 } from '@qwen-code/qwen-code-core';
 
@@ -70,12 +74,27 @@ export class SystemController extends BaseController {
           signal,
         );
 
+      case 'set_effort':
+        return this.handleSetEffort(
+          payload as CLIControlSetEffortRequest,
+          signal,
+        );
+
       case 'supported_commands':
         return this.handleSupportedCommands(signal);
 
       case 'get_context_usage':
         return this.handleGetContextUsage(
           payload as CLIControlGetContextUsageRequest,
+          signal,
+        );
+
+      case 'get_available_models':
+        return this.handleGetAvailableModels(signal);
+
+      case 'get_usage_info':
+        return this.handleGetUsageInfo(
+          payload as CLIControlGetUsageInfoRequest,
           signal,
         );
 
@@ -151,6 +170,34 @@ export class SystemController extends BaseController {
       canUseToolTimeout <= MAX_CAN_USE_TOOL_TIMEOUT_MS
     ) {
       this.context.sdkCanUseToolTimeoutMs = canUseToolTimeout;
+    }
+
+    if (payload.effort) {
+      const normalized = normalizeReasoningEffort(payload.effort);
+      if (normalized) {
+        try {
+          this.context.config.setReasoningEffort(normalized);
+
+          if (this.context.config.getReasoningEffort() !== normalized) {
+            debugLogger.warn(
+              `[SystemController] Effort '${normalized}' was not applied (thinking may be disabled)`,
+            );
+          } else {
+            debugLogger.info(
+              `[SystemController] Set reasoning effort to: ${normalized}`,
+            );
+          }
+        } catch (error) {
+          debugLogger.error(
+            '[SystemController] Failed to set reasoning effort:',
+            error,
+          );
+        }
+      } else {
+        throw new Error(
+          'Invalid effort value. Supported: low, medium, high, xhigh, max',
+        );
+      }
     }
 
     // Process SDK MCP servers
@@ -281,7 +328,12 @@ export class SystemController extends BaseController {
       can_set_permission_mode:
         typeof this.context.config.setApprovalMode === 'function',
       can_set_model: typeof this.context.config.setModel === 'function',
+      can_set_effort:
+        typeof this.context.config.setReasoningEffort === 'function',
       can_get_context_usage: true,
+      can_get_available_models:
+        typeof this.context.config.getAvailableModels === 'function',
+      can_get_usage_info: true,
       // SDK MCP servers are supported - messages routed through control plane
       can_handle_mcp_message: true,
     };
@@ -450,6 +502,130 @@ export class SystemController extends BaseController {
         `[SystemController] Failed to set model ${model}:`,
         error,
       );
+
+      throw new Error(errorMessage);
+    }
+  }
+
+  /**
+   * Handle set_effort request
+   *
+   * Sets the reasoning effort tier at runtime.
+   */
+  private async handleSetEffort(
+    payload: CLIControlSetEffortRequest,
+    signal: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    if (signal.aborted) {
+      throw new Error('Request aborted');
+    }
+
+    const effort = payload.effort;
+    if (typeof effort !== 'string' || effort.trim() === '') {
+      throw new Error('Invalid effort specified for set_effort request');
+    }
+
+    const normalized = normalizeReasoningEffort(effort);
+    if (!normalized) {
+      throw new Error(
+        'Invalid effort value. Supported: low, medium, high, xhigh, max',
+      );
+    }
+
+    try {
+      this.context.config.setReasoningEffort(normalized);
+
+      const applied = this.context.config.getReasoningEffort() === normalized;
+
+      debugLogger.info(
+        `[SystemController] Reasoning effort set to: ${normalized} (applied: ${applied})`,
+      );
+
+      return {
+        subtype: 'set_effort',
+        effort: normalized,
+        applied,
+      };
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Failed to set effort';
+
+      debugLogger.error(
+        `[SystemController] Failed to set effort ${effort}:`,
+        error,
+      );
+
+      throw new Error(errorMessage);
+    }
+  }
+
+  /**
+   * Handle get_available_models request
+   *
+   * Returns the list of models available for the current auth type.
+   */
+  private async handleGetAvailableModels(
+    signal: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    if (signal.aborted) {
+      throw new Error('Request aborted');
+    }
+
+    try {
+      const models = this.context.config
+        .getAvailableModels()
+        .map(({ id, label, capabilities, contextWindowSize }) => ({
+          id,
+          label,
+          capabilities,
+          contextWindowSize,
+        }));
+
+      return {
+        subtype: 'get_available_models',
+        models,
+      };
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error
+          ? error.message
+          : 'Failed to get available models';
+
+      debugLogger.error(
+        '[SystemController] Failed to get available models:',
+        error,
+      );
+
+      throw new Error(errorMessage);
+    }
+  }
+
+  /**
+   * Handle get_usage_info request
+   *
+   * Returns usage dashboard data for the specified time range.
+   */
+  private async handleGetUsageInfo(
+    payload: CLIControlGetUsageInfoRequest,
+    signal: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    if (signal.aborted) {
+      throw new Error('Request aborted');
+    }
+
+    try {
+      const range = payload.range;
+      const dashboard = await loadUsageDashboard(range ? { range } : undefined);
+
+      return {
+        ...dashboard,
+        subtype: 'get_usage_info',
+      };
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Failed to get usage info';
+
+      debugLogger.error('[SystemController] Failed to get usage info:', error);
 
       throw new Error(errorMessage);
     }

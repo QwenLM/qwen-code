@@ -280,7 +280,13 @@ export function useCompletionTrigger(
         ) {
           offset += inputElement.childNodes[i].textContent?.length || 0;
         }
-        cursorPosition = offset || text.length;
+        // Preserve a legitimate offset of 0 (cursor at the container start);
+        // only fall back to text.length when the container has no children and
+        // the offset can't be computed from childNodes.
+        cursorPosition =
+          childIndex > 0 || inputElement.childNodes.length > 0
+            ? offset
+            : text.length;
       } else if (range.startContainer.nodeType === Node.TEXT_NODE) {
         // Cursor is in a text node - calculate offset from start of input
         const walker = document.createTreeWalker(
@@ -305,16 +311,14 @@ export function useCompletionTrigger(
         cursorPosition = found ? offset : text.length;
       }
 
-      // Find trigger character before cursor
-      // Use text length if cursorPosition is 0 but we have text (edge case for first character)
-      // Clamp to text.length because the DOM cursor offset may exceed the
-      // stripped text length (e.g. after removing a leading zero-width space).
-      const effectiveCursorPosition = Math.min(
-        cursorPosition === 0 && text.length > 0 ? text.length : cursorPosition,
-        text.length,
-      );
+      // Find trigger character before cursor.
+      // A cursorPosition of 0 is a valid position (cursor at the very start),
+      // so it must not be rewritten to text.length. We still clamp to
+      // text.length because the DOM cursor offset may exceed the stripped text
+      // length (e.g. after removing a leading zero-width space).
+      const clampedCursorPosition = Math.min(cursorPosition, text.length);
 
-      const textBeforeCursor = text.substring(0, effectiveCursorPosition);
+      const textBeforeCursor = text.substring(0, clampedCursorPosition);
       const lastAtMatch = textBeforeCursor.lastIndexOf('@');
       const lastSlashMatch = textBeforeCursor.lastIndexOf('/');
 
@@ -340,7 +344,7 @@ export function useCompletionTrigger(
           charBefore === ' ' || charBefore === '\n' || triggerPos === 0;
 
         if (isValidTrigger) {
-          const query = text.substring(triggerPos + 1, effectiveCursorPosition);
+          const query = text.substring(triggerPos + 1, clampedCursorPosition);
 
           if (shouldAllowCompletionQuery(triggerChar, query)) {
             // Get precise cursor position for menu

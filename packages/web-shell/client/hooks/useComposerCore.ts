@@ -60,7 +60,12 @@ import {
 } from '../extensions/inputHighlight';
 import { isEditableTarget } from '../utils/dom';
 import { cssUrlValue } from '../utils/cssUrlVar';
-import { getComposerTagIconUrl } from '../components/composerTagIcons';
+import {
+  createInputAnnotationsFromComposerTags,
+  getComposerTagIconUrl,
+  getComposerTagSerialized,
+} from '../utils/composerTag';
+import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import { isSafeImageSrc } from '../components/messages/Markdown';
 import type {
   ComposerTagClickHandler,
@@ -488,9 +493,7 @@ export function expandLargePastePlaceholders(
 // ---- Tag serialization (shared) ----
 
 export function serializeComposerTag(tag: WebShellComposerTag): string {
-  return (
-    tag.serialized?.trim() || tag.value?.trim() || tag.label?.trim() || tag.id
-  );
+  return getComposerTagSerialized(tag);
 }
 
 function serializeComposerTags(tags: readonly WebShellComposerTag[]): string {
@@ -601,6 +604,8 @@ export const removeInlineTagEffect = StateEffect.define<{
 }>();
 export const clearInlineTagsEffect = StateEffect.define<void>();
 
+let nextComposerTagTooltipId = 0;
+
 class ComposerTagWidget extends WidgetType {
   private contentRoot: Root | null = null;
   private tooltipRoot: Root | null = null;
@@ -631,7 +636,6 @@ class ComposerTagWidget extends WidgetType {
     const publicTag = toPublicComposerTag(this.tag);
     chip.style.cssText =
       'position:relative;display:inline-flex;align-items:center;max-width:min(44ch,100%);min-height:20px;margin:0 0.25ch;border:1px solid var(--border);border-radius:4px;background:var(--secondary);color:var(--foreground);font-family:var(--font-mono,monospace);font-size:12px;line-height:1.2;vertical-align:baseline;';
-    if (this.tag.tooltipText) chip.title = this.tag.tooltipText;
     if (this.tag.onClick) {
       chip.setAttribute('role', 'button');
       chip.tabIndex = 0;
@@ -757,6 +761,21 @@ class ComposerTagWidget extends WidgetType {
     tooltipElement.setAttribute('role', 'tooltip');
     tooltipElement.style.cssText =
       'position:absolute;z-index:calc(var(--web-shell-tooltip-z-index,1000) + 1);top:calc(100% + 6px);left:0;display:none;min-width:160px;max-width:min(320px,80vw);padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--background);box-shadow:0 8px 24px rgba(0,0,0,0.18);color:var(--foreground);font-family:var(--font-sans,system-ui,sans-serif);font-size:12px;line-height:1.5;white-space:normal;';
+    try {
+      this.tooltipRoot = createRoot(tooltipElement);
+      this.tooltipRoot.render(tooltip);
+      chip.appendChild(tooltipElement);
+      tooltipElement.id = `composer-tag-tooltip-${++nextComposerTagTooltipId}`;
+      chip.setAttribute('aria-describedby', tooltipElement.id);
+    } catch (error) {
+      this.tooltipRoot?.unmount();
+      this.tooltipRoot = null;
+      if (this.tag.tooltipText) {
+        chip.title = this.tag.tooltipText;
+      }
+      console.warn('[WebShell] inline tag tooltip render failed', error);
+      return;
+    }
     const show = () => {
       tooltipElement.style.display = 'block';
     };
@@ -767,15 +786,6 @@ class ComposerTagWidget extends WidgetType {
     chip.addEventListener('mouseleave', hide);
     chip.addEventListener('focusin', show);
     chip.addEventListener('focusout', hide);
-    try {
-      this.tooltipRoot = createRoot(tooltipElement);
-      this.tooltipRoot.render(tooltip);
-      chip.appendChild(tooltipElement);
-    } catch (error) {
-      this.tooltipRoot?.unmount();
-      this.tooltipRoot = null;
-      console.warn('[WebShell] inline tag tooltip render failed', error);
-    }
   }
 
   private appendRemoveButton(chip: HTMLElement, view: EditorView) {
@@ -881,12 +891,11 @@ const inlineComposerTagField = StateField.define<DecorationSet>({
 
 export function getInlineComposerTags(view: EditorView): WebShellComposerTag[] {
   const tags: WebShellComposerTag[] = [];
-  view.state
-    .field(inlineComposerTagField)
-    .between(0, view.state.doc.length, (_from, _to, value) => {
-      const tag = (value.spec as Partial<InlineTagDecorationSpec>).tag;
-      if (tag) tags.push(toPublicComposerTag(tag));
-    });
+  const inlineTags = view.state.field(inlineComposerTagField, false);
+  inlineTags?.between(0, view.state.doc.length, (_from, _to, value) => {
+    const tag = (value.spec as Partial<InlineTagDecorationSpec>).tag;
+    if (tag) tags.push(toPublicComposerTag(tag));
+  });
   return tags;
 }
 
@@ -1011,11 +1020,16 @@ function createFollowupGhostExtension(suggestion: string | null) {
 
 export type ComposerSubmitCommit = () => void;
 
+export interface ComposerSubmitMetadata {
+  inputAnnotations?: DaemonInputAnnotation[];
+}
+
 export interface UseComposerCoreOptions {
   onSubmit: (
     text: string,
     images?: PromptImage[],
     commitAccepted?: ComposerSubmitCommit,
+    metadata?: ComposerSubmitMetadata,
   ) => boolean | void;
   onCycleMode?: () => void;
   onToggleShortcuts?: () => void;
@@ -1732,7 +1746,7 @@ export function useComposerCore(
               }))
           : [];
       const tags = tagsOverride ?? composerTagsRef.current;
-      if (!rawText && tags.length === 0) return true;
+      if (!rawText && tags.length === 0 && inlineTags.length === 0) return true;
       const textWithInlineTags =
         tagsOverride === undefined
           ? replaceInlineTagPlacements(rawText, normalizedInlineTags)
@@ -1744,6 +1758,11 @@ export function useComposerCore(
       const prompt = buildComposerPrompt(text, tags);
       const images = pastedImagesRef.current;
       const isShellMode = shellModeRef.current;
+      const promptText = isShellMode ? `!${prompt}` : prompt;
+      const inputAnnotations = createInputAnnotationsFromComposerTags(
+        promptText,
+        [...tags, ...normalizedInlineTags.map((placement) => placement.tag)],
+      );
       let committed = false;
       const commitAccepted = () => {
         if (committed) return;
@@ -1771,9 +1790,10 @@ export function useComposerCore(
         });
       };
       const accepted = onSubmitRef.current(
-        isShellMode ? `!${prompt}` : prompt,
+        promptText,
         images.length > 0 ? [...images] : undefined,
         commitAccepted,
+        inputAnnotations.length > 0 ? { inputAnnotations } : undefined,
       );
       if (accepted === false) return true;
       commitAccepted();
@@ -2819,11 +2839,7 @@ export function useComposerCore(
     if (!view) return;
     const inlineTags = getInlineComposerTags(view);
     if (input?.tagPlacement === 'inline') {
-      submitTextRef.current(
-        view,
-        buildComposerPrompt(input.text ?? '', input.tags ?? inlineTags),
-        [],
-      );
+      submitTextRef.current(view, input.text ?? '', input.tags ?? inlineTags);
       return;
     }
     if (
@@ -2831,11 +2847,7 @@ export function useComposerCore(
       input.tags === undefined &&
       inlineTags.length > 0
     ) {
-      submitTextRef.current(
-        view,
-        buildComposerPrompt(input.text, inlineTags),
-        [],
-      );
+      submitTextRef.current(view, input.text, inlineTags);
       return;
     }
     submitTextRef.current(
