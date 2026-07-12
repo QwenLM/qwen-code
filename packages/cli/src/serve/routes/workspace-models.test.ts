@@ -215,6 +215,10 @@ describe('DELETE /workspace/models', () => {
       .send({ authType: 'openai', modelId: 'gpt-4o' });
 
     expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({
+      code: 'partial_persist_error',
+      committedKeys: ['modelProviders'],
+    });
     // The committed modelProviders write is broadcast; the uncommitted ones are not.
     expect(broadcastSettingsChanged).toHaveBeenCalledTimes(1);
     expect(broadcastSettingsChanged).toHaveBeenCalledWith(
@@ -223,5 +227,36 @@ describe('DELETE /workspace/models', () => {
       'user',
       undefined,
     );
+  });
+
+  it('trims whitespace-padded fields before matching', async () => {
+    writeUserSettings({
+      modelProviders: { openai: [{ id: 'gpt-4o' }, { id: 'deepseek-v4' }] },
+    });
+    const { app } = makeApp();
+
+    const res = await request(app)
+      .delete('/workspace/models')
+      .send({ authType: '  openai ', modelId: ' gpt-4o  ' });
+
+    expect(res.status).toBe(200);
+    expect(readUserSettings()['modelProviders']).toEqual({
+      openai: [{ id: 'deepseek-v4' }],
+    });
+  });
+
+  it('scrubs the deleted model from modelFallbacks', async () => {
+    writeUserSettings({
+      modelProviders: { openai: [{ id: 'gpt-4o' }, { id: 'deepseek-v4' }] },
+      modelFallbacks: 'gpt-4o,deepseek-v4',
+    });
+    const { app } = makeApp();
+
+    const res = await request(app)
+      .delete('/workspace/models')
+      .send({ authType: 'openai', modelId: 'gpt-4o' });
+
+    expect(res.status).toBe(200);
+    expect(readUserSettings()['modelFallbacks']).toBe('deepseek-v4');
   });
 });

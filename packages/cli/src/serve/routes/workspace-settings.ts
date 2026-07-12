@@ -415,9 +415,8 @@ export function registerWorkspaceQualifiedSettingsRoutes(
       );
       if (clientId === null) return;
 
-      const settingScope = QUALIFIED_WRITE_SCOPES.has(scope)
-        ? SCOPE_MAP[scope]
-        : undefined;
+      // The guard above already rejected any scope outside QUALIFIED_WRITE_SCOPES.
+      const settingScope = SCOPE_MAP[scope];
       if (!settingScope) {
         res.status(400).json({
           error: `scope must be one of: ${[...QUALIFIED_WRITE_SCOPES].join(', ')}`,

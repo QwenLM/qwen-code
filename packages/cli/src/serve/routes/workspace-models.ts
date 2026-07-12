@@ -70,10 +70,13 @@ function parseTarget(
   ) {
     return { error: 'field exceeds length limit', code: 'invalid_field' };
   }
+  // Return trimmed values — validation trims, so raw padding would otherwise
+  // fail the exact string match in removeModelFromProviders (misleading 404).
+  const trimmedBaseUrl = typeof baseUrl === 'string' ? baseUrl.trim() : '';
   return {
-    authType,
-    modelId,
-    ...(typeof baseUrl === 'string' && baseUrl.length > 0 ? { baseUrl } : {}),
+    authType: authType.trim(),
+    modelId: modelId.trim(),
+    ...(trimmedBaseUrl ? { baseUrl: trimmedBaseUrl } : {}),
   };
 }
 
@@ -157,6 +160,24 @@ export function registerWorkspaceModelsRoutes(
           writes.push({ scope, key: 'model.baseUrl', value: '' });
         }
 
+        // Drop the deleted model from modelFallbacks so it doesn't linger as a
+        // dangling fallback reference the runtime/UI would show as unavailable.
+        const fallbacks = scopeSettings.modelFallbacks;
+        if (typeof fallbacks === 'string' && fallbacks.length > 0) {
+          const original = fallbacks
+            .split(',')
+            .map((entry) => entry.trim())
+            .filter(Boolean);
+          const kept = original.filter((id) => id !== parsed.modelId);
+          if (kept.length !== original.length) {
+            writes.push({
+              scope,
+              key: 'modelFallbacks',
+              value: kept.join(','),
+            });
+          }
+        }
+
         try {
           await persistSettings(boundWorkspace, writes);
         } catch (err) {
@@ -173,6 +194,16 @@ export function registerWorkspaceModelsRoutes(
             err instanceof Error ? err.message : String(err)
           }`,
         );
+        // On a partial persist, tell the caller which keys committed so it can
+        // reconcile (e.g. modelProviders removed but model.name not cleared).
+        if (err instanceof WorkspaceSettingsPartialPersistError) {
+          res.status(500).json({
+            error: 'Model removal only partially persisted',
+            code: 'partial_persist_error',
+            committedKeys: err.committedWrites.map((write) => write.key),
+          });
+          return;
+        }
         res.status(500).json({
           error: 'Failed to remove model',
           code: 'internal_error',

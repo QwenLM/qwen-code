@@ -20,7 +20,6 @@ describe('removeModelFromProviders', () => {
       modelId: 'gpt-4o',
     });
     expect(result.removed).toBe(true);
-    expect(result.providerKey).toBe('openai');
     expect(result.next).toEqual({ openai: [{ id: 'deepseek-v4' }] });
     // input is not mutated
     expect(providers.openai).toHaveLength(2);
@@ -48,7 +47,6 @@ describe('removeModelFromProviders', () => {
       { authType: 'openai', modelId: 'idea-model' },
     );
     expect(result.removed).toBe(true);
-    expect(result.providerKey).toBe('idealab');
     expect(result.next).toEqual({ openai: [{ id: 'gpt-4o' }], idealab: [] });
   });
 

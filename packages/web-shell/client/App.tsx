@@ -4984,10 +4984,17 @@ export function App({
         .deleteModel(target)
         .then(() => {
           // A transient reload failure shouldn't surface as "delete failed" —
-          // the model was already removed. Just log it.
+          // the model was already removed. Just log it. Reload settings too so a
+          // cleared active model / scrubbed fallback isn't shown stale.
           providersState.reload().catch((err: unknown) => {
             console.warn(
               '[web-shell] failed to reload providers after delete',
+              err,
+            );
+          });
+          reloadWorkspaceSettings().catch((err: unknown) => {
+            console.warn(
+              '[web-shell] failed to reload settings after delete',
               err,
             );
           });
@@ -4997,7 +5004,7 @@ export function App({
         })
         .finally(() => setModelActionBusy(false));
     },
-    [workspaceActions, providersState, reportError, t],
+    [workspaceActions, providersState, reloadWorkspaceSettings, reportError, t],
   );
 
   const handleCloseAuthDialog = useCallback(() => {

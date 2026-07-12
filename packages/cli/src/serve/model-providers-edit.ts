@@ -22,8 +22,6 @@ export interface RemoveModelTarget {
 export interface RemoveModelResult {
   next: ModelProvidersConfig;
   removed: boolean;
-  /** The `modelProviders` key the model was removed from, when removed. */
-  providerKey?: string;
 }
 
 /**
@@ -81,7 +79,7 @@ function buildRemoval(
   // while an emptied array is written correctly. An empty provider contributes
   // no models and is hidden from the model list.
   next[key] = nextModels;
-  return { next, removed: true, providerKey: key };
+  return { next, removed: true };
 }
 
 /**

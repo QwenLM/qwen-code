@@ -3852,7 +3852,9 @@ export class WorkspaceDaemonClient {
   }
 
   setWorkspaceSetting(
-    scope: 'workspace' | 'user',
+    // The workspace-qualified settings route is workspace-only (see
+    // QUALIFIED_WRITE_SCOPES); only the primary DaemonClient writes user scope.
+    scope: 'workspace',
     key: string,
     value: unknown,
     opts?: { clientId?: string },
