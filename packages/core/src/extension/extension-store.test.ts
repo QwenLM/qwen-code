@@ -297,6 +297,48 @@ describe('ExtensionStore', () => {
     });
   });
 
+  it('keeps V2 reads available when an older V1 projection cannot be repaired', async () => {
+    const store = makeStore();
+    const id = 'e5'.repeat(32);
+    await store.ensureInitialized([{ id, name: 'demo' }]);
+    const changed = await store.setDefaultActivation(
+      { id, name: 'demo' },
+      'disabled',
+    );
+    await fsp.writeFile(enablementPath, '{}');
+    const stateStat = await fsp.stat(path.join(storeDir, 'state.json'));
+    const older = new Date(stateStat.mtimeMs - 1_000);
+    await fsp.utimes(enablementPath, older, older);
+
+    const projectionAgeSpy = vi
+      .spyOn(
+        store as unknown as {
+          legacyProjectionIsNewerThanState(): Promise<boolean>;
+        },
+        'legacyProjectionIsNewerThanState',
+      )
+      .mockImplementationOnce(async () => {
+        await fsp.rm(enablementPath);
+        await fsp.mkdir(enablementPath);
+        return false;
+      });
+    try {
+      const readable = await store.ensureInitialized([{ id, name: 'demo' }]);
+      expect(readable).toEqual(changed);
+      expect((await fsp.stat(enablementPath)).isDirectory()).toBe(true);
+    } finally {
+      projectionAgeSpy.mockRestore();
+    }
+
+    await fsp.rm(enablementPath, { recursive: true });
+    await fsp.writeFile(enablementPath, '{}');
+    await fsp.utimes(enablementPath, older, older);
+    await store.ensureInitialized([{ id, name: 'demo' }]);
+    expect(JSON.parse(await fsp.readFile(enablementPath, 'utf8'))).toEqual({
+      demo: { overrides: ['!/*'] },
+    });
+  });
+
   it('imports a newer V1 projection as a sequential downgrade write', async () => {
     const store = makeStore();
     const id = 'e2'.repeat(32);

@@ -270,7 +270,11 @@ export class ExtensionStore {
       let changed = false;
       if (existing.legacyProjectionHash !== projectionHash(legacy)) {
         if (!(await this.legacyProjectionIsNewerThanState())) {
-          await this.writeLegacyProjectionUnlocked(existing);
+          try {
+            await this.writeLegacyProjectionUnlocked(existing);
+          } catch {
+            // state.json remains authoritative; a later access retries repair.
+          }
           return existing;
         }
         for (const identity of extensions) {
