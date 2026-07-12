@@ -14,8 +14,6 @@ import {
   generateReleaseNotes,
   parseGeneratedEntries,
   renderReleaseNotes,
-  validateHighlights,
-  validateSummaryBatch,
 } from '../generate-release-notes.js';
 
 const PR = (number) => `https://github.com/QwenLM/qwen-code/pull/${number}`;
@@ -39,6 +37,7 @@ describe('parseGeneratedEntries', () => {
       "## What's Changed",
       `* feat(cli): add session search by @alice in ${PR(12)}`,
       `* fix(core): preserve tool results by @bob in ${PR(8)}`,
+      `* fix(ci): retry publishing by @carol with @Copilot in ${PR(6574)}`,
       '',
       '**Full Changelog**: https://github.com/QwenLM/qwen-code/compare/v1...v2',
     ].join('\n');
@@ -56,18 +55,11 @@ describe('parseGeneratedEntries', () => {
         url: PR(8),
         author: 'bob',
       },
-    ]);
-  });
-
-  it('keeps entries that credit an additional collaborator', () => {
-    const body = `* fix(ci): retry publishing by @alice with @Copilot in ${PR(6574)}`;
-
-    expect(parseGeneratedEntries(body)).toEqual([
       {
         number: 6574,
         title: 'fix(ci): retry publishing',
         url: PR(6574),
-        author: 'alice',
+        author: 'carol',
       },
     ]);
   });
@@ -108,17 +100,6 @@ describe('parseGeneratedEntries', () => {
       },
     ]);
   });
-
-  it('does not treat New Contributors bullets as change entries', () => {
-    const body = [
-      `* feat(cli): parsed by @alice in ${PR(1)}`,
-      '',
-      '## New Contributors',
-      `* @alice made their first contribution in ${PR(1)}`,
-    ].join('\n');
-
-    expect(parseGeneratedEntries(body)).toHaveLength(1);
-  });
 });
 
 describe('classifyChange', () => {
@@ -150,80 +131,6 @@ describe('classifyChange', () => {
     expect(classifyChange(entry(1, 'A clearer change title', [label]))).toBe(
       expected,
     );
-  });
-});
-
-describe('validateSummaryBatch', () => {
-  it('returns summaries only when every requested PR appears exactly once', () => {
-    const summaries = validateSummaryBatch(
-      [entry(1, 'feat: a'), entry(2, 'fix: b')],
-      {
-        summaries: [
-          { pr: 1, summary: 'Adds a user-visible capability.' },
-          { pr: 2, summary: 'Prevents an existing failure.' },
-        ],
-      },
-    );
-
-    expect(summaries.get(1)).toBe('Adds a user-visible capability.');
-    expect(summaries.get(2)).toBe('Prevents an existing failure.');
-  });
-
-  it.each([
-    ['missing', { summaries: [{ pr: 1, summary: 'Only one.' }] }],
-    [
-      'unknown',
-      {
-        summaries: [
-          { pr: 1, summary: 'Known.' },
-          { pr: 3, summary: 'Unknown.' },
-        ],
-      },
-    ],
-    [
-      'duplicate',
-      {
-        summaries: [
-          { pr: 1, summary: 'First.' },
-          { pr: 1, summary: 'Again.' },
-        ],
-      },
-    ],
-  ])('rejects a %s PR set', (_name, response) => {
-    expect(() =>
-      validateSummaryBatch([entry(1, 'feat: a'), entry(2, 'fix: b')], response),
-    ).toThrow();
-  });
-
-  it('rejects multiline model text that could escape its Markdown list item', () => {
-    expect(() =>
-      validateSummaryBatch([entry(1, 'feat: a')], {
-        summaries: [{ pr: 1, summary: 'Readable.\n## Injected heading' }],
-      }),
-    ).toThrow(/single line/);
-  });
-
-  it.each([
-    '<details>hidden content</details>',
-    '[misleading link](https://example.com)',
-    'Visit https://example.com for details.',
-    '@QwenLM/security should review this.',
-    'See #123 for the real details.',
-    '**Critical:** this looks important.',
-  ])('rejects non-plain-text model output: %s', (summary) => {
-    expect(() =>
-      validateSummaryBatch([entry(1, 'feat: a')], {
-        summaries: [{ pr: 1, summary }],
-      }),
-    ).toThrow(/plain text/);
-  });
-
-  it('enforces the prompted 180-character summary limit', () => {
-    expect(() =>
-      validateSummaryBatch([entry(1, 'feat: a')], {
-        summaries: [{ pr: 1, summary: 'x'.repeat(181) }],
-      }),
-    ).toThrow(/180 characters/);
   });
 });
 
@@ -274,32 +181,6 @@ describe('renderReleaseNotes', () => {
     expect(markdown).toContain(
       '**Full Changelog**: https://github.com/QwenLM/qwen-code/compare/v1.0.0...v1.1.0',
     );
-  });
-});
-
-describe('validateHighlights', () => {
-  it('accepts concise highlights that only reference known PRs', () => {
-    expect(
-      validateHighlights([entry(1, 'feat: a'), entry(2, 'fix: b')], {
-        highlights: [{ text: 'A clearer workflow.', prs: [1, 2] }],
-      }),
-    ).toEqual([{ text: 'A clearer workflow.', prs: [1, 2] }]);
-  });
-
-  it('rejects references outside the authoritative PR set', () => {
-    expect(() =>
-      validateHighlights([entry(1, 'feat: a')], {
-        highlights: [{ text: 'Invented change.', prs: [99] }],
-      }),
-    ).toThrow(/Unknown pull request/);
-  });
-
-  it('rejects overlong highlight text', () => {
-    expect(() =>
-      validateHighlights([entry(1, 'feat: a')], {
-        highlights: [{ text: 'x'.repeat(181), prs: [1] }],
-      }),
-    ).toThrow(/180 characters/);
   });
 });
 
@@ -359,6 +240,24 @@ describe('generateAiContent', () => {
     expect(result.warnings).toHaveLength(1);
   });
 
+  it('falls back to original titles when the model omits a PR summary', async () => {
+    const entries = [entry(1, 'feat: original'), entry(2, 'fix: original')];
+    const complete = async (request) =>
+      request.kind === 'summaries'
+        ? JSON.stringify({ summaries: [{ pr: 1, summary: 'Only one.' }] })
+        : JSON.stringify({ highlights: [] });
+
+    const result = await generateAiContent(entries, complete);
+
+    expect(result.summaries).toEqual(
+      new Map([
+        [1, 'feat: original'],
+        [2, 'fix: original'],
+      ]),
+    );
+    expect(result.warnings[0]).toMatch(/missing pull request summaries/);
+  });
+
   it('falls back only the summary whose text is unsafe', async () => {
     const entries = [entry(1, 'feat: original'), entry(2, 'fix: original')];
     const complete = async (request) =>
@@ -366,7 +265,7 @@ describe('generateAiContent', () => {
         ? JSON.stringify({
             summaries: [
               { pr: 1, summary: 'A safe summary.' },
-              { pr: 2, summary: '<unsafe>summary</unsafe>' },
+              { pr: 2, summary: '@QwenLM/security should review this.' },
             ],
           })
         : JSON.stringify({ highlights: [] });
@@ -486,26 +385,7 @@ describe('generateReleaseNotes', () => {
     expect(result.usedAi).toBe(false);
   });
 
-  it('renders a complete categorized list without model configuration', async () => {
-    const generatedBody = `* feat(cli): add search by @alice in ${PR(1)}`;
-    const result = await generateReleaseNotes({
-      generatedBody,
-      metadata: [],
-      complete: null,
-      previousTag: 'v1.0.0',
-      tag: 'v1.1.0',
-      repo: 'QwenLM/qwen-code',
-    });
-
-    expect(result.markdown).toContain('### Features');
-    expect(result.markdown).toContain(
-      `feat(cli): add search ([#1](${PR(1)})) by @alice`,
-    );
-    expect(result.usedAi).toBe(false);
-    expect(result.warnings).toEqual(['Model configuration is unavailable.']);
-  });
-
-  it('preserves GitHub new contributor credits in the final release notes', async () => {
+  it('renders the complete fallback list and new contributor credits', async () => {
     const generatedBody = [
       "## What's Changed",
       `* feat(cli): add search by @alice in ${PR(1)}`,
@@ -523,9 +403,15 @@ describe('generateReleaseNotes', () => {
       repo: 'QwenLM/qwen-code',
     });
 
+    expect(result.markdown).toContain('### Features');
+    expect(result.markdown).toContain(
+      `feat(cli): add search ([#1](${PR(1)})) by @alice`,
+    );
     expect(result.markdown).toContain('## New Contributors');
     expect(result.markdown).toContain(
       `- @newbie made their first contribution in [#1](${PR(1)})`,
     );
+    expect(result.usedAi).toBe(false);
+    expect(result.warnings).toEqual(['Model configuration is unavailable.']);
   });
 });

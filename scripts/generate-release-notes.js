@@ -7,7 +7,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { isMainModule, parseArgs } from './release-script-utils.js';
 
 const GENERATED_ENTRY_RE =
@@ -225,19 +225,7 @@ function indexSummaryBatch(entries, response) {
   return items;
 }
 
-export function validateSummaryBatch(entries, response) {
-  const items = indexSummaryBatch(entries, response);
-  const summaries = new Map();
-  for (const [number, summary] of items) {
-    summaries.set(
-      number,
-      validateModelText(summary, `Summary for pull request ${number}`, 180),
-    );
-  }
-  return summaries;
-}
-
-export function validateHighlights(entries, response) {
+function validateHighlights(entries, response) {
   if (!Array.isArray(response?.highlights)) {
     throw new Error('Model response must contain a highlights array.');
   }
@@ -625,8 +613,6 @@ Options:
   --previous-tag=<tag>           Previous release tag.
   --target=<ref>                 Target commitish (default: HEAD).
   --output=<path>                Output file (default: release-notes.md).
-  --generated-notes-file=<path>  Read GitHub-generated notes from a local fixture.
-  --metadata-file=<path>         Read PR metadata from a local JSON fixture.
   --dry-run                      Print Markdown instead of writing a file.
   -h, --help                     Show this help.
 `;
@@ -638,11 +624,6 @@ async function main() {
     '--previous-tag': { key: 'previous-tag', type: 'value' },
     '--target': { key: 'target', type: 'value' },
     '--output': { key: 'output', type: 'value' },
-    '--generated-notes-file': {
-      key: 'generated-notes-file',
-      type: 'value',
-    },
-    '--metadata-file': { key: 'metadata-file', type: 'value' },
     '--dry-run': { key: 'dry-run', type: 'flag' },
   });
   if (args.help) {
@@ -654,21 +635,17 @@ async function main() {
   }
 
   const repo = args.repo || process.env.GITHUB_REPOSITORY || 'QwenLM/qwen-code';
-  const generatedBody = args['generated-notes-file']
-    ? readFileSync(args['generated-notes-file'], 'utf8')
-    : fetchGeneratedNotes({
-        repo,
-        tag: args.tag,
-        previousTag: args['previous-tag'],
-        target: args.target || 'HEAD',
-      });
+  const generatedBody = fetchGeneratedNotes({
+    repo,
+    tag: args.tag,
+    previousTag: args['previous-tag'],
+    target: args.target || 'HEAD',
+  });
   const baseEntries = parseGeneratedEntries(generatedBody);
-  const metadata = args['metadata-file']
-    ? JSON.parse(readFileSync(args['metadata-file'], 'utf8'))
-    : fetchPullRequestMetadata(
-        repo,
-        baseEntries.map((entry) => entry.number),
-      );
+  const metadata = fetchPullRequestMetadata(
+    repo,
+    baseEntries.map((entry) => entry.number),
+  );
 
   const { OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL } = process.env;
   const complete =
