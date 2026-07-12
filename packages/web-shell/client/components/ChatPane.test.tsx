@@ -73,6 +73,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   }),
   usePromptStatus: () => 'idle',
   useWorkspaceActions: () => ({}),
+  useWorkspace: () => ({ capabilities: connectionState.capabilities }),
   useWorkspaceEventSignals: () => ({ artifactsVersion: 0 }),
 }));
 
@@ -280,6 +281,30 @@ describe('ChatPane', () => {
     render({ title: 'Refactor core' });
     expect(testid('pane-messages')?.textContent).toBe('1');
     expect(container!.textContent).toContain('Refactor core');
+  });
+
+  it('adds no workspace toolbar chip on a single-workspace daemon', () => {
+    render({ title: 'Refactor core', workspaceCwd: '/w' });
+    expect(latestChatEditorProps.visibleToolbarActions).not.toContain(
+      'workspace',
+    );
+    expect(latestChatEditorProps.workspaceName).toBeUndefined();
+  });
+
+  it('shows the pane workspace as a toolbar chip on a multi-workspace daemon', () => {
+    connectionState.capabilities = {
+      features: [],
+      workspaceCwd: '/work/web-shell',
+      workspaces: [
+        { id: 'w0', cwd: '/work/web-shell', primary: true, trusted: true },
+        { id: 'w1', cwd: '/work/api', primary: false, trusted: true },
+      ],
+    };
+    // The split view hands each pane its own workspace explicitly.
+    render({ title: 'Add pagination', workspaceCwd: '/work/api' });
+    expect(latestChatEditorProps.visibleToolbarActions).toContain('workspace');
+    expect(latestChatEditorProps.workspaceName).toBe('api');
+    expect(latestChatEditorProps.workspaceTitle).toBe('/work/api');
   });
 
   it('reports loaded pane artifacts to the outer panel owner', async () => {

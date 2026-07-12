@@ -419,6 +419,7 @@ export function SplitView({
                   >
                     <ChatPane
                       title={titleById.get(sessionId)}
+                      workspaceCwd={paneWorkspaceCwd}
                       onClose={() => removePane(sessionId)}
                       onError={onError}
                       onRightPanelOpen={onRightPanelOpen}

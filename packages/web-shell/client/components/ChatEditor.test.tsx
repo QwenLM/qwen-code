@@ -107,6 +107,8 @@ afterEach(() => {
 
 function renderChatEditor(props: {
   gitBranch?: string;
+  workspaceName?: string;
+  workspaceTitle?: string;
   visibleToolbarActions?: readonly ComposerToolbarAction[];
 }) {
   const container = document.createElement('div');
@@ -157,6 +159,36 @@ describe('ChatEditor git branch toolbar integration', () => {
         gitBranch: 'main',
         visibleToolbarActions: [],
       }).querySelector('[aria-label^="Current Git branch:"]'),
+    ).toBeNull();
+  });
+});
+
+describe('ChatEditor workspace toolbar integration', () => {
+  it('shows the workspace indicator when the workspace action is visible', () => {
+    const container = renderChatEditor({
+      workspaceName: 'api',
+      workspaceTitle: '/work/api',
+      visibleToolbarActions: ['workspace'],
+    });
+    const chip = container.querySelector('[aria-label="Workspace: api"]');
+    expect(chip).not.toBeNull();
+    expect(chip?.getAttribute('title')).toBe('/work/api');
+    expect(
+      container.querySelector('[data-web-shell-workspace]'),
+    ).not.toBeNull();
+  });
+
+  it('hides the workspace indicator without a name or visible action', () => {
+    expect(
+      renderChatEditor({
+        visibleToolbarActions: ['workspace'],
+      }).querySelector('[aria-label^="Workspace:"]'),
+    ).toBeNull();
+    expect(
+      renderChatEditor({
+        workspaceName: 'api',
+        visibleToolbarActions: [],
+      }).querySelector('[aria-label^="Workspace:"]'),
     ).toBeNull();
   });
 });
