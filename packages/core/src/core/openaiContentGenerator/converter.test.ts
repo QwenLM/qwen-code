@@ -447,6 +447,45 @@ describe('OpenAIContentConverter', () => {
       expect(result.candidates?.[0]?.finishReason).toBeUndefined();
     });
 
+    it('keeps buffered thinking tags held across clean chunks', () => {
+      const stream = withStreamParser(new StreamingToolCallParser());
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('late-think', {
+          content: 'late <think>payload</think>',
+        }),
+        stream,
+      );
+      const cleanGap = converter.convertOpenAIChunkToGemini(
+        streamChunk('clean-gap', {
+          content: 'visible gap',
+        }),
+        stream,
+      );
+      const malformed = converter.convertOpenAIChunkToGemini(
+        streamChunk('late-tool-call', {
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_without_name',
+              type: 'function',
+              function: { arguments: '' },
+            },
+          ],
+        }),
+        stream,
+      );
+      const result = converter.convertOpenAIChunkToGemini(
+        streamChunk('late-finish', {}, 'stop'),
+        stream,
+      );
+
+      expect(cleanGap.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(malformed.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(result.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(result.candidates?.[0]?.finishReason).toBeUndefined();
+    });
+
     it('holds nameless tool-call content after prior reasoning output', () => {
       const stream = withStreamParser(new StreamingToolCallParser());
       const reasoning = converter.convertOpenAIChunkToGemini(

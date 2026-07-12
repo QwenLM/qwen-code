@@ -1426,7 +1426,9 @@ export function convertOpenAIChunkToGemini(
       malformedNamelessToolCall || malformedThinkingTagLeak;
     const shouldHoldUntrustedParts =
       toolCallWithoutName ||
-      (!choice.finish_reason && hasUntrustedProtocolText);
+      (!choice.finish_reason &&
+        (hasUntrustedProtocolText ||
+          Boolean(requestContext.pendingUntrustedResponseParts?.length)));
 
     if (shouldDropMalformedAttempt) {
       parts.length = 0;
