@@ -3531,7 +3531,30 @@ describe('DaemonClient', () => {
           { timeoutMs: 0 },
         ),
       ).rejects.toThrow('server operation was not cancelled');
-      expect(polls).toBe(1);
+      expect(polls).toBe(0);
+    });
+
+    it('aborts an in-flight poll when the operation deadline expires', async () => {
+      let pollSignal: AbortSignal | null | undefined;
+      const { fetch } = recordingFetch(
+        (request) =>
+          new Promise<Response>(() => {
+            pollSignal = request.signal;
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 0,
+      });
+
+      await expect(
+        client.waitForExtensionOperation(
+          { accepted: true, operationId: 'op-1' },
+          { timeoutMs: 10 },
+        ),
+      ).rejects.toThrow('server operation was not cancelled');
+      expect(pollSignal?.aborted).toBe(true);
     });
 
     it('stops polling when the caller aborts', async () => {

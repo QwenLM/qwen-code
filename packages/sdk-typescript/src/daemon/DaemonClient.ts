@@ -1126,27 +1126,43 @@ export class DaemonClient {
     const pollIntervalMs = options.pollIntervalMs ?? 1_000;
     const timeoutMs = options.timeoutMs ?? 10 * 60_000;
     const deadline = Date.now() + timeoutMs;
-    let firstPoll = true;
+    const timeoutError = () =>
+      new Error(
+        `Timed out waiting for extension operation ${handle.operationId}. The server operation was not cancelled.`,
+      );
     for (;;) {
       options.signal?.throwIfAborted();
-      if (!firstPoll && Date.now() >= deadline) {
-        throw new Error(
-          `Timed out waiting for extension operation ${handle.operationId}. The server operation was not cancelled.`,
-        );
+      const pollBudgetMs = deadline - Date.now();
+      if (pollBudgetMs <= 0) {
+        throw timeoutError();
       }
-      firstPoll = false;
-      const operation = await this.extensionOperation(
-        handle.operationId,
-        options.signal,
-      );
+      const deadlineController = new AbortController();
+      const pollSignal = options.signal
+        ? composeAbortSignals([options.signal, deadlineController.signal])
+        : deadlineController.signal;
+      let deadlineTimer: ReturnType<typeof setTimeout>;
+      const deadlinePromise = new Promise<never>((_, reject) => {
+        deadlineTimer = setTimeout(() => {
+          const error = timeoutError();
+          reject(error);
+          deadlineController.abort(error);
+        }, pollBudgetMs);
+      });
+      let operation: ExtensionOperationStatus;
+      try {
+        operation = await Promise.race([
+          this.extensionOperation(handle.operationId, pollSignal),
+          deadlinePromise,
+        ]);
+      } finally {
+        clearTimeout(deadlineTimer!);
+      }
       if (operation.status !== 'queued' && operation.status !== 'running') {
         return operation;
       }
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) {
-        throw new Error(
-          `Timed out waiting for extension operation ${handle.operationId}. The server operation was not cancelled.`,
-        );
+        throw timeoutError();
       }
       await new Promise<void>((resolve, reject) => {
         const finish = () => {
