@@ -547,6 +547,59 @@ describe('Session', () => {
     vi.clearAllTimers();
   });
 
+  it('forwards recording degradation and unsubscribes on dispose', async () => {
+    let recordingFailureListener:
+      | ((event: { sessionId: string; error: Error }) => Promise<void> | void)
+      | undefined;
+    const unsubscribe = vi.fn();
+    session.dispose();
+    mockConfig.onChatRecordingFailure = vi.fn((listener) => {
+      recordingFailureListener = listener;
+      return unsubscribe;
+    });
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+
+    await recordingFailureListener?.({
+      sessionId: 'failed-session-id',
+      error: new Error('private details'),
+    });
+
+    expect(mockClient.extNotification).toHaveBeenCalledWith(
+      'qwen/notify/session/recording-degraded',
+      {
+        v: 1,
+        sessionId: 'failed-session-id',
+        reason: 'write_failed',
+      },
+    );
+    session.dispose();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it('attributes a delayed title notification to the persisted record session', () => {
+    const callback = mockChatRecordingService.setTitleRecordedCallback.mock
+      .calls[0]?.[0] as
+      | ((title: string, source: string, sessionId: string) => void)
+      | undefined;
+
+    callback?.('Durable title', 'auto', 'persisted-session-id');
+
+    expect(mockClient.extNotification).toHaveBeenCalledWith(
+      'qwen/notify/session/title-update',
+      {
+        v: 1,
+        sessionId: 'persisted-session-id',
+        title: 'Durable title',
+        titleSource: 'auto',
+      },
+    );
+  });
+
   describe('continueLastTurn', () => {
     it('returns none and starts no continuation when the last turn ended cleanly', async () => {
       vi.mocked(mockChat.getHistory).mockReturnValue([

@@ -153,4 +153,21 @@ describe('ChatRecordingService - recordParentSession', () => {
 
     expect(parentRecord.parentUuid).toBe(userRecord.uuid);
   });
+
+  it('reports failure without retrying after the recorder degrades', async () => {
+    const writeError = new Error('disk full');
+    vi.mocked(jsonl.writeLine)
+      .mockRejectedValueOnce(writeError)
+      .mockResolvedValue(undefined);
+
+    await expect(
+      chatRecordingService.recordParentSession('parent-abc'),
+    ).resolves.toBe(false);
+    await expect(chatRecordingService.flush()).rejects.toBe(writeError);
+    await expect(
+      chatRecordingService.recordParentSession('parent-abc'),
+    ).resolves.toBe(false);
+
+    expect(jsonl.writeLine).toHaveBeenCalledOnce();
+  });
 });

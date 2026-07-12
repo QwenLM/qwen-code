@@ -306,7 +306,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       id: input.id ?? `daemon-notice-${Date.now()}-${++noticeIdRef.current}`,
       createdAt: input.createdAt ?? Date.now(),
     };
-    setNotices((current) => [...current.slice(-49), notice]);
+    setNotices((current) =>
+      current.some((existing) => existing.id === notice.id)
+        ? current
+        : [...current.slice(-49), notice],
+    );
     return notice;
   }, []);
   const dismissNotice = useCallback((id: string) => {
@@ -760,6 +764,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     replayEvent,
                     replayUiEvents,
                     addNotice,
+                    dismissNotice,
                   ),
                 );
                 if (replayEvent.type === 'turn_complete') {
@@ -1061,6 +1066,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 event,
                 normalizedUiEvents,
                 addNotice,
+                dismissNotice,
               );
               if (event.type === 'state_resync_required') {
                 const reason =
@@ -1545,6 +1551,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     shouldDeferInitialSessionCreation,
     clearNotices,
     addNotice,
+    dismissNotice,
   ]);
 
   useEffect(() => {
@@ -1929,7 +1936,18 @@ function filterDaemonUiEventsForTranscript(
   sourceEvent: DaemonEvent,
   events: DaemonUiEvent[],
   addNotice: AddDaemonSessionNotice,
+  dismissNotice: (id: string) => void,
 ): DaemonUiEvent[] {
+  if (
+    sourceEvent.type === 'session_snapshot' &&
+    isRecord(sourceEvent.data) &&
+    sourceEvent.data['recordingDegraded'] === false
+  ) {
+    const sessionId = getString(sourceEvent.data, 'sessionId');
+    if (sessionId) {
+      dismissNotice(`daemon.session_recording_degraded:${sessionId}`);
+    }
+  }
   const filtered: DaemonUiEvent[] = [];
   for (const event of events) {
     if (event.type !== 'error') {
@@ -1963,6 +1981,22 @@ function daemonErrorEventToNotice(
   };
 
   switch (sourceEvent.type) {
+    case 'session_recording_degraded':
+    case 'session_snapshot': {
+      const sessionId = isRecord(sourceEvent.data)
+        ? getString(sourceEvent.data, 'sessionId')
+        : undefined;
+      return {
+        ...base,
+        ...(sessionId
+          ? { id: `daemon.session_recording_degraded:${sessionId}` }
+          : {}),
+        severity: 'warning',
+        category: 'system',
+        operation: 'record_session',
+        code: 'daemon.session_recording_degraded',
+      };
+    }
     case 'model_switch_failed':
       return {
         ...base,

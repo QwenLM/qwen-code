@@ -931,21 +931,129 @@ describe('ChatRecordingService', () => {
       expect(jsonl.writeLine).not.toHaveBeenCalled();
     });
 
-    it('a failed write does not block subsequent records', async () => {
-      // Regression guard: the inner .catch swallows fs errors and keeps
-      // the chain alive so the next record's write still runs.
-      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(
-        new Error('simulated EACCES'),
-      );
+    it('permanently stops recording after a failed write', async () => {
+      const writeError = new Error('simulated EACCES');
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(writeError);
       chatRecordingService.recordUserMessage([{ text: 'first' }]);
       chatRecordingService.recordUserMessage([{ text: 'second' }]);
-      await chatRecordingService.flush();
+      await expect(chatRecordingService.flush()).rejects.toBe(writeError);
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+
+      chatRecordingService.recordAssistantTurn({
+        model: 'gemini-pro',
+        message: [{ text: 'third' }],
+      });
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      await expect(chatRecordingService.flush()).rejects.toBe(writeError);
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+    });
+
+    it('scopes a write failure to the recorder instance', async () => {
+      vi.mocked(jsonl.writeLine)
+        .mockRejectedValueOnce(new Error('disk full'))
+        .mockResolvedValue(undefined);
+      chatRecordingService.recordUserMessage([{ text: 'first' }]);
+      await expect(chatRecordingService.flush()).rejects.toThrow('disk full');
+
+      const nextRecordingService = new ChatRecordingService(mockConfig);
+      nextRecordingService.recordUserMessage([{ text: 'new session' }]);
+      await expect(nextRecordingService.flush()).resolves.toBeUndefined();
 
       expect(jsonl.writeLine).toHaveBeenCalledTimes(2);
-      const second = vi.mocked(jsonl.writeLine).mock.calls[1][1] as ChatRecord;
-      expect(
-        (second.message as { parts: Array<{ text: string }> }).parts[0].text,
-      ).toBe('second');
+    });
+
+    it('normalizes a non-Error rejection and keeps it sticky', async () => {
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce('disk full');
+      chatRecordingService.recordUserMessage([{ text: 'first' }]);
+
+      let firstFailure: unknown;
+      try {
+        await chatRecordingService.flush();
+      } catch (error) {
+        firstFailure = error;
+      }
+      expect(firstFailure).toEqual(new Error('disk full'));
+      await expect(chatRecordingService.flush()).rejects.toBe(firstFailure);
+    });
+
+    it('notifies once with the failed record session id', async () => {
+      let rejectWrite!: (error: Error) => void;
+      vi.mocked(jsonl.writeLine).mockReturnValueOnce(
+        new Promise<void>((_resolve, reject) => {
+          rejectWrite = reject;
+        }),
+      );
+      const listener = vi.fn();
+      const service = new ChatRecordingService(mockConfig, listener);
+
+      service.recordUserMessage([{ text: 'first' }]);
+      service.recordUserMessage([{ text: 'queued descendant' }]);
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('new-session-id');
+      const writeError = new Error('disk full');
+      rejectWrite(writeError);
+
+      await expect(service.flush()).rejects.toBe(writeError);
+      service.recordUserMessage([{ text: 'after failure' }]);
+      await expect(service.flush()).rejects.toBe(writeError);
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledOnce();
+      expect(listener).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        error: writeError,
+      });
+    });
+
+    it('allows a replacement recorder to notify independently', async () => {
+      const firstListener = vi.fn();
+      const secondListener = vi.fn();
+      vi.mocked(jsonl.writeLine)
+        .mockRejectedValueOnce(new Error('first failure'))
+        .mockRejectedValueOnce(new Error('second failure'));
+
+      const first = new ChatRecordingService(mockConfig, firstListener);
+      first.recordUserMessage([{ text: 'first' }]);
+      await expect(first.flush()).rejects.toThrow('first failure');
+
+      const second = new ChatRecordingService(mockConfig, secondListener);
+      second.recordUserMessage([{ text: 'second' }]);
+      await expect(second.flush()).rejects.toThrow('second failure');
+
+      expect(firstListener).toHaveBeenCalledOnce();
+      expect(secondListener).toHaveBeenCalledOnce();
+    });
+
+    it('isolates synchronous and asynchronous listener failures', async () => {
+      const unhandled: unknown[] = [];
+      const handler = (error: unknown) => unhandled.push(error);
+      process.on('unhandledRejection', handler);
+      try {
+        const syncFailure = new ChatRecordingService(mockConfig, () => {
+          throw new Error('listener threw');
+        });
+        vi.mocked(jsonl.writeLine).mockRejectedValueOnce(
+          new Error('sync observer write failure'),
+        );
+        syncFailure.recordUserMessage([{ text: 'first' }]);
+        await expect(syncFailure.flush()).rejects.toThrow(
+          'sync observer write failure',
+        );
+
+        const asyncFailure = new ChatRecordingService(mockConfig, async () => {
+          throw new Error('listener rejected');
+        });
+        vi.mocked(jsonl.writeLine).mockRejectedValueOnce(
+          new Error('async observer write failure'),
+        );
+        asyncFailure.recordUserMessage([{ text: 'second' }]);
+        await expect(asyncFailure.flush()).rejects.toThrow(
+          'async observer write failure',
+        );
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off('unhandledRejection', handler);
+      }
     });
   });
 
@@ -967,13 +1075,30 @@ describe('ChatRecordingService', () => {
       });
       writeSpy.mockImplementation(() => undefined);
 
-      chatRecordingService.recordUserMessage([{ text: 'first' }]);
-      await chatRecordingService.flush();
-      chatRecordingService.recordUserMessage([{ text: 'second' }]);
-      await chatRecordingService.flush();
+      chatRecordingService.recordUserMessage([{ text: 'retry me' }]);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      await expect(chatRecordingService.flush()).resolves.toBeUndefined();
 
-      // ≥ rather than === leaves room for a future flush()-side retry.
+      chatRecordingService.recordUserMessage([{ text: 'retry me' }]);
+      await expect(chatRecordingService.flush()).resolves.toBeUndefined();
+
       expect(mkdirSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.parentUuid).toBeNull();
+    });
+
+    it('does not notify for a synchronous conversation-file failure', () => {
+      const listener = vi.fn();
+      const service = new ChatRecordingService(mockConfig, listener);
+      vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(() => {
+        throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      });
+
+      service.recordUserMessage([{ text: 'retry me' }]);
+
+      expect(listener).not.toHaveBeenCalled();
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
     });
 
     it('caches after a successful mkdir so steady-state writes skip the syscall', async () => {
@@ -1070,50 +1195,33 @@ describe('ChatRecordingService', () => {
       );
     });
 
-    // A transient write failure must NOT permanently suppress future
-    // identical snapshots: if the dedup key were committed before the
-    // write, the next identical snapshot would dedup and the session
-    // would have no attribution snapshot at all.
-    it('should retry an identical snapshot after a write failure', async () => {
-      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
+    it('should not retry an identical snapshot after a write failure', async () => {
+      const writeError = new Error('disk full');
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(writeError);
       chatRecordingService.recordAttributionSnapshot(baseSnapshot);
-      // Wait for the queued (failing) write to settle so the rollback runs.
-      await chatRecordingService.flush();
-      const afterFailure = vi.mocked(jsonl.writeLine).mock.calls.length;
+      await expect(chatRecordingService.flush()).rejects.toBe(writeError);
 
       chatRecordingService.recordAttributionSnapshot(baseSnapshot);
-      await chatRecordingService.flush();
-      // Retry should fire, so we get a new write call.
-      expect(vi.mocked(jsonl.writeLine).mock.calls.length).toBe(
-        afterFailure + 1,
-      );
+      await expect(chatRecordingService.flush()).rejects.toBe(writeError);
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
     });
 
-    // appendRecord is fire-and-forget for non-snapshot callers
-    // (recordUserMessage / recordAssistantTurn / recordAtCommand /
-    // ...). When jsonl.writeLine rejects, the rejection MUST be
-    // swallowed inside the service — otherwise it surfaces as an
-    // unhandled-promise-rejection in production (and as a flaky
-    // failure under vitest's --reporter=default).
-    it('should swallow async writeLine rejection for fire-and-forget callers', async () => {
+    it('should handle fire-and-forget rejection while flush reports it', async () => {
       vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
-      // Track unhandled rejections during this test.
       const unhandled: unknown[] = [];
       const handler = (err: unknown) => unhandled.push(err);
       process.on('unhandledRejection', handler);
       try {
         chatRecordingService.recordUserMessage([{ text: 'hi' }]);
-        await chatRecordingService.flush();
-        // Microtask drain to give any unhandled rejections a chance
-        // to surface before we assert.
         await new Promise((resolve) => setImmediate(resolve));
         expect(unhandled).toHaveLength(0);
+        await expect(chatRecordingService.flush()).rejects.toThrow('disk full');
       } finally {
         process.off('unhandledRejection', handler);
       }
     });
 
-    it('does not rewind the shared parent pointer when strict artifact writes race with normal appends', async () => {
+    it('stops queued normal writes when a strict artifact write fails', async () => {
       let rejectStrict!: (error: Error) => void;
       const strictWrite = new Promise<void>((_resolve, reject) => {
         rejectStrict = reject;
@@ -1133,21 +1241,28 @@ describe('ChatRecordingService', () => {
       rejectStrict(new Error('disk full'));
 
       await expect(strict).rejects.toThrow('disk full');
-      await chatRecordingService.flush();
+      await expect(chatRecordingService.flush()).rejects.toThrow('disk full');
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
 
       chatRecordingService.recordUserMessage([{ text: 'next message' }]);
-      await chatRecordingService.flush();
-
-      const first = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
-      const second = vi.mocked(jsonl.writeLine).mock.calls[1][1] as ChatRecord;
-      const third = vi.mocked(jsonl.writeLine).mock.calls[2][1] as ChatRecord;
-      expect(second.parentUuid).not.toBe(first.uuid);
-      expect(third.parentUuid).toBe(second.uuid);
+      await expect(
+        chatRecordingService.recordSessionArtifactSnapshot({
+          v: 2,
+          sessionId: 'test-session-id',
+          sequence: 2,
+          recordedAt: '2026-07-04T00:00:01.000Z',
+          artifacts: [],
+          tombstonedIds: [],
+          stickyEphemeralIds: [],
+        }),
+      ).rejects.toThrow('disk full');
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
     });
 
-    it('appends strict artifact records after a previous strict write failed', async () => {
+    it('rejects strict artifact records after a previous strict write failed', async () => {
+      const writeError = new Error('corrupt journal');
       vi.mocked(jsonl.writeLine)
-        .mockRejectedValueOnce(new Error('corrupt journal'))
+        .mockRejectedValueOnce(writeError)
         .mockResolvedValue(undefined);
 
       await expect(
@@ -1158,7 +1273,7 @@ describe('ChatRecordingService', () => {
           recordedAt: '2026-07-04T00:00:00.000Z',
           changes: [],
         }),
-      ).rejects.toThrow('corrupt journal');
+      ).rejects.toBe(writeError);
 
       await expect(
         chatRecordingService.recordSessionArtifactSnapshot({
@@ -1170,11 +1285,36 @@ describe('ChatRecordingService', () => {
           tombstonedIds: [],
           stickyEphemeralIds: [],
         }),
+      ).rejects.toBe(writeError);
+      await expect(chatRecordingService.flush()).rejects.toBe(writeError);
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not let anchor size estimation preempt a strict writer result', async () => {
+      await chatRecordingService.recordCustomTitle('durable-title');
+      vi.mocked(jsonl.writeLine).mockClear();
+      const circular: Record<string, unknown> = {};
+      circular['self'] = circular;
+      const payload = {
+        v: 2,
+        sessionId: 'test-session-id',
+        sequence: 1,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        changes: [
+          {
+            action: 'upsert',
+            artifactId: 'artifact-1',
+            artifact: circular,
+          },
+        ],
+      } as unknown as Parameters<
+        ChatRecordingService['recordSessionArtifactEvent']
+      >[0];
+
+      await expect(
+        chatRecordingService.recordSessionArtifactEvent(payload),
       ).resolves.toBeUndefined();
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(2);
-      const snapshotRecord = vi.mocked(jsonl.writeLine).mock
-        .calls[1][1] as ChatRecord;
-      expect(snapshotRecord.subtype).toBe('session_artifact_snapshot');
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
     });
 
     it('keeps artifact journal records out of the active conversation chain', async () => {
