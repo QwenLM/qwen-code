@@ -218,7 +218,9 @@ export function createChannelWorkerGroup(
                 entryGeneration
               ) {
                 opts.onExit!(withRuntimeMeta(snapshot));
-              } else {
+              } else if (
+                pendingGenerations.get(runtime.workspaceCwd) !== entryGeneration
+              ) {
                 opts.onLog?.({
                   stream: 'stderr',
                   line: `Ignored stale channel worker exit (generation=${entryGeneration}).`,

@@ -737,6 +737,7 @@ describe('createChannelWorkerGroup', () => {
       return {
         start: vi.fn(async () => {
           opts.onReady?.(snapshot({ state: 'running' }));
+          opts.onExit?.(snapshot({ state: 'exited' }));
         }),
         stop: vi.fn(async () => {}),
         restart: vi.fn(async () => snapshot({})),

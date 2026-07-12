@@ -10477,6 +10477,36 @@ describe('createServeApp', () => {
       expect(JSON.stringify(response.body)).not.toContain('rollback-secret');
     });
 
+    it('maps untrusted workspace failures to 403', async () => {
+      const state = disabled();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerControl: () => state,
+        setChannelWorkerSelection: vi.fn(async () => {
+          throw Object.assign(new Error('Workspace is not trusted.'), {
+            code: 'untrusted_workspace',
+          });
+        }),
+        stopChannelWorker: vi.fn(async () => ({ changed: false, state })),
+        reloadChannelWorker: vi.fn(async () => ({
+          enabled: false,
+          state: 'disabled',
+          channels: [],
+        })),
+      });
+
+      const response = await auth(request(app).put('/workspace/channel')).send({
+        selection: { mode: 'all' },
+      });
+
+      expect(response.status).toBe(403);
+      expect(response.body).toEqual({
+        error: 'Workspace is not trusted.',
+        code: 'untrusted_workspace',
+      });
+    });
+
     it('maps a pre-manager daemon draining gate to the stable 503 error', async () => {
       const state = disabled();
       const app = createServeApp(tokenOpts, undefined, {
@@ -14659,6 +14689,7 @@ describe('createServeApp', () => {
         resetHomeEnvBootstrapForTesting();
         let version = 1;
         let names = ['old'];
+        let failSources = false;
         let refreshWebhookConfigs: (() => void) | undefined;
         const enqueueChannelWebhookTask = vi.fn(async () => ({
           accepted: true as const,
@@ -14667,10 +14698,12 @@ describe('createServeApp', () => {
           bridge: fakeBridge(),
           enqueueChannelWebhookTask,
           getChannelWebhookConfigVersion: () => version,
-          getChannelWebhookConfigSources: () =>
-            names.length > 0
+          getChannelWebhookConfigSources: () => {
+            if (failSources) throw new Error('settings busy');
+            return names.length > 0
               ? [{ workspaceCwd: workspace, channelNames: names }]
-              : [],
+              : [];
+          },
           registerChannelWebhookConfigRefresh: (refresh) => {
             refreshWebhookConfigs = refresh;
           },
@@ -14682,6 +14715,12 @@ describe('createServeApp', () => {
             .set('x-qwen-webhook-secret', secret)
             .send({ eventType: 'ci', targetRef: 'default', title: 'Build' });
 
+        expect((await send('old', 'old-secret')).status).toBe(202);
+
+        failSources = true;
+        version += 1;
+        expect((await send('old', 'old-secret')).status).toBe(401);
+        failSources = false;
         expect((await send('old', 'old-secret')).status).toBe(202);
 
         names = ['next'];

@@ -935,6 +935,7 @@ export function createServeApp(
                 { workspaceCwd: primaryBoundWorkspace },
               ]));
         channelWebhookConfigs = loadServeChannelWebhookConfigs(sources);
+        channelWebhookConfigVersion = version;
       } catch (error) {
         channelWebhookConfigs = {};
         daemonLog?.warn(
@@ -943,7 +944,6 @@ export function createServeApp(
           }`,
         );
       }
-      channelWebhookConfigVersion = version;
     };
     deps.registerChannelWebhookConfigRefresh?.(refreshChannelWebhookConfigs);
     registerChannelWebhookRoutes(app, {
