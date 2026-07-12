@@ -702,11 +702,20 @@ export function registerWorkspaceExtensionRoutes(
                     }),
                 );
               } catch (error) {
-                throw new Error(
+                const wrapped = new Error(
                   `Update check failed for extension "${extension.name}": ${
                     error instanceof Error ? error.message : String(error)
                   }`,
-                );
+                  { cause: error },
+                ) as Error & { code?: string };
+                if (
+                  error &&
+                  typeof error === 'object' &&
+                  typeof (error as { code?: unknown }).code === 'string'
+                ) {
+                  wrapped.code = (error as { code: string }).code;
+                }
+                throw wrapped;
               }
               if (preparedResult.upToDate) {
                 throw new Error(`Extension "${extension.name}" has no update`);

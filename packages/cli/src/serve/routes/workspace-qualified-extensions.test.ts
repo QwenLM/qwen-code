@@ -734,6 +734,35 @@ describe('extension management v2 REST', () => {
     }
   });
 
+  it('preserves structured update preparation error codes', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    const timeout = Object.assign(new Error('preparation timed out'), {
+      code: 'extension_prepare_timeout',
+    });
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'prepareExtensionUpdate',
+    ).mockRejectedValue(timeout);
+    try {
+      const started = await auth(
+        request(h.app).post('/workspace/extensions/demo/update'),
+      );
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({
+        status: 'failed',
+        code: 'extension_prepare_timeout',
+        error:
+          'Update check failed for extension "demo": preparation timed out',
+      });
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('still rejects non-updatable extensions through the global V2 route', async () => {
     const h = await makeHarness();
     mockExtensionManager('local');
