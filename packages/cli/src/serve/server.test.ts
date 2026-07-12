@@ -19502,6 +19502,7 @@ describe('sendBridgeError daemonLog routing', () => {
       .send({ cwd: '/work/a' });
 
     expect(res.status).toBe(503);
+    expect(res.headers['retry-after']).toBe('5');
     expect(res.body).toMatchObject({
       code: 'workspace_draining',
       workspaceCwd: '/work/a',

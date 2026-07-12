@@ -190,6 +190,7 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof WorkspaceDrainingError) {
+    res.set('Retry-After', '5');
     res.status(503).json({
       error: err.message,
       code: 'workspace_draining',
