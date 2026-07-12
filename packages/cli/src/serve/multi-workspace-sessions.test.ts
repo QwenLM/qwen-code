@@ -9,7 +9,6 @@ import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import { describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
-import type { Response } from 'express';
 import {
   Storage,
   createDebugLogger,
@@ -37,8 +36,8 @@ import {
 } from './workspace-registry.js';
 import { createSessionOrganizationService } from './session-organization-helpers.js';
 import {
-  parseTranscriptCursorQueryForTest,
-  serializeWorkspaceTranscriptResponseForTest,
+  serializeWorkspaceTranscriptResponseForTesting,
+  workspaceTranscriptCursorExceedsLimitForTesting,
 } from './routes/session.js';
 
 const PRIMARY_CWD = path.resolve(path.sep, 'work', 'primary');
@@ -1639,30 +1638,22 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
-  it('rejects oversized workspace transcript cursors before reading storage', async () => {
-    const json = vi.fn();
-    const status = vi.fn(() => ({ json }));
-    const response = { status } as unknown as Response;
-
+  it('enforces the workspace transcript cursor byte boundary', () => {
     expect(
-      parseTranscriptCursorQueryForTest(
+      workspaceTranscriptCursorExceedsLimitForTesting(
         'a'.repeat(64 * 1024 + 1),
-        response,
-        64 * 1024,
       ),
-    ).toBeNull();
-    expect(status).toHaveBeenCalledWith(400);
-    expect(json).toHaveBeenCalledWith({
-      error: '`cursor` exceeds the maximum size',
-      code: 'invalid_transcript_cursor',
-    });
+    ).toBe(true);
+    expect(
+      workspaceTranscriptCursorExceedsLimitForTesting('a'.repeat(64 * 1024)),
+    ).toBe(false);
   });
 
   it('rejects workspace transcript responses over the serialized byte budget', () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440279';
 
     expect(() =>
-      serializeWorkspaceTranscriptResponseForTest(
+      serializeWorkspaceTranscriptResponseForTesting(
         { events: ['response too large'] },
         sessionId,
         8,
@@ -1739,6 +1730,8 @@ describe('multi-workspace session dispatch', () => {
       );
       expect(response.body.hasMore).toBe(false);
       expect(response.body.nextCursor).toBeUndefined();
+      expect(Array.isArray(response.body.events)).toBe(true);
+      expect(response.body.events.length).toBeGreaterThan(0);
       expect(secondaryBridge.spawnCalls).toEqual([]);
       expect(secondaryBridge.restoreCalls).toEqual([]);
     });

@@ -201,7 +201,6 @@ function parseTranscriptLimitQuery(
 function parseTranscriptCursorQuery(
   rawCursor: unknown,
   res: Response,
-  maxBytes?: number,
 ): string | undefined | null {
   if (rawCursor === undefined) return undefined;
   if (typeof rawCursor !== 'string' || rawCursor.trim() === '') {
@@ -211,17 +210,18 @@ function parseTranscriptCursorQuery(
     });
     return null;
   }
-  if (maxBytes !== undefined && Buffer.byteLength(rawCursor) > maxBytes) {
-    res.status(400).json({
-      error: '`cursor` exceeds the maximum size',
-      code: 'invalid_transcript_cursor',
-    });
-    return null;
-  }
   return rawCursor;
 }
 
-export const parseTranscriptCursorQueryForTest = parseTranscriptCursorQuery;
+function workspaceTranscriptCursorExceedsLimit(
+  cursor: string,
+  maxBytes = WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES,
+): boolean {
+  return Buffer.byteLength(cursor) > maxBytes;
+}
+
+export const workspaceTranscriptCursorExceedsLimitForTesting =
+  workspaceTranscriptCursorExceedsLimit;
 
 function serializeWorkspaceTranscriptResponse(
   result: unknown,
@@ -240,7 +240,7 @@ function serializeWorkspaceTranscriptResponse(
   return serialized;
 }
 
-export const serializeWorkspaceTranscriptResponseForTest =
+export const serializeWorkspaceTranscriptResponseForTesting =
   serializeWorkspaceTranscriptResponse;
 
 function transcriptSnapshotUnavailableError(sessionId: string): Error & {
@@ -1406,12 +1406,15 @@ export function registerSessionRoutes(
     }
     const limit = parseTranscriptLimitQuery(req.query['limit'], res);
     if (limit === null) return;
-    const cursor = parseTranscriptCursorQuery(
-      req.query['cursor'],
-      res,
-      WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES,
-    );
+    const cursor = parseTranscriptCursorQuery(req.query['cursor'], res);
     if (cursor === null) return;
+    if (cursor !== undefined && workspaceTranscriptCursorExceedsLimit(cursor)) {
+      res.status(400).json({
+        error: '`cursor` exceeds the maximum size',
+        code: 'invalid_transcript_cursor',
+      });
+      return;
+    }
 
     try {
       const result = await runWithoutDebugLogSession(() =>
