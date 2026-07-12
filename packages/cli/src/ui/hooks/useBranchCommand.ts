@@ -147,6 +147,7 @@ export function useBranchCommand(
         const titlePersisted = await sessionService.renameSession(
           newSessionId,
           effectiveTitle,
+          name ? 'manual' : 'auto',
         );
         if (!titlePersisted) {
           throw new Error('Failed to persist branch title');

@@ -48,6 +48,7 @@ describe('SessionService', () => {
   let existsSyncSpy: MockInstance<typeof fs.existsSync>;
   let mkdirSyncSpy: MockInstance<typeof fs.mkdirSync>;
   let renameSyncSpy: MockInstance<typeof fs.renameSync>;
+  let rmSyncSpy: MockInstance<typeof fs.rmSync>;
 
   beforeEach(() => {
     vi.mocked(getProjectHash).mockReturnValue('test-project-hash');
@@ -76,6 +77,7 @@ describe('SessionService', () => {
     renameSyncSpy = vi
       .spyOn(fs, 'renameSync')
       .mockImplementation(() => undefined);
+    rmSyncSpy = vi.spyOn(fs, 'rmSync').mockImplementation(() => undefined);
 
     // Mock jsonl-utils. `parseLineTolerant` defaults to a no-op so any code
     // path that streams lines through it (e.g. countSessionMessages,
@@ -1260,6 +1262,10 @@ describe('SessionService', () => {
 
       expect(result).toBe(true);
       expect(unlinkSyncSpy).toHaveBeenCalled();
+      expect(rmSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`file-history/${sessionIdA}`),
+        { recursive: true, force: true },
+      );
     });
 
     it('should clear session organization when removing a session', async () => {
@@ -2729,6 +2735,7 @@ describe('SessionService', () => {
     let realPath: typeof import('node:path');
     let service: SessionService;
     let cwd: string;
+    let originalQwenHome: string | undefined;
 
     beforeEach(async () => {
       realOs = await import('node:os');
@@ -2770,10 +2777,13 @@ describe('SessionService', () => {
       vi.mocked(readdirSyncSpy).mockRestore?.();
       vi.mocked(statSyncSpy).mockRestore?.();
       vi.mocked(unlinkSyncSpy).mockRestore?.();
+      vi.mocked(rmSyncSpy).mockRestore?.();
 
       realTmpDir = fs.mkdtempSync(
         realPath.join(realOs.tmpdir(), 'fork-session-'),
       );
+      originalQwenHome = process.env['QWEN_HOME'];
+      process.env['QWEN_HOME'] = realTmpDir;
       process.env['QWEN_RUNTIME_DIR'] = realTmpDir;
       cwd = process.cwd();
       service = new SessionService(cwd);
@@ -2781,6 +2791,11 @@ describe('SessionService', () => {
 
     afterEach(() => {
       delete process.env['QWEN_RUNTIME_DIR'];
+      if (originalQwenHome === undefined) {
+        delete process.env['QWEN_HOME'];
+      } else {
+        process.env['QWEN_HOME'] = originalQwenHome;
+      }
       try {
         fs.rmSync(realTmpDir, { recursive: true, force: true });
       } catch {
@@ -3223,6 +3238,25 @@ describe('SessionService', () => {
       expect(loaded?.fileHistorySnapshots?.[0]?.promptId).toBe(
         `${newId}########0`,
       );
+    });
+
+    it('removes copied file-history backups when deleting a fork', async () => {
+      const oldId = '31313131-3131-3131-3131-313131313132';
+      const newId = '41414141-4141-4141-4141-414141414142';
+      seedSession(oldId);
+      const sourceBackupDir = realPath.join(realTmpDir, 'file-history', oldId);
+      const targetBackupDir = realPath.join(realTmpDir, 'file-history', newId);
+      fs.mkdirSync(sourceBackupDir, { recursive: true });
+      fs.writeFileSync(realPath.join(sourceBackupDir, 'backup-a'), 'content');
+
+      await service.forkSession(oldId, newId);
+      expect(fs.existsSync(realPath.join(targetBackupDir, 'backup-a'))).toBe(
+        true,
+      );
+
+      await expect(service.removeSession(newId)).resolves.toBe(true);
+      expect(fs.existsSync(targetBackupDir)).toBe(false);
+      expect(fs.existsSync(sourceBackupDir)).toBe(true);
     });
 
     it('forks only the active branch after rewind', async () => {

@@ -6,6 +6,7 @@
 
 import { randomUUID } from 'node:crypto';
 import {
+  createDebugLogger,
   OutputFormat,
   type ChatRecordingFailureEvent,
   type Config,
@@ -22,6 +23,7 @@ export const TUI_CHAT_RECORDING_FAILURE_MESSAGE =
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.';
 
 const CHAT_RECORDING_SETTLE_TIMEOUT_MS = 2000;
+const debugLogger = createDebugLogger('CHAT_RECORDING');
 
 export function createChatRecordingFailureSystemMessage(
   event: ChatRecordingFailureEvent,
@@ -73,10 +75,10 @@ export async function settleChatRecording(
 
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<'timeout'>((resolve) => {
-    timer = setTimeout(
-      () => resolve('timeout'),
-      CHAT_RECORDING_SETTLE_TIMEOUT_MS,
-    );
+    timer = setTimeout(() => {
+      debugLogger.debug('Timed out waiting for chat recording to flush');
+      resolve('timeout');
+    }, CHAT_RECORDING_SETTLE_TIMEOUT_MS);
     timer.unref?.();
   });
   const settled = recorder.flush().then(

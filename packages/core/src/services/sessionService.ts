@@ -475,6 +475,13 @@ export class SessionService {
     }
   }
 
+  private removeFileHistoryBackups(sessionId: string): void {
+    fs.rmSync(
+      path.join(Storage.getGlobalQwenDir(), FILE_HISTORY_DIR, sessionId),
+      { recursive: true, force: true },
+    );
+  }
+
   private async removeSessionOrganization(sessionId: string): Promise<void> {
     try {
       await new SessionOrganizationService(this.projectRoot, (message) => {
@@ -1210,6 +1217,7 @@ export class SessionService {
           this.removeFileIfExists(archivedPath);
         }
         this.removeWorktreeSidecars(sessionId);
+        this.removeFileHistoryBackups(sessionId);
         return true;
       }
       const archivedPath = this.getSessionFilePath(sessionId, 'archived');
@@ -1222,6 +1230,7 @@ export class SessionService {
       }
       this.removeFileIfExists(archivedPath);
       this.removeWorktreeSidecars(sessionId);
+      this.removeFileHistoryBackups(sessionId);
       return true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -1645,6 +1654,13 @@ export class SessionService {
         } catch (cleanupError) {
           this.warn(
             `forkSession: failed to clean up incomplete target ${newSessionId}: ${cleanupError}`,
+          );
+        }
+        try {
+          this.removeFileHistoryBackups(newSessionId);
+        } catch (cleanupError) {
+          this.warn(
+            `forkSession: failed to clean up file history for incomplete target ${newSessionId}: ${cleanupError}`,
           );
         }
       }

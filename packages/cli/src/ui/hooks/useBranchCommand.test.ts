@@ -204,6 +204,7 @@ describe('useBranchCommand', () => {
     expect(renameSession).toHaveBeenCalledWith(
       expect.any(String),
       'my-branch (Branch)',
+      'manual',
     );
     expect(setSessionName).toHaveBeenCalledWith('my-branch (Branch)');
   });
@@ -221,6 +222,7 @@ describe('useBranchCommand', () => {
     expect(renameSession).toHaveBeenCalledWith(
       expect.any(String),
       'my-branch (Branch 2)',
+      'manual',
     );
     expect(setSessionName).toHaveBeenCalledWith('my-branch (Branch 2)');
   });
@@ -247,6 +249,7 @@ describe('useBranchCommand', () => {
     expect(renameSession).toHaveBeenCalledWith(
       expect.any(String),
       'my-branch (Branch 5)',
+      'manual',
     );
   });
 
@@ -260,6 +263,7 @@ describe('useBranchCommand', () => {
     expect(renameSession).toHaveBeenCalledWith(
       expect.any(String),
       'help me fix the login bug (Branch)',
+      'auto',
     );
   });
 
@@ -276,6 +280,7 @@ describe('useBranchCommand', () => {
     expect(renameSession).toHaveBeenCalledWith(
       expect.any(String),
       'Branched conversation (Branch)',
+      'auto',
     );
   });
 
@@ -299,6 +304,7 @@ describe('useBranchCommand', () => {
     expect(renameSession).toHaveBeenCalledWith(
       expect.any(String),
       'what does this codebase do (Branch)',
+      'auto',
     );
   });
 
