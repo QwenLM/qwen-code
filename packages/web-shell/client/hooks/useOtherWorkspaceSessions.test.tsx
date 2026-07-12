@@ -47,9 +47,11 @@ function render(): void {
   act(() => root!.render(<Harness />));
 }
 
-// Flush the hook's async fan-out (Promise.allSettled + setState).
+// Flush the hook's async fan-out (Promise.allSettled + the effect's `.then`
+// setState). Three ticks so the React state update lands inside `act`.
 async function flush(): Promise<void> {
   await act(async () => {
+    await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
   });
@@ -127,5 +129,22 @@ describe('useOtherWorkspaceSessions', () => {
     expect(latest.sessions.map((s) => s.sessionId)).toEqual(['b1']);
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
+  });
+
+  it('re-fetches the target workspaces when reload() is called', async () => {
+    capabilities = {
+      workspaces: [ws('/w', true, true), ws('/b', false, true)],
+    };
+    listWorkspaceSessions.mockResolvedValue([session('b1', '/b')]);
+    render();
+    await flush();
+    expect(listWorkspaceSessions).toHaveBeenCalledTimes(1);
+    // The callers drive refresh via reload() (poll tick / picker open) — it must
+    // fetch again.
+    await act(async () => {
+      await latest.reload();
+    });
+    expect(listWorkspaceSessions).toHaveBeenCalledTimes(2);
+    expect(latest.sessions.map((s) => s.sessionId)).toEqual(['b1']);
   });
 });

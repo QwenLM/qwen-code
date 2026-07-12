@@ -83,6 +83,13 @@ describe('mergeSessionsById', () => {
     expect(merged.map((s) => s.sessionId)).toEqual(['a', 'b']);
   });
 
+  it('returns only other-workspace sessions when the primary list is empty', () => {
+    // The primary workspace may have no live sessions while a non-primary one
+    // does — the early same-ref return is skipped and every other is inserted.
+    const merged = mergeSessionsById([], [session('b', '/b')]);
+    expect(merged.map((s) => s.sessionId)).toEqual(['b']);
+  });
+
   it('keeps the primary entry on an id collision', () => {
     const merged = mergeSessionsById(
       [session('a', '/w')],

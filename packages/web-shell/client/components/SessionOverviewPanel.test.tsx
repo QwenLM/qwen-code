@@ -142,9 +142,11 @@ function rerender(props: { onOpenSplit?: (ids: string[]) => void } = {}): void {
   );
 }
 
-// Flush the other-workspace hook's async fan-out (Promise.allSettled + setState).
+// Flush the other-workspace hook's async fan-out (Promise.allSettled + the
+// effect's `.then` setState). Three ticks so the state update lands in `act`.
 async function flushAsync(): Promise<void> {
   await act(async () => {
+    await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
   });
@@ -455,8 +457,10 @@ describe('SessionOverviewPanel', () => {
     await flushAsync(); // let the other-workspace fan-out resolve
     // The non-primary session shows up as its own card…
     expect(cardLabels()).toContain('Beta');
-    // …tagged with its workspace basename (the primary card reads "primary").
+    // …tagged with its workspace basename…
     expect(container!.textContent).toContain('wsB');
+    // …while the primary card carries the localized "primary" badge.
+    expect(container!.textContent).toContain('primary');
   });
 
   it('does not query other workspaces on a single-workspace daemon', async () => {
@@ -533,6 +537,32 @@ describe('SessionOverviewPanel polling', () => {
       // …but crossing the 10s status cadence does, exactly once.
       await vi.advanceTimersByTimeAsync(7000);
       expect(statusReload).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('re-queries other workspaces on each list poll (multi-workspace)', async () => {
+    connectionState.capabilities = {
+      features: [],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    sessionsState.sessions = [session('a')];
+    otherWorkspaceSessions['/wsB'] = [session('b1', { workspaceCwd: '/wsB' })];
+    vi.useFakeTimers();
+    try {
+      render();
+      await vi.advanceTimersByTimeAsync(10); // settle the initial fan-out
+      workspaceClient.listWorkspaceSessions.mockClear();
+      await vi.advanceTimersByTimeAsync(3100); // one list-poll tick
+      expect(workspaceClient.listWorkspaceSessions).toHaveBeenCalledWith(
+        '/wsB',
+        expect.objectContaining({ archiveState: 'active' }),
+      );
     } finally {
       vi.useRealTimers();
     }

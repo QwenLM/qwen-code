@@ -53,12 +53,14 @@ export function useOtherWorkspaceSessions(): OtherWorkspaceSessionsResult {
 
   const [sessions, setSessions] = useState<DaemonSessionSummary[]>(EMPTY);
 
-  const load = useCallback(async () => {
+  // Fetch + merge the target workspaces' live sessions. Returns the stable
+  // EMPTY sentinel when there is nothing to fetch or every list came back
+  // empty, so `setSessions` is a reference-equal no-op re-render in that case.
+  const fetchSessions = useCallback(async (): Promise<
+    DaemonSessionSummary[]
+  > => {
     const cwds = targetsKey ? targetsKey.split('\n') : [];
-    if (cwds.length === 0) {
-      setSessions((prev) => (prev.length === 0 ? prev : EMPTY));
-      return;
-    }
+    if (cwds.length === 0) return EMPTY;
     const settled = await Promise.allSettled(
       cwds.map((cwd) =>
         // Match the primary list's page size (both callers fetch the primary
@@ -83,12 +85,35 @@ export function useOtherWorkspaceSessions(): OtherWorkspaceSessionsResult {
         );
       }
     });
-    setSessions(merged);
+    return merged.length === 0 ? EMPTY : merged;
   }, [client, targetsKey]);
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const reload = useCallback(async () => {
+    // Nothing to reload on a single-workspace daemon — return synchronously so
+    // callers polling `reloadOther()` don't trigger a no-op async state update.
+    if (!targetsKey) return;
+    setSessions(await fetchSessions());
+  }, [targetsKey, fetchSessions]);
 
-  return { sessions, reload: load };
+  // Load on mount and whenever the target set changes. With no other
+  // workspaces (the single-workspace daemon) this stays fully synchronous — no
+  // fetch, no post-render `setState` — so the common path never even touches
+  // the daemon. The `cancelled` guard stops a slow in-flight fetch from
+  // overwriting a newer one when the target set changes mid-flight (e.g. a
+  // workspace is registered / unregistered).
+  useEffect(() => {
+    if (!targetsKey) {
+      setSessions((prev) => (prev.length === 0 ? prev : EMPTY));
+      return;
+    }
+    let cancelled = false;
+    void fetchSessions().then((result) => {
+      if (!cancelled) setSessions(result);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [targetsKey, fetchSessions]);
+
+  return { sessions, reload };
 }

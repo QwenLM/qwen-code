@@ -101,9 +101,11 @@ beforeEach(() => {
   reloadMock = vi.fn();
 });
 
-// Flush the other-workspace hook's async fan-out (Promise.allSettled + setState).
+// Flush the other-workspace hook's async fan-out (Promise.allSettled + the
+// effect's `.then` setState). Three ticks so the state update lands in `act`.
 async function flushAsync(): Promise<void> {
   await act(async () => {
+    await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
   });
@@ -439,6 +441,7 @@ describe('SplitView', () => {
 
   const MULTI_WORKSPACE_CAPS = {
     features: [] as string[],
+    workspaceCwd: '/w',
     workspaces: [
       { id: 'w0', cwd: '/w', primary: true, trusted: true },
       { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
@@ -508,5 +511,22 @@ describe('SplitView', () => {
     render({ sessionIds: ['s1'] });
     const provider = container!.querySelector('[data-session="s1"]');
     expect(provider?.getAttribute('data-workspace')).toBeNull();
+  });
+
+  it('re-queries other workspaces when the picker opens', async () => {
+    connectionState.capabilities = MULTI_WORKSPACE_CAPS;
+    otherWorkspaceSessions['/wsB'] = [
+      { sessionId: 'b1', workspaceCwd: '/wsB', displayName: 'Beta' },
+    ];
+    render({ sessionIds: ['s1'] });
+    await flushAsync();
+    const before = workspaceClient.listWorkspaceSessions.mock.calls.length;
+    openPicker();
+    await flushAsync();
+    // Opening the picker reloads the other-workspace list so it never offers a
+    // stale set (mirrors the primary `reload()` on picker open).
+    expect(
+      workspaceClient.listWorkspaceSessions.mock.calls.length,
+    ).toBeGreaterThan(before);
   });
 });

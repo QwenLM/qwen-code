@@ -27,6 +27,7 @@ import {
 import { useOtherWorkspaceSessions } from '../hooks/useOtherWorkspaceSessions';
 import {
   hasMultipleWorkspaces,
+  isNonPrimaryWorkspaceSession,
   mergeSessionsById,
   workspaceBasename,
 } from '../utils/workspace';
@@ -104,6 +105,10 @@ export function SplitView({
     [sessions, otherSessions],
   );
   const multiWorkspace = hasMultipleWorkspaces(connection.capabilities);
+  // The primary workspace cwd, for labeling picker items the same way the
+  // Session Overview labels its cards (primary → the localized tag, others →
+  // the workspace basename).
+  const primaryCwd = connection.capabilities?.workspaceCwd;
   const sessionIdsControlled = sessionIds !== undefined;
   const normalizedSessionIds = useMemo(
     () =>
@@ -339,7 +344,12 @@ export function SplitView({
                         className={styles.pickerItemWorkspace}
                         title={session.workspaceCwd}
                       >
-                        {workspaceBasename(session.workspaceCwd)}
+                        {isNonPrimaryWorkspaceSession(
+                          session.workspaceCwd,
+                          primaryCwd,
+                        )
+                          ? workspaceBasename(session.workspaceCwd)
+                          : t('sidebar.workspacePrimary')}
                       </span>
                     )}
                   </button>
