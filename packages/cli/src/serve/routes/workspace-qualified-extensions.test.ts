@@ -35,6 +35,7 @@ const baseOpts: ServeOptions = {
   port: 4198,
   mode: 'http-bridge',
 };
+const activeApps = new Set<ReturnType<typeof createServeApp>>();
 
 function host(): string {
   return `127.0.0.1:${baseOpts.port}`;
@@ -134,6 +135,7 @@ async function makeHarness(opts?: { secondaryTrusted?: boolean }) {
       workspaceRegistry: createWorkspaceRegistry([primary, secondary]),
     },
   );
+  activeApps.add(app);
   return { app, scratch, primary, secondary };
 }
 
@@ -231,6 +233,12 @@ async function pollOperation(
 
 describe('extension management v2 REST', () => {
   afterEach(() => {
+    for (const app of activeApps) {
+      (
+        app.locals as { stopExtensionGenerationReconciler?: () => void }
+      ).stopExtensionGenerationReconciler?.();
+    }
+    activeApps.clear();
     vi.restoreAllMocks();
   });
 
@@ -496,9 +504,6 @@ describe('extension management v2 REST', () => {
         ),
       );
     } finally {
-      (
-        h.app.locals as { stopExtensionGenerationReconciler?: () => void }
-      ).stopExtensionGenerationReconciler?.();
       vi.useRealTimers();
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
@@ -701,9 +706,6 @@ describe('extension management v2 REST', () => {
         pollOperation(h.app, global.body.operationId),
       ).resolves.toMatchObject({ status: 'succeeded' });
     } finally {
-      (
-        h.app.locals as { stopExtensionGenerationReconciler?: () => void }
-      ).stopExtensionGenerationReconciler?.();
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
   });
@@ -795,9 +797,6 @@ describe('extension management v2 REST', () => {
         appliedGeneration: 7,
       });
     } finally {
-      (
-        h.app.locals as { stopExtensionGenerationReconciler?: () => void }
-      ).stopExtensionGenerationReconciler?.();
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
   });
@@ -868,9 +867,6 @@ describe('extension management v2 REST', () => {
         appliedGeneration: 8,
       });
     } finally {
-      (
-        h.app.locals as { stopExtensionGenerationReconciler?: () => void }
-      ).stopExtensionGenerationReconciler?.();
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
   });
