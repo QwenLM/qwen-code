@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { SessionContext } from '../types.js';
+import type { SessionEmitterContext } from '../types.js';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
 
 /**
@@ -12,7 +12,7 @@ import type { SessionUpdate } from '@agentclientprotocol/sdk';
  * Provides common functionality and access to session context.
  */
 export abstract class BaseEmitter {
-  constructor(protected readonly ctx: SessionContext) {}
+  constructor(protected readonly ctx: SessionEmitterContext) {}
 
   /**
    * Converts an ISO timestamp string or epoch ms to epoch ms number.
@@ -39,13 +39,6 @@ export abstract class BaseEmitter {
       return this.ctx.messageRewriter.interceptUpdate(update);
     }
     return this.ctx.sendUpdate(update);
-  }
-
-  /**
-   * Gets the session configuration.
-   */
-  protected get config() {
-    return this.ctx.config;
   }
 
   /**

@@ -240,25 +240,22 @@ function getCursorHmacKey(workspaceCwd: string): Buffer {
   return key;
 }
 
-function signCursorPayload(
+function signCursorPayloadWithKey(
   payload: Record<string, unknown>,
-  workspaceCwd: string,
+  key: Uint8Array,
 ): string {
   return crypto
-    .createHmac('sha256', getCursorHmacKey(workspaceCwd))
+    .createHmac('sha256', key)
     .update(JSON.stringify(payload))
     .digest('base64url');
 }
 
-function hasValidCursorMac(
+function hasValidCursorMacWithKey(
   payload: Record<string, unknown>,
   mac: string,
-  workspaceCwd: string,
+  key: Uint8Array,
 ): boolean {
-  const expected = Buffer.from(
-    signCursorPayload(payload, workspaceCwd),
-    'utf8',
-  );
+  const expected = Buffer.from(signCursorPayloadWithKey(payload, key), 'utf8');
   const actual = Buffer.from(mac, 'utf8');
   return (
     expected.length === actual.length &&
@@ -268,28 +265,21 @@ function hasValidCursorMac(
 
 function encodeCursorState(
   state: SessionTranscriptCursorState,
-  workspaceCwd: string,
+  key: Uint8Array,
 ): string {
   const payload = cursorPayload(state);
   return Buffer.from(
     JSON.stringify({
       ...payload,
-      mac: signCursorPayload(payload, workspaceCwd),
+      mac: signCursorPayloadWithKey(payload, key),
     }),
     'utf8',
   ).toString('base64url');
 }
 
-export function encodeSessionTranscriptCursor(
-  state: SessionTranscriptCursorState,
-  workspaceCwd: string,
-): string {
-  return encodeCursorState(state, workspaceCwd);
-}
-
-export function decodeSessionTranscriptCursor(
+function decodeCursorState(
   cursor: string,
-  workspaceCwd: string,
+  key: Uint8Array,
 ): SessionTranscriptCursorState {
   try {
     const decoded = Buffer.from(cursor, 'base64url').toString('utf8');
@@ -328,7 +318,7 @@ export function decodeSessionTranscriptCursor(
       lastUpdated: parsed['lastUpdated'],
       ...(parsed['replay'] !== undefined ? { replay: parsed['replay'] } : {}),
     };
-    if (!hasValidCursorMac(cursorPayload(state), parsed['mac'], workspaceCwd)) {
+    if (!hasValidCursorMacWithKey(cursorPayload(state), parsed['mac'], key)) {
       debugLogger.debug(
         `cursor decode failed: mac mismatch session=${state.sessionId} ` +
           `position=${state.position} snapshotSize=${state.snapshotSize}`,
@@ -351,6 +341,41 @@ export function decodeSessionTranscriptCursor(
     );
     throw new InvalidSessionTranscriptCursorError();
   }
+}
+
+export class SessionTranscriptCursorCodec {
+  private readonly key: Buffer;
+
+  constructor(key: Uint8Array) {
+    if (key.byteLength !== CURSOR_HMAC_KEY_BYTES) {
+      throw new RangeError(
+        `Transcript cursor signing key must be ${CURSOR_HMAC_KEY_BYTES} bytes`,
+      );
+    }
+    this.key = Buffer.from(key);
+  }
+
+  encode(state: SessionTranscriptCursorState): string {
+    return encodeCursorState(state, this.key);
+  }
+
+  decode(cursor: string): SessionTranscriptCursorState {
+    return decodeCursorState(cursor, this.key);
+  }
+}
+
+export function encodeSessionTranscriptCursor(
+  state: SessionTranscriptCursorState,
+  workspaceCwd: string,
+): string {
+  return encodeCursorState(state, getCursorHmacKey(workspaceCwd));
+}
+
+export function decodeSessionTranscriptCursor(
+  cursor: string,
+  workspaceCwd: string,
+): SessionTranscriptCursorState {
+  return decodeCursorState(cursor, getCursorHmacKey(workspaceCwd));
 }
 
 function normalizeLimit(limit: number | undefined): number {
@@ -834,7 +859,10 @@ async function getCachedIndex(params: {
 export class SessionTranscriptReader {
   private readonly storage: Storage;
 
-  constructor(private readonly workspaceCwd: string) {
+  constructor(
+    private readonly workspaceCwd: string,
+    private readonly cursorCodec?: SessionTranscriptCursorCodec,
+  ) {
     this.storage = new Storage(workspaceCwd);
   }
 
@@ -857,7 +885,8 @@ export class SessionTranscriptReader {
     const limit = normalizeLimit(options.limit);
     const cursor =
       options.cursor !== undefined
-        ? decodeSessionTranscriptCursor(options.cursor, this.workspaceCwd)
+        ? (this.cursorCodec?.decode(options.cursor) ??
+          decodeSessionTranscriptCursor(options.cursor, this.workspaceCwd))
         : undefined;
     if (cursor && cursor.sessionId !== sessionId) {
       debugLogger.debug(

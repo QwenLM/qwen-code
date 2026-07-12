@@ -9,7 +9,7 @@ import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import type { SessionContext } from '../../../acp-integration/session/types.js';
 import type { SessionUpdate, ToolCall } from '@agentclientprotocol/sdk';
-import { HistoryReplayer } from '../../../acp-integration/session/HistoryReplayer.js';
+import { HistoryReplayer } from '../../../acp-integration/session/history-replayer.js';
 import { getExplicitToolResultCallId } from '../../../utils/chat-record-tool-call-id.js';
 import type {
   ExportConfig,
