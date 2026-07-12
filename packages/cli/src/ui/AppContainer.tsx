@@ -1324,10 +1324,11 @@ export const AppContainer = (props: AppContainerProps) => {
     };
   }, [config]);
 
+  const addHistoryItem = historyManager.addItem;
   useEffect(() => {
     if (typeof config.onChatRecordingFailure !== 'function') return;
     return config.onChatRecordingFailure(() => {
-      historyManager.addItem(
+      addHistoryItem(
         {
           type: MessageType.WARNING,
           text: t(TUI_CHAT_RECORDING_FAILURE_MESSAGE),
@@ -1335,7 +1336,7 @@ export const AppContainer = (props: AppContainerProps) => {
         Date.now(),
       );
     });
-  }, [config, historyManager]);
+  }, [addHistoryItem, config]);
 
   const {
     isResumeDialogOpen,

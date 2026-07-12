@@ -2007,6 +2007,8 @@ export async function runNonInteractive(
       const skipAdapterEmit =
         outputFormat === OutputFormat.TEXT && isAlreadyReportedError;
 
+      // This path must settle independently because skipAdapterEmit bypasses
+      // emitResult(), which normally performs the settle step.
       await settleBeforeTerminalOutput();
       if (!skipAdapterEmit) {
         // Wrap in try/catch: emitResult eventually hits stdout.write, which

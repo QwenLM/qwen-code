@@ -2270,6 +2270,8 @@ export default {
     '正在新會話中執行該定時任務：{{link}}',
   'This scheduled run could not be started: {{error}}':
     '本次定時執行無法啟動：{{error}}',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.':
+    '工作階段錄製因寫入失敗而停止。受影響工作階段中的新訊息將不會被儲存。請檢查磁碟空間和權限，然後建立新的工作階段以恢復錄製。詳細資訊請查看偵錯日誌。',
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     '工作階段錄製因寫入失敗而停止。受影響工作階段中的新訊息將不會被儲存。請檢查磁碟空間和權限，然後執行 `/clear` 建立新的可錄製工作階段。詳細資訊請查看偵錯日誌。',
 };

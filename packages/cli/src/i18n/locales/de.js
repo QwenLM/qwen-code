@@ -2214,6 +2214,8 @@ export default {
     'Failed to refresh extension content. Run /reload-plugins to apply updates.',
   'Extension reload did not complete. Run /reload-plugins to try again.':
     'Extension reload did not complete. Run /reload-plugins to try again.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.':
+    'Die Sitzungsaufzeichnung wurde nach einem Schreibfehler beendet. Neue Nachrichten der betroffenen Sitzung werden nicht gespeichert. Prüfen Sie Speicherplatz und Berechtigungen und starten Sie anschließend eine neue Sitzung, um die Aufzeichnung fortzusetzen. Weitere Details finden Sie im Debug-Protokoll.',
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     'Die Sitzungsaufzeichnung wurde nach einem Schreibfehler beendet. Neue Nachrichten der betroffenen Sitzung werden nicht gespeichert. Prüfen Sie Speicherplatz und Berechtigungen und führen Sie anschließend `/clear` aus, um eine neue aufgezeichnete Sitzung zu starten. Weitere Details finden Sie im Debug-Protokoll.',
 };

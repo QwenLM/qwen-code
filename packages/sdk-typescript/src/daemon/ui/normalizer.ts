@@ -158,7 +158,7 @@ export function normalizeDaemonEvent(
           },
         ];
       }
-      return normalizeUnrecognizedEvent(event, base);
+      return [];
     }
     case 'client_evicted':
       return [

@@ -18,6 +18,14 @@ import {
   subscribeToHeadlessChatRecordingFailures,
 } from './chat-recording-failure.js';
 
+const { mockWriteStderrLine } = vi.hoisted(() => ({
+  mockWriteStderrLine: vi.fn(),
+}));
+
+vi.mock('./stdioHelpers.js', () => ({
+  writeStderrLine: mockWriteStderrLine,
+}));
+
 describe('chat recording failure reporting', () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -70,6 +78,31 @@ describe('chat recording failure reporting', () => {
     );
     dispose();
     expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it('reports text failures to stderr without using the adapter', () => {
+    let listener: ChatRecordingFailureListener | undefined;
+    const config = {
+      getOutputFormat: () => OutputFormat.TEXT,
+      onChatRecordingFailure: (next: ChatRecordingFailureListener) => {
+        listener = next;
+        return vi.fn();
+      },
+    } as unknown as Config;
+    const adapter = {
+      emitMessage: vi.fn(),
+    } as unknown as JsonOutputAdapterInterface;
+
+    subscribeToHeadlessChatRecordingFailures(config, adapter);
+    listener?.({
+      sessionId: 'failed-session',
+      error: new Error('disk full'),
+    });
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringMatching(/^Warning: Session recording stopped/),
+    );
+    expect(adapter.emitMessage).not.toHaveBeenCalled();
   });
 
   it('finalizes before flushing and treats a rejected flush as settled', async () => {

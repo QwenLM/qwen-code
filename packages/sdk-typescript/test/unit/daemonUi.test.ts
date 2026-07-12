@@ -7536,13 +7536,6 @@ describe('parallel subAgent text interleaving fix', () => {
       data: { sessionId: 's-1', recordingDegraded: false },
     });
 
-    expect(events).not.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          type: 'error',
-          code: 'session_recording_degraded',
-        }),
-      ]),
-    );
+    expect(events).toEqual([]);
   });
 });

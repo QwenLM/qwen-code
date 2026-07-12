@@ -383,6 +383,22 @@ describe('useBranchCommand', () => {
     expect(startNewSessionUI).not.toHaveBeenCalled();
   });
 
+  it('does not create a fork when source finalization throws', async () => {
+    finalize.mockImplementation(() => {
+      throw new Error('finalize failed');
+    });
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('x');
+    });
+
+    expect(flush).not.toHaveBeenCalled();
+    expect(forkSession).not.toHaveBeenCalled();
+    expect(startNewSessionConfig).not.toHaveBeenCalled();
+    expect(startNewSessionUI).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['returns false', () => renameSession.mockResolvedValue(false)],
     [

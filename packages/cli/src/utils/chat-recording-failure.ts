@@ -12,6 +12,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOutputAdapter.js';
 import type { CLISystemMessage } from '../nonInteractive/types.js';
+import { t } from '../i18n/index.js';
 import { writeStderrLine } from './stdioHelpers.js';
 
 export const CHAT_RECORDING_FAILURE_MESSAGE =
@@ -53,7 +54,7 @@ export function subscribeToHeadlessChatRecordingFailures(
   if (typeof config.onChatRecordingFailure !== 'function') return () => {};
   return config.onChatRecordingFailure((event) => {
     if (config.getOutputFormat() === OutputFormat.TEXT) {
-      writeStderrLine(`Warning: ${CHAT_RECORDING_FAILURE_MESSAGE}`);
+      writeStderrLine(`Warning: ${t(CHAT_RECORDING_FAILURE_MESSAGE)}`);
       return;
     }
     reportChatRecordingFailureToAdapter(adapter, event);
