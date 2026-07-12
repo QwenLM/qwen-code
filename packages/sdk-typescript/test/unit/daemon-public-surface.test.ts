@@ -60,6 +60,8 @@ import type {
   DaemonSessionDiedEvent,
   DaemonSessionEvent,
   DaemonSessionRecapResult,
+  DaemonSessionRecordingDegradedData,
+  DaemonSessionRecordingDegradedEvent,
   DaemonSessionUpdateData,
   DaemonSessionUpdateEvent,
   DaemonSessionViewState,
@@ -172,6 +174,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonModelSwitchedEvent>().not.toBeNever();
     expectTypeOf<DaemonModelSwitchFailedEvent>().not.toBeNever();
     expectTypeOf<DaemonSessionDiedEvent>().not.toBeNever();
+    expectTypeOf<DaemonSessionRecordingDegradedEvent>().not.toBeNever();
     expectTypeOf<DaemonClientEvictedEvent>().not.toBeNever();
     expectTypeOf<DaemonHistoryTruncatedEvent>().not.toBeNever();
     expectTypeOf<DaemonStreamErrorEvent>().not.toBeNever();
@@ -187,6 +190,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonModelSwitchedData>().not.toBeNever();
     expectTypeOf<DaemonModelSwitchFailedData>().not.toBeNever();
     expectTypeOf<DaemonSessionDiedData>().not.toBeNever();
+    expectTypeOf<DaemonSessionRecordingDegradedData>().not.toBeNever();
     expectTypeOf<DaemonClientEvictedData>().not.toBeNever();
     expectTypeOf<DaemonHistoryTruncatedData>().not.toBeNever();
     expectTypeOf<DaemonStreamErrorData>().not.toBeNever();

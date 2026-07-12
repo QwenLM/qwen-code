@@ -531,6 +531,31 @@
   color: var(--muted-foreground);
 }
 
+/* Workspace tag on a card in the aggregated multi-workspace view. Bordered +
+ * accent-tinted so it reads as an origin label, distinct from the plain muted
+ * schedule pill. Truncates a long workspace name rather than wrapping the row. */
+.workspacePill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 180px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--primary) 30%, transparent);
+  border-radius: 999px;
+  padding: 2px 9px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.workspaceIcon {
+  font-size: 11px;
+  opacity: 0.85;
+}
+
 .countdown {
   display: inline-flex;
   align-items: center;

@@ -134,6 +134,7 @@ export interface CLISystemMessage {
   subtype: string;
   uuid: string;
   session_id: string;
+  parent_tool_use_id?: string | null;
   data?: unknown;
   cwd?: string;
   tools?: string[];

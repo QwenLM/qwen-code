@@ -19,6 +19,7 @@ import {
   ghApiAll,
   currentUser,
   ensureAuthenticated,
+  setGhHost,
 } from './lib/gh.js';
 
 interface FindingAnchor {
@@ -295,12 +296,18 @@ export const presubmitCommand: CommandModule = {
         demandOption: true,
         describe: 'Output JSON path (will be overwritten)',
       })
+      .option('host', {
+        type: 'string',
+        describe:
+          'GitHub host for this PR (GitHub Enterprise). Routes every gh call in this command via GH_HOST; omit for github.com.',
+      })
       .option('new-findings', {
         type: 'string',
         describe:
           'Path to a JSON file shaped as [{path, line}, ...] — when provided, existing comments are checked for same-(path, line) overlap with the new findings.',
       }),
   handler: async (argv) => {
+    setGhHost((argv as { host?: string }).host);
     await runPresubmit(argv as unknown as PresubmitArgs);
   },
 };

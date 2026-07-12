@@ -17,6 +17,7 @@ type Messages = Record<string, MessageValue>;
 
 const EN: Messages = {
   'git.currentBranch': (v) => `Current Git branch: ${v?.branch ?? ''}`,
+  'workspace.paneLabel': (v) => `Workspace: ${v?.name ?? ''}`,
   'about.auth': 'Auth',
   'about.baseUrl': 'Base URL',
   'about.fastModel': 'Fast Model',
@@ -687,6 +688,8 @@ const EN: Messages = {
   'scheduledTasks.chatStarter':
     'Help me set up a recurring scheduled task (keep it long-term). What I want: ',
   'scheduledTasks.name': 'Name',
+  'scheduledTasks.workspace': 'Workspace',
+  'scheduledTasks.workspacePrimaryTag': '(primary)',
   'scheduledTasks.taskId': 'Task ID',
   'scheduledTasks.schedule': 'Schedule',
   'scheduledTasks.type': 'Type',
@@ -872,6 +875,10 @@ const EN: Messages = {
   'sidebar.groupColor.green': 'Green',
   'sidebar.groupColor.blue': 'Blue',
   'sidebar.groupColor.purple': 'Purple',
+  'sidebar.groupColor.custom': 'Custom…',
+  'sidebar.groupColor.picker': 'Choose custom group color',
+  'sidebar.groupColor.hex': 'Hex color',
+  'sidebar.groupColor.invalid': 'Enter a six-digit Hex color such as #416ef5.',
   'quickKeys.cursor': 'Move cursor',
   'quickKeys.escape': 'Cancel run',
   'quickKeys.history': 'History',
@@ -1765,6 +1772,7 @@ const EN: Messages = {
 const ZH: Messages = {
   ...EN,
   'git.currentBranch': (v) => `当前 Git 分支：${v?.branch ?? ''}`,
+  'workspace.paneLabel': (v) => `工作区：${v?.name ?? ''}`,
   // Tool display names (chat-stream badge labels). Keyed by `toolName.<wire>`;
   // a wire name with no entry here falls back to the English display name via
   // `localizeToolDisplayName`. Proper tool names / acronyms stay in English
@@ -2448,6 +2456,8 @@ const ZH: Messages = {
   'scheduledTasks.createViaChat': '通过聊天创建',
   'scheduledTasks.chatStarter': '帮我创建一个长期保留的定时任务，我想：',
   'scheduledTasks.name': '名称',
+  'scheduledTasks.workspace': '工作区',
+  'scheduledTasks.workspacePrimaryTag': '（主）',
   'scheduledTasks.taskId': '任务 ID',
   'scheduledTasks.schedule': '计划',
   'scheduledTasks.type': '类型',
@@ -2628,6 +2638,10 @@ const ZH: Messages = {
   'sidebar.groupColor.green': '绿色',
   'sidebar.groupColor.blue': '蓝色',
   'sidebar.groupColor.purple': '紫色',
+  'sidebar.groupColor.custom': '自定义…',
+  'sidebar.groupColor.picker': '选择自定义分组颜色',
+  'sidebar.groupColor.hex': 'Hex 颜色',
+  'sidebar.groupColor.invalid': '请输入六位 Hex 颜色，例如 #416ef5。',
   'quickKeys.cursor': '移动光标',
   'quickKeys.escape': '取消运行',
   'quickKeys.history': '切换历史',

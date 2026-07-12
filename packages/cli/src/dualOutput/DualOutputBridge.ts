@@ -20,6 +20,7 @@ import type {
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import { StreamJsonOutputAdapter } from '../nonInteractive/io/index.js';
+import { reportChatRecordingFailureToAdapter } from '../utils/chat-recording-failure.js';
 
 const debugLogger = createDebugLogger('DUAL_OUTPUT');
 
@@ -85,6 +86,7 @@ export class DualOutputBridge {
   private readonly sessionId: string;
   private active = true;
   private shutdownPromise: Promise<void> | null = null;
+  private readonly unsubscribeRecordingFailure: () => void;
 
   constructor(
     config: Config,
@@ -176,6 +178,12 @@ export class DualOutputBridge {
       true, // includePartialMessages — always emit streaming events
       this.stream,
     );
+    this.unsubscribeRecordingFailure =
+      typeof config.onChatRecordingFailure === 'function'
+        ? config.onChatRecordingFailure((event) => {
+            this.emitRecordingFailure(event);
+          })
+        : () => {};
 
     // Announce the session immediately so consumers can correlate the channel
     // with a session before any other event arrives. The data payload also
@@ -348,8 +356,23 @@ export class DualOutputBridge {
     }
   }
 
+  private emitRecordingFailure(
+    event: Parameters<typeof reportChatRecordingFailureToAdapter>[1],
+  ): void {
+    if (!this.active) return;
+    this.disableIfBufferOverflowed();
+    if (!this.active) return;
+    try {
+      reportChatRecordingFailureToAdapter(this.adapter, event);
+    } catch (err) {
+      debugLogger.error('DualOutput recording failure output error:', err);
+      this.active = false;
+    }
+  }
+
   shutdown(): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
+    this.unsubscribeRecordingFailure();
     // Try to emit session_end before tearing the stream down so consumers
     // get a definitive termination signal rather than inferring it from
     // EPIPE. Failures here are swallowed — the stream may already be in an

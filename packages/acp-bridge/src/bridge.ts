@@ -400,6 +400,8 @@ interface SessionEntry {
   events: EventBus;
   /** Per-session structured artifact registry. */
   artifacts: SessionArtifactStore;
+  /** Sticky in-memory health state for the session's transcript recorder. */
+  recordingDegraded: boolean;
   /**
    * Tail of the per-session prompt queue. Each new prompt chains off the
    * resolved (or rejected) state of this promise so prompts run one at a
@@ -3058,6 +3060,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         workspaceCwd,
         persistence: createSessionArtifactPersistence(ci.connection, sessionId),
       }),
+      recordingDegraded: false,
       promptQueue: Promise.resolve(),
       pendingPromptCount: 0,
       pendingPromptList: [],
@@ -4731,6 +4734,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           sessionId: entry.sessionId,
           currentModelId: entry.currentModelId ?? null,
           currentApprovalMode: entry.currentApprovalMode ?? null,
+          recordingDegraded: entry.recordingDegraded,
         },
       });
       async function* withSnapshot(): AsyncIterable<BridgeEvent> {
@@ -5156,7 +5160,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 const r = res as { persisted?: boolean } | undefined;
                 if (r && r.persisted === false) {
                   writeStderrLine(
-                    `qwen serve: displayName for ${sessionId} was not persisted (recording service unavailable)`,
+                    `qwen serve: displayName for ${sessionId} was not persisted`,
                   );
                 }
               })

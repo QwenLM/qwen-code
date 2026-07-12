@@ -74,6 +74,8 @@ import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { HookSystem } from '../hooks/index.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
+import type { ChatRecordingFailureEvent } from '../services/chatRecordingService.js';
+import * as jsonl from '../utils/jsonl-utils.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -2086,6 +2088,116 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('chat recording failure listeners', () => {
+    const notify = (config: Config, event: ChatRecordingFailureEvent) => {
+      (
+        config as unknown as {
+          notifyChatRecordingFailure: (
+            failure: ChatRecordingFailureEvent,
+          ) => void;
+        }
+      ).notifyChatRecordingFailure(event);
+    };
+
+    it('notifies multiple listeners and disposes them independently', () => {
+      const config = new Config(baseParams);
+      const first = vi.fn();
+      const second = vi.fn();
+      const disposeFirst = config.onChatRecordingFailure(first);
+      config.onChatRecordingFailure(second);
+      const event = { sessionId: 's-1', error: new Error('write failed') };
+
+      notify(config, event);
+      disposeFirst();
+      notify(config, event);
+
+      expect(first).toHaveBeenCalledTimes(1);
+      expect(second).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps a subscription wired to a replacement session recorder', async () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const listener = vi.fn();
+      config.onChatRecordingFailure(listener);
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      config.startNewSession(sessionId);
+      const error = new Error('replacement write failed');
+      const writeLine = vi
+        .spyOn(jsonl, 'writeLine')
+        .mockRejectedValueOnce(error);
+
+      try {
+        const recorder = config.getChatRecordingService()!;
+        recorder.recordUserMessage([{ text: 'new session' }]);
+        await expect(recorder.flush()).rejects.toBe(error);
+
+        expect(listener).toHaveBeenCalledOnce();
+        expect(listener).toHaveBeenCalledWith({ sessionId, error });
+      } finally {
+        writeLine.mockRestore();
+      }
+    });
+
+    it('isolates synchronous throws and asynchronous listener rejections', async () => {
+      const config = new Config(baseParams);
+      const unhandled: unknown[] = [];
+      const onUnhandled = (error: unknown) => unhandled.push(error);
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        config.onChatRecordingFailure(() => {
+          throw new Error('listener threw');
+        });
+        config.onChatRecordingFailure(async () => {
+          throw new Error('listener rejected');
+        });
+
+        notify(config, {
+          sessionId: 's-1',
+          error: new Error('write failed'),
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+      }
+    });
+
+    it('keeps listeners through shutdown flush and clears them afterward', async () => {
+      const config = new Config(baseParams);
+      const listener = vi.fn();
+      config.onChatRecordingFailure(listener);
+      const event = { sessionId: 's-1', error: new Error('write failed') };
+      (
+        config as unknown as {
+          initialized: boolean;
+          chatRecordingService: {
+            finalize: () => void;
+            flush: () => Promise<void>;
+          };
+        }
+      ).initialized = true;
+      (
+        config as unknown as {
+          chatRecordingService: {
+            finalize: () => void;
+            flush: () => Promise<void>;
+          };
+        }
+      ).chatRecordingService = {
+        finalize: vi.fn(),
+        flush: async () => {
+          notify(config, event);
+        },
+      };
+
+      await config.shutdown();
+      notify(config, event);
+
+      expect(listener).toHaveBeenCalledOnce();
+    });
+  });
+
   it('should expose LSP status from the configured client', () => {
     const getStatusSnapshot = vi.fn().mockReturnValue({
       enabled: true,
@@ -3832,6 +3944,37 @@ describe('Server Config (config.ts)', () => {
     await config.relocateWorkingDirectory(newDir);
 
     expect(config.getFileService()).not.toBe(fileServiceBefore);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should continue after recording flush fails', async () => {
+    const config = new Config(baseParams);
+    const newDir = path.resolve('/path/to/other');
+    const finalize = vi.fn();
+    const flush = vi.fn().mockRejectedValue(new Error('recording failed'));
+    const resetStoragePaths = vi.fn();
+    (
+      config as unknown as {
+        chatRecordingService: {
+          finalize: () => void;
+          flush: () => Promise<void>;
+          resetStoragePaths: () => void;
+        };
+      }
+    ).chatRecordingService = { finalize, flush, resetStoragePaths };
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+
+    await expect(config.relocateWorkingDirectory(newDir)).resolves.toEqual({});
+
+    expect(finalize).toHaveBeenCalledOnce();
+    expect(flush).toHaveBeenCalledOnce();
+    expect(resetStoragePaths).toHaveBeenCalledOnce();
+    expect(config.getTargetDir()).toBe(newDir);
 
     chdirSpy.mockRestore();
     cwdSpy.mockRestore();

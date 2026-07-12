@@ -28,6 +28,7 @@ import {
   convertSchema,
   type SchemaComplianceMode,
 } from '../../utils/schemaConverter.js';
+import { InvalidStreamError } from '../invalid-stream-error.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
 const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
@@ -1086,6 +1087,64 @@ function hasThoughtPart(parts: Part[]): boolean {
   return parts.some((part) => part.thought === true);
 }
 
+const THINKING_TAG_PATTERN = /<\/?think(?:ing)?\b/i;
+const COMPLETE_THINKING_TAG_PATTERN = /<\/?think(?:ing)?\s*>/gi;
+const LEADING_THINKING_TAG_PATTERN = /^\s*<think(?:ing)?\s*>/i;
+const PARTIAL_SPACED_THINKING_TAG_PATTERN = /^<\/?think(?:ing)?\s+$/;
+const OPENING_THINKING_TAGS = ['<think>', '<thinking>'] as const;
+const CLOSING_THINKING_TAGS = ['</think>', '</thinking>'] as const;
+
+function getPartText(parts: Part[], visibleOnly = false): string {
+  return parts
+    .map((part) =>
+      (!visibleOnly || part.thought !== true) && typeof part.text === 'string'
+        ? part.text
+        : '',
+    )
+    .join('');
+}
+
+function hasVisibleThinkingTagLeakSignature(parts: Part[]): boolean {
+  const text = getPartText(parts, true);
+  const lowerText = text.toLowerCase();
+  const leadingText = lowerText.trimStart();
+  if (
+    LEADING_THINKING_TAG_PATTERN.test(text) ||
+    OPENING_THINKING_TAGS.some(
+      (tag) =>
+        leadingText.startsWith(tag) ||
+        (leadingText.length >= 2 && tag.startsWith(leadingText)),
+    ) ||
+    PARTIAL_SPACED_THINKING_TAG_PATTERN.test(leadingText)
+  ) {
+    return true;
+  }
+
+  let openTags = 0;
+  for (const match of text.matchAll(COMPLETE_THINKING_TAG_PATTERN)) {
+    if (match[0].startsWith('</')) {
+      if (openTags === 0) {
+        return true;
+      }
+      openTags--;
+    } else {
+      openTags++;
+    }
+  }
+
+  const tagStart = lowerText.lastIndexOf('<');
+  if (tagStart < 0) {
+    return false;
+  }
+  const suffix = lowerText.slice(tagStart);
+  return (
+    suffix.length >= 3 &&
+    (CLOSING_THINKING_TAGS.some((tag) => tag.startsWith(suffix)) ||
+      (suffix.startsWith('</') &&
+        PARTIAL_SPACED_THINKING_TAG_PATTERN.test(suffix)))
+  );
+}
+
 /**
  * Convert OpenAI response to Gemini format.
  */
@@ -1289,11 +1348,13 @@ export function convertOpenAIChunkToGemini(
         normalizedReasoningText &&
         !requestContext.responseParsingOptions?.taggedThinkingTags
       ) {
+        requestContext.hasStructuredReasoningContent = true;
         parts.push(createOpenAIReasoningThoughtPart(normalizedReasoningText));
       } else if (
         normalizedReasoningText &&
         !requestContext.hasTaggedThinkingThought
       ) {
+        requestContext.hasStructuredReasoningContent = true;
         requestContext.pendingReasoningText =
           (requestContext.pendingReasoningText ?? '') + normalizedReasoningText;
         debugLogger.debug(
@@ -1366,9 +1427,57 @@ export function convertOpenAIChunkToGemini(
       }
     }
 
+    // The recorded leak starts with a tag in the thought part, so all parts
+    // participate in holding while only visible parts decide rejection.
+    const pendingAndCurrentParts = [
+      ...(requestContext.pendingUntrustedResponseParts ?? []),
+      ...parts,
+    ];
+    const hasVisibleThinkingTagLeak =
+      requestContext.hasStructuredReasoningContent &&
+      hasVisibleThinkingTagLeakSignature(pendingAndCurrentParts);
+    const hasUntrustedProtocolText =
+      requestContext.hasStructuredReasoningContent &&
+      (parts.some(
+        (part) =>
+          part.thought === true &&
+          typeof part.text === 'string' &&
+          THINKING_TAG_PATTERN.test(part.text),
+      ) ||
+        hasVisibleThinkingTagLeak);
+    const toolCallWithoutName = toolCallParser.hasNamelessToolCall();
+    const malformedNamelessToolCall =
+      Boolean(choice.finish_reason) && toolCallWithoutName;
+    const malformedThinkingTagLeak =
+      Boolean(choice.finish_reason) && hasVisibleThinkingTagLeak;
+    if (malformedThinkingTagLeak) {
+      requestContext.pendingUntrustedResponseParts = undefined;
+      throw new InvalidStreamError(
+        'Model response leaked thinking tags into visible content.',
+        'PROTOCOL_TAG_LEAK',
+      );
+    }
+    const shouldDropMalformedAttempt = malformedNamelessToolCall;
+    const shouldHoldUntrustedParts =
+      toolCallWithoutName ||
+      (!choice.finish_reason &&
+        (hasUntrustedProtocolText ||
+          Boolean(requestContext.pendingUntrustedResponseParts?.length)));
+
+    if (shouldDropMalformedAttempt) {
+      parts.length = 0;
+      requestContext.pendingUntrustedResponseParts = undefined;
+    } else if (shouldHoldUntrustedParts) {
+      (requestContext.pendingUntrustedResponseParts ??= []).push(...parts);
+      parts.length = 0;
+    } else if (requestContext.pendingUntrustedResponseParts) {
+      parts.unshift(...requestContext.pendingUntrustedResponseParts);
+      requestContext.pendingUntrustedResponseParts = undefined;
+    }
+
     // Only emit function calls when streaming is complete (finish_reason is present)
     let toolCallsTruncated = false;
-    if (choice.finish_reason) {
+    if (choice.finish_reason && !shouldDropMalformedAttempt) {
       // Detect truncation the provider may not report correctly.
       // Some providers (e.g. DashScope/Qwen) send "stop" or "tool_calls"
       // even when output was cut off mid-JSON due to max_tokens.
@@ -1393,8 +1502,11 @@ export function convertOpenAIChunkToGemini(
 
     // If tool call JSON was truncated, override to "length" so downstream
     // (turn.ts) correctly sets wasOutputTruncated=true.
-    const effectiveFinishReason =
-      toolCallsTruncated && choice.finish_reason !== 'length'
+    // Withhold the finish signal so the existing invalid-stream retry drops
+    // the buffered attempt instead of accepting a silently lost tool call.
+    const effectiveFinishReason = shouldDropMalformedAttempt
+      ? undefined
+      : toolCallsTruncated && choice.finish_reason !== 'length'
         ? 'length'
         : choice.finish_reason;
 
