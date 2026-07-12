@@ -104,3 +104,24 @@ export function gitRaw(...args: string[]): Buffer {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 }
+
+/**
+ * Like `gitRaw`, but treats exit code 1 as success and returns the stdout the
+ * child produced anyway.
+ *
+ * `git diff --no-index` — the only way to diff a file git does not track
+ * without first writing to the index — reports "the two inputs differ" by
+ * **exiting 1**. For an untracked file against `/dev/null` that is the only
+ * outcome there is, so `gitRaw` would throw on every single capture and the
+ * whole point (seeing brand-new files) would be lost. Exit codes above 1 are
+ * real errors and still throw.
+ */
+export function gitRawTolerateDiff(...args: string[]): Buffer {
+  try {
+    return gitRaw(...args);
+  } catch (err) {
+    const e = err as { status?: number; stdout?: Buffer };
+    if (e.status === 1 && e.stdout) return e.stdout;
+    throw err;
+  }
+}

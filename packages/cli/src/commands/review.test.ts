@@ -41,9 +41,11 @@ describe('reviewCommand', () => {
     expect(registeredSubcommands()).toEqual([
       'parse-args',
       'fetch-pr',
+      'capture-local',
       'plan-diff',
       'pr-context',
       'load-rules',
+      'resolve-anchors',
       'presubmit',
       'compose-review',
       'cleanup',

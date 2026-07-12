@@ -31,6 +31,7 @@ import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { ensureAuthenticated, gh, setGhHost } from './lib/gh.js';
 import { git, gitOpt, gitRaw, refExists, releaseWorktree } from './lib/git.js';
+import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
 import {
   REVIEW_TMP_DIR,
   reviewBranch,
@@ -214,36 +215,13 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   let diffText = '';
   if (mergeBaseSha) {
     try {
-      // Pin every knob that user config could turn: `color.diff=always` would
-      // inject ANSI escapes that make every `diff --git` line unrecognisable
-      // (the plan would come back with zero chunks); `diff.external` and
-      // textconv filters emit output that is not a unified diff at all;
-      // `diff.mnemonicPrefix` renames the `a/`/`b/` prefixes to `i/`/`w/`;
-      // `diff.context` changes how many lines each hunk carries.
+      // Every knob user config could turn is pinned in `lib/diff-flags.ts`,
+      // shared with `capture-local` so the two capture paths cannot drift into
+      // producing diffs that parse differently.
       const buf = gitRaw(
-        // `diff.suppressBlankEmpty` has no command-line override, only `-c`.
-        // With it set, a blank context line is printed as a physically empty
-        // record instead of a lone space.
-        '-c',
-        'diff.suppressBlankEmpty=false',
+        ...PINNED_DIFF_CONFIG,
         'diff',
-        '--no-ext-diff',
-        '--no-textconv',
-        '--no-color',
-        '--unified=3',
-        '--src-prefix=a/',
-        '--dst-prefix=b/',
-        // `diff.renames=false` would report a move as delete + add, so the new
-        // path's `preLines` would derive to 0 and a wholesale rewrite would
-        // never be flagged heavy. `diff.relative` would strip the repo prefix
-        // from every path when the command runs from a subdirectory.
-        '--find-renames',
-        '--no-relative',
-        // `diff.ignoreSubmodules=all` hides a changed gitlink entirely — a
-        // silent coverage hole — and `diff.submodule=log` replaces the whole
-        // `diff --git` section with prose the parser cannot read.
-        '--ignore-submodules=none',
-        '--submodule=short',
+        ...PINNED_DIFF_FLAGS,
         `${mergeBaseSha}..${fetchedSha}`,
       );
       writeFileSync(diffRel, buf);

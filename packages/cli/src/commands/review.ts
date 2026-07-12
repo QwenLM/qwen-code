@@ -12,10 +12,12 @@ import type { Argv, CommandModule } from 'yargs';
 import { parseArgsCommand } from './review/parse-args.js';
 import { composeReviewCommand } from './review/compose-review.js';
 import { fetchPrCommand } from './review/fetch-pr.js';
+import { captureLocalCommand } from './review/capture-local.js';
 import { planDiffCommand } from './review/plan-diff.js';
 import { prContextCommand } from './review/pr-context.js';
 import { loadRulesCommand } from './review/load-rules.js';
 import { presubmitCommand } from './review/presubmit.js';
+import { resolveAnchorsCommand } from './review/resolve-anchors.js';
 import { cleanupCommand } from './review/cleanup.js';
 
 export const reviewCommand: CommandModule = {
@@ -26,15 +28,17 @@ export const reviewCommand: CommandModule = {
     yargs
       .command(parseArgsCommand)
       .command(fetchPrCommand)
+      .command(captureLocalCommand)
       .command(planDiffCommand)
       .command(prContextCommand)
       .command(loadRulesCommand)
+      .command(resolveAnchorsCommand)
       .command(presubmitCommand)
       .command(composeReviewCommand)
       .command(cleanupCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: parse-args, fetch-pr, plan-diff, pr-context, load-rules, presubmit, compose-review, or cleanup.',
+        'Specify a subcommand: parse-args, fetch-pr, capture-local, plan-diff, pr-context, load-rules, resolve-anchors, presubmit, compose-review, or cleanup.',
       )
       .version(false),
   handler: () => {

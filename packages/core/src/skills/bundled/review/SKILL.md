@@ -68,9 +68,8 @@ For a `pr-url` whose `host` is not `github.com` (GitHub Enterprise), **pass `--h
 
 Based on the parsed `target.type`:
 
-- **`local`**: Review local uncommitted changes
-  - Run `git diff` and `git diff --staged` to get all changes
-  - If both diffs are empty, inform the user there are no changes to review and stop here — do not proceed to the review agents
+- **`local`**: Review local uncommitted changes — staged, unstaged, **and untracked**. Capture them with `qwen review capture-local` (below); do not run `git diff` yourself. A `git diff` of any form reports changes to files git already **tracks**, and a file the user created but has not `git add`ed is in neither the index nor HEAD — so it appears in no `git diff` output at all. The reviews that skipped a brand-new file did not decide it was low-risk; they never saw it. When the new file was the _only_ change, `/review` reported "no changes to review" and stopped.
+  - If the capture's plan is empty (`chunks: []` — nothing staged, nothing unstaged, nothing untracked), inform the user there are no changes to review and stop here — do not proceed to the review agents
 
 - **`pr-number`, or `pr-url` with a matching remote** (cross-repo `pr-url`s are handled by the lightweight mode above):
 
@@ -118,8 +117,8 @@ Based on the parsed `target.type`:
   - **Install dependencies in the worktree** (high effort only — needed for building and testing): run `npm ci` (or `yarn install --frozen-lockfile`, `pip install -e .`, etc.) inside `worktreePath`. If installation fails, log a warning and continue — build/test may fail but LLM review agents can still operate. At low/medium effort skip the install: nothing builds or runs tests there, and greps against worktree sources work without it.
 
 - **`file`** (e.g., `src/foo.ts`):
-  - Run `git diff HEAD -- <file>` to get recent changes
-  - If no diff, read the file and review its current state
+  - Run `qwen review capture-local --file <file> --target <filename>` to get its changes. An **untracked** target file is captured whole (every line reads as added), which is the right frame for a file that does not exist upstream yet.
+  - If the plan is empty (the file is tracked and unmodified), read the file and review its current state — see the no-diff branch below
 
 ### Diff capture and the review topology
 
@@ -142,25 +141,23 @@ Read from it:
 
 A chunk is read with `read_file(file_path=diffPathAbsolute, offset=startLine - 1, limit=endLine - startLine + 1)` — `offset` is 0-based.
 
-For **local-diff and file-path reviews**, capture the diff to a file and plan it. Pin the same flags `fetch-pr` pins — a user's `color.diff=always` alone makes the diff unparseable, and `diff.mnemonicPrefix` rewrites every path:
+For **local-diff and file-path reviews**, capture and plan in one command:
 
 ```bash
-mkdir -p .qwen/tmp   # shell redirection opens the target, it does not create the directory
-
-git -c diff.suppressBlankEmpty=false diff \
-  --no-ext-diff --no-textconv --no-color --unified=3 \
-  --src-prefix=a/ --dst-prefix=b/ --find-renames --no-relative \
-  --ignore-submodules=none --submodule=short \
-  HEAD > .qwen/tmp/qwen-review-local-diff.txt        # staged AND unstaged
-# for a file-path review, append: -- <file>
-
-qwen review plan-diff .qwen/tmp/qwen-review-local-diff.txt \
-  --out .qwen/tmp/qwen-review-local-plan.json
+qwen review capture-local --out .qwen/tmp/qwen-review-local-plan.json
+# for a file-path review:
+qwen review capture-local --file <file> --target <filename> \
+  --out .qwen/tmp/qwen-review-<filename>-plan.json
 ```
 
-`git diff HEAD` is what covers the whole local scope; a bare `git diff` omits staged changes.
+It writes the diff to `.qwen/tmp/qwen-review-<target>-diff.txt` and emits the same report `fetch-pr` does (`diffPathAbsolute`, `chunks[]`, `files[]`, the topology counts), plus two fields of its own: `untrackedFiles` (brand-new files, whose contents no `git diff` would have shown) and `skippedFiles` (untracked files too large to inline — **name these under "Not reviewed" in Step 6**; a capture that quietly dropped a file is the bug this command exists to fix, and re-introducing it one size class up would be no better).
 
-**If the diff comes back empty**, stop and take the no-diff branch. `plan-diff` emits `chunks: []`, every agent is given nothing to read, and the review would return a clean verdict over no code at all. For a **file-path** review of an unchanged file, skip planning entirely: hand every agent the file's absolute path and tell it to read the whole file, paging until `isTruncated` is false. For a **local** review with no changes, tell the user there is nothing to review and stop.
+Do **not** hand-type a `git diff` here. Two reasons, and the second is why this is a command and not a prose recipe:
+
+- **The flags.** A user's `color.diff=always` alone makes the diff unparseable, and `diff.mnemonicPrefix` rewrites every path. `capture-local` pins the same ten flags `fetch-pr` pins, from the same constant, so the two capture paths cannot drift into producing diffs that parse differently.
+- **The scope.** `git diff HEAD` covers staged and unstaged changes **to files git already tracks**. It cannot see an untracked file — a file that exists only in the working tree is in neither the index nor HEAD, so it is in no diff. Every brand-new file went unreviewed. `capture-local` diffs each untracked, non-ignored file against `/dev/null` and appends the section, which touches nothing: it does **not** `git add -N` them (that would make them show up in `git diff` by silently staging the user's work — the same class of side effect the mandatory-worktree rule exists to prevent).
+
+**If the plan comes back empty** (`chunks: []`), stop and take the no-diff branch. Every agent would be given nothing to read, and the review would return a clean verdict over no code at all. For a **file-path** review of a tracked, unmodified file, skip planning entirely: hand every agent the file's absolute path and tell it to read the whole file, paging until `isTruncated` is false. For a **local** review with a genuinely clean tree — nothing staged, nothing unstaged, nothing untracked — tell the user there is nothing to review and stop.
 
 For **cross-repo lightweight reviews**, do the same with the diff GitHub hands you. Redirecting to a file is what keeps the 30 000-char shell cap out of it:
 
@@ -171,7 +168,7 @@ qwen review plan-diff .qwen/tmp/qwen-review-pr-<n>-diff.txt \
   --out .qwen/tmp/qwen-review-pr-<n>-plan.json
 ```
 
-`plan-diff` emits the same `diffPathAbsolute`, `chunks[]`, `files[]` and topology counts as `fetch-pr`, so Steps 3A, 3B and 7 work identically on all four review paths. It cannot decide `heavy` — that needs a tree to read the post-change file from — so no invariant agents run on a bare diff.
+`plan-diff` and `capture-local` emit the same `diffPathAbsolute`, `chunks[]`, `files[]` and topology counts as `fetch-pr`, so Steps 3A, 3B and 7 work identically on all four review paths. Neither can decide `heavy` — that needs a tree to read the post-change file from — so no invariant agents run on a bare diff.
 
 If `diffPath` is `null` (merge-base could not be resolved), fall back to giving agents the `git diff` command and **tell the user coverage will be partial on a large diff**.
 
@@ -327,6 +324,7 @@ Each agent must return findings in this structured format (one per issue):
 
 ```
 - **File:** <file path>:<line number or range>
+- **Anchor:** <1-3 consecutive lines copied VERBATIM from the diff — the code this finding is about>
 - **Source:** [review] (Agents 0-6, 8) or [build]/[test] (Agent 7)
 - **Issue:** <one-line statement of the defect>
 - **Failure scenario:** <the concrete trigger and the concrete wrong outcome: what input, state, timing, or config makes this code misbehave, and what incorrect output / crash / leak / exposure results>
@@ -334,6 +332,17 @@ Each agent must return findings in this structured format (one per issue):
 - **Severity:** Critical | Suggestion | Nice to have
 - **Confidence:** high | low
 ```
+
+**The `Anchor` is what places the comment on GitHub. The line number is not.** A line number is something you _derive_ — by counting hunk headers and `+` lines across a diff you are paging through 25 000 characters at a time — and GitHub answers a comment whose line falls outside every hunk with a 422 that rejects the **entire** review, all-or-nothing: one bad anchor sinks every Critical in it, and the recovery path then discards the unanchorable finding outright. Findings that were _right about the code_ got thrown away over arithmetic.
+
+Be clear about how often that happens, because the fix is cheap and the temptation to oversell it is real: **agents count well.** Measured across 22 findings from real agents on two real PRs — a 576-line diff read whole, and a 7 063-line diff where Step 3B chunk agents saw only their own ~380-line slice — 21 of 22 line numbers were exactly right, and not one of them would have 422'd. The anchor is not here because counting usually fails. It is here because when it fails it fails _catastrophically and silently_ (a 422 takes the whole review down; an off-by-one lands a Critical on the wrong line and nobody can tell), because a derived number is strictly better evidence than an asserted one, and because a quoted snippet buys two things a number cannot: it resolves a multi-line range (see `start_line` in Step 7), and it catches a finding filed against a file the diff does not touch.
+
+So quote the code instead of numbering it, and Step 7 computes the number from the diff (`qwen review resolve-anchors`). Rules for the snippet:
+
+- Copy it **verbatim** from the diff, including indentation. Strip the leading `+` marker (a snippet whose every line carries one is accepted anyway, but clean is better).
+- Prefer **added (`+`) lines** — that is what a review comments on. An unchanged context line inside a hunk is a legal anchor too, and resolves; a **removed (`-`) line is not** — deleted code has no line on the right-hand side of the diff, which is the only side GitHub anchors on. To comment on a deletion, anchor on the line that _replaced_ it.
+- Give **enough lines to be unique**. A bare `}` or `});` appears everywhere in the file; the resolver will report it as ambiguous and fall back to whichever match sits nearest your claimed line. Two or three lines are almost always unique. One distinctive line is fine.
+- Still fill in **File** and the line number. The path selects the file, and the line breaks a tie when the snippet genuinely repeats. Neither is trusted as the answer.
 
 **The failure scenario is the finding's evidence, and it gates reporting.** For quality findings (Agent 3/4 improvements and rule violations) state the concrete cost instead of a crash — what is duplicated, wasted, or harder to maintain, or quote the violated project rule. A **Suggestion** or **Nice to have** whose failure scenario you cannot fill in concretely is not a finding — do not report it. A suspected **Critical** whose trigger you cannot pin down is still reported (`Confidence: low`), with the failure scenario naming the real mechanism and what remains uncertain — Step 4's verifier rules on it. "This looks risky" with no nameable trigger and no nameable cost is how hallucinated findings reach a PR; requiring the scenario stops them at the source, and it hands the verifier a claim it can actually test.
 
@@ -708,9 +717,9 @@ If there are no low-confidence findings, omit this section.
 
 ### Not reviewed
 
-List every chunk that returned `Uncoverable` in Step 3, with the files it spans, **and every dimension in `unreviewedDimensions`** (an agent that whiffed twice — its lens ran over nothing). Both are scope nobody reviewed: a single line longer than one `read_file` returns in the first case, a silent agent in the second. Say so plainly rather than implying coverage — in the terminal output of every run, posting or not.
+List every chunk that returned `Uncoverable` in Step 3, with the files it spans, **and every dimension in `unreviewedDimensions`** (an agent that whiffed twice — its lens ran over nothing), **and every entry in the capture's `skippedFiles`** (a local review only — an untracked file too large to inline). All three are scope nobody reviewed: a single line longer than one `read_file` returns in the first case, a silent agent in the second, a file nobody opened in the third. Say so plainly rather than implying coverage — in the terminal output of every run, posting or not.
 
-If there are none of either, omit this section.
+If there are none of these, omit this section.
 
 ### Before an Approve or a zero-Critical verdict: re-check the open Criticals
 
@@ -756,7 +765,26 @@ Also skip this step (independently of the gate above) if the review target is no
 
 **Use the "Create Review" API to submit verdict + inline comments in a single call** (like Copilot Code Review). This eliminates separate summary comments — the inline comments ARE the review.
 
-**Validate every anchor before you submit, and never validate one by posting.** GitHub rejects the whole review with a 422 if any comment's `(path, line)` falls outside every hunk of that file. The fetch report's `files[]` carries each file's `hunks[]` as new-side `newStart`/`newEnd` ranges, so the check is a lookup: an anchor is valid iff its `line` falls inside one of the ranges for its `path`. Pure-deletion hunks are already omitted from that list — they hold no right-side line, and the review never sets `side`, so nothing can be anchored in them. Do this for every comment, and drop or relocate the ones that fail, **before** the single Create Review call.
+**Resolve every anchor before you submit — do not post the line numbers the agents reported.** GitHub rejects the whole review with a 422 if any comment's `(path, line)` falls outside every hunk of that file, and it does so all-or-nothing: one miscounted anchor takes every Critical in the review down with it. The line is therefore computed from the diff, not carried over from an agent. Write every Critical and Suggestion headed for the `comments` array — using each finding's **Anchor** snippet — and run the resolver:
+
+```bash
+# write_file .qwen/tmp/qwen-review-{target}-anchors.json
+# [{"id": "f1", "path": "src/pay.ts",
+#   "anchor": "  if (amt < 0) return;\n  charge(amt);", "line": 42}]
+
+qwen review resolve-anchors \
+  --diff <diffPathAbsolute> \
+  --input .qwen/tmp/qwen-review-{target}-anchors.json \
+  --out .qwen/tmp/qwen-review-{target}-anchors-resolved.json
+```
+
+`line` is the agent's claim; the resolver uses it **only** to break a tie when the snippet genuinely repeats. Read the report:
+
+- **`resolved[]`** — each entry carries `line` (computed — **this is the one you post**), `startLine`, `claimedLine`, `tier`, `ambiguous`, and `drift` (how far the agent's count was off). Use `line` for the `comments[]` entry. A resolved anchor sits inside a hunk **by construction** — every candidate line the resolver will consider was collected from inside one — so the 422 class this replaces is not reachable from a resolved entry, and no separate hunk lookup is needed.
+- **`unmatched[]`** — the snippet appears in no hunk of that file. Disposition is unchanged from any other unanchorable finding: a **Critical** moves to `bodyCriticals`, a **Suggestion** is discarded and counted in `suggestionsDiscarded`. Report each one's `reason` in the terminal — an unmatched anchor means the finding quoted unchanged code from outside the diff, paraphrased instead of copying, quoted a removed (`-`) line, or named the wrong file, and each of those is worth the author knowing.
+- **`ambiguous: true`** — the snippet repeats and the resolver took the match nearest the claimed line. It is anchored and safe to post; say so in the terminal summary.
+
+Report `stats.drifted` in the terminal: it is the number of findings whose agent got the line wrong and whose comment would have landed on unrelated code — or sunk the review — under the old contract.
 
 Do **not** submit a review — with a placeholder body, a one-character body, or any body at all — merely to discover whether an anchor sticks. Each such attempt is a permanent, public review on someone's pull request. This has happened: a run against a real PR left five reviews carrying the bodies `Test`, `Test`, `t`, `t`, `t` before submitting the real one. One Create Review call, after the lookup, is the only write this step makes.
 
@@ -891,7 +919,8 @@ Rules:
 
   **"Actually downgraded" means the verdict would have differed.** The downgrade sentence is only true when, without the presubmit's downgrade flag, the event would have been `APPROVE` (no Critical **and** no Suggestion) or `REQUEST_CHANGES` (has a Critical). A Suggestion-only review is already `COMMENT` on its own; saying it was "downgraded from Approve" tells the author their PR would otherwise have been approved, which is false. Decide the event from the findings **first**, then apply the downgrade flag, and only write the sentence if applying it changed the answer.
 
-- `comments`: high-confidence **Critical and Suggestion** findings. Skip Nice to have and low-confidence. Each must reference a line in the diff.
+- `comments`: high-confidence **Critical and Suggestion** findings. Skip Nice to have and low-confidence. Each must reference a line in the diff — the `line` `resolve-anchors` computed, never one you derived.
+- **Multi-line anchors get a `start_line`.** When a finding's resolution has `startLine !== line`, add `"start_line": <startLine>` alongside `"line": <line>` and GitHub highlights the whole construct instead of just its last line — the `if` and its condition, the three lines of a broken guard. This is something a bare line number could not express, and it is free: the resolver already computed both ends. Omit `start_line` when they are equal.
 - Comment body format: `**[Critical]** issue description — Failure scenario: <trigger> → <wrong outcome>\n\n```suggestion\nfix\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review_` — use the `**[Suggestion]**` prefix for Suggestion-level findings so the author can tell blockers from recommendations at a glance. The `description` MUST carry the finding's concrete failure scenario (the trigger and the wrong outcome, or the concrete cost) — a posted comment that says only what to change, without why it fails, has lost the evidence the finder was required to produce. The prefix must be the **first thing in the body** and the footer must be present: `.github/workflows/qwen-autofix.yml` keys off both to keep Suggestion findings out of the autofix loop. Changing either string silently makes the autofix bot start applying non-blocking suggestions.
 - The model name is declared at the top of this prompt. You MUST include it in every footer. Do NOT omit the model name.
 - Use ` ```suggestion ` for one-click fixes; regular code blocks if fix spans multiple locations.
@@ -904,7 +933,9 @@ gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
   --input .qwen/tmp/qwen-review-{target}-review.json
 ```
 
-**If the call fails with HTTP 422**, the review is created all-or-nothing — nothing was posted, including the Critical findings. The usual cause is one `comments` entry whose `(path, line)` is not part of the diff — a line outside every hunk, a line only present on the left (deleted) side, or a file the PR does not touch. GitHub's error names the failing field (`pull_request_review_thread.line must be part of the diff`) but **does not tell you which entry is at fault**, so do not try to read the offender out of the error text. Instead, recheck the anchors against `files[].hunks[]` from the fetch report — a pure lookup, no API calls (in lightweight mode, against the `gh pr diff` output you already have): an entry is valid if its `line` appears **anywhere inside a diff hunk** for `path` — an added or modified line, or an unchanged context line rendered within the hunk (the review JSON never sets `side`, so every comment is `RIGHT`). What GitHub rejects is a line in **no hunk at all**, or a file the PR does not touch. Drop every entry that fails that test, then resubmit once: move each failing **Critical** into the `body` as a whole-PR observation, and discard each failing **Suggestion** (it stays in the terminal output and the Step 8 report — Suggestion text must not enter `body`, see above). **Recompute the event and body before you resubmit — by re-running `compose-review` with the updated counts** (each relocated Critical moves into `bodyCriticals`, each discarded Suggestion increments `suggestionsDiscarded`; everything else is unchanged). The subcommand owns the guarantees the recovery used to hand-derive: a discarded Suggestion still counts toward `S`, so the verdict never upgrades to `APPROVE` on the resubmit; a context-unavailable run keeps its diff-only wording; a relocated blocker keeps `REQUEST_CHANGES`. If the resubmit still 422s, re-run `compose-review` once more with `comments: []` in mind — every remaining Critical in `bodyCriticals`, every Suggestion counted in `suggestionsDiscarded` — and submit its output with `comments: []`: a review with the blockers in prose beats no review at all, and the subcommand's truth table already produces the correct non-empty `COMMENT` body when no Critical remains (`comments: []` plus an empty `body` is the one combination GitHub is documented to reject, and it would lose the review entirely). Never let a single mis-anchored Suggestion suppress a Critical blocker. Relocation can never change the verdict — compose-review's `C` counts body Criticals, so a review whose blockers now live in `body` still submits `REQUEST_CHANGES` with those blockers as the body text. Log which entries were relocated and which were discarded.
+**If the call fails with HTTP 422**, the review is created all-or-nothing — nothing was posted, including the Critical findings. This should now be unreachable for anchor arithmetic: every `line` you posted came out of `resolve-anchors`, which only ever considers lines it collected from **inside a hunk** of the very diff you are reviewing. So before working the recovery below, check the likelier remaining causes: the diff you resolved against is not the commit you are posting to (re-check `headRefOid` against the `fetchedSha` in your review JSON — a PR's head can advance mid-review), or you hand-edited a `line` after the resolver returned it. GitHub's error names the failing field (`pull_request_review_thread.line must be part of the diff`) but **does not tell you which entry is at fault**, so do not try to read the offender out of the error text.
+
+Recovery, if it is genuinely an anchor: recheck them against `files[].hunks[]` from the fetch report — a pure lookup, no API calls (in lightweight mode, against the `gh pr diff` output you already have): an entry is valid if its `line` appears **anywhere inside a diff hunk** for `path` — an added or modified line, or an unchanged context line rendered within the hunk (the review JSON never sets `side`, so every comment is `RIGHT`). What GitHub rejects is a line in **no hunk at all**, or a file the PR does not touch. Drop every entry that fails that test, then resubmit once: move each failing **Critical** into the `body` as a whole-PR observation, and discard each failing **Suggestion** (it stays in the terminal output and the Step 8 report — Suggestion text must not enter `body`, see above). **Recompute the event and body before you resubmit — by re-running `compose-review` with the updated counts** (each relocated Critical moves into `bodyCriticals`, each discarded Suggestion increments `suggestionsDiscarded`; everything else is unchanged). The subcommand owns the guarantees the recovery used to hand-derive: a discarded Suggestion still counts toward `S`, so the verdict never upgrades to `APPROVE` on the resubmit; a context-unavailable run keeps its diff-only wording; a relocated blocker keeps `REQUEST_CHANGES`. If the resubmit still 422s, re-run `compose-review` once more with `comments: []` in mind — every remaining Critical in `bodyCriticals`, every Suggestion counted in `suggestionsDiscarded` — and submit its output with `comments: []`: a review with the blockers in prose beats no review at all, and the subcommand's truth table already produces the correct non-empty `COMMENT` body when no Critical remains (`comments: []` plus an empty `body` is the one combination GitHub is documented to reject, and it would lose the review entirely). Never let a single mis-anchored Suggestion suppress a Critical blocker. Relocation can never change the verdict — compose-review's `C` counts body Criticals, so a review whose blockers now live in `body` still submits `REQUEST_CHANGES` with those blockers as the body text. Log which entries were relocated and which were discarded.
 
 If there are **no confirmed findings**, this branch is **not a shortcut around the invariant**: it is the same `compose-review` call as every other submission, just with zero counts. The cap states (`cannotTellCriticals`, `uncoverableChunks`, `unreviewedDimensions`, `contextUnavailable`) and the presubmit flags still go in, and the output is still used verbatim — the subcommand returns the `APPROVE`/LGTM shape **only when no cap state is present**; zero findings with a whiffed Security lens is not an approval. Build the submission JSON from its output (the `body` already contains the footer and its line breaks — write the JSON with `write_file`, never `-f body` flags, so nothing re-escapes them):
 
