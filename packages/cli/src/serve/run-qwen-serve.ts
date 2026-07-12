@@ -2453,7 +2453,7 @@ export async function runQwenServe(
     const manager = await ensureChannelWorkerManager?.();
     if (!manager) throw new Error('Channel worker manager is unavailable.');
     if (channelControlDraining) {
-      await manager.shutdown();
+      await manager.shutdown().catch(() => undefined);
       throw daemonDrainingError();
     }
     return manager.setSelection(selection);
@@ -2463,7 +2463,7 @@ export async function runQwenServe(
     const manager =
       channelWorkerManager ?? (await channelWorkerManagerStarting);
     if (channelControlDraining) {
-      await manager?.shutdown();
+      await manager?.shutdown().catch(() => undefined);
       throw daemonDrainingError();
     }
     if (!manager) {
@@ -2476,7 +2476,7 @@ export async function runQwenServe(
     const manager =
       channelWorkerManager ?? (await channelWorkerManagerStarting);
     if (channelControlDraining) {
-      await manager?.shutdown();
+      await manager?.shutdown().catch(() => undefined);
       throw daemonDrainingError();
     }
     if (!manager) {

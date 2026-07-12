@@ -10509,16 +10509,15 @@ describe('createServeApp', () => {
 
     it('maps a pre-manager daemon draining gate to the stable 503 error', async () => {
       const state = disabled();
+      const setSelection = vi.fn();
+      const stopChannelWorker = vi.fn();
       const app = createServeApp(tokenOpts, undefined, {
         bridge: fakeBridge(),
         boundWorkspace: WS_BOUND,
         getChannelWorkerControl: () => state,
-        setChannelWorkerSelection: vi.fn(async () => {
-          throw Object.assign(new Error('Daemon is shutting down.'), {
-            code: 'daemon_draining',
-          });
-        }),
-        stopChannelWorker: vi.fn(async () => ({ changed: false, state })),
+        isChannelControlDraining: () => true,
+        setChannelWorkerSelection: setSelection,
+        stopChannelWorker,
         reloadChannelWorker: vi.fn(async () => ({
           enabled: false,
           state: 'disabled',
@@ -10535,6 +10534,11 @@ describe('createServeApp', () => {
         code: 'daemon_draining',
         state,
       });
+      const stopped = await auth(request(app).delete('/workspace/channel'));
+      expect(stopped.status).toBe(503);
+      expect(stopped.body).toMatchObject({ code: 'daemon_draining', state });
+      expect(setSelection).not.toHaveBeenCalled();
+      expect(stopChannelWorker).not.toHaveBeenCalled();
     });
 
     it('stops idempotently and removes channel_reload dynamically', async () => {
@@ -10766,6 +10770,34 @@ describe('createServeApp', () => {
       expect(res.status).toBe(500);
       expect(res.body).toEqual({ error: 'relaunch failed' });
       expect(reloadChannelWorker).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns typed and redacted reload start failures', async () => {
+      const reloadChannelWorker = vi.fn(async () => {
+        throw new ChannelWorkerControlError(
+          'channel_worker_start_failed',
+          'token=reload-secret',
+          { rolledBack: false, rollbackError: 'token=rollback-secret' },
+        );
+      });
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => runningSnapshot,
+        reloadChannelWorker,
+      });
+
+      const res = await auth(
+        request(app).post('/workspace/channel/reload'),
+      ).send({});
+
+      expect(res.status).toBe(502);
+      expect(res.body).toMatchObject({
+        code: 'channel_worker_start_failed',
+        rolledBack: false,
+      });
+      expect(JSON.stringify(res.body)).not.toContain('reload-secret');
+      expect(JSON.stringify(res.body)).not.toContain('rollback-secret');
     });
 
     it('advertises channel_reload only when the reload dep is wired', async () => {

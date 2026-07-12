@@ -178,6 +178,14 @@ export function registerWorkspaceChannelControlRoutes(
       deps.mutate({ strict: true }),
       async (req, res) => {
         if (!parseClient(req, res)) return;
+        if (deps.isDaemonDraining?.()) {
+          res.status(503).json({
+            error: 'Daemon is shutting down.',
+            code: 'daemon_draining',
+            state: deps.getChannelWorkerControl(),
+          });
+          return;
+        }
         const selection = parseSelection(deps.safeBody(req), res);
         if (!selection) return;
         try {
@@ -201,6 +209,14 @@ export function registerWorkspaceChannelControlRoutes(
       deps.mutate({ strict: true }),
       async (req, res) => {
         if (!parseClient(req, res)) return;
+        if (deps.isDaemonDraining?.()) {
+          res.status(503).json({
+            error: 'Daemon is shutting down.',
+            code: 'daemon_draining',
+            state: deps.getChannelWorkerControl(),
+          });
+          return;
+        }
         try {
           res.status(200).json(await deps.stopChannelWorker!());
         } catch (error) {
