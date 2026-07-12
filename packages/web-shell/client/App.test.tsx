@@ -337,6 +337,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
   return {
     WebShellSidebar: (props: {
       sessionListReloadToken?: number;
+      collapsed?: boolean;
       onOpenDaemonStatus?: () => void;
       onOpenSessions?: () => void;
       onOpenSplitView?: () => void;
@@ -346,7 +347,10 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
       // exercise those activePanel branches (neither has a slash command).
       return React.createElement(
         'div',
-        { 'data-testid': 'sidebar' },
+        {
+          'data-testid': 'sidebar',
+          'data-collapsed': String(Boolean(props.collapsed)),
+        },
         React.createElement(
           'button',
           {
@@ -1958,7 +1962,7 @@ describe('App session callbacks', () => {
           _type: string,
           cb: (event: { matches: boolean }) => void,
         ) => {
-          if (query.includes('min-width')) changeHandler = cb;
+          if (query.includes('1024')) changeHandler = cb;
         },
         removeEventListener: vi.fn(),
       })),
@@ -2002,7 +2006,7 @@ describe('App session callbacks', () => {
           _type: string,
           cb: (event: { matches: boolean }) => void,
         ) => {
-          if (query.includes('min-width')) changeHandler = cb;
+          if (query.includes('1024')) changeHandler = cb;
         },
         removeEventListener: vi.fn(),
       })),
@@ -2031,6 +2035,149 @@ describe('App session callbacks', () => {
     ).toBeNull();
   });
 
+  it('folds the split without switching the chat session on shrink', async () => {
+    let large = true;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('1024')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    mockConnection.sessionId = 'session-1';
+    window.history.replaceState(null, '', '/?split=s1,s2');
+
+    try {
+      const { container } = renderApp();
+      await flush();
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).not.toBeNull();
+
+      await act(async () => {
+        large = false;
+        changeHandler?.({ matches: false });
+        await Promise.resolve();
+      });
+
+      // The split folds back to chat, but folding must leave the chat's own
+      // connection untouched — switching sessions here would drop its session /
+      // git-branch / URL context and break the lossless restore on regrow.
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).toBeNull();
+      expect(mockSessionActions.loadSession).not.toHaveBeenCalled();
+    } finally {
+      window.history.replaceState(null, '', '/');
+    }
+  });
+
+  it('restores the split view when the screen grows back after a shrink', async () => {
+    let large = true;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('1024')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    window.history.replaceState(null, '', '/?split=s1,s2');
+
+    try {
+      const { container } = renderApp();
+      await flush();
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).not.toBeNull();
+
+      // Shrinking below the breakpoint folds the split away...
+      await act(async () => {
+        large = false;
+        changeHandler?.({ matches: false });
+        await Promise.resolve();
+      });
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).toBeNull();
+
+      // ...and growing back past it restores the same split (a transient resize
+      // is lossless, not a permanent drop of the panes).
+      await act(async () => {
+        large = true;
+        changeHandler?.({ matches: true });
+        await Promise.resolve();
+      });
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).not.toBeNull();
+    } finally {
+      window.history.replaceState(null, '', '/');
+    }
+  });
+
+  it('auto-collapses the sidebar in a narrow split and expands it when wide', async () => {
+    let wide = false;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          // Keep the large-screen (>=1024) query true so the split renders;
+          // the >=1200 "sidebar has room" query is the one under test.
+          if (query.includes('1200')) return wide;
+          return query.includes('min-width');
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('1200')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    window.history.replaceState(null, '', '/?split=s1,s2');
+
+    try {
+      const { container } = renderApp();
+      await flush();
+      const sidebar = () => container.querySelector('[data-testid="sidebar"]');
+      // Narrow split (< 1200px): the sidebar collapses to free room for panes.
+      expect(sidebar()?.getAttribute('data-collapsed')).toBe('true');
+
+      // Grow past 1200px: the sidebar expands again.
+      await act(async () => {
+        wide = true;
+        changeHandler?.({ matches: true });
+        await Promise.resolve();
+      });
+      expect(sidebar()?.getAttribute('data-collapsed')).toBe('false');
+    } finally {
+      window.history.replaceState(null, '', '/');
+    }
+  });
+
   it('auto-closes the Session Overview when the screen shrinks below the breakpoint', async () => {
     // Drive isLargeScreen through a controllable media query: open the panel on
     // a large screen, then flip below the breakpoint and confirm it closes.
@@ -2047,7 +2194,7 @@ describe('App session callbacks', () => {
           _type: string,
           cb: (event: { matches: boolean }) => void,
         ) => {
-          if (query.includes('min-width')) changeHandler = cb;
+          if (query.includes('1024')) changeHandler = cb;
         },
         removeEventListener: vi.fn(),
       })),

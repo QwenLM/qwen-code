@@ -130,6 +130,7 @@ import {
 } from './utils/copyCommand';
 import { isEditableTarget } from './utils/dom';
 import { getModelDisplayName } from './utils/modelDisplay';
+import { hasMultipleWorkspaces, workspaceBasename } from './utils/workspace';
 import { isVisibleComposerModel } from './utils/composerModels';
 import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
 import { decideEscapeIntent } from './utils/escapeIntent';
@@ -1003,6 +1004,11 @@ export function App({
   // once) is only offered on large screens; below that there is no room for it
   // to be useful.
   const isLargeScreen = useIsLargeScreen();
+  // In split view the session sidebar competes with the panes for width. Below
+  // this width it auto-collapses to its icon rail so the panes get the room, and
+  // expands again once the window grows back. A wide split keeps the full
+  // sidebar (and the user's own collapse preference).
+  const splitSidebarHasRoom = useIsLargeScreen('(min-width: 1200px)');
 
   useEffect(() => {
     const mql = window.matchMedia('(max-width: 760px)');
@@ -1944,6 +1950,10 @@ export function App({
   );
   // Sessions to seed the split view with (e.g. the selection from the overview).
   const [splitSessionIds, setSplitSessionIds] = useState<string[]>([]);
+  // Latest pane list, readable from the shrink-close effect without making it a
+  // dependency (it changes on every pane add/remove).
+  const splitSessionIdsRef = useRef<string[]>(splitSessionIds);
+  splitSessionIdsRef.current = splitSessionIds;
   const [showExtensionsDialog, setShowExtensionsDialog] = useState(false);
   const [mcpDialogMessage, setMcpDialogMessage] =
     useState<SerializedMcpStatusMessage | null>(null);
@@ -2089,23 +2099,53 @@ export function App({
       openSplitView(ids);
     }
   }, [externalSplitControlled, openSplitView]);
-  // If the viewport shrinks below the large-screen breakpoint, close the Session
-  // Overview panel and the split view — both are large-screen-only surfaces
-  // whose entry points are hidden on small screens, so leaving them up would
-  // strand the user in a view they can no longer re-enter.
-  // When a shrink closes the split, its panes unmount and take keyboard focus
-  // with them; flag the composer to be refocused once the chat is shown again.
+  // If the viewport shrinks below the large-screen breakpoint, fold away the
+  // Session Overview panel and the split view — both are large-screen-only
+  // surfaces whose entry points are hidden on small screens. The split is only
+  // folded, not discarded: growing back past the breakpoint restores it, so a
+  // transient resize is lossless. When a shrink folds the split, its panes
+  // unmount and take keyboard focus with them; flag the composer to be refocused
+  // once the chat is shown again.
   const focusComposerAfterSplitCloseRef = useRef(false);
+  // True while the split view is only *temporarily* folded away because the
+  // window is narrower than the large-screen breakpoint. Growing back past the
+  // breakpoint restores it, so a transient resize doesn't drop the user's panes.
+  const splitFoldedByShrinkRef = useRef(false);
   useEffect(() => {
-    if (!isLargeScreen && activePanel === 'sessions') {
+    if (isLargeScreen) {
+      // Grew back above the breakpoint: restore a split that a shrink folded
+      // away. Standalone/uncontrolled only — a controlled host owns its split
+      // lifecycle and re-opens it itself.
+      if (splitFoldedByShrinkRef.current) {
+        splitFoldedByShrinkRef.current = false;
+        if (!externalSplitControlled && splitSessionIdsRef.current.length > 0) {
+          setMainView((prev) => (prev === 'chat' ? 'split' : prev));
+        }
+      }
+      return;
+    }
+    if (activePanel === 'sessions') {
       setActivePanel(null);
     }
-    if (!isLargeScreen && mainView === 'split') {
+    if (mainView === 'split') {
       notifyControlledSplitClose();
       setMainView('chat');
       focusComposerAfterSplitCloseRef.current = true;
+      // Fold, don't discard: remember to restore the same split once the screen
+      // grows back, so a transient shrink is lossless. The chat's own connection
+      // (its session, git branch, URL, …) is left untouched — restoring the
+      // split, or dropping back to that chat, is exactly what it was before.
+      if (!externalSplitControlled) {
+        splitFoldedByShrinkRef.current = true;
+      }
     }
-  }, [isLargeScreen, activePanel, mainView, notifyControlledSplitClose]);
+  }, [
+    isLargeScreen,
+    activePanel,
+    mainView,
+    notifyControlledSplitClose,
+    externalSplitControlled,
+  ]);
   // Land focus on the composer after a shrink-driven split close so keyboard
   // users aren't dropped onto <body> — but not when the chat now shows an
   // approval overlay (it owns the keyboard) or a panel (its Back self-focuses).
@@ -5396,7 +5436,11 @@ export function App({
                   aria-hidden="true"
                 />
                 <WebShellSidebar
-                  collapsed={sidebarCollapsed && !mobileDrawerOpen}
+                  collapsed={
+                    (sidebarCollapsed ||
+                      (mainView === 'split' && !splitSidebarHasRoom)) &&
+                    !mobileDrawerOpen
+                  }
                   onCollapsedChange={handleSidebarCollapsedChange}
                   onOpenSettings={() => {
                     closeMobileDrawer();
@@ -5969,6 +6013,13 @@ export function App({
                           currentMode={currentMode}
                           currentModel={currentModel}
                           gitBranch={connection.gitBranch}
+                          workspaceName={
+                            hasMultipleWorkspaces(connection.capabilities) &&
+                            connection.workspaceCwd
+                              ? workspaceBasename(connection.workspaceCwd)
+                              : undefined
+                          }
+                          workspaceTitle={connection.workspaceCwd || undefined}
                           chatWidthMode={chatWidthMode}
                           showChatWidthToggle={!isChatEmptyState}
                           chatWidthToggleMin={chatWidthToggleMin}

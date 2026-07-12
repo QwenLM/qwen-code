@@ -939,6 +939,42 @@
   white-space: nowrap;
 }
 
+/* Which workspace a split-view pane's session lives in — parallel to the git
+   branch chip, shown only on a multi-workspace daemon. */
+.workspaceChip {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 160px;
+  height: 28px;
+  padding: 0 8px;
+  align-items: center;
+  gap: 5px;
+  border-radius: 6px;
+  color: var(--agent-gray-500);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.workspaceChipIcon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+}
+
+.workspaceChipIcon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.workspaceChipText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .toolbarRight {
   flex-shrink: 0;
   margin-right: -5px;
@@ -965,7 +1001,7 @@
   /* Keep the leading controls on a single row on narrow screens. The branch
      chip yields space first — truncating via its ellipsis, down to just the
      icon if needed — instead of pushing the mode/model buttons onto a second
-     line and making the composer taller. */
+     line and making the composer taller (#6753). */
   .toolbarLeft {
     flex-wrap: nowrap;
   }
@@ -977,6 +1013,17 @@
   .gitBranchChip {
     max-width: 140px;
     flex-shrink: 1;
+  }
+
+  /* Keep the workspace name legible in a narrow split pane — it is the pane's
+     identity, so unlike the action buttons it never collapses to an icon; it
+     only tightens and truncates (the full cwd stays in the tooltip). It yields
+     space the same way the branch chip does so the row never wraps. */
+  .toolbarLeft .workspaceChip {
+    max-width: 108px;
+    flex-shrink: 1;
+    padding: 0 6px;
+    gap: 4px;
   }
 }
 

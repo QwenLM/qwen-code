@@ -43,6 +43,7 @@ import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { VoiceButton } from '../voice/VoiceButton';
 import { GitBranchIndicator } from './GitBranchIndicator';
+import { WorkspaceIndicator } from './WorkspaceIndicator';
 import {
   filterToolbarDropdownItems,
   getToolbarDropdownGeometry,
@@ -60,7 +61,8 @@ export type ComposerToolbarAction =
   | 'commands'
   | 'files'
   | 'widthMode'
-  | 'voice';
+  | 'voice'
+  | 'workspace';
 
 const ACTIVE_TOOLBAR_ACTIONS = [
   'approvalMode',
@@ -68,6 +70,7 @@ const ACTIVE_TOOLBAR_ACTIONS = [
   'model',
   'widthMode',
   'voice',
+  'workspace',
 ] as const satisfies readonly ComposerToolbarAction[];
 const ACTIVE_TOOLBAR_ACTION_SET = new Set<ComposerToolbarAction>(
   ACTIVE_TOOLBAR_ACTIONS,
@@ -98,6 +101,10 @@ interface ChatEditorProps {
   currentMode?: string;
   currentModel?: string;
   gitBranch?: string;
+  /** Workspace name shown in the pane composer's `workspace` toolbar chip. */
+  workspaceName?: string;
+  /** Full workspace cwd, used as the chip's tooltip. */
+  workspaceTitle?: string;
   chatWidthMode?: '1000' | 'wide';
   showChatWidthToggle?: boolean;
   chatWidthToggleMin?: number;
@@ -1021,6 +1028,8 @@ export const ChatEditor = memo(
       currentMode = 'default',
       currentModel = '',
       gitBranch,
+      workspaceName,
+      workspaceTitle,
       chatWidthMode = '1000',
       showChatWidthToggle = true,
       chatWidthToggleMin,
@@ -1772,6 +1781,15 @@ export const ChatEditor = memo(
                   </div>
                 )}
                 <div className={styles.toolbarLeft}>
+                  {workspaceName && showToolbarAction('workspace') && (
+                    <WorkspaceIndicator
+                      name={workspaceName}
+                      title={workspaceTitle ?? workspaceName}
+                      ariaLabel={t('workspace.paneLabel', {
+                        name: workspaceName,
+                      })}
+                    />
+                  )}
                   {gitBranch && showToolbarAction('gitBranch') && (
                     <GitBranchIndicator
                       branch={gitBranch}
