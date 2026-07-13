@@ -533,7 +533,8 @@ describe('OpenAIContentConverter', () => {
           text: 'The user is asking about response formats.',
         },
       ]);
-      expect(content.candidates?.[0]?.content?.parts).toEqual([
+      expect(content.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
         { text: visibleText },
       ]);
       expect(finish.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
@@ -685,13 +686,13 @@ describe('OpenAIContentConverter', () => {
         }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      const reasoningSuffix = converter.convertOpenAIChunkToGemini(
         streamChunk('interleaved-reasoning-tag-suffix', {
           reasoning_content: 'nk>secret',
         }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      const closing = converter.convertOpenAIChunkToGemini(
         streamChunk('interleaved-visible-closing-tag', {
           content: 'answer </think>',
         }),
@@ -700,6 +701,8 @@ describe('OpenAIContentConverter', () => {
 
       expect(reasoningPrefix.candidates?.[0]?.content?.parts).toEqual([]);
       expect(visible.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(reasoningSuffix.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(closing.candidates?.[0]?.content?.parts).toEqual([]);
       expect(() =>
         converter.convertOpenAIChunkToGemini(
           streamChunk('interleaved-reasoning-tag-finish', {}, 'stop'),
@@ -806,10 +809,10 @@ describe('OpenAIContentConverter', () => {
         stream,
       );
 
-      expect(first.candidates?.[0]?.content?.parts).toEqual([
+      expect(first.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(second.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
         { text: 'Use <think>literal' },
-      ]);
-      expect(second.candidates?.[0]?.content?.parts).toEqual([
         { text: '</think> text.' },
       ]);
       expect(finish.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
@@ -857,21 +860,20 @@ describe('OpenAIContentConverter', () => {
       );
 
       expect(held.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(released.candidates?.[0]?.content?.parts).toEqual([
+      expect(released.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
         { text: 'Use <think>literal' },
         { text: '</think> text.' },
-      ]);
-      expect(finish.candidates?.[0]?.content?.parts).toEqual([
         { functionCall: { id: 'call_edit', name: 'edit', args: {} } },
       ]);
     });
 
     it.each([
-      [`Use <think${' '.repeat(80)}`, '>literal</think> text.'],
-      [`<think${' '.repeat(80)}`, 'x>'],
+      [`Use <think${' '.repeat(80)}`, '>literal</think> text.', true],
+      [`<think${' '.repeat(80)}`, 'x>', false],
     ])(
       'releases a long-whitespace tag prefix %s once decided',
-      (head, tail) => {
+      (head, tail, holdUntilFinish) => {
         const stream = withStreamParser(new StreamingToolCallParser());
         converter.convertOpenAIChunkToGemini(
           streamChunk('reasoning-before-long-whitespace-prefix', {
@@ -894,10 +896,13 @@ describe('OpenAIContentConverter', () => {
         );
 
         expect(prefix.candidates?.[0]?.content?.parts).toEqual([]);
-        expect(suffix.candidates?.[0]?.content?.parts).toEqual([
-          { text: head },
-          { text: tail },
-        ]);
+        const expectedParts = [{ text: head }, { text: tail }];
+        expect(suffix.candidates?.[0]?.content?.parts).toEqual(
+          holdUntilFinish ? [] : expectedParts,
+        );
+        expect(finish.candidates?.[0]?.content?.parts).toEqual(
+          holdUntilFinish ? expectedParts : [],
+        );
         expect(finish.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
       },
     );
@@ -931,7 +936,8 @@ describe('OpenAIContentConverter', () => {
       expect(earlierContent.candidates?.[0]?.content?.parts).toEqual([
         { text: 'Earlier visible content. ' },
       ]);
-      expect(inlineTag.candidates?.[0]?.content?.parts).toEqual([
+      expect(inlineTag.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
         { text: '<think>literal</think> reference.' },
       ]);
       expect(finish.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
@@ -1080,6 +1086,38 @@ describe('OpenAIContentConverter', () => {
       expect(() =>
         converter.convertOpenAIChunkToGemini(
           streamChunk('matching-late-reasoning-finish', {}, 'stop'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('holds an inline tag until later reasoning is classified', () => {
+      const stream = withStreamParser(new StreamingToolCallParser());
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('ordinary-reasoning-before-inline-tag', {
+          reasoning_content: 'ordinary hidden reasoning',
+        }),
+        stream,
+      );
+      const visible = converter.convertOpenAIChunkToGemini(
+        streamChunk('inline-tag-before-late-matching-reasoning', {
+          content: 'Use <think>literal</think> text.',
+        }),
+        stream,
+      );
+      const reasoning = converter.convertOpenAIChunkToGemini(
+        streamChunk('late-matching-reasoning-after-inline-tag', {
+          reasoning_content: 'hidden <think>reasoning</think>',
+        }),
+        stream,
+      );
+
+      expect(visible.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(reasoning.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('late-matching-reasoning-finish', {}, 'stop'),
           stream,
         ),
       ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));

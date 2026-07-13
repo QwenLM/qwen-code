@@ -47,6 +47,8 @@ export class StreamingToolCallParser {
   private namelessToolCallIndices = new Set<number>();
   /** Map from tool call ID to actual index used for storage */
   private idToIndexMap: Map<string, number> = new Map();
+  /** Latest relocated storage index for each provider-supplied wire index. */
+  private relocatedIndexByWireIndex: Map<number, number> = new Map();
   /** Counter for generating new indices when collisions occur */
   private nextAvailableIndex: number = 0;
 
@@ -73,9 +75,10 @@ export class StreamingToolCallParser {
     name?: string,
   ): ToolCallParseResult {
     if (!id && !name && !chunk.trim()) {
-      const depth = this.depths.get(index) ?? 0;
-      const inString = this.inStrings.get(index) ?? false;
-      if (!this.buffers.has(index) || (depth === 0 && !inString)) {
+      const routedIndex = this.relocatedIndexByWireIndex.get(index) ?? index;
+      const depth = this.depths.get(routedIndex) ?? 0;
+      const inString = this.inStrings.get(routedIndex) ?? false;
+      if (!this.buffers.has(routedIndex) || (depth === 0 && !inString)) {
         return { complete: false };
       }
     }
@@ -104,11 +107,19 @@ export class StreamingToolCallParser {
         // Map this ID to the actual index we're using
         this.idToIndexMap.set(id, actualIndex);
       }
+      if (actualIndex === index) {
+        this.relocatedIndexByWireIndex.delete(index);
+      } else {
+        this.relocatedIndexByWireIndex.set(index, actualIndex);
+      }
     } else {
       // No ID provided - this is a continuation chunk
       // Try to find which tool call this belongs to based on the index
       // Look for an existing tool call at this index that's not complete
-      if (this.buffers.has(index)) {
+      const relocatedIndex = this.relocatedIndexByWireIndex.get(index);
+      if (relocatedIndex !== undefined) {
+        actualIndex = relocatedIndex;
+      } else if (this.buffers.has(index)) {
         const existingBuffer = this.buffers.get(index)!;
         const existingDepth = this.depths.get(index)!;
 
@@ -453,6 +464,11 @@ export class StreamingToolCallParser {
     this.escapes.set(index, false);
     this.toolCallMeta.set(index, {});
     this.namelessToolCallIndices.delete(index);
+    for (const [wireIndex, actualIndex] of this.relocatedIndexByWireIndex) {
+      if (wireIndex === index || actualIndex === index) {
+        this.relocatedIndexByWireIndex.delete(wireIndex);
+      }
+    }
   }
 
   /**
@@ -470,6 +486,7 @@ export class StreamingToolCallParser {
     this.toolCallMeta.clear();
     this.namelessToolCallIndices.clear();
     this.idToIndexMap.clear();
+    this.relocatedIndexByWireIndex.clear();
     this.nextAvailableIndex = 0;
   }
 

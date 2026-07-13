@@ -1549,7 +1549,9 @@ export function convertOpenAIChunkToGemini(
     const hasUntrustedVisibleTag =
       visibleThinkingTagState.tagBeforeReasoning === true ||
       Boolean(visibleThinkingTagState.pendingTag) ||
-      (hasStructuredReasoning && visibleThinkingTagState.leaked);
+      (hasStructuredReasoning &&
+        (visibleThinkingTagState.leaked ||
+          visibleThinkingTagState.completedTag === true));
     const malformedThinkingTagLeak =
       Boolean(choice.finish_reason) &&
       hasStructuredReasoning &&

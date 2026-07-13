@@ -374,6 +374,21 @@ describe('StreamingToolCallParser', () => {
         index: 1,
       });
     });
+
+    it('routes id-less continuations to a relocated call', () => {
+      parser.addChunk(0, '{"fromFirst":', 'call_first', 'first_tool');
+      parser.addChunk(0, '{"fromSecond":', 'call_second', 'second_tool');
+      parser.addChunk(0, '"second"}');
+
+      expect(parser.getBuffer(0)).toBe('{"fromFirst":');
+      expect(parser.getBuffer(1)).toBe('{"fromSecond":"second"}');
+      expect(parser.getCompletedToolCalls()).toContainEqual({
+        id: 'call_second',
+        name: 'second_tool',
+        args: { fromSecond: 'second' },
+        index: 1,
+      });
+    });
   });
 
   describe('Completed tool calls', () => {
