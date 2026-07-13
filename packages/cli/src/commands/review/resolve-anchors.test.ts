@@ -72,7 +72,7 @@ describe('resolve-anchors (command boundary)', () => {
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   /** Drive the real yargs handler, as `qwen review resolve-anchors` does. */
-  function run(findings: unknown): Record<string, never> {
+  function run(findings: unknown): Record<string, unknown> {
     const diff = join(dir, 'diff.txt');
     const input = join(dir, 'in.json');
     const out = join(dir, 'out.json');
@@ -99,7 +99,7 @@ describe('resolve-anchors (command boundary)', () => {
       },
       // the file is not in the diff at all
       { id: 'c', path: 'src/ghost.ts', anchor: 'nope();' },
-    ]) as unknown as {
+    ]) as {
       resolved: Array<Record<string, unknown>>;
       unmatched: Array<Record<string, unknown>>;
       stats: Record<string, number>;
@@ -123,6 +123,70 @@ describe('resolve-anchors (command boundary)', () => {
 
   it('fails loudly on malformed input rather than resolving part of it', () => {
     expect(() => run([{ id: 'a', path: 'src/pay.ts' }])).toThrow(/"anchor"/);
+  });
+
+  it('creates the output directory the caller chose', () => {
+    // `mkdirSync` created `.qwen/tmp` — our directory — and then wrote to the
+    // caller's, which may be somewhere else entirely. `--out reports/x.json` is
+    // a legal request and it answered with ENOENT. The sibling `compose-review`
+    // had it right all along; this one did not copy it.
+    const diff = join(dir, 'diff.txt');
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'nested', 'deeper', 'anchors.json');
+    writeFileSync(diff, DIFF);
+    writeFileSync(input, JSON.stringify([]));
+
+    (resolveAnchorsCommand.handler as (a: unknown) => void)({
+      diff,
+      input,
+      out,
+    });
+
+    expect(JSON.parse(readFileSync(out, 'utf8')).stats.total).toBe(0);
+  });
+
+  it('routes each finding to its own file in a multi-file diff', () => {
+    // The batch is keyed by path, and every earlier test used a one-file diff —
+    // so the routing itself (`byPath.get`) was never exercised against a second
+    // real file. A bug that leaked lines across files would have passed.
+    const twoFiles = [
+      DIFF.trimEnd(),
+      'diff --git a/src/other.ts b/src/other.ts',
+      '--- a/src/other.ts',
+      '+++ b/src/other.ts',
+      '@@ -100,0 +100,2 @@',
+      '+  const other = 1;',
+      '+  useOther(other);',
+      '',
+    ].join('\n');
+    const diff = join(dir, 'two.txt');
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'out.json');
+    writeFileSync(diff, twoFiles);
+    writeFileSync(
+      input,
+      JSON.stringify([
+        { id: 'a', path: 'src/pay.ts', anchor: '  charge(amt);' },
+        { id: 'b', path: 'src/other.ts', anchor: '  useOther(other);' },
+      ]),
+    );
+
+    (resolveAnchorsCommand.handler as (a: unknown) => void)({
+      diff,
+      input,
+      out,
+    });
+    const report = JSON.parse(readFileSync(out, 'utf8'));
+
+    // `pay.ts` line 12 and `other.ts` line 101 — neither file's numbering may
+    // bleed into the other's.
+    expect(
+      report.resolved.map((r: { id: string; line: number }) => [r.id, r.line]),
+    ).toEqual([
+      ['a', 12],
+      ['b', 101],
+    ]);
+    expect(report.unmatched).toEqual([]);
   });
 
   it('fails on a diff path that does not exist', () => {

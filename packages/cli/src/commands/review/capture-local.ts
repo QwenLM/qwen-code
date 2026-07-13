@@ -18,7 +18,7 @@
 
 import type { CommandModule } from 'yargs';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { captureLocalDiff, type SkippedFile } from './lib/local-diff.js';
@@ -71,7 +71,12 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   });
   const diffText = capture.diff.toString('utf8');
 
+  // Two directories, and they are not the same one. The diff always lands in
+  // `.qwen/tmp` (its path is ours to choose), but `--out` is the caller's — and
+  // `--out reports/plan.json` is a legal request that answering with the temp
+  // dir turned into an ENOENT from `writeFileSync`.
   mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+  mkdirSync(dirname(resolve(out)), { recursive: true });
   const diffPath = tmpFile(target, 'diff.txt');
   // Write the bytes, not the string: a re-encode would rewrite the content of
   // every hunk touching a file git handed us in a non-UTF-8 encoding.

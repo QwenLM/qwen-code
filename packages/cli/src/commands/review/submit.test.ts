@@ -128,6 +128,20 @@ describe('the posting gate', () => {
     expect(ghMock).toHaveBeenCalledOnce();
   });
 
+  it('refuses a malformed --repo before building an API path from it', () => {
+    // It goes straight into the URL. A bad value does not fail safely — it fails
+    // as a confusing 404 from a path nobody meant to build.
+    expect(() =>
+      runSubmit(args({ userAuthorized: true, repo: 'not-a-repo' })),
+    ).toThrow(/<owner>\/<repo>/);
+    expect(ghMock).not.toHaveBeenCalled();
+
+    expect(() =>
+      runSubmit(args({ userAuthorized: true, repo: 'a/b/../../etc' })),
+    ).toThrow(/<owner>\/<repo>/);
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
   it('checks and reports without writing under --dry-run', () => {
     runSubmit(args({ userAuthorized: true, dryRun: true }));
     expect(ghMock).not.toHaveBeenCalled();
@@ -157,13 +171,44 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(ghMock).not.toHaveBeenCalled();
   });
 
-  it('rejects a literal `\\n` smuggled into the body', () => {
+  it('rejects an escaped footer — the fingerprint of a shell-built body', () => {
+    // Verbatim from the breaching dogfood run.
     const review = file('bad-1.json', {
       ...REVIEW,
-      body: 'Reviewed.\\n\\n_— model via Qwen Code /review_',
+      body: 'Reviewed.\\n\\n_— qwen3-coder-plus via Qwen Code /review_',
     });
 
     expect(() => runSubmit(authorized({ review }))).toThrow(/literal/);
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('does not refuse a body whose finding text legitimately contains `\\n`', () => {
+    // An unmappable Critical's description is finding text, and finding text
+    // quotes code: `/\n/` in a regex, an escaped string in a snippet. A check
+    // that searched the whole body for the two characters would fire here — and
+    // a false positive does not warn, it REFUSES the post, losing a review that
+    // had a real blocker in it. The bug's signature is the escaped footer, not
+    // the character.
+    const review = file('good-1.json', {
+      ...REVIEW,
+      body:
+        '**[Critical]** the splitter uses `/\\n/` where the input is CRLF, so ' +
+        'every line keeps a trailing `\\r`.\n\n_— model via Qwen Code /review_',
+    });
+
+    runSubmit(authorized({ review }));
+    expect(ghMock).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a payload with no commit_id', () => {
+    const review = file('bad-6.json', { ...REVIEW, commit_id: undefined });
+    expect(() => runSubmit(authorized({ review }))).toThrow(/`commit_id`/);
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects a payload with no event', () => {
+    const review = file('bad-7.json', { ...REVIEW, event: undefined });
+    expect(() => runSubmit(authorized({ review }))).toThrow(/`event`/);
     expect(ghMock).not.toHaveBeenCalled();
   });
 

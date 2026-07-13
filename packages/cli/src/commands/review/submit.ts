@@ -124,13 +124,23 @@ function inconsistencies(payload: ReviewPayload): string[] {
         'would lose the review entirely',
     );
   }
-  // A literal backslash-n in the body means the JSON was built by shell string
-  // interpolation (`-f body=...`) rather than written as JSON, and the footer
-  // renders as `\n\n_— model_` instead of breaking the line.
-  if ((payload.body ?? '').includes('\\n')) {
+  // The escaped footer, which is the fingerprint of a body built by shell string
+  // interpolation (`-f body=...`) instead of written as JSON: the newlines before
+  // `_— <model> via Qwen Code /review_` arrive as the two literal characters
+  // backslash-n and the footer lands mid-sentence. The breaching dogfood run
+  // posted exactly this.
+  //
+  // Deliberately not a bare search for `\n` anywhere in the body. A body may
+  // legitimately carry one — an unmappable Critical whose description quotes a
+  // regex (`/\n/`) or an escaped string is exactly the finding text this field
+  // exists to hold — and a false positive here does not warn, it **refuses the
+  // post**, which loses a review that had a real blocker in it. Match the bug's
+  // actual signature, not a character that resembles it.
+  if (/\\n\s*(\\n)?\s*_—/.test(payload.body ?? '')) {
     problems.push(
-      'the body contains a literal `\\n` — write the review JSON with a file, ' +
-        'not with `-f body`, or the escapes survive into the posted text',
+      'the footer is preceded by a literal `\\n` — the body was built with ' +
+        '`-f body=` (or another shell interpolation) instead of written as ' +
+        'JSON, so its newlines will be posted as text',
     );
   }
   comments.forEach((c, i) => {
@@ -154,8 +164,19 @@ function inconsistencies(payload: ReviewPayload): string[] {
   return problems;
 }
 
+/** `owner/repo`, and nothing that could be a path segment of its own. */
+const REPO_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+
 export function runSubmit(args: SubmitArgs): void {
   setGhHost(args.host);
+
+  // The repo goes straight into the API path. A malformed value does not fail
+  // safely — it fails as a confusing 404 from a URL nobody meant to build.
+  if (!REPO_RE.test(args.repo)) {
+    throw new Error(
+      `--repo ${JSON.stringify(args.repo)} is not <owner>/<repo>.`,
+    );
+  }
 
   let payload: ReviewPayload;
   try {

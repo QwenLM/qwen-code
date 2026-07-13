@@ -17,8 +17,8 @@
 
 import type { CommandModule } from 'yargs';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { REVIEW_TMP_DIR } from './lib/paths.js';
 import {
   resolveAnchors,
   type AnchorRequest,
@@ -87,12 +87,25 @@ function runResolveAnchors(args: ResolveAnchorsArgs): void {
     );
   }
 
-  let raw: unknown;
+  // Two failures, two messages. One `try` around both told a user with a stray
+  // trailing comma that their file "could not be read", and sent them looking at
+  // permissions.
+  let rawText: string;
   try {
-    raw = JSON.parse(readFileSync(args.input, 'utf8'));
+    rawText = readFileSync(args.input, 'utf8');
   } catch (err) {
     throw new Error(
       `Cannot read findings file ${args.input}: ${(err as Error).message}`,
+    );
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(rawText);
+  } catch (err) {
+    throw new Error(
+      `Cannot parse findings file ${args.input} as JSON: ${
+        (err as Error).message
+      }`,
     );
   }
 
@@ -115,7 +128,10 @@ function runResolveAnchors(args: ResolveAnchorsArgs): void {
     },
   };
 
-  mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+  // The directory of the path the CALLER chose, which is not necessarily
+  // `.qwen/tmp` — `--out reports/anchors.json` is a legal request, and creating
+  // the temp dir instead answered it with ENOENT.
+  mkdirSync(dirname(resolve(args.out)), { recursive: true });
   writeFileSync(args.out, JSON.stringify(report, null, 2), 'utf8');
   writeStdoutLine(`Wrote resolved anchors to ${args.out}`);
 
