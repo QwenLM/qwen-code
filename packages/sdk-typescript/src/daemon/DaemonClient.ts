@@ -128,6 +128,8 @@ import type {
   ExtensionMutationResponse,
   ExtensionInstallRequest,
   ExtensionInstallResponse,
+  ExtensionInteractionResponse,
+  ExtensionInteractionResponseResult,
   ExtensionOperationStatus,
   ExtensionScopeRequest,
   ExtensionRefreshResponse,
@@ -970,6 +972,19 @@ export class DaemonClient {
     return await this.jsonRequest<ExtensionOperationStatus>(
       `/workspace/extensions/operations/${urlEncode(operationId)}`,
       'GET /workspace/extensions/operations/:operationId',
+    );
+  }
+
+  async respondToExtensionInteraction(
+    operationId: string,
+    interactionId: string,
+    response: ExtensionInteractionResponse,
+    clientId?: string,
+  ): Promise<ExtensionInteractionResponseResult> {
+    return await this.jsonRequest<ExtensionInteractionResponseResult>(
+      `/workspace/extensions/operations/${urlEncode(operationId)}/interactions/${urlEncode(interactionId)}`,
+      'POST /workspace/extensions/operations/:operationId/interactions/:interactionId',
+      { method: 'POST', body: response, clientId },
     );
   }
 

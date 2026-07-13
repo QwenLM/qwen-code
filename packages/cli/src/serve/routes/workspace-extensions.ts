@@ -15,6 +15,7 @@ import {
   type Extension,
   type ExtensionInstallMetadata,
   type ExtensionSetting,
+  type ClaudeMarketplaceConfig,
 } from '@qwen-code/qwen-code-core';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { loadSettings } from '../../config/settings.js';
@@ -78,6 +79,9 @@ export function registerWorkspaceExtensionRoutes(
     return next;
   };
   const EXTENSION_MUTATION_TIMEOUT_MS = 10 * 60_000;
+  const EXTENSION_INTERACTION_TIMEOUT_MS = 10 * 60_000;
+  const EXTENSION_INSTALL_TIMEOUT_MS =
+    EXTENSION_MUTATION_TIMEOUT_MS + EXTENSION_INTERACTION_TIMEOUT_MS;
   const EXTENSION_REFRESH_TIMEOUT_MS = 30_000;
   const isExtensionQueueFullError = (err: unknown): boolean =>
     err instanceof Error && err.message === 'Extension operation queue is full';
@@ -107,7 +111,12 @@ export function registerWorkspaceExtensionRoutes(
         },
       );
     });
-  const createExtensionManager = () =>
+  const createExtensionManager = (interactions?: {
+    requestSetting?: (setting: ExtensionSetting) => Promise<string>;
+    requestChoicePlugin?: (
+      marketplace: ClaudeMarketplaceConfig,
+    ) => Promise<string>;
+  }) =>
     new ExtensionManager({
       workspaceDir: boundWorkspace,
       isWorkspaceTrusted:
@@ -116,16 +125,20 @@ export function registerWorkspaceExtensionRoutes(
           boundWorkspace,
         ).effective.state === 'trusted',
       requestConsent: () => Promise.resolve(),
-      requestSetting: async (setting: ExtensionSetting) => {
-        throw new Error(
-          `Extension setting "${setting.envVar}" requires interactive configuration and is not supported over the daemon install endpoint.`,
-        );
-      },
-      requestChoicePlugin: async () => {
-        throw new Error(
-          'Marketplace plugin selection is not supported over the daemon install endpoint. Specify a plugin name in the source.',
-        );
-      },
+      requestSetting:
+        interactions?.requestSetting ??
+        (async (setting) => {
+          throw new Error(
+            `Extension setting "${setting.envVar}" requires interactive configuration and is not supported over the daemon install endpoint.`,
+          );
+        }),
+      requestChoicePlugin:
+        interactions?.requestChoicePlugin ??
+        (async () => {
+          throw new Error(
+            'Marketplace plugin selection is not supported over the daemon install endpoint. Specify a plugin name in the source.',
+          );
+        }),
     });
   const validateExtensionMutationClient = (
     req: Request,
@@ -254,6 +267,29 @@ export function registerWorkspaceExtensionRoutes(
     name?: string;
     version?: string;
   };
+  type ExtensionPendingInteraction =
+    | {
+        id: string;
+        kind: 'marketplace_plugin';
+        marketplace: { name: string };
+        plugins: Array<{ name: string; category?: string; tags?: string[] }>;
+      }
+    | {
+        id: string;
+        kind: 'setting';
+        setting: {
+          name: string;
+          description: string;
+          envVar: string;
+          sensitive: boolean;
+        };
+      };
+  type ExtensionInteractionRequest =
+    | Omit<
+        Extract<ExtensionPendingInteraction, { kind: 'marketplace_plugin' }>,
+        'id'
+      >
+    | Omit<Extract<ExtensionPendingInteraction, { kind: 'setting' }>, 'id'>;
   type ExtensionOperationStatus = {
     v: 1;
     operationId: string;
@@ -261,6 +297,7 @@ export function registerWorkspaceExtensionRoutes(
     status:
       | 'queued'
       | 'running'
+      | 'waiting_for_input'
       | 'succeeded'
       | 'succeeded_with_refresh_error'
       | 'failed';
@@ -273,12 +310,25 @@ export function registerWorkspaceExtensionRoutes(
       failed?: number;
       error?: string;
     };
+    interaction?: ExtensionPendingInteraction;
     error?: string;
   };
   const extensionOperations = new Map<string, ExtensionOperationStatus>();
+  const pendingExtensionInteractions = new Map<
+    string,
+    {
+      interaction: ExtensionPendingInteraction;
+      resolve: (value: string) => void;
+      reject: (reason: Error) => void;
+      timeout: ReturnType<typeof setTimeout>;
+    }
+  >();
   const isTerminalExtensionOperation = (
     operation: ExtensionOperationStatus,
-  ): boolean => operation.status !== 'queued' && operation.status !== 'running';
+  ): boolean =>
+    operation.status !== 'queued' &&
+    operation.status !== 'running' &&
+    operation.status !== 'waiting_for_input';
   const redactExtensionOperationResult = (
     event: ExtensionMutationEvent,
   ): ExtensionMutationEvent => ({
@@ -312,6 +362,67 @@ export function registerWorkspaceExtensionRoutes(
       updatedAt: Date.now(),
     });
   };
+  const cancelPendingExtensionInteraction = (
+    operationId: string,
+    reason: string,
+  ) => {
+    const pending = pendingExtensionInteractions.get(operationId);
+    if (!pending) return;
+    clearTimeout(pending.timeout);
+    pendingExtensionInteractions.delete(operationId);
+    pending.reject(new Error(reason));
+  };
+  const waitForExtensionInteraction = (
+    operationId: string,
+    interaction: ExtensionInteractionRequest,
+  ): Promise<string> => {
+    const pendingInteraction = {
+      ...interaction,
+      id: crypto.randomUUID(),
+    } as ExtensionPendingInteraction;
+    return new Promise<string>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        pendingExtensionInteractions.delete(operationId);
+        updateExtensionOperation(operationId, {
+          status: 'running',
+          interaction: undefined,
+        });
+        reject(new Error('Extension interaction timed out'));
+      }, EXTENSION_INTERACTION_TIMEOUT_MS);
+      pendingExtensionInteractions.set(operationId, {
+        interaction: pendingInteraction,
+        resolve,
+        reject,
+        timeout,
+      });
+      updateExtensionOperation(operationId, {
+        status: 'waiting_for_input',
+        interaction: pendingInteraction,
+      });
+    });
+  };
+  const extensionInteractionHandlers = (operationId: string) => ({
+    requestSetting: (setting: ExtensionSetting) =>
+      waitForExtensionInteraction(operationId, {
+        kind: 'setting',
+        setting: {
+          name: setting.name,
+          description: setting.description,
+          envVar: setting.envVar,
+          sensitive: setting.sensitive === true,
+        },
+      }),
+    requestChoicePlugin: (marketplace: ClaudeMarketplaceConfig) =>
+      waitForExtensionInteraction(operationId, {
+        kind: 'marketplace_plugin',
+        marketplace: { name: marketplace.name },
+        plugins: marketplace.plugins.map((plugin) => ({
+          name: plugin.name,
+          ...(plugin.category ? { category: plugin.category } : {}),
+          ...(plugin.tags ? { tags: plugin.tags } : {}),
+        })),
+      }),
+  });
   const runQueuedExtensionMutation = (
     operation: string,
     failureContext: { source?: string; name?: string },
@@ -342,11 +453,15 @@ export function registerWorkspaceExtensionRoutes(
     void enqueueExtensionInstall(async () => {
       try {
         updateExtensionOperation(operationId, { status: 'running' });
-        const extensionManager = createExtensionManager();
+        const extensionManager = createExtensionManager(
+          extensionInteractionHandlers(operationId),
+        );
         await extensionManager.refreshCache();
         const event = await withExtensionTimeout(
           run(extensionManager),
-          EXTENSION_MUTATION_TIMEOUT_MS,
+          operation === 'install'
+            ? EXTENSION_INSTALL_TIMEOUT_MS
+            : EXTENSION_MUTATION_TIMEOUT_MS,
           `extension ${operation}`,
         );
         extensionsStatusCache = undefined;
@@ -400,11 +515,16 @@ export function registerWorkspaceExtensionRoutes(
           );
         }
       } catch (err) {
+        cancelPendingExtensionInteraction(
+          operationId,
+          'Extension operation ended',
+        );
         const message = redactUrlCredentials(
           err instanceof Error ? err.message : String(err),
         );
         updateExtensionOperation(operationId, {
           status: 'failed',
+          interaction: undefined,
           error: message.slice(0, 500),
         });
         try {
@@ -436,11 +556,16 @@ export function registerWorkspaceExtensionRoutes(
         }
       }
     }).catch((err) => {
+      cancelPendingExtensionInteraction(
+        operationId,
+        'Extension operation ended',
+      );
       const message = redactUrlCredentials(
         err instanceof Error ? err.message : String(err),
       );
       updateExtensionOperation(operationId, {
         status: 'failed',
+        interaction: undefined,
         error: message.slice(0, 500),
       });
       try {
@@ -567,6 +692,75 @@ export function registerWorkspaceExtensionRoutes(
       });
     }
   });
+
+  app.post(
+    '/workspace/extensions/operations/:operationId/interactions/:interactionId',
+    mutate({ strict: true }),
+    async (req, res) => {
+      try {
+        if (
+          !validateExtensionMutationClient(
+            req,
+            res,
+            'POST /workspace/extensions/operations/:operationId/interactions/:interactionId',
+          )
+        ) {
+          return;
+        }
+        const operationId = req.params['operationId'];
+        const interactionId = req.params['interactionId'];
+        const pending =
+          operationId === undefined
+            ? undefined
+            : pendingExtensionInteractions.get(operationId);
+        if (!operationId || !interactionId || !pending) {
+          res.status(404).json({ error: 'Extension interaction not found' });
+          return;
+        }
+        if (pending.interaction.id !== interactionId) {
+          res.status(404).json({ error: 'Extension interaction not found' });
+          return;
+        }
+        const body = safeBody(req);
+        let value: string | undefined;
+        if (pending.interaction.kind === 'marketplace_plugin') {
+          const pluginName = body['pluginName'];
+          if (
+            typeof pluginName !== 'string' ||
+            !pending.interaction.plugins.some(
+              (plugin) => plugin.name === pluginName,
+            )
+          ) {
+            res.status(400).json({ error: 'Invalid marketplace plugin name' });
+            return;
+          }
+          value = pluginName;
+        } else {
+          const settingValue = body['value'];
+          if (typeof settingValue !== 'string') {
+            res
+              .status(400)
+              .json({ error: 'Extension setting value must be a string' });
+            return;
+          }
+          value = settingValue;
+        }
+        clearTimeout(pending.timeout);
+        pendingExtensionInteractions.delete(operationId);
+        updateExtensionOperation(operationId, {
+          status: 'running',
+          interaction: undefined,
+        });
+        pending.resolve(value);
+        res.status(200).json({ accepted: true });
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route:
+            'POST /workspace/extensions/operations/:operationId/interactions/:interactionId',
+        });
+      }
+    },
+  );
 
   // POST /workspace/extensions/install — install an extension and refresh
   // all active sessions asynchronously.

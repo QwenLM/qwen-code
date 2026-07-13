@@ -3715,18 +3715,23 @@ describe('createServeApp', () => {
     });
 
     it('queues extension install and refreshes active sessions', async () => {
-      let requestSettingError: string | undefined;
+      let submittedSetting: string | undefined;
       const restore = mockExtensionManagerMethods({
         async installExtension() {
           const manager = this as unknown as {
-            requestSetting?: (setting: { envVar: string }) => Promise<string>;
+            requestSetting?: (setting: {
+              name: string;
+              description: string;
+              envVar: string;
+              sensitive?: boolean;
+            }) => Promise<string>;
           };
-          try {
-            await manager.requestSetting?.({ envVar: 'API_KEY' });
-          } catch (error) {
-            requestSettingError =
-              error instanceof Error ? error.message : String(error);
-          }
+          submittedSetting = await manager.requestSetting?.({
+            name: 'API key',
+            description: 'API key used by this extension',
+            envVar: 'API_KEY',
+            sensitive: true,
+          });
           return testExtension('installed-ext');
         },
       });
@@ -3755,6 +3760,42 @@ describe('createServeApp', () => {
         expect(res.status).toBe(202);
         expect(res.body).toMatchObject({ accepted: true });
         expect(res.body.operationId).toEqual(expect.any(String));
+        let interactionId = '';
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(
+              `/workspace/extensions/operations/${encodeURIComponent(
+                res.body.operationId as string,
+              )}`,
+            )
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body).toMatchObject({
+            status: 'waiting_for_input',
+            interaction: {
+              kind: 'setting',
+              setting: {
+                name: 'API key',
+                envVar: 'API_KEY',
+                sensitive: true,
+              },
+            },
+          });
+          interactionId = poll.body.interaction.id as string;
+        });
+        expect(JSON.stringify(res.body)).not.toContain('super-secret');
+        const answer = await request(app)
+          .post(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              res.body.operationId as string,
+            )}/interactions/${encodeURIComponent(interactionId)}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ value: 'super-secret' });
+        expect(answer.status).toBe(200);
+        expect(answer.body).toEqual({ accepted: true });
         await vi.waitFor(() => {
           expect(bridge.extensionEvents.at(-1)).toMatchObject({
             status: 'installed',
@@ -3775,9 +3816,7 @@ describe('createServeApp', () => {
           }),
           expect.any(Function),
         );
-        expect(requestSettingError).toContain(
-          'requires interactive configuration',
-        );
+        expect(submittedSetting).toBe('super-secret');
 
         const poll = await request(app)
           .get(
@@ -3802,6 +3841,114 @@ describe('createServeApp', () => {
             refreshed: 1,
             failed: 0,
           },
+        });
+        expect(JSON.stringify(poll.body)).not.toContain('super-secret');
+      } finally {
+        restore();
+      }
+    });
+
+    it('accepts a marketplace plugin selection while installing', async () => {
+      let submittedPlugin: string | undefined;
+      const restore = mockExtensionManagerMethods({
+        async installExtension() {
+          const manager = this as unknown as {
+            requestChoicePlugin?: (marketplace: {
+              name: string;
+              owner: { name: string; email: string };
+              plugins: Array<{
+                name: string;
+                source: string;
+                category?: string;
+                tags?: string[];
+              }>;
+            }) => Promise<string>;
+          };
+          submittedPlugin = await manager.requestChoicePlugin?.({
+            name: 'example-marketplace',
+            owner: { name: 'Example', email: 'example@example.com' },
+            plugins: [
+              {
+                name: 'example-plugin',
+                source: 'https://example.com/plugin',
+                category: 'tools',
+                tags: ['example'],
+              },
+            ],
+          });
+          return testExtension('example-plugin');
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+        const install = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source: 'https://example.com/marketplace', consent: true });
+
+        let interactionId = '';
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(
+              `/workspace/extensions/operations/${encodeURIComponent(
+                install.body.operationId as string,
+              )}`,
+            )
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body).toMatchObject({
+            status: 'waiting_for_input',
+            interaction: {
+              kind: 'marketplace_plugin',
+              marketplace: { name: 'example-marketplace' },
+              plugins: [
+                {
+                  name: 'example-plugin',
+                  category: 'tools',
+                  tags: ['example'],
+                },
+              ],
+            },
+          });
+          interactionId = poll.body.interaction.id as string;
+        });
+        const invalid = await request(app)
+          .post(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              install.body.operationId as string,
+            )}/interactions/${encodeURIComponent(interactionId)}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ pluginName: 'missing-plugin' });
+        expect(invalid.status).toBe(400);
+
+        const answer = await request(app)
+          .post(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              install.body.operationId as string,
+            )}/interactions/${encodeURIComponent(interactionId)}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ pluginName: 'example-plugin' });
+        expect(answer.status).toBe(200);
+        await vi.waitFor(() => {
+          expect(submittedPlugin).toBe('example-plugin');
+          expect(bridge.extensionEvents.at(-1)).toMatchObject({
+            status: 'installed',
+            name: 'example-plugin',
+          });
         });
       } finally {
         restore();

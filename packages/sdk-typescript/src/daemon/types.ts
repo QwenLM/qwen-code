@@ -2911,6 +2911,7 @@ export type ExtensionMutationResponse = ExtensionInstallResponse;
 export type ExtensionOperationState =
   | 'queued'
   | 'running'
+  | 'waiting_for_input'
   | 'succeeded'
   | 'succeeded_with_refresh_error'
   | 'failed';
@@ -2935,7 +2936,38 @@ export interface ExtensionOperationStatus {
   source?: string;
   name?: string;
   result?: ExtensionOperationResult;
+  interaction?: ExtensionPendingInteraction;
   error?: string;
+}
+
+export type ExtensionPendingInteraction =
+  | ExtensionMarketplacePluginInteraction
+  | ExtensionSettingInteraction;
+
+export interface ExtensionMarketplacePluginInteraction {
+  id: string;
+  kind: 'marketplace_plugin';
+  marketplace: { name: string };
+  plugins: Array<{ name: string; category?: string; tags?: string[] }>;
+}
+
+export interface ExtensionSettingInteraction {
+  id: string;
+  kind: 'setting';
+  setting: {
+    name: string;
+    description: string;
+    envVar: string;
+    sensitive: boolean;
+  };
+}
+
+export type ExtensionInteractionResponse =
+  | { pluginName: string }
+  | { value: string };
+
+export interface ExtensionInteractionResponseResult {
+  accepted: true;
 }
 
 export type ExtensionScope = 'user' | 'workspace';
