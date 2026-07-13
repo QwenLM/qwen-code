@@ -17,7 +17,7 @@ describe('createExtensionsController', () => {
     vi.restoreAllMocks();
   });
 
-  it('keeps the commit lane until a timed-out manual refresh settles', async () => {
+  it('releases the commit lane when a manual refresh times out', async () => {
     vi.useFakeTimers();
     let refreshCalls = 0;
     let releaseRefresh:
@@ -56,12 +56,11 @@ describe('createExtensionsController', () => {
       (error: unknown) => (error instanceof Error ? error.message : 'error'),
     );
     await vi.advanceTimersByTimeAsync(0);
-    expect(refreshCalls).toBe(1);
+    expect(refreshCalls).toBe(2);
+    await expect(nextOutcome).resolves.toEqual({ refreshed: 1, failed: 0 });
 
     releaseRefresh?.({ refreshed: 0, failed: 0 });
     await vi.advanceTimersByTimeAsync(0);
-    expect(refreshCalls).toBe(2);
-    await expect(nextOutcome).resolves.toEqual({ refreshed: 1, failed: 0 });
   });
 
   it('releases the commit lane at the durable commit boundary', async () => {

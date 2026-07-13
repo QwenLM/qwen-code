@@ -307,21 +307,28 @@ export function createExtensionsController(
     refreshed: number;
     failed: number;
   }> => {
-    const refresh = commitQueue.run(async () => {
-      extensionsStatusCache = undefined;
-      return await workspace.refreshExtensionsForAllSessions();
-    });
+    const queueAbort = new AbortController();
+    let releaseCommitLane: (() => void) | undefined;
+    const refresh = commitQueue.runUntilReleased(
+      async (release) => {
+        releaseCommitLane = release;
+        extensionsStatusCache = undefined;
+        return await workspace.refreshExtensionsForAllSessions();
+      },
+      { signal: queueAbort.signal },
+    );
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
         refresh,
         new Promise<never>((_resolve, reject) => {
           timer = setTimeout(() => {
-            reject(
-              new Error(
-                `extension refresh timed out after ${EXTENSION_REFRESH_TIMEOUT_MS}ms`,
-              ),
+            const error = new Error(
+              `extension refresh timed out after ${EXTENSION_REFRESH_TIMEOUT_MS}ms`,
             );
+            releaseCommitLane?.();
+            queueAbort.abort(error);
+            reject(error);
           }, EXTENSION_REFRESH_TIMEOUT_MS);
           timer.unref?.();
         }),

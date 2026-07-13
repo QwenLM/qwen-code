@@ -102,8 +102,9 @@ type InitialActivation =
   | { scope: 'workspace'; workspaceId: string };
 ```
 
-The daemon install endpoint accepts Git, GitHub Release, and npm sources.
-Local/link remains a local CLI feature. Update preserves the extension id,
+The daemon install endpoint accepts HTTPS Git, GitHub Release, and npm sources
+under the public network policy. SSH and local/link sources remain local CLI
+features. Update preserves the extension id,
 manifest name, settings, and activation policy. “Already current” is a
 successful `updated: false` result. Uninstall is idempotent and removes both the
 artifact and policy.
@@ -135,8 +136,9 @@ or credentials selected by the installed artifact. Prepared mutations enter a
 separate single-concurrency FIFO commit queue in the order preparation
 finishes. Activation and uninstall enter only the commit queue; check-updates
 enters only the preparation queue. Manual refresh is serialized through the
-commit queue, and an HTTP timeout does not release that lane until the
-underlying refresh settles. Sensitive settings are staged as one atomic secret
+commit queue. Its HTTP timeout releases that lane so a stalled runtime refresh
+cannot permanently block later extension mutations; the already-started refresh
+may still settle afterward. Sensitive settings are staged as one atomic secret
 bundle under a per-prepare revision. A non-secret selector records that revision
 and secure-storage backend inside the staged artifact, so only the winning
 artifact commit activates a complete bundle. The store commit is therefore the
@@ -177,9 +179,10 @@ uses a daemon-wide FIFO shared by mutations and the generation poller. A
 mutation reserves its position at the durable commit callback, so later
 generations cannot refresh a runtime first even when earlier post-commit work
 finishes later.
-The ACP bridge bounds each session refresh at 30 seconds; the route layer does
-not abandon an uncancelled refresh or release its FIFO slot on a separate
-watchdog. Applying generation N also satisfies waiters for older generations,
+The ACP bridge bounds each session refresh at 30 seconds. If the aggregate
+refresh still exceeds the route deadline, the controller releases the commit
+lane without cancelling the underlying RPC. Applying generation N also
+satisfies waiters for older generations,
 and a late lower-generation refresh therefore cannot move the applied
 generation backwards. Partial refresh failure or post-commit reload/cleanup
 failure produces `succeeded_with_warnings` with workspace-specific or commit
