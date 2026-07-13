@@ -648,7 +648,7 @@ async function main() {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch((error) => {
-    console.error(error.stderr || error.message);
+    console.error(error.stderr ? `${error.message}\n${error.stderr}` : error.message);
     process.exit(1);
   });
 }
