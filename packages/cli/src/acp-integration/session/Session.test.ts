@@ -8344,7 +8344,7 @@ describe('Session', () => {
         );
         const inProgressIndex = updates.findIndex(
           (update) =>
-            update.sessionUpdate === 'tool_call' &&
+            update.sessionUpdate === 'tool_call_update' &&
             update.toolCallId === 'call-1' &&
             update.status === 'in_progress' &&
             'rawInput' in update &&
@@ -8665,7 +8665,7 @@ describe('Session', () => {
         );
       });
 
-      it('surfaces a cleanup error after a normally completed stream', async () => {
+      it('preserves a normally completed stream when preparation cleanup fails', async () => {
         vi.mocked(mockClient.sessionUpdate).mockImplementation(
           async ({ update }) => {
             if (update._meta?.['preparationDiscarded'] === true) {
@@ -8687,7 +8687,10 @@ describe('Session', () => {
             sessionId: 'test-session-id',
             prompt: [{ type: 'text', text: 'finish normally' }],
           }),
-        ).rejects.toThrow('cleanup failed');
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining('cleanup failed'),
+        );
       });
 
       it('tracks unresolved preparation in a Stop Hook continuation stream', async () => {

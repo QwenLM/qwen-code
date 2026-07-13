@@ -1477,7 +1477,9 @@ export function convertOpenAIChunkToGemini(
     };
   }
 
-  setToolCallPreparations(response, preparations);
+  if (preparations.length > 0) {
+    setToolCallPreparations(response, preparations);
+  }
 
   return response;
 }

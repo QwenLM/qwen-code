@@ -186,6 +186,36 @@ describe('ToolCallEmitter', () => {
       );
     });
 
+    it('updates the prepared tool call when execution starts', async () => {
+      await emitter.emitStart({
+        callId: 'call-1',
+        toolName: 'read_file',
+        args: {},
+        status: 'pending',
+        phase: 'preparing',
+      });
+      await emitter.emitStart({
+        callId: 'call-1',
+        toolName: 'read_file',
+        args: { file_path: 'README.md' },
+        status: 'in_progress',
+      });
+
+      expect(sendUpdateSpy.mock.calls.map(([update]) => update)).toEqual([
+        expect.objectContaining({
+          sessionUpdate: 'tool_call',
+          toolCallId: 'call-1',
+          _meta: expect.objectContaining({ phase: 'preparing' }),
+        }),
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-1',
+          status: 'in_progress',
+          rawInput: { file_path: 'README.md' },
+        }),
+      ]);
+    });
+
     it('emits a protocol-valid discarded preparation terminal update', async () => {
       await emitter.emitPreparationDiscarded(
         'call-1',

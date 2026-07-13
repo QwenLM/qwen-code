@@ -228,24 +228,18 @@ const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
 
-/**
- * Finalizes unresolved preparations without letting cleanup failures mask a
- * stream error or cancellation. Cleanup failures still propagate after a
- * successful stream so ACP update failures remain fail-fast.
- */
+/** Finalizes preparations without allowing ACP cleanup to change the stream outcome. */
 async function finalizeToolCallPreparations(
   tracker: ToolCallPreparationTracker,
-  preservePrimaryOutcome: boolean,
+  includeResolved: boolean,
   streamName: string,
 ): Promise<void> {
   try {
-    await tracker.discard(preservePrimaryOutcome);
+    await tracker.discard(includeResolved);
   } catch (error) {
-    if (!preservePrimaryOutcome) throw error;
-
     const message = error instanceof Error ? error.message : String(error);
     debugLogger.warn(
-      `Failed to discard tool preparations for ${streamName}; preserving the original stream outcome: ${message}`,
+      `Failed to discard tool preparations for ${streamName}; continuing stream: ${message}`,
     );
   }
 }
@@ -2076,15 +2070,11 @@ export class Session implements SessionContext {
                     streamFailed = true;
                     throw error;
                   } finally {
-                    try {
-                      await finalizeToolCallPreparations(
-                        preparationTracker,
-                        streamFailed || pendingSend.signal.aborted,
-                        'main prompt',
-                      );
-                    } finally {
-                      await messageDisplay?.finish();
-                    }
+                    await finalizeToolCallPreparations(
+                      preparationTracker,
+                      streamFailed || pendingSend.signal.aborted,
+                      'main prompt',
+                    );
                   }
                 } catch (error) {
                   // Restore the stripped orphan if the send threw before
@@ -2437,15 +2427,11 @@ export class Session implements SessionContext {
               streamFailed = true;
               throw error;
             } finally {
-              try {
-                await finalizeToolCallPreparations(
-                  preparationTracker,
-                  streamFailed || pendingSend.signal.aborted,
-                  'Stop Hook continuation',
-                );
-              } finally {
-                await messageDisplay?.finish();
-              }
+              await finalizeToolCallPreparations(
+                preparationTracker,
+                streamFailed || pendingSend.signal.aborted,
+                'Stop Hook continuation',
+              );
             }
           } catch (error) {
             // Fire StopFailure hook (fire-and-forget)
