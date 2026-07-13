@@ -786,6 +786,8 @@ describe('OpenAIContentConverter', () => {
 
     it.each([
       ['an unambiguous leading opening prefix', '<think'],
+      ['a short incomplete closing prefix', 'leaked visible reasoning </t'],
+      ['a longer incomplete closing prefix', 'leaked visible reasoning </th'],
       ['an incomplete closing prefix', 'leaked visible reasoning </thi'],
     ])('rejects %s at stream finish', (_name, visibleText) => {
       const stream = withStreamParser(new StreamingToolCallParser());

@@ -166,6 +166,9 @@
   margin: 5px 0;
   min-width: 0;
   overflow: hidden;
+  /* Sizes the timeline ruler's visibility to the panel itself (split
+     view panes are narrower than the viewport). */
+  container-type: inline-size;
 }
 
 .header {
@@ -231,4 +234,97 @@
 
 .detail {
   margin-top: 4px;
+}
+
+/* Shared-axis mini timeline: one bar per agent laid out against the
+   group's combined wall-clock span. */
+.track {
+  position: relative;
+  height: 6px;
+  margin: 1px 0 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted-foreground) 14%, transparent);
+}
+
+.bar {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted-foreground) 60%, transparent);
+}
+
+.barRunning {
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--agent-blue-500) 55%, transparent),
+    var(--agent-blue-500)
+  );
+}
+
+.barRunning::after {
+  content: '';
+  position: absolute;
+  right: -1px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--agent-blue-500);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .barRunning::after {
+    animation: bar-pulse 1.6s ease-out infinite;
+  }
+}
+
+@keyframes bar-pulse {
+  0% {
+    box-shadow: 0 0 0 0
+      color-mix(in srgb, var(--agent-blue-500) 55%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+.ruler {
+  position: relative;
+  height: 15px;
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.tick {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  padding-top: 2px;
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-foreground);
+}
+
+.tick::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 1px;
+  height: 3px;
+  background: var(--border);
+}
+
+/* Narrow panels (split view, mobile): the bars still read — overlap and
+   relative duration — while each row keeps its absolute numbers, so only
+   the ruler goes. */
+@container (max-width: 380px) {
+  .ruler {
+    display: none;
+  }
 }

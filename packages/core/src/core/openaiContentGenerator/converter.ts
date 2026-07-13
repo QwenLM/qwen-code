@@ -28,7 +28,7 @@ import {
   convertSchema,
   type SchemaComplianceMode,
 } from '../../utils/schemaConverter.js';
-import { InvalidStreamError } from '../invalid-stream-error.js';
+import { InvalidStreamError } from '../geminiChat.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
 const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
@@ -1117,11 +1117,13 @@ function isTerminalThinkingTagLeak(
   state: NonNullable<RequestContext['visibleThinkingTagState']>,
 ): boolean {
   const pendingTag = state.pendingTag.toLowerCase();
+  const isClosingTagPrefix = pendingTag.startsWith('</');
+  const isOpeningThinkTagPrefix = pendingTag.startsWith('<think');
   return (
     isPossibleThinkingTagPrefix(state.pendingTag) &&
-    (pendingTag.startsWith('</thi')
+    (isClosingTagPrefix
       ? state.openTagCount === 0
-      : pendingTag.startsWith('<think') && state.atVisibleStart)
+      : isOpeningThinkTagPrefix && state.atVisibleStart)
   );
 }
 

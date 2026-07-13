@@ -38,7 +38,7 @@ Replay is page-transactional at the protocol boundary: updates emitted before a 
 
 ## Compatibility and limits
 
-The old singular route, persisted cursor key and ACP error mapping remain intact. The new route keeps the existing default page size of 100, maximum of 500, 256 MiB snapshot cap, 32-entry/64 MiB index cache and five-minute cache lifetime. The first index scan remains linear in the frozen snapshot size.
+The old singular route, persisted cursor key and ACP error mapping remain intact. The new route keeps the existing default page size of 100, maximum of 500, 256 MiB snapshot cap, 32-entry/64 MiB index cache and five-minute cache lifetime. The workspace-qualified route additionally caps each page at 4 MiB of persisted source records, 32 MiB of serialized response JSON and 64 KiB of cursor state. `limit` is therefore a record-count ceiling rather than a promise that every successful page contains that many records. A single aggregate record over the source budget returns `transcript_page_too_large`; an oversized replay cursor terminates the otherwise successful page as partial without issuing a continuation cursor. The first index scan remains linear in the frozen snapshot size.
 
 The TypeScript SDK exposes the method on `WorkspaceDaemonClient`. It forces native REST transport and has no ACP route mapping. Older daemons can be detected through the new capability and continue returning 404 for the route.
 
