@@ -452,6 +452,12 @@ describe('DaemonStatusDialog', () => {
       container!.querySelectorAll('button[aria-label]'),
     ).filter((b) => (b.getAttribute('aria-label') ?? '').length > 20);
     expect(helpButtons.length).toBeGreaterThanOrEqual(12);
+    // The ⓘ must be a SIBLING of the heading, not a child: a nested button's
+    // aria-label folds the whole help sentence into the heading's accessible
+    // name. No <h3> may contain a button.
+    for (const h of container!.querySelectorAll('h3')) {
+      expect(h.querySelector('button')).toBeNull();
+    }
     // The two highest-value disambiguations render in the DOM: the model-health
     // errors-vs-retries explanation, and that the HTTP "Requests" chart is NOT
     // model calls (resolving the "two errors charts" confusion).

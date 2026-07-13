@@ -141,6 +141,20 @@
   color: var(--muted-foreground);
 }
 
+/* Chart cards render the title and its ⓘ help as siblings in a flex row (the
+   hint must stay out of the <h3> for a clean heading accessible name). The row
+   owns the bottom gap so the heading's own margin doesn't double it. */
+.cardHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+}
+
+.cardHeader .cardTitle {
+  margin: 0;
+}
+
 /* Per-chart help affordance: an ⓘ button whose hover/focus reveals a plain
    explanation. The card has no `overflow: hidden` and the ⓘ sits at the card's
    top-left after the title, so the bubble opens downward into the card's own
@@ -149,7 +163,6 @@
   position: relative;
   display: inline-flex;
   vertical-align: middle;
-  margin-left: 6px;
 }
 
 .infoHintButton {

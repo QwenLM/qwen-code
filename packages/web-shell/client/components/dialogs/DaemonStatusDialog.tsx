@@ -200,10 +200,20 @@ function Card({
 }) {
   return (
     <section className={styles.card}>
-      <h3 className={styles.cardTitle}>
-        {title}
-        {help && <InfoHint text={help} />}
-      </h3>
+      {/* Keep the ⓘ a SIBLING of the heading, not a child: the accessible-name
+          algorithm folds a descendant button's `aria-label` (the whole help
+          sentence) into the heading name, so a nested hint would make screen
+          readers announce "Model API health Each failed attempt = 1 error…"
+          in the heading rotor. The flex header preserves the visual inline
+          layout. Cards without help keep the bare heading. */}
+      {help ? (
+        <div className={styles.cardHeader}>
+          <h3 className={styles.cardTitle}>{title}</h3>
+          <InfoHint text={help} />
+        </div>
+      ) : (
+        <h3 className={styles.cardTitle}>{title}</h3>
+      )}
       {children}
     </section>
   );

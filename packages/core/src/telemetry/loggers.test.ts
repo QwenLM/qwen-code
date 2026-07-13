@@ -591,6 +591,21 @@ describe('loggers', () => {
       logApiError(makeFakeConfig({ sessionId: 'test-session-id' }), event);
       expect(apiActivityTracker.peek()).toEqual({ errors: 1, retries: 0 });
     });
+
+    it('counts the error even when the OTel SDK is not initialized', () => {
+      vi.spyOn(sdk, 'isTelemetrySdkInitialized').mockReturnValue(false);
+      apiActivityTracker.drain();
+      const event = new ApiErrorEvent({
+        model: 'test-model',
+        durationMs: 100,
+        promptId: 'user_query',
+        errorMessage: 'boom',
+      });
+      logApiError(makeFakeConfig({ sessionId: 's' }), event);
+      // The daemon health chart is independent of OTel export state — the
+      // counter is bumped before the SDK guard, mirroring logApiRetry.
+      expect(apiActivityTracker.peek().errors).toBe(1);
+    });
   });
 
   describe('logApiRequest', () => {
