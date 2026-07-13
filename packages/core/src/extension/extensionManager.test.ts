@@ -29,6 +29,7 @@ import {
 } from './extensionManager.js';
 import type { MCPServerConfig, ExtensionInstallMetadata } from '../index.js';
 import { ExtensionStore } from './extension-store.js';
+import { ExtensionPreferencesStore } from './extensionPreferences.js';
 
 const mockGit = {
   clone: vi.fn(),
@@ -834,6 +835,62 @@ describe('extension tests', () => {
   });
 
   describe('uninstallExtension', () => {
+    it('returns a committed warning when preference cleanup fails', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'my-extension',
+        version: '1.0.0',
+        installMetadata: {
+          type: 'local',
+          source: tempWorkspaceDir,
+          originSource: 'QwenCode',
+        },
+      });
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      vi.spyOn(ExtensionPreferencesStore.prototype, 'clear').mockImplementation(
+        () => {
+          throw new Error('cleanup failed');
+        },
+      );
+
+      const result = await manager.uninstallExtension('my-extension', false);
+
+      expect(result.warnings).toEqual([
+        {
+          code: 'extension_preferences_cleanup_failed',
+          error: 'cleanup failed',
+        },
+      ]);
+    });
+
+    it('returns a committed warning when uninstall runtime refresh fails', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'my-extension',
+        version: '1.0.0',
+        installMetadata: {
+          type: 'local',
+          source: tempWorkspaceDir,
+          originSource: 'QwenCode',
+        },
+      });
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      vi.spyOn(manager, 'refreshTools').mockRejectedValue(
+        new Error('refresh failed'),
+      );
+
+      const result = await manager.uninstallExtension('my-extension', false);
+
+      expect(result.warnings).toEqual([
+        {
+          code: 'extension_runtime_refresh_failed',
+          error: 'refresh failed',
+        },
+      ]);
+    });
+
     it('should emit mutation lifecycle events around uninstall', async () => {
       createExtension({
         extensionsDir: userExtensionsDir,
@@ -1337,6 +1394,35 @@ describe('extension tests', () => {
       );
 
       expect(refreshTools).toHaveBeenCalledTimes(4);
+    });
+
+    it('returns a committed warning when activation runtime refresh fails', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'my-extension',
+        version: '1.0.0',
+      });
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extension = manager.getLoadedExtensions()[0]!;
+      vi.spyOn(manager, 'refreshTools').mockRejectedValue(
+        new Error('refresh failed'),
+      );
+
+      const result = await manager.setExtensionDefaultActivation(
+        extension.id,
+        'disabled',
+      );
+
+      expect(result.warnings).toEqual([
+        {
+          code: 'extension_runtime_refresh_failed',
+          error: 'refresh failed',
+        },
+      ]);
+      expect(result.extensions[extension.id]?.defaultActivation).toBe(
+        'disabled',
+      );
     });
 
     it('derives activation from the supplied store snapshot', async () => {

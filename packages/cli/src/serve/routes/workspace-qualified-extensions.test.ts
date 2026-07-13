@@ -179,6 +179,10 @@ function mockExtensionManager(
     },
   };
   vi.spyOn(ExtensionManager.prototype, 'refreshCache').mockResolvedValue();
+  vi.spyOn(
+    ExtensionManager.prototype,
+    'refreshCacheWithSnapshot',
+  ).mockResolvedValue(snapshot);
   vi.spyOn(ExtensionManager.prototype, 'getLoadedExtensions').mockReturnValue([
     extension,
   ]);
@@ -190,6 +194,15 @@ function mockExtensionManager(
     ExtensionManager.prototype,
     'getExtensionActivation',
   ).mockResolvedValue({
+    default: 'disabled',
+    workspace: 'inherit',
+    effective: 'disabled',
+    source: 'default',
+  });
+  vi.spyOn(
+    ExtensionManager.prototype,
+    'getExtensionActivationFromSnapshot',
+  ).mockReturnValue({
     default: 'disabled',
     workspace: 'inherit',
     effective: 'disabled',
@@ -281,6 +294,12 @@ describe('extension management v2 REST', () => {
           },
         ],
       });
+      expect(
+        ExtensionManager.prototype.refreshCacheWithSnapshot,
+      ).toHaveBeenCalledOnce();
+      expect(
+        ExtensionManager.prototype.getExtensionStoreSnapshot,
+      ).not.toHaveBeenCalled();
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
@@ -342,6 +361,16 @@ describe('extension management v2 REST', () => {
           },
         ],
       });
+      expect(
+        ExtensionManager.prototype.getExtensionActivationFromSnapshot,
+      ).toHaveBeenCalledWith(
+        extensionId,
+        expect.objectContaining({ generation: 7 }),
+        h.secondary.workspaceCwd,
+      );
+      expect(
+        ExtensionManager.prototype.getExtensionActivation,
+      ).not.toHaveBeenCalled();
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
@@ -956,6 +985,14 @@ describe('extension management v2 REST', () => {
 
       vi.mocked(
         ExtensionManager.prototype.getExtensionStoreSnapshot,
+      ).mockResolvedValue({
+        version: 2,
+        generation: 8,
+        legacyProjectionHash: 'hash',
+        extensions: {},
+      });
+      vi.mocked(
+        ExtensionManager.prototype.refreshCacheWithSnapshot,
       ).mockResolvedValue({
         version: 2,
         generation: 8,

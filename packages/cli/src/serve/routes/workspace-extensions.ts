@@ -960,8 +960,7 @@ export function registerWorkspaceExtensionRoutes(
         boundWorkspace,
         true,
       );
-      await manager.refreshCache();
-      const snapshot = await manager.getExtensionStoreSnapshot();
+      const snapshot = await manager.refreshCacheWithSnapshot();
       res.status(200).json({
         v: 1,
         generation: snapshot.generation,
@@ -1377,28 +1376,24 @@ export function registerWorkspaceExtensionRoutes(
           runtime.workspaceCwd,
           runtime.trusted,
         );
-        await manager.refreshCache();
-        const snapshot = await manager.getExtensionStoreSnapshot();
-        const extensions = await Promise.all(
-          manager.getLoadedExtensions().map(async (extension) => {
-            const activation = await manager.getExtensionActivation(
-              extension.id,
-              runtime.workspaceCwd,
-            );
-            return {
-              extensionId: extension.id,
-              name: extension.name,
-              version: extension.version,
-              defaultActivation: activation.default,
-              workspaceActivation:
-                activation.workspace === 'inherit'
-                  ? null
-                  : activation.workspace,
-              effectiveActivation: activation.effective,
-              activationSource: activation.source,
-            };
-          }),
-        );
+        const snapshot = await manager.refreshCacheWithSnapshot();
+        const extensions = manager.getLoadedExtensions().map((extension) => {
+          const activation = manager.getExtensionActivationFromSnapshot(
+            extension.id,
+            snapshot,
+            runtime.workspaceCwd,
+          );
+          return {
+            extensionId: extension.id,
+            name: extension.name,
+            version: extension.version,
+            defaultActivation: activation.default,
+            workspaceActivation:
+              activation.workspace === 'inherit' ? null : activation.workspace,
+            effectiveActivation: activation.effective,
+            activationSource: activation.source,
+          };
+        });
         res.status(200).json({
           v: 1,
           workspaceId: runtime.workspaceId,

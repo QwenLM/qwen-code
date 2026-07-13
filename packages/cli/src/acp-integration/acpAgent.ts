@@ -7545,30 +7545,10 @@ class QwenAgent implements Agent {
         const extensionManager = session.getConfig().getExtensionManager();
         const skillManager = session.getConfig().getSkillManager();
         await Promise.all([
-          extensionManager.refreshCache().catch((err: unknown) => {
-            debugLogger.warn(
-              `Extension refresh failed for session ${sessionId}: ${
-                err instanceof Error ? err.message : String(err)
-              }`,
-            );
-          }),
-          skillManager?.refreshCache().catch((err: unknown) => {
-            debugLogger.warn(
-              `Skill refresh failed after extension refresh for session ${sessionId}: ${
-                err instanceof Error ? err.message : String(err)
-              }`,
-            );
-          }),
+          extensionManager.refreshCache(),
+          skillManager?.refreshCache(),
         ]);
-        try {
-          await extensionManager.refreshTools();
-        } catch (err) {
-          debugLogger.warn(
-            `Extension tool refresh failed for session ${sessionId}: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-        }
+        await extensionManager.refreshTools();
         await session.sendAvailableCommandsUpdate();
         return { ok: true };
       }

@@ -296,6 +296,10 @@ export interface CommittedExtensionMutation {
   warnings?: Array<{ code: string; error: string }>;
 }
 
+export interface ExtensionStoreMutationResult extends ExtensionStoreSnapshot {
+  warnings?: Array<{ code: string; error: string }>;
+}
+
 export class PreparedExtensionConsumedError extends Error {
   readonly code = 'prepared_extension_consumed';
 
@@ -597,7 +601,7 @@ export class ExtensionManager {
     name: string,
     scope: SettingScope,
     cwd?: string,
-  ): Promise<ExtensionStoreSnapshot> {
+  ): Promise<ExtensionStoreMutationResult> {
     const currentDir = cwd ?? this.workspaceDir;
     if (
       scope === SettingScope.System ||
@@ -632,8 +636,8 @@ export class ExtensionManager {
       const config = getTelemetryConfig(currentDir, this.telemetrySettings);
       logExtensionEnable(config, new ExtensionEnableEvent(name, scope));
       this.applyStoreActivation(snapshot);
-      await this.refreshToolsAfterActivation(name);
-      return snapshot;
+      const warning = await this.refreshToolsAfterActivation(name);
+      return warning ? { ...snapshot, warnings: [warning] } : snapshot;
     } finally {
       endMutation();
     }
@@ -646,7 +650,7 @@ export class ExtensionManager {
     name: string,
     scope: SettingScope,
     cwd?: string,
-  ): Promise<ExtensionStoreSnapshot> {
+  ): Promise<ExtensionStoreMutationResult> {
     const currentDir = cwd ?? this.workspaceDir;
     const config = getTelemetryConfig(currentDir, this.telemetrySettings);
     if (
@@ -681,8 +685,8 @@ export class ExtensionManager {
       }
       logExtensionDisable(config, new ExtensionDisableEvent(name, scope));
       this.applyStoreActivation(snapshot);
-      await this.refreshToolsAfterActivation(name);
-      return snapshot;
+      const warning = await this.refreshToolsAfterActivation(name);
+      return warning ? { ...snapshot, warnings: [warning] } : snapshot;
     } finally {
       endMutation();
     }
@@ -729,7 +733,7 @@ export class ExtensionManager {
   async setExtensionDefaultActivation(
     extensionId: string,
     activation: ExtensionActivation,
-  ): Promise<ExtensionStoreSnapshot> {
+  ): Promise<ExtensionStoreMutationResult> {
     const extension = this.findExtensionById(extensionId);
     const endMutation = this.beginMutation('setExtensionDefaultActivation');
     try {
@@ -738,8 +742,8 @@ export class ExtensionManager {
         activation,
       );
       this.applyStoreActivation(snapshot);
-      await this.refreshToolsAfterActivation(extension.name);
-      return snapshot;
+      const warning = await this.refreshToolsAfterActivation(extension.name);
+      return warning ? { ...snapshot, warnings: [warning] } : snapshot;
     } finally {
       endMutation();
     }
@@ -748,7 +752,7 @@ export class ExtensionManager {
   async setExtensionActivationScope(
     extensionId: string,
     activation: InitialExtensionActivation,
-  ): Promise<ExtensionStoreSnapshot> {
+  ): Promise<ExtensionStoreMutationResult> {
     const extension = this.findExtensionById(extensionId);
     const endMutation = this.beginMutation('setExtensionActivationScope');
     try {
@@ -757,8 +761,8 @@ export class ExtensionManager {
         activation,
       );
       this.applyStoreActivation(snapshot);
-      await this.refreshToolsAfterActivation(extension.name);
-      return snapshot;
+      const warning = await this.refreshToolsAfterActivation(extension.name);
+      return warning ? { ...snapshot, warnings: [warning] } : snapshot;
     } finally {
       endMutation();
     }
@@ -768,7 +772,7 @@ export class ExtensionManager {
     extensionId: string,
     workspacePath: string,
     activation: ExtensionActivation,
-  ): Promise<ExtensionStoreSnapshot> {
+  ): Promise<ExtensionStoreMutationResult> {
     const extension = this.findExtensionById(extensionId);
     const endMutation = this.beginMutation('setExtensionWorkspaceActivation');
     try {
@@ -778,8 +782,8 @@ export class ExtensionManager {
         activation,
       );
       this.applyStoreActivation(snapshot);
-      await this.refreshToolsAfterActivation(extension.name);
-      return snapshot;
+      const warning = await this.refreshToolsAfterActivation(extension.name);
+      return warning ? { ...snapshot, warnings: [warning] } : snapshot;
     } finally {
       endMutation();
     }
@@ -788,7 +792,7 @@ export class ExtensionManager {
   async clearExtensionWorkspaceActivation(
     extensionId: string,
     workspacePath: string,
-  ): Promise<ExtensionStoreSnapshot> {
+  ): Promise<ExtensionStoreMutationResult> {
     const extension = this.findExtensionById(extensionId);
     const endMutation = this.beginMutation('clearExtensionWorkspaceActivation');
     try {
@@ -797,8 +801,8 @@ export class ExtensionManager {
         workspacePath,
       );
       this.applyStoreActivation(snapshot);
-      await this.refreshToolsAfterActivation(extension.name);
-      return snapshot;
+      const warning = await this.refreshToolsAfterActivation(extension.name);
+      return warning ? { ...snapshot, warnings: [warning] } : snapshot;
     } finally {
       endMutation();
     }
@@ -830,12 +834,21 @@ export class ExtensionManager {
     }
   }
 
-  private async refreshToolsAfterActivation(name: string): Promise<void> {
-    await this.refreshTools().catch((error) => {
+  private async refreshToolsAfterActivation(
+    name: string,
+  ): Promise<{ code: string; error: string } | undefined> {
+    try {
+      await this.refreshTools();
+      return undefined;
+    } catch (error) {
       debugLogger.warn(
         `Extension "${name}" activation changed, but runtime refresh failed: ${getErrorMessage(error)}`,
       );
-    });
+      return {
+        code: 'extension_runtime_refresh_failed',
+        error: getErrorMessage(error),
+      };
+    }
   }
 
   // ==========================================================================
@@ -1043,6 +1056,12 @@ export class ExtensionManager {
    * Refreshes the extension cache from disk.
    */
   async refreshCache(options?: { names?: string[] }): Promise<void> {
+    await this.refreshCacheWithSnapshot(options);
+  }
+
+  async refreshCacheWithSnapshot(options?: {
+    names?: string[];
+  }): Promise<ExtensionStoreSnapshot> {
     const requestedNames = options?.names?.filter(Boolean) ?? [];
     const { value: extensions, snapshot } =
       await this.extensionStore.readConsistent(async () => {
@@ -1074,6 +1093,7 @@ export class ExtensionManager {
     });
     this.extensionCache = nextCache;
     this.applyStoreActivation(snapshot);
+    return snapshot;
   }
 
   getLoadedExtensions(): Extension[] {
@@ -2220,7 +2240,7 @@ export class ExtensionManager {
     extensionIdentifier: string,
     isUpdate: boolean,
     cwd?: string,
-  ): Promise<ExtensionStoreSnapshot> {
+  ): Promise<ExtensionStoreMutationResult> {
     const endMutation = this.beginMutation('uninstallExtension');
     try {
       const currentDir = cwd ?? this.workspaceDir;
@@ -2258,7 +2278,7 @@ export class ExtensionManager {
     extensionId: string,
     isUpdate: boolean,
     cwd?: string,
-  ): Promise<ExtensionStoreSnapshot> {
+  ): Promise<ExtensionStoreMutationResult> {
     const endMutation = this.beginMutation('uninstallExtension');
     try {
       const snapshot = await this.extensionStore.readSnapshot();
@@ -2280,7 +2300,7 @@ export class ExtensionManager {
     destinationDirectory: string,
     isUpdate: boolean,
     telemetryConfig: Config,
-  ): Promise<ExtensionStoreSnapshot> {
+  ): Promise<ExtensionStoreMutationResult> {
     const snapshot = await this.extensionStore.commitArtifact({
       operation: 'uninstall',
       identity,
@@ -2288,23 +2308,34 @@ export class ExtensionManager {
     });
     this.extensionCache?.delete(identity.name);
     if (isUpdate) return snapshot;
+    const warnings: NonNullable<ExtensionStoreMutationResult['warnings']> = [];
     try {
       this.preferencesStore.clear(identity.name);
     } catch (error) {
       debugLogger.warn(
         `Extension "${identity.name}" was uninstalled, but preference cleanup failed: ${getErrorMessage(error)}`,
       );
+      warnings.push({
+        code: 'extension_preferences_cleanup_failed',
+        error: getErrorMessage(error),
+      });
     }
-    await this.refreshTools().catch((error) => {
+    try {
+      await this.refreshTools();
+    } catch (error) {
       debugLogger.warn(
         `Extension "${identity.name}" was uninstalled, but runtime refresh failed: ${getErrorMessage(error)}`,
       );
-    });
+      warnings.push({
+        code: 'extension_runtime_refresh_failed',
+        error: getErrorMessage(error),
+      });
+    }
     logExtensionUninstall(
       telemetryConfig,
       new ExtensionUninstallEvent(identity.name, 'success'),
     );
-    return snapshot;
+    return warnings.length > 0 ? { ...snapshot, warnings } : snapshot;
   }
 
   async performWorkspaceExtensionMigration(

@@ -11260,7 +11260,7 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
-  it('still sends available commands update when extension tool refresh fails', async () => {
+  it('propagates extension tool refresh failures', async () => {
     const extensionManager = {
       refreshCache: vi.fn().mockResolvedValue(undefined),
       refreshTools: vi.fn().mockRejectedValue(new Error('bad tool schema')),
@@ -11310,12 +11310,12 @@ describe('sessionLanguage multi-session propagation', () => {
       agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh, {
         sessionId: 's-ext',
       }),
-    ).resolves.toEqual({ ok: true });
+    ).rejects.toThrow('bad tool schema');
 
     expect(extensionManager.refreshCache).toHaveBeenCalledOnce();
     expect(skillManager.refreshCache).toHaveBeenCalledOnce();
     expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
-    expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
+    expect(sendAvailableCommandsUpdate).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
