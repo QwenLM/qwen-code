@@ -8,13 +8,20 @@ import { act } from 'react';
 import { render } from 'ink-testing-library';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { waitFor } from '@testing-library/react';
-import type { Config, Extension } from '@qwen-code/qwen-code-core';
+import {
+  SettingScope,
+  type Config,
+  type Extension,
+} from '@qwen-code/qwen-code-core';
 import type { StatusMessage } from '../ExtensionsManagerDialog.js';
 import type { PluginDetailAction } from './PluginDetailView.js';
 import { ExtensionActionsView } from './ExtensionActionsView.js';
 
 const mockPluginDetailView = vi.hoisted(() => vi.fn((_props: unknown) => null));
 const mockRadioButtonSelect = vi.hoisted(() =>
+  vi.fn((_props: unknown) => null),
+);
+const mockUninstallConfirmStep = vi.hoisted(() =>
   vi.fn((_props: unknown) => null),
 );
 
@@ -31,7 +38,7 @@ vi.mock('../../shared/RadioButtonSelect.js', () => ({
 }));
 
 vi.mock('../steps/UninstallConfirmStep.js', () => ({
-  UninstallConfirmStep: vi.fn((_props: unknown) => null),
+  UninstallConfirmStep: mockUninstallConfirmStep,
 }));
 
 interface DetailProps {
@@ -40,6 +47,10 @@ interface DetailProps {
 
 interface SelectProps {
   onSelect: (scope: 'user' | 'project') => void;
+}
+
+interface ConfirmProps {
+  onConfirm: (extension: Extension) => void;
 }
 
 const extension = {
@@ -64,6 +75,9 @@ function createManager() {
     getExtensionScope: vi.fn(() => 'user' as const),
     setExtensionActivationScope: vi.fn().mockResolvedValue({ warnings: [] }),
     setExtensionScope: vi.fn(),
+    disableExtension: vi.fn().mockResolvedValue({ warnings: [] }),
+    enableExtension: vi.fn().mockResolvedValue({ warnings: [] }),
+    uninstallExtension: vi.fn().mockResolvedValue({ warnings: [] }),
   };
 }
 
@@ -71,6 +85,7 @@ function renderView(
   manager: ReturnType<typeof createManager>,
   onStatus: (status: StatusMessage | null) => void,
   onReload = vi.fn(),
+  onExit = vi.fn(),
 ) {
   const config = {
     getExtensionManager: () => manager,
@@ -82,10 +97,10 @@ function renderView(
       isActive
       onStatus={onStatus}
       onReload={onReload}
-      onExit={vi.fn()}
+      onExit={onExit}
     />,
   );
-  return { onReload };
+  return { onReload, onExit };
 }
 
 async function openScopeSelect(): Promise<SelectProps> {
@@ -173,6 +188,68 @@ describe('ExtensionActionsView', () => {
     expect(statuses).toContainEqual({
       type: 'info',
       text: 'Set "demo" scope with warnings: preference denied',
+    });
+  });
+
+  it('surfaces committed activation warnings and reloads the view', async () => {
+    const manager = createManager();
+    manager.disableExtension.mockResolvedValueOnce({
+      warnings: [
+        { code: 'extension_runtime_refresh_failed', error: 'refresh failed' },
+      ],
+    });
+    const statuses: Array<StatusMessage | null> = [];
+    const { onReload } = renderView(manager, (status) => statuses.push(status));
+    const detail = mockPluginDetailView.mock.calls.at(-1)?.[0] as
+      | DetailProps
+      | undefined;
+
+    await act(async () => {
+      await detail?.onAction('toggle');
+    });
+
+    expect(manager.disableExtension).toHaveBeenCalledWith(
+      'demo',
+      SettingScope.User,
+    );
+    expect(onReload).toHaveBeenCalledOnce();
+    expect(statuses).toContainEqual({
+      type: 'info',
+      text: '"demo" changed with warnings: refresh failed',
+    });
+  });
+
+  it('surfaces committed uninstall warnings and reloads before exiting', async () => {
+    const manager = createManager();
+    manager.uninstallExtension.mockResolvedValueOnce({
+      warnings: [
+        { code: 'extension_runtime_refresh_failed', error: 'refresh failed' },
+      ],
+    });
+    const statuses: Array<StatusMessage | null> = [];
+    const { onReload, onExit } = renderView(manager, (status) =>
+      statuses.push(status),
+    );
+    const detail = mockPluginDetailView.mock.calls.at(-1)?.[0] as
+      | DetailProps
+      | undefined;
+    await act(async () => {
+      detail?.onAction('uninstall');
+    });
+    const confirm = mockUninstallConfirmStep.mock.calls.at(-1)?.[0] as
+      | ConfirmProps
+      | undefined;
+
+    await act(async () => {
+      await confirm?.onConfirm(extension);
+    });
+
+    expect(manager.uninstallExtension).toHaveBeenCalledWith('demo', false);
+    expect(onReload).toHaveBeenCalledOnce();
+    expect(onExit).toHaveBeenCalledOnce();
+    expect(statuses).toContainEqual({
+      type: 'info',
+      text: 'Uninstalled "demo" with warnings: refresh failed',
     });
   });
 });

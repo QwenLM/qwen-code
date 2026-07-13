@@ -302,13 +302,14 @@ export class ExtensionStore {
           for (const identity of identities.values()) {
             assertIdentity(identity);
             const existingPolicy = existing.extensions[identity.id];
-            const rules = this.importedLegacyRules(
+            const { rules, activationChanged } = this.importLegacyProjection(
               legacy[identity.name]?.overrides ?? [],
               existingPolicy,
             );
             if (existingPolicy) {
               const previousRules = existingPolicy.legacyPathRules ?? [];
               const policyChanged =
+                activationChanged ||
                 existingPolicy.name !== identity.name ||
                 previousRules.length !== rules.length ||
                 previousRules.some((rule, index) => rule !== rules[index]);
@@ -812,35 +813,66 @@ export class ExtensionStore {
     return projection;
   }
 
-  private importedLegacyRules(
+  private importLegacyProjection(
     incomingRules: readonly string[],
     policy: ExtensionPolicy | undefined,
-  ): string[] {
-    if (!policy) return [...incomingRules];
-    const generatedCounts = new Map<string, number>();
-    const generatedRules: string[] = [];
-    if (policy.defaultActivation === 'disabled') generatedRules.push('!/*');
+  ): { rules: string[]; activationChanged: boolean } {
+    if (!policy) return { rules: [...incomingRules], activationChanged: false };
+    const generatedRules: Array<{
+      rule: Override;
+      workspacePath?: string;
+    }> = [];
+    if (policy.defaultActivation === 'disabled') {
+      generatedRules.push({
+        rule: Override.fromFileRule('!/*'),
+      });
+    }
     for (const [workspacePath, activation] of Object.entries(
       policy.workspaceOverrides,
     )) {
       const effective =
         activation === 'inherit' ? policy.defaultActivation : activation;
-      generatedRules.push(
-        Override.fromInput(
+      generatedRules.push({
+        rule: Override.fromInput(
           effective === 'disabled' ? `!${workspacePath}` : workspacePath,
           false,
-        ).output(),
+        ),
+        workspacePath,
+      });
+    }
+    let activationChanged = false;
+    const consumed = new Set<number>();
+    const rules = incomingRules.filter((rule) => {
+      const incoming = Override.fromFileRule(rule);
+      const exactIndex = generatedRules.findIndex(
+        (generated, index) =>
+          !consumed.has(index) && generated.rule.isEqualTo(incoming),
       );
-    }
-    for (const rule of generatedRules) {
-      generatedCounts.set(rule, (generatedCounts.get(rule) ?? 0) + 1);
-    }
-    return incomingRules.filter((rule) => {
-      const remaining = generatedCounts.get(rule) ?? 0;
-      if (remaining === 0) return true;
-      generatedCounts.set(rule, remaining - 1);
+      if (exactIndex >= 0) {
+        consumed.add(exactIndex);
+        return false;
+      }
+      const oppositeIndex = generatedRules.findIndex(
+        (generated, index) =>
+          !consumed.has(index) &&
+          generated.rule.baseRule === incoming.baseRule &&
+          generated.rule.includeSubdirs === incoming.includeSubdirs &&
+          generated.rule.isDisable !== incoming.isDisable,
+      );
+      if (oppositeIndex < 0) return true;
+      consumed.add(oppositeIndex);
+      const opposite = generatedRules[oppositeIndex];
+      if (opposite.workspacePath) {
+        policy.workspaceOverrides[opposite.workspacePath] = incoming.isDisable
+          ? 'disabled'
+          : 'enabled';
+      } else {
+        policy.defaultActivation = 'enabled';
+      }
+      activationChanged = true;
       return false;
     });
+    return { rules, activationChanged };
   }
 
   private async writeSnapshotUnlocked(

@@ -586,6 +586,28 @@ describe('ExtensionStore', () => {
     ]);
   });
 
+  it('imports an opposite V1 workspace rule into structured activation', async () => {
+    const store = makeStore();
+    const identity = { id: 'ea'.repeat(32), name: 'demo' };
+    await store.ensureInitialized([identity]);
+    await store.setWorkspaceActivation(identity, '/workspace', 'enabled');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await fsp.writeFile(
+      enablementPath,
+      JSON.stringify({ demo: { overrides: ['!/workspace/'] } }),
+    );
+
+    const imported = await store.ensureInitialized([identity]);
+
+    expect(imported.extensions[identity.id]).toMatchObject({
+      workspaceOverrides: { '/workspace': 'disabled' },
+    });
+    expect(imported.extensions[identity.id]?.legacyPathRules).toBeUndefined();
+    expect(JSON.parse(await fsp.readFile(enablementPath, 'utf8'))).toEqual({
+      demo: { overrides: ['!/workspace/'] },
+    });
+  });
+
   it('imports newer V1 rules for policies omitted from a partial refresh', async () => {
     const store = makeStore();
     const first = { id: 'e6'.repeat(32), name: 'first' };
