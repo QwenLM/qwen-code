@@ -1285,14 +1285,14 @@ describe('createAcpSessionBridge', () => {
   it('bounds a hung session extension refresh', async () => {
     vi.useFakeTimers();
     const refreshGate = deferred<Record<string, unknown>>();
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh
+          ? await refreshGate.promise
+          : {},
+    });
     const bridge = makeBridge({
-      channelFactory: async () =>
-        makeChannel({
-          extMethodImpl: async (method) =>
-            method === SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh
-              ? await refreshGate.promise
-              : {},
-        }).channel,
+      channelFactory: async () => handle.channel,
     });
     try {
       await bridge.spawnOrAttach({ workspaceCwd: WS_A });
@@ -1301,6 +1301,31 @@ describe('createAcpSessionBridge', () => {
       await vi.advanceTimersByTimeAsync(30_000);
 
       await expect(refresh).resolves.toEqual({ refreshed: 0, failed: 1 });
+
+      const retry = bridge.refreshExtensionsForAllSessions();
+      expect(
+        handle.agent.extMethodCalls.filter(
+          (call) =>
+            call.method ===
+            SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+        ),
+      ).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await expect(retry).resolves.toEqual({ refreshed: 0, failed: 1 });
+
+      refreshGate.resolve({});
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(bridge.refreshExtensionsForAllSessions()).resolves.toEqual({
+        refreshed: 1,
+        failed: 0,
+      });
+      expect(
+        handle.agent.extMethodCalls.filter(
+          (call) =>
+            call.method ===
+            SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+        ),
+      ).toHaveLength(2);
     } finally {
       refreshGate.resolve({});
       vi.useRealTimers();
