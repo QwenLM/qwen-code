@@ -38,11 +38,12 @@
   cursor: pointer;
 }
 
-.row:hover:not(:disabled) {
+.row:hover:not(:disabled):not([aria-disabled='true']) {
   border-color: var(--agent-blue-500);
 }
 
-.row:disabled {
+.row:disabled,
+.row[aria-disabled='true'] {
   opacity: 0.45;
   cursor: default;
 }

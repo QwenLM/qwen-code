@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type {
   DaemonWorkspaceProviderModel,
   DaemonWorkspaceProviderStatus,
@@ -71,6 +71,17 @@ export function ModelManagementSection({
 }: ModelManagementProps) {
   const { t } = useI18n();
   const [confirmKey, setConfirmKey] = useState<string | null>(null);
+
+  // Escape dismisses the inline delete confirmation — the conventional gesture,
+  // so keyboard users don't have to Tab to Cancel.
+  useEffect(() => {
+    if (confirmKey === null) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setConfirmKey(null);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [confirmKey]);
 
   const hasModels = providers.some((p) => p.models.length > 0);
   const currentRowKey = findCurrentRowKey(providers, currentModelId);

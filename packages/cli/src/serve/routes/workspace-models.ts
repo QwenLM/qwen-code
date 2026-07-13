@@ -31,7 +31,11 @@ type PersistSettings = (
 const MAX_MODEL_FIELD_LENGTH = 1024;
 
 function scopeToWire(scope: SettingScope): string {
-  return scope === SettingScope.Workspace ? 'workspace' : 'user';
+  // Writes are only ever Workspace/User (the scope helpers never return others),
+  // so reject anything else loudly rather than silently reporting it as 'user'.
+  if (scope === SettingScope.Workspace) return 'workspace';
+  if (scope === SettingScope.User) return 'user';
+  throw new Error(`unexpected settings scope for wire mapping: ${scope}`);
 }
 
 export interface WorkspaceModelsRouteDeps {

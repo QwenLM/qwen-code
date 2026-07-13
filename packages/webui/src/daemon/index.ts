@@ -171,6 +171,7 @@ export type {
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceProviderStatus,
   DaemonWorkspaceProviderModel,
+  DaemonWorkspaceProviderCurrent,
   DaemonModelDeleteRequest,
   DaemonModelDeleteResult,
 } from '@qwen-code/sdk/daemon';

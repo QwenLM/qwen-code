@@ -81,8 +81,18 @@ describe('ModelFallbacksDialog', () => {
     const opts = options(container);
     act(() => opts[2]!.click()); // qwen3-coder → now 3 selected
     const refreshed = options(container);
-    // The 4th option (gemini) is not selected and the limit is reached.
-    expect(refreshed[3]!.disabled).toBe(true);
+    // The 4th option (gemini) is not selected and the limit is reached. It uses
+    // aria-disabled (not native disabled) so it stays hoverable for the tooltip.
+    expect(refreshed[3]!.getAttribute('aria-disabled')).toBe('true');
+    expect(refreshed[3]!.getAttribute('title')).toContain('Maximum');
+    // Clicking an at-limit option is a no-op (toggle guards), so it can't be
+    // added beyond the max.
+    act(() => refreshed[3]!.click());
+    expect(
+      options(container).filter(
+        (o) => o.getAttribute('aria-pressed') === 'true',
+      ).length,
+    ).toBe(3);
   });
 
   it('toggles a selected option off', () => {

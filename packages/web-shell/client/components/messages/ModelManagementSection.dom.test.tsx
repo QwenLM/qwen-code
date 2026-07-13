@@ -159,6 +159,26 @@ describe('ModelManagementSection', () => {
     ).toBe(false);
   });
 
+  it('dismisses the delete confirmation on Escape', () => {
+    const { container, props } = renderSection();
+    const deletes = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).filter((b) => b.textContent?.trim() === 'Delete');
+    act(() => deletes[1]!.click()); // enter confirm mode
+    expect(buttonByText(container, 'Confirm')).toBeTruthy();
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+    });
+    expect(props.onDeleteModel).not.toHaveBeenCalled();
+    expect(
+      Array.from(container.querySelectorAll('button')).some(
+        (b) => b.textContent?.trim() === 'Confirm',
+      ),
+    ).toBe(false);
+  });
+
   it('does not offer delete for runtime models', () => {
     const { container } = renderSection();
     // Scope to the runtime model's row (span.modelName → div.modelInfo →

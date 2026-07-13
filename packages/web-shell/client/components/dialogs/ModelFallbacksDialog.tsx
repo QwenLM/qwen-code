@@ -89,7 +89,11 @@ export function ModelFallbacksDialog({
               type="button"
               aria-pressed={isSelected}
               className={`${styles.row} ${isSelected ? styles.rowSelected : ''}`}
-              disabled={atLimit}
+              // aria-disabled (not the native `disabled`) so the button still
+              // receives hover/focus and can surface the "limit reached" title —
+              // disabled buttons fire no events, so the tooltip never shows. The
+              // toggle() handler already no-ops when at the max.
+              aria-disabled={atLimit || undefined}
               title={
                 atLimit
                   ? t('settings.models.fallbacks.limitReached', { max })
