@@ -294,12 +294,17 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
   writeFileSync(args.out, JSON.stringify(report, null, 2), 'utf8');
   writeStdoutLine(`Wrote coverage report to ${args.out}`);
 
+  // Branch the headline by topology: the dimension fan-out has no receipts, so
+  // "0/N chunks receipted" on a clean dimension run reads as a failure it is not.
   writeStderrLine(
-    `Coverage: ${report.coveredChunks.length}/${planned.length} chunks ` +
-      `receipted by ${report.agents} agent return(s)` +
-      (report.uncoverableChunks.length
-        ? `, ${report.uncoverableChunks.length} uncoverable`
-        : ''),
+    report.topology === 'dimension'
+      ? `Coverage: ${report.agents} dimension agent return(s), no per-chunk ` +
+          `receipts (every agent walks the whole plan)`
+      : `Coverage: ${report.coveredChunks.length}/${planned.length} chunks ` +
+          `receipted by ${report.agents} agent return(s)` +
+          (report.uncoverableChunks.length
+            ? `, ${report.uncoverableChunks.length} uncoverable`
+            : ''),
   );
 
   if (report.missingChunks.length > 0) {
@@ -321,7 +326,8 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
     writeStderrLine(
       `ERROR: ${report.whiffedAgents.length} agent(s) returned nothing ` +
         `substantive — ${report.whiffedAgents.join('; ')}. A return this short ` +
-        `with no receipt is indistinguishable from an agent that did not run. ` +
+        `is indistinguishable from an agent that did not run (a receipt says ` +
+        `which lines it was handed, not that it looked at them). ` +
         `Relaunch each ONCE; if it comes back bare again, record its dimension ` +
         `in \`unreviewedDimensions\`, which forbids an Approve.`,
     );
