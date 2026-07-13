@@ -1425,6 +1425,7 @@ const EMPTY_DISABLED_SKILL_NAMES: ReadonlySet<string> = Object.freeze(
 // overwriting the real session's ID while still allowing nested qwen-code
 // processes to claim their own (they start with a fresh module scope).
 let sessionEnvClaimed = false;
+let projectDirEnvClaimed = false;
 
 function resolveSensitiveSpanAttributeMaxLength(
   value: number | undefined,
@@ -2060,6 +2061,16 @@ export class Config {
     this.inputFile = params.inputFile;
     this.defaultFileEncoding = params.defaultFileEncoding;
     this.storage = new Storage(this.targetDir);
+    // Publish the project dir the same way the session id is published, and for
+    // the same reason: a subprocess needs it and must not have to guess. It is
+    // derived from the session's *launch* cwd, so a subprocess that has `cd`-ed
+    // elsewhere — which the /review skill explicitly does, into a PR worktree —
+    // cannot recompute it from `process.cwd()`. It would land on a directory
+    // that does not exist. Claimed once per process, like the session id.
+    if (!projectDirEnvClaimed && process.env) {
+      process.env['QWEN_CODE_PROJECT_DIR'] = this.storage.getProjectDir();
+      projectDirEnvClaimed = true;
+    }
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
     this.fileExclusions = new FileExclusions(this);
     this.eventEmitter = params.eventEmitter;

@@ -4,8 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  rmSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -20,6 +26,134 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 }));
 
 const MODEL = 'test-model';
+
+// Coverage is read from the harness's transcripts on disk, so the fixtures build
+// them: a plan, and the `agent-<id>.jsonl` files the harness would have written.
+let dir: string;
+/** Passed explicitly, so these tests never race another suite over process.env. */
+let ENV: NodeJS.ProcessEnv;
+
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), 'compose-cov-'));
+  ENV = { QWEN_CODE_PROJECT_DIR: dir, QWEN_CODE_SESSION_ID: 'S1' };
+  mkdirSync(join(dir, 'subagents', 'S1'), { recursive: true });
+});
+
+afterEach(() => {
+  rmSync(dir, { recursive: true, force: true });
+});
+
+const DIFF = '/abs/diff.txt';
+
+/** Write a plan with two chunks, and return its path. */
+function plan(): string {
+  const p = join(dir, 'plan.json');
+  writeFileSync(
+    p,
+    JSON.stringify({
+      diffPathAbsolute: DIFF,
+      chunks: [
+        { id: 1, startLine: 1, endLine: 100 },
+        { id: 2, startLine: 101, endLine: 200 },
+      ],
+    }),
+  );
+  return p;
+}
+
+/** Write one agent transcript, as the harness would. */
+function transcript(
+  id: string,
+  launchPrompt: string,
+  opts: { toolCalls?: number; text?: string } = {},
+): void {
+  const base = { agentId: id, agentName: 'general-purpose', sessionId: 'S1' };
+  const lines: string[] = [
+    JSON.stringify({
+      ...base,
+      type: 'user',
+      message: { role: 'user', parts: [{ text: launchPrompt }] },
+    }),
+  ];
+  for (let i = 0; i < (opts.toolCalls ?? 0); i++) {
+    lines.push(
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            { functionCall: { name: 'read_file', args: { file_path: DIFF } } },
+          ],
+        },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: 'ok' },
+              },
+            },
+          ],
+        },
+      }),
+    );
+  }
+  lines.push(
+    JSON.stringify({
+      ...base,
+      type: 'assistant',
+      message: {
+        role: 'model',
+        parts: [{ text: opts.text ?? 'No issues found.' }],
+      },
+    }),
+  );
+  writeFileSync(
+    join(dir, 'subagents', 'S1', `agent-${id}.jsonl`),
+    lines.join('\n') + '\n',
+  );
+}
+
+/** A prompt the CLI would have built: it names the diff and the read. */
+function goodPrompt(chunk: number): string {
+  return `You are reviewing chunk ${chunk} of 2.\nread_file(file_path="${DIFF}", offset=0, limit=100)`;
+}
+
+/** The prompt the orchestrator actually sent, 23 times: no diff anywhere. */
+function blindPrompt(chunk: number): string {
+  return `The changes are in chunk ${chunk} of 2, covering lines 1-100 of the diff.`;
+}
+
+/** Both chunks reviewed by agents that opened the diff. */
+function coveredPlan(): string {
+  transcript('a1', goodPrompt(1), { toolCalls: 3 });
+  transcript('a2', goodPrompt(2), { toolCalls: 2 });
+  return plan();
+}
+
+/** Agents given the diff, that never opened it — and said so at length. */
+function idlePlan(): string {
+  transcript('a1', goodPrompt(1), {
+    toolCalls: 0,
+    text: 'No issues found — reviewed chunk 1 (src/pay.ts) thoroughly.',
+  });
+  transcript('a2', goodPrompt(2), { toolCalls: 0 });
+  return plan();
+}
+
+/** Agents launched with no diff in their prompt. They could not have read it. */
+function blindPlan(): string {
+  transcript('a1', blindPrompt(1), { toolCalls: 0 });
+  transcript('a2', blindPrompt(2), { toolCalls: 0 });
+  return plan();
+}
+
 const FOOTER = `_— ${MODEL} via Qwen Code /review_`;
 
 function base(overrides: Partial<ComposeReviewInput>): ComposeReviewInput {
@@ -27,16 +161,11 @@ function base(overrides: Partial<ComposeReviewInput>): ComposeReviewInput {
     criticalsInline: 0,
     suggestionsInline: 0,
     // These cases exercise the C/S table, the body clauses and the downgrades —
-    // not coverage. Absent coverage caps now (a run must show what it read), so a
-    // table test meaning to reach a clean APPROVE supplies a real "covered"
-    // report — the same thing the PR path passes — not a model-settable opt-out
-    // (there is none: no model-written field can be its own authorisation).
-    coverage: {
-      ok: true,
-      missingChunks: [],
-      whiffedAgents: [],
-      uncoverableChunks: [],
-    },
+    // not coverage. Coverage is no longer an input at all (it is recomputed from
+    // the harness's transcripts), so a table test that means to reach a clean
+    // APPROVE points at a plan whose agents did read it. See coveredPlan().
+    planPath: coveredPlan(),
+    env: ENV,
     modelId: MODEL,
     ...overrides,
   };
@@ -498,134 +627,75 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
   });
 });
 
-describe('coverage caps the verdict', () => {
-  const base = { criticalsInline: 0, suggestionsInline: 0, modelId: 'm' };
-
-  it('caps when coverage is omitted and not opted out — the JSDoc promise', () => {
-    // "Omitting it is itself a cap." A caller that supplies no coverage and does
-    // not declare it inapplicable cannot approve — that is the dogfood failure,
-    // an orchestrator that skipped check-coverage and got a rubber stamp.
+describe('coverage is recomputed, never accepted', () => {
+  it('caps when no plan is given — nothing can show the diff was read', () => {
     const r = composeReview({
       criticalsInline: 0,
       suggestionsInline: 0,
       modelId: MODEL,
     });
     expect(r.event).not.toBe('APPROVE');
-    expect(r.body).toContain('no `check-coverage` report was supplied');
+    expect(r.body).toContain('no plan was given');
   });
 
-  it('approves a clean run that supplies a covered report', () => {
+  it('caps when the agents made no tool call — whatever their prose said', () => {
+    // The dogfood run, from its real transcripts: every agent returned confident,
+    // specific text and not one of them opened the diff.
     const r = composeReview({
       criticalsInline: 0,
       suggestionsInline: 0,
-      coverage: { ok: true, missingChunks: [], whiffedAgents: [] },
-      modelId: MODEL,
-    });
-    expect(r.event).toBe('APPROVE');
-  });
-
-  it('caps on an EMPTY coverage report — {} is not coverage', () => {
-    // `{}` fell between both guards: "provided", so the absent-coverage cap was
-    // skipped, and `Object.keys({}).length > 0` was false, so the failed-coverage
-    // cap was skipped too. Both gates open, and `{}` composed an APPROVE.
-    const r = composeReview({
-      criticalsInline: 0,
-      suggestionsInline: 0,
-      coverage: {},
+      planPath: idlePlan(),
+      env: ENV,
       modelId: MODEL,
     });
     expect(r.event).not.toBe('APPROVE');
+    expect(r.body).toContain('read nothing');
   });
 
-  it('refuses a chunk id that is not one', () => {
-    // `typeof v === 'number'` admits NaN/Infinity/-1/2.5, each of which would be
-    // rendered into the body as "chunk NaN".
-    for (const bad of [Number.NaN, Infinity, -1, 2.5, 0]) {
-      expect(() =>
-        composeReview({
-          ...base,
-          coverage: { ok: true, missingChunks: [bad] },
-        }),
-      ).toThrow(/positive whole numbers/);
+  it('names a blind launch as itself, not as a whiff', () => {
+    // An agent whose prompt never named the diff could not have read it, and
+    // relaunching it produces another agent that cannot either. The prompt is the
+    // defect, and the body has to say so or the reader will retry forever.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: blindPlan(),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).not.toBe('APPROVE');
+    expect(r.body).toContain('never named the diff file');
+    expect(r.body).toContain('agent-prompt');
+  });
+
+  it('caps when the transcripts cannot be read at all — and says so', () => {
+    // A read-only HOME must not read as "every agent idled". It still caps, but
+    // it names the infrastructure, not the agents.
+    const prev = process.env['QWEN_CODE_PROJECT_DIR'];
+    process.env['QWEN_CODE_PROJECT_DIR'] = join(dir, 'no-such-project');
+    try {
+      const r = composeReview({
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        planPath: coveredPlan(),
+        modelId: MODEL,
+      });
+      expect(r.event).not.toBe('APPROVE');
+      expect(r.body).toContain('transcripts');
+    } finally {
+      if (prev === undefined) delete process.env['QWEN_CODE_PROJECT_DIR'];
+      else process.env['QWEN_CODE_PROJECT_DIR'] = prev;
     }
   });
 
-  it('forbids an Approve on `ok: false` alone', () => {
-    // A report that says the coverage check failed is the strongest statement in
-    // this input; it must cap without needing an itemised list to be believed.
-    const r = composeReview({ ...base, coverage: { ok: false } });
-    expect(r.event).not.toBe('APPROVE');
-  });
-
-  it('never certifies "no blockers" over a chunk nobody read', () => {
-    // The event capped correctly but certification did not, so the body opened
-    // "Reviewed — no blockers." two lines above "nobody read them."
+  it('approves when the agents actually read their chunks', () => {
     const r = composeReview({
-      ...base,
-      coverage: { ok: true, missingChunks: [1] },
-    });
-    expect(r.body).not.toContain('no blockers');
-    expect(r.body).toContain('nobody read them');
-  });
-
-  it('forbids an Approve on a missing receipt alone', () => {
-    // Independently of `ok`: a chunk nobody receipted caps on its own.
-    const r = composeReview({
-      ...base,
-      coverage: { ok: true, missingChunks: [1, 2, 3] },
-    });
-    expect(r.event).not.toBe('APPROVE');
-    expect(r.body).toContain('chunk 1');
-    // And with its true cause, not the uncoverable renderer's read-limit excuse.
-    expect(r.body).toContain('nobody read them');
-    expect(r.body).not.toContain('exceeds the read limit');
-  });
-
-  it('the dogfood failure: empty findings, unread diff, no Approve', () => {
-    const r = composeReview({
-      ...base,
-      coverage: { missingChunks: [1, 2, 3], whiffedAgents: [], ok: false },
-    });
-    expect(r.event).not.toBe('APPROVE');
-    expect(r.body).toContain('chunk 1');
-  });
-
-  it('forbids an Approve when an agent returned nothing', () => {
-    const r = composeReview({
-      ...base,
-      coverage: { missingChunks: [], whiffedAgents: ['security'], ok: false },
-    });
-
-    expect(r.event).not.toBe('APPROVE');
-    expect(r.body).toContain('security');
-  });
-
-  it('caps on a diff-induced uncoverable chunk from the coverage report', () => {
-    // The type declared missingChunks/whiffedAgents/ok but the code also reads
-    // coverage.uncoverableChunks — untyped and untested, so a regression there
-    // was invisible. An uncoverable chunk forbids an Approve.
-    const r = composeReview({
-      ...base,
-      coverage: { ok: true, uncoverableChunks: [5] },
-    });
-    expect(r.event).not.toBe('APPROVE');
-    expect(r.body).toContain('chunk 5');
-  });
-
-  it('still approves a clean, fully covered run', () => {
-    const r = composeReview({
-      ...base,
-      coverage: { missingChunks: [], whiffedAgents: [], ok: true },
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(),
+      env: ENV,
+      modelId: MODEL,
     });
     expect(r.event).toBe('APPROVE');
-  });
-
-  it('refuses a coverage value that is not an object', () => {
-    expect(() => composeReview({ ...base, coverage: 'ok' } as never)).toThrow(
-      /coverage must be an object/,
-    );
-    expect(() =>
-      composeReview({ ...base, coverage: { missingChunks: ['1'] } } as never),
-    ).toThrow(/positive whole numbers/);
   });
 });

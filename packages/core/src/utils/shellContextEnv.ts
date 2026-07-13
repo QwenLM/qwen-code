@@ -44,6 +44,16 @@ export function getShellContextEnvVars(): Record<string, string> {
     env['QWEN_CODE_SESSION_ID'] = sessionId;
   }
 
+  // The project dir a subprocess needs to find this session's harness records
+  // (subagent transcripts, chats). It is keyed on the session's *launch* cwd, so
+  // a subprocess that has `cd`-ed into a worktree cannot recompute it — the
+  // /review skill does exactly that, and would look for a directory that never
+  // existed. Passed through, never recomputed downstream.
+  const projectDir = process.env['QWEN_CODE_PROJECT_DIR'];
+  if (projectDir) {
+    env['QWEN_CODE_PROJECT_DIR'] = projectDir;
+  }
+
   // For agent/prompt IDs: explicitly set empty string when no ALS context
   // exists, so that stale values inherited from a parent qwen-code process
   // (via process.env spread) are overwritten rather than leaked.
