@@ -3667,10 +3667,37 @@ describe('runQwenServe runtime startup failures', () => {
       bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
     );
     const stopExtensionGenerationReconciler = vi.fn();
+    const stopScheduledTaskKeepalive = vi.fn(() => {
+      throw new Error('keepalive dispose failed');
+    });
+    const stopWorkspaceGitState = vi.fn();
+    const stopSubSession = vi.fn();
+    const disposeEventLoopMonitor = vi.fn();
+    vi.spyOn(qwenCore, 'startEventLoopLagMonitor').mockReturnValueOnce({
+      snapshot: () => ({
+        meanMs: 0,
+        p50Ms: 0,
+        p99Ms: 0,
+        maxMs: 0,
+      }),
+      dispose: disposeEventLoopMonitor,
+    });
     vi.spyOn(serverModule, 'createServeApp').mockImplementation(() => {
       const runtimeApp = express();
       runtimeApp.locals['stopExtensionGenerationReconciler'] =
         stopExtensionGenerationReconciler;
+      runtimeApp.locals['stopScheduledTaskKeepalive'] =
+        stopScheduledTaskKeepalive;
+      runtimeApp.locals['stopWorkspaceGitState'] = stopWorkspaceGitState;
+      let subSessionStoppers: Array<() => void> = [];
+      Object.defineProperty(runtimeApp.locals, 'subSessionStoppers', {
+        configurable: true,
+        get: () => subSessionStoppers,
+        set: (stoppers: Array<() => void>) => {
+          stoppers.push(stopSubSession);
+          subSessionStoppers = stoppers;
+        },
+      });
       return runtimeApp;
     });
 
@@ -3728,6 +3755,10 @@ describe('runQwenServe runtime startup failures', () => {
       () => expect(stopExtensionGenerationReconciler).toHaveBeenCalledOnce(),
       { timeout: 1_000 },
     );
+    expect(stopScheduledTaskKeepalive).toHaveBeenCalledOnce();
+    expect(stopWorkspaceGitState).toHaveBeenCalledOnce();
+    expect(stopSubSession).toHaveBeenCalledOnce();
+    expect(disposeEventLoopMonitor).toHaveBeenCalledOnce();
     expect(bridge.shutdown).toHaveBeenCalledOnce();
     await expect(handle.runtimeReady).rejects.toThrow(
       'Daemon runtime stopped before mounting.',

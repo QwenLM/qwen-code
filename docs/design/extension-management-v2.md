@@ -129,17 +129,28 @@ polling timeout stops polling only; it never cancels accepted work.
 The daemon admits at most 10 unfinished extension operations. A daemon-wide
 FIFO preparation queue runs at most two downloads, extractions, conversions,
 or single-extension update checks at once. Install and update use an explicit
-`prepare -> commit/dispose` lifecycle: preparation owns only staging files and
-does not change the store, cache, or runtime. Prepared mutations enter a
+`prepare -> commit/dispose` lifecycle: preparation owns staging files and
+revisioned credential snapshots but does not change the store, cache, runtime,
+or credentials selected by the installed artifact. Prepared mutations enter a
 separate single-concurrency FIFO commit queue in the order preparation
 finishes. Activation and uninstall enter only the commit queue; check-updates
 enters only the preparation queue. Manual refresh is serialized through the
 commit queue, and an HTTP timeout does not release that lane until the
-underlying refresh settles. The commit lane is released after the store commit
-and settings commit; extension reload, manager runtime refresh, prepared-file
+underlying refresh settles. Sensitive settings are staged as one atomic secret
+bundle under a per-prepare revision. A non-secret selector records that revision
+and secure-storage backend inside the staged artifact, so only the winning
+artifact commit activates a complete bundle. The store commit is therefore the
+durability point and releases the commit lane immediately. Extension reload,
+legacy per-key settings synchronization, manager runtime refresh, prepared-file
 cleanup, and daemon runtime reconciliation run outside it. These post-commit
 steps do not occupy either slot, so later commits may proceed while an earlier
 generation is being applied or cleaned up.
+
+Disposing a prepared mutation removes its unselected credential snapshot, and a
+successful commit removes the previously selected snapshot best-effort. A hard
+process crash before disposal can leave an unreachable entry in the secure
+backend; no artifact selector references it, so it cannot become active or be
+mistaken for the committed credentials.
 
 The preparation deadline starts when an operation first acquires a preparation
 slot, not while it waits. Abort is propagated to network operations and active
@@ -175,8 +186,11 @@ failure produces `succeeded_with_warnings` with workspace-specific or commit
 diagnostics, without rolling back the artifact.
 
 Legacy workspace migration treats a committed artifact as failed only when it
-could not be reloaded. Settings, cleanup, or runtime-refresh warnings do not
-trigger a retry of an artifact that is already durably installed.
+could not be reloaded. Settings compatibility synchronization, cleanup, or
+runtime-refresh warnings do not trigger a retry of an artifact that is already
+durably installed. Update callers receive warning details; compatibility and
+cleanup warnings use a distinct `updated with warnings` state, while reload or
+runtime-refresh failures remain `updated, needs restart`.
 
 The extension file watcher observes only `extension-store/state.json` for
 policy generation and continues to observe installed/linked extension content

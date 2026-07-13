@@ -76,6 +76,7 @@ import {
   getEnvContents,
   maybePromptForSettings,
   promptForSetting,
+  type PreparedExtensionSettingsMutation,
   validateExtensionSettingEnvVars,
 } from './extensionSettings.js';
 import type {
@@ -174,6 +175,7 @@ export interface ExtensionUpdateInfo {
   name: string;
   originalVersion: string;
   updatedVersion: string;
+  warnings?: Array<{ code: string; error: string }>;
 }
 
 export interface ExtensionCommittedWithWarningsError extends Error {
@@ -205,6 +207,7 @@ export interface ExtensionUpdateStatus {
 export enum ExtensionUpdateState {
   CHECKING_FOR_UPDATES = 'checking for updates',
   UPDATED_NEEDS_RESTART = 'updated, needs restart',
+  UPDATED_WITH_WARNINGS = 'updated with warnings',
   UPDATING = 'updating',
   UPDATED = 'updated',
   UPDATE_AVAILABLE = 'update available',
@@ -282,6 +285,10 @@ export interface PreparedExtensionMutation {
   readonly cleanupPaths: readonly string[];
   /** @internal */
   readonly commitSettings?: () => Promise<void>;
+  /** @internal */
+  readonly discardSettings?: () => Promise<void>;
+  /** @internal */
+  settingsActivated: boolean;
   /** @internal */
   consumed: boolean;
   /** @internal */
@@ -1566,6 +1573,7 @@ export class ExtensionManager {
     let tempDir: string | undefined;
     let convertedSourcePath: string | undefined;
     let stagingPath: string | undefined;
+    let preparedSettings: PreparedExtensionSettingsMutation | undefined;
 
     let ownershipTransferred = false;
     const endMutation = emitMutation
@@ -1770,7 +1778,6 @@ export class ExtensionManager {
           );
         }
         let previousSettings: Record<string, string> | undefined;
-        let commitSettings: (() => Promise<void>) | undefined;
         if (isUpdate) {
           previousSettings = await getEnvContents(
             previousExtensionConfig,
@@ -1784,24 +1791,24 @@ export class ExtensionManager {
         }
 
         if (isUpdate) {
-          commitSettings = await maybePromptForSettings(
+          preparedSettings = await maybePromptForSettings(
             newExtensionConfig,
             extensionId,
             requestSetting || this.requestSetting || promptForSetting,
             previousExtensionConfig,
             previousSettings,
             path.join(stagingPath, EXTENSION_SETTINGS_FILENAME),
-            prepareOnly,
+            true,
           );
         } else {
-          commitSettings = await maybePromptForSettings(
+          preparedSettings = await maybePromptForSettings(
             newExtensionConfig,
             extensionId,
             requestSetting || this.requestSetting || promptForSetting,
             undefined,
             undefined,
             path.join(stagingPath, EXTENSION_SETTINGS_FILENAME),
-            prepareOnly,
+            true,
           );
         }
 
@@ -1868,7 +1875,13 @@ export class ExtensionManager {
             destinationDirectory: destinationPath,
             currentDir,
             cleanupPaths,
-            ...(commitSettings ? { commitSettings } : {}),
+            ...(preparedSettings
+              ? {
+                  commitSettings: preparedSettings.commit,
+                  discardSettings: preparedSettings.discard,
+                }
+              : {}),
+            settingsActivated: false,
             consumed: false,
             disposed: false,
           };
@@ -1886,6 +1899,12 @@ export class ExtensionManager {
             ? {}
             : { expectedArtifactGeneration }),
         });
+        await preparedSettings?.commit().catch((error) => {
+          debugLogger.warn(
+            `Extension "${newExtensionName}" settings compatibility cleanup failed: ${getErrorMessage(error)}`,
+          );
+        });
+        preparedSettings = undefined;
         stagingPath = undefined;
 
         try {
@@ -1959,6 +1978,13 @@ export class ExtensionManager {
           );
         });
       } finally {
+        if (!ownershipTransferred && preparedSettings) {
+          await preparedSettings.discard().catch((error) => {
+            debugLogger.warn(
+              `Failed to discard prepared extension settings: ${getErrorMessage(error)}`,
+            );
+          });
+        }
         if (stagingPath && !ownershipTransferred) {
           await fs.promises.rm(stagingPath, {
             recursive: true,
@@ -2107,6 +2133,7 @@ export class ExtensionManager {
                   prepared.expectedArtifactGeneration ?? 0,
               }),
         });
+        prepared.settingsActivated = true;
       } catch (error) {
         const telemetryConfig = getTelemetryConfig(
           prepared.currentDir,
@@ -2143,7 +2170,7 @@ export class ExtensionManager {
         await prepared.commitSettings?.();
       } catch (error) {
         warnings.push({
-          code: 'extension_settings_commit_failed',
+          code: 'extension_settings_legacy_sync_failed',
           error: getErrorMessage(error),
         });
       }
@@ -2238,22 +2265,30 @@ export class ExtensionManager {
     prepared: PreparedExtensionMutation,
   ): Promise<unknown[]> {
     if (prepared.disposed) return [];
+    const settingsCleanup =
+      !prepared.settingsActivated && prepared.discardSettings
+        ? await Promise.allSettled([prepared.discardSettings()])
+        : [];
+    const settingsErrors = settingsCleanup.flatMap((result) =>
+      result.status === 'rejected' ? [result.reason] : [],
+    );
     const paths = [prepared.stagingDirectory, ...prepared.cleanupPaths];
     let failedPaths = paths;
-    let errors: unknown[] = [];
+    let pathErrors: unknown[] = [];
     for (let attempt = 0; attempt < 2 && failedPaths.length > 0; attempt++) {
       const results = await Promise.allSettled(
         failedPaths.map(async (target) =>
           fs.promises.rm(target, { recursive: true, force: true }),
         ),
       );
-      errors = results.flatMap((result) =>
+      pathErrors = results.flatMap((result) =>
         result.status === 'rejected' ? [result.reason] : [],
       );
       failedPaths = failedPaths.filter(
         (_target, index) => results[index]?.status === 'rejected',
       );
     }
+    const errors = [...settingsErrors, ...pathErrors];
     prepared.disposed = errors.length === 0;
     return errors;
   }
@@ -2485,16 +2520,24 @@ export class ExtensionManager {
         );
       }
       const updatedVersion = committed.extension?.version ?? committed.version;
+      const needsRestart = warnings.some(
+        (warning) =>
+          warning.code === 'extension_reload_failed' ||
+          warning.code === 'extension_runtime_refresh_failed',
+      );
       callback(
         extension.name,
-        !committed.extension || warnings.length > 0 || !enableExtensionReloading
+        !committed.extension || needsRestart || !enableExtensionReloading
           ? ExtensionUpdateState.UPDATED_NEEDS_RESTART
-          : ExtensionUpdateState.UPDATED,
+          : warnings.length > 0
+            ? ExtensionUpdateState.UPDATED_WITH_WARNINGS
+            : ExtensionUpdateState.UPDATED,
       );
       return {
         name: extension.name,
         originalVersion,
         updatedVersion,
+        ...(warnings.length > 0 ? { warnings } : {}),
       };
     } catch (e) {
       debugLogger.error(`Error updating extension. ${getErrorMessage(e)}`);

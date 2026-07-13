@@ -206,18 +206,31 @@ export const ExtensionActionsView = ({
             }
             break;
           }
-          case 'update':
-            await manager.updateExtension(
+          case 'update': {
+            const result = await manager.updateExtension(
               extension,
               ExtensionUpdateState.UPDATE_AVAILABLE,
               () => {},
             );
-            onStatus({
-              type: 'success',
-              text: t('Updated "{{name}}".', { name }),
-            });
+            if (result?.warnings?.length) {
+              onStatus({
+                type: 'warning',
+                text: t('Updated "{{name}}" with warnings: {{warnings}}.', {
+                  name,
+                  warnings: result.warnings
+                    .map((warning) => `${warning.code}: ${warning.error}`)
+                    .join('; '),
+                }),
+              });
+            } else {
+              onStatus({
+                type: 'success',
+                text: t('Updated "{{name}}".', { name }),
+              });
+            }
             onReload();
             break;
+          }
           case 'uninstall':
             setSub('uninstall-confirm');
             break;

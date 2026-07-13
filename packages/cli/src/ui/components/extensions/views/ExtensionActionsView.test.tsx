@@ -9,6 +9,7 @@ import { render } from 'ink-testing-library';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { waitFor } from '@testing-library/react';
 import {
+  ExtensionUpdateState,
   SettingScope,
   type Config,
   type Extension,
@@ -77,6 +78,10 @@ function createManager() {
     setExtensionScope: vi.fn(),
     disableExtension: vi.fn().mockResolvedValue({ warnings: [] }),
     enableExtension: vi.fn().mockResolvedValue({ warnings: [] }),
+    checkForExtensionUpdate: vi
+      .fn()
+      .mockResolvedValue(ExtensionUpdateState.UPDATE_AVAILABLE),
+    updateExtension: vi.fn().mockResolvedValue({ warnings: [] }),
     uninstallExtension: vi.fn().mockResolvedValue({ warnings: [] }),
   };
 }
@@ -216,6 +221,33 @@ describe('ExtensionActionsView', () => {
     expect(statuses).toContainEqual({
       type: 'info',
       text: '"demo" changed with warnings: refresh failed',
+    });
+  });
+
+  it('surfaces update warnings distinctly and reloads the view', async () => {
+    const manager = createManager();
+    manager.updateExtension.mockResolvedValueOnce({
+      warnings: [
+        {
+          code: 'extension_settings_legacy_sync_failed',
+          error: 'keychain unavailable',
+        },
+      ],
+    });
+    const statuses: Array<StatusMessage | null> = [];
+    const { onReload } = renderView(manager, (status) => statuses.push(status));
+    const detail = mockPluginDetailView.mock.calls.at(-1)?.[0] as
+      | DetailProps
+      | undefined;
+
+    await act(async () => {
+      await detail?.onAction('update');
+    });
+
+    expect(onReload).toHaveBeenCalledOnce();
+    expect(statuses).toContainEqual({
+      type: 'warning',
+      text: 'Updated "demo" with warnings: extension_settings_legacy_sync_failed: keychain unavailable.',
     });
   });
 

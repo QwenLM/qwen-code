@@ -508,7 +508,7 @@ describe('extension tests', () => {
       const committed = await manager.commitPreparedExtension(prepared);
 
       expect(committed.warnings).toContainEqual({
-        code: 'extension_settings_commit_failed',
+        code: 'extension_settings_legacy_sync_failed',
         error: 'keychain unavailable',
       });
     });
@@ -2218,6 +2218,12 @@ describe('extension tests', () => {
         name: 'my-extension',
         originalVersion: '1.0.0',
         updatedVersion: '2.0.0',
+        warnings: [
+          {
+            code: 'extension_reload_failed',
+            error: 'Extension not found after commit.',
+          },
+        ],
       });
 
       expect(callback).toHaveBeenLastCalledWith(
@@ -2266,6 +2272,67 @@ describe('extension tests', () => {
       expect(callback).toHaveBeenLastCalledWith(
         'my-extension',
         ExtensionUpdateState.UPDATED_NEEDS_RESTART,
+      );
+    });
+
+    it('surfaces a committed settings compatibility warning distinctly', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'settings-update.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'my-extension',
+        version: '1.0.0',
+        installMetadata: {
+          type: 'local',
+          source: archivePath,
+          originSource: 'QwenCode',
+        },
+      });
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          fs.mkdirSync(destination, { recursive: true });
+          fs.writeFileSync(
+            path.join(destination, EXTENSIONS_CONFIG_FILENAME),
+            JSON.stringify({ name: 'my-extension', version: '2.0.0' }),
+          );
+        },
+      );
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extension = manager.getLoadedExtensions()[0]!;
+      const internals = manager as unknown as {
+        prepareExtensionUpdateFromState(
+          extension: Extension,
+        ): Promise<PreparedExtensionMutation>;
+      };
+      const prepared =
+        await internals.prepareExtensionUpdateFromState(extension);
+      Object.defineProperty(prepared, 'commitSettings', {
+        value: vi.fn().mockRejectedValue(new Error('legacy sync unavailable')),
+      });
+      vi.spyOn(
+        internals,
+        'prepareExtensionUpdateFromState',
+      ).mockResolvedValueOnce(prepared);
+      const callback = vi.fn();
+
+      await expect(
+        manager.updateExtension(
+          extension,
+          ExtensionUpdateState.UPDATE_AVAILABLE,
+          callback,
+        ),
+      ).resolves.toMatchObject({
+        warnings: [
+          {
+            code: 'extension_settings_legacy_sync_failed',
+            error: 'legacy sync unavailable',
+          },
+        ],
+      });
+      expect(callback).toHaveBeenLastCalledWith(
+        'my-extension',
+        ExtensionUpdateState.UPDATED_WITH_WARNINGS,
       );
     });
 
