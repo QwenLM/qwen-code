@@ -1959,17 +1959,96 @@ describe('multi-workspace session dispatch', () => {
 
     const duplicate = makeSummary('duplicate-session', PRIMARY_CWD);
     const ambiguous = makeHarness({
+      token: TEST_TOKEN,
       primarySummaries: [duplicate],
       secondarySummaries: [makeSummary('duplicate-session', SECONDARY_CWD)],
     });
-    const ambiguousResponse = await request(ambiguous.app)
-      .post('/session/duplicate-session/language')
-      .set('Host', host())
-      .send({ language: 'zh' });
-    expect(ambiguousResponse.status).toBe(500);
-    expect(ambiguousResponse.body.code).toBe('ambiguous_session_owner');
+    const ambiguousResponses = await Promise.all([
+      auth(
+        request(ambiguous.app).post('/session/duplicate-session/language'),
+      ).send({ language: 'zh' }),
+      auth(
+        request(ambiguous.app).post('/session/duplicate-session/continue'),
+      ).send({}),
+    ]);
+    expect(ambiguousResponses.map((response) => response.status)).toEqual([
+      500, 500,
+    ]);
+    for (const response of ambiguousResponses) {
+      expect(response.body.code).toBe('ambiguous_session_owner');
+    }
     expect(ambiguous.primaryBridge.languageCalls).toEqual([]);
     expect(ambiguous.secondaryBridge.languageCalls).toEqual([]);
+    expect(ambiguous.primaryBridge.continueCalls).toEqual([]);
+    expect(ambiguous.secondaryBridge.continueCalls).toEqual([]);
+  });
+
+  it('preserves primary routing for remaining mutations', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      token: TEST_TOKEN,
+    });
+    const auth = (test: request.Test) =>
+      test.set('Host', host()).set('Authorization', TEST_AUTHORIZATION);
+
+    const responses = await Promise.all([
+      auth(request(app).post('/session/primary-session/continue'))
+        .set('X-Qwen-Client-Id', 'primary-client')
+        .send({}),
+      auth(request(app).post('/session/primary-session/language'))
+        .set('X-Qwen-Client-Id', 'primary-client')
+        .send({ language: 'en', syncOutputLanguage: true }),
+      auth(request(app).post('/session/primary-session/artifacts'))
+        .set('X-Qwen-Client-Id', 'primary-client')
+        .send({
+          title: 'Primary artifact',
+          url: 'https://example.com/primary',
+        }),
+      auth(
+        request(app).delete(
+          '/session/primary-session/artifacts/artifact-primary',
+        ),
+      ).set('X-Qwen-Client-Id', 'primary-client'),
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([
+      200, 200, 200, 200,
+    ]);
+    expect(primaryBridge.continueCalls).toEqual([
+      {
+        sessionId: 'primary-session',
+        context: {
+          clientId: 'primary-client',
+          promptId: expect.any(String),
+        },
+      },
+    ]);
+    expect(primaryBridge.languageCalls).toEqual([
+      {
+        sessionId: 'primary-session',
+        params: { language: 'en', syncOutputLanguage: true },
+        context: { clientId: 'primary-client' },
+      },
+    ]);
+    expect(primaryBridge.addArtifactCalls).toEqual([
+      expect.objectContaining({
+        sessionId: 'primary-session',
+        artifact: expect.objectContaining({
+          title: 'Primary artifact',
+          url: 'https://example.com/primary',
+        }),
+        context: { clientId: 'primary-client' },
+      }),
+    ]);
+    expect(primaryBridge.removeArtifactCalls).toEqual([
+      {
+        sessionId: 'primary-session',
+        artifactId: 'artifact-primary',
+        context: { clientId: 'primary-client' },
+      },
+    ]);
+    expect(secondaryBridge.continueCalls).toEqual([]);
+    expect(secondaryBridge.languageCalls).toEqual([]);
+    expect(secondaryBridge.addArtifactCalls).toEqual([]);
+    expect(secondaryBridge.removeArtifactCalls).toEqual([]);
   });
 
   it('preserves primary routing for owner-local actions', async () => {
