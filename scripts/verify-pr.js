@@ -6,7 +6,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { lstatSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -14,6 +14,9 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { classifyChangedFiles } from '../.github/scripts/ci/classify-profile.mjs';
+
+const SETTINGS_SCHEMA_PATH =
+  'packages/vscode-ide-companion/schemas/settings.schema.json';
 
 export function parseArgs(argv) {
   const options = {
@@ -211,6 +214,22 @@ export function createValidationSteps({ prettierFiles = [], profile }) {
             '--',
             '--check',
           ],
+          [
+            'Ensure settings schema is tracked',
+            'git',
+            'ls-files',
+            '--error-unmatch',
+            '--',
+            SETTINGS_SCHEMA_PATH,
+          ],
+          [
+            'Check committed settings schema',
+            'git',
+            'diff',
+            '--exit-code',
+            '--',
+            SETTINGS_SCHEMA_PATH,
+          ],
           ['Run typecheck', 'npm', 'run', 'typecheck'],
           [
             'Check serve fast-path bundle closure',
@@ -393,11 +412,55 @@ function formatCommand(command) {
   return command.map(quoteArgument).join(' ');
 }
 
-function executeChild({ command, cwd, env }) {
-  return spawnSync(command[0], command.slice(1), {
-    cwd,
-    env,
-    stdio: 'inherit',
+function signalChild(child, signal) {
+  try {
+    if (process.platform !== 'win32' && child.pid) {
+      process.kill(-child.pid, signal);
+    } else {
+      child.kill(signal);
+    }
+  } catch (error) {
+    if (error?.code !== 'ESRCH') throw error;
+  }
+}
+
+export function executeChild({ command, cwd, env }) {
+  return new Promise((resolveResult) => {
+    const child = spawn(command[0], command.slice(1), {
+      cwd,
+      detached: process.platform !== 'win32',
+      env,
+      stdio: 'inherit',
+    });
+    let forwardedSignal;
+    let settled = false;
+    const signalHandlers = new Map();
+
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      for (const [signal, handler] of signalHandlers) {
+        process.off(signal, handler);
+      }
+      resolveResult(result);
+    };
+
+    for (const signal of ['SIGINT', 'SIGTERM']) {
+      const handler = () => {
+        if (forwardedSignal) return;
+        forwardedSignal = signal;
+        signalChild(child, signal);
+      };
+      signalHandlers.set(signal, handler);
+      process.on(signal, handler);
+    }
+
+    child.once('error', (error) => {
+      finish({ error, signal: forwardedSignal, status: null });
+    });
+    child.once('exit', (status, signal) => {
+      finish({ signal: forwardedSignal ?? signal, status });
+    });
   });
 }
 

@@ -15,7 +15,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
@@ -332,6 +332,8 @@ describe('validation profiles', () => {
       'npx prettier --experimental-cli --check --ignore-unknown -- scripts/verify-pr.js',
       'npm run check-i18n',
       'npm run generate:settings-schema -- --check',
+      'git ls-files --error-unmatch -- packages/vscode-ide-companion/schemas/settings.schema.json',
+      'git diff --exit-code -- packages/vscode-ide-companion/schemas/settings.schema.json',
       'npm run typecheck',
       'npm run check:serve-fast-path-bundle',
       'npm run test:ci',
@@ -559,6 +561,175 @@ describe('step execution', () => {
       },
     ]);
   });
+
+  it('rejects a schema rewritten before the committed freshness check', async () => {
+    const cwd = createRepository();
+    const schemaPath = path.join(
+      cwd,
+      'packages',
+      'vscode-ide-companion',
+      'schemas',
+      'settings.schema.json',
+    );
+    mkdirSync(path.dirname(schemaPath), { recursive: true });
+    writeFileSync(schemaPath, 'committed schema\n');
+    git(cwd, ['add', schemaPath]);
+    git(cwd, ['commit', '--quiet', '-m', 'add schema']);
+    writeFileSync(schemaPath, 'schema rewritten by build\n');
+    const steps = createValidationSteps({ profile: 'full' }).filter(
+      ({ name }) =>
+        name === 'Ensure settings schema is tracked' ||
+        name === 'Check committed settings schema',
+    );
+
+    await expect(
+      runSteps({
+        allocatePort: async () => 43123,
+        baseEnv: process.env,
+        cwd,
+        home: '/temporary-home',
+        log: () => {},
+        steps,
+      }),
+    ).rejects.toMatchObject({
+      exitCode: 1,
+      stage: 'Check committed settings schema',
+    });
+  });
+
+  it('rejects a generated schema that is not tracked at HEAD', async () => {
+    const cwd = createRepository();
+    const schemaPath = path.join(
+      cwd,
+      'packages',
+      'vscode-ide-companion',
+      'schemas',
+      'settings.schema.json',
+    );
+    mkdirSync(path.dirname(schemaPath), { recursive: true });
+    writeFileSync(schemaPath, 'untracked generated schema\n');
+    const steps = createValidationSteps({ profile: 'full' }).filter(
+      ({ name }) => name === 'Ensure settings schema is tracked',
+    );
+
+    await expect(
+      runSteps({
+        allocatePort: async () => 43123,
+        baseEnv: process.env,
+        cwd,
+        home: '/temporary-home',
+        log: () => {},
+        steps,
+      }),
+    ).rejects.toMatchObject({
+      exitCode: 1,
+      stage: 'Ensure settings schema is tracked',
+    });
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'cleans an owned worktree before relaying a real termination signal',
+    async () => {
+      const harnessRoot = mkdtempSync(path.join(tmpdir(), 'verify-pr-signal-'));
+      tempDirs.push(harnessRoot);
+      const marker = path.join(harnessRoot, 'cleanup.json');
+      const moduleUrl = new URL('../verify-pr.js', import.meta.url).href;
+      const harnessScript = `
+        import { existsSync, writeFileSync } from 'node:fs';
+        import { spawnSync } from 'node:child_process';
+        import { runSteps, withTemporaryWorktree } from ${JSON.stringify(moduleUrl)};
+
+        let ownedPaths;
+        let relayedSignal;
+        try {
+          await withTemporaryWorktree({
+            cwd: process.cwd(),
+            validate: async (paths) => {
+              ownedPaths = paths;
+              await runSteps({
+                allocatePort: async () => 43123,
+                baseEnv: process.env,
+                cwd: paths.worktree,
+                home: paths.home,
+                log: () => {},
+                steps: [{
+                  command: [
+                    process.execPath,
+                    '--input-type=module',
+                    '--eval',
+                    'console.log("READY"); setInterval(() => {}, 1000);',
+                  ],
+                  name: 'Wait for signal',
+                }],
+              });
+            },
+          });
+        } catch (error) {
+          relayedSignal = error.signal;
+        }
+
+        const registrations = spawnSync(
+          'git',
+          ['worktree', 'list', '--porcelain'],
+          { cwd: process.cwd(), encoding: 'utf8' },
+        ).stdout;
+        writeFileSync(
+          ${JSON.stringify(marker)},
+          JSON.stringify({
+            containerExists: existsSync(ownedPaths.container),
+            registered: registrations.includes(ownedPaths.worktree),
+            signal: relayedSignal,
+          }),
+        );
+        process.kill(process.pid, relayedSignal);
+      `;
+      const harness = spawn(
+        process.execPath,
+        ['--input-type=module', '--eval', harnessScript],
+        {
+          cwd: process.cwd(),
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+      let output = '';
+      harness.stdout.setEncoding('utf8');
+      harness.stderr.setEncoding('utf8');
+      harness.stdout.on('data', (chunk) => {
+        output += chunk;
+      });
+      harness.stderr.on('data', (chunk) => {
+        output += chunk;
+      });
+      const completion = new Promise((resolve) => {
+        harness.once('exit', (code, signal) => resolve({ code, signal }));
+      });
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(
+          () => reject(new Error(`Signal harness did not start:\n${output}`)),
+          10_000,
+        );
+        const checkReady = () => {
+          if (!output.includes('READY')) return;
+          clearTimeout(timeout);
+          harness.stdout.off('data', checkReady);
+          resolve();
+        };
+        harness.stdout.on('data', checkReady);
+        checkReady();
+      });
+
+      harness.kill('SIGTERM');
+      const result = await completion;
+
+      expect(result).toEqual({ code: null, signal: 'SIGTERM' });
+      expect(JSON.parse(readFileSync(marker, 'utf8'))).toEqual({
+        containerExists: false,
+        registered: false,
+        signal: 'SIGTERM',
+      });
+    },
+    15_000,
+  );
 
   it('uses CI-equivalent npm fetch settings only for npm ci', () => {
     const steps = createValidationSteps({ profile: 'full' });
@@ -896,10 +1067,13 @@ describe('verification orchestration', () => {
       RUNNER_TEMP: '/owned/container',
       SAFE: 'kept',
     });
-    expect(execution.steps).toHaveLength(39);
+    const pythonSteps = execution.steps.filter(
+      ({ name, uvRequirement }) => uvRequirement || name.includes('(Python '),
+    );
+    expect(pythonSteps).toHaveLength(22);
     expect(execution.steps[0].command.join(' ')).toBe(
       'npm ci --prefer-offline --no-audit --progress=false --ignore-scripts=false',
     );
-    expect(execution.steps[17].command).toEqual(['uv', '--version']);
+    expect(pythonSteps[0].command).toEqual(['uv', '--version']);
   });
 });

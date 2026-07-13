@@ -68,8 +68,9 @@ The full profile runs these categories in fail-fast order:
   workspace isolation;
 - ESLint, actionlint, shellcheck, yamllint, and a read-only Prettier check of
   regular files changed by the PR that still exist at `HEAD`;
-- i18n validation, read-only settings-schema freshness, type checking, and the
-  serve fast-path bundle-closure check;
+- i18n validation, read-only settings-schema freshness plus a check that the
+  build left the committed schema unchanged, type checking, and the serve
+  fast-path bundle-closure check;
 - all workspace unit tests plus script tests, with an isolated temporary home,
   CI settings, and the known model credentials and default auth selection
   removed;
@@ -98,6 +99,8 @@ copyable command before execution; validation failures also report the exact
 `HEAD`, selected base and profile, and a rerun command. It preserves a child's
 numeric exit code or relays its terminating signal after cleanup. The gate
 always attempts to remove the temporary worktree on success or failure.
+`SIGINT` and `SIGTERM` received while a validation command is running are
+forwarded to its process group; the gate cleans up and then relays the signal.
 Cleanup failures are reported, including separately when a validation failure
 already exists.
 
