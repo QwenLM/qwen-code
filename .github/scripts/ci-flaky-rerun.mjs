@@ -54,9 +54,10 @@ function alreadyHandled(pr, target, options) {
   const legacyPattern = new RegExp(
     `<!-- ${MARKER} v=1 pr=${target.prNumber} head=${target.headSha} run=${target.runId}(?: | )`,
   );
-  return markerComments(pr, options).some((comment) =>
-    attemptPattern.test(String(comment.body ?? '')) ||
-    legacyPattern.test(String(comment.body ?? '')),
+  return markerComments(pr, options).some(
+    (comment) =>
+      attemptPattern.test(String(comment.body ?? '')) ||
+      legacyPattern.test(String(comment.body ?? '')),
   );
 }
 
@@ -82,15 +83,13 @@ function fingerprint(target, log) {
   return `check-${createHash('sha256').update(`${target.workflowName}\n${normalized}`).digest('hex').slice(0, 16)}`;
 }
 
-function stateMarkers(comments, prNumber) {
+function stateMarkers(comments, prNumber, trustedMarkerLogin) {
   const marker = new RegExp(
     `<!-- ${MARKER} v=2 pr=${prNumber} head=(\\S+) run=(\\d+) attempt=(\\d+) action=(\\S+) key=([a-z0-9._-]+) check=(\\S+) count=(\\d+) -->`,
   );
   return comments
-    .filter((comment) =>
-      ['qwen-code-ci-bot', 'github-actions[bot]'].includes(
-        String(comment.author?.login ?? ''),
-      ),
+    .filter(
+      (comment) => String(comment.author?.login ?? '') === trustedMarkerLogin,
     )
     .map((comment) => {
       const match = marker.exec(String(comment.body ?? ''));
@@ -211,6 +210,23 @@ export function selectTarget(prs, options = {}) {
 
 export async function actOnDecision(client, target, decision) {
   if (!target) return;
+  if (decision?.action === 'no_action') {
+    if ((await client.currentHeadSha(target.prNumber)) !== target.headSha)
+      return;
+    if (!(await client.isCurrentFailure(target))) return;
+    const key = failureKey(target, decision);
+    if (!key) return;
+    await client.comment(
+      target.prNumber,
+      markerFor(
+        target,
+        'no_action',
+        key,
+        await client.failureActionCount(target.prNumber, key),
+      ),
+    );
+    return;
+  }
   if (decision?.confidence !== 'high') return;
   if (!['rerun', 'update_branch', 'comment'].includes(decision.action)) return;
   if ((await client.currentHeadSha(target.prNumber)) !== target.headSha) return;
@@ -237,10 +253,10 @@ export async function actOnDecision(client, target, decision) {
   if (decision.action === 'update_branch') {
     if ((await client.behindBy(target.headSha)) <= 0) return;
     if (!Number.isSafeInteger(decision.mainRunId)) return;
+    if (!target.mainHeadSha) return;
     if (
-      target.mainHeadSha &&
-      (decision.mainRunId !== target.mainRunId ||
-        (await client.mainHeadSha()) !== target.mainHeadSha)
+      decision.mainRunId !== target.mainRunId ||
+      (await client.mainHeadSha()) !== target.mainHeadSha
     )
       return;
     if (!(await client.mainRunSucceeded(decision.mainRunId))) return;
@@ -286,14 +302,25 @@ export async function actOnDecisions(client, targets, decisions) {
     const target = targetsById.get(
       `${decision.prNumber}:${decision.headSha}:${decision.runId}`,
     );
-    if (target) await actOnDecision(client, target, decision);
+    if (!target) continue;
+    try {
+      await actOnDecision(client, target, decision);
+    } catch (error) {
+      process.stderr.write(
+        `actOnDecision failed for ${decision.prNumber}: ${error.message}\n`,
+      );
+    }
   }
 }
 
 export async function resetSuccessfulFailures(client, prs) {
   for (const pr of prs) {
     const states = new Map();
-    for (const state of stateMarkers(await client.comments(pr.number), pr.number))
+    for (const state of stateMarkers(
+      await client.comments(pr.number),
+      pr.number,
+      client.trustedMarkerLogin,
+    ))
       states.set(state.key, state);
     for (const state of states.values()) {
       if (state.count === 0) continue;
@@ -335,10 +362,7 @@ export async function writeSkillInputs(
             ? ''
             : skillLog(await client.jobLog(target.jobId)),
       });
-      candidates.at(-1).failureKey = fingerprint(
-        target,
-        candidates.at(-1).log,
-      );
+      candidates.at(-1).failureKey = fingerprint(target, candidates.at(-1).log);
       if (candidates.length >= maxCandidates) break;
     } catch {
       // Expired Actions logs cannot be classified safely; try the next PR.
@@ -349,14 +373,16 @@ export async function writeSkillInputs(
 }
 
 class GhClient {
-  constructor(repo) {
+  constructor(repo, trustedMarkerLogin) {
     this.repo = repo;
+    this.trustedMarkerLogin = trustedMarkerLogin;
   }
 
   async gh(args, options = {}) {
     const { stdout } = await execFile('gh', args, {
       encoding: 'utf8',
       maxBuffer: 16 * 1024 * 1024,
+      timeout: 60_000,
       ...options,
     });
     return stdout;
@@ -402,9 +428,17 @@ class GhClient {
     );
   }
 
+  async viewerLogin() {
+    return (await this.gh(['api', 'user', '--jq', '.login'])).trim();
+  }
+
   async failureActionCount(prNumber, key) {
     return (
-      stateMarkers(await this.comments(prNumber), prNumber)
+      stateMarkers(
+        await this.comments(prNumber),
+        prNumber,
+        this.trustedMarkerLogin,
+      )
         .filter((state) => state.key === key)
         .at(-1)?.count ?? 0
     );
@@ -456,10 +490,7 @@ class GhClient {
 
   async isCurrentFailure(target) {
     const run = JSON.parse(
-      await this.gh([
-        'api',
-        `repos/${this.repo}/actions/runs/${target.runId}`,
-      ]),
+      await this.gh(['api', `repos/${this.repo}/actions/runs/${target.runId}`]),
     );
     return (
       run.status === 'completed' &&
@@ -495,12 +526,7 @@ class GhClient {
 
   async mainHeadSha() {
     return (
-      await this.gh([
-        'api',
-        `repos/${this.repo}/commits/main`,
-        '--jq',
-        '.sha',
-      ])
+      await this.gh(['api', `repos/${this.repo}/commits/main`, '--jq', '.sha'])
     ).trim();
   }
 
@@ -574,7 +600,11 @@ function argsMap(argv) {
   const args = new Map();
   for (let i = 0; i < argv.length; i += 1) {
     if (!argv[i].startsWith('--')) continue;
-    args.set(argv[i].slice(2), argv[i + 1]);
+    const value = argv[i + 1];
+    if (value === undefined || value.startsWith('--')) {
+      throw new Error(`missing value for ${argv[i]}`);
+    }
+    args.set(argv[i].slice(2), value);
     i += 1;
   }
   return args;
@@ -585,38 +615,66 @@ function writeJson(workdir, name, value) {
   writeFileSync(resolve(workdir, name), `${JSON.stringify(value, null, 2)}\n`);
 }
 
+async function trustedMarkerLogin(args, client) {
+  const login =
+    args.get('trusted-marker-login') ?? (await client.viewerLogin());
+  if (!login) throw new Error('trusted marker login is required');
+  client.trustedMarkerLogin = login;
+  return login;
+}
+
+async function skillCandidate(client, candidate, prs, options, mainEvidence) {
+  const pr = prs.find((item) => item.number === candidate.prNumber);
+  const target = {
+    ...candidate,
+    runAttempt: await client.runAttempt(candidate.runId),
+  };
+  const comments = await client.comments(candidate.prNumber);
+  if (!canAct({ ...pr, comments }, target, options)) return null;
+  return {
+    ...target,
+    behindBy: await client.behindBy(target.headSha),
+    ...mainEvidence,
+  };
+}
+
 async function scan(args) {
   const client = new GhClient(args.get('repo'));
-  const activeDays = Number(args.get('active-days') ?? DEFAULT_ACTIVE_DAYS);
+  const trustedLogin = await trustedMarkerLogin(args, client);
+  const parsedActiveDays = Number(args.get('active-days'));
+  const activeDays =
+    Number.isFinite(parsedActiveDays) && parsedActiveDays > 0
+      ? parsedActiveDays
+      : DEFAULT_ACTIVE_DAYS;
   const prs = await client.prs(activeDays);
   const candidates = selectCandidateTargets(prs, {
     staleMinutes: Number(args.get('stale-minutes') ?? DEFAULT_STALE_MINUTES),
     activeDays,
   });
-  const trustedMarkerLogins = (args.get('trusted-marker-logins') ?? '')
-    .split(',')
-    .filter(Boolean);
-  const options = { trustedMarkerLogins };
+  const options = { trustedMarkerLogins: [trustedLogin] };
   const requestedMax = Number(args.get('max-candidates'));
   const maxCandidates =
     Number.isSafeInteger(requestedMax) && requestedMax > 0
       ? requestedMax
-       : DEFAULT_MAX_CANDIDATES_PER_RUN;
+      : DEFAULT_MAX_CANDIDATES_PER_RUN;
   const mainEvidence = await client.mainEvidence();
   const targets = [];
   for (const candidate of candidates) {
-    const pr = prs.find((item) => item.number === candidate.prNumber);
-    const target = {
-      ...candidate,
-      runAttempt: await client.runAttempt(candidate.runId),
-    };
-    const comments = await client.comments(candidate.prNumber);
-    if (!canAct({ ...pr, comments }, target, options)) continue;
-    targets.push({
-      ...target,
-      behindBy: await client.behindBy(target.headSha),
-      ...mainEvidence,
-    });
+    if (targets.length >= maxCandidates) break;
+    try {
+      const target = await skillCandidate(
+        client,
+        candidate,
+        prs,
+        options,
+        mainEvidence,
+      );
+      if (target) targets.push(target);
+    } catch (error) {
+      process.stderr.write(
+        `scan: skipping PR ${candidate.prNumber}: ${error.message}\n`,
+      );
+    }
   }
   const inputs = await writeSkillInputs(
     client,
@@ -624,7 +682,9 @@ async function scan(args) {
     args.get('workdir'),
     maxCandidates,
   );
-  process.stdout.write(`target_found=${inputs.length > 0 ? 'true' : 'false'}\n`);
+  process.stdout.write(
+    `target_found=${inputs.length > 0 ? 'true' : 'false'}\n`,
+  );
   process.stdout.write(`target_count=${inputs.length}\n`);
 }
 
@@ -636,11 +696,14 @@ async function act(args) {
   const { decisions } = JSON.parse(
     readFileSync(resolve(workdir, 'ci-flaky-decisions.json')),
   );
-  await actOnDecisions(new GhClient(args.get('repo')), candidates, decisions);
+  const client = new GhClient(args.get('repo'));
+  await trustedMarkerLogin(args, client);
+  await actOnDecisions(client, candidates, decisions);
 }
 
 async function reset(args) {
   const client = new GhClient(args.get('repo'));
+  await trustedMarkerLogin(args, client);
   await resetSuccessfulFailures(client, await client.markerPrs());
 }
 
@@ -650,12 +713,12 @@ async function main() {
   if (command === 'scan') return scan(args);
   if (command === 'act') return act(args);
   if (command === 'reset') return reset(args);
-  throw new Error('command must be scan or act');
+  throw new Error('command must be scan, act, or reset');
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch((error) => {
-    console.error(error.message);
+    console.error(error.stderr || error.message);
     process.exit(1);
   });
 }

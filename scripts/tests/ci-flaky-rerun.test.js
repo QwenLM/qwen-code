@@ -89,7 +89,7 @@ describe('ci flaky rerun patrol', () => {
       execFileSync('node', ['.github/scripts/ci-flaky-rerun.mjs', 'invalid'], {
         encoding: 'utf8',
       }),
-    ).toThrow(/command must be scan or act/);
+    ).toThrow(/command must be scan, act, or reset/);
   });
 
   it('selects the newest stale failed PR run', () => {
@@ -161,7 +161,7 @@ describe('ci flaky rerun patrol', () => {
             comments: [{ body: marker, author: { login: 'untrusted-user' } }],
           }),
         ],
-        { now: NOW, trustedMarkerLogins: ['qwen-code-ci-bot'] },
+        { now: NOW, trustedMarkerLogins: ['trusted-patrol-bot'] },
       ),
     ).toMatchObject({ prNumber: 42, runId: 123 });
   });
@@ -224,12 +224,12 @@ describe('ci flaky rerun patrol', () => {
   });
 
   it('bounds each skill batch after scanning all eligible failed PRs', () => {
-    expect(script).toContain('const targets = []');
-    expect(script).toContain('targets.push({');
     expect(script).toContain('DEFAULT_MAX_CANDIDATES_PER_RUN');
     expect(script).toContain('maxCandidates = Infinity');
     expect(script).toContain('if (candidates.length >= maxCandidates) break;');
-    expect(script).toContain('const inputs = await writeSkillInputs(');
+    expect(script).toContain('async function skillCandidate');
+    expect(script).toContain('const targets = [];');
+    expect(script).toContain('await skillCandidate(');
   });
 
   it('can rank candidates before fetching comments', () => {
@@ -330,6 +330,7 @@ describe('ci flaky rerun patrol', () => {
 
   it('resets a PR failure count after its matching check succeeds', async () => {
     const client = runner();
+    client.trustedMarkerLogin = 'trusted-patrol-bot';
     const target = selectTarget([pr()], { now: NOW });
     const marker =
       '<!-- qwen-ci-flaky-rerun v=2 pr=42 head=abc123 run=120 attempt=1 action=rerun key=runner-network-timeout check=E2E%20Tests count=2 -->';
@@ -345,7 +346,7 @@ describe('ci flaky rerun patrol', () => {
       {
         body: marker,
         createdAt: '2026-07-12T07:20:00.000Z',
-        author: { login: 'qwen-code-ci-bot' },
+        author: { login: 'trusted-patrol-bot' },
       },
     ];
 
@@ -361,6 +362,45 @@ describe('ci flaky rerun patrol', () => {
       ],
     ]);
     expect(client.calls[0][2]).toContain(`head=${target.headSha}`);
+  });
+
+  it('derives the trusted marker identity from the active gh token', () => {
+    expect(script).toContain('async viewerLogin()');
+    expect(script).toContain("['api', 'user', '--jq', '.login']");
+    expect(script).toContain("args.get('trusted-marker-login')");
+    expect(script).not.toContain('qwen-code-ci-bot');
+    expect(script).not.toContain('github-actions[bot]');
+  });
+
+  it('ignores reset markers from untrusted accounts', async () => {
+    const client = runner();
+    client.trustedMarkerLogin = 'trusted-patrol-bot';
+    client.comments = async () => [
+      {
+        body: '<!-- qwen-ci-flaky-rerun v=2 pr=42 head=abc123 run=120 attempt=1 action=rerun key=runner-network-timeout check=E2E%20Tests count=2 -->',
+        createdAt: '2026-07-12T07:20:00.000Z',
+        author: { login: 'random-user' },
+      },
+    ];
+
+    await resetSuccessfulFailures(client, [
+      pr({
+        statusCheckRollup: [
+          run({
+            conclusion: 'SUCCESS',
+            completedAt: '2026-07-12T07:30:00.000Z',
+          }),
+        ],
+      }),
+    ]);
+
+    expect(client.calls).toEqual([]);
+  });
+
+  it('keeps gh diagnostics bounded and visible', () => {
+    expect(script).toContain('timeout: 60_000');
+    expect(script).toContain('error.stderr || error.message');
+    expect(script).toContain('throw new Error(`missing value for ${argv[i]}`)');
   });
 
   it('applies only decisions that match an input target', async () => {
@@ -446,7 +486,11 @@ describe('ci flaky rerun patrol', () => {
 
   it('updates a still-behind branch only for a high-confidence skill decision', async () => {
     const client = runner();
-    const target = selectTarget([pr()], { now: NOW });
+    const target = {
+      ...selectTarget([pr()], { now: NOW }),
+      mainHeadSha: 'main-head',
+      mainRunId: 456,
+    };
 
     await actOnDecision(client, target, {
       action: 'update_branch',
@@ -479,6 +523,55 @@ describe('ci flaky rerun patrol', () => {
     });
 
     expect(client.calls).toEqual([]);
+  });
+
+  it('keeps applying later decisions after one action fails', async () => {
+    const client = runner();
+    client.rerunFailedJobs = async (runId) => {
+      client.calls.push(['rerunFailedJobs', runId]);
+      if (runId === 123) throw new Error('temporary gh failure');
+    };
+    client.currentHeadSha = async (prNumber) =>
+      prNumber === 42 ? 'abc123' : 'def456';
+
+    await actOnDecisions(
+      client,
+      [
+        selectTarget([pr()], { now: NOW }),
+        {
+          ...selectTarget([pr()], { now: NOW }),
+          prNumber: 43,
+          headSha: 'def456',
+          runId: 124,
+        },
+      ],
+      [
+        {
+          prNumber: 42,
+          headSha: 'abc123',
+          runId: 123,
+          action: 'rerun',
+          confidence: 'high',
+          reason_en: 'runner timeout',
+          reason_zh: 'runner 超时。',
+        },
+        {
+          prNumber: 43,
+          headSha: 'def456',
+          runId: 124,
+          action: 'rerun',
+          confidence: 'high',
+          reason_en: 'runner timeout',
+          reason_zh: 'runner 超时。',
+        },
+      ],
+    );
+
+    expect(client.calls).toEqual([
+      ['rerunFailedJobs', 123],
+      ['rerunFailedJobs', 124],
+      ['comment', 43, expect.stringContaining('action=rerun')],
+    ]);
   });
 
   it('does not update a branch when main advanced after classification', async () => {
@@ -739,7 +832,7 @@ describe('ci flaky rerun patrol', () => {
     }
   });
 
-  it('does not rerun low-confidence or non-flaky decisions', async () => {
+  it('does not rerun low-confidence decisions and records no-action state', async () => {
     const target = selectTarget([pr()], { now: NOW });
     const client = runner();
 
@@ -756,6 +849,11 @@ describe('ci flaky rerun patrol', () => {
       reason_zh: '测试断言失败。',
     });
 
-    expect(client.calls).toEqual([]);
+    expect(client.calls).toHaveLength(1);
+    expect(client.calls[0].slice(0, 2)).toEqual(['comment', 42]);
+    expect(client.calls[0][2]).toContain(
+      'action=no_action key=unknown check=E2E%20Tests count=0',
+    );
+    expect(client.calls[0][2]).toMatch(/^<!-- qwen-ci-flaky-rerun v=2 .* -->$/);
   });
 });

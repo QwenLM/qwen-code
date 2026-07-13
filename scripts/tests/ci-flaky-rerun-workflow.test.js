@@ -31,6 +31,19 @@ describe('ci flaky rerun workflow', () => {
     expect(workflow).toContain('persist-credentials: false');
   });
 
+  it('resolves the patrol identity from CI_BOT_PAT rather than a hardcoded login', () => {
+    expect(workflow).toContain('identity:');
+    expect(workflow).toContain('gh api user --jq .login');
+    expect(workflow).toContain(
+      "bot_login: '${{ steps.identity.outputs.bot_login }}'",
+    );
+    expect(workflow).toContain(
+      '--trusted-marker-login "${{ needs.identity.outputs.bot_login }}"',
+    );
+    expect(workflow).not.toContain('qwen-code-ci-bot');
+    expect(workflow).not.toContain('github-actions[bot]');
+  });
+
   it('delegates PR failure judgment to the project skill', () => {
     expect(workflow).toContain('.qwen/skills/ci-flaky-patrol/SKILL.md');
     expect(workflow).toContain('ci-flaky-input.json');

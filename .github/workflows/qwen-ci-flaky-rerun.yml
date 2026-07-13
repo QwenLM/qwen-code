@@ -19,8 +19,26 @@ env:
   WORKDIR: '${{ github.workspace }}/.qwen/ci-flaky-rerun'
 
 jobs:
+  identity:
+    name: 'Resolve patrol bot identity'
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    runs-on: 'ubuntu-latest'
+    outputs:
+      bot_login: '${{ steps.identity.outputs.bot_login }}'
+    permissions: {}
+    steps:
+      - name: 'Resolve CI bot login'
+        id: 'identity'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+        run: |-
+          bot_login="$(gh api user --jq .login)"
+          test -n "${bot_login}"
+          echo "bot_login=${bot_login}" >> "${GITHUB_OUTPUT}"
+
   classify:
     name: 'Classify stale PR CI failure'
+    needs: 'identity'
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     runs-on: 'ubuntu-latest'
     outputs:
@@ -54,7 +72,7 @@ jobs:
             --stale-minutes "${STALE_MINUTES}" \
             --active-days "${ACTIVE_DAYS}" \
             --max-candidates "${MAX_CANDIDATES_PER_RUN}" \
-            --trusted-marker-logins 'qwen-code-ci-bot,github-actions[bot]' | tee "${WORKDIR}/scan.out"
+            --trusted-marker-login "${{ needs.identity.outputs.bot_login }}" | tee "${WORKDIR}/scan.out"
           cat "${WORKDIR}/scan.out" >> "${GITHUB_OUTPUT}"
           if test -s "${WORKDIR}/ci-flaky-input.json"; then
             input_sha="$(sha256sum "${WORKDIR}/ci-flaky-input.json" | cut -d ' ' -f 1)"
@@ -97,7 +115,7 @@ jobs:
 
   act:
     name: 'Apply validated PR CI action'
-    needs: 'classify'
+    needs: ['identity', 'classify']
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     runs-on: 'ubuntu-latest'
     permissions:
@@ -121,7 +139,8 @@ jobs:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
         run: |-
           node .github/scripts/ci-flaky-rerun.mjs reset \
-            --repo "${{ github.repository }}"
+            --repo "${{ github.repository }}" \
+            --trusted-marker-login "${{ needs.identity.outputs.bot_login }}"
 
       - name: 'Download patrol decision'
         if: "${{ needs.classify.outputs.target_found == 'true' }}"
@@ -139,4 +158,5 @@ jobs:
           test -s "${WORKDIR}/ci-flaky-decisions.json"
           node .github/scripts/ci-flaky-rerun.mjs act \
             --repo "${{ github.repository }}" \
-            --workdir "${WORKDIR}"
+            --workdir "${WORKDIR}" \
+            --trusted-marker-login "${{ needs.identity.outputs.bot_login }}"
