@@ -24,6 +24,7 @@ import type { IncomingMessage } from 'node:http';
 import * as fs from 'node:fs/promises';
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { promises as dns } from 'node:dns';
 import * as tar from 'tar';
@@ -36,6 +37,7 @@ import {
 import { getErrorMessage } from '../utils/errors.js';
 import { EXTENSIONS_CONFIG_FILENAME } from './variables.js';
 import { ExtensionStorage } from './storage.js';
+import { assertTarArchiveHasNoLinks } from './archive-safety.js';
 
 const mockPlatform = vi.hoisted(() => vi.fn());
 const mockArch = vi.hoisted(() => vi.fn());
@@ -1957,6 +1959,40 @@ describe('git extension helpers', () => {
   describe('extractFile', () => {
     let tempDir: string;
 
+    async function getFileSize(filePath: string): Promise<number> {
+      try {
+        return (await fs.stat(filePath)).size;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+        throw error;
+      }
+    }
+
+    async function waitForFileData(filePath: string): Promise<void> {
+      for (let attempt = 0; attempt < 1_000; attempt += 1) {
+        if ((await getFileSize(filePath)) > 0) return;
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      throw new Error(`Timed out waiting for extracted data at ${filePath}`);
+    }
+
+    async function waitForStableFileSize(filePath: string): Promise<number> {
+      let previousSize = -1;
+      let stableChecks = 0;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        await new Promise((resolve) => setImmediate(resolve));
+        const size = await getFileSize(filePath);
+        if (size === previousSize) {
+          stableChecks += 1;
+          if (stableChecks === 3) return size;
+        } else {
+          previousSize = size;
+          stableChecks = 0;
+        }
+      }
+      throw new Error(`Extracted data did not stop changing at ${filePath}`);
+    }
+
     beforeEach(async () => {
       tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gemini-test-'));
     });
@@ -1989,6 +2025,54 @@ describe('git extension helpers', () => {
       const extractedFilePath = path.join(extractionDest, 'test.txt');
       const content = await fs.readFile(extractedFilePath, 'utf-8');
       expect(content).toBe('hello tar');
+    });
+
+    it('should cancel while scanning a tar archive', async () => {
+      const archivePath = path.join(tempDir, 'scan-cancel.tar.gz');
+      const sourcePath = path.join(tempDir, 'large.bin');
+      await fs.writeFile(sourcePath, randomBytes(16 * 1024 * 1024));
+      await tar.c({ gzip: true, file: archivePath, cwd: tempDir }, [
+        'large.bin',
+      ]);
+
+      const controller = new AbortController();
+      const abortReason = new Error('cancel tar scan');
+      const scan = assertTarArchiveHasNoLinks(archivePath, controller.signal);
+      setImmediate(() => controller.abort(abortReason));
+      await expect(scan).rejects.toBe(abortReason);
+    });
+
+    it('should cancel while extracting a tar archive', async () => {
+      const archivePath = path.join(tempDir, 'extract-cancel.tar.gz');
+      const extractionDest = path.join(tempDir, 'extracted');
+      const sourcePath = path.join(tempDir, 'large.bin');
+      const extractedFilePath = path.join(extractionDest, 'large.bin');
+      const content = randomBytes(32 * 1024 * 1024);
+      await fs.mkdir(extractionDest);
+      await fs.writeFile(sourcePath, content);
+      await tar.c({ gzip: true, file: archivePath, cwd: tempDir }, [
+        'large.bin',
+      ]);
+
+      const controller = new AbortController();
+      const abortReason = new Error('cancel tar extraction');
+      const extraction = extractFile(
+        archivePath,
+        extractionDest,
+        controller.signal,
+      );
+      try {
+        await waitForFileData(extractedFilePath);
+      } catch (error) {
+        controller.abort(error);
+        await extraction.catch(() => undefined);
+        throw error;
+      }
+      controller.abort(abortReason);
+      await expect(extraction).rejects.toBe(abortReason);
+      expect(await waitForStableFileSize(extractedFilePath)).toBeLessThan(
+        content.length,
+      );
     });
 
     it.skipIf(process.platform === 'win32')(
@@ -2052,6 +2136,45 @@ describe('git extension helpers', () => {
       expect(content).toBe('hello zip');
     });
 
+    it('should cancel while extracting a zip archive', async () => {
+      const archivePath = path.join(tempDir, 'extract-cancel.zip');
+      const extractionDest = path.join(tempDir, 'extracted');
+      const extractedFilePath = path.join(extractionDest, 'large.bin');
+      const content = Buffer.alloc(64 * 1024 * 1024, 0x61);
+      await fs.mkdir(extractionDest);
+
+      const output = fsSync.createWriteStream(archivePath);
+      const archive = archiver.create('zip');
+      const streamFinished = new Promise((resolve, reject) => {
+        output.on('close', () => resolve(null));
+        archive.on('error', reject);
+      });
+      archive.pipe(output);
+      archive.append(content, { name: 'large.bin' });
+      await archive.finalize();
+      await streamFinished;
+
+      const controller = new AbortController();
+      const abortReason = new Error('cancel zip extraction');
+      const extraction = extractFile(
+        archivePath,
+        extractionDest,
+        controller.signal,
+      );
+      try {
+        await waitForFileData(extractedFilePath);
+      } catch (error) {
+        controller.abort(error);
+        await extraction.catch(() => undefined);
+        throw error;
+      }
+      controller.abort(abortReason);
+      await expect(extraction).rejects.toBe(abortReason);
+      expect(await waitForStableFileSize(extractedFilePath)).toBeLessThan(
+        content.length,
+      );
+    });
+
     it('should reject symlink entries in zip archives', async () => {
       const archivePath = path.join(tempDir, 'symlink.zip');
       const extractionDest = path.join(tempDir, 'extracted');
@@ -2077,6 +2200,36 @@ describe('git extension helpers', () => {
         fs.lstat(path.join(extractionDest, 'escape-link')),
       ).rejects.toThrow();
     });
+
+    it.skipIf(process.platform === 'win32')(
+      'should reject zip extraction through an existing symlink',
+      async () => {
+        const archivePath = path.join(tempDir, 'existing-symlink.zip');
+        const extractionDest = path.join(tempDir, 'extracted');
+        const outsideDir = path.join(tempDir, 'outside');
+        await fs.mkdir(extractionDest);
+        await fs.mkdir(outsideDir);
+        await fs.symlink(outsideDir, path.join(extractionDest, 'escape'));
+
+        const output = fsSync.createWriteStream(archivePath);
+        const archive = archiver.create('zip');
+        const streamFinished = new Promise((resolve, reject) => {
+          output.on('close', () => resolve(null));
+          archive.on('error', reject);
+        });
+        archive.pipe(output);
+        archive.append('outside write', { name: 'escape/file.txt' });
+        await archive.finalize();
+        await streamFinished;
+
+        await expect(extractFile(archivePath, extractionDest)).rejects.toThrow(
+          'Out of bound path',
+        );
+        await expect(
+          fs.lstat(path.join(outsideDir, 'file.txt')),
+        ).rejects.toThrow();
+      },
+    );
 
     it('should throw an error for unsupported file types', async () => {
       const unsupportedFilePath = path.join(tempDir, 'test.txt');

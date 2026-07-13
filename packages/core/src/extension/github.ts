@@ -10,8 +10,8 @@ import * as os from 'node:os';
 import * as https from 'node:https';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import * as tar from 'tar';
-import extract from 'extract-zip';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   ExtensionUpdateState,
@@ -28,11 +28,10 @@ import {
 } from './extension-converter.js';
 import { assertTarArchiveHasNoLinks } from './archive-safety.js';
 import { resolveNetworkTarget } from './network-policy.js';
+import { extractZipArchive } from './zip-extraction.js';
 
 const debugLogger = createDebugLogger('EXT_GITHUB');
 const SUPPORTED_ARCHIVE_EXTENSIONS = ['.tar.gz', '.zip'] as const;
-const ZIP_FILE_TYPE_MASK = 0xf000;
-const ZIP_SYMBOLIC_LINK_TYPE = 0xa000;
 const ARCHIVE_DOWNLOAD_TIMEOUT_MS = 120_000;
 const ARCHIVE_DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024;
 const MINIMUM_PINNED_GIT_VERSION = { major: 2, minor: 37 } as const;
@@ -900,32 +899,22 @@ export async function extractFile(
 ): Promise<void> {
   signal?.throwIfAborted();
   if (file.endsWith('.tar.gz')) {
-    await assertTarArchiveHasNoLinks(file);
+    await assertTarArchiveHasNoLinks(file, signal);
     signal?.throwIfAborted();
-    await tar.x({
-      file,
-      cwd: dest,
-    });
+    try {
+      await pipeline(fs.createReadStream(file), tar.x({ cwd: dest }), {
+        signal,
+      });
+    } catch (error) {
+      signal?.throwIfAborted();
+      throw error;
+    }
   } else if (file.endsWith('.zip')) {
-    await extract(file, {
-      dir: dest,
-      onEntry: (entry) => {
-        if (isZipSymlinkEntry(entry.externalFileAttributes)) {
-          throw new Error(
-            `Zip archive contains unsupported symbolic link entry: ${entry.fileName}`,
-          );
-        }
-      },
-    });
+    await extractZipArchive(file, dest, signal);
   } else {
     throw new Error(`Unsupported file extension for extraction: ${file}`);
   }
   signal?.throwIfAborted();
-}
-
-function isZipSymlinkEntry(externalFileAttributes: number): boolean {
-  const mode = externalFileAttributes >>> 16;
-  return (mode & ZIP_FILE_TYPE_MASK) === ZIP_SYMBOLIC_LINK_TYPE;
 }
 
 async function flattenSingleExtensionDirectory(

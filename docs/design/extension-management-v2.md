@@ -139,11 +139,12 @@ occupy either slot, so later commits may proceed while an earlier generation is
 being applied or cleaned up.
 
 The preparation deadline starts when an operation first acquires a preparation
-slot, not while it waits. Abort is propagated to network operations. A started
-task continues to occupy its slot until its underlying promise settles even if
-it ignores abort. Commit is not cancellable. Prepared updates carry the target
-artifact generation: unrelated extension or activation changes safely rebase,
-while a stale update of the same artifact fails with `extension_conflict`.
+slot, not while it waits. Abort is propagated to network operations and active
+archive scanning and extraction streams. A started task continues to occupy its
+slot until its underlying promise settles even if it ignores abort. Commit is
+not cancellable. Prepared updates carry the target artifact generation:
+unrelated extension or activation changes safely rebase, while a stale update
+of the same artifact fails with `extension_conflict`.
 
 ## Runtime reconciliation
 
