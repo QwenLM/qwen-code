@@ -330,6 +330,29 @@ Three changes, and the ordering one is load-bearing:
 
 The lesson generalizes past this file: **"a false positive is cheap" is a claim about a budget, and it has to be measured against the real distribution, not assumed.** Here it was false until the ordering was fixed.
 
+## Why "fixed by this diff" is the verdict that needed a bar
+
+The re-check has three verdicts, and until PR #6486 only two of them cost anything:
+
+| verdict              | consequence                                           |
+| -------------------- | ----------------------------------------------------- |
+| `still stands`       | `REQUEST_CHANGES` — blocks the merge                  |
+| `cannot tell`        | serialized into the body, caps the event at `COMMENT` |
+| `fixed by this diff` | **nothing. Silent, free, unrecorded.**                |
+
+An agent under context pressure, choosing among three answers where one is free and two are not, drifts toward the free one — and the free one is the only one that can ship a bug.
+
+Worse, the bar for it read "you read the lines and the fix is there", which invites reading **the diff's lines**. That is precisely the reading that fails. A fix's new lines are always in the diff; whether they _work_ routinely depends on code outside it.
+
+PR #6486 is the case. A `Ctrl+F` dual-fire blocker was filed — the hotkey toggled the model _and_ moved the input cursor. The author added a guard to the toggle handler: visible in the diff, and it reads like a fix. It changed nothing. The second handler is `text-buffer.ts:2663`, in a file the PR never touches, subscribed independently to a `KeypressContext.broadcast()` that has no stop-propagation — `return`ing from one subscriber does not stop the other. Read the diff and you see a guard and rule "fixed". Read `text-buffer.ts:2663` and you cannot.
+
+Two changes, split the way this document keeps arriving at — **determinism owns the evidence, judgment owns the ruling**:
+
+- **`pr-context` extracts the evidence** (`extractCodeRefs`). A blocker's body names the code it is about — #6486's named `text-buffer.ts:2663` outright — so every promoted blocker now renders a **Referenced code** list. "Go read the untouched code" stops being a hope the agent might have and becomes a list it is handed.
+- **SKILL.md raises the bar** on the ruling: name the mechanism, name what now stops it, and when the stopping condition lives outside the diff, read it there — or the verdict is `cannot tell`.
+
+No new `compose-review` input was needed: `cannot tell` already caps the event. The change is to make wrong "fixed" rulings land there instead of passing silently.
+
 ## What the first dogfood batch changed
 
 Six concurrent real-PR runs (batch 3) produced three targeted changes, each fixing something the batch measured rather than predicted:

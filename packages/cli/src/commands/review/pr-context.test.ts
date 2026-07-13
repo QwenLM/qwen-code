@@ -17,6 +17,7 @@ import {
   truncatedHeadings,
   buildMarkdown,
   carriesBlockerSignal,
+  extractCodeRefs,
   classifyInlineThreads,
   fullBody,
   fullCommentBody,
@@ -457,6 +458,53 @@ describe('buildMarkdown — a markerless maintainer blocker must not render as a
     ).toBe(true);
   });
 
+  it('hands the re-check the untouched file the fix turns on', () => {
+    const md = render();
+    // The blocker names `text-buffer.ts:2663` — a file THIS PR NEVER TOUCHES,
+    // and the reason the author's first fix (a guard, plainly visible in the
+    // diff) was inert. An agent that rules "fixed" from the diff alone rules
+    // wrong. Extracting the reference turns "go read the untouched code" from
+    // a hope into a list the agent is handed.
+    expect(md).toContain('**Referenced code');
+    expect(md).toContain('`text-buffer.ts:2663`');
+  });
+
+  it('puts the blockers where one read_file can see them', () => {
+    // Found by running it against the live thread, not by any unit test. The
+    // section was originally written after "Open inline comments"; on #6486 that
+    // put its heading at char 25 961 and the blocker body at 43 094 — both past
+    // the 25 000 chars one `read_file` returns. The blocker was in the file and
+    // nobody could read it, which is strictly no better than not promoting it.
+    const md = render();
+    const section = md.indexOf('## Blockers to re-check');
+    const blocker = md.indexOf('dual-fires');
+    expect(section).toBeGreaterThanOrEqual(0);
+    expect(section).toBeLessThan(md.indexOf('## Description'));
+    expect(blocker).toBeLessThan(25_000);
+  });
+
+  it('does not promote the triage bot saying there are NO blockers', () => {
+    // "No critical blockers." is the triage bot's own template line. A
+    // whole-body keyword scan fired on it, on every PR it ever commented on —
+    // and each false promotion spends the read budget the real blocker needs.
+    const md = buildMarkdown(
+      '6486',
+      'QwenLM/qwen-code',
+      meta,
+      [],
+      [
+        { id: 1, user: { login: 'bot' }, body: 'No critical blockers. LGTM.' },
+        {
+          id: 2,
+          user: { login: 'author' },
+          body: '### 🔴 Critical fixes\nAddressed all 3 findings.',
+        },
+      ],
+      [],
+    );
+    expect(md).not.toContain('## Blockers to re-check');
+  });
+
   it('still lets ordinary chatter settle into Already discussed', () => {
     const md = render();
     const alreadyDiscussed = md.indexOf('## Already discussed');
@@ -465,6 +513,59 @@ describe('buildMarkdown — a markerless maintainer blocker must not render as a
     // otherwise every thankyou note becomes a mandatory ruling.
     expect(alreadyDiscussed).toBeGreaterThanOrEqual(0);
     expect(chatter).toBeGreaterThan(alreadyDiscussed);
+  });
+});
+
+describe('extractCodeRefs', () => {
+  it('pulls the locations a blocker points at, with line numbers', () => {
+    expect(
+      extractCodeRefs(
+        "`text-buffer.ts:2663` still binds `Ctrl+F → move('right')`, and the " +
+          'handler in `AppContainer.tsx` is an independent subscriber.',
+      ),
+    ).toEqual(['text-buffer.ts:2663', 'AppContainer.tsx']);
+  });
+
+  it('keeps full paths and line ranges', () => {
+    expect(
+      extractCodeRefs('see packages/cli/src/ui/x.ts:10-20 and lib/y.go:3'),
+    ).toEqual(['packages/cli/src/ui/x.ts:10-20', 'lib/y.go:3']);
+  });
+
+  it('dedups repeats and bounds the list', () => {
+    expect(extractCodeRefs('a.ts:1 a.ts:1 a.ts:1')).toEqual(['a.ts:1']);
+    const many = Array.from({ length: 30 }, (_, i) => `f${i}.ts`).join(' ');
+    expect(extractCodeRefs(many)).toHaveLength(12);
+  });
+
+  it('collapses a bare filename into the full path naming the same location', () => {
+    // Reports name a location twice — once bare, once by path. Keep the one
+    // the reader can actually open.
+    expect(
+      extractCodeRefs(
+        '`text-buffer.ts:2663` still binds it; remove it at ' +
+          '`packages/cli/src/ui/components/shared/text-buffer.ts:2663`.',
+      ),
+    ).toEqual(['packages/cli/src/ui/components/shared/text-buffer.ts:2663']);
+    // Different lines in the same file are different locations — keep both.
+    expect(extractCodeRefs('a/b.ts:1 and a/b.ts:2')).toEqual([
+      'a/b.ts:1',
+      'a/b.ts:2',
+    ]);
+  });
+
+  it('keeps a scoped or relative path prefix intact', () => {
+    // `\b` fires on the first word-character transition, so `@scope/…` came back
+    // as `scope/…` and `../lib/b.ts` as `lib/b.ts` — not the path that was cited.
+    expect(extractCodeRefs('see @scope/pkg/index.ts:10')).toEqual([
+      '@scope/pkg/index.ts:10',
+    ]);
+    expect(extractCodeRefs('see ../lib/b.ts')).toEqual(['../lib/b.ts']);
+  });
+
+  it('returns nothing for a body that names no code', () => {
+    expect(extractCodeRefs('LGTM, ship it')).toEqual([]);
+    expect(extractCodeRefs(undefined)).toEqual([]);
   });
 });
 

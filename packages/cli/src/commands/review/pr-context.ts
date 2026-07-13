@@ -169,6 +169,47 @@ export function fullIssueCommentBody(
 }
 
 /**
+ * Code locations a blocker's body points at, in the order they appear.
+ *
+ * The Step 6 re-check rules "fixed by this diff" by reading the code. The trap
+ * is *which* code: a fix's new lines are in the diff, but whether they actually
+ * work often turns on a file the diff never touches, and an agent reading only
+ * the diff sees a plausible-looking fix and rules it good.
+ *
+ * PR #6486 again. The author's first fix added a guard to the toggle handler —
+ * visible in the diff, and it looks like a fix. It changed nothing: `Ctrl+F`
+ * still dual-fired, because the second handler is `text-buffer.ts:2663`, an
+ * untouched file, subscribed independently to the same broadcast. The blocker's
+ * body *names that line*. So the evidence the re-check needs is right there in
+ * the text — it just has to be pulled out and handed over as a read list, not
+ * left for an agent to notice inside 6 000 characters of prose.
+ *
+ * Deliberately loose: a path-shaped token with a known-ish extension, optional
+ * `:line` (or `:line-line`). Over-matching costs one file read; under-matching
+ * costs the ruling. `MAX_CODE_REFS` bounds the render, since a long report can
+ * name a lot of files.
+ */
+// The leading boundary is a lookbehind, not `\b`: `\b` fires on the first
+// word-character transition, so `@scope/pkg/index.ts` extracted as
+// `scope/pkg/index.ts` and `../lib/b.ts` as `lib/b.ts` — a path whose meaning
+// is not the path that was cited.
+const CODE_REF_RE =
+  /(?<![\w./@-])[\w./@-]*[\w-]+\.(?:tsx?|jsx?|mjs|cjs|vue|svelte|py|go|rs|java|kt|rb|c|cc|cpp|h|hpp|cs|php|swift|scala|sh|sql|graphql|gql|proto|gradle|ya?ml|json|toml|md)(?::\d+(?:-\d+)?)?\b/g;
+const MAX_CODE_REFS = 12;
+export function extractCodeRefs(body: string | undefined): string[] {
+  const all = [
+    ...new Set([...(body ?? '').matchAll(CODE_REF_RE)].map((m) => m[0])),
+  ];
+  // A report routinely names the same location twice — once bare and once by
+  // full path (`text-buffer.ts:2663` and `packages/.../text-buffer.ts:2663`).
+  // Keep the fuller path: it is the one the reader can open.
+  const refs = all.filter(
+    (r) => !all.some((other) => other !== r && other.endsWith(`/${r}`)),
+  );
+  return refs.slice(0, MAX_CODE_REFS);
+}
+
+/**
  * Does this body assert a blocking defect?
  *
  * The re-check section used to be gated on the literal `[Critical]` marker,
@@ -417,6 +458,8 @@ function blockerSection(
     '## Blockers to re-check — a reply alone does NOT retire a blocker; the re-check must rule on each against the code',
     '',
     '> Bodies are rendered in full; a body cut at a cap names its comment id to fetch, and a body read in part is `cannot tell`, never "no blocker in it".',
+    '>',
+    '> **Ruling "fixed by this diff" means reading the code the blocker names — including the files this PR never touches.** Each blocker below carries a **Referenced code** list extracted from its own body. A fix whose new lines are in the diff can still be inert because of a file outside it (PR #6486: the added guard looked right; `Ctrl+F` still dual-fired, because the second handler lived in an untouched file). A location you did not read is not evidence of a fix — that ruling is `cannot tell`.',
     '',
   ];
 
@@ -434,6 +477,16 @@ function blockerSection(
     spent += lines.join('\n').length;
     return lines;
   };
+  const refsLine = (body: string | undefined): string[] => {
+    const refs = extractCodeRefs(body);
+    return refs.length > 0
+      ? [
+          `**Referenced code — read each at the reviewed commit before ruling:** ${refs.map((r) => `\`${r}\``).join(', ')}`,
+          '',
+        ]
+      : [];
+  };
+
   const sortedRoots = [...roots].sort((a, b) => {
     const p = (a.path ?? '').localeCompare(b.path ?? '');
     if (p !== 0) return p;
@@ -462,6 +515,7 @@ function blockerSection(
         ]),
       );
     }
+    out.push(...charge(refsLine(root.body)));
     const replies = repliesByRoot.get(root.id) ?? [];
     if (replies.length > 0) {
       out.push(
@@ -500,6 +554,7 @@ function blockerSection(
         ]),
       );
     }
+    out.push(...charge(refsLine(c.body)));
   }
   return out;
 }
