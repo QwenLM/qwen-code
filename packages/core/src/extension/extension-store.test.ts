@@ -38,6 +38,18 @@ describe('ExtensionStore', () => {
   const makeStore = () =>
     new ExtensionStore({ extensionsDir, storeDir, enablementPath });
 
+  const readQuarantinedJournal = async (journal: string): Promise<string> => {
+    const prefix = `${path.basename(journal)}.corrupt-`;
+    const quarantined = (await fsp.readdir(path.dirname(journal))).find(
+      (name) => name.startsWith(prefix),
+    );
+    expect(quarantined).toBeDefined();
+    return await fsp.readFile(
+      path.join(path.dirname(journal), quarantined!),
+      'utf8',
+    );
+  };
+
   it('imports V1 rules without materializing workspace overrides', async () => {
     await fsp.writeFile(
       enablementPath,
@@ -1376,7 +1388,7 @@ describe('ExtensionStore', () => {
     expect(fs.existsSync(journal)).toBe(false);
   });
 
-  it('fails closed when an active transaction journal is corrupt', async () => {
+  it('quarantines a corrupt transaction journal and continues', async () => {
     const store = makeStore();
     const identity = { id: 'd4'.repeat(32), name: 'demo' };
     await store.ensureInitialized([identity]);
@@ -1384,17 +1396,37 @@ describe('ExtensionStore', () => {
     const journal = path.join(transactionsDir, 'corrupt.json');
     await fsp.writeFile(journal, '{not-json');
 
-    await expect(store.readSnapshot()).rejects.toBeInstanceOf(
-      ExtensionStoreCorruptError,
-    );
+    await expect(store.readSnapshot()).resolves.toMatchObject({
+      generation: 0,
+    });
     await expect(
       store.setDefaultActivation(identity, 'disabled'),
-    ).rejects.toBeInstanceOf(ExtensionStoreCorruptError);
-    expect(fs.existsSync(journal)).toBe(true);
+    ).resolves.toMatchObject({ generation: 1 });
+    expect(fs.existsSync(journal)).toBe(false);
+    expect(await readQuarantinedJournal(journal)).toBe('{not-json');
+  });
+
+  it('quarantines a corrupt journal while recovering corrupt state', async () => {
+    const store = makeStore();
+    const identity = { id: 'd6'.repeat(32), name: 'demo' };
+    await store.ensureInitialized([identity]);
+    await store.setDefaultActivation(identity, 'disabled');
+    await fsp.writeFile(path.join(storeDir, 'state.json'), '{not-json');
+    const journal = path.join(storeDir, 'transactions', 'corrupt.json');
+    await fsp.writeFile(journal, '{also-not-json');
+
+    await expect(store.readSnapshot()).resolves.toMatchObject({
+      generation: 0,
+      extensions: {
+        [identity.id]: { defaultActivation: 'enabled' },
+      },
+    });
+    expect(fs.existsSync(journal)).toBe(false);
+    expect(await readQuarantinedJournal(journal)).toBe('{also-not-json');
   });
 
   it.each(['destination', 'backup', 'staging', 'transaction-id'] as const)(
-    'fails closed for a journal with a hostile %s path',
+    'quarantines a journal with a hostile %s path',
     async (kind) => {
       const store = makeStore();
       const identity = { id: 'd5'.repeat(32), name: 'demo' };
@@ -1437,11 +1469,18 @@ describe('ExtensionStore', () => {
         }),
       );
 
-      await expect(store.readSnapshot()).rejects.toBeInstanceOf(
-        ExtensionStoreCorruptError,
-      );
+      await expect(store.readSnapshot()).resolves.toMatchObject({
+        generation: 0,
+      });
+      await expect(
+        store.setDefaultActivation(identity, 'disabled'),
+      ).resolves.toMatchObject({ generation: 1 });
       expect(await fsp.readFile(sentinel, 'utf8')).toBe('preserve');
-      expect(fs.existsSync(journal)).toBe(true);
+      expect(fs.existsSync(journal)).toBe(false);
+      expect(JSON.parse(await readQuarantinedJournal(journal))).toMatchObject({
+        transactionId:
+          kind === 'transaction-id' ? 'different-id' : transactionId,
+      });
     },
   );
 

@@ -1178,7 +1178,27 @@ export class ExtensionStore {
   private async readRecoverableJournalUnlocked(
     journalPath: string,
   ): Promise<ExtensionTransactionJournal | undefined> {
-    return await this.readJournalUnlocked(journalPath);
+    try {
+      return await this.readJournalUnlocked(journalPath);
+    } catch (error) {
+      if (!(error instanceof ExtensionStoreCorruptError)) throw error;
+      const quarantinePath = `${journalPath}.corrupt-${crypto.randomUUID()}`;
+      try {
+        await fsp.rename(journalPath, quarantinePath);
+      } catch (quarantineError) {
+        throw new ExtensionStoreCorruptError(
+          `Extension transaction journal is corrupt and could not be quarantined at ${journalPath}.`,
+          {
+            cause: new AggregateError([error, quarantineError]),
+          },
+        );
+      }
+      debugLogger.warn(
+        `Quarantined corrupt extension transaction journal at ${quarantinePath}:`,
+        error,
+      );
+      return undefined;
+    }
   }
 
   private assertRecoveredJournalPaths(
