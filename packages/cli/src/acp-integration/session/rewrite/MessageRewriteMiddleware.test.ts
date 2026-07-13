@@ -73,6 +73,45 @@ describe('MessageRewriteMiddleware', () => {
   });
 
   describe('interceptUpdate — target filtering', () => {
+    it.each(['message', 'all'] as const)(
+      'does not carry slash-command metadata into the next %s rewrite',
+      async (target) => {
+        const { middleware, mockSendUpdate } = createMiddleware(target);
+
+        await middleware.interceptUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Context compressed.' },
+          _meta: { source: 'slash_command' },
+        } as unknown as SessionUpdate);
+        await middleware.interceptUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Normal model response.' },
+        } as unknown as SessionUpdate);
+
+        await middleware.flushTurn();
+        await middleware.waitForPendingRewrites();
+
+        expect(mockSendUpdate).toHaveBeenNthCalledWith(3, {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'rewritten text' },
+          _meta: { rewritten: true, turnIndex: 1 },
+        });
+
+        const { LlmRewriter } = await import('./LlmRewriter.js');
+        const rewriter = vi.mocked(LlmRewriter).mock.results[0]?.value as {
+          rewrite: ReturnType<typeof vi.fn>;
+        };
+        expect(rewriter.rewrite).toHaveBeenCalledWith(
+          {
+            thoughts: [],
+            messages: ['Normal model response.'],
+            hasToolCalls: false,
+          },
+          expect.any(AbortSignal),
+        );
+      },
+    );
+
     it('should accumulate messages when target is "message"', async () => {
       const { middleware, mockSendUpdate } = createMiddleware('message');
 

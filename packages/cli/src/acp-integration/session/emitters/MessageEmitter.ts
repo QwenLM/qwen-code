@@ -148,6 +148,21 @@ export class MessageEmitter extends BaseEmitter {
     });
   }
 
+  async emitSlashCommandOutput(
+    text: string,
+    timestamp?: string | number,
+  ): Promise<void> {
+    const epochMs = BaseEmitter.toEpochMs(timestamp);
+    await this.sendUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text },
+      _meta: {
+        source: 'slash_command',
+        ...(epochMs != null ? { timestamp: epochMs } : {}),
+      },
+    });
+  }
+
   /**
    * Emits usage metadata.
    */

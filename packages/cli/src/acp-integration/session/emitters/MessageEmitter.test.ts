@@ -98,6 +98,18 @@ describe('MessageEmitter', () => {
     });
   });
 
+  describe('emitSlashCommandOutput', () => {
+    it('should identify slash-command output in metadata', async () => {
+      await emitter.emitSlashCommandOutput('Compressing context...');
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Compressing context...' },
+        _meta: { source: 'slash_command' },
+      });
+    });
+  });
+
   describe('emitGoalTerminal', () => {
     it('should send a goal terminal update in metadata', async () => {
       const event = {

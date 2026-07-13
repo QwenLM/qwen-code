@@ -5627,7 +5627,7 @@ export class Session implements SessionContext {
         // Replace bare \n with Markdown hard line-breaks (two trailing spaces)
         // so Zed's Markdown renderer preserves the line structure.
         const rendered = (result.content || '').replace(/\n/g, '  \n');
-        await this.messageEmitter.emitAgentMessage(rendered);
+        await this.messageEmitter.emitSlashCommandOutput(rendered);
         // Write a system/slash_command record so history replay on restart can
         // re-emit this message. system records are skipped by
         // buildApiHistoryFromConversation, so this won't pollute model context.
@@ -5652,7 +5652,7 @@ export class Session implements SessionContext {
           if (msg.messageType === 'error') {
             throw new Error(msg.content || 'Slash command failed.');
           }
-          await this.messageEmitter.emitAgentMessage(
+          await this.messageEmitter.emitSlashCommandOutput(
             (msg.content || '').replace(/\n/g, '  \n'),
           );
           chunks.push(msg.content || '');
