@@ -3613,7 +3613,8 @@ describe('createServeApp', () => {
       };
     };
 
-    it('rejects extension install without a registered workspace client id', async () => {
+    it('queues extension install without a workspace client id', async () => {
+      const restore = mockExtensionManagerMethods();
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
       const bridge = fakeBridge();
       const app = createServeApp(
@@ -3626,10 +3627,19 @@ describe('createServeApp', () => {
         .post('/workspace/extensions/install')
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret')
-        .send({ source: 'owner/repo', consent: true });
+        .send({ source: 'https://example.com/installed-ext', consent: true });
 
-      expect(res.status).toBe(400);
-      expect(res.body.code).toBe('missing_client_id');
+      try {
+        expect(res.status).toBe(202);
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents.at(-1)).toMatchObject({
+            status: 'installed',
+            source: 'https://example.com/installed-ext',
+          });
+        });
+      } finally {
+        restore();
+      }
     });
 
     it('rejects extension install from an unknown workspace client id', async () => {
@@ -3949,6 +3959,74 @@ describe('createServeApp', () => {
             status: 'installed',
             name: 'example-plugin',
           });
+        });
+      } finally {
+        restore();
+      }
+    });
+
+    it('cancels a pending install interaction before queuing a new install', async () => {
+      let installCount = 0;
+      const restore = mockExtensionManagerMethods({
+        async installExtension() {
+          installCount += 1;
+          if (installCount === 1) {
+            const manager = this as unknown as {
+              requestChoicePlugin?: (marketplace: {
+                name: string;
+                owner: { name: string; email: string };
+                plugins: Array<{ name: string; source: string }>;
+              }) => Promise<string>;
+            };
+            await manager.requestChoicePlugin?.({
+              name: 'example-marketplace',
+              owner: { name: 'Example', email: 'example@example.com' },
+              plugins: [
+                {
+                  name: 'example-plugin',
+                  source: 'https://example.com/plugin',
+                },
+              ],
+            });
+          }
+          return testExtension(`installed-${installCount}`);
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge({ knownClientIds: ['client-1'] }) },
+        );
+        const install = (source: string) =>
+          request(app)
+            .post('/workspace/extensions/install')
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret')
+            .send({ source, consent: true });
+
+        const first = await install('https://example.com/first');
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(`/workspace/extensions/operations/${first.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body.status).toBe('waiting_for_input');
+        });
+
+        const second = await install('https://example.com/second');
+        await vi.waitFor(async () => {
+          const firstPoll = await request(app)
+            .get(`/workspace/extensions/operations/${first.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          const secondPoll = await request(app)
+            .get(`/workspace/extensions/operations/${second.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(firstPoll.body.status).toBe('failed');
+          expect(secondPoll.body.status).toBe('succeeded');
         });
       } finally {
         restore();
@@ -4943,7 +5021,7 @@ describe('createServeApp', () => {
 
     it('refreshes extensions for all sessions on request', async () => {
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
-      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const bridge = fakeBridge();
       const app = createServeApp(
         { ...tokenOpts, workspace: WS_BOUND },
         undefined,
@@ -4954,7 +5032,6 @@ describe('createServeApp', () => {
         .post('/workspace/extensions/refresh')
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret')
-        .set('X-Qwen-Client-Id', 'client-1')
         .send({});
 
       expect(res.status).toBe(200);
@@ -5191,7 +5268,8 @@ describe('createServeApp', () => {
       }
     });
 
-    it('rejects extension uninstall without a registered workspace client id', async () => {
+    it('queues extension uninstall without a workspace client id', async () => {
+      const restore = mockExtensionManagerMethods();
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
       const bridge = fakeBridge();
       const app = createServeApp(
@@ -5205,8 +5283,17 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret');
 
-      expect(res.status).toBe(400);
-      expect(res.body.code).toBe('missing_client_id');
+      try {
+        expect(res.status).toBe(202);
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents.at(-1)).toMatchObject({
+            status: 'uninstalled',
+            name: 'test-ext',
+          });
+        });
+      } finally {
+        restore();
+      }
     });
 
     it('queues extension uninstall mutations', async () => {

@@ -272,7 +272,13 @@ export function registerWorkspaceExtensionRoutes(
         id: string;
         kind: 'marketplace_plugin';
         marketplace: { name: string };
-        plugins: Array<{ name: string; category?: string; tags?: string[] }>;
+        plugins: Array<{
+          name: string;
+          description?: string;
+          source?: string;
+          category?: string;
+          tags?: string[];
+        }>;
       }
     | {
         id: string;
@@ -372,6 +378,11 @@ export function registerWorkspaceExtensionRoutes(
     pendingExtensionInteractions.delete(operationId);
     pending.reject(new Error(reason));
   };
+  const cancelPendingExtensionInteractions = (reason: string) => {
+    for (const operationId of pendingExtensionInteractions.keys()) {
+      cancelPendingExtensionInteraction(operationId, reason);
+    }
+  };
   const waitForExtensionInteraction = (
     operationId: string,
     interaction: ExtensionInteractionRequest,
@@ -418,6 +429,15 @@ export function registerWorkspaceExtensionRoutes(
         marketplace: { name: marketplace.name },
         plugins: marketplace.plugins.map((plugin) => ({
           name: plugin.name,
+          ...(plugin.description ? { description: plugin.description } : {}),
+          source:
+            typeof plugin.source === 'string'
+              ? plugin.source
+              : plugin.source.source === 'github'
+                ? plugin.source.repo
+                : plugin.source.source === 'git-subdir'
+                  ? plugin.source.path
+                  : plugin.source.url,
           ...(plugin.category ? { category: plugin.category } : {}),
           ...(plugin.tags ? { tags: plugin.tags } : {}),
         })),
@@ -703,6 +723,7 @@ export function registerWorkspaceExtensionRoutes(
             req,
             res,
             'POST /workspace/extensions/operations/:operationId/interactions/:interactionId',
+            { requireClientId: false },
           )
         ) {
           return;
@@ -723,6 +744,17 @@ export function registerWorkspaceExtensionRoutes(
         }
         const body = safeBody(req);
         let value: string | undefined;
+        if (body['cancelled'] === true) {
+          clearTimeout(pending.timeout);
+          pendingExtensionInteractions.delete(operationId);
+          updateExtensionOperation(operationId, {
+            status: 'running',
+            interaction: undefined,
+          });
+          pending.reject(new Error('Extension installation cancelled'));
+          res.status(200).json({ accepted: true });
+          return;
+        }
         if (pending.interaction.kind === 'marketplace_plugin') {
           const pluginName = body['pluginName'];
           if (
@@ -774,6 +806,7 @@ export function registerWorkspaceExtensionRoutes(
             req,
             res,
             'POST /workspace/extensions/install',
+            { requireClientId: false },
           )
         ) {
           return;
@@ -837,6 +870,10 @@ export function registerWorkspaceExtensionRoutes(
         if (!validateExtensionSourceHost(sourceValue, res)) {
           return;
         }
+
+        cancelPendingExtensionInteractions(
+          'Extension installation cancelled by a new install request',
+        );
 
         runQueuedExtensionMutation(
           'install',
@@ -903,6 +940,7 @@ export function registerWorkspaceExtensionRoutes(
             req,
             res,
             'POST /workspace/extensions/check-updates',
+            { requireClientId: false },
           )
         ) {
           return;
@@ -947,6 +985,7 @@ export function registerWorkspaceExtensionRoutes(
             req,
             res,
             'POST /workspace/extensions/refresh',
+            { requireClientId: false },
           )
         ) {
           return;
@@ -1153,6 +1192,7 @@ export function registerWorkspaceExtensionRoutes(
             req,
             res,
             'DELETE /workspace/extensions/:name',
+            { requireClientId: false },
           )
         ) {
           return;

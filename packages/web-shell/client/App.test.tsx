@@ -539,7 +539,15 @@ vi.doMock('./components/dialogs/ScheduledTasksDialog', async () => {
     },
   };
 });
-mockComponent('./components/dialogs/ExtensionsDialog', 'ExtensionsDialog');
+vi.doMock('./components/extensions/ExtensionsManagerPage', async () => {
+  const React = await import('react');
+  return {
+    ExtensionsManagerPage: () =>
+      React.createElement('div', {
+        'data-testid': 'extensions-manager-page',
+      }),
+  };
+});
 mockComponent('./components/dialogs/ThemeDialog', 'ThemeDialog');
 mockComponent(
   './components/dialogs/DeleteSessionDialog',
@@ -1405,6 +1413,32 @@ describe('App session callbacks', () => {
     });
 
     expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
+
+  it('does not open the extensions manager page with /extension manage', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/extension manage';
+    await clickSubmit(container);
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="extensions-manager-page"]'),
+    ).toBeNull();
+  });
+
+  it('opens the extensions manager page with /extensions manage', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/extensions manage';
+    await clickSubmit(container);
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="extensions-manager-page"]'),
+    ).not.toBeNull();
   });
 
   it('auto-closes an open panel when an AskUserQuestion approval becomes pending', async () => {

@@ -90,7 +90,7 @@ import {
 import { useIsLargeScreen } from './hooks/useIsLargeScreen';
 import { MAX_SPLIT_PANES, parseSplitSessionIds } from './utils/splitUrl';
 import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
-import { ExtensionsDialog } from './components/dialogs/ExtensionsDialog';
+import { ExtensionsManagerPage } from './components/extensions/ExtensionsManagerPage';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { isAskUserPermission } from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
@@ -1976,14 +1976,13 @@ export function App({
   // dependency (it changes on every pane add/remove).
   const splitSessionIdsRef = useRef<string[]>(splitSessionIds);
   splitSessionIdsRef.current = splitSessionIds;
-  const [showExtensionsDialog, setShowExtensionsDialog] = useState(false);
   const [mcpDialogMessage, setMcpDialogMessage] =
     useState<SerializedMcpStatusMessage | null>(null);
   // Settings and Daemon Status are shown as an in-place panel that replaces the
   // chat view (message list + composer), not as a modal overlay. Only one may be
   // active at a time; null means the normal chat view is shown.
   const [activePanel, setActivePanel] = useState<
-    'settings' | 'status' | 'sessions' | null
+    'settings' | 'status' | 'sessions' | 'extensions' | null
   >(null);
   const closePanel = useCallback(() => setActivePanel(null), []);
   // The Settings/Status panel (activePanel) and the Scheduled Tasks page
@@ -1992,10 +1991,13 @@ export function App({
   // one closes the other. Without this, opening Scheduled Tasks then Daemon
   // Status left the panel rendered behind the Scheduled Tasks overlay, looking
   // like the button did nothing.
-  const openPanel = useCallback((panel: 'settings' | 'status' | 'sessions') => {
-    setMainView('chat');
-    setActivePanel(panel);
-  }, []);
+  const openPanel = useCallback(
+    (panel: 'settings' | 'status' | 'sessions' | 'extensions') => {
+      setMainView('chat');
+      setActivePanel(panel);
+    },
+    [],
+  );
   const openScheduledTasks = useCallback(() => {
     setActivePanel(null);
     setMainView('scheduledTasks');
@@ -2583,7 +2585,6 @@ export function App({
     showHelpDialog ||
     showThemeDialog ||
     showToolsDialog ||
-    showExtensionsDialog ||
     modelDialogMode !== null ||
     showApprovalModeDialog ||
     tasksDialogMessage !== null ||
@@ -4327,7 +4328,7 @@ export function App({
             const args = text.slice(match[0].length).trim();
             const subCommand = args.split(/\s+/)[0]?.toLowerCase();
             if (!subCommand || subCommand === 'manage') {
-              setShowExtensionsDialog(true);
+              openPanel('extensions');
               return true;
             }
             if (subCommand === 'install') {
@@ -5353,15 +5354,6 @@ export function App({
               <ToolsDialog />
             </DialogShell>
           )}
-          {showExtensionsDialog && (
-            <DialogShell
-              title={t('extensions.manage.title')}
-              size="lg"
-              onClose={() => setShowExtensionsDialog(false)}
-            >
-              <ExtensionsDialog />
-            </DialogShell>
-          )}
           {mcpDialogMessage && (
             <DialogShell
               title={t('mcp.manageServers')}
@@ -5662,10 +5654,13 @@ export function App({
                       ? t('settings.title')
                       : activePanel === 'status'
                         ? t('daemon.title')
+                        : activePanel === 'extensions'
+                          ? t('extensions.manage.title')
                         : t('sessionsOverview.title')
                   }
                 >
-                  <div className={styles.panelHeader}>
+                  {activePanel !== 'extensions' && (
+                    <div className={styles.panelHeader}>
                     <button
                       ref={panelBackRef}
                       type="button"
@@ -5693,7 +5688,8 @@ export function App({
                           ? t('daemon.title')
                           : t('sessionsOverview.title')}
                     </div>
-                  </div>
+                    </div>
+                  )}
                   <div className={styles.panelBody} key={activePanel}>
                     {activePanel === 'settings' ? (
                       <SettingsMessage
@@ -5713,6 +5709,8 @@ export function App({
                       />
                     ) : activePanel === 'status' ? (
                       <DaemonStatusDialog />
+                    ) : activePanel === 'extensions' ? (
+                      <ExtensionsManagerPage onClose={closePanel} />
                     ) : (
                       <SessionOverviewPanel
                         onOpenSession={handleOpenSessionFromOverview}

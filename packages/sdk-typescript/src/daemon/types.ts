@@ -2948,7 +2948,13 @@ export interface ExtensionMarketplacePluginInteraction {
   id: string;
   kind: 'marketplace_plugin';
   marketplace: { name: string };
-  plugins: Array<{ name: string; category?: string; tags?: string[] }>;
+  plugins: Array<{
+    name: string;
+    description?: string;
+    source?: string;
+    category?: string;
+    tags?: string[];
+  }>;
 }
 
 export interface ExtensionSettingInteraction {
@@ -2964,7 +2970,8 @@ export interface ExtensionSettingInteraction {
 
 export type ExtensionInteractionResponse =
   | { pluginName: string }
-  | { value: string };
+  | { value: string }
+  | { cancelled: true };
 
 export interface ExtensionInteractionResponseResult {
   accepted: true;
