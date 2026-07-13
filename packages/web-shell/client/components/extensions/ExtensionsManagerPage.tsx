@@ -71,6 +71,14 @@ import {
   CardTitle,
 } from '../ui/card';
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '../ui/dialog';
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuGroup,
@@ -246,7 +254,7 @@ function ExtensionInteractionDialog({
   t: T;
 }) {
   return (
-    <AlertDialog
+    <Dialog
       open={Boolean(pendingInteraction)}
       onOpenChange={(open) => {
         if (!open && pendingInteraction && !submitting) {
@@ -254,21 +262,24 @@ function ExtensionInteractionDialog({
         }
       }}
     >
-      <AlertDialogContent size="lg">
-        <AlertDialogHeader className="place-items-start px-3 text-left">
-          <AlertDialogTitle>
+      <DialogContent
+        showCloseButton={false}
+        className="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-3xl"
+      >
+        <DialogHeader className="items-start px-3 text-left">
+          <DialogTitle>
             {pendingInteraction?.interaction.kind === 'setting'
               ? pendingInteraction.interaction.setting.name
               : t('extensions.manage.selectExtension')}
-          </AlertDialogTitle>
-          <AlertDialogDescription>
+          </DialogTitle>
+          <DialogDescription>
             {pendingInteraction?.interaction.kind === 'marketplace_plugin'
               ? t('extensions.manage.installSelectPluginDescription', {
                   marketplace: pendingInteraction.interaction.marketplace.name,
                 })
               : pendingInteraction?.interaction.setting.description}
-          </AlertDialogDescription>
-        </AlertDialogHeader>
+          </DialogDescription>
+        </DialogHeader>
         {pendingInteraction?.interaction.kind === 'marketplace_plugin' ? (
           <RadioGroup
             aria-label={t('extensions.manage.selectExtension')}
@@ -314,7 +325,7 @@ function ExtensionInteractionDialog({
           </RadioGroup>
         ) : null}
         {pendingInteraction?.interaction.kind === 'marketplace_plugin' ? (
-          <AlertDialogFooter>
+          <DialogFooter>
             <Button
               variant="outline"
               disabled={submitting}
@@ -331,10 +342,11 @@ function ExtensionInteractionDialog({
                 ? t('extensions.manage.update')
                 : t('extensions.manage.install')}
             </Button>
-          </AlertDialogFooter>
+          </DialogFooter>
         ) : pendingInteraction?.interaction.kind === 'setting' ? (
           <>
             <Input
+              autoComplete="off"
               aria-label={pendingInteraction.interaction.setting.name}
               type={
                 pendingInteraction.interaction.setting.sensitive
@@ -344,7 +356,7 @@ function ExtensionInteractionDialog({
               value={interactionValue}
               onChange={(event) => setInteractionValue(event.target.value)}
             />
-            <AlertDialogFooter>
+            <DialogFooter>
               <Button
                 variant="outline"
                 disabled={submitting}
@@ -361,11 +373,11 @@ function ExtensionInteractionDialog({
                   ? t('extensions.manage.update')
                   : t('extensions.manage.install')}
               </Button>
-            </AlertDialogFooter>
+            </DialogFooter>
           </>
         ) : null}
-      </AlertDialogContent>
-    </AlertDialog>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -470,6 +482,7 @@ export function ExtensionsManagerPage({
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let retryDelay = 2000;
     const recover = async () => {
       try {
         const { operations } = await actions.activeExtensionOperations();
@@ -501,7 +514,10 @@ export function ExtensionsManagerPage({
           setBusyName((current) => current ?? activeMutation.name ?? null);
         }
       } catch {
-        if (!cancelled) timer = setTimeout(() => void recover(), 2000);
+        if (!cancelled) {
+          timer = setTimeout(() => void recover(), retryDelay);
+          retryDelay = Math.min(retryDelay * 2, 30_000);
+        }
       }
     };
     void recover();
@@ -521,7 +537,7 @@ export function ExtensionsManagerPage({
   useEffect(() => {
     if (extensions.length === 0) return;
     void checkAllUpdates();
-  }, [checkAllUpdates, extensions.length]);
+  }, [checkAllUpdates, extensions]);
 
   useEffect(() => {
     if (!pendingInstall) return;
