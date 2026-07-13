@@ -26,7 +26,7 @@ Run staged admission via `gh`. Post comment after each stage.
 
 ```bash
 gh issue view "$NUM" --repo "$REPO" --json number,title,body,author,labels,comments,url
-gh pr view "$NUM" --repo "$REPO" --json number,title,body,author,labels,additions,deletions,changedFiles,baseRefName,headRefName,headRefOid,isCrossRepository,isDraft,reviewDecision,url
+gh pr view "$NUM" --repo "$REPO" --json number,title,body,author,labels,additions,deletions,changedFiles,files,baseRefName,headRefName,headRefOid,isCrossRepository,isDraft,reviewDecision,url
 gh label list --repo "$REPO" --limit 200
 ```
 
@@ -71,13 +71,7 @@ Bilingual: English first, Chinese in `<details>`. @mention author when blocking.
 - **Issue**: one comment, Stage 2 updates it in place. Key-point bullet format.
 - **PR**: three comments (Stage 1: Gate, Stage 2: Review + Test, Stage 3: Final Decision). Key-point bullet format.
 
-**PR enrichments (conditional, human-voiced — PR only):** for complex PRs the comments may carry more signal, but these are augmentations, never a template to fill in on every run — skip any that doesn't earn its place:
-
-- Stage 2 may add a **sequence diagram** (only when the PR introduces/reshapes a multi-step runtime flow) and/or a **changed-files overview** table (only when many files are touched).
-- Stage 3 opens with a one-line **`Confidence: N/5`** score summarizing the verdict.
-- Every staged comment ends with a footer recording the **reviewed commit SHA**, so a maintainer can tell on re-run whether new commits landed since.
-
-Details and templates in `references/pr-workflow.md`. A diagram or files table bolted onto a small, focused PR is the auto-generated noise the gate philosophy warns against — when in doubt, leave it out.
+**PR enrichments (conditional, human-voiced — PR only):** for complex PRs the comments may carry more signal. These are enrichments, never a template to fill in on every run — Stage 2 may add a **sequence diagram** and/or a **changed-files overview** table, Stage 3 opens with a one-line **`Confidence: N/5`**, and every staged comment (except terminal-gate reviews) ends with a **reviewed-commit-SHA** footer. Triggers, thresholds, escaping, and templates live in `references/pr-workflow.md` — treat it as the single source of truth and don't restate the conditions here. Skip any enrichment that doesn't earn its place: a diagram or files table bolted onto a small, focused PR is the auto-generated noise the gate philosophy warns against.
 
 ## ⛔ Mandatory Pre-flight Checks (DO NOT SKIP)
 
