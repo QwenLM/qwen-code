@@ -609,7 +609,6 @@ describe('OpenAIContentConverter', () => {
           stream,
         ),
       ).toThrowError(expect.objectContaining({ type: 'MALFORMED_TOOL_CALL' }));
-
       expect(visible.candidates?.[0]?.content?.parts).toEqual([
         { text: 'late <think>payload</think>' },
       ]);
