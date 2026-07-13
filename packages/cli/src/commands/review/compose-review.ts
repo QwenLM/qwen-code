@@ -84,6 +84,13 @@ export interface ComposeReviewInput {
     uncoverableChunks?: number[];
     ok?: boolean;
   };
+  /**
+   * The caller has no territory to cover, so an absent `coverage` is not a gap.
+   * Set by a Suggestion-only quick pass and non-review callers. Must be stated
+   * explicitly — the failure this guards is a caller that supplied nothing, so
+   * silence cannot be read as "not applicable".
+   */
+  coverageNotApplicable?: boolean;
   /** Step 1's lightweight `pr-context` fetch failed. */
   contextUnavailable?: boolean;
   presubmit?: {
@@ -203,16 +210,26 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   }
   const cov = coverageRaw as Record<string, unknown>;
 
-  // A cap that only fires on the caller's say-so is not a cap. The first cut of
-  // this read `missingChunks` and `whiffedAgents` and nothing else — so an
-  // absent `coverage`, a `coverage: {ok: false}`, and a report carrying an
-  // uncoverable chunk **all composed an APPROVE**. The doc comment above
-  // promised "omitting it is itself a cap" and the code did not implement it.
+  // A cap that only fires on the caller's say-so is not a cap. Omitting the
+  // report is itself a cap: a run that cannot show what it covered has not shown
+  // it covered anything, and the whole dogfood failure was an orchestrator that
+  // skipped the coverage step and got a rubber stamp. So an **absent** `coverage`
+  // caps too, unless the caller states, in a field of its own, that coverage does
+  // not apply to this run.
   //
-  // Every one of these is a cap now, and `ok: false` is a cap on its own: a
-  // report that says the coverage check failed is the strongest statement in
-  // this input, and it must not need an itemised list to be believed.
-  if (input.coverage !== undefined && input.coverage !== null) {
+  // `coverageNotApplicable` is the opt-out for the callers that genuinely have no
+  // territory to cover — a Suggestion-only quick pass, a non-review use of this
+  // subcommand. It has to be said out loud, because the failure mode this guards
+  // is precisely a caller that said nothing.
+  const covProvided = input.coverage !== undefined && input.coverage !== null;
+  const covNA = toBool(input.coverageNotApplicable, 'coverageNotApplicable');
+  if (!covProvided && !covNA) {
+    unreviewed.push(
+      'coverage — no `check-coverage` report was supplied, so this run cannot ' +
+        'show that any of the diff was read',
+    );
+  }
+  if (covProvided) {
     if (cov['ok'] !== true && Object.keys(cov).length > 0) {
       unreviewed.push(
         'coverage — the `check-coverage` report says the diff was not covered',

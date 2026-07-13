@@ -26,6 +26,11 @@ function base(overrides: Partial<ComposeReviewInput>): ComposeReviewInput {
   return {
     criticalsInline: 0,
     suggestionsInline: 0,
+    // These cases exercise the C/S table, the body clauses and the downgrades —
+    // not coverage. Opting out is the honest annotation: absent coverage caps
+    // now (a run must show what it read), so a table test that means to reach a
+    // clean APPROVE has to say it has no territory to cover.
+    coverageNotApplicable: true,
     modelId: MODEL,
     ...overrides,
   };
@@ -489,6 +494,29 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
 
 describe('coverage caps the verdict', () => {
   const base = { criticalsInline: 0, suggestionsInline: 0, modelId: 'm' };
+
+  it('caps when coverage is omitted and not opted out — the JSDoc promise', () => {
+    // "Omitting it is itself a cap." A caller that supplies no coverage and does
+    // not declare it inapplicable cannot approve — that is the dogfood failure,
+    // an orchestrator that skipped check-coverage and got a rubber stamp.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      modelId: MODEL,
+    });
+    expect(r.event).not.toBe('APPROVE');
+    expect(r.body).toContain('no `check-coverage` report was supplied');
+  });
+
+  it('approves a clean run that declares coverage inapplicable', () => {
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      coverageNotApplicable: true,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('APPROVE');
+  });
 
   it('forbids an Approve on `ok: false` alone', () => {
     // A report that says the coverage check failed is the strongest statement in
