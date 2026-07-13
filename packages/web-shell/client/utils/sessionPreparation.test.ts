@@ -92,6 +92,19 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.setModel).not.toHaveBeenCalled();
   });
 
+  it('attaches without a callback while connection state catches up', async () => {
+    const actions = createActions();
+
+    await prepareSession({
+      sessionActions: actions,
+      getCurrentSessionId: () => undefined,
+    });
+
+    expect(actions.attachSession).toHaveBeenCalledOnce();
+    expect(actions.releaseSession).not.toHaveBeenCalled();
+    expect(actions.clearSession).not.toHaveBeenCalled();
+  });
+
   it('warns but resolves when the post-create model switch fails', async () => {
     const order: string[] = [];
     const error = new Error('model failed');
@@ -192,9 +205,10 @@ describe('createAndAttachSessionForPrompt', () => {
     );
   });
 
-  it('still clears the created session when release after attach failure fails', async () => {
+  it('preserves the original error when release and clear both fail', async () => {
     const attachError = new Error('attach failed');
     const releaseError = new Error('release failed');
+    const clearError = new Error('clear failed');
     const warn = vi.fn();
     const actions = createActions({
       attachSession: vi.fn(async () => {
@@ -202,6 +216,9 @@ describe('createAndAttachSessionForPrompt', () => {
       }),
       releaseSession: vi.fn(async () => {
         throw releaseError;
+      }),
+      clearSession: vi.fn(async () => {
+        throw clearError;
       }),
     });
 
@@ -217,6 +234,10 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(warn).toHaveBeenCalledWith(
       '[WebShell] failed to release unattached session:',
       releaseError,
+    );
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] failed to clear unattached session:',
+      clearError,
     );
   });
 
@@ -286,7 +307,7 @@ describe('createAndAttachSessionForPrompt', () => {
     callbackFinished.resolve();
 
     await expect(result).rejects.toThrow(
-      'Session changed during onSessionCreated: expected session-1, found session-2',
+      'Session changed before attach: expected session-1, found session-2',
     );
     expect(actions.attachSession).not.toHaveBeenCalled();
     expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
@@ -350,6 +371,24 @@ describe('createAndAttachSessionForPrompt', () => {
       '[WebShell] failed to run onSessionCreated:',
       error,
     );
+  });
+
+  it('clears a rejected session while connection state catches up', async () => {
+    const actions = createActions();
+
+    await expect(
+      prepareSession({
+        sessionActions: actions,
+        getCurrentSessionId: () => undefined,
+        onSessionCreated: vi.fn(async () => {
+          throw new Error('callback failed');
+        }),
+        warn: vi.fn(),
+      }),
+    ).rejects.toThrow('callback failed');
+
+    expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
+    expect(actions.clearSession).toHaveBeenCalledOnce();
   });
 
   it('cleans up when onSessionCreated times out', async () => {

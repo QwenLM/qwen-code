@@ -26,6 +26,7 @@ export async function createAndAttachSessionForPrompt({
   modeId,
   workspaceCwd,
   onSessionCreated,
+  onSessionAllocated,
   getCurrentSessionId,
   warn = console.warn,
 }: {
@@ -33,7 +34,8 @@ export async function createAndAttachSessionForPrompt({
   modelId?: string;
   modeId?: string;
   workspaceCwd?: string;
-  onSessionCreated?: (sessionId: string) => Promise<void>;
+  onSessionCreated?: (sessionId: string) => Promise<void> | void;
+  onSessionAllocated?: (sessionId: string) => void;
   getCurrentSessionId: () => string | undefined;
   warn?: (message?: unknown, ...optionalParams: unknown[]) => void;
 }): Promise<void> {
@@ -49,6 +51,7 @@ export async function createAndAttachSessionForPrompt({
     workspaceCwd,
     ...(approvalMode ? { approvalMode } : {}),
   });
+  onSessionAllocated?.(sessionId);
   let preparationStep = 'prepare new session';
   try {
     if (onSessionCreated) {
@@ -68,16 +71,24 @@ export async function createAndAttachSessionForPrompt({
         clearTimeout(timeout);
       }
     }
-    const sessionIdAfterCallback = getCurrentSessionId();
-    if (sessionIdAfterCallback !== sessionId) {
+    preparationStep = 'verify session identity';
+    const sessionIdBeforeAttach = getCurrentSessionId();
+    if (
+      sessionIdBeforeAttach !== undefined &&
+      sessionIdBeforeAttach !== sessionId
+    ) {
       throw new Error(
-        `Session changed during onSessionCreated: expected ${sessionId}, found ${sessionIdAfterCallback}`,
+        `Session changed before attach: expected ${sessionId}, found ${sessionIdBeforeAttach}`,
       );
     }
     preparationStep = 'attach new session';
     await sessionActions.attachSession();
+    preparationStep = 'verify attached session';
     const sessionIdAfterAttach = getCurrentSessionId();
-    if (sessionIdAfterAttach !== sessionId) {
+    if (
+      sessionIdAfterAttach !== undefined &&
+      sessionIdAfterAttach !== sessionId
+    ) {
       throw new Error(
         `Session changed while attaching: expected ${sessionId}, found ${sessionIdAfterAttach}`,
       );
@@ -90,7 +101,7 @@ export async function createAndAttachSessionForPrompt({
         warn('[WebShell] failed to release unattached session:', releaseError);
       });
     const currentSessionId = getCurrentSessionId();
-    if (currentSessionId === sessionId) {
+    if (currentSessionId === undefined || currentSessionId === sessionId) {
       await sessionActions.clearSession().catch((clearError: unknown) => {
         warn('[WebShell] failed to clear unattached session:', clearError);
       });

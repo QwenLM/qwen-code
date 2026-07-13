@@ -419,7 +419,7 @@ export interface WebShellProps {
   /** Called whenever the attached daemon session id changes. */
   onSessionIdChange?: (sessionId: string | undefined) => void;
   /** Called after a new session is created. Session setup waits up to 30 seconds. */
-  onSessionCreated?: (sessionId: string) => Promise<void>;
+  onSessionCreated?: (sessionId: string) => Promise<void> | void;
   /** Visual theme for the embedded shell. */
   theme?: WebShellTheme;
   /** Called when `/theme` changes the web-shell theme. */
@@ -2302,13 +2302,21 @@ export function App({
   }, []);
   const [isPreparingPrompt, setIsPreparingPrompt] = useState(false);
   const createSessionPromiseRef = useRef<Promise<void> | null>(null);
+  const preparingSessionIdRef = useRef<string | null>(null);
   const onSessionCreatedRef = useRef(onSessionCreated);
   onSessionCreatedRef.current = onSessionCreated;
   const ensureSessionForPrompt = useCallback(() => {
+    const currentSessionId = connectionRef.current.sessionId;
     if (createSessionPromiseRef.current) {
-      return createSessionPromiseRef.current;
+      if (
+        !currentSessionId ||
+        currentSessionId === preparingSessionIdRef.current
+      ) {
+        return createSessionPromiseRef.current;
+      }
+      return Promise.resolve();
     }
-    if (connectionRef.current.sessionId) return Promise.resolve();
+    if (currentSessionId) return Promise.resolve();
     const promise = (async () => {
       const modelId =
         currentModelRef.current || connectionRef.current.currentModel;
@@ -2321,6 +2329,9 @@ export function App({
         modeId,
         workspaceCwd: selectedWorkspaceCwdRef.current,
         onSessionCreated: onSessionCreatedRef.current,
+        onSessionAllocated: (sessionId) => {
+          preparingSessionIdRef.current = sessionId;
+        },
         getCurrentSessionId: () => connectionRef.current.sessionId,
       });
       // One-shot: the picker targets only the *next* new session, so clear
@@ -2329,18 +2340,13 @@ export function App({
       setSelectedWorkspaceCwd(undefined);
     })();
     createSessionPromiseRef.current = promise;
-    void promise.then(
-      () => {
-        if (createSessionPromiseRef.current === promise) {
-          createSessionPromiseRef.current = null;
-        }
-      },
-      () => {
-        if (createSessionPromiseRef.current === promise) {
-          createSessionPromiseRef.current = null;
-        }
-      },
-    );
+    const clearPreparation = () => {
+      if (createSessionPromiseRef.current === promise) {
+        createSessionPromiseRef.current = null;
+        preparingSessionIdRef.current = null;
+      }
+    };
+    void promise.then(clearPreparation, clearPreparation);
     return promise;
   }, [sessionActions]);
   const onSubmitBeforeRef = useRef(onSubmitBefore);

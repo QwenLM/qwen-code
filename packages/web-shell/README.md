@@ -98,14 +98,14 @@ export function App() {
 
 ### WebShell
 
-| 属性                | 类型                                       | 说明                                                                             |
-| ------------------- | ------------------------------------------ | -------------------------------------------------------------------------------- |
-| `onSessionIdChange` | `(sessionId: string \| undefined) => void` | 当前 session id 变化或清空时触发                                                 |
-| `onSessionCreated`  | `(sessionId: string) => Promise<void>`     | 新 session 创建后触发；完成前会阻塞 session 初始化和 prompt 提交，最长等待 30 秒 |
-| `theme`             | `'dark' \| 'light'`                        | UI 主题，默认 `dark`                                                             |
-| `onThemeChange`     | `(theme: WebShellTheme) => void`           | `/theme` 命令切换主题后触发                                                      |
-| `language`          | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`       | UI 语言                                                                          |
-| `onLanguageChange`  | `(language: WebShellLanguage) => void`     | `/language ui` 切换 UI 语言后触发                                                |
+| 属性                | 类型                                           | 说明                                                                             |
+| ------------------- | ---------------------------------------------- | -------------------------------------------------------------------------------- |
+| `onSessionIdChange` | `(sessionId: string \| undefined) => void`     | 当前 session id 变化或清空时触发                                                 |
+| `onSessionCreated`  | `(sessionId: string) => Promise<void> \| void` | 新 session 创建后触发；完成前会阻塞 session 初始化和 prompt 提交，最长等待 30 秒 |
+| `theme`             | `'dark' \| 'light'`                            | UI 主题，默认 `dark`                                                             |
+| `onThemeChange`     | `(theme: WebShellTheme) => void`               | `/theme` 命令切换主题后触发                                                      |
+| `language`          | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`           | UI 语言                                                                          |
+| `onLanguageChange`  | `(language: WebShellLanguage) => void`         | `/language ui` 切换 UI 语言后触发                                                |
 
 ## 可选图表 Renderer
 

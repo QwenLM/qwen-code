@@ -606,12 +606,15 @@ async function clickSubmit(container: HTMLElement): Promise<void> {
 function deferred<T>(): {
   promise: Promise<T>;
   resolve: (value?: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
 } {
   let resolve!: (value?: T | PromiseLike<T>) => void;
-  const promise = new Promise<T>((res) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
     resolve = (value) => res(value as T | PromiseLike<T>);
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 // A transcript block shaped like extractPendingPermission() expects. Defaults to
@@ -962,6 +965,124 @@ describe('App session callbacks', () => {
       });
     });
     expect(mockSessionActions.attachSession).toHaveBeenCalledOnce();
+  });
+
+  it('lets a selected session bypass a stale preparation promise', async () => {
+    mockConnection.sessionId = undefined;
+    const callbackStarted = deferred<void>();
+    const callbackFinished = deferred<void>();
+    mockSessionActions.createSession.mockImplementation(async () => {
+      mockConnection.sessionId = 'session-created';
+      return { sessionId: 'session-created' };
+    });
+    const onSessionCreated = vi.fn(async () => {
+      callbackStarted.resolve();
+      await callbackFinished.promise;
+    });
+    const { rerender } = renderApp({ onSessionCreated });
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('first');
+      await callbackStarted.promise;
+    });
+    mockConnection.sessionId = 'session-selected';
+    rerender({ onSessionCreated });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('second');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    expect(mockSessionActions.attachSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'second',
+      expect.any(Object),
+    );
+
+    await act(async () => {
+      callbackFinished.resolve();
+      await vi.waitFor(() => {
+        expect(mockSessionActions.releaseSession).toHaveBeenCalledWith(
+          'session-created',
+        );
+      });
+    });
+    expect(mockSessionActions.attachSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+  });
+
+  it('lets a selected session bypass creation before its id is allocated', async () => {
+    mockConnection.sessionId = undefined;
+    const creationFinished = deferred<{ sessionId: string }>();
+    mockSessionActions.createSession.mockImplementation(
+      () => creationFinished.promise,
+    );
+    const { rerender } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('first');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
+    });
+    mockConnection.sessionId = 'session-selected';
+    rerender();
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('second');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    expect(mockSessionActions.attachSession).not.toHaveBeenCalled();
+    await act(async () => {
+      creationFinished.resolve({ sessionId: 'session-created' });
+      await vi.waitFor(() => {
+        expect(mockSessionActions.releaseSession).toHaveBeenCalledWith(
+          'session-created',
+        );
+      });
+    });
+    expect(mockSessionActions.attachSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+  });
+
+  it('clears a shared rejected preparation so a later submit can retry', async () => {
+    mockConnection.sessionId = undefined;
+    const firstCreation = deferred<{ sessionId: string }>();
+    mockSessionActions.createSession
+      .mockImplementationOnce(() => firstCreation.promise)
+      .mockImplementationOnce(async () => {
+        mockConnection.sessionId = 'session-retry';
+        return { sessionId: 'session-retry' };
+      });
+    renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('first');
+      testState.latestChatEditorProps?.onSubmit('second');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
+    });
+    firstCreation.reject(new Error('create failed'));
+    await flush();
+    await flush();
+
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('third');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalledTimes(2);
+      });
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+      });
+    });
   });
 
   it('cancels direct submissions when onSubmitBefore rejects and preserves retry state', async () => {
