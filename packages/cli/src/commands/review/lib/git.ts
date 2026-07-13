@@ -9,7 +9,7 @@
 // across platforms.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 
 /** Deadline for a single `git` invocation. Generous; a hang must still end. */
 const GIT_TIMEOUT_MS = 120_000;
@@ -106,6 +106,14 @@ export function releaseWorktree(worktreePath: string): boolean {
   const existed = existsSync(worktreePath);
   if (existed) {
     gitOpt('worktree', 'remove', worktreePath, '--force');
+    // `worktree remove` only clears a tree git still tracks. A directory left at
+    // the path after metadata loss or a partial cleanup is reported "not a
+    // working tree" and left in place — and a non-empty one then blocks the next
+    // `worktree add` with `already exists`. So remove whatever remains, which
+    // also keeps this function's promise honest: a `true` return means the path
+    // is gone, not merely unregistered. `rmSync` unlinks a symlink rather than
+    // following it, so a tampered leftover cannot redirect the delete.
+    rmSync(worktreePath, { recursive: true, force: true });
   }
   gitOpt('worktree', 'prune');
   return existed;
