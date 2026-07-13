@@ -583,6 +583,13 @@ export class DaemonChannelBridge
   ): void {
     switch (event.type) {
       case 'session_update':
+        if (
+          isRecord(event.data) &&
+          typeof event.data['sessionId'] === 'string' &&
+          event.data['sessionId'] !== session.sessionId
+        ) {
+          break;
+        }
         this.handleSessionUpdate(session.sessionId, event.data);
         break;
       case 'permission_request':
