@@ -64,6 +64,35 @@ function createRepository() {
   return cwd;
 }
 
+async function captureValidation({ baseEnv, changedFiles, worktree }) {
+  let execution;
+  await verifyPullRequest(
+    { base: 'origin/main', cwd: '/caller', requestedProfile: 'full' },
+    {
+      baseEnv,
+      inspect: () => ({
+        baseSha: '1'.repeat(40),
+        changedFiles,
+        head: '2'.repeat(40),
+        mergeBase: '1'.repeat(40),
+      }),
+      log: () => {},
+      nodeVersion: '22.17.0',
+      runValidationSteps: async (options) => {
+        execution = options;
+      },
+      temporaryWorktree: async ({ validate }) =>
+        validate({
+          container: '/owned/container',
+          home: '/owned/home',
+          pythonRoot: '/owned/python',
+          worktree,
+        }),
+    },
+  );
+  return execution;
+}
+
 describe('verify-pr CLI', () => {
   it('uses the full profile against origin/main by default', () => {
     expect(parseArgs([])).toEqual({
@@ -285,9 +314,10 @@ describe('validation profiles', () => {
 
   it('uses the exact full validation sequence without a redundant build', () => {
     expect(
-      createValidationSteps({ profile: 'full' }).map(({ command }) =>
-        command.join(' '),
-      ),
+      createValidationSteps({
+        prettierFiles: ['scripts/verify-pr.js'],
+        profile: 'full',
+      }).map(({ command }) => command.join(' ')),
     ).toEqual([
       'npm ci --prefer-offline --no-audit --progress=false --ignore-scripts=false',
       'npm run audit:runtime:critical',
@@ -298,7 +328,7 @@ describe('validation profiles', () => {
       'node scripts/lint.js --actionlint',
       'node scripts/lint.js --shellcheck',
       'node scripts/lint.js --yamllint',
-      'npx prettier --experimental-cli --check .',
+      'npx prettier --experimental-cli --check --ignore-unknown -- scripts/verify-pr.js',
       'npm run check-i18n',
       'npm run generate:settings-schema -- --check',
       'npm run typecheck',
@@ -307,6 +337,24 @@ describe('validation profiles', () => {
       'npm run test:integration:no-ak:sandbox:none',
       'npm run test:e2e:smoke --workspace=packages/web-shell',
     ]);
+  });
+
+  it('omits Prettier when there are no existing changed files', () => {
+    const steps = createValidationSteps({ profile: 'full' });
+
+    expect(steps.map(({ name }) => name)).not.toContain('Run Prettier');
+    expect(
+      steps.find(({ name }) => name === 'Install dependencies'),
+    ).toMatchObject({ installEnvironment: true });
+    for (const name of ['Run unit tests', 'Run no-AK integration tests']) {
+      expect(steps.find((candidate) => candidate.name === name)).toMatchObject({
+        isolatedHome: true,
+        testEnvironment: true,
+      });
+    }
+    expect(
+      steps.find(({ name }) => name === 'Run web shell smoke tests'),
+    ).toMatchObject({ playwright: true, testEnvironment: true });
   });
 
   it('adds Python checks only for SDK or workflow changes', () => {
@@ -761,34 +809,71 @@ describe('verification orchestration', () => {
     expect(created).toBe(false);
   });
 
-  it('runs Python-expanded validation steps only in the temporary worktree', async () => {
-    let execution;
-    await verifyPullRequest(
-      { base: 'origin/main', cwd: '/caller', requestedProfile: 'full' },
-      {
-        baseEnv: { RUNNER_TEMP: '/caller/temp', SAFE: 'kept' },
-        inspect: () => ({
-          baseSha: '1'.repeat(40),
-          changedFiles: ['packages/sdk-python/src/client.py'],
-          head: '2'.repeat(40),
-          mergeBase: '1'.repeat(40),
-        }),
-        log: () => {},
-        nodeVersion: '22.17.0',
-        runValidationSteps: async (options) => {
-          execution = options;
-        },
-        temporaryWorktree: async ({ validate }) =>
-          validate({
-            container: '/owned/container',
-            home: '/owned/home',
-            pythonRoot: '/owned/python',
-            worktree: '/owned/worktree',
-          }),
-      },
-    );
+  it('checks only existing regular changed files with Prettier', async () => {
+    const worktree = mkdtempSync(path.join(tmpdir(), 'verify-pr-worktree-'));
+    tempDirs.push(worktree);
+    mkdirSync(path.join(worktree, 'docs'));
+    mkdirSync(path.join(worktree, 'tracked-directory'));
+    writeFileSync(path.join(worktree, 'source.js'), 'export {};\n');
+    writeFileSync(path.join(worktree, 'docs', 'path with spaces.md'), 'doc\n');
+    writeFileSync(path.join(worktree, '-leading-option.md'), 'option\n');
+    const execution = await captureValidation({
+      changedFiles: [
+        'source.js',
+        'deleted.js',
+        'tracked-directory',
+        'docs/path with spaces.md',
+        '-leading-option.md',
+      ],
+      worktree,
+    });
 
-    expect(execution.cwd).toBe('/owned/worktree');
+    expect(
+      execution.steps.find(({ name }) => name === 'Run Prettier').command,
+    ).toEqual([
+      'npx',
+      'prettier',
+      '--experimental-cli',
+      '--check',
+      '--ignore-unknown',
+      '--',
+      'source.js',
+      'docs/path with spaces.md',
+      '-leading-option.md',
+    ]);
+  });
+
+  it('omits Prettier when all changed paths are deleted or directories', async () => {
+    const worktree = mkdtempSync(path.join(tmpdir(), 'verify-pr-worktree-'));
+    tempDirs.push(worktree);
+    mkdirSync(path.join(worktree, 'tracked-directory'));
+    const execution = await captureValidation({
+      changedFiles: ['deleted.js', 'tracked-directory'],
+      worktree,
+    });
+
+    expect(execution.steps.map(({ name }) => name)).not.toContain(
+      'Run Prettier',
+    );
+  });
+
+  it('runs Python-expanded validation steps only in the temporary worktree', async () => {
+    const worktree = mkdtempSync(path.join(tmpdir(), 'verify-pr-worktree-'));
+    tempDirs.push(worktree);
+    mkdirSync(path.join(worktree, 'packages', 'sdk-python', 'src'), {
+      recursive: true,
+    });
+    writeFileSync(
+      path.join(worktree, 'packages', 'sdk-python', 'src', 'client.py'),
+      'pass\n',
+    );
+    const execution = await captureValidation({
+      baseEnv: { RUNNER_TEMP: '/caller/temp', SAFE: 'kept' },
+      changedFiles: ['packages/sdk-python/src/client.py'],
+      worktree,
+    });
+
+    expect(execution.cwd).toBe(worktree);
     expect(execution.home).toBe('/owned/home');
     expect(execution.baseEnv).toMatchObject({
       RUNNER_TEMP: '/owned/container',

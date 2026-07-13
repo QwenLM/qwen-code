@@ -66,7 +66,8 @@ The full profile runs these categories in fail-fast order:
   repository `prepare` script, which runs the build and bundle;
 - critical runtime dependency audit, lockfile validation, and desktop
   workspace isolation;
-- ESLint, actionlint, shellcheck, yamllint, and a read-only Prettier check;
+- ESLint, actionlint, shellcheck, yamllint, and a read-only Prettier check of
+  regular files changed by the PR that still exist at `HEAD`;
 - i18n validation, read-only settings-schema freshness, type checking, and the
   serve fast-path bundle-closure check;
 - all workspace unit tests plus script tests, with an isolated temporary home,

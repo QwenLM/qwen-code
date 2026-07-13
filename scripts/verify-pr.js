@@ -7,7 +7,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -128,7 +128,7 @@ function step(name, ...command) {
   return { command, name };
 }
 
-export function createValidationSteps({ profile }) {
+export function createValidationSteps({ prettierFiles = [], profile }) {
   if (profile === 'docs_only') return [];
   const commands =
     profile === 'github_ci_only'
@@ -173,14 +173,20 @@ export function createValidationSteps({ profile }) {
           ['Run actionlint', 'node', 'scripts/lint.js', '--actionlint'],
           ['Run shellcheck', 'node', 'scripts/lint.js', '--shellcheck'],
           ['Run yamllint', 'node', 'scripts/lint.js', '--yamllint'],
-          [
-            'Run Prettier',
-            'npx',
-            'prettier',
-            '--experimental-cli',
-            '--check',
-            '.',
-          ],
+          ...(prettierFiles.length > 0
+            ? [
+                [
+                  'Run Prettier',
+                  'npx',
+                  'prettier',
+                  '--experimental-cli',
+                  '--check',
+                  '--ignore-unknown',
+                  '--',
+                  ...prettierFiles,
+                ],
+              ]
+            : []),
           ['Run i18n check', 'npm', 'run', 'check-i18n'],
           [
             'Check settings schema',
@@ -214,12 +220,21 @@ export function createValidationSteps({ profile }) {
         ];
   const steps = commands.map(([name, ...command]) => step(name, ...command));
   if (profile === 'full') {
-    steps[0].installEnvironment = true;
-    for (const testStep of steps.slice(14)) testStep.testEnvironment = true;
-    for (const isolatedHomeStep of steps.slice(14, 16)) {
-      isolatedHomeStep.isolatedHome = true;
+    steps.find(
+      ({ name }) => name === 'Install dependencies',
+    ).installEnvironment = true;
+    for (const name of [
+      'Run unit tests',
+      'Run no-AK integration tests',
+      'Run web shell smoke tests',
+    ]) {
+      steps.find((candidate) => candidate.name === name).testEnvironment = true;
     }
-    steps[16].playwright = true;
+    for (const name of ['Run unit tests', 'Run no-AK integration tests']) {
+      steps.find((candidate) => candidate.name === name).isolatedHome = true;
+    }
+    steps.find(({ name }) => name === 'Run web shell smoke tests').playwright =
+      true;
   }
   return steps;
 }
@@ -565,7 +580,15 @@ export async function verifyPullRequest(
       cwd,
       reportCleanup: error,
       validate: async ({ container, home, pythonRoot, worktree }) => {
-        const steps = createValidationSteps({ profile });
+        const prettierFiles =
+          profile === 'full'
+            ? repository.changedFiles.filter((file) =>
+                statSync(join(worktree, file), {
+                  throwIfNoEntry: false,
+                })?.isFile(),
+              )
+            : [];
+        const steps = createValidationSteps({ prettierFiles, profile });
         if (profile === 'full' && needsPythonChecks(repository.changedFiles)) {
           steps.push(...createPythonSteps({ pythonRoot }));
         }
