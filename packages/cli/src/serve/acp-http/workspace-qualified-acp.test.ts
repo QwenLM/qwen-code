@@ -38,7 +38,20 @@ const PARENT_ENV: WorkspaceRuntimeEnvMetadata = {
 
 function makeBridge(): HttpAcpBridge {
   return {
+    spawnOrAttach: vi.fn(async (req: { workspaceCwd: string }) => ({
+      sessionId:
+        req.workspaceCwd === '/ws-b' ? 'secondary-session' : 'primary-session',
+      workspaceCwd: req.workspaceCwd,
+      attached: false,
+      clientId:
+        req.workspaceCwd === '/ws-b' ? 'secondary-client' : 'primary-client',
+    })),
     detachClient: vi.fn(async () => {}),
+    executeShellCommand: vi.fn(async () => ({
+      exitCode: 0,
+      output: 'ok',
+      aborted: false,
+    })),
     isWorkspaceMemoryRememberAvailable: vi.fn(async () => true),
     runWorkspaceMemoryRemember: vi.fn(async () => ({
       filesTouched: [],
@@ -172,6 +185,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       cdpTunnelOverWs: true,
       cdpTunnelRegistry: cdpRegistry,
       checkRate,
+      sessionShellCommandEnabled: true,
       workspaceRememberLane: new WorkspaceRememberTaskLane(primaryBridge),
     });
 
@@ -242,6 +256,44 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
             ws.close();
             resolve(message);
           }
+        } catch (err) {
+          ws.terminate();
+          reject(err as Error);
+        }
+      });
+      ws.on('error', reject);
+    });
+  }
+
+  async function sendWsRequests(
+    pathname: string,
+    requests: Array<Record<string, unknown>>,
+  ): Promise<Array<Record<string, unknown>>> {
+    return new Promise((resolve, reject) => {
+      const responses: Array<Record<string, unknown>> = [];
+      const ws = new WebSocket(`ws://127.0.0.1:${port}${pathname}`, {
+        handshakeTimeout: 2000,
+      });
+      ws.on('open', () => ws.send(INITIALIZE));
+      ws.on('message', (data: WebSocket.RawData) => {
+        try {
+          const message = JSON.parse(data.toString()) as Record<
+            string,
+            unknown
+          >;
+          if (message['id'] === 1) {
+            ws.send(JSON.stringify(requests[0]));
+            return;
+          }
+          const request = requests[responses.length];
+          if (message['id'] !== request?.['id']) return;
+          responses.push(message);
+          if (responses.length === requests.length) {
+            ws.close();
+            resolve(responses);
+            return;
+          }
+          ws.send(JSON.stringify(requests[responses.length]));
         } catch (err) {
           ws.terminate();
           reject(err as Error);
@@ -367,6 +419,43 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       },
     });
     expect(primary.status).toBe(404);
+  });
+
+  it('keeps ACP shell scoped to the workspace-qualified connection', async () => {
+    const secondary = await sendWsRequests('/workspaces/secondary-id/acp', [
+      {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'session/new',
+        params: { workspaceCwd: '/ws-b' },
+      },
+      {
+        jsonrpc: '2.0',
+        id: 3,
+        method: '_qwen/session/shell',
+        params: { sessionId: 'secondary-session', command: 'pwd' },
+      },
+    ]);
+    expect(secondary[1]?.['result']).toMatchObject({
+      exitCode: 0,
+      output: 'ok',
+    });
+    expect(secondaryBridge.executeShellCommand).toHaveBeenCalledWith(
+      'secondary-session',
+      'pwd',
+      expect.any(AbortSignal),
+      expect.objectContaining({ clientId: 'secondary-client' }),
+    );
+    expect(primaryBridge.executeShellCommand).not.toHaveBeenCalled();
+
+    const primary = await sendWsRequest('/acp', {
+      jsonrpc: '2.0',
+      id: 4,
+      method: '_qwen/session/shell',
+      params: { sessionId: 'secondary-session', command: 'pwd' },
+    });
+    expect(primary['error']).toMatchObject({ code: -32602 });
+    expect(primaryBridge.executeShellCommand).not.toHaveBeenCalled();
   });
 
   it('rejects a body workspaceCwd that differs from the selected mount', async () => {

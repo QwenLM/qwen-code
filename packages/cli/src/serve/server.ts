@@ -1000,27 +1000,40 @@ export function createServeApp(
   });
 
   app.use(
-    daemonTelemetryMiddleware((req) => {
-      const match = req.path.match(/^\/workspaces\/([^/]+)/);
-      const rawSelector = match?.[1];
-      if (rawSelector) {
-        try {
-          const selector = decodeURIComponent(rawSelector);
-          const byId = workspaceRegistry.getByWorkspaceId(selector);
-          if (byId) return byId.workspaceCwd;
-          if (isPortableAbsolutePath(selector)) {
-            const runtime = resolveRegisteredWorkspaceRuntimeByPathSelector(
-              workspaceRegistry,
-              selector,
-            );
-            if (runtime) return runtime.workspaceCwd;
+    daemonTelemetryMiddleware(
+      (req) => {
+        const match = req.path.match(/^\/workspaces\/([^/]+)/);
+        const rawSelector = match?.[1];
+        if (rawSelector) {
+          try {
+            const selector = decodeURIComponent(rawSelector);
+            const byId = workspaceRegistry.getByWorkspaceId(selector);
+            if (byId) return byId.workspaceCwd;
+            if (isPortableAbsolutePath(selector)) {
+              const runtime = resolveRegisteredWorkspaceRuntimeByPathSelector(
+                workspaceRegistry,
+                selector,
+              );
+              if (runtime) return runtime.workspaceCwd;
+            }
+          } catch {
+            return primaryBoundWorkspace;
           }
-        } catch {
-          return primaryBoundWorkspace;
         }
-      }
-      return primaryBoundWorkspace;
-    }, deps.recordDaemonRequest),
+        return primaryBoundWorkspace;
+      },
+      deps.recordDaemonRequest,
+      (sessionId) => {
+        try {
+          const owner = workspaceRegistry.resolveLiveSessionOwner(sessionId);
+          return owner.kind === 'found'
+            ? owner.runtime.workspaceCwd
+            : undefined;
+        } catch {
+          return undefined;
+        }
+      },
+    ),
   );
 
   const buildWorkspaceCtx = createBuildWorkspaceCtx(primaryBoundWorkspace);

@@ -14,6 +14,7 @@ import {
   normalizePendingPromptLimit,
 } from '../../src/daemon/DaemonClient.js';
 import type { DaemonTransport } from '../../src/daemon/DaemonTransport.js';
+import { negotiateTransport } from '../../src/daemon/negotiateTransport.js';
 import {
   DaemonCapabilityMissingError,
   isDaemonContentHash,
@@ -705,6 +706,9 @@ describe('DaemonClient', () => {
         type: 'acp-http',
         supportsReplay: true,
         connected: true,
+        restFetch: vi.fn(async () => {
+          throw new Error('transport REST fetch must not override opts.fetch');
+        }) as unknown as typeof globalThis.fetch,
         fetch: transportFetch,
         async *subscribeEvents() {},
         dispose() {},
@@ -1172,6 +1176,157 @@ describe('DaemonClient', () => {
       await expect(
         client.getSessionTranscriptPage('s-1', { limit: 501 }),
       ).rejects.toBeInstanceOf(DaemonHttpError);
+    });
+  });
+
+  describe('session rewind transport', () => {
+    it('reuses the negotiated native fetch for REST-only rewind calls', async () => {
+      const negotiatedFetch = vi.fn(async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.endsWith('/capabilities')) {
+          return jsonResponse(200, { transports: ['acp-http'] });
+        }
+        if (url.endsWith('/rewind/snapshots')) {
+          return jsonResponse(200, { snapshots: [] });
+        }
+        return jsonResponse(200, {
+          rewound: true,
+          targetTurnIndex: 0,
+          filesChanged: [],
+          filesFailed: [],
+        });
+      }) as unknown as typeof globalThis.fetch;
+      const globalFetch = vi
+        .spyOn(globalThis, 'fetch')
+        .mockRejectedValue(new Error('global fetch must not handle rewind'));
+
+      try {
+        const transport = await negotiateTransport('http://daemon', 'secret', {
+          fetchFn: negotiatedFetch,
+        });
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          token: 'secret',
+          transport,
+        });
+
+        await expect(client.getRewindSnapshots('s-1')).resolves.toEqual({
+          snapshots: [],
+        });
+        await expect(
+          client.rewindSession('s-1', 'prompt-1'),
+        ).resolves.toMatchObject({ rewound: true });
+
+        expect(negotiatedFetch).toHaveBeenCalledTimes(3);
+        expect(globalFetch).not.toHaveBeenCalled();
+      } finally {
+        globalFetch.mockRestore();
+      }
+    });
+
+    it('forces owner-aware REST with auth, client id, timeout, and boolean body', async () => {
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/rewind/snapshots')) {
+          return jsonResponse(200, { snapshots: [] });
+        }
+        return jsonResponse(200, {
+          rewound: true,
+          targetTurnIndex: 0,
+          filesChanged: [],
+          filesFailed: [],
+        });
+      });
+      const transportFetch = vi.fn(async () => {
+        throw new Error('ACP transport must not handle rewind');
+      });
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        token: 'secret',
+        fetch,
+        transport,
+        fetchTimeoutMs: 1234,
+      });
+
+      await expect(client.getRewindSnapshots('with/slash')).resolves.toEqual({
+        snapshots: [],
+      });
+      await expect(
+        client.rewindSession('with/slash', 'prompt-1', {
+          clientId: 'client-1',
+          rewindFiles: false,
+        }),
+      ).resolves.toMatchObject({ rewound: true });
+
+      expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls).toHaveLength(2);
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/session/with%2Fslash/rewind/snapshots',
+        method: 'GET',
+        headers: { authorization: 'Bearer secret' },
+        signal: expect.any(AbortSignal),
+      });
+      expect(calls[1]).toMatchObject({
+        url: 'http://daemon/session/with%2Fslash/rewind',
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json',
+          'x-qwen-client-id': 'client-1',
+        },
+        signal: expect.any(AbortSignal),
+      });
+      expect(JSON.parse(calls[1]!.body!)).toEqual({
+        promptId: 'prompt-1',
+        rewindFiles: false,
+      });
+    });
+
+    it('keeps shell on the configured transport', async () => {
+      const nativeFetch = vi.fn(async () => {
+        throw new Error('native REST fetch must not handle ACP shell');
+      }) as unknown as typeof globalThis.fetch;
+      const transportFetch = vi.fn(async () =>
+        jsonResponse(200, { exitCode: 0, output: '/work/b', aborted: false }),
+      );
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        token: 'secret',
+        fetch: nativeFetch,
+        transport,
+      });
+
+      await expect(
+        client.shellCommand('session-b', 'pwd', { clientId: 'client-b' }),
+      ).resolves.toMatchObject({ output: '/work/b' });
+      expect(nativeFetch).not.toHaveBeenCalled();
+      expect(transportFetch).toHaveBeenCalledOnce();
+      expect(transportFetch).toHaveBeenCalledWith(
+        'http://daemon/session/session-b/shell',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ command: 'pwd' }),
+          headers: expect.objectContaining({
+            Authorization: 'Bearer secret',
+            'X-Qwen-Client-Id': 'client-b',
+          }),
+        }),
+      );
     });
   });
 
