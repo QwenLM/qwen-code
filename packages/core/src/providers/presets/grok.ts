@@ -17,9 +17,12 @@ export const grokProvider: ProviderConfig = {
   protocol: AuthType.USE_OPENAI,
   baseUrl: GROK_BASE_URL,
   envKey: GROK_ENV_KEY,
+  // xAI's API follows the standard OpenAI format and takes no custom
+  // parameters — Grok reasoning models think by default, with no
+  // enable_thinking toggle — so models carry only their context window.
   models: [
-    { id: 'grok-4', contextWindowSize: 256000, enableThinking: true },
-    { id: 'grok-4-heavy', contextWindowSize: 256000, enableThinking: true },
+    { id: 'grok-4', contextWindowSize: 256000 },
+    { id: 'grok-4-heavy', contextWindowSize: 256000 },
     { id: 'grok-3', contextWindowSize: 131072 },
   ],
   modelsEditable: true,
