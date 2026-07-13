@@ -322,10 +322,6 @@ const EN: Messages = {
     const count = Number(v?.count ?? 0);
     return `${count} filter${count === 1 ? '' : 's'}`;
   },
-  'markdownTable.cellsSelected': (v) => {
-    const count = Number(v?.count ?? 0);
-    return `${count} cell${count === 1 ? '' : 's'} selected`;
-  },
   'markdownTable.selection.selected': 'Selected',
   'markdownTable.selection.nonEmpty': 'Non-empty',
   'markdownTable.selection.numeric': 'Numeric',
@@ -2200,7 +2196,6 @@ const ZH: Messages = {
   'markdownTable.rowsFiltered': (v) => `${v?.visible ?? 0}/${v?.total ?? 0} 行`,
   'markdownTable.hint': '点击表头排序，点击 ▾ 打开筛选。',
   'markdownTable.filtersActive': (v) => `${v?.count ?? 0} 个筛选`,
-  'markdownTable.cellsSelected': (v) => `${v?.count ?? 0} 个单元格已选中`,
   'markdownTable.selection.selected': '已选',
   'markdownTable.selection.nonEmpty': '非空',
   'markdownTable.selection.numeric': '数值',

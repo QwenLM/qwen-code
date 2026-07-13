@@ -477,19 +477,6 @@ function getVisibleTableText(
   return lines.join('\n');
 }
 
-function selectionSize(
-  range: SelectionRange | null,
-  visibleColumnIndexes: number[],
-): number {
-  if (!range) return 0;
-  const { minRow, maxRow } = getSelectionRowBounds(range);
-  const selectedColumnCount = getSelectedColumnIndexes(
-    range,
-    visibleColumnIndexes,
-  ).length;
-  return (maxRow - minRow + 1) * selectedColumnCount;
-}
-
 function getSelectionStatistics(
   range: SelectionRange | null,
   rows: EnhancedTableRow[],
@@ -1671,6 +1658,14 @@ export function EnhancedTable({
     () => sortRows(filteredRows, sort),
     [filteredRows, sort],
   );
+  useEffect(() => {
+    setSelection((current) => {
+      if (!current) return current;
+      return getSelectionRowBounds(current).maxRow < visibleRows.length
+        ? current
+        : null;
+    });
+  }, [visibleRows.length]);
   const openFilterOptions = useMemo(() => {
     if (!openFilterMenu) return [];
     const columnIndex = openFilterMenu.columnIndex;
@@ -2311,9 +2306,7 @@ export function EnhancedTable({
       ),
     [orderedVisibleColumnIndexes, selection, visibleRows],
   );
-  const selectedCount =
-    selectionStatistics?.selectedCount ??
-    selectionSize(selection, orderedVisibleColumnIndexes);
+  const selectedCount = selectionStatistics?.selectedCount ?? 0;
   const activeFilterCount =
     Object.values(filters).filter(isFilterActive).length;
   const densityLabel = t(`markdownTable.density.${density}`);
