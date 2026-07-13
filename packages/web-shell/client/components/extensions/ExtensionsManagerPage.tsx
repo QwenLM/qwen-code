@@ -26,6 +26,7 @@ import {
   DaemonHttpError,
   type DaemonExtensionEntry,
   type DaemonExtensionUpdateState,
+  type ExtensionInteractionResponse,
   type ExtensionPendingInteraction,
 } from '@qwen-code/sdk/daemon';
 import {
@@ -98,10 +99,6 @@ import {
 type Scope = 'user' | 'workspace';
 type Mutation = 'enable' | 'disable';
 type T = ReturnType<typeof useI18n>['t'];
-type InteractionResponse =
-  | { pluginName: string }
-  | { value: string }
-  | { cancelled: true };
 type PendingInteractionState = {
   operationId: string;
   interaction: ExtensionPendingInteraction;
@@ -245,7 +242,7 @@ function ExtensionInteractionDialog({
   interactionValue: string;
   setSelectedPlugin: (value: string) => void;
   setInteractionValue: (value: string) => void;
-  submit: (response: InteractionResponse) => void;
+  submit: (response: ExtensionInteractionResponse) => void;
   t: T;
 }) {
   return (
@@ -610,9 +607,16 @@ export function ExtensionsManagerPage({
   }, [actions, clearInteraction, load, pendingInstall, showInteraction, t]);
 
   const submitInteraction = useCallback(
-    (response: InteractionResponse) => {
+    (response: ExtensionInteractionResponse) => {
       if (!pendingInteraction) return;
       const owner = pendingInteraction.owner;
+      const restartPolling = () => {
+        if (owner === 'install') {
+          setPendingInstall((current) => (current ? { ...current } : current));
+        } else {
+          setPendingMutation((current) => (current ? { ...current } : current));
+        }
+      };
       setSubmittingInteraction(true);
       actions
         .respondToExtensionInteraction(
@@ -623,28 +627,12 @@ export function ExtensionsManagerPage({
         )
         .then(() => {
           clearInteraction();
-          if (owner === 'install') {
-            setPendingInstall((current) =>
-              current ? { ...current } : current,
-            );
-          } else {
-            setPendingMutation((current) =>
-              current ? { ...current } : current,
-            );
-          }
+          restartPolling();
         })
         .catch((error: unknown) => {
           setMessage(error instanceof Error ? error.message : String(error));
           clearInteraction();
-          if (owner === 'install') {
-            setPendingInstall((current) =>
-              current ? { ...current } : current,
-            );
-          } else {
-            setPendingMutation((current) =>
-              current ? { ...current } : current,
-            );
-          }
+          restartPolling();
         })
         .finally(() => setSubmittingInteraction(false));
     },
@@ -1349,8 +1337,12 @@ export function ExtensionsManagerPage({
                       {capabilities.contextFileCount}
                     </span>
                     {capabilities.hasSettings ? (
-                      <span className="inline-flex items-center gap-1">
-                        <SettingsIcon className="size-4" />1
+                      <span
+                        className="inline-flex items-center"
+                        aria-label={t('extensions.manage.settings')}
+                        title={t('extensions.manage.settings')}
+                      >
+                        <SettingsIcon className="size-4" />
                       </span>
                     ) : null}
                   </CardFooter>

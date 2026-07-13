@@ -1230,7 +1230,6 @@ const EN: Messages = {
     'Enter a GitHub, Git, or npm extension source.',
   'extensions.manage.installSelectPluginDescription': (v) =>
     `Choose a plugin from "${v?.marketplace ?? 'this marketplace'}".`,
-  'extensions.manage.selectExtension': 'Choose an extension',
   'extensions.manage.installType': 'Install type:',
   'extensions.manage.loading': 'Loading extensions...',
   'extensions.manage.mcpServers': 'MCP servers:',
@@ -1238,10 +1237,6 @@ const EN: Messages = {
   'extensions.manage.name': 'Name:',
   'extensions.manage.notUpdatable': 'not updatable',
   'extensions.manage.operationFailed': 'Extension operation failed.',
-  'extensions.manage.refreshFailed': (v) =>
-    `Extension action succeeded, but session refresh failed${
-      v?.error ? `: ${v.error}` : '.'
-    }`,
   'extensions.manage.noDescription': 'No description',
   'extensions.manage.noMatches': 'No matching extensions.',
   'extensions.manage.origin': 'Origin:',
@@ -1251,9 +1246,14 @@ const EN: Messages = {
     `Extension action queued for "${v?.name ?? 'extension'}".`,
   'extensions.manage.refreshed': (v) =>
     `Extensions refreshed in ${v?.refreshed ?? 0} session(s), ${v?.failed ?? 0} failed.`,
+  'extensions.manage.refreshFailed': (v) =>
+    `Extension action succeeded, but session refresh failed${
+      v?.error ? `: ${v.error}` : '.'
+    }`,
   'extensions.manage.restartRequired': 'updated; restart required',
-  'extensions.manage.settings': 'Settings:',
   'extensions.manage.search': 'Search extensions…',
+  'extensions.manage.selectExtension': 'Choose an extension',
+  'extensions.manage.settings': 'Settings:',
   'extensions.manage.skills': 'Skills:',
   'extensions.manage.source': 'Source:',
   'extensions.manage.sourcePlaceholder': 'https://github.com/owner/repository',
@@ -3107,7 +3107,6 @@ const ZH: Messages = {
   'extensions.manage.installDescription': '输入 GitHub、Git 或 npm 扩展来源。',
   'extensions.manage.installSelectPluginDescription': (v) =>
     `从「${v?.marketplace ?? '此市场'}」中选择插件。`,
-  'extensions.manage.selectExtension': '请选择扩展',
   'extensions.manage.installType': '安装类型：',
   'extensions.manage.loading': '正在加载扩展...',
   'extensions.manage.mcpServers': 'MCP servers：',
@@ -3115,8 +3114,6 @@ const ZH: Messages = {
   'extensions.manage.name': '名称：',
   'extensions.manage.notUpdatable': '不可更新',
   'extensions.manage.operationFailed': '扩展操作失败。',
-  'extensions.manage.refreshFailed': (v) =>
-    `扩展操作已成功，但 session 刷新失败${v?.error ? `：${v.error}` : '。'}`,
   'extensions.manage.noDescription': '暂无描述',
   'extensions.manage.noMatches': '没有匹配的扩展。',
   'extensions.manage.origin': '来源平台：',
@@ -3126,9 +3123,12 @@ const ZH: Messages = {
     `扩展 "${v?.name ?? '扩展'}" 的操作已提交。`,
   'extensions.manage.refreshed': (v) =>
     `已刷新 ${v?.refreshed ?? 0} 个 session，${v?.failed ?? 0} 个失败。`,
+  'extensions.manage.refreshFailed': (v) =>
+    `扩展操作已成功，但 session 刷新失败${v?.error ? `：${v.error}` : '。'}`,
   'extensions.manage.restartRequired': '已更新，需要重启',
-  'extensions.manage.settings': '设置：',
   'extensions.manage.search': '搜索扩展…',
+  'extensions.manage.selectExtension': '请选择扩展',
+  'extensions.manage.settings': '设置：',
   'extensions.manage.skills': 'Skills：',
   'extensions.manage.source': '来源：',
   'extensions.manage.sourcePlaceholder': 'https://github.com/owner/repository',
