@@ -128,7 +128,7 @@ export const ExtensionActionsView = ({
             setEnabled(!enabled);
             const warnings = activationResult.warnings ?? [];
             onStatus({
-              type: warnings.length > 0 ? 'info' : 'success',
+              type: warnings.length > 0 ? 'warning' : 'success',
               text:
                 warnings.length > 0
                   ? t('"{{name}}" changed with warnings: {{detail}}', {
@@ -269,7 +269,7 @@ export const ExtensionActionsView = ({
           ...(preferenceWarning ? [preferenceWarning] : []),
         ];
         onStatus({
-          type: warnings.length > 0 ? 'info' : 'success',
+          type: warnings.length > 0 ? 'warning' : 'success',
           text:
             warnings.length > 0
               ? t('Set "{{name}}" scope with warnings: {{detail}}', {
@@ -299,7 +299,7 @@ export const ExtensionActionsView = ({
         const result = await manager.uninstallExtension(ext.name, false);
         const warnings = result.warnings ?? [];
         onStatus({
-          type: warnings.length > 0 ? 'info' : 'success',
+          type: warnings.length > 0 ? 'warning' : 'success',
           text:
             warnings.length > 0
               ? t('Uninstalled "{{name}}" with warnings: {{detail}}', {

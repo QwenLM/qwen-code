@@ -147,7 +147,7 @@ describe('ExtensionActionsView', () => {
     expect(manager.setExtensionScope).toHaveBeenCalledWith('demo', 'project');
     expect(onReload).toHaveBeenCalledOnce();
     expect(statuses).toContainEqual({
-      type: 'info',
+      type: 'warning',
       text: 'Set "demo" scope with warnings: refresh failed',
     });
   });
@@ -191,7 +191,7 @@ describe('ExtensionActionsView', () => {
 
     await waitFor(() => expect(onReload).toHaveBeenCalledOnce());
     expect(statuses).toContainEqual({
-      type: 'info',
+      type: 'warning',
       text: 'Set "demo" scope with warnings: preference denied',
     });
   });
@@ -219,7 +219,7 @@ describe('ExtensionActionsView', () => {
     );
     expect(onReload).toHaveBeenCalledOnce();
     expect(statuses).toContainEqual({
-      type: 'info',
+      type: 'warning',
       text: '"demo" changed with warnings: refresh failed',
     });
   });
@@ -280,7 +280,7 @@ describe('ExtensionActionsView', () => {
     expect(onReload).toHaveBeenCalledOnce();
     expect(onExit).toHaveBeenCalledOnce();
     expect(statuses).toContainEqual({
-      type: 'info',
+      type: 'warning',
       text: 'Uninstalled "demo" with warnings: refresh failed',
     });
   });

@@ -274,7 +274,7 @@ export const DiscoverTab = ({
       setSelectedKeys(new Set());
       if (errors.length === 0) {
         onStatus({
-          type: warnings.length === 0 ? 'success' : 'info',
+          type: warnings.length === 0 ? 'success' : 'warning',
           text:
             warnings.length === 0
               ? t('Installed {{count}} extension(s).', {

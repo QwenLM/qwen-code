@@ -106,7 +106,7 @@ describe('SourcesTab', () => {
 
     await waitFor(() =>
       expect(statuses).toContainEqual({
-        type: 'info',
+        type: 'warning',
         text: 'committed with warnings',
       }),
     );

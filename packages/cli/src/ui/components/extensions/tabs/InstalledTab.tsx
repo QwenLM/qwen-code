@@ -469,7 +469,7 @@ export const InstalledTab = ({
         }
         const warnings = result.warnings ?? [];
         onStatus({
-          type: warnings.length > 0 ? 'info' : 'success',
+          type: warnings.length > 0 ? 'warning' : 'success',
           text:
             warnings.length > 0
               ? t('"{{name}}" changed with warnings: {{detail}}', {

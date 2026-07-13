@@ -21,7 +21,7 @@ import {
   type SecretStorage,
 } from '../mcp/token-storage/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
+import { atomicWriteFile, atomicWriteJSON } from '../utils/atomicFileWrite.js';
 
 const debugLogger = createDebugLogger('EXT_SETTINGS');
 
@@ -216,7 +216,7 @@ export async function maybePromptForSettings(
 
   if (!settings || settings.length === 0) {
     if (fsSync.existsSync(envFilePath)) {
-      await fs.writeFile(envFilePath, '');
+      await atomicWriteFile(envFilePath, '');
     }
     await fs.rm(selectorPath, { force: true });
     keychainMutations.push(async () => await clearKeychainSettings(keychain));
@@ -272,7 +272,7 @@ export async function maybePromptForSettings(
 
   const envContent = formatEnvContent(nonSensitiveSettings);
 
-  await fs.writeFile(envFilePath, envContent);
+  await atomicWriteFile(envFilePath, envContent);
   if (Object.keys(sensitiveSettings).length > 0) {
     const bundleKey = `${SETTINGS_BUNDLE_PREFIX}${randomUUID()}`;
     await keychain.setSecret(bundleKey, JSON.stringify(sensitiveSettings));
@@ -528,7 +528,7 @@ export async function updateSetting(
   }
 
   const newEnvContent = formatEnvContent(nonSensitiveSettings);
-  await fs.writeFile(envFilePath, newEnvContent);
+  await atomicWriteFile(envFilePath, newEnvContent);
 }
 
 interface settingsChanges {

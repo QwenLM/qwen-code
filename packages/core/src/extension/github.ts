@@ -679,6 +679,16 @@ async function fetchJson<T>(
   signal?: AbortSignal,
   networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
 ): Promise<T> {
+  const timeoutError = new Error('Timed out fetching GitHub API response');
+  const timeoutController = new AbortController();
+  const hardDeadline = setTimeout(
+    () => timeoutController.abort(timeoutError),
+    ARCHIVE_DOWNLOAD_TIMEOUT_MS,
+  );
+  hardDeadline.unref();
+  const requestSignal = signal
+    ? AbortSignal.any([signal, timeoutController.signal])
+    : timeoutController.signal;
   const headers: { 'User-Agent': string; Authorization?: string } = {
     'User-Agent': 'gemini-cli',
   };
@@ -686,28 +696,53 @@ async function fetchJson<T>(
   if (token) {
     headers.Authorization = `token ${token}`;
   }
-  const target = networkPolicy
-    ? await resolveNetworkTarget(url, networkPolicy, signal)
-    : { url: new URL(url) };
-  signal?.throwIfAborted();
-  return new Promise((resolve, reject) => {
-    const rejectRequest = (error: unknown) => {
-      reject(signal?.aborted ? signal.reason : error);
+  let target;
+  try {
+    target = networkPolicy
+      ? await resolveNetworkTarget(url, networkPolicy, requestSignal)
+      : { url: new URL(url) };
+    requestSignal.throwIfAborted();
+  } catch (error) {
+    clearTimeout(hardDeadline);
+    throw requestSignal.aborted ? requestSignal.reason : error;
+  }
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(hardDeadline);
+      requestSignal.removeEventListener('abort', onAbort);
     };
-    https
-      .get(
+    const finish = (value: T) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(requestSignal.aborted ? requestSignal.reason : error);
+    };
+    let req: ReturnType<typeof https.get> | undefined;
+    const onAbort = () => {
+      req?.destroy();
+      fail(requestSignal.reason);
+    };
+    try {
+      req = https.get(
         url,
         {
           headers,
-          signal,
+          signal: requestSignal,
           lookup: target.lookup,
           ...(target.lookup ? { agent: false } : {}),
         },
         (res) => {
-          res.on('error', rejectRequest);
+          res.on('error', fail);
           if (res.statusCode !== 200) {
             res.resume();
-            return rejectRequest(
+            return fail(
               new Error(`Request failed with status code ${res.statusCode}`),
             );
           }
@@ -715,14 +750,22 @@ async function fetchJson<T>(
           res.on('data', (chunk) => chunks.push(chunk));
           res.on('end', () => {
             try {
-              resolve(JSON.parse(Buffer.concat(chunks).toString()) as T);
+              finish(JSON.parse(Buffer.concat(chunks).toString()) as T);
             } catch (error) {
-              rejectRequest(error);
+              fail(error);
             }
           });
         },
-      )
-      .on('error', rejectRequest);
+      );
+      req.on('error', fail);
+    } catch (error) {
+      fail(error);
+      return;
+    }
+    requestSignal.addEventListener('abort', onAbort, { once: true });
+    if (requestSignal.aborted) {
+      onAbort();
+    }
   });
 }
 

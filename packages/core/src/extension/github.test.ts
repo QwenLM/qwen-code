@@ -1067,6 +1067,32 @@ describe('git extension helpers', () => {
       ).rejects.toBe(abortReason);
     });
 
+    it('times out release metadata requests', async () => {
+      vi.useFakeTimers();
+      const request = {
+        on: vi.fn().mockReturnThis(),
+        destroy: vi.fn().mockReturnThis(),
+      } as unknown as ReturnType<typeof https.get>;
+      mockHttpsGet.mockImplementationOnce(() => request);
+
+      try {
+        const download = downloadFromGitHubRelease(
+          { source: 'owner/repo', type: 'github-release' },
+          tempDir,
+        );
+        const outcome = download.catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(120_000);
+
+        await expect(outcome).resolves.toMatchObject({
+          message: 'Timed out fetching GitHub API response',
+        });
+        expect(request.destroy).toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('rejects invalid release metadata JSON', async () => {
       mockHttpsResponses('{ invalid json');
 
@@ -1496,6 +1522,59 @@ describe('git extension helpers', () => {
       });
       expect(redirectedDownloadOptions?.headers).toEqual({
         'User-agent': 'gemini-cli',
+      });
+    });
+
+    it('should reject same-host scheme downgrade redirects before sending a token', async () => {
+      const originalToken = process.env['GITHUB_TOKEN'];
+      process.env['GITHUB_TOKEN'] = 'secret-token';
+      mockHttpsGet
+        .mockImplementationOnce(((_url, options, callback) => {
+          const response = createResponse(
+            JSON.stringify({
+              assets: [
+                {
+                  name: 'extension.zip',
+                  browser_download_url:
+                    'https://github.com/owner/repo/releases/download/v1.0.0/extension.zip',
+                },
+              ],
+              tag_name: 'v1.0.0',
+            }),
+          );
+          callResponseCallback(options, callback, response);
+          return createRequestMock();
+        }) as typeof https.get)
+        .mockImplementationOnce(((_url, options, callback) => {
+          const response = createResponse(undefined, 302, {
+            location:
+              'http://github.com/owner/repo/releases/download/v1.0.0/extension.zip',
+          });
+          callResponseCallback(options, callback, response);
+          return createRequestMock();
+        }) as typeof https.get);
+
+      try {
+        await expect(
+          downloadFromGitHubRelease(
+            { source: 'owner/repo', type: 'github-release' },
+            tempDir,
+          ),
+        ).rejects.toThrow('Unsupported download URL protocol: http:');
+      } finally {
+        if (originalToken === undefined) {
+          delete process.env['GITHUB_TOKEN'];
+        } else {
+          process.env['GITHUB_TOKEN'] = originalToken;
+        }
+      }
+
+      expect(mockHttpsGet).toHaveBeenCalledTimes(2);
+      const originalDownloadOptions = mockHttpsGet.mock.calls[1][1] as
+        | https.RequestOptions
+        | undefined;
+      expect(originalDownloadOptions?.headers).toMatchObject({
+        Authorization: 'token secret-token',
       });
     });
 

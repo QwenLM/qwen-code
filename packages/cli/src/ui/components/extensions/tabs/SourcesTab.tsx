@@ -214,7 +214,7 @@ export const SourcesTab = ({
     } catch (error) {
       if (isExtensionCommittedWithWarningsError(error)) {
         onStatus({
-          type: 'info',
+          type: 'warning',
           text: redactUrlCredentials(getErrorMessage(error)),
         });
         await load();

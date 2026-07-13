@@ -145,7 +145,7 @@ describe('DiscoverTab', () => {
 
     await waitFor(() =>
       expect(onStatus).toHaveBeenCalledWith({
-        type: 'info',
+        type: 'warning',
         text: 'Installed 1 extension(s) with warnings: demo: preference denied',
       }),
     );

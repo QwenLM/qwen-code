@@ -93,7 +93,7 @@ describe('InstalledTab', () => {
     );
     await waitFor(() => expect(manager.refreshCache).toHaveBeenCalledTimes(2));
     expect(statuses).toContainEqual({
-      type: 'info',
+      type: 'warning',
       text: '"demo" changed with warnings: refresh failed',
     });
   });
