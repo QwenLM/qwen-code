@@ -65,6 +65,20 @@ describe('LruCache', () => {
     expect(cache.get('c')).toBe(3);
   });
 
+  it('updates an existing key in place without evicting another entry', () => {
+    // Covers the set() update branch: re-setting the *newer* key on a full
+    // cache must delete + reinsert it, leaving the older entry intact. Without
+    // that branch, set() would instead evict the LRU ('a') and overwrite 'b'
+    // in place, wrongly dropping 'a'.
+    const cache = new LruCache<string, number>(2);
+    cache.set('a', 1);
+    cache.set('b', 2);
+    cache.set('b', 99); // update the newer key on a full cache
+
+    expect(cache.get('a')).toBe(1); // must not have been evicted
+    expect(cache.get('b')).toBe(99); // value updated in place
+  });
+
   it('clear() empties the cache', () => {
     const cache = new LruCache<string, number>(2);
     cache.set('a', 1);
