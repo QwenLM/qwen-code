@@ -55,6 +55,28 @@ export interface ComposeReviewInput {
    * not be fetched"`) is rendered verbatim.
    */
   unreviewedDimensions?: string[];
+  /**
+   * The `check-coverage` report for this run.
+   *
+   * The cap lists above are numbers the caller supplies, and a caller that
+   * skipped Step 3's receipt check supplies empty ones — which is exactly what a
+   * clean review looks like. Dogfooding, an orchestrator launched 25 agents over
+   * an 18-chunk diff, 22 of them returned in under two seconds having made zero
+   * tool calls, and it passed `uncoverableChunks: []`, `unreviewedDimensions: []`
+   * and filed an **Approve** over 4 925 lines nobody had read.
+   *
+   * So the coverage is not asked for, it is **shown**: pass the report that
+   * `check-coverage` produced from the agents' verbatim returns. Its
+   * `missingChunks` and `whiffedAgents` are folded into the cap lists here, and
+   * they forbid an Approve exactly as a hand-supplied entry would. Omitting it is
+   * itself a cap — a run that cannot show what it covered has not shown that it
+   * covered anything.
+   */
+  coverage?: {
+    missingChunks?: number[];
+    whiffedAgents?: string[];
+    ok?: boolean;
+  };
   /** Step 1's lightweight `pr-context` fetch failed. */
   contextUnavailable?: boolean;
   presubmit?: {
@@ -108,6 +130,17 @@ function toStringList(value: unknown, field: string): string[] {
   return value as string[];
 }
 
+/** A list of chunk ids. Same discipline as `toStringList`: refuse, don't coerce. */
+function toNumberList(value: unknown, field: string): number[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.some((v) => typeof v !== 'number')) {
+    throw new TypeError(
+      `compose-review: ${field} must be an array of numbers, got ${JSON.stringify(value)}`,
+    );
+  }
+  return value as number[];
+}
+
 // Booleans get the same boundary treatment as the counts: the JSON is
 // model-written, and a stringified `"false"` is truthy — it once stood to
 // fire the downgrade sentence on a review that was never downgraded, and to
@@ -145,6 +178,30 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     input.unreviewedDimensions,
     'unreviewedDimensions',
   );
+
+  // Coverage is shown, not asserted. Whatever the caller listed by hand, the
+  // report's own gaps are added to it — a run cannot approve past a chunk nobody
+  // receipted or an agent that returned nothing, and it cannot do so by leaving
+  // the lists empty.
+  const coverageRaw: unknown = input.coverage ?? {};
+  if (typeof coverageRaw !== 'object' || Array.isArray(coverageRaw)) {
+    throw new TypeError(
+      `compose-review: coverage must be an object, got ${JSON.stringify(coverageRaw)}`,
+    );
+  }
+  const cov = coverageRaw as Record<string, unknown>;
+  for (const id of toNumberList(
+    cov['missingChunks'],
+    'coverage.missingChunks',
+  )) {
+    uncoverable.push(`chunk ${id} — no agent receipted it; nobody read it`);
+  }
+  for (const label of toStringList(
+    cov['whiffedAgents'],
+    'coverage.whiffedAgents',
+  )) {
+    unreviewed.push(`${label} — the agent returned nothing substantive`);
+  }
   const contextUnavailable = toBool(
     input.contextUnavailable,
     'contextUnavailable',

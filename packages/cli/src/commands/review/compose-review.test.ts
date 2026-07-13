@@ -486,3 +486,49 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     expect(written.body.endsWith(FOOTER)).toBe(true);
   });
 });
+
+describe('coverage caps the verdict', () => {
+  const base = { criticalsInline: 0, suggestionsInline: 0, modelId: 'm' };
+
+  it('forbids an Approve over chunks nobody receipted', () => {
+    // The dogfood failure, at the one place that could still have stopped it:
+    // 22 of 25 agents returned nothing, the orchestrator passed empty cap lists
+    // — which is exactly what a clean review looks like — and this composed an
+    // APPROVE over 4 925 lines nobody had read. The coverage is now *shown*, not
+    // asserted, and its gaps are the cap.
+    const r = composeReview({
+      ...base,
+      coverage: { missingChunks: [1, 2, 3], whiffedAgents: [], ok: false },
+    });
+
+    expect(r.event).not.toBe('APPROVE');
+    expect(r.body).toContain('chunk 1');
+  });
+
+  it('forbids an Approve when an agent returned nothing', () => {
+    const r = composeReview({
+      ...base,
+      coverage: { missingChunks: [], whiffedAgents: ['security'], ok: false },
+    });
+
+    expect(r.event).not.toBe('APPROVE');
+    expect(r.body).toContain('security');
+  });
+
+  it('still approves a clean, fully covered run', () => {
+    const r = composeReview({
+      ...base,
+      coverage: { missingChunks: [], whiffedAgents: [], ok: true },
+    });
+    expect(r.event).toBe('APPROVE');
+  });
+
+  it('refuses a coverage value that is not an object', () => {
+    expect(() => composeReview({ ...base, coverage: 'ok' } as never)).toThrow(
+      /coverage must be an object/,
+    );
+    expect(() =>
+      composeReview({ ...base, coverage: { missingChunks: ['1'] } } as never),
+    ).toThrow(/array of numbers/);
+  });
+});

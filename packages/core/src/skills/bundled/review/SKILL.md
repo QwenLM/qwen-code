@@ -320,7 +320,20 @@ After all agents return, verify that **every chunk id carries exactly one receip
 - **A chunk with no receipt at all** was never reviewed. Relaunch an agent for it before proceeding to Step 4. Without this check the omission is invisible and the review silently reports "no blockers" on code nobody read.
 - **A chunk with an `Uncoverable` receipt** must not be relaunched — the next agent would fail the same way. Carry its id into Step 6 and list it under "Not reviewed". **The verdict may not be Approve while any chunk is uncoverable**, because the review does not know what is in it.
 
-**Write the roll-call down. Do not "sanity-check" it in your head.** Before Step 4, emit one line per agent you launched — the agent, and the concrete artifact its return actually named:
+**Do not check the coverage. Show it.** Before Step 4, `write_file` **every agent's return, verbatim**, each preceded by a `=== AGENT: <label> ===` line, to `.qwen/tmp/qwen-review-{target}-returns.txt`, and run:
+
+```bash
+qwen review check-coverage \
+  --plan .qwen/tmp/qwen-review-{target}-fetch.json \
+  --returns .qwen/tmp/qwen-review-{target}-returns.txt \
+  --out .qwen/tmp/qwen-review-{target}-coverage.json
+```
+
+It reads the receipts out of what the agents actually said and tells you which chunks nobody covered and which agents returned nothing. **It exits 3 when the diff was not covered, and you may not proceed to Step 4 on a non-zero exit** — relaunch an agent for every chunk it names, once each, and run it again. Its report goes into `compose-review`'s `coverage` input in Step 7, where `missingChunks` and `whiffedAgents` forbid an Approve exactly as a hand-written cap entry would. **Copy the returns; do not summarise them.** A summary of an agent that said nothing says something, and the subcommand would believe it.
+
+Why this is a command and not a paragraph: **the review approved a pull request that no agent read.** Dogfooded against its own PR, the orchestrator launched 25 agents over an 18-chunk, 4 925-line diff. Twenty-two came back in under two seconds having made **zero tool calls**, returning about nineteen tokens each — the length of the words "No issues found." The three that worked were the three whose jobs do not require opening the diff. The prompt had three defences against this and every one of them was prose: the receipts every chunk agent "MUST" emit, the "exactly one receipt per chunk" verification, and the substantive-return check below. The run performed none of them, reported zero findings, wrote "Not reviewed: none", and filed an **Approve**.
+
+The roll-call below is still worth writing for your own reading — but it is not what stops this any more:
 
 ```
 Agent 0 (Issue Fidelity) — closingIssuesReferences empty, PR context names no target issue, not a bugfix → scope empty
@@ -962,7 +975,8 @@ Rules:
   - `bodyCriticals` — the descriptions of unmappable or 422-relocated Criticals (their only copy lives in the body; they count toward `C` like anchored ones).
   - `suggestionsDiscarded` — Suggestions whose anchors failed offline validation or the 422 recovery. They still count toward `S`: dropping every anchor must never upgrade the verdict.
   - `cannotTellCriticals` — one line per existing PR Critical whose Step 6 re-check landed on `cannot tell` (location + what could not be determined).
-  - `uncoverableChunks` / `unreviewedDimensions` — the not-reviewed scope from Step 3 (e.g. `"chunk 5 (src/big.min.js)"`, `"security"`). A bare dimension name gets the standard whiffed-agent explanation in the body; an entry carrying its own reason after an em-dash (`"issue-fidelity — linked issue #123 could not be fetched"`) is rendered verbatim.
+  - `coverage` — the `check-coverage` report from Step 3, passed through **whole**. Its `missingChunks` and `whiffedAgents` become caps here, so a run that cannot show what it covered cannot approve. Omitting it is itself a cap.
+  - `uncoverableChunks` / `unreviewedDimensions` — any _additional_ not-reviewed scope from Step 3 (e.g. `"chunk 5 (src/big.min.js)"`, `"security"`). A bare dimension name gets the standard whiffed-agent explanation in the body; an entry carrying its own reason after an em-dash (`"issue-fidelity — linked issue #123 could not be fetched"`) is rendered verbatim.
   - `contextUnavailable` — the Step 1 state.
   - `presubmit` — `downgradeApprove` / `downgradeRequestChanges` / `downgradeReasons` from the presubmit report.
   - `modelId` — for the footer.
