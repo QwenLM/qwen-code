@@ -123,11 +123,11 @@ function realpathOrResolved(filePath: string): string {
   } catch {
     // The root may not exist yet (e.g. before the first managed-memory write).
     // Resolve the nearest existing ancestor's real path — the same way the
-    // candidate is resolved via realpathExistingOrNew — so a symlinked base
-    // dir (notably macOS `/var` -> `/private/var`) stays symmetric on both
-    // sides. Otherwise a `/var` root compared against a `/private/var`
-    // candidate makes isWithinRoot false and misclassifies allowed writes as
-    // outside managed memory.
+    // candidate is resolved via realpathExistingOrNew — so a symlinked
+    // component in the path (e.g. a linked worktree, or macOS `/var` ->
+    // `/private/var`) stays symmetric on both sides. Otherwise a symlinked
+    // root compared against a realpath'd candidate makes isWithinRoot false
+    // and misclassifies allowed writes as outside managed memory.
     return realpathNewPath(filePath) ?? path.resolve(filePath);
   }
 }
