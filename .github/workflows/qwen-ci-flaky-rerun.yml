@@ -23,6 +23,7 @@ jobs:
     name: 'Resolve patrol bot identity'
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
     outputs:
       bot_login: '${{ steps.identity.outputs.bot_login }}'
     permissions: {}
@@ -44,6 +45,8 @@ jobs:
     outputs:
       target_found: '${{ steps.scan.outputs.target_found }}'
       input_sha: '${{ steps.scan.outputs.input_sha }}'
+      decisions_sha: '${{ steps.decisions.outputs.decisions_sha }}'
+    timeout-minutes: 10
     permissions:
       actions: 'read'
       contents: 'read'
@@ -113,11 +116,19 @@ jobs:
           if-no-files-found: 'error'
           retention-days: 1
 
+      - name: 'Hash patrol decision'
+        id: 'decisions'
+        if: "${{ steps.scan.outputs.target_found == 'true' }}"
+        run: |-
+          decisions_sha="$(sha256sum "${WORKDIR}/ci-flaky-decisions.json" | cut -d ' ' -f 1)"
+          echo "decisions_sha=${decisions_sha}" >> "${GITHUB_OUTPUT}"
+
   act:
     name: 'Apply validated PR CI action'
     needs: ['identity', 'classify']
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
     permissions:
       actions: 'write'
       contents: 'read'
@@ -155,6 +166,7 @@ jobs:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
         run: |-
           test "$(sha256sum "${WORKDIR}/ci-flaky-input.json" | cut -d ' ' -f 1)" = "${{ needs.classify.outputs.input_sha }}"
+          test "$(sha256sum "${WORKDIR}/ci-flaky-decisions.json" | cut -d ' ' -f 1)" = "${{ needs.classify.outputs.decisions_sha }}"
           test -s "${WORKDIR}/ci-flaky-decisions.json"
           node .github/scripts/ci-flaky-rerun.mjs act \
             --repo "${{ github.repository }}" \

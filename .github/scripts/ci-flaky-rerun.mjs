@@ -216,14 +216,11 @@ export async function actOnDecision(client, target, decision) {
     if (!(await client.isCurrentFailure(target))) return;
     const key = failureKey(target, decision);
     if (!key) return;
+    const actionCount = await client.failureActionCount(target.prNumber, key);
+    if (actionCount >= MAX_ACTIONS_PER_HEAD) return;
     await client.comment(
       target.prNumber,
-      markerFor(
-        target,
-        'no_action',
-        key,
-        await client.failureActionCount(target.prNumber, key),
-      ),
+      markerFor(target, 'no_action', key, actionCount + 1),
     );
     return;
   }
@@ -338,12 +335,6 @@ export async function resetSuccessfulFailures(client, prs) {
         );
     }
   }
-}
-
-export async function writeSkillInput(client, target, workdir) {
-  writeJson(workdir, 'ci-target.json', target);
-  const log = target.jobId === null ? '' : await client.jobLog(target.jobId);
-  writeFileSync(resolve(workdir, 'ci-log.txt'), skillLog(log));
 }
 
 export async function writeSkillInputs(
@@ -641,9 +632,14 @@ async function scan(args) {
     Number.isFinite(parsedActiveDays) && parsedActiveDays > 0
       ? parsedActiveDays
       : DEFAULT_ACTIVE_DAYS;
+  const parsedStaleMinutes = Number(args.get('stale-minutes'));
+  const staleMinutes =
+    Number.isFinite(parsedStaleMinutes) && parsedStaleMinutes > 0
+      ? parsedStaleMinutes
+      : DEFAULT_STALE_MINUTES;
   const prs = await client.prs(activeDays);
   const candidates = selectCandidateTargets(prs, {
-    staleMinutes: Number(args.get('stale-minutes') ?? DEFAULT_STALE_MINUTES),
+    staleMinutes,
     activeDays,
   });
   const options = { trustedMarkerLogins: [trustedLogin] };

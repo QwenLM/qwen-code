@@ -12,7 +12,6 @@ import {
   resetSuccessfulFailures,
   selectCandidateTargets,
   selectTarget,
-  writeSkillInput,
   writeSkillInputs,
 } from '../../.github/scripts/ci-flaky-rerun.mjs';
 import {
@@ -238,6 +237,11 @@ describe('ci flaky rerun patrol', () => {
     expect(script).toContain('await skillCandidate(');
   });
 
+  it('does not keep the superseded single-target skill input writer', () => {
+    expect(script).not.toContain('export async function writeSkillInput(');
+    expect(script).toContain('writeSkillInputs');
+  });
+
   it('continues scanning when an early candidate has an expired job log', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ci-flaky-scan-'));
     try {
@@ -297,7 +301,7 @@ if (args[0] === 'pr' && args[1] === 'list') {
           '--workdir',
           dir,
           '--stale-minutes',
-          '30',
+          'not-a-number',
           '--active-days',
           '7',
           '--max-candidates',
@@ -743,34 +747,6 @@ if (args[0] === 'pr' && args[1] === 'list') {
     expect(client.calls).toEqual([]);
   });
 
-  it('writes target metadata and failed job log for the skill', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'ci-flaky-rerun-'));
-    const target = selectTarget([pr()], { now: NOW });
-    try {
-      await writeSkillInput(
-        {
-          async jobLog() {
-            return 'network timeout while downloading package';
-          },
-        },
-        target,
-        dir,
-      );
-
-      expect(
-        JSON.parse(readFileSync(join(dir, 'ci-target.json'), 'utf8')),
-      ).toMatchObject({
-        prNumber: 42,
-        runId: 123,
-      });
-      expect(readFileSync(join(dir, 'ci-log.txt'), 'utf8')).toContain(
-        'network timeout',
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
   it('writes a single batch input with each target and its sanitized log', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'ci-flaky-rerun-'));
     const targets = [
@@ -854,17 +830,19 @@ if (args[0] === 'pr' && args[1] === 'list') {
     const dir = mkdtempSync(join(tmpdir(), 'ci-flaky-rerun-'));
     const target = selectTarget([pr()], { now: NOW });
     try {
-      await writeSkillInput(
+      await writeSkillInputs(
         {
           async jobLog() {
             return `${'setup log\n'.repeat(3000)}AssertionError: expected true to be false`;
           },
         },
-        target,
+        [target],
         dir,
       );
 
-      const log = readFileSync(join(dir, 'ci-log.txt'), 'utf8');
+      const log = JSON.parse(
+        readFileSync(join(dir, 'ci-flaky-input.json'), 'utf8'),
+      ).candidates[0].log;
       expect(log.length).toBeLessThanOrEqual(20_000);
       expect(log).toContain('AssertionError');
     } finally {
@@ -880,7 +858,7 @@ if (args[0] === 'pr' && args[1] === 'list') {
     const dir = mkdtempSync(join(tmpdir(), 'ci-flaky-rerun-'));
     const target = selectTarget([pr()], { now: NOW });
     try {
-      await writeSkillInput(
+      await writeSkillInputs(
         {
           async jobLog() {
             return [
@@ -900,11 +878,13 @@ if (args[0] === 'pr' && args[1] === 'list') {
             ].join('\n');
           },
         },
-        target,
+        [target],
         dir,
       );
 
-      const log = readFileSync(join(dir, 'ci-log.txt'), 'utf8');
+      const log = JSON.parse(
+        readFileSync(join(dir, 'ci-flaky-input.json'), 'utf8'),
+      ).candidates[0].log;
       expect(log).not.toContain('normal setup output');
       expect(log).toContain('Extra key in zh.js');
       expect(log).not.toContain('secret-value');
@@ -923,8 +903,36 @@ if (args[0] === 'pr' && args[1] === 'list') {
     }
   });
 
+  it('writes an empty skill log when a failed check has no job URL', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ci-flaky-rerun-'));
+    const target = { ...selectTarget([pr()], { now: NOW }), jobId: null };
+    try {
+      await writeSkillInputs(
+        {
+          async jobLog() {
+            throw new Error('must not fetch a missing job log');
+          },
+        },
+        [target],
+        dir,
+      );
+
+      const input = JSON.parse(
+        readFileSync(join(dir, 'ci-flaky-input.json'), 'utf8'),
+      );
+      expect(input.candidates).toMatchObject([
+        { prNumber: 42, runId: 123, log: '' },
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('does not rerun low-confidence decisions and records no-action state', async () => {
-    const target = selectTarget([pr()], { now: NOW });
+    const target = {
+      ...selectTarget([pr()], { now: NOW }),
+      failureKey: 'deterministic-test-failure',
+    };
     const client = runner();
 
     await actOnDecision(client, target, {
@@ -936,6 +944,7 @@ if (args[0] === 'pr' && args[1] === 'list') {
     await actOnDecision(client, target, {
       action: 'no_action',
       confidence: 'high',
+      failureKey: 'deterministic-test-failure',
       reason_en: 'test assertion failed',
       reason_zh: '测试断言失败。',
     });
@@ -943,8 +952,27 @@ if (args[0] === 'pr' && args[1] === 'list') {
     expect(client.calls).toHaveLength(1);
     expect(client.calls[0].slice(0, 2)).toEqual(['comment', 42]);
     expect(client.calls[0][2]).toContain(
-      'action=no_action key=unknown check=E2E%20Tests count=0',
+      'action=no_action key=deterministic-test-failure check=E2E%20Tests count=1',
     );
     expect(client.calls[0][2]).toMatch(/^<!-- qwen-ci-flaky-rerun v=2 .* -->$/);
+  });
+
+  it('stops no-action markers after three actions for the same PR failure key', async () => {
+    const target = {
+      ...selectTarget([pr()], { now: NOW }),
+      failureKey: 'deterministic-test-failure',
+    };
+    const client = runner();
+    client.failureActionCount = async () => 3;
+
+    await actOnDecision(client, target, {
+      action: 'no_action',
+      confidence: 'high',
+      failureKey: 'deterministic-test-failure',
+      reason_en: 'test assertion failed',
+      reason_zh: '测试断言失败。',
+    });
+
+    expect(client.calls).toEqual([]);
   });
 });

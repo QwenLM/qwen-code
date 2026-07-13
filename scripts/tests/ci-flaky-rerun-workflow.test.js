@@ -20,6 +20,8 @@ describe('ci flaky rerun workflow', () => {
     expect(workflow).toContain("MAX_CANDIDATES_PER_RUN: '5'");
     expect(workflow).toContain('classify:');
     expect(workflow).toContain('act:');
+    expect(workflow).toContain('timeout-minutes: 5');
+    expect(workflow).toContain('timeout-minutes: 10');
     expect(workflow).toContain("actions: 'read'");
     expect(workflow).toContain("pull-requests: 'read'");
     expect(workflow).toContain("pull-requests: 'write'");
@@ -53,6 +55,10 @@ describe('ci flaky rerun workflow', () => {
     );
     expect(workflow).toContain('"sandbox": true');
     expect(workflow).toContain('input_sha');
+    expect(workflow).toContain('decisions_sha');
+    expect(workflow).toContain(
+      'sha256sum "${WORKDIR}/ci-flaky-decisions.json"',
+    );
     expect(workflow).toContain('node .github/scripts/ci-flaky-rerun.mjs act');
     expect(workflow).toContain('node .github/scripts/ci-flaky-rerun.mjs reset');
     expect(workflow).toContain('actions/upload-artifact@');
