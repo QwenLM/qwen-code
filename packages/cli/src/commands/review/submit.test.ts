@@ -115,6 +115,28 @@ describe('the posting gate', () => {
     expect(process.exitCode).toBe(3);
   });
 
+  it('refuses to post to a pull request the arguments did not name', () => {
+    // Authorisation is for a target, not a mood. Without this the flag is a
+    // bearer token: a dry run confirmed that `6771 --comment` authorised a
+    // submission to `--pr 9999 --repo other/repo`.
+    runSubmit(
+      args({
+        pr: 9999,
+        repo: 'other/repo',
+        skillArgs: file('skill-args.txt', '6771 --comment'),
+      }),
+    );
+
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(3);
+  });
+
+  it('refuses when the arguments name no pull request at all', () => {
+    // `--comment` on a local review is not authorisation to post anywhere.
+    runSubmit(args({ skillArgs: file('skill-args.txt', '--comment') }));
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
   it('posts when the user typed `--comment`', () => {
     runSubmit(args({ skillArgs: file('skill-args.txt', '6771 --comment') }));
 
@@ -258,7 +280,71 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       comments: [{ path: 'a.ts', body: '**[Critical]** x' }],
     });
 
-    expect(() => runSubmit(authorized({ review }))).toThrow(/no `line`/);
+    expect(() => runSubmit(authorized({ review }))).toThrow(/usable `line`/);
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('does not refuse a blocker that merely says the word "inline"', () => {
+    // A body IS finding text. An unmappable Critical reading "the inline cache
+    // is stale" is a real blocker, and a `/\binline\b/` search refused to post
+    // it. The check is for a body that *promises* comments it did not bring — so
+    // look for the promise, not for the word.
+    const review = file('good-2.json', {
+      ...REVIEW,
+      body: '**[Critical]** the inline cache is stale after a rebase.',
+      comments: [],
+    });
+
+    runSubmit(authorized({ review }));
+    expect(ghMock).toHaveBeenCalledOnce();
+  });
+
+  it('rejects an event GitHub does not accept', () => {
+    const review = file('bad-8.json', { ...REVIEW, event: 'LGTM' });
+    expect(() => runSubmit(authorized({ review }))).toThrow(
+      /GitHub accepts only/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects a line that is not a positive whole number', () => {
+    // Every one of these 422s, and a 422 discards every blocker in the review.
+    for (const [i, line] of [-1, 0, 2.5, NaN, Infinity].entries()) {
+      const review = file(`bad-line-${i}.json`, {
+        ...REVIEW,
+        comments: [{ path: 'a.ts', line, body: '**[Critical]** x' }],
+      });
+      expect(() => runSubmit(authorized({ review }))).toThrow(/usable `line`/);
+    }
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects a comment with no body', () => {
+    const review = file('bad-9.json', {
+      ...REVIEW,
+      comments: [{ path: 'a.ts', line: 12 }],
+    });
+    expect(() => runSubmit(authorized({ review }))).toThrow(/empty comment/);
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects a range that ends before it begins', () => {
+    const review = file('bad-10.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 10,
+          start_line: 12,
+          side: 'RIGHT',
+          start_side: 'RIGHT',
+          body: '**[Critical]** x',
+        },
+      ],
+    });
+    expect(() => runSubmit(authorized({ review }))).toThrow(
+      /cannot end before/,
+    );
     expect(ghMock).not.toHaveBeenCalled();
   });
 

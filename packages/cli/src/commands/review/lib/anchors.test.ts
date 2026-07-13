@@ -308,6 +308,58 @@ describe('resolveAnchor', () => {
     expect(blind.reason).toContain('more than one place');
   });
 
+  it('refuses when the claim lands exactly between two candidates', () => {
+    // A `reduce` that keeps the incumbent on a tie silently prefers the earlier
+    // match — and "earlier" is not a reason. With matches at 10 and 12 and a
+    // claim of 11, nothing distinguishes them, and answering 10 with a straight
+    // face attaches a blocker to whichever occurrence happened to come first.
+    const diff = [
+      'diff --git a/e.ts b/e.ts',
+      '--- a/e.ts',
+      '+++ b/e.ts',
+      '@@ -10,0 +10,3 @@',
+      '+flush();', // 10
+      '+other();',
+      '+flush();', // 12
+      '',
+    ].join('\n');
+    const hayE = lines(diff, 'e.ts');
+
+    const tie = resolveAnchor(hayE, 'flush();', 11);
+    expect(tie.status).toBe('unmatched');
+    expect(tie.reason).toContain('more than one place');
+
+    // One step nearer either way and the claim does distinguish them.
+    expect(resolveAnchor(hayE, 'flush();', 10)).toMatchObject({ line: 10 });
+    expect(resolveAnchor(hayE, 'flush();', 12)).toMatchObject({ line: 12 });
+  });
+
+  it('does not let a weaker reading rescue an ambiguous faithful one', () => {
+    // The worst shape this resolver can take: most confident exactly where it is
+    // most wrong. Two added lines whose code is `+value;` make the faithful
+    // reading of the anchor `+value;` ambiguous — and the marker-stripped reading
+    // then matches the unrelated `value;` *uniquely*, returning it as
+    // `matchCount: 1, ambiguous: false`. A blocker lands on a line the finding
+    // has nothing to do with, with every signal saying it is certain.
+    //
+    // A stronger interpretation that is undecided outranks a weaker one that is
+    // sure.
+    const diff = [
+      'diff --git a/v.ts b/v.ts',
+      '--- a/v.ts',
+      '+++ b/v.ts',
+      '@@ -1,0 +1,3 @@',
+      '++value;', // line 1, code: `+value;`
+      '++value;', // line 2, code: `+value;`  → faithful match is ambiguous
+      '+value;', // line 3, code: `value;`   → the marker-stripped guess
+      '',
+    ].join('\n');
+
+    const r = resolveAnchor(lines(diff, 'v.ts'), '+value;');
+    expect(r.status).toBe('unmatched');
+    expect(r.line).toBeUndefined();
+  });
+
   it('will not choose between two indentation-stripped candidates', () => {
     // Loose matching exists so a mangled indent does not lose a finding. It must
     // not become a way to *choose* an indent: in Python or YAML the nesting level

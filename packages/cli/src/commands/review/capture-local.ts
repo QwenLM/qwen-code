@@ -110,9 +110,13 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     );
   }
   for (const s of capture.skipped) {
+    // The reason needs escaping too, and for the same reason the path did: it is
+    // built from `Error.message`, and a filesystem or git error quotes the
+    // filename back at you (`ENOENT: ... stat '<name>'`). Escaping the path and
+    // then printing the error that contains it is a lock on the front door.
     writeStderrLine(
       `WARNING: untracked file ${display(s.path)} was NOT reviewed — ` +
-        `${s.reason}. List it under "Not reviewed" in the review output.`,
+        `${display(s.reason)}. List it under "Not reviewed" in the review output.`,
     );
   }
   if (plan.diffLines === 0) {

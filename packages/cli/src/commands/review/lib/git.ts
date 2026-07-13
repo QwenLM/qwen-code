@@ -15,21 +15,31 @@ import { existsSync } from 'node:fs';
 const GIT_TIMEOUT_MS = 120_000;
 
 /**
- * Options every wrapper shares.
+ * Options every wrapper shares, **read fresh on every call**.
  *
  * `git fetch` is a network operation, and on a headless machine a missing
  * credential turns into a terminal prompt that never gets an answer. Without a
  * deadline and `GIT_TERMINAL_PROMPT=0` the process waits forever with no output
  * — indistinguishable from a deadlock.
+ *
+ * A module-level constant would snapshot `process.env` at **import** time, and
+ * an importer cannot set an environment variable before that: the import is
+ * hoisted above every statement in the file. That made the integration fixtures'
+ * `GIT_CONFIG_GLOBAL` / `GIT_CONFIG_NOSYSTEM` isolation a no-op — the suite that
+ * exists to prove a hostile developer config cannot reach the capture was
+ * running with the developer's config the whole time, and the "fix" for it was
+ * a comment. Read the environment when git is actually run.
  */
-const GIT_OPTS = {
-  timeout: GIT_TIMEOUT_MS,
-  env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-} as const;
+function gitOpts() {
+  return {
+    timeout: GIT_TIMEOUT_MS,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+  };
+}
 
 /** Run `git` with args. Returns stdout, trimmed and CRLF-normalised. */
 export function git(...args: string[]): string {
-  return execFileSync('git', args, { ...GIT_OPTS, encoding: 'utf8' })
+  return execFileSync('git', args, { ...gitOpts(), encoding: 'utf8' })
     .replace(/\r\n/g, '\n')
     .trim();
 }
@@ -42,7 +52,7 @@ export function git(...args: string[]): string {
  * every other subcommand would try to open the name as an ordinary file.
  */
 export function gitWithInput(input: Buffer, args: string[]): string {
-  return execFileSync('git', args, { ...GIT_OPTS, encoding: 'utf8', input })
+  return execFileSync('git', args, { ...gitOpts(), encoding: 'utf8', input })
     .replace(/\r\n/g, '\n')
     .trim();
 }
@@ -58,7 +68,7 @@ export function gitWithInput(input: Buffer, args: string[]): string {
 export function gitOpt(...args: string[]): string | null {
   try {
     return execFileSync('git', args, {
-      ...GIT_OPTS,
+      ...gitOpts(),
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     })
@@ -112,7 +122,7 @@ export function releaseWorktree(worktreePath: string): boolean {
  */
 export function gitRaw(...args: string[]): Buffer {
   return execFileSync('git', args, {
-    ...GIT_OPTS,
+    ...gitOpts(),
     maxBuffer: 512 * 1024 * 1024,
     stdio: ['ignore', 'pipe', 'pipe'],
   });

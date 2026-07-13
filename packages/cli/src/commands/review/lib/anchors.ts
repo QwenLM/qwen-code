@@ -284,13 +284,19 @@ function candidatesFor(
  */
 function pick(cands: Candidate[], claimedLine?: number): Candidate | null {
   if (cands.length === 1) return cands[0];
+
   if (claimedLine !== undefined) {
-    return cands.reduce((a, b) =>
-      Math.abs(a.startLine - claimedLine) <= Math.abs(b.startLine - claimedLine)
-        ? a
-        : b,
-    );
+    // Nearest to the claim — but only if exactly one candidate *is* nearest.
+    // A `reduce` that keeps the incumbent on a tie silently prefers the earlier
+    // one, and "earlier" is not a reason: with matches at 10 and 12 and a claim
+    // of 11, nothing distinguishes them, and answering 10 with a straight face
+    // attaches a blocker to whichever occurrence happened to come first.
+    const dist = (c: Candidate) => Math.abs(c.startLine - claimedLine);
+    const best = Math.min(...cands.map(dist));
+    const nearest = cands.filter((c) => dist(c) === best);
+    return nearest.length === 1 ? nearest[0] : null;
   }
+
   const added = cands.filter((c) => c.added);
   return added.length === 1 ? added[0] : null;
 }
@@ -312,8 +318,6 @@ export function resolveAnchor(
   if (variants.length === 0) {
     return { status: 'unmatched', reason: 'anchor is empty' };
   }
-
-  let ambiguousUnpickable = false;
 
   for (const [vi, needle] of variants.entries()) {
     // Indentation-insensitive matching is offered only to the **faithful**
@@ -339,14 +343,37 @@ export function resolveAnchor(
       // candidates is choosing which nesting level the agent meant, and the
       // resolver has no way to know.
       if (!exact && cands.length > 1) {
-        ambiguousUnpickable = true;
-        continue;
+        return {
+          status: 'unmatched',
+          reason:
+            'the snippet matched in more than one place only after its ' +
+            'indentation was normalised — and in an indentation-significant ' +
+            'language the nesting level IS the semantics, so choosing between ' +
+            'them would be choosing which block the finding is about. Quote it ' +
+            'verbatim.',
+        };
       }
 
       const best = pick(cands, claimedLine);
       if (!best) {
-        ambiguousUnpickable = true;
-        continue;
+        // An interpretation that found candidates and cannot choose between them
+        // is **the** answer for this snippet, and it is "unmatched". Falling
+        // through to a weaker reading is how a confident wrong line is born: with
+        // two added lines whose code is `+value;` and one whose code is `value;`,
+        // the faithful reading of the anchor `+value;` is ambiguous — and the
+        // marker-stripped reading below then matches the unrelated `value;`
+        // uniquely and returns it as `matchCount: 1, ambiguous: false`. The
+        // resolver would be at its most confident exactly where it is most wrong.
+        //
+        // So stop. A stronger interpretation that is undecided outranks a weaker
+        // one that is sure.
+        return {
+          status: 'unmatched',
+          reason:
+            'the snippet appears in more than one place and nothing ' +
+            'distinguishes them — quote more lines so it is unique, or give the ' +
+            'line number you mean so the nearest match can be chosen',
+        };
       }
 
       const { startLine, line } = best;
@@ -363,16 +390,6 @@ export function resolveAnchor(
           : {}),
       } as AnchorResolution;
     }
-  }
-
-  if (ambiguousUnpickable) {
-    return {
-      status: 'unmatched',
-      reason:
-        'the snippet appears in more than one place and nothing distinguishes ' +
-        'them — quote more lines so it is unique, or give the line number you ' +
-        'mean so the nearest match can be chosen',
-    };
   }
 
   return {

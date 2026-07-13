@@ -37,6 +37,20 @@ import { parseReviewArgs } from './parse-args.js';
  */
 const DEFAULT_SKILL_ARGS_PATH = '.qwen/tmp/qwen-skill-args-review.txt';
 
+/** The only events GitHub's Create Review API accepts. */
+const EVENTS = new Set(['APPROVE', 'REQUEST_CHANGES', 'COMMENT']);
+
+/**
+ * A line number GitHub will take: a positive whole number.
+ *
+ * `typeof x === 'number'` admits `-1`, `2.5`, `NaN` and `Infinity`, every one of
+ * which 422s — and a 422 is all-or-nothing, so each takes the whole review's
+ * blockers down with it.
+ */
+function isDiffLine(n: unknown): n is number {
+  return typeof n === 'number' && Number.isSafeInteger(n) && n > 0;
+}
+
 interface SubmitArgs {
   pr: number;
   repo: string;
@@ -106,14 +120,63 @@ function authorization(args: SubmitArgs): { ok: boolean; why: string } {
   }
 
   const verdict = parseReviewArgs(raw);
-  if (verdict.comment.effective) {
-    return { ok: true, why: '`--comment` was in the review arguments' };
+  if (!verdict.comment.effective) {
+    return {
+      ok: false,
+      why:
+        '`--comment` was not in the review arguments ' +
+        `(${JSON.stringify(raw.trim())})`,
+    };
   }
+
+  // Authorisation is for a *target*, not a mood. `/review 6771 --comment`
+  // authorises a write to pull request 6771 — and to nothing else. Without this
+  // check the flag is a bearer token: a dry run confirmed that arguments naming
+  // 6771 happily authorised a submission to `--pr 9999 --repo other/repo`, so a
+  // stale args file, or a target swapped anywhere between Step 1 and Step 7,
+  // could put a review on a pull request the user never named.
+  const t = verdict.target;
+  const authorisedPr =
+    t.type === 'pr-number' || t.type === 'pr-url' ? t.number : undefined;
+  if (authorisedPr === undefined) {
+    return {
+      ok: false,
+      why:
+        `the review arguments (${JSON.stringify(raw.trim())}) do not name a ` +
+        'pull request, so they cannot authorise posting to one',
+    };
+  }
+  if (authorisedPr !== args.pr) {
+    return {
+      ok: false,
+      why:
+        `the review arguments authorise pull request #${authorisedPr}, but ` +
+        `this submission targets #${args.pr}`,
+    };
+  }
+  if (t.type === 'pr-url') {
+    const authorisedRepo = `${t.owner}/${t.repo}`;
+    if (authorisedRepo.toLowerCase() !== args.repo.toLowerCase()) {
+      return {
+        ok: false,
+        why:
+          `the review arguments authorise ${authorisedRepo}, but this ` +
+          `submission targets ${args.repo}`,
+      };
+    }
+    if (args.host && t.host.toLowerCase() !== args.host.toLowerCase()) {
+      return {
+        ok: false,
+        why:
+          `the review arguments authorise ${t.host}, but this submission ` +
+          `targets ${args.host}`,
+      };
+    }
+  }
+
   return {
-    ok: false,
-    why:
-      '`--comment` was not in the review arguments ' +
-      `(${JSON.stringify(raw.trim())})`,
+    ok: true,
+    why: `\`--comment\` was in the review arguments for #${authorisedPr}`,
   };
 }
 
@@ -132,9 +195,20 @@ function inconsistencies(payload: ReviewPayload): string[] {
 
   if (!payload.commit_id) problems.push('`commit_id` is missing');
   if (!payload.event) problems.push('`event` is missing');
+  else if (!EVENTS.has(payload.event)) {
+    problems.push(
+      `\`event\` is ${JSON.stringify(payload.event)}; GitHub accepts only ` +
+        `${[...EVENTS].join(', ')}`,
+    );
+  }
 
-  const claimsInline = /\binline\b/i.test(payload.body ?? '');
-  if (claimsInline && comments.length === 0) {
+  // The exact sentence `compose-review` writes when it puts findings inline —
+  // not the word "inline" anywhere in the body. A body IS finding text: an
+  // unmappable Critical reading "the inline cache is stale" is a real blocker,
+  // and a `/\binline\b/` search refuses to post it. The check exists to catch a
+  // body that *promises* comments it did not bring, so look for the promise.
+  const promisesInline = /\b(are|is) inline\b/i.test(payload.body ?? '');
+  if (promisesInline && comments.length === 0) {
     problems.push(
       'the body says findings are inline, but `comments` is empty — the ' +
         'author would be told to look for comments that do not exist',
@@ -165,19 +239,39 @@ function inconsistencies(payload: ReviewPayload): string[] {
         'JSON, so its newlines will be posted as text',
     );
   }
+  // Everything below is a shape GitHub 422s — and a 422 is all-or-nothing, so
+  // each of these discards every blocker in the review along with itself. The
+  // API is the wrong place to find out.
   comments.forEach((c, i) => {
-    if (!c.path) problems.push(`comments[${i}] has no \`path\``);
-    if (typeof c.line !== 'number') {
+    const at = `comments[${i}]`;
+    if (!c.path) problems.push(`${at} has no \`path\``);
+    if (!c.body) problems.push(`${at} has no \`body\` — an empty comment`);
+
+    if (!isDiffLine(c.line)) {
       problems.push(
-        `comments[${i}] has no \`line\` — resolve its anchor first`,
+        `${at} has no usable \`line\` (${JSON.stringify(c.line)}) — a line is a ` +
+          `positive whole number; resolve its anchor first`,
       );
     }
+
     // A multi-line comment without both side fields is a 422 that takes the
-    // whole review with it.
-    if (typeof c.start_line === 'number') {
+    // whole review with it. `start_line` must also *be* a line, and must come
+    // before the line it ends on.
+    if (c.start_line !== undefined) {
+      if (!isDiffLine(c.start_line)) {
+        problems.push(
+          `${at} has a \`start_line\` of ${JSON.stringify(c.start_line)}, ` +
+            `which is not a positive whole number`,
+        );
+      } else if (isDiffLine(c.line) && c.start_line > c.line) {
+        problems.push(
+          `${at} starts at ${c.start_line} and ends at ${c.line} — a range ` +
+            `cannot end before it begins`,
+        );
+      }
       if (c.side !== 'RIGHT' || c.start_side !== 'RIGHT') {
         problems.push(
-          `comments[${i}] sets \`start_line\` without \`side\` and ` +
+          `${at} sets \`start_line\` without \`side\` and ` +
             `\`start_side\` — GitHub 422s the entire review`,
         );
       }

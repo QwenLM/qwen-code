@@ -336,6 +336,49 @@ describe('captureLocalDiff — untracked files', () => {
     expect(res.files.map((f) => f.path)).toEqual(['a[bc].ts']);
   });
 
+  it('accepts a valid file whose name merely begins with dots', () => {
+    // `rel.startsWith('..')` is not a containment check. A root-level `..foo.ts`
+    // relativises to `..foo.ts`, and the scoped review refused to look at an
+    // ordinary file on the grounds that it had escaped the repository.
+    write('..foo.ts', 'export const dotted = 1;\n');
+
+    const res = capture({ file: '..foo.ts' });
+    expect(res.untracked).toEqual(['..foo.ts']);
+    expect(res.files.map((f) => f.path)).toEqual(['..foo.ts']);
+  });
+
+  it('does not mistake prose about binary patches for a binary file', () => {
+    // The old test looked for `GIT binary patch` as a substring anywhere in the
+    // first 4096 bytes. That is a sentence, and sentences appear in prose: this
+    // markdown file was classified binary and thrown away unreviewed.
+    write('notes.md', '# Diffs\n\nGIT binary patch is a format git uses.\n');
+
+    const res = capture();
+    expect(res.untracked).toEqual(['notes.md']);
+    expect(res.skipped).toEqual([]);
+    expect(res.text).toContain('GIT binary patch is a format git uses.');
+  });
+
+  it('still catches a binary file whose header is pushed past 4 kB by its path', () => {
+    // The window the old check read was 4096 bytes, on the theory that a binary
+    // section is short. Its *header* is short; the path in it is not bounded, and
+    // a Linux path can run to 4096 bytes on its own — pushing git's marker out of
+    // the window and certifying unreadable bytes as reviewed.
+    const deep = Array.from({ length: 40 }, (_, i) => `d${i}`.repeat(20)).join(
+      '/',
+    );
+    mkdirSync(join(repo, deep), { recursive: true });
+    writeFileSync(
+      join(repo, deep, 'logo.png'),
+      Buffer.from([0, 1, 2, 3, 0, 255]),
+    );
+
+    const res = capture();
+    expect(res.untracked).toEqual([]);
+    expect(res.skipped).toHaveLength(1);
+    expect(res.skipped[0].reason).toContain('binary');
+  });
+
   it('never claims to have reviewed a binary file', () => {
     // Git renders a binary file as the single line `Binary files ... differ`.
     // The section is well-formed and parses; it contains not one byte an agent

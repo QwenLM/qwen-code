@@ -184,7 +184,14 @@ function describeUndiffable(abs: string, st: Stats): string | null {
 function toRepoPathspec(repoRoot: string, file: string): string {
   const abs = resolve(process.cwd(), file);
   const rel = relative(repoRoot, abs);
-  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
+  // `rel.startsWith('..')` is not the containment check it looks like: a file
+  // called `..foo.ts` at the repository root relativises to `..foo.ts`, and the
+  // scoped review would refuse to look at a perfectly ordinary file on the
+  // grounds that it had escaped. What escapes is `..` itself, or a path whose
+  // FIRST SEGMENT is `..`.
+  const escapes =
+    rel === '' || rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel);
+  if (escapes) {
     throw new Error(
       `--file ${file} resolves to ${abs}, which is outside the repository ` +
         `at ${repoRoot}.`,
@@ -201,11 +208,22 @@ function toRepoPathspec(repoRoot: string, file: string): string {
  * section parses, and it contains nothing to review.
  */
 function isBinarySection(section: Buffer): boolean {
-  // Only the header matters, and a binary section is a few hundred bytes; do not
-  // decode a megabyte of payload to answer this.
-  const head = section.subarray(0, 4096).toString('utf8');
-  return (
-    /^Binary files .* differ$/m.test(head) || head.includes('GIT binary patch')
+  // Both halves of the old test were wrong, in opposite directions.
+  //
+  // It read only the first 4096 bytes, on the theory that a binary section is
+  // short. Its *header* is short; the path in that header is not bounded, and a
+  // Linux path can run to 4096 bytes on its own. Push git's marker past the
+  // window and the file reads as text — which certifies unreadable bytes as
+  // reviewed, the exact lie this function was added to stop.
+  //
+  // And it looked for `GIT binary patch` as a substring anywhere. That is a
+  // sentence, and sentences appear in prose: a Markdown file with the line
+  // `+GIT binary patch is a format git uses` was classified binary and thrown
+  // away. Git writes both markers as whole records at the start of a line, so
+  // match them there. The section is bounded by the per-file cap, so scanning it
+  // is not the expense the window was avoiding.
+  return /^(Binary files .* differ|GIT binary patch)$/m.test(
+    section.toString('utf8'),
   );
 }
 
@@ -395,6 +413,34 @@ export function captureLocalDiff(opts: {
           continue;
         }
 
+        // Charge the budget with what git actually produced, not with what
+        // `lstat` said a moment earlier. The size gate above is a cheap way to
+        // skip a file without spawning git; it is not a measurement of the diff,
+        // and it is not even a measurement of the file — an editor writing the
+        // file between the `lstat` and git's read makes it stale. The section in
+        // hand is the only number that is true.
+        if (section.length > MAX_UNTRACKED_BYTES) {
+          skipped.push({
+            path,
+            bytes: section.length,
+            reason:
+              `its diff is ${Math.round(section.length / 1000)} kB, over the ` +
+              `${Math.round(MAX_UNTRACKED_BYTES / 1000)} kB untracked-file cap ` +
+              `(the file grew after it was measured)`,
+          });
+          continue;
+        }
+        if (section.length > budget) {
+          skipped.push({
+            path,
+            bytes: section.length,
+            reason:
+              `the untracked capture reached its ` +
+              `${Math.round(MAX_UNTRACKED_TOTAL_BYTES / 1_000_000)} MB total cap`,
+          });
+          continue;
+        }
+
         if (isBinarySection(section)) {
           // Git renders a binary file as the single line `Binary files ... differ`
           // and nothing else. The section is well-formed and parses, but it holds
@@ -412,7 +458,7 @@ export function captureLocalDiff(opts: {
           continue;
         }
 
-        budget -= bytes;
+        budget -= section.length;
         parts.push(section);
         untracked.push(path);
       }
