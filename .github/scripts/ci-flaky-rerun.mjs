@@ -263,7 +263,6 @@ export async function actOnDecision(client, target, decision) {
 
   if (decision.action === 'rerun') {
     if (!decision.reason_en) return;
-    await client.rerunFailedJobs(target.runId);
     await client.comment(
       target.prNumber,
       [
@@ -272,6 +271,7 @@ export async function actOnDecision(client, target, decision) {
         markerFor(nextTarget, 'rerun', key, actionCount + 1),
       ].join('\n'),
     );
+    await client.rerunFailedJobs(target.runId);
     return;
   }
 

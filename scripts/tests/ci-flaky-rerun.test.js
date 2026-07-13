@@ -581,7 +581,6 @@ if (args[0] === 'pr' && args[1] === 'list') {
     });
 
     expect(client.calls).toEqual([
-      ['rerunFailedJobs', 123],
       [
         'comment',
         42,
@@ -589,9 +588,10 @@ if (args[0] === 'pr' && args[1] === 'list') {
           'qwen-ci-flaky-rerun v=2 pr=42 head=abc123 run=123',
         ),
       ],
+      ['rerunFailedJobs', 123],
     ]);
-    expect(client.calls[1][2]).toContain('action=rerun key=unknown');
-    expect(client.calls[1][2]).toContain('count=1');
+    expect(client.calls[0][2]).toContain('action=rerun key=unknown');
+    expect(client.calls[0][2]).toContain('count=1');
   });
 
   it('counts matching failures across PR head changes', async () => {
@@ -614,8 +614,8 @@ if (args[0] === 'pr' && args[1] === 'list') {
       reason_zh: '日志显示 runner 网络超时。',
     });
 
-    expect(client.calls[1][2]).toContain('key=runner-network-timeout');
-    expect(client.calls[1][2]).toContain('count=3');
+    expect(client.calls[0][2]).toContain('key=runner-network-timeout');
+    expect(client.calls[0][2]).toContain('count=3');
     expect(countCalls).toEqual([[42, 'abc123', 'runner-network-timeout']]);
   });
 
@@ -872,7 +872,12 @@ if (args[0] === 'pr' && args[1] === 'list') {
     ]);
 
     expect(client.calls).toHaveLength(2);
-    expect(client.calls[0]).toEqual(['rerunFailedJobs', 123]);
+    expect(client.calls[0]).toEqual([
+      'comment',
+      42,
+      expect.stringContaining('action=rerun'),
+    ]);
+    expect(client.calls[1]).toEqual(['rerunFailedJobs', 123]);
   });
 
   it('ignores duplicate decisions for the same scanned target', async () => {
@@ -953,7 +958,7 @@ if (args[0] === 'pr' && args[1] === 'list') {
     expect(client.calls).toEqual([]);
   });
 
-  it('records a marker only after rerunning failed jobs', async () => {
+  it('does not rerun when recording the marker fails', async () => {
     const client = runner();
     client.comment = async () => {
       throw new Error('comment failed');
@@ -969,7 +974,7 @@ if (args[0] === 'pr' && args[1] === 'list') {
       }),
     ).rejects.toThrow('comment failed');
 
-    expect(client.calls).toEqual([['rerunFailedJobs', 123]]);
+    expect(client.calls).toEqual([]);
   });
 
   it('updates a still-behind branch only for a high-confidence skill decision', async () => {
@@ -1111,9 +1116,10 @@ if (args[0] === 'pr' && args[1] === 'list') {
     );
 
     expect(client.calls).toEqual([
+      ['comment', 42, expect.stringContaining('action=rerun')],
       ['rerunFailedJobs', 123],
-      ['rerunFailedJobs', 124],
       ['comment', 43, expect.stringContaining('action=rerun')],
+      ['rerunFailedJobs', 124],
     ]);
   });
 
