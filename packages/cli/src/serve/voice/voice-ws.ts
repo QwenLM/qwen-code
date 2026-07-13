@@ -24,9 +24,10 @@ import type {
   VoiceStreamCallbacks,
   VoiceStreamSession,
 } from '../../ui/voice/voice-stream-session.js';
-import type {
-  VoiceAdmissionLease,
-  VoiceAdmissionResult,
+import {
+  MAX_CONCURRENT_VOICE_SESSIONS,
+  type VoiceAdmissionLease,
+  type VoiceAdmissionResult,
 } from './workspace-voice-coordinator.js';
 
 const debugLogger = createDebugLogger('VOICE_WS');
@@ -199,7 +200,9 @@ export function createVoiceWsConnectionHandler(
   // coordinator. Production always uses `acquireVoiceLease`.
   let activeSessions = 0;
   const acquireLocalLease = (): VoiceAdmissionResult => {
-    if (activeSessions >= 8) return { kind: 'rejected', reason: 'capacity' };
+    if (activeSessions >= MAX_CONCURRENT_VOICE_SESSIONS) {
+      return { kind: 'rejected', reason: 'capacity' };
+    }
     activeSessions++;
     const controller = new AbortController();
     let released = false;
@@ -217,9 +220,7 @@ export function createVoiceWsConnectionHandler(
   return (ws: WebSocket) => {
     const admission = (deps.acquireVoiceLease ?? acquireLocalLease)();
     if (admission.kind === 'rejected') {
-      writeStderrLine(
-        `qwen serve: voice websocket rejected; activeSessions=${activeSessions}`,
-      );
+      writeStderrLine('qwen serve: voice websocket rejected');
       try {
         if (admission.reason === 'draining') {
           ws.close(1012, 'Workspace removed');
@@ -238,17 +239,13 @@ export function createVoiceWsConnectionHandler(
       return;
     }
     const lease = admission.lease;
-    writeStderrLine(
-      `qwen serve: voice websocket accepted; activeSessions=${activeSessions}`,
-    );
+    writeStderrLine('qwen serve: voice websocket accepted');
     let released = false;
     const releaseSlot = () => {
       if (!released) {
         released = true;
         lease.release();
-        writeStderrLine(
-          `qwen serve: voice websocket slot released; activeSessions=${activeSessions}`,
-        );
+        writeStderrLine('qwen serve: voice websocket slot released');
       }
     };
 

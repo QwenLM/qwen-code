@@ -101,7 +101,7 @@ function isActiveDrainCorrelation(
 }
 
 /** Prefix of workspace-qualified WebSocket routes. */
-const PLURAL_ACP_WS_PREFIX = '/workspaces/';
+const PLURAL_WS_PREFIX = '/workspaces/';
 const PLURAL_ACP_WS_SUFFIX = '/acp';
 const PLURAL_VOICE_WS_SUFFIX = '/voice/stream';
 
@@ -138,16 +138,13 @@ function pluralWorkspaceRawSelector(
     p = p.slice(0, -1);
   }
   if (
-    !p.startsWith(PLURAL_ACP_WS_PREFIX) ||
+    !p.startsWith(PLURAL_WS_PREFIX) ||
     !p.endsWith(suffix) ||
-    p.length <= PLURAL_ACP_WS_PREFIX.length + suffix.length
+    p.length <= PLURAL_WS_PREFIX.length + suffix.length
   ) {
     return null;
   }
-  const selector = p.slice(
-    PLURAL_ACP_WS_PREFIX.length,
-    p.length - suffix.length,
-  );
+  const selector = p.slice(PLURAL_WS_PREFIX.length, p.length - suffix.length);
   if (
     selector.length === 0 ||
     selector.includes('/') ||

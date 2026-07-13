@@ -69,9 +69,25 @@ describe('WorkspaceVoiceCoordinator', () => {
       expect(vi.getTimerCount()).toBe(0);
       admitted.lease.release();
       expect(coordinator.getWorkspaceActivity(target)).toBe(0);
+      expect(coordinator['states'].has(target)).toBe(false);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('aborts active leases when a workspace drain completes', () => {
+    const coordinator = new WorkspaceVoiceCoordinator();
+    const target = runtime('target');
+    const admitted = coordinator.acquire(target);
+    if (admitted.kind !== 'admitted') throw new Error('expected lease');
+
+    coordinator.completeWorkspaceDrain(target);
+
+    expect(admitted.lease.signal.aborted).toBe(true);
+    expect(coordinator.getWorkspaceActivity(target)).toBe(1);
+    admitted.lease.release();
+    expect(coordinator.getWorkspaceActivity(target)).toBe(0);
+    expect(coordinator['states'].has(target)).toBe(false);
   });
 
   it('keeps a re-added runtime generation independent from old leases', async () => {

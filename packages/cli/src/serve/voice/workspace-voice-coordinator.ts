@@ -79,6 +79,8 @@ export class WorkspaceVoiceCoordinator {
     if (!state) return;
     state.draining = true;
     state.completed = true;
+    const abortReason = new Error('Workspace drain completed');
+    for (const lease of state.leases) lease.abort(abortReason);
     this.deleteIfIdle(runtime, state);
   }
 
@@ -94,13 +96,17 @@ export class WorkspaceVoiceCoordinator {
     const state = this.states.get(runtime);
     if (!state) return;
     state.draining = true;
+    state.completed = true;
     const abortReason = new Error(
       reason === 'workspace_removed'
         ? 'Workspace runtime was removed'
         : 'Daemon is shutting down',
     );
     for (const lease of state.leases) lease.abort(abortReason);
-    if (state.leases.size === 0) return;
+    if (state.leases.size === 0) {
+      this.deleteIfIdle(runtime, state);
+      return;
+    }
     let resolveIdle: (() => void) | undefined;
     const idle = new Promise<void>((resolve) => {
       resolveIdle = resolve;
