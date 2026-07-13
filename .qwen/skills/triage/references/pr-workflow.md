@@ -441,7 +441,9 @@ If Stage 0 escalated the PR for maintainer awareness, do **not** approve automat
 All stages genuinely clean, `GUARD` is `ok`, and no Stage 0 maintainer escalation remains — approve:
 
 ```bash
-gh pr review "$PR_NUMBER" --repo "$REPO" --approve --body "LGTM, looks ready to ship. ✅"
+# Approve pinned to the reviewed commit (see the Approval note above) — never `gh pr review --approve`, which binds to no SHA.
+gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" \
+  -f commit_id="$HEAD_SHA" -f event=APPROVE -f body='LGTM, looks ready to ship. ✅'
 ```
 
 Reflection shows it shouldn't merge — request changes immediately, citing the specific concerns from the comment:
