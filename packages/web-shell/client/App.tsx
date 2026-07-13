@@ -441,6 +441,8 @@ export type WebShellComposerPlaceholders = Readonly<
 export interface WebShellProps {
   /** Called whenever the attached daemon session id changes. */
   onSessionIdChange?: (sessionId: string | undefined) => void;
+  /** Called after a new session is created. Session setup waits up to 30 seconds. */
+  onSessionCreated?: (sessionId: string) => Promise<void> | void;
   /** Visual theme for the embedded shell. */
   theme?: WebShellTheme;
   /** Called when `/theme` changes the web-shell theme. */
@@ -584,8 +586,8 @@ type SessionActionsWithCreate = {
     workspaceCwd?: string;
   }) => Promise<{ sessionId: string }>;
   attachSession: () => Promise<void>;
-  closeSession: () => Promise<void>;
   clearSession: () => Promise<void>;
+  releaseSession: (sessionId: string) => Promise<void>;
 };
 
 const emptyComposerApi: WebShellComposerApi = {
@@ -936,6 +938,7 @@ function translateCopyMessage(
 
 export function App({
   onSessionIdChange,
+  onSessionCreated,
   theme: providedTheme,
   onThemeChange,
   language: providedLanguage,
@@ -2387,36 +2390,52 @@ export function App({
   }, []);
   const [isPreparingPrompt, setIsPreparingPrompt] = useState(false);
   const createSessionPromiseRef = useRef<Promise<void> | null>(null);
-  useEffect(() => {
-    if (connection.sessionId) {
-      createSessionPromiseRef.current = null;
-    }
-  }, [connection.sessionId]);
+  const preparingSessionIdRef = useRef<string | null>(null);
+  const onSessionCreatedRef = useRef(onSessionCreated);
+  onSessionCreatedRef.current = onSessionCreated;
   const ensureSessionForPrompt = useCallback(() => {
-    if (connectionRef.current.sessionId) return Promise.resolve();
-    if (!createSessionPromiseRef.current) {
-      createSessionPromiseRef.current = (async () => {
-        const modelId =
-          currentModelRef.current || connectionRef.current.currentModel;
-        const modeId =
-          currentModeRef.current || connectionRef.current.currentMode;
-        await createAndAttachSessionForPrompt({
-          sessionActions: sessionActions as typeof sessionActions &
-            SessionActionsWithCreate,
-          modelId,
-          modeId,
-          workspaceCwd: selectedWorkspaceCwdRef.current,
-        });
-        // One-shot: the picker targets only the *next* new session, so clear
-        // it after creation. The next new chat defaults back to the primary
-        // workspace unless the user picks one again.
-        setSelectedWorkspaceCwd(undefined);
-      })().catch((error: unknown) => {
-        createSessionPromiseRef.current = null;
-        throw error;
-      });
+    const currentSessionId = connectionRef.current.sessionId;
+    if (createSessionPromiseRef.current) {
+      if (
+        !currentSessionId ||
+        currentSessionId === preparingSessionIdRef.current
+      ) {
+        return createSessionPromiseRef.current;
+      }
+      return Promise.resolve();
     }
-    return createSessionPromiseRef.current;
+    if (currentSessionId) return Promise.resolve();
+    const promise = (async () => {
+      const modelId =
+        currentModelRef.current || connectionRef.current.currentModel;
+      const modeId =
+        currentModeRef.current || connectionRef.current.currentMode;
+      await createAndAttachSessionForPrompt({
+        sessionActions: sessionActions as typeof sessionActions &
+          SessionActionsWithCreate,
+        modelId,
+        modeId,
+        workspaceCwd: selectedWorkspaceCwdRef.current,
+        onSessionCreated: onSessionCreatedRef.current,
+        onSessionAllocated: (sessionId) => {
+          preparingSessionIdRef.current = sessionId;
+        },
+        getCurrentSessionId: () => connectionRef.current.sessionId,
+      });
+      // One-shot: the picker targets only the *next* new session, so clear
+      // it after creation. The next new chat defaults back to the primary
+      // workspace unless the user picks one again.
+      setSelectedWorkspaceCwd(undefined);
+    })();
+    createSessionPromiseRef.current = promise;
+    const clearPreparation = () => {
+      if (createSessionPromiseRef.current === promise) {
+        createSessionPromiseRef.current = null;
+        preparingSessionIdRef.current = null;
+      }
+    };
+    void promise.then(clearPreparation, clearPreparation);
+    return promise;
   }, [sessionActions]);
   const onSubmitBeforeRef = useRef(onSubmitBefore);
   onSubmitBeforeRef.current = onSubmitBefore;
