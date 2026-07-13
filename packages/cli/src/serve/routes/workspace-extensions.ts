@@ -575,9 +575,37 @@ export function registerWorkspaceExtensionRoutes(
           releaseOperationSlot = ctrl.acquireOperationSlot(res);
           if (!releaseOperationSlot) return;
           const extensionManager = ctrl.createExtensionManager();
-          await extensionManager.refreshCache();
           const updateStates: Record<string, string> = Object.create(null);
           const deadline = new AbortController();
+          timer = setTimeout(() => {
+            const error = new Error(
+              'Extension update check exceeded its preparation deadline.',
+            ) as Error & { code: string };
+            error.code = 'extension_prepare_timeout';
+            deadline.abort(error);
+          }, EXTENSION_UPDATE_CHECK_DEADLINE_MS);
+          timer.unref();
+          let rejectRefreshOnAbort: (() => void) | undefined;
+          try {
+            await Promise.race([
+              extensionManager.refreshCache(),
+              new Promise<never>((_resolve, reject) => {
+                rejectRefreshOnAbort = () => reject(deadline.signal.reason);
+                deadline.signal.addEventListener(
+                  'abort',
+                  rejectRefreshOnAbort,
+                  { once: true },
+                );
+              }),
+            ]);
+          } finally {
+            if (rejectRefreshOnAbort) {
+              deadline.signal.removeEventListener(
+                'abort',
+                rejectRefreshOnAbort,
+              );
+            }
+          }
           await extensionManager.checkForAllExtensionUpdates(
             (name, state) => {
               updateStates[name] = state;
@@ -586,17 +614,6 @@ export function registerWorkspaceExtensionRoutes(
             async (task) =>
               await ctrl.preparationQueue.run(task, {
                 signal: deadline.signal,
-                onStart: () => {
-                  if (timer) return;
-                  timer = setTimeout(() => {
-                    const error = new Error(
-                      'Extension update check exceeded its preparation deadline.',
-                    ) as Error & { code: string };
-                    error.code = 'extension_prepare_timeout';
-                    deadline.abort(error);
-                  }, EXTENSION_UPDATE_CHECK_DEADLINE_MS);
-                  timer.unref();
-                },
               }),
           );
           const states = updateStates;

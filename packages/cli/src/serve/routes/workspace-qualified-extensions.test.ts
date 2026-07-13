@@ -994,6 +994,38 @@ describe('extension management v2 REST', () => {
     }
   });
 
+  it('times out a legacy update check while its cache refresh stalls', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const stalledRefresh = new Promise<void>(() => {});
+    const refreshCache = vi
+      .spyOn(ExtensionManager.prototype, 'refreshCache')
+      .mockImplementationOnce(async () => await stalledRefresh)
+      .mockResolvedValue(undefined);
+    try {
+      const response = auth(
+        request(h.app).post('/workspace/extensions/check-updates'),
+      ).then((result) => result);
+      await vi.waitFor(() => expect(refreshCache).toHaveBeenCalledOnce());
+
+      await vi.advanceTimersByTimeAsync(2 * 60_000);
+
+      await expect(response).resolves.toMatchObject({
+        status: 500,
+        body: { code: 'extension_prepare_timeout' },
+      });
+      const next = await auth(
+        request(h.app).post('/workspace/extensions/check-updates'),
+      );
+      expect(next.status).toBe(200);
+    } finally {
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('reports legacy global mutations as applied after runtime reconciliation', async () => {
     const h = await makeHarness();
     mockExtensionManager();
