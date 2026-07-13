@@ -25,7 +25,7 @@
 
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import { promptIdContext } from './promptIdContext.js';
-import { sessionIdContext } from './sessionIdContext.js';
+import { sessionIdContext, getSessionProjectDir } from './sessionIdContext.js';
 import {
   isShellTracePropagationEnabled,
   getTraceContext,
@@ -49,7 +49,12 @@ export function getShellContextEnvVars(): Record<string, string> {
   // a subprocess that has `cd`-ed into a worktree cannot recompute it — the
   // /review skill does exactly that, and would look for a directory that never
   // existed. Passed through, never recomputed downstream.
-  const projectDir = process.env['QWEN_CODE_PROJECT_DIR'];
+  // Keyed on *this* session, exactly as the session id above is — a process-global
+  // slot holds whichever session booted first, and in daemon mode every later one
+  // would hand its subprocesses another session's directory.
+  const projectDir =
+    (sessionId ? getSessionProjectDir(sessionId) : undefined) ??
+    process.env['QWEN_CODE_PROJECT_DIR'];
   if (projectDir) {
     env['QWEN_CODE_PROJECT_DIR'] = projectDir;
   }

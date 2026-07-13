@@ -173,6 +173,7 @@ import {
 import { DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES } from '../utils/qwenIgnoreParser.js';
 import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaults.js';
 import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
+import { registerSessionProjectDir } from '../utils/sessionIdContext.js';
 import { Storage } from './storage.js';
 import {
   ChatRecordingService,
@@ -2061,12 +2062,18 @@ export class Config {
     this.inputFile = params.inputFile;
     this.defaultFileEncoding = params.defaultFileEncoding;
     this.storage = new Storage(this.targetDir);
-    // Publish the project dir the same way the session id is published, and for
-    // the same reason: a subprocess needs it and must not have to guess. It is
-    // derived from the session's *launch* cwd, so a subprocess that has `cd`-ed
-    // elsewhere — which the /review skill explicitly does, into a PR worktree —
-    // cannot recompute it from `process.cwd()`. It would land on a directory
-    // that does not exist. Claimed once per process, like the session id.
+    // Publish the project dir a subprocess needs to find this session's harness
+    // records. It is derived from the session's *launch* cwd, so a subprocess
+    // that has `cd`-ed elsewhere — which the /review skill explicitly does, into
+    // a PR worktree — cannot recompute it from `process.cwd()`; it would land on
+    // a directory that never existed.
+    //
+    // Registered per session, not claimed in one process-global slot. In daemon
+    // mode one process serves many sessions: a single slot would hold whichever
+    // booted first, and every later session would hand its subprocesses another
+    // session's directory. The env var is still set for the single-session CLI,
+    // where it is the only consumer and there is nothing to collide with.
+    registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
     if (!projectDirEnvClaimed && process.env) {
       process.env['QWEN_CODE_PROJECT_DIR'] = this.storage.getProjectDir();
       projectDirEnvClaimed = true;

@@ -23,7 +23,10 @@ import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { coverageFromTranscripts } from './lib/coverage.js';
+import {
+  coverageFromTranscripts,
+  TranscriptsUnavailableError,
+} from './lib/coverage.js';
 
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 
@@ -138,7 +141,10 @@ function toStringList(value: unknown, field: string): string[] {
       `compose-review: ${field} must be an array of strings, got ${JSON.stringify(value)}`,
     );
   }
-  return value as string[];
+  // A copy. The caller's array is not ours to push into, and coverage-derived
+  // entries are appended to these lists — a programmatic caller that reused one
+  // across two calls would find the first call's caps in the second.
+  return [...(value as string[])];
 }
 
 // Booleans get the same boundary treatment as the counts: the JSON is
@@ -228,13 +234,18 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
         );
       }
     } catch (err) {
-      // No transcripts at all is an infrastructure fact, not a verdict about the
-      // agents: a read-only HOME or a sandbox would otherwise read as "every
-      // agent idled". It still caps — a run that cannot show what it read has
-      // not shown it read anything — but it says what is actually wrong.
+      // Two different failures, and they must not wear each other's message. A
+      // malformed plan is the caller's mistake and says so; missing transcripts
+      // are an environment fault (a read-only HOME, a sandbox) and say *that*.
+      // Both cap — a run that cannot show what it read has not shown it read
+      // anything — but a reader chasing "could not read the transcripts" over a
+      // plan with no `chunks[]` is chasing the wrong thing.
+      const why =
+        err instanceof TranscriptsUnavailableError
+          ? `could not read the agents' transcripts (${err.message})`
+          : `the plan could not be used (${(err as Error).message})`;
       unreviewed.push(
-        `coverage — could not read the agents' transcripts, so this run cannot ` +
-          `show that any of the diff was read (${(err as Error).message})`,
+        `coverage — ${why}, so this run cannot show that any of the diff was read`,
       );
     }
   }

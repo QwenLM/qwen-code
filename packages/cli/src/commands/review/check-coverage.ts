@@ -42,10 +42,7 @@ import {
 
 interface CheckCoverageArgs {
   plan: string;
-  returns: string;
   out: string;
-  topology: 'territory' | 'dimension';
-  expect?: string;
 }
 
 /**
@@ -85,9 +82,21 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
   writeFileSync(args.out, JSON.stringify(report, null, 2));
   writeStdoutLine(`Wrote coverage report to ${args.out}`);
 
+  const totalChunks =
+    report.coveredChunks.length +
+    report.missingChunks.length +
+    report.uncoverableChunks.length;
+  const worked =
+    report.agents - report.blindAgents.length - report.idleAgents.length;
   writeStderrLine(
-    `Coverage: ${report.coveredChunks.length}/${report.coveredChunks.length + report.missingChunks.length + report.uncoverableChunks.length} ` +
-      `chunk(s) reviewed by ${report.agents} agent(s) that opened the diff`,
+    `Coverage: ${report.coveredChunks.length}/${totalChunks} chunk(s) reviewed. ` +
+      `${report.agents} agent(s) ran; ${worked} of them opened the diff` +
+      (report.blindAgents.length
+        ? `, ${report.blindAgents.length} were launched blind`
+        : '') +
+      (report.idleAgents.length
+        ? `, ${report.idleAgents.length} made no tool call`
+        : ''),
   );
 
   // The defect that actually happened, named as itself.

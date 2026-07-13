@@ -103,8 +103,22 @@ function textOf(rec: Record<string, unknown>): string {
  * precisely nothing.
  */
 function isErrorResponse(rec: Record<string, unknown>): boolean {
-  const s = JSON.stringify(rec['message'] ?? {});
-  return /"error"\s*:/.test(s);
+  // Look at the response object itself, not the stringified record. A tool whose
+  // *output* happens to contain the text `"error":` — a JSON payload with an
+  // `error: null` field, a log line, this very file quoted in a diff — is not a
+  // failed call, and treating it as one would mark a working agent idle.
+  const msg = rec['message'] as { parts?: unknown } | undefined;
+  const parts = Array.isArray(msg?.parts) ? msg.parts : [];
+  for (const part of parts) {
+    const fr = (part as { functionResponse?: { response?: unknown } })
+      .functionResponse;
+    if (!fr) continue;
+    const resp = fr.response as Record<string, unknown> | undefined;
+    if (resp && resp['error'] !== undefined && resp['error'] !== null) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** Parse one transcript. Returns null for a file that is not one. */

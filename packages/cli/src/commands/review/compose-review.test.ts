@@ -11,6 +11,7 @@ import {
   writeFileSync,
   mkdirSync,
   rmSync,
+  utimesSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -58,6 +59,12 @@ function plan(): string {
       ],
     }),
   );
+  // Backdate it. The transcripts are written first and the stale-transcript
+  // filter is `mtime < planMtime`; on a filesystem with millisecond granularity
+  // both land in the same tick and the comparison flips at random. An explicit
+  // gap makes the fixture say what it means: these transcripts are newer.
+  const old = new Date(2020, 0, 1);
+  utimesSync(p, old, old);
   return p;
 }
 
@@ -670,22 +677,21 @@ describe('coverage is recomputed, never accepted', () => {
 
   it('caps when the transcripts cannot be read at all — and says so', () => {
     // A read-only HOME must not read as "every agent idled". It still caps, but
-    // it names the infrastructure, not the agents.
-    const prev = process.env['QWEN_CODE_PROJECT_DIR'];
-    process.env['QWEN_CODE_PROJECT_DIR'] = join(dir, 'no-such-project');
-    try {
-      const r = composeReview({
-        criticalsInline: 0,
-        suggestionsInline: 0,
-        planPath: coveredPlan(),
-        modelId: MODEL,
-      });
-      expect(r.event).not.toBe('APPROVE');
-      expect(r.body).toContain('transcripts');
-    } finally {
-      if (prev === undefined) delete process.env['QWEN_CODE_PROJECT_DIR'];
-      else process.env['QWEN_CODE_PROJECT_DIR'] = prev;
-    }
+    // it names the infrastructure, not the agents. Env passed explicitly, like
+    // every other test here: mutating `process.env` leaks across a concurrent
+    // suite, which is how a sibling test started failing only when run together.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(),
+      env: {
+        QWEN_CODE_PROJECT_DIR: join(dir, 'no-such-project'),
+        QWEN_CODE_SESSION_ID: 'S1',
+      },
+      modelId: MODEL,
+    });
+    expect(r.event).not.toBe('APPROVE');
+    expect(r.body).toContain('transcripts');
   });
 
   it('approves when the agents actually read their chunks', () => {

@@ -232,6 +232,64 @@ describe('coverage — from the harness, not from the caller', () => {
     );
   });
 
+  it('does not treat a tool output containing "error": as a failed call', () => {
+    // The response *object* is what says whether the call failed. A tool whose
+    // OUTPUT happens to contain that text — a JSON payload with `error: null`, a
+    // log line, this very file quoted back in a diff — is a working agent, and
+    // marking it idle would blame it for the diff it read.
+    const base = {
+      agentId: 'a1',
+      agentName: 'general-purpose',
+      sessionId: 'S1',
+    };
+    const lines = [
+      JSON.stringify({
+        ...base,
+        type: 'user',
+        message: { role: 'user', parts: [{ text: good(1) }] },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [{ functionCall: { name: 'read_file', args: {} } }],
+        },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                // `error: null` means *no* error. A coarse `/"error":/` over the
+                // stringified record matches this and marks a working agent idle.
+                response: { output: 'diff bytes', error: null },
+              },
+            },
+          ],
+        },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: { role: 'model', parts: [{ text: 'Reviewed.' }] },
+      }),
+    ];
+    writeFileSync(
+      join(dir, 'subagents', 'S1', 'agent-a1.jsonl'),
+      lines.join('\n') + '\n',
+    );
+    transcript('a2', good(2), { calls: 1 });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.idleAgents).toEqual([]); // it worked
+    expect(r.coveredChunks).toEqual([1, 2]);
+  });
+
   it('refuses a plan that is not one', () => {
     const p = join(dir, 'bad.json');
     writeFileSync(p, JSON.stringify({}));
