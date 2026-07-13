@@ -19,6 +19,7 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { refExists, releaseWorktree } from './lib/git.js';
 import {
   worktreePath,
+  probeWorktreePath,
   reviewBranch,
   REVIEW_TMP_DIR,
   tmpPrefix,
@@ -46,8 +47,9 @@ function runCleanup(target: string): void {
 
     // The test-efficacy probe runs in a disposable sibling worktree and removes
     // it itself; sweep one a crashed probe left behind so it does not block the
-    // next run's `git worktree add` (see #6832 / test-efficacy.ts).
-    const probeWt = `${wt}-probe`;
+    // next run's `git worktree add` (see #6832 / test-efficacy.ts). Shares the
+    // path helper with the probe so the suffix cannot drift between the two.
+    const probeWt = probeWorktreePath(wt);
     if (releaseWorktree(probeWt)) {
       writeStdoutLine(`Removed probe worktree: ${probeWt}`);
       removedAny = true;

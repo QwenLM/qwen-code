@@ -43,8 +43,9 @@ import {
   rmSync,
   lstatSync,
 } from 'node:fs';
-import { dirname, join, isAbsolute, resolve, sep } from 'node:path';
+import { dirname, join, isAbsolute, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { probeWorktreePath } from './lib/paths.js';
 
 export type ProbeVerdict = 'gated' | 'inert' | 'inconclusive';
 
@@ -396,22 +397,41 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     // repo-root `node_modules` — exactly how the shared review worktree already
     // runs vitest.
     const headSha = gitOut(worktree, 'rev-parse', 'HEAD');
-    const probeTree = `${resolve(worktree)}-probe`;
+    const probeTree = probeWorktreePath(worktree);
     let created = false;
+    let sweep: ReturnType<typeof spawnSync> | undefined;
     try {
       // Sweep a stale probe tree left by a crashed run — it would fail `add`.
-      // Best-effort (no stale tree is the normal case), so it does not go through
-      // the throwing `git()` wrapper.
-      spawnSync('git', ['worktree', 'remove', '--force', probeTree], {
+      // Two ways it can be stale, and `worktree remove` only clears one:
+      //   - REGISTERED (metadata intact) — `worktree remove --force` unregisters
+      //     it and deletes the dir.
+      //   - an UNREGISTERED directory (metadata lost, or a partial cleanup) —
+      //     `worktree remove` says "not a working tree" and leaves it, and then a
+      //     *non-empty* leftover makes `worktree add` fail `already exists`,
+      //     wedging every probe as `inconclusive` until someone clears it by hand.
+      // So follow the unregister sweep with a plain remove of whatever dir is
+      // still there. Both are best-effort — no stale tree is the normal case — so
+      // the unregister does not go through the throwing `git()` wrapper, and its
+      // stderr is kept to explain a subsequent `add` failure. `rmSync` on the
+      // path unlinks a symlink rather than following it, so even a tampered
+      // leftover cannot redirect the delete outside `probeTree`.
+      sweep = spawnSync('git', ['worktree', 'remove', '--force', probeTree], {
         cwd: worktree,
+        encoding: 'utf8',
       });
+      rmSync(probeTree, { recursive: true, force: true });
       git(worktree, 'worktree', 'add', '--detach', probeTree, headSha);
       created = true;
     } catch (e) {
       // Could not isolate — probe nothing rather than fall back to mutating the
       // shared tree. Probes are inconclusive; the unreachable findings, which
-      // need no probe, still ship.
-      const detail = `probe worktree could not be created: ${e instanceof Error ? e.message : String(e)}`;
+      // need no probe, still ship. Surface the stale-sweep's stderr too: when the
+      // `add` fails on a leftover the sweep could not clear, that is the context
+      // that explains why.
+      const sweepErr = String(sweep?.stderr ?? '').trim();
+      const detail =
+        `probe worktree could not be created: ${e instanceof Error ? e.message : String(e)}` +
+        (sweepErr ? ` (stale-tree sweep also reported: ${sweepErr})` : '');
       for (const file of probes) {
         results.push({ file, verdict: 'inconclusive' as const, detail });
       }
