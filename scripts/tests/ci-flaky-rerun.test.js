@@ -492,10 +492,47 @@ if (args[0] === 'pr' && args[1] === 'list') {
     expect(client.calls).toEqual([]);
   });
 
+  it('keeps resetting later PRs after one reset lookup fails', async () => {
+    const client = runner();
+    client.trustedMarkerLogin = 'trusted-patrol-bot';
+    client.comments = async (prNumber) => {
+      if (prNumber === 41) throw new Error('temporary comments failure');
+      return [
+        {
+          body: '<!-- qwen-ci-flaky-rerun v=2 pr=42 head=abc123 run=120 attempt=1 action=rerun key=runner-network-timeout check=E2E%20Tests count=2 -->',
+          createdAt: '2026-07-12T07:20:00.000Z',
+          author: { login: 'trusted-patrol-bot' },
+        },
+      ];
+    };
+
+    await resetSuccessfulFailures(client, [
+      pr({ number: 41 }),
+      pr({
+        statusCheckRollup: [
+          run({
+            conclusion: 'SUCCESS',
+            completedAt: '2026-07-12T07:30:00.000Z',
+          }),
+        ],
+      }),
+    ]);
+
+    expect(client.calls).toEqual([
+      ['comment', 42, expect.stringContaining('action=reset')],
+    ]);
+  });
+
   it('keeps gh diagnostics bounded and visible', () => {
     expect(script).toContain('timeout: 60_000');
     expect(script).toContain('error.stderr || error.message');
     expect(script).toContain('throw new Error(`missing value for ${argv[i]}`)');
+    expect(script).toMatch(
+      /maxBuffer: 16 \* 1024 \* 1024,[\s\S]*\.\.\.options,[\s\S]*timeout: 60_000/,
+    );
+    expect(script.indexOf(".replace(/[a-f0-9]{8,}/g, '#')")).toBeLessThan(
+      script.indexOf(".replace(/\\d+/g, '#')"),
+    );
   });
 
   it('applies only decisions that match an input target', async () => {
@@ -709,6 +746,19 @@ if (args[0] === 'pr' && args[1] === 'list') {
     ]);
     expect(client.calls[0][2]).toContain('<details>');
     expect(client.calls[0][2]).toContain('i18n 检查发现了多余的语言键。');
+  });
+
+  it('does not post blank failure explanations', async () => {
+    const client = runner();
+    const target = selectTarget([pr()], { now: NOW });
+
+    await actOnDecision(client, target, {
+      action: 'comment',
+      confidence: 'high',
+      reason_en: 'The i18n check found an extra locale key.',
+    });
+
+    expect(client.calls).toEqual([]);
   });
 
   it('does not update a branch after a new push changes its head', async () => {

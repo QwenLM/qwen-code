@@ -77,8 +77,8 @@ function failureKey(target, decision) {
 function fingerprint(target, log) {
   const normalized = log
     .toLowerCase()
-    .replace(/\d+/g, '#')
     .replace(/[a-f0-9]{8,}/g, '#')
+    .replace(/\d+/g, '#')
     .slice(0, 1000);
   return `check-${createHash('sha256').update(`${target.workflowName}\n${normalized}`).digest('hex').slice(0, 16)}`;
 }
@@ -270,6 +270,7 @@ export async function actOnDecision(client, target, decision) {
   }
 
   if (decision.action === 'comment') {
+    if (!decision.reason_en || !decision.reason_zh) return;
     await client.comment(
       target.prNumber,
       [
@@ -312,27 +313,33 @@ export async function actOnDecisions(client, targets, decisions) {
 
 export async function resetSuccessfulFailures(client, prs) {
   for (const pr of prs) {
-    const states = new Map();
-    for (const state of stateMarkers(
-      await client.comments(pr.number),
-      pr.number,
-      client.trustedMarkerLogin,
-    ))
-      states.set(state.key, state);
-    for (const state of states.values()) {
-      if (state.count === 0) continue;
-      const run = (pr.statusCheckRollup ?? []).find(
-        (check) =>
-          check.name === state.check &&
-          check.conclusion === 'SUCCESS' &&
-          timeMs(check.completedAt) > timeMs(state.createdAt),
-      );
-      const target = run ? toTarget(pr, run) : null;
-      if (target)
-        await client.comment(
-          pr.number,
-          markerFor(target, 'reset', state.key, 0),
+    try {
+      const states = new Map();
+      for (const state of stateMarkers(
+        await client.comments(pr.number),
+        pr.number,
+        client.trustedMarkerLogin,
+      ))
+        states.set(state.key, state);
+      for (const state of states.values()) {
+        if (state.count === 0) continue;
+        const run = (pr.statusCheckRollup ?? []).find(
+          (check) =>
+            check.name === state.check &&
+            check.conclusion === 'SUCCESS' &&
+            timeMs(check.completedAt) > timeMs(state.createdAt),
         );
+        const target = run ? toTarget(pr, run) : null;
+        if (target)
+          await client.comment(
+            pr.number,
+            markerFor(target, 'reset', state.key, 0),
+          );
+      }
+    } catch (error) {
+      process.stderr.write(
+        `resetSuccessfulFailures failed for ${pr.number}: ${error.message}\n`,
+      );
     }
   }
 }
@@ -373,8 +380,8 @@ class GhClient {
     const { stdout } = await execFile('gh', args, {
       encoding: 'utf8',
       maxBuffer: 16 * 1024 * 1024,
-      timeout: 60_000,
       ...options,
+      timeout: 60_000,
     });
     return stdout;
   }
