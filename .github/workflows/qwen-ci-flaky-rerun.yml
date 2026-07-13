@@ -30,6 +30,7 @@ jobs:
       pull-requests: 'read'
     outputs:
       target_found: '${{ steps.scan.outputs.target_found }}'
+      input_sha: '${{ steps.scan.outputs.input_sha }}'
       bot_login: '${{ steps.identity.outputs.bot_login }}'
     steps:
       - name: 'Resolve patrol identity'
@@ -65,7 +66,7 @@ jobs:
             --active-days "${ACTIVE_DAYS}" \
             --max-candidates "${MAX_CANDIDATES_PER_RUN}" \
             --trusted-marker-login "${{ steps.identity.outputs.bot_login }}" | tee "${WORKDIR}/scan.out"
-          grep -E '^(target_found|target_count)=' "${WORKDIR}/scan.out" >> "${GITHUB_OUTPUT}"
+          grep -E '^(target_found|input_sha)=' "${WORKDIR}/scan.out" >> "${GITHUB_OUTPUT}"
 
       - name: 'Classify with ci-flaky-patrol skill'
         if: "${{ steps.scan.outputs.target_found == 'true' }}"
@@ -95,7 +96,9 @@ jobs:
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'
         with:
           name: 'ci-flaky-patrol-decision'
-          path: '${{ env.WORKDIR }}/'
+          path: |-
+            ${{ env.WORKDIR }}/ci-flaky-input.json
+            ${{ env.WORKDIR }}/ci-flaky-decisions.json
           if-no-files-found: 'error'
           retention-days: 1
 
@@ -106,9 +109,9 @@ jobs:
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:
-      actions: 'write'
+      actions: 'read'
       contents: 'read'
-      pull-requests: 'write'
+      pull-requests: 'read'
     steps:
       - name: 'Checkout trusted main'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'
@@ -120,14 +123,6 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'
         with:
           node-version: '22'
-
-      - name: 'Reset successful failure state'
-        env:
-          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
-        run: |-
-          node .github/scripts/ci-flaky-rerun.mjs reset \
-            --repo "${{ github.repository }}" \
-            --trusted-marker-login "${{ needs.classify.outputs.bot_login }}"
 
       - name: 'Download patrol decisions'
         if: "${{ needs.classify.outputs.target_found == 'true' }}"
@@ -144,4 +139,14 @@ jobs:
           node .github/scripts/ci-flaky-rerun.mjs act \
             --repo "${{ github.repository }}" \
             --workdir "${WORKDIR}" \
+            --input-sha "${{ needs.classify.outputs.input_sha }}" \
+            --trusted-marker-login "${{ needs.classify.outputs.bot_login }}"
+
+      - name: 'Reset successful failure state'
+        continue-on-error: true
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+        run: |-
+          node .github/scripts/ci-flaky-rerun.mjs reset \
+            --repo "${{ github.repository }}" \
             --trusted-marker-login "${{ needs.classify.outputs.bot_login }}"

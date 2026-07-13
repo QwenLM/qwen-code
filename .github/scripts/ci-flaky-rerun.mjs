@@ -11,12 +11,17 @@ const DEFAULT_STALE_MINUTES = 30;
 const DEFAULT_ACTIVE_DAYS = 7;
 const DEFAULT_MAX_CANDIDATES_PER_RUN = 5;
 const MAX_ACTIONS_PER_HEAD = 3;
-const MAIN_CI_WORKFLOW = 'ci.yml';
+const TARGET_WORKFLOW = 'Qwen Code CI';
+const MAX_REASON_LENGTH = 200;
 const MARKER = 'qwen-ci-flaky-rerun';
 
 function timeMs(value) {
   const ms = Date.parse(value ?? '');
   return Number.isFinite(ms) ? ms : 0;
+}
+
+function checkTimeMs(run) {
+  return Math.max(timeMs(run.completedAt), timeMs(run.startedAt));
 }
 
 function runIdFromUrl(url) {
@@ -30,7 +35,7 @@ function jobIdFromUrl(url) {
 }
 
 function markerFor(target, action, failureKey, count) {
-  const check = encodeURIComponent(target.workflowName);
+  const check = encodeURIComponent(target.checkName ?? target.workflowName);
   return `<!-- ${MARKER} v=2 pr=${target.prNumber} head=${target.headSha} run=${target.runId} attempt=${target.runAttempt ?? 1} action=${action} key=${failureKey} check=${check} count=${count} -->`;
 }
 
@@ -51,14 +56,12 @@ function alreadyHandled(pr, target, options) {
   );
 }
 
-function isRecentlyActive(pr, now, activeDays) {
-  return timeMs(now) - timeMs(pr.updatedAt) <= activeDays * 24 * 60 * 60_000;
-}
-
-function isStaleFailure(run, now, staleMinutes) {
+function isStaleFailure(run, now, staleMinutes, activeDays) {
   if (run.status !== 'COMPLETED') return false;
-  if (run.conclusion !== 'FAILURE') return false;
-  return timeMs(now) - timeMs(run.completedAt) >= staleMinutes * 60_000;
+  if (!['FAILURE', 'TIMED_OUT'].includes(run.conclusion)) return false;
+  if (run.workflowName !== TARGET_WORKFLOW) return false;
+  const age = timeMs(now) - timeMs(run.completedAt);
+  return age >= staleMinutes * 60_000 && age <= activeDays * 24 * 60 * 60_000;
 }
 
 function toTarget(pr, run) {
@@ -70,7 +73,8 @@ function toTarget(pr, run) {
     runId,
     runAttempt: run.runAttempt ?? 1,
     jobId: jobIdFromUrl(run.detailsUrl),
-    workflowName: run.name,
+    workflowName: run.workflowName,
+    checkName: run.name,
     detailsUrl: run.detailsUrl,
     completedAt: run.completedAt,
   };
@@ -80,9 +84,8 @@ export function fingerprint(target, log) {
   const normalized = log
     .toLowerCase()
     .replace(/[a-f0-9]{8,}/g, '#')
-    .replace(/\d+/g, '#')
-    .slice(0, 1000);
-  return `check-${createHash('sha256').update(`${target.workflowName}\n${normalized}`).digest('hex').slice(0, 16)}`;
+    .replace(/\d+/g, '#');
+  return `check-${createHash('sha256').update(`${target.workflowName}/${target.checkName}\n${normalized}`).digest('hex').slice(0, 16)}`;
 }
 
 function stateMarkers(comments, prNumber, trustedMarkerLogin) {
@@ -100,9 +103,6 @@ function stateMarkers(comments, prNumber, trustedMarkerLogin) {
       if (!match) return null;
       return {
         headSha: match[1],
-        runId: Number(match[2]),
-        runAttempt: Number(match[3]),
-        action: match[4],
         key: match[5],
         check: decodeURIComponent(match[6]),
         count: Number(match[7]),
@@ -119,7 +119,7 @@ function redactLogLine(line) {
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, '$1[redacted]')
     .replace(/(Authorization:\s*)[^\r\n]*/gi, '$1[redacted]')
     .replace(
-      /(?:gh[pousr]_|github_pat_|glpat-|xox[b]-|xox[p]-)[A-Za-z0-9_-]{20,}/g,
+      /(?:gh[pousr]_|github_pat_|glpat-|xox[b]-|xox[p]-)[A-Za-z0-9_-]{8,}/g,
       '[redacted]',
     )
     .replace(/\bsk-(?:proj-)?[A-Za-z0-9-]{20,}/g, 'sk-[redacted]')
@@ -132,25 +132,24 @@ function redactLogLine(line) {
     .replace(/\bnpm_[A-Za-z0-9]{20,}/g, '[redacted]');
 }
 
-function skillLog(log) {
+export function skillLog(log) {
   const lines = log.split('\n');
-  const selected = new Set();
-  for (const [index, line] of lines.entries()) {
-    if (
-      /(\bfail\b|×|error|failed|failure|exception|timeout|timed out|network|download|assertion|lint|typecheck)/i.test(
-        line,
-      )
-    ) {
-      for (let offset = 0; offset < 4; offset += 1)
-        selected.add(index + offset);
-    }
-  }
-  return [...selected]
-    .sort((a, b) => a - b)
-    .map((index) => lines[index])
-    .filter((line) => line !== undefined)
-    .slice(-200)
+  const failure = lines.findLastIndex((line) =>
+    /npm error|AssertionError|Test Files.*failed|❌ Errors:|error TS\d+|Code style issues found|(?:^|\s)FAIL(?:\s|$)/.test(
+      line,
+    ),
+  );
+  const end =
+    failure === -1
+      ? lines.findLastIndex((line) => line.includes('##[error]'))
+      : failure;
+  return (
+    end === -1
+      ? lines.slice(-120)
+      : lines.slice(Math.max(0, end - 80), end + 41)
+  )
     .map(redactLogLine)
+    .map((line) => line.slice(0, 500))
     .join('\n');
 }
 
@@ -163,9 +162,16 @@ export function selectCandidateTargets(prs, options = {}) {
   for (const pr of prs) {
     if (pr.isDraft) continue;
     if (pr.baseRefName !== 'main') continue;
-    if (!isRecentlyActive(pr, now, activeDays)) continue;
+    const latestByCheck = new Map();
     for (const run of pr.statusCheckRollup ?? []) {
-      if (!isStaleFailure(run, now, staleMinutes)) continue;
+      const key = `${run.workflowName}/${run.name}`;
+      const current = latestByCheck.get(key);
+      if (!current || checkTimeMs(run) > checkTimeMs(current)) {
+        latestByCheck.set(key, run);
+      }
+    }
+    for (const run of latestByCheck.values()) {
+      if (!isStaleFailure(run, now, staleMinutes, activeDays)) continue;
       const target = toTarget(pr, run);
       if (!target) continue;
       targets.push(target);
@@ -198,6 +204,14 @@ export function selectTarget(prs, options = {}) {
   );
 }
 
+function validReason(value) {
+  return (
+    typeof value === 'string' &&
+    value.trim().length > 0 &&
+    value.length <= MAX_REASON_LENGTH
+  );
+}
+
 async function isActionablePr(client, target) {
   const pr = await client.currentPr(target.prNumber);
   return (
@@ -210,49 +224,71 @@ async function isActionablePr(client, target) {
 
 export async function actOnDecision(client, target, decision) {
   if (!target) return;
+  if (
+    !['rerun', 'update_branch', 'comment', 'no_action'].includes(
+      decision.action,
+    )
+  )
+    return;
+  if (decision.action !== 'no_action' && decision.confidence !== 'high') return;
+  if (
+    decision.action !== 'no_action' &&
+    (!validReason(decision.reason_en) || !validReason(decision.reason_zh))
+  )
+    return;
+  if (decision.failureKey !== target.failureKey) return;
   if (!(await isActionablePr(client, target))) return;
   if (!(await client.isCurrentFailure(target))) return;
-  if (decision.failureKey !== target.failureKey) return;
   const count = await client.failureActionCount(
     target.prNumber,
     target.headSha,
-    target.failureKey,
   );
   if (count >= MAX_ACTIONS_PER_HEAD) return;
-  const next = { ...target, actionCount: count };
   const marker = markerFor(
-    next,
+    target,
     decision.action,
     target.failureKey,
     count + 1,
   );
 
   if (decision.action === 'rerun') {
+    await client.rerunFailedJobs(target.runId);
     await client.comment(
       target.prNumber,
-      `Rerunning failed jobs: ${decision.reason_en || ''}\n\n${marker}`,
+      `Reran failed jobs: ${decision.reason_en}\n\n${marker}`,
     );
-    await client.rerunFailedJobs(target.runId);
     return;
   }
   if (decision.action === 'update_branch') {
+    if (
+      target.behindBy <= 0 ||
+      !target.mainHeadSha ||
+      decision.mainHeadSha !== target.mainHeadSha
+    )
+      return;
+    const currentMain = await client.mainContext(target.headSha);
+    if (
+      currentMain.behindBy <= 0 ||
+      currentMain.mainHeadSha !== target.mainHeadSha
+    )
+      return;
+    await client.updateBranch(target.prNumber, target.headSha);
     await client.comment(
       target.prNumber,
-      `Updating branch from main: ${decision.reason_en || ''}\n\n${marker}`,
+      `Updated the branch from main: ${decision.reason_en}\n\n${marker}`,
     );
-    await client.updateBranch(target.prNumber, target.headSha);
     return;
   }
   if (decision.action === 'comment') {
     await client.comment(
       target.prNumber,
       [
-        decision.reason_en || '',
+        decision.reason_en,
         '',
         '<details>',
         '<summary>中文说明</summary>',
         '',
-        decision.reason_zh || '',
+        decision.reason_zh,
         '',
         '</details>',
         '',
@@ -302,6 +338,7 @@ export async function resetSuccessfulFailures(client, prs) {
         if (state.count === 0) continue;
         const run = (pr.statusCheckRollup ?? []).find(
           (check) =>
+            check.workflowName === TARGET_WORKFLOW &&
             check.name === state.check &&
             check.conclusion === 'SUCCESS' &&
             timeMs(check.completedAt) > timeMs(state.createdAt),
@@ -321,7 +358,7 @@ export async function resetSuccessfulFailures(client, prs) {
   }
 }
 
-class GhClient {
+export class GhClient {
   constructor(repo) {
     this.repo = repo;
   }
@@ -330,16 +367,13 @@ class GhClient {
     const { stdout } = await execFile('gh', args, {
       encoding: 'utf8',
       maxBuffer: 16 * 1024 * 1024,
-      ...options,
       timeout: 60_000,
+      ...options,
     });
     return stdout;
   }
 
-  async prs(activeDays) {
-    const activeSince = new Date(Date.now() - activeDays * 24 * 60 * 60_000)
-      .toISOString()
-      .slice(0, 10);
+  async prs() {
     return JSON.parse(
       await this.gh([
         'pr',
@@ -351,9 +385,9 @@ class GhClient {
         '--state',
         'open',
         '--search',
-        `updated:>=${activeSince} status:failure`,
+        'status:failure',
         '--json',
-        'number,isDraft,baseRefName,headRefOid,updatedAt,statusCheckRollup',
+        'number,isDraft,baseRefName,headRefOid,statusCheckRollup',
         '--limit',
         '1000',
       ]),
@@ -380,14 +414,16 @@ class GhClient {
     return (await this.gh(['api', 'user', '--jq', '.login'])).trim();
   }
 
-  async failureActionCount(prNumber, headSha, key) {
+  async failureActionCount(prNumber, headSha) {
+    if (!this.trustedMarkerLogin)
+      throw new Error('trusted marker login is required');
     return (
       stateMarkers(
         await this.comments(prNumber),
         prNumber,
         this.trustedMarkerLogin,
       )
-        .filter((state) => state.headSha === headSha && state.key === key)
+        .filter((state) => state.headSha === headSha)
         .at(-1)?.count ?? 0
     );
   }
@@ -440,7 +476,7 @@ class GhClient {
     );
     return (
       run.status === 'completed' &&
-      run.conclusion === 'failure' &&
+      ['failure', 'timed_out'].includes(run.conclusion) &&
       run.head_sha === target.headSha &&
       run.run_attempt === target.runAttempt
     );
@@ -459,46 +495,20 @@ class GhClient {
     );
   }
 
-  async mainHeadSha() {
-    return (
-      await this.gh(['api', `repos/${this.repo}/commits/main`, '--jq', '.sha'])
-    ).trim();
-  }
-
-  async mainEvidence() {
-    const headSha = await this.mainHeadSha();
-    const response = JSON.parse(
-      await this.gh([
-        'api',
-        `repos/${this.repo}/actions/workflows/${MAIN_CI_WORKFLOW}/runs?branch=main&event=push&status=success&per_page=30`,
-      ]),
-    );
-    const run = response.workflow_runs.find(
-      (candidate) =>
-        candidate.head_sha === headSha &&
-        candidate.event === 'push' &&
-        candidate.conclusion === 'success',
-    );
-    return run
-      ? {
-          mainHeadSha: headSha,
-          mainRunId: run.id,
-          mainWorkflow: MAIN_CI_WORKFLOW,
-        }
-      : {};
-  }
-
-  async behindBy(headSha) {
-    return Number(
-      (
-        await this.gh([
-          'api',
-          `repos/${this.repo}/compare/${headSha}...main`,
-          '--jq',
-          '.ahead_by',
-        ])
-      ).trim(),
-    );
+  async mainContext(headSha) {
+    const [comparison, mainHeadSha] = await Promise.all([
+      this.gh(['api', `repos/${this.repo}/compare/${headSha}...main`]),
+      this.gh(['api', `repos/${this.repo}/commits/main`, '--jq', '.sha']),
+    ]);
+    const response = JSON.parse(comparison);
+    return {
+      behindBy: Number(response.ahead_by),
+      mainHeadSha: mainHeadSha.trim(),
+      mainCommits: response.commits.slice(-20).map((commit) => ({
+        sha: commit.sha,
+        message: String(commit.commit?.message ?? '').split('\n')[0],
+      })),
+    };
   }
 
   async updateBranch(prNumber, headSha) {
@@ -548,6 +558,10 @@ function writeJson(workdir, name, value) {
   writeFileSync(resolve(workdir, name), `${JSON.stringify(value, null, 2)}\n`);
 }
 
+export function fileSha256(path) {
+  return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
 function requiredArg(args, name) {
   const value = args.get(name);
   if (!value) throw new Error(`--${name} is required`);
@@ -570,37 +584,34 @@ async function scan(args) {
   const activeDays = Number(args.get('active-days')) || DEFAULT_ACTIVE_DAYS;
   const staleMinutes =
     Number(args.get('stale-minutes')) || DEFAULT_STALE_MINUTES;
-  const prs = await client.prs(activeDays);
+  const prs = await client.prs();
   const candidates = selectCandidateTargets(prs, { staleMinutes, activeDays });
   const options = { trustedMarkerLogins: [trustedLogin] };
   const maxCandidates =
     Number(args.get('max-candidates')) || DEFAULT_MAX_CANDIDATES_PER_RUN;
   const inputs = [];
   const selectedPrs = new Set();
-  let mainEvidence;
   for (const candidate of candidates) {
     if (inputs.length >= maxCandidates) break;
     if (selectedPrs.has(candidate.prNumber)) continue;
     try {
       const pr = prs.find((item) => item.number === candidate.prNumber);
-      if (
-        (await client.runAttempt(candidate.runId)) !== candidate.runAttempt
-      )
-        continue;
-      const comments = await client.comments(candidate.prNumber);
-      if (alreadyHandled({ ...pr, comments }, candidate, options)) continue;
-      const log =
-        candidate.jobId === null
-          ? ''
-          : skillLog(await client.jobLog(candidate.jobId));
-      const failureKey = fingerprint(candidate, log);
-      mainEvidence ??= await client.mainEvidence();
-      inputs.push({
+      const target = {
         ...candidate,
+        runAttempt: await client.runAttempt(candidate.runId),
+      };
+      const comments = await client.comments(candidate.prNumber);
+      if (alreadyHandled({ ...pr, comments }, target, options)) continue;
+      const log =
+        target.jobId === null
+          ? ''
+          : skillLog(await client.jobLog(target.jobId));
+      const failureKey = fingerprint(target, log);
+      inputs.push({
+        ...target,
         log,
         failureKey,
-        behindBy: await client.behindBy(candidate.headSha),
-        ...mainEvidence,
+        ...(await client.mainContext(target.headSha)),
       });
       selectedPrs.add(candidate.prNumber);
     } catch (error) {
@@ -609,19 +620,22 @@ async function scan(args) {
       );
     }
   }
+  const inputPath = resolve(workdir, 'ci-flaky-input.json');
   writeJson(workdir, 'ci-flaky-input.json', { candidates: inputs });
   process.stdout.write(
     `target_found=${inputs.length > 0 ? 'true' : 'false'}\n`,
   );
-  process.stdout.write(`target_count=${inputs.length}\n`);
+  process.stdout.write(`input_sha=${fileSha256(inputPath)}\n`);
 }
 
 async function act(args) {
   const repo = requiredArg(args, 'repo');
   const workdir = requiredArg(args, 'workdir');
-  const { candidates } = JSON.parse(
-    readFileSync(resolve(workdir, 'ci-flaky-input.json')),
-  );
+  const inputPath = resolve(workdir, 'ci-flaky-input.json');
+  if (fileSha256(inputPath) !== requiredArg(args, 'input-sha')) {
+    throw new Error('ci-flaky-input.json integrity check failed');
+  }
+  const { candidates } = JSON.parse(readFileSync(inputPath));
   const { decisions } = JSON.parse(
     readFileSync(resolve(workdir, 'ci-flaky-decisions.json')),
   );
@@ -648,7 +662,9 @@ async function main() {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch((error) => {
-    console.error(error.stderr ? `${error.message}\n${error.stderr}` : error.message);
+    console.error(
+      error.stderr ? `${error.message}\n${error.stderr}` : error.message,
+    );
     process.exit(1);
   });
 }

@@ -6,7 +6,6 @@ const workflow = readFileSync(
   '.github/workflows/qwen-ci-flaky-rerun.yml',
   'utf8',
 );
-const skill = readFileSync('.qwen/skills/ci-flaky-patrol/SKILL.md', 'utf8');
 const yml = parse(workflow);
 
 describe('ci flaky rerun workflow', () => {
@@ -23,9 +22,9 @@ describe('ci flaky rerun workflow', () => {
       'pull-requests': 'read',
     });
     expect(yml.jobs.act.permissions).toEqual({
-      actions: 'write',
+      actions: 'read',
       contents: 'read',
-      'pull-requests': 'write',
+      'pull-requests': 'read',
     });
     const skillStep = yml.jobs.classify.steps.find((s) =>
       s.uses?.includes('qwen-code-action'),
@@ -44,6 +43,8 @@ describe('ci flaky rerun workflow', () => {
     expect(workflow).toContain('"read_file"');
     expect(workflow).toContain('"write_file"');
     expect(workflow).not.toContain('"shell"');
+    expect(workflow).toContain('--input-sha');
+    expect(workflow).toContain('needs.classify.outputs.input_sha');
   });
 
   it('runs act even when classify finds nothing, for reset', () => {
@@ -51,13 +52,11 @@ describe('ci flaky rerun workflow', () => {
     expect(yml.jobs.act.needs).toContain('classify');
   });
 
-  it('skill defines the classification contract', () => {
-    expect(skill).toContain('rerun');
-    expect(skill).toContain('update_branch');
-    expect(skill).toContain('comment');
-    expect(skill).toContain('no_action');
-    expect(skill).toContain('failureKey');
-    expect(skill).toContain('confidence');
-    expect(skill).toContain('main-branch failures');
+  it('applies decisions before best-effort state cleanup', () => {
+    const act = workflow.indexOf("name: 'Act on PR failure decisions'");
+    const reset = workflow.indexOf("name: 'Reset successful failure state'");
+    expect(act).toBeGreaterThan(-1);
+    expect(reset).toBeGreaterThan(act);
+    expect(workflow.slice(reset)).toContain('continue-on-error: true');
   });
 });
