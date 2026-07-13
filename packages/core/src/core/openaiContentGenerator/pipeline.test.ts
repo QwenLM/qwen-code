@@ -17,6 +17,7 @@ import {
   StreamInactivityTimeoutError,
 } from './pipeline.js';
 import { OpenAIContentConverter } from './converter.js';
+import { InvalidStreamError } from '../invalid-stream-error.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { Config } from '../../config/config.js';
@@ -1699,6 +1700,46 @@ describe('ContentGenerationPipeline', () => {
         expect.any(Object),
         request,
       );
+    });
+
+    it('should pass retryable invalid stream errors to the caller without generic handling', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const invalidStreamError = new InvalidStreamError(
+        'Malformed model stream.',
+        'PROTOCOL_TAG_LEAK',
+      );
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            choices: [{ delta: { content: 'chunk' }, finish_reason: null }],
+          } as unknown as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+        () => {
+          throw invalidStreamError;
+        },
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'prompt-id',
+      );
+
+      await expect(async () => {
+        for await (const _ of resultGenerator) {
+          // consume stream
+        }
+      }).rejects.toBe(invalidStreamError);
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
 
     it('should redact proxy credentials from stream creation errors', async () => {

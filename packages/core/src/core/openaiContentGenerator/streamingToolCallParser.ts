@@ -44,6 +44,7 @@ export class StreamingToolCallParser {
   private escapes: Map<number, boolean> = new Map();
   /** Metadata for each tool call index */
   private toolCallMeta: Map<number, { id?: string; name?: string }> = new Map();
+  private namelessToolCallIndices = new Set<number>();
   /** Map from tool call ID to actual index used for storage */
   private idToIndexMap: Map<string, number> = new Map();
   /** Counter for generating new indices when collisions occur */
@@ -71,6 +72,10 @@ export class StreamingToolCallParser {
     id?: string,
     name?: string,
   ): ToolCallParseResult {
+    if (!id && !name && !chunk.trim() && !this.buffers.has(index)) {
+      return { complete: false };
+    }
+
     let actualIndex = index;
     const isKnownId = Boolean(id && this.idToIndexMap.has(id));
 
@@ -82,35 +87,13 @@ export class StreamingToolCallParser {
         actualIndex = this.idToIndexMap.get(id)!;
       } else {
         // New tool call ID
-        // Check if the requested index is already occupied by a different complete tool call
+        // A different ID means the provider reused an occupied index. Keep
+        // the existing arguments isolated even if that call never supplied a
+        // name or completed its JSON.
         if (this.buffers.has(index)) {
-          const existingBuffer = this.buffers.get(index)!;
-          const existingDepth = this.depths.get(index)!;
           const existingMeta = this.toolCallMeta.get(index);
-
-          // Check if we have a complete tool call at this index. Occupancy
-          // is signaled by the name metadata, not the buffer: an empty
-          // buffer with a name is a complete no-argument call.
-          if (
-            existingMeta?.name &&
-            existingDepth === 0 &&
-            existingMeta?.id &&
-            existingMeta.id !== id
-          ) {
-            let existingComplete = true;
-            if (existingBuffer.trim()) {
-              try {
-                JSON.parse(existingBuffer);
-              } catch {
-                // Existing buffer is not complete JSON, we can reuse this index
-                existingComplete = false;
-              }
-            }
-            if (existingComplete) {
-              // We have a complete tool call with a different ID at this index
-              // Find a new index for this tool call
-              actualIndex = this.findNextAvailableIndex();
-            }
+          if (existingMeta?.id && existingMeta.id !== id) {
+            actualIndex = this.findNextUnusedIndex();
           }
         }
 
@@ -194,6 +177,13 @@ export class StreamingToolCallParser {
     // Add chunk to buffer
     const newBuffer = currentBuffer + chunk;
     this.buffers.set(actualIndex, newBuffer);
+    const hasArguments =
+      this.namelessToolCallIndices.has(actualIndex) || /\S/.test(chunk);
+    if (!meta.name && (meta.id || hasArguments)) {
+      this.namelessToolCallIndices.add(actualIndex);
+    } else {
+      this.namelessToolCallIndices.delete(actualIndex);
+    }
 
     // Track JSON structure depth - only count brackets/braces outside of strings
     let depth = currentDepth;
@@ -261,19 +251,7 @@ export class StreamingToolCallParser {
   }
 
   hasNamelessToolCall(): boolean {
-    for (const [index, buffer] of this.buffers.entries()) {
-      const meta = this.toolCallMeta.get(index);
-      // A nameless tool call only counts as malformed when the provider
-      // actually started a real call — signaled by an assigned id or
-      // streamed argument content. Pure phantom slots (no name, id, or
-      // content) are created by trailing structural deltas and must not
-      // trigger a whole-attempt drop, which would suppress finish_reason
-      // and break legitimate tool-call responses.
-      if (!meta?.name && (meta?.id || buffer.trim())) {
-        return true;
-      }
-    }
-    return false;
+    return this.namelessToolCallIndices.size > 0;
   }
 
   /**
@@ -411,6 +389,13 @@ export class StreamingToolCallParser {
     return this.nextAvailableIndex++;
   }
 
+  private findNextUnusedIndex(): number {
+    while (this.buffers.has(this.nextAvailableIndex)) {
+      this.nextAvailableIndex++;
+    }
+    return this.nextAvailableIndex++;
+  }
+
   /**
    * Finds the most recent incomplete tool call index
    *
@@ -459,6 +444,7 @@ export class StreamingToolCallParser {
     this.inStrings.set(index, false);
     this.escapes.set(index, false);
     this.toolCallMeta.set(index, {});
+    this.namelessToolCallIndices.delete(index);
   }
 
   /**
@@ -474,6 +460,7 @@ export class StreamingToolCallParser {
     this.inStrings.clear();
     this.escapes.clear();
     this.toolCallMeta.clear();
+    this.namelessToolCallIndices.clear();
     this.idToIndexMap.clear();
     this.nextAvailableIndex = 0;
   }

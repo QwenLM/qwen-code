@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type OpenAI from 'openai';
 import type {
   Content,
   GenerateContentConfig,
@@ -23,6 +24,8 @@ import {
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
 import { classifyRetryError } from '../utils/retryErrorClassification.js';
 import { StreamContentError } from './openaiContentGenerator/pipeline.js';
+import { OpenAIContentGenerator } from './openaiContentGenerator/openaiContentGenerator.js';
+import type { OpenAICompatibleProvider } from './openaiContentGenerator/provider/index.js';
 import type { Config } from '../config/config.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
@@ -4732,26 +4735,43 @@ describe('GeminiChat', async () => {
     it('should retry protocol tag leaks four times', async () => {
       vi.useFakeTimers();
       try {
-        vi.mocked(
-          mockContentGenerator.generateContentStream,
-        ).mockImplementation(async () =>
+        const create = vi.fn().mockImplementation(async () =>
           (async function* () {
             yield {
-              candidates: [
+              id: 'protocol-tag-leak',
+              created: 1,
+              model: 'test-model',
+              choices: [
                 {
-                  content: {
-                    parts: [
-                      {
-                        text: '<analysis>hidden</analysis><summary>leaked</summary>',
-                      },
-                    ],
+                  index: 0,
+                  delta: {
+                    reasoning_content: 'hidden reasoning',
+                    content: '</think> leaked visible reasoning',
                   },
-                  finishReason: 'STOP',
+                  finish_reason: 'stop',
                 },
               ],
-            } as unknown as GenerateContentResponse;
+            } as unknown as OpenAI.Chat.ChatCompletionChunk;
           })(),
         );
+        const provider = {
+          buildClient: () =>
+            ({ chat: { completions: { create } } }) as unknown as OpenAI,
+          buildRequest: (request: OpenAI.Chat.ChatCompletionCreateParams) =>
+            request,
+          buildHeaders: () => ({}),
+          getDefaultGenerationConfig: () => ({}),
+        } as OpenAICompatibleProvider;
+        const generator = new OpenAIContentGenerator(
+          { model: 'test-model', authType: AuthType.USE_OPENAI },
+          mockConfig,
+          provider,
+        );
+        vi.mocked(mockConfig.getContentGenerator).mockReturnValue(generator);
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          model: 'test-model',
+          authType: AuthType.USE_OPENAI,
+        });
 
         const stream = await chat.sendMessageStream(
           'test-model',
@@ -4760,9 +4780,7 @@ describe('GeminiChat', async () => {
         );
         await expectStreamExhaustion(stream);
 
-        expect(
-          mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledTimes(5);
+        expect(create).toHaveBeenCalledTimes(5);
         expect(mockLogContentRetry).toHaveBeenCalledTimes(4);
         expect(mockLogContentRetryFailure).toHaveBeenCalledWith(
           mockConfig,
@@ -6197,17 +6215,6 @@ describe('GeminiChat', async () => {
         vi.useRealTimers();
       }
     });
-
-    // NOTE: no test for the InvalidStreamError content-retry branch
-    // (geminiChat.ts ~line 1399). Verified unreachable for that error
-    // class: `isTransientStreamError` and `isContentError` are the
-    // same predicate (`error instanceof InvalidStreamError`), so the
-    // transient branch above always either `continue`s or `break`s
-    // before control reaches the content branch. The
-    // `popPartialIfPushed()` call there is preserved as
-    // defense-in-depth for a future error class that should diverge
-    // the predicates; see the comment block at that call site for
-    // the full analysis.
 
     it('rolls back the chat-recording entry too when the retry succeeds', async () => {
       // The in-memory rollback test above asserts `this.history` ends

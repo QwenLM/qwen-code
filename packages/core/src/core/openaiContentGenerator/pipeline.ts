@@ -27,6 +27,7 @@ import {
   QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
 } from './constants.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { InvalidStreamError } from '../invalid-stream-error.js';
 
 const debugLogger = createDebugLogger('OPENAI_PIPELINE');
 
@@ -557,6 +558,10 @@ export class ContentGenerationPipeline {
         yield pendingFinishResponse;
       }
     } catch (error) {
+      if (error instanceof InvalidStreamError) {
+        throw error;
+      }
+
       // Re-throw StreamContentError directly so it can be handled by
       // the caller's retry logic (e.g., TPM throttling retry in sendMessageStream)
       if (error instanceof StreamContentError) {

@@ -295,16 +295,6 @@ export type StreamEvent =
   | { type: StreamEventType.COMPRESSED; info: ChatCompressionInfo }
   | { type: StreamEventType.MODEL_FALLBACK; info: ModelFallbackInfo };
 
-/**
- * Options for retrying due to invalid content from the model.
- */
-interface ContentRetryOptions {
-  /** Total number of attempts to make (1 initial + N retries). */
-  maxAttempts: number;
-  /** The base delay in milliseconds for linear backoff. */
-  initialDelayMs: number;
-}
-
 interface TryCompressOptions {
   originalTokenCountOverride?: number;
   trigger?: CompactTrigger;
@@ -334,11 +324,6 @@ interface TryCompressOptions {
    */
   customInstructions?: string;
 }
-
-const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
-  maxAttempts: 2, // 1 initial call + 1 retry
-  initialDelayMs: 500,
-};
 
 // Some providers occasionally return transient stream anomalies: either an
 // empty stream (usage metadata only, no candidates), a stream that finishes
@@ -2241,17 +2226,12 @@ export class GeminiChat {
 
         let lastFinishReason: string | undefined;
 
-        for (
-          let attempt = 0;
-          attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts;
-          attempt++
-        ) {
+        for (;;) {
           let streamYieldedChunk = false;
           try {
             if (suppressNextRetryEvent) {
               suppressNextRetryEvent = false;
             } else if (
-              attempt > 0 ||
               rateLimitRetryCount > 0 ||
               totalInvalidStreamRetryCount() > 0 ||
               transportStreamRetryCount > 0
@@ -2338,8 +2318,6 @@ export class GeminiChat {
                     skipDelay: skip,
                   },
                 };
-                // Don't count rate-limit retries against the content retry limit
-                attempt--;
                 await delayPromise;
                 continue;
               }
@@ -2383,8 +2361,6 @@ export class GeminiChat {
               });
               yield { type: StreamEventType.RETRY };
               suppressNextRetryEvent = true;
-              // Don't count transport retries against the content retry limit.
-              attempt--;
               await delay(delayMs, params.config?.abortSignal).promise;
               continue;
             }
@@ -2451,9 +2427,6 @@ export class GeminiChat {
                     };
                     yield { type: StreamEventType.RETRY };
                     suppressNextRetryEvent = true;
-                    // Do not count reactive compression against the content
-                    // validation retry budget.
-                    attempt--;
                     continue;
                   }
 
@@ -2539,45 +2512,8 @@ export class GeminiChat {
                 ),
               );
               yield { type: StreamEventType.RETRY };
-              // Don't count transient retries against content retry limit.
-              attempt--;
               await delay(delayMs, params.config?.abortSignal).promise;
               continue;
-            }
-            // Invalid-stream budget exhausted — stop immediately.
-            if (isInvalidStreamError) {
-              break;
-            }
-
-            // Currently unreachable for `InvalidStreamError`. The
-            // `isContentError` predicate is identical to
-            // `isInvalidStreamError` (`error instanceof InvalidStreamError`),
-            // and the transient branch above already either continued or
-            // broke for that class. The branch is preserved as
-            // defense-in-depth: a future error class that should consume
-            // its own content-retry budget but NOT the transient one
-            // could be threaded through here without re-deriving the
-            // popPartialIfPushed sequence. No reachable test path until
-            // the predicates diverge.
-            const isContentError = error instanceof InvalidStreamError;
-            if (isContentError) {
-              if (attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts - 1) {
-                self.popPendingPartialAssistantTurn();
-                logContentRetry(
-                  self.config,
-                  new ContentRetryEvent(
-                    attempt,
-                    (error as InvalidStreamError).type,
-                    INVALID_CONTENT_RETRY_OPTIONS.initialDelayMs,
-                    model,
-                  ),
-                );
-                await delay(
-                  INVALID_CONTENT_RETRY_OPTIONS.initialDelayMs * (attempt + 1),
-                  params.config?.abortSignal,
-                ).promise;
-                continue;
-              }
             }
             break;
           }

@@ -1115,12 +1115,14 @@ function isPossibleThinkingTagPrefix(value: string): boolean {
 
 function isTerminalThinkingTagLeak(
   state: NonNullable<RequestContext['visibleThinkingTagState']>,
+  hasMatchingThoughtTag: boolean,
 ): boolean {
   const pendingTag = state.pendingTag.toLowerCase();
   return (
     isPossibleThinkingTagPrefix(state.pendingTag) &&
     (pendingTag.startsWith('</thi')
-      ? state.openTagCount === 0
+      ? state.openTagCount === 0 &&
+        (state.atVisibleStart || hasMatchingThoughtTag)
       : pendingTag.startsWith('<think') && state.atVisibleStart)
   );
 }
@@ -1128,13 +1130,14 @@ function isTerminalThinkingTagLeak(
 function scanVisibleThinkingTags(
   text: string,
   state: NonNullable<RequestContext['visibleThinkingTagState']>,
+  hasStructuredReasoning: boolean,
+  hasMatchingThoughtTag: boolean,
 ): void {
   const markVisible = (value: string) => {
     if (state.atVisibleStart && /\S/.test(value)) {
       state.atVisibleStart = false;
     }
   };
-
   for (const char of text) {
     if (!state.pendingTag) {
       if (char === '<') {
@@ -1145,16 +1148,28 @@ function scanVisibleThinkingTags(
       continue;
     }
 
+    if (
+      /\s/.test(char) &&
+      SPACED_THINKING_TAG_PREFIX_PATTERN.test(state.pendingTag.toLowerCase())
+    ) {
+      continue;
+    }
     state.pendingTag += char;
     if (COMPLETE_THINKING_TAG_PATTERN.test(state.pendingTag)) {
+      const tagAtVisibleStart = state.atVisibleStart;
       if (state.pendingTag.startsWith('</')) {
         if (state.openTagCount === 0) {
-          state.leaked = true;
+          if (
+            hasStructuredReasoning &&
+            (tagAtVisibleStart || hasMatchingThoughtTag)
+          ) {
+            state.leaked = true;
+          }
         } else {
           state.openTagCount--;
         }
       } else {
-        if (state.atVisibleStart) {
+        if (state.atVisibleStart && hasStructuredReasoning) {
           state.leaked = true;
         }
         state.openTagCount++;
@@ -1465,9 +1480,30 @@ export function convertOpenAIChunkToGemini(
         atVisibleStart: true,
         leaked: false,
       });
-    scanVisibleThinkingTags(getVisiblePartText(parts), visibleThinkingTagState);
     const hasStructuredReasoning =
       requestContext.hasStructuredReasoningContent === true;
+    if (
+      hasStructuredReasoning &&
+      !requestContext.hasUntrustedThoughtTag &&
+      parts.some(
+        (part) =>
+          part.thought === true &&
+          typeof part.text === 'string' &&
+          THINKING_TAG_PATTERN.test(part.text),
+      )
+    ) {
+      requestContext.hasUntrustedThoughtTag = true;
+    }
+    const hasMatchingThoughtTag =
+      requestContext.hasUntrustedThoughtTag === true;
+    if (!visibleThinkingTagState.leaked) {
+      scanVisibleThinkingTags(
+        getVisiblePartText(parts),
+        visibleThinkingTagState,
+        hasStructuredReasoning,
+        hasMatchingThoughtTag,
+      );
+    }
     const hasUntrustedVisibleTag =
       hasStructuredReasoning &&
       (visibleThinkingTagState.leaked ||
@@ -1476,20 +1512,20 @@ export function convertOpenAIChunkToGemini(
       Boolean(choice.finish_reason) &&
       hasStructuredReasoning &&
       (visibleThinkingTagState.leaked ||
-        isTerminalThinkingTagLeak(visibleThinkingTagState));
-    const hasUntrustedThoughtTag =
-      hasStructuredReasoning &&
-      [...(requestContext.pendingUntrustedResponseParts ?? []), ...parts].some(
-        (part) =>
-          part.thought === true &&
-          typeof part.text === 'string' &&
-          THINKING_TAG_PATTERN.test(part.text),
-      );
+        isTerminalThinkingTagLeak(
+          visibleThinkingTagState,
+          hasMatchingThoughtTag,
+        ));
     const hasUntrustedProtocolText =
-      hasUntrustedThoughtTag || hasUntrustedVisibleTag;
+      requestContext.hasUntrustedThoughtTag === true || hasUntrustedVisibleTag;
     const toolCallWithoutName = toolCallParser.hasNamelessToolCall();
     const malformedNamelessToolCall =
       Boolean(choice.finish_reason) && toolCallWithoutName;
+    const completedToolCalls = choice.finish_reason
+      ? toolCallParser.getCompletedToolCalls()
+      : [];
+    const malformedEmptyToolCallFinish =
+      choice.finish_reason === 'tool_calls' && completedToolCalls.length === 0;
     if (malformedThinkingTagLeak) {
       requestContext.pendingUntrustedResponseParts = undefined;
       throw new InvalidStreamError(
@@ -1497,7 +1533,8 @@ export function convertOpenAIChunkToGemini(
         'PROTOCOL_TAG_LEAK',
       );
     }
-    const shouldDropMalformedAttempt = malformedNamelessToolCall;
+    const shouldDropMalformedAttempt =
+      malformedNamelessToolCall || malformedEmptyToolCallFinish;
     const shouldHoldUntrustedParts =
       toolCallWithoutName ||
       (!choice.finish_reason && hasUntrustedProtocolText);
@@ -1520,8 +1557,6 @@ export function convertOpenAIChunkToGemini(
       // Some providers (e.g. DashScope/Qwen) send "stop" or "tool_calls"
       // even when output was cut off mid-JSON due to max_tokens.
       toolCallsTruncated = toolCallParser.hasIncompleteToolCalls();
-
-      const completedToolCalls = toolCallParser.getCompletedToolCalls();
 
       for (const toolCall of completedToolCalls) {
         if (toolCall.name) {

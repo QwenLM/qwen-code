@@ -308,6 +308,22 @@ describe('StreamingToolCallParser', () => {
       expect(parser.getToolCallMeta(0).name).toBe('my_function');
     });
 
+    it('should track only real nameless tool calls', () => {
+      parser.addChunk(0, '');
+      expect(parser.hasNamelessToolCall()).toBe(false);
+
+      parser.addChunk(1, '', 'call_1');
+      expect(parser.hasNamelessToolCall()).toBe(true);
+
+      parser.addChunk(1, '', undefined, 'my_function');
+      expect(parser.hasNamelessToolCall()).toBe(false);
+
+      parser.addChunk(2, '{"value":1}');
+      expect(parser.hasNamelessToolCall()).toBe(true);
+      parser.resetIndex(2);
+      expect(parser.hasNamelessToolCall()).toBe(false);
+    });
+
     it('should detect new tool call with same index and reassign to new index', () => {
       // First tool call
       const result1 = parser.addChunk(
@@ -334,6 +350,20 @@ describe('StreamingToolCallParser', () => {
       expect(parser.getToolCallMeta(1)).toEqual({
         id: 'call_2',
         name: 'function2',
+      });
+    });
+
+    it('should isolate a new id from an earlier nameless call at the same index', () => {
+      parser.addChunk(0, '{"path":"/from-first"}', 'call_first');
+      parser.addChunk(0, '{"path":"/from-second"}', 'call_second', 'read_file');
+
+      expect(parser.getBuffer(0)).toBe('{"path":"/from-first"}');
+      expect(parser.getToolCallMeta(0)).toEqual({ id: 'call_first' });
+      expect(parser.getCompletedToolCalls()).toContainEqual({
+        id: 'call_second',
+        name: 'read_file',
+        args: { path: '/from-second' },
+        index: 1,
       });
     });
   });
@@ -829,18 +859,27 @@ describe('StreamingToolCallParser', () => {
       expect(call3?.index).toBe(3);
     });
 
-    it('should reuse incomplete index when available', () => {
+    it('should preserve an incomplete call when a different id reuses its index', () => {
       // Create an incomplete tool call at index 0
       parser.addChunk(0, '{"incomplete":', 'call_1', 'function1');
 
-      // New tool call with different ID should reuse the incomplete index
-      const result = parser.addChunk(0, ' "completed"}', 'call_2', 'function2');
+      const result = parser.addChunk(
+        0,
+        '{"completed":true}',
+        'call_2',
+        'function2',
+      );
       expect(result.complete).toBe(true);
 
-      // Should have updated the metadata for the same index
       expect(parser.getToolCallMeta(0)).toEqual({
+        id: 'call_1',
+        name: 'function1',
+      });
+      expect(parser.getCompletedToolCalls()).toContainEqual({
         id: 'call_2',
         name: 'function2',
+        args: { completed: true },
+        index: 1,
       });
     });
   });
