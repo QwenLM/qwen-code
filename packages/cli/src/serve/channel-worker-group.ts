@@ -22,16 +22,44 @@ export interface ChannelWorkerGroupSnapshot extends ChannelWorkerSnapshot {
   primary: boolean;
 }
 
+export interface ChannelWorkerGroupReconcileResult {
+  changed: boolean;
+  workers: ChannelWorkerGroupSnapshot[];
+}
+
+export class ChannelWorkerReconcileError extends Error {
+  readonly rolledBack: boolean;
+  readonly rollbackError?: string;
+  readonly stopFailed: boolean;
+
+  constructor(
+    message: string,
+    options: {
+      rolledBack: boolean;
+      rollbackError?: string;
+      stopFailed?: boolean;
+    },
+  ) {
+    super(message);
+    this.name = 'ChannelWorkerReconcileError';
+    this.rolledBack = options.rolledBack;
+    this.rollbackError = options.rollbackError;
+    this.stopFailed = options.stopFailed === true;
+  }
+}
+
 /**
- * Manages one `ChannelWorkerSupervisor` per owning workspace for a
- * multi-workspace `qwen serve --channel`. Single-workspace runs collapse to a
- * single primary supervisor, matching the pre-4b behavior.
+ * Manages one `ChannelWorkerSupervisor` per owning workspace. Single-workspace
+ * runs collapse to one primary supervisor, preserving the legacy behavior.
  */
 export interface ChannelWorkerGroup {
   start(): Promise<void>;
   stop(): Promise<void>;
-  /** On rejection, all supervisors are stopped; call again to retry. */
-  restart(): Promise<ChannelWorkerGroupSnapshot[]>;
+  reconcile(
+    groups: readonly ChannelWorkspaceGroup[],
+    options?: { force?: boolean; onRollingBack?: () => void },
+  ): Promise<ChannelWorkerGroupReconcileResult>;
+  isHealthy(): boolean;
   killAllSync(): void;
   snapshots(): ChannelWorkerGroupSnapshot[];
   /** Primary workspace snapshot, backing the legacy single-worker fields. */
@@ -57,6 +85,7 @@ export interface CreateChannelWorkerGroupOptions {
   shared: ChannelWorkerGroupSharedOptions;
   onReady?: (snapshot: ChannelWorkerGroupSnapshot) => void;
   onExit?: (snapshot: ChannelWorkerGroupSnapshot) => void;
+  onStateChange?: () => void;
   onLog?: (entry: ChannelWorkerLogEntry & { workspaceCwd: string }) => void;
 }
 
@@ -70,16 +99,50 @@ interface ChannelWorkerGroupEntry {
   workspaceId: string;
   workspaceCwd: string;
   primary: boolean;
+  selection: ChannelWorkspaceGroup['selection'];
+  generation: number;
   supervisor: ChannelWorkerSupervisor;
+}
+
+function selectionsEqual(
+  left: ChannelWorkspaceGroup['selection'],
+  right: ChannelWorkspaceGroup['selection'],
+): boolean {
+  if (left.mode !== right.mode) return false;
+  if (left.mode === 'all') return true;
+  if (right.mode === 'all' || left.names.length !== right.names.length) {
+    return false;
+  }
+  return left.names.every((name, index) => name === right.names[index]);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export function createChannelWorkerGroup(
   opts: CreateChannelWorkerGroupOptions,
 ): ChannelWorkerGroup {
-  const entries: ChannelWorkerGroupEntry[] = [];
-  const entriesByChannel = new Map<string, ChannelWorkerGroupEntry>();
-  let allEntry: ChannelWorkerGroupEntry | undefined;
-  for (const group of opts.groups) {
+  let generation = 0;
+  let entries = new Map<string, ChannelWorkerGroupEntry>();
+  const pendingEntries = new Set<ChannelWorkerGroupEntry>();
+  const pendingGenerations = new Map<string, number>();
+  let reconciling: Promise<ChannelWorkerGroupReconcileResult> | undefined;
+  let stopping = false;
+
+  const withMeta = (
+    entry: ChannelWorkerGroupEntry,
+    snapshot: ChannelWorkerSnapshot,
+  ): ChannelWorkerGroupSnapshot => ({
+    ...snapshot,
+    workspaceId: entry.workspaceId,
+    workspaceCwd: entry.workspaceCwd,
+    primary: entry.primary,
+  });
+
+  const createEntry = (
+    group: ChannelWorkspaceGroup,
+  ): ChannelWorkerGroupEntry => {
     const runtime = opts.registry.getByWorkspaceCwd(group.workspaceCwd);
     if (!runtime) {
       throw new Error(
@@ -94,16 +157,15 @@ export function createChannelWorkerGroup(
         { code: 'untrusted_workspace' },
       );
     }
-    const workspaceId = runtime.workspaceId;
-    const workspaceCwd = runtime.workspaceCwd;
-    const primary = runtime.primary;
-    const withMeta = (
+
+    const entryGeneration = ++generation;
+    const withRuntimeMeta = (
       snapshot: ChannelWorkerSnapshot,
     ): ChannelWorkerGroupSnapshot => ({
       ...snapshot,
-      workspaceId,
-      workspaceCwd,
-      primary,
+      workspaceId: runtime.workspaceId,
+      workspaceCwd: runtime.workspaceCwd,
+      primary: runtime.primary,
     });
     const supervisor = opts.createSupervisor({
       cliEntryPath: opts.shared.cliEntryPath,
@@ -111,11 +173,11 @@ export function createChannelWorkerGroup(
       ...(opts.shared.daemonToken
         ? { daemonToken: opts.shared.daemonToken }
         : {}),
-      workspace: workspaceCwd,
+      workspace: runtime.workspaceCwd,
       selection: group.selection,
       // Multi-workspace runtimes expose a per-workspace env overlay; a
-      // parent-process (single-workspace) runtime leaves it undefined so the
-      // supervisor falls back to `process.env` exactly as before.
+      // parent-process runtime leaves it undefined so the supervisor inherits
+      // process.env exactly as before.
       ...(runtime.env.effectiveEnv
         ? { workerBaseEnv: runtime.env.effectiveEnv }
         : {}),
@@ -129,35 +191,94 @@ export function createChannelWorkerGroup(
         ? { heartbeatTimeoutMs: opts.shared.heartbeatTimeoutMs }
         : {}),
       ...(opts.onReady
-        ? { onReady: (snapshot) => opts.onReady!(withMeta(snapshot)) }
+        ? {
+            onReady: (snapshot) => {
+              if (
+                entries.get(runtime.workspaceCwd)?.generation ===
+                entryGeneration
+              ) {
+                opts.onReady!(withRuntimeMeta(snapshot));
+              } else if (
+                pendingGenerations.get(runtime.workspaceCwd) !== entryGeneration
+              ) {
+                opts.onLog?.({
+                  stream: 'stderr',
+                  line: `Ignored stale channel worker ready (generation=${entryGeneration}).`,
+                  workspaceCwd: runtime.workspaceCwd,
+                });
+              }
+            },
+          }
         : {}),
       ...(opts.onExit
-        ? { onExit: (snapshot) => opts.onExit!(withMeta(snapshot)) }
+        ? {
+            onExit: (snapshot) => {
+              if (
+                entries.get(runtime.workspaceCwd)?.generation ===
+                entryGeneration
+              ) {
+                opts.onExit!(withRuntimeMeta(snapshot));
+              } else if (
+                pendingGenerations.get(runtime.workspaceCwd) !== entryGeneration
+              ) {
+                opts.onLog?.({
+                  stream: 'stderr',
+                  line: `Ignored stale channel worker exit (generation=${entryGeneration}).`,
+                  workspaceCwd: runtime.workspaceCwd,
+                });
+              }
+            },
+          }
         : {}),
       ...(opts.onLog
-        ? { onLog: (entry) => opts.onLog!({ ...entry, workspaceCwd }) }
+        ? {
+            onLog: (logEntry) =>
+              opts.onLog!({
+                ...logEntry,
+                workspaceCwd: runtime.workspaceCwd,
+              }),
+          }
         : {}),
     });
-    const entry = { workspaceId, workspaceCwd, primary, supervisor };
-    entries.push(entry);
-    if (group.selection.mode === 'all') {
-      allEntry = entry;
-    } else {
-      for (const channel of group.selection.names) {
-        entriesByChannel.set(channel, entry);
-      }
-    }
+    return {
+      workspaceId: runtime.workspaceId,
+      workspaceCwd: runtime.workspaceCwd,
+      primary: runtime.primary,
+      selection: group.selection,
+      generation: entryGeneration,
+      supervisor,
+    };
+  };
+
+  for (const group of opts.groups) {
+    const entry = createEntry(group);
+    entries.set(entry.workspaceCwd, entry);
   }
 
-  const primaryEntry = entries.find((entry) => entry.primary);
-  let restartInFlight: Promise<ChannelWorkerGroupSnapshot[]> | undefined;
-  let stopping = false;
+  const entrySnapshots = (): ChannelWorkerGroupSnapshot[] =>
+    [...entries.values()].map((entry) =>
+      withMeta(entry, entry.supervisor.snapshot()),
+    );
 
-  const stopEntries = async (
+  const stopEntry = async (entry: ChannelWorkerGroupEntry): Promise<void> => {
+    try {
+      await entry.supervisor.stop();
+    } finally {
+      opts.onStateChange?.();
+    }
+  };
+
+  const stopEntriesBestEffort = async (
+    entriesToStop: readonly ChannelWorkerGroupEntry[],
+  ): Promise<void> => {
+    await Promise.allSettled(entriesToStop.map((entry) => stopEntry(entry)));
+  };
+
+  const stopAllEntries = async (
     entriesToStop: readonly ChannelWorkerGroupEntry[],
   ): Promise<void> => {
     const results = await Promise.allSettled(
-      entriesToStop.map((entry) => entry.supervisor.stop()),
+      entriesToStop.map((entry) => stopEntry(entry)),
     );
     const failure = results.find(
       (result): result is PromiseRejectedResult => result.status === 'rejected',
@@ -165,89 +286,213 @@ export function createChannelWorkerGroup(
     if (failure) throw failure.reason;
   };
 
-  const stopEntriesBestEffort = async (
+  const stopEntriesForRollback = async (
     entriesToStop: readonly ChannelWorkerGroupEntry[],
-  ): Promise<void> => {
-    await Promise.allSettled(
-      entriesToStop.map((entry) => entry.supervisor.stop()),
-    );
+  ): Promise<{
+    error?: string;
+    failedEntries: ChannelWorkerGroupEntry[];
+  }> => {
+    let firstError: string | undefined;
+    const failedEntries: ChannelWorkerGroupEntry[] = [];
+    for (const entry of entriesToStop) {
+      try {
+        await stopEntry(entry);
+      } catch (error) {
+        firstError ??= errorMessage(error);
+        failedEntries.push(entry);
+      }
+    }
+    return {
+      ...(firstError ? { error: firstError } : {}),
+      failedEntries,
+    };
   };
 
-  return {
+  const restoreEntries = async (
+    entriesToRestore: readonly ChannelWorkerGroupEntry[],
+  ): Promise<{ rolledBack: boolean; rollbackError?: string }> => {
+    let firstError: string | undefined;
+    for (const entry of entriesToRestore) {
+      try {
+        await entry.supervisor.start();
+      } catch (error) {
+        firstError ??= errorMessage(error);
+      }
+    }
+    return firstError
+      ? { rolledBack: false, rollbackError: firstError }
+      : { rolledBack: true };
+  };
+
+  const routeEntry = (
+    channelName: string,
+  ): ChannelWorkerGroupEntry | undefined => {
+    for (const entry of entries.values()) {
+      if (
+        entry.selection.mode === 'all' ||
+        entry.selection.names.includes(channelName)
+      ) {
+        return entry;
+      }
+    }
+    return undefined;
+  };
+
+  const group: ChannelWorkerGroup = {
     async start() {
-      // Start sequentially: a failing initial launch rejects and fails runtime
-      // startup (fail-closed, no half-enabled daemon), matching single-worker
-      // behavior. Roll back workers that already reached ready before
-      // propagating the startup failure.
+      // Start sequentially so a failing initial launch can roll back every
+      // worker that already reached ready before propagating the failure.
       stopping = false;
       const started: ChannelWorkerGroupEntry[] = [];
       try {
-        for (const entry of entries) {
+        for (const entry of entries.values()) {
           if (stopping) {
             throw new Error('Channel worker group stopped during startup.');
           }
-          await entry.supervisor.start();
           started.push(entry);
+          await entry.supervisor.start();
           if (stopping) {
             throw new Error('Channel worker group stopped during startup.');
           }
         }
-      } catch (err) {
+      } catch (error) {
         await stopEntriesBestEffort(started);
-        throw err;
+        throw error;
       }
     },
     async stop() {
       stopping = true;
-      await restartInFlight?.catch(() => {});
-      await stopEntries(entries);
+      await reconciling?.catch(() => {});
+      await stopAllEntries([...entries.values()]);
     },
-    restart() {
+    reconcile(targetGroups, reconcileOptions) {
       if (stopping) {
-        return Promise.reject(new Error('Channel worker group is stopping.'));
+        return Promise.reject(
+          new ChannelWorkerReconcileError(
+            'Channel worker group has not completed stopping.',
+            { rolledBack: true, stopFailed: true },
+          ),
+        );
       }
-      restartInFlight ??= (async () => {
-        try {
-          for (const entry of entries) {
-            if (stopping) {
-              throw new Error('Channel worker group is stopping.');
-            }
-            await entry.supervisor.restart();
+      if (reconciling) return reconciling;
+      reconciling = (async () => {
+        const targets = new Map(
+          targetGroups.map((target) => [target.workspaceCwd, target]),
+        );
+        const unchanged = new Map<string, ChannelWorkerGroupEntry>();
+        const oldAffected: ChannelWorkerGroupEntry[] = [];
+        const newEntries: ChannelWorkerGroupEntry[] = [];
+
+        for (const [workspaceCwd, entry] of entries) {
+          const target = targets.get(workspaceCwd);
+          const healthy = entry.supervisor.snapshot().state === 'running';
+          if (
+            target &&
+            !reconcileOptions?.force &&
+            healthy &&
+            selectionsEqual(entry.selection, target.selection)
+          ) {
+            unchanged.set(workspaceCwd, entry);
+            targets.delete(workspaceCwd);
+          } else {
+            oldAffected.push(entry);
           }
-          return entries.map((entry) => ({
-            ...entry.supervisor.snapshot(),
-            workspaceId: entry.workspaceId,
-            workspaceCwd: entry.workspaceCwd,
-            primary: entry.primary,
-          }));
-        } catch (err) {
-          await stopEntriesBestEffort(entries);
-          throw err;
-        } finally {
-          restartInFlight = undefined;
         }
-      })();
-      return restartInFlight;
+        for (const target of targets.values()) {
+          const entry = createEntry(target);
+          newEntries.push(entry);
+          pendingEntries.add(entry);
+          pendingGenerations.set(entry.workspaceCwd, entry.generation);
+        }
+        if (oldAffected.length === 0 && newEntries.length === 0) {
+          return { changed: false, workers: entrySnapshots() };
+        }
+
+        const stoppedOld: ChannelWorkerGroupEntry[] = [];
+        try {
+          for (const entry of oldAffected) {
+            await stopEntry(entry);
+            stoppedOld.push(entry);
+          }
+        } catch (error) {
+          reconcileOptions?.onRollingBack?.();
+          const rollback = await restoreEntries(stoppedOld);
+          throw new ChannelWorkerReconcileError(errorMessage(error), {
+            ...rollback,
+            stopFailed: true,
+          });
+        }
+
+        const startedNew: ChannelWorkerGroupEntry[] = [];
+        try {
+          for (const entry of newEntries) {
+            if (stopping) {
+              throw new Error('Channel worker group stopped during reconcile.');
+            }
+            startedNew.push(entry);
+            await entry.supervisor.start();
+            if (stopping) {
+              throw new Error('Channel worker group stopped during reconcile.');
+            }
+          }
+        } catch (error) {
+          reconcileOptions?.onRollingBack?.();
+          const cleanup = await stopEntriesForRollback(startedNew);
+          if (cleanup.error) {
+            for (const entry of cleanup.failedEntries) {
+              entries.set(entry.workspaceCwd, entry);
+            }
+            throw new ChannelWorkerReconcileError(errorMessage(error), {
+              rolledBack: false,
+              rollbackError: cleanup.error,
+            });
+          }
+          if (stopping) {
+            throw new ChannelWorkerReconcileError(errorMessage(error), {
+              rolledBack: false,
+            });
+          }
+          const rollback = await restoreEntries(stoppedOld);
+          throw new ChannelWorkerReconcileError(errorMessage(error), rollback);
+        }
+
+        const committed = new Map(unchanged);
+        for (const entry of newEntries) {
+          committed.set(entry.workspaceCwd, entry);
+        }
+        entries = committed;
+        return { changed: true, workers: entrySnapshots() };
+      })().finally(() => {
+        pendingEntries.clear();
+        pendingGenerations.clear();
+        reconciling = undefined;
+      });
+      return reconciling;
+    },
+    isHealthy() {
+      return (
+        entries.size > 0 &&
+        [...entries.values()].every(
+          (entry) => entry.supervisor.snapshot().state === 'running',
+        )
+      );
     },
     killAllSync() {
       stopping = true;
-      for (const entry of entries) {
+      for (const entry of entries.values()) {
+        entry.supervisor.killAllSync();
+      }
+      for (const entry of pendingEntries) {
         entry.supervisor.killAllSync();
       }
     },
-    snapshots() {
-      return entries.map((entry) => ({
-        ...entry.supervisor.snapshot(),
-        workspaceId: entry.workspaceId,
-        workspaceCwd: entry.workspaceCwd,
-        primary: entry.primary,
-      }));
-    },
+    snapshots: entrySnapshots,
     primarySnapshot() {
-      return primaryEntry?.supervisor.snapshot() ?? { ...DISABLED_SNAPSHOT };
+      const primary = [...entries.values()].find((entry) => entry.primary);
+      return primary?.supervisor.snapshot() ?? { ...DISABLED_SNAPSHOT };
     },
     async enqueueWebhookTask(task) {
-      const entry = entriesByChannel.get(task.channelName) ?? allEntry;
+      const entry = routeEntry(task.channelName);
       if (!entry) {
         throw new ChannelWebhookEnqueueError(
           'channel_worker_unavailable',
@@ -257,4 +502,5 @@ export function createChannelWorkerGroup(
       return entry.supervisor.enqueueWebhookTask(task);
     },
   };
+  return group;
 }

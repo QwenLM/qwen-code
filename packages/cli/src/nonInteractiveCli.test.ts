@@ -40,6 +40,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LoadedSettings } from './config/settings.js';
+import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAdapter.js';
 import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
 import { _resetCleanupFunctionsForTest } from './utils/cleanup.js';
@@ -856,6 +857,123 @@ describe('runNonInteractive', () => {
     expect(resultMessage?.error?.message).toContain(
       'Loop detection halted the run',
     );
+  });
+
+  it('finalizes and reports recording failure before the JSON terminal result', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
+    setupMetricsMock();
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        { type: GeminiEventType.Content, value: 'Answer' },
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+    const order: string[] = [];
+    let recordingFailureListener:
+      | ((event: { sessionId: string; error: Error }) => void)
+      | undefined;
+    (
+      mockConfig as unknown as {
+        onChatRecordingFailure: (
+          listener: (event: { sessionId: string; error: Error }) => void,
+        ) => () => void;
+        getChatRecordingService: () => {
+          finalize: () => void;
+          flush: () => Promise<void>;
+        };
+      }
+    ).onChatRecordingFailure = (listener) => {
+      recordingFailureListener = listener;
+      return vi.fn();
+    };
+    (
+      mockConfig as unknown as {
+        getChatRecordingService: () => {
+          finalize: () => void;
+          flush: () => Promise<void>;
+        };
+      }
+    ).getChatRecordingService = () => ({
+      finalize: () => order.push('finalize'),
+      flush: async () => {
+        order.push('flush');
+        recordingFailureListener?.({
+          sessionId: 'affected-session',
+          error: new Error('/private/transcript.jsonl: ENOSPC'),
+        });
+        throw new Error('write failed');
+      },
+    });
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Test input',
+      'prompt-recording-failure',
+    );
+
+    const output = processStdoutSpy.mock.calls.at(-1)?.[0] as string;
+    const messages = JSON.parse(output) as Array<{
+      type: string;
+      subtype?: string;
+      session_id?: string;
+      data?: { session_id?: string };
+    }>;
+    const warningIndex = messages.findIndex(
+      (message) => message.subtype === 'session_recording_degraded',
+    );
+    const resultIndex = messages.findIndex(
+      (message) => message.type === 'result',
+    );
+    expect(order).toEqual(['finalize', 'flush']);
+    expect(warningIndex).toBeGreaterThanOrEqual(0);
+    expect(warningIndex).toBeLessThan(resultIndex);
+    expect(messages[warningIndex]).toMatchObject({
+      session_id: 'affected-session',
+      data: { session_id: 'affected-session' },
+    });
+    expect(output).not.toContain('/private/transcript.jsonl');
+  });
+
+  it('flushes but does not finalize when the caller owns the stream adapter', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        { type: GeminiEventType.Content, value: 'Answer' },
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+    const finalize = vi.fn();
+    const flush = vi.fn().mockResolvedValue(undefined);
+    (
+      mockConfig as unknown as {
+        getChatRecordingService: () => {
+          finalize: () => void;
+          flush: () => Promise<void>;
+        };
+      }
+    ).getChatRecordingService = () => ({ finalize, flush });
+    const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Test input',
+      'prompt-caller-owned-adapter',
+      { adapter },
+    );
+
+    expect(flush).toHaveBeenCalledOnce();
+    expect(finalize).not.toHaveBeenCalled();
   });
 
   it('should handle a single tool call and respond', async () => {
@@ -1752,6 +1870,16 @@ describe('runNonInteractive', () => {
     // strictly forbid is the double-wrap and any handleError-path duplicate.
     (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.TEXT);
     setupMetricsMock();
+    const finalize = vi.fn();
+    const flush = vi.fn().mockResolvedValue(undefined);
+    (
+      mockConfig as unknown as {
+        getChatRecordingService: () => {
+          finalize: () => void;
+          flush: () => Promise<void>;
+        };
+      }
+    ).getChatRecordingService = () => ({ finalize, flush });
 
     const apiErrorEvent: ServerGeminiStreamEvent = {
       type: GeminiEventType.Error,
@@ -1775,6 +1903,9 @@ describe('runNonInteractive', () => {
         'prompt-id-double-wrap',
       ),
     ).rejects.toBeInstanceOf(AlreadyReportedError);
+
+    expect(finalize).toHaveBeenCalledOnce();
+    expect(flush).toHaveBeenCalledOnce();
 
     const stderrOutput = processStderrSpy.mock.calls
       .map((call) => String(call[0]))

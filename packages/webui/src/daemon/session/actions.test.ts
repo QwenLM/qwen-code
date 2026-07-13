@@ -272,6 +272,35 @@ describe('createDaemonSessionActions', () => {
     expect(pendingSessionLoadRef.current?.sessionId).toBe('session-b');
   });
 
+  it('keeps the active workspace when a session load omits one', () => {
+    const setRestoreWorkspaceCwd = vi.fn();
+    const { actions } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace/secondary',
+      },
+      setRestoreWorkspaceCwd,
+    });
+
+    void actions.loadSession('session-b').catch(() => undefined);
+
+    expect(setRestoreWorkspaceCwd).toHaveBeenCalledWith('/workspace/secondary');
+  });
+
+  it('forwards the workspace when resuming a session', () => {
+    const setRestoreWorkspaceCwd = vi.fn();
+    const { actions } = createActionsHarness({
+      connection: { status: 'connected', workspaceCwd: '/workspace/primary' },
+      setRestoreWorkspaceCwd,
+    });
+
+    void actions
+      .resumeSession('session-b', { workspaceCwd: '/workspace/secondary' })
+      .catch(() => undefined);
+
+    expect(setRestoreWorkspaceCwd).toHaveBeenCalledWith('/workspace/secondary');
+  });
+
   it('clears transcript loading when a session switch fails', async () => {
     vi.useFakeTimers();
     try {
@@ -418,6 +447,7 @@ function createActionsHarness(
     pendingSessionLoadRef?: { current: PendingSessionLoad | undefined };
     session?: ReturnType<typeof createMockSession>;
     setAttachSessionNonce?: ReturnType<typeof vi.fn>;
+    setRestoreWorkspaceCwd?: ReturnType<typeof vi.fn>;
   } = {},
 ) {
   let connection: DaemonConnectionState = opts.connection ?? {
@@ -467,6 +497,7 @@ function createActionsHarness(
     },
     setPromptStatus: vi.fn(),
     setRestoreSessionId: vi.fn(),
+    setRestoreWorkspaceCwd: opts.setRestoreWorkspaceCwd ?? vi.fn(),
     setRestoreMode: vi.fn(),
     setRestoreSessionNonce: vi.fn(),
     setAttachSessionNonce: opts.setAttachSessionNonce ?? vi.fn(),

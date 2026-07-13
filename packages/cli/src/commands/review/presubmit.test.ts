@@ -13,6 +13,7 @@ const {
   ghApiAllMock,
   currentUserMock,
   ensureAuthenticatedMock,
+  setGhHostMock,
   readFileSyncMock,
   writeFileSyncMock,
   writeStdoutLineMock,
@@ -22,6 +23,7 @@ const {
   ghApiAllMock: vi.fn(),
   currentUserMock: vi.fn(),
   ensureAuthenticatedMock: vi.fn(),
+  setGhHostMock: vi.fn(),
   readFileSyncMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
   writeStdoutLineMock: vi.fn(),
@@ -33,6 +35,7 @@ vi.mock('./lib/gh.js', () => ({
   ghApiAll: ghApiAllMock,
   currentUser: currentUserMock,
   ensureAuthenticated: ensureAuthenticatedMock,
+  setGhHost: setGhHostMock,
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -118,5 +121,33 @@ describe('presubmitCommand', () => {
     expect(result.ciStatus.class).toBe('all_pass');
     expect(result.downgradeApprove).toBe(false);
     expect(result.downgradeReasons).not.toContain('CI still running');
+  });
+
+  it('threads --host to the gh layer before any call (GitHub Enterprise routing is code, not prose)', async () => {
+    ghApiMock.mockReturnValue(null);
+    ghApiAllMock.mockReturnValue([]);
+    currentUserMock.mockReturnValue('someone');
+    ghMock.mockReturnValue('{}');
+
+    const handler = presubmitCommand.handler;
+    if (!handler) throw new Error('presubmit handler missing');
+    try {
+      await handler({
+        ...baseArgs,
+        host: 'github.example.com',
+      } as unknown as Parameters<typeof handler>[0]);
+    } catch {
+      // gh is mocked; a downstream failure is irrelevant to this wiring test
+    }
+
+    expect(setGhHostMock).toHaveBeenCalledWith('github.example.com');
+    // And the default path resets rather than leaking a prior host.
+    setGhHostMock.mockClear();
+    try {
+      await handler(baseArgs as unknown as Parameters<typeof handler>[0]);
+    } catch {
+      // same
+    }
+    expect(setGhHostMock).toHaveBeenCalledWith(undefined);
   });
 });

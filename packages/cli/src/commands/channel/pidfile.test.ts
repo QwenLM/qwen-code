@@ -16,6 +16,7 @@ const fsFds = vi.hoisted(() => {
   return fds;
 });
 const mockGlobalQwenDir = vi.hoisted(() => '/tmp/qwen-pidfile-test/.qwen');
+const fsControls = vi.hoisted(() => ({ failUnlink: false }));
 
 vi.mock('node:fs', () => {
   const mock = {
@@ -76,6 +77,7 @@ vi.mock('node:fs', () => {
     },
     mkdirSync: () => {},
     unlinkSync: (p: string) => {
+      if (fsControls.failUnlink) throw new Error('EPERM');
       delete fsStore[p];
     },
     constants: {
@@ -116,6 +118,7 @@ beforeEach(() => {
   for (const k of Object.keys(fsFds.paths)) delete fsFds.paths[Number(k)];
   for (const k of Object.keys(fsFds.flags)) delete fsFds.flags[Number(k)];
   fsFds.openedFlags.length = 0;
+  fsControls.failUnlink = false;
 });
 
 afterEach(() => {
@@ -510,6 +513,19 @@ describe('removeServeServiceInfo', () => {
     expect(readServiceInfo()).toMatchObject({
       owner: 'channel',
       pid: process.pid,
+    });
+  });
+
+  it('returns false when the owned pidfile cannot be unlinked', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+    writeServeServiceInfo({ channels: ['telegram'], servePid: 4321 });
+    fsControls.failUnlink = true;
+
+    expect(removeServeServiceInfo(4321)).toBe(false);
+    expect(readServiceInfo()).toMatchObject({
+      owner: 'serve',
+      servePid: 4321,
     });
   });
 });

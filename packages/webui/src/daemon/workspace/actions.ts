@@ -470,10 +470,13 @@ export function createDaemonWorkspaceActions({
     // Scheduled tasks (durable cron). Raw fetch like glob/stat/list — the
     // /scheduled-tasks routes are REST-only and not yet on the DaemonClient
     // transport, so this path only reaches the daemon over plain HTTP (the
-    // web-shell's own origin), which is exactly where the page runs.
-    async listScheduledTasks() {
+    // web-shell's own origin), which is exactly where the page runs. A
+    // `workspaceId` selects a non-primary workspace's own cron file via the
+    // workspace-qualified route; omitting it hits the primary surface.
+    async listScheduledTasks(workspaceId) {
       requireClient(getClient, 'List scheduled tasks failed');
-      const url = createDaemonRequestUrl(baseUrl, '/scheduled-tasks');
+      const path = scheduledTasksPath(workspaceId);
+      const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
         fetch(serializeDaemonRequestUrl(url, baseUrl), {
           headers: createDaemonHeaders(token),
@@ -481,15 +484,16 @@ export function createDaemonWorkspaceActions({
         'List scheduled tasks timed out',
       );
       if (!res.ok) {
-        throw new Error(await readDaemonError(res, 'GET /scheduled-tasks'));
+        throw new Error(await readDaemonError(res, `GET ${path}`));
       }
       const data = (await res.json()) as { tasks?: DaemonScheduledTask[] };
       return Array.isArray(data.tasks) ? data.tasks : [];
     },
 
-    async createScheduledTask(req) {
+    async createScheduledTask(req, workspaceId) {
       requireClient(getClient, 'Create scheduled task failed');
-      const url = createDaemonRequestUrl(baseUrl, '/scheduled-tasks');
+      const path = scheduledTasksPath(workspaceId);
+      const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
         fetch(serializeDaemonRequestUrl(url, baseUrl), {
           method: 'POST',
@@ -499,17 +503,18 @@ export function createDaemonWorkspaceActions({
         'Create scheduled task timed out',
       );
       if (!res.ok) {
-        throw new Error(await readDaemonError(res, 'POST /scheduled-tasks'));
+        throw new Error(await readDaemonError(res, `POST ${path}`));
       }
       return (await res.json()) as DaemonScheduledTask;
     },
 
-    async updateScheduledTask(id, patch) {
+    async updateScheduledTask(id, patch, workspaceId) {
       requireClient(getClient, 'Update scheduled task failed');
-      const url = createDaemonRequestUrl(
-        baseUrl,
-        `/scheduled-tasks/${encodeURIComponent(id)}`,
+      const path = scheduledTasksPath(
+        workspaceId,
+        `/${encodeURIComponent(id)}`,
       );
+      const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
         fetch(serializeDaemonRequestUrl(url, baseUrl), {
           method: 'PATCH',
@@ -519,19 +524,18 @@ export function createDaemonWorkspaceActions({
         'Update scheduled task timed out',
       );
       if (!res.ok) {
-        throw new Error(
-          await readDaemonError(res, `PATCH /scheduled-tasks/${id}`),
-        );
+        throw new Error(await readDaemonError(res, `PATCH ${path}`));
       }
       return (await res.json()) as DaemonScheduledTask;
     },
 
-    async runScheduledTask(id) {
+    async runScheduledTask(id, workspaceId) {
       requireClient(getClient, 'Run scheduled task failed');
-      const url = createDaemonRequestUrl(
-        baseUrl,
-        `/scheduled-tasks/${encodeURIComponent(id)}/run`,
+      const path = scheduledTasksPath(
+        workspaceId,
+        `/${encodeURIComponent(id)}/run`,
       );
+      const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
         fetch(serializeDaemonRequestUrl(url, baseUrl), {
           method: 'POST',
@@ -540,19 +544,18 @@ export function createDaemonWorkspaceActions({
         'Run scheduled task timed out',
       );
       if (!res.ok) {
-        throw new Error(
-          await readDaemonError(res, `POST /scheduled-tasks/${id}/run`),
-        );
+        throw new Error(await readDaemonError(res, `POST ${path}`));
       }
       return (await res.json()) as DaemonScheduledTask;
     },
 
-    async deleteScheduledTask(id) {
+    async deleteScheduledTask(id, workspaceId) {
       requireClient(getClient, 'Delete scheduled task failed');
-      const url = createDaemonRequestUrl(
-        baseUrl,
-        `/scheduled-tasks/${encodeURIComponent(id)}`,
+      const path = scheduledTasksPath(
+        workspaceId,
+        `/${encodeURIComponent(id)}`,
       );
+      const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
         fetch(serializeDaemonRequestUrl(url, baseUrl), {
           method: 'DELETE',
@@ -561,9 +564,7 @@ export function createDaemonWorkspaceActions({
         'Delete scheduled task timed out',
       );
       if (!res.ok) {
-        throw new Error(
-          await readDaemonError(res, `DELETE /scheduled-tasks/${id}`),
-        );
+        throw new Error(await readDaemonError(res, `DELETE ${path}`));
       }
     },
 
@@ -750,6 +751,18 @@ function requireWorkspaceCwd(
     throw new Error('Daemon workspace is not connected');
   }
   return cwd;
+}
+
+// Builds a scheduled-tasks REST path. With a `workspaceId` it targets that
+// workspace's own cron file via the qualified route; without one it hits the
+// primary surface. `suffix` appends the task id (and `/run`) for item routes.
+// The aggregated view passes the primary workspace as `undefined`, so the
+// primary keeps its trust-free unqualified surface while secondaries use the
+// (trust-checked) qualified one.
+function scheduledTasksPath(workspaceId?: string, suffix = ''): string {
+  return workspaceId
+    ? `/workspaces/${encodeURIComponent(workspaceId)}/scheduled-tasks${suffix}`
+    : `/scheduled-tasks${suffix}`;
 }
 
 function createDaemonHeaders(token: string | undefined): HeadersInit {

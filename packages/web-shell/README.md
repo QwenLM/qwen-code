@@ -11,8 +11,60 @@ Qwen Code Web Shell 是面向浏览器的 daemon 会话终端 UI，可以作为 
 - `@qwen-code/sdk`：`>=0.1.8`
 - 浏览器环境需要能访问 Qwen Code daemon serve 的 HTTP 接口。
 
-组件包会自动注入自身样式，样式已通过 CSS Modules 和组件作用域隔离；
-接入方不需要额外引入全局 CSS。
+组件包会自动注入自身的 CSS（包括 Tailwind 编译产物），接入方不需要配置
+Tailwind 或额外引入全局 CSS。
+
+## Tailwind 与 shadcn/ui
+
+Web Shell 已配置 Tailwind CSS v4 和 shadcn/ui。shadcn 的 token 仅用于新增的
+Tailwind/shadcn 组件；现有 CSS Modules 的主题色值保持不变。组件代码在仓库内，
+可直接修改。
+
+### 新增 UI 的约定
+
+- 新增通用 UI 或交互组件时，优先使用 shadcn/ui 已提供的组件，再根据 Web Shell
+  的需求修改生成到仓库中的源码。已有且稳定的 CSS Modules 组件不要求为了统一而
+  重写。
+- Tailwind class 使用标准的无前缀写法，例如 `flex gap-2`。发布构建会通过 PostCSS
+  将生成的选择器限制在 Web Shell root 和 portal root，并为全局动画、CSS property
+  注册增加 Web Shell 前缀，避免与接入方样式冲突。
+- shadcn 颜色必须使用 `background`、`primary`、`muted` 等语义 token，不要直接
+  引用 Web Shell 原有颜色变量。原有 CSS Modules 继续使用原来的 token，两套色值
+  各自维护。
+- Dialog、Popover、DropdownMenu、Tooltip 等包含 Portal 的组件，必须将内容挂载到
+  Web Shell 的 portal root。新增 shadcn 组件后，应参考现有 `dialog.tsx`，使用
+  `useWebShellPortalRoot()` 向 Radix Portal 传入 `container`。这样主题、旧 CSS
+  变量以及外部配置的 z-index 才能正确继承。
+- 保留组件上的 `data-web-shell-*` 属性和公开 CSS 变量。接入方可能通过这些属性或
+  `--web-shell-dialog-backdrop-z-index`、`--web-shell-popover-z-index`、
+  `--web-shell-tooltip-z-index` 等变量定制样式和层级。
+
+在 `packages/web-shell` 目录添加后续组件，例如：
+
+```bash
+npx shadcn@latest add button
+```
+
+生成后需要检查 diff。shadcn CLI 可能更新 `globals.css`、依赖或生成默认 Portal
+实现，不应覆盖现有的 CSS scope、语义 token 和 portal root 适配。组件默认仅供
+Web Shell 内部使用；没有明确的公共 API 需求时，不要从包入口导出。
+
+Tailwind 会在发布前编译并内联到 npm 包，接入方不需要安装或配置 Tailwind，也不
+需要额外引入 `globals.css`。
+
+### 图标约定
+
+- 新增图标统一优先使用 `lucide-react`，不要为已有的常见图标重复编写 SVG。
+- 使用具名静态导入，确保 Vite/Rollup 可以按需打包：
+
+```tsx
+import { CheckIcon, XIcon } from 'lucide-react';
+```
+
+- 不要使用 `import * as Icons` 后按名称动态取图标，这可能把整个图标库打入产物。
+- 图标默认使用 `currentColor`，尺寸优先交给 shadcn 组件或 Tailwind class 控制，
+  避免在每个调用处重复添加颜色、margin 和 padding。
+- 只有 Lucide 没有对应图标或需要产品专属图形时，才新增自定义 SVG。
 
 ## 安装
 
@@ -46,6 +98,9 @@ export function QwenCodePanel() {
       sessionId="838e1811-9f84-4848-9915-d9a7f01ff5c6"
       onSessionIdChange={(sessionId) => {
         console.log('current session:', sessionId);
+      }}
+      onSessionCreated={async (sessionId) => {
+        await registerSession(sessionId);
       }}
       theme="dark"
       language="zh-CN"
@@ -95,13 +150,14 @@ export function App() {
 
 ### WebShell
 
-| 属性                | 类型                                       | 说明                              |
-| ------------------- | ------------------------------------------ | --------------------------------- |
-| `onSessionIdChange` | `(sessionId: string \| undefined) => void` | 当前 session id 变化或清空时触发  |
-| `theme`             | `'dark' \| 'light'`                        | UI 主题，默认 `dark`              |
-| `onThemeChange`     | `(theme: WebShellTheme) => void`           | `/theme` 命令切换主题后触发       |
-| `language`          | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`       | UI 语言                           |
-| `onLanguageChange`  | `(language: WebShellLanguage) => void`     | `/language ui` 切换 UI 语言后触发 |
+| 属性                | 类型                                                             | 说明                                                                             |
+| ------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `onSessionIdChange` | `(sessionId: string \| undefined, workspaceId?: string) => void` | 当前 session id 或 workspace id 变化或清空时触发                                 |
+| `onSessionCreated`  | `(sessionId: string) => Promise<void> \| void`                   | 新 session 创建后触发；完成前会阻塞 session 初始化和 prompt 提交，最长等待 30 秒 |
+| `theme`             | `'dark' \| 'light'`                                              | UI 主题，默认 `dark`                                                             |
+| `onThemeChange`     | `(theme: WebShellTheme) => void`                                 | `/theme` 命令切换主题后触发                                                      |
+| `language`          | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`                             | UI 语言                                                                          |
+| `onLanguageChange`  | `(language: WebShellLanguage) => void`                           | `/language ui` 切换 UI 语言后触发                                                |
 
 ## 可选图表 Renderer
 

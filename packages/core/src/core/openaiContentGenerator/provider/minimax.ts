@@ -38,7 +38,7 @@ export class MiniMaxOpenAICompatibleProvider extends DefaultOpenAICompatibleProv
     }
   }
 
-  override getResponseParsingOptions(): OpenAIResponseParsingOptions {
+  getResponseParsingOptions(): OpenAIResponseParsingOptions {
     return { taggedThinkingTags: true };
   }
 }

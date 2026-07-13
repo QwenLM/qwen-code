@@ -6,12 +6,14 @@ import type {
   DaemonSettingDescriptor,
   DaemonSettingUpdateResult,
   DaemonWorkspaceSettingsStatus,
+  DaemonWorkspaceProviderStatus,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
 import {
   SettingsMessage,
   type SettingsMessageSettingsState,
 } from './SettingsMessage';
+import type { ModelManagementProps } from './ModelManagementSection';
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -59,23 +61,6 @@ function subDialogSetting(): DaemonSettingDescriptor {
   };
 }
 
-/** Theme with divergent per-scope values so scope-aware display is observable. */
-function themeSetting(): DaemonSettingDescriptor {
-  return {
-    key: 'ui.theme',
-    type: 'string',
-    label: 'Theme',
-    category: 'UI',
-    requiresRestart: false,
-    default: 'Qwen Dark',
-    values: {
-      effective: 'Qwen Dark',
-      workspace: 'Qwen Dark',
-      user: 'Qwen Light',
-    },
-  };
-}
-
 function makeState(
   settings: DaemonSettingDescriptor[],
   setValue: SettingsMessageSettingsState['setValue'],
@@ -91,12 +76,43 @@ function makeState(
   };
 }
 
+function makeModelManagement(): ModelManagementProps {
+  const providers: DaemonWorkspaceProviderStatus[] = [
+    {
+      kind: 'model_provider',
+      status: 'ok',
+      authType: 'openai',
+      current: true,
+      models: [
+        {
+          modelId: 'gpt-4o(openai)',
+          baseModelId: 'gpt-4o',
+          name: 'GPT-4o',
+          isCurrent: true,
+          isRuntime: false,
+        },
+      ],
+    },
+  ];
+  return {
+    providers,
+    currentModelId: 'gpt-4o(openai)',
+    loading: false,
+    error: undefined,
+    busy: false,
+    onSelectModel: vi.fn(),
+    onDeleteModel: vi.fn(),
+    onAddModel: vi.fn(),
+  };
+}
+
 const noop = () => {};
 
 function renderPanel(
   state: SettingsMessageSettingsState,
   overrides: Partial<{
     onSubDialog: (key: string, scope: 'workspace' | 'user') => void;
+    modelManagement: ModelManagementProps;
   }> = {},
 ): HTMLElement {
   return render(
@@ -109,18 +125,34 @@ function renderPanel(
         onSubDialog={overrides.onSubDialog ?? noop}
         chatWidthMode="1000"
         onChatWidthModeChange={noop}
+        modelManagement={overrides.modelManagement}
       />
     </I18nProvider>,
   );
 }
 
-/** The second scope tab is "User"; clicking it flips the panel to user scope. */
+/**
+ * The second scope tab (radix TabsTrigger) is "User". Radix Tabs default to
+ * automatic activation (on focus), so focus it then click to flip to user.
+ */
 function clickUserTab(container: HTMLElement): void {
   const tabs = container.querySelectorAll<HTMLButtonElement>('[role="tab"]');
   const userTab = tabs[1];
   if (!userTab) throw new Error('User scope tab not found');
-  act(() => userTab.click());
+  act(() => {
+    userTab.focus();
+    userTab.click();
+  });
   expect(userTab.getAttribute('aria-selected')).toBe('true');
+}
+
+/** The boolean control is a radix Switch (button[role="switch"]). */
+function switchButton(container: HTMLElement): HTMLButtonElement {
+  const el = container.querySelector<HTMLButtonElement>(
+    'button[role="switch"]',
+  );
+  if (!el) throw new Error('boolean switch not found');
+  return el;
 }
 
 describe('SettingsMessage user-scope editing', () => {
@@ -137,13 +169,8 @@ describe('SettingsMessage user-scope editing', () => {
     const container = renderPanel(makeState([boolSetting()], setValue));
 
     clickUserTab(container);
-
-    const toggle = container.querySelector<HTMLButtonElement>(
-      'button[aria-pressed]',
-    );
-    if (!toggle) throw new Error('boolean toggle not found');
     await act(async () => {
-      toggle.click();
+      switchButton(container).click();
     });
 
     expect(setValue).toHaveBeenCalledWith('user', 'general.testFlag', true);
@@ -161,12 +188,8 @@ describe('SettingsMessage user-scope editing', () => {
     );
     const container = renderPanel(makeState([boolSetting()], setValue));
 
-    const toggle = container.querySelector<HTMLButtonElement>(
-      'button[aria-pressed]',
-    );
-    if (!toggle) throw new Error('boolean toggle not found');
     await act(async () => {
-      toggle.click();
+      switchButton(container).click();
     });
 
     expect(setValue).toHaveBeenCalledWith(
@@ -187,8 +210,8 @@ describe('SettingsMessage user-scope editing', () => {
 
     clickUserTab(container);
 
-    // The only control button outside the scope tabs and the category nav is
-    // the fastModel sub-dialog button.
+    // The fastModel sub-dialog Button is the only control button outside the
+    // scope tabs and the category nav.
     const nav = container.querySelector('nav');
     const modelButton = Array.from(
       container.querySelectorAll<HTMLButtonElement>('button'),
@@ -199,20 +222,17 @@ describe('SettingsMessage user-scope editing', () => {
     expect(onSubDialog).toHaveBeenCalledWith('fastModel', 'user');
   });
 
-  it('displays the theme value for the selected scope, not the effective merge', () => {
+  it('renders the model-management block inside the Model category', () => {
     const setValue = vi.fn(() =>
       Promise.resolve({} as DaemonSettingUpdateResult),
     );
-    const container = renderPanel(makeState([themeSetting()], setValue));
+    const container = renderPanel(makeState([subDialogSetting()], setValue), {
+      modelManagement: makeModelManagement(),
+    });
 
-    // Workspace tab (default) → workspace value "Qwen Dark" → dark.
-    const select = container.querySelector<HTMLSelectElement>('select');
-    if (!select) throw new Error('theme select not found');
-    expect(select.value).toBe('dark');
-
-    // User tab → user value "Qwen Light" → light (not the effective dark).
-    clickUserTab(container);
-    const userSelect = container.querySelector<HTMLSelectElement>('select');
-    expect(userSelect?.value).toBe('light');
+    // Model is the only category, so it's active — the management block shows.
+    const block = container.querySelector('[data-testid="model-management"]');
+    expect(block).toBeTruthy();
+    expect(block?.textContent).toContain('GPT-4o');
   });
 });
