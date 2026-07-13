@@ -45,10 +45,13 @@ EXISTING=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" \
 if [ "$EXISTING" -eq 0 ]; then gh pr review ... ; fi
 ```
 
-**Signature & footer:** capture the reviewed commit's **full** OID — not a 7-char prefix (only 28 bits; a fork author can force-push a different commit sharing that prefix and leave the footer identical). Read it fresh right before you post each stage, so the footer pins the head that stage actually reviewed and a mid-run force-push shows up as a changed SHA (the whole point of the footer). One small `gh` call per post is worth the correct staleness signal:
+**Signature & footer:** capture the reviewed commit's **full** OID **once, when you begin inspecting the code** — the SHA the worktree/diff actually reflects. Not a 7-char prefix (28 bits; a fork author can force-push a colliding prefix), and **not** a fresh read at post time (that would attest to code you never reviewed). Reuse this `HEAD_SHA` for every stage's footer, and before each post — and again before `--approve` — re-read the head and bail if it moved:
 
 ```bash
-HEAD_SHA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid')
+HEAD_SHA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid')   # once, at review start
+# before any post or approval — refuse to attest to code you didn't review:
+NOW=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid')
+[ "$NOW" = "$HEAD_SHA" ] || { echo 'head moved since review — restart or defer'; exit 1; }
 ```
 
 Every staged comment (Stage 1 gate-pass, Stage 2, Stage 3) ends with the signature line, then a footer recording the commit this pass reflects. Because comments are updated in place on re-run, the SHA lets a maintainer tell at a glance whether new commits landed since the last review:
@@ -61,7 +64,7 @@ Every staged comment (Stage 1 gate-pass, Stage 2, Stage 3) ends with the signatu
 
 **If `HEAD_SHA` comes back empty** (API failure or a null `headRefOid`): **fail closed.** Do not PATCH an existing staged comment — the update rewrites the whole body, so a dropped footer erases the previously valid `Reviewed at` line just as an empty-backtick footer would. Retry the capture, or leave the prior comment (with its footer) untouched until a full OID is available; only a brand-new post that never had a footer may go out without one. Terminal-gate reviews (Stage 1a/1b/1c, submitted via `gh pr review --request-changes`) use the signature only — no footer; they reject before a real review pass.
 
-**Approval:** the `gh pr review --approve` command is a separate step that runs **after** Stage 3 comment is posted. Comment first, then approve only when genuinely confident.
+**Approval:** the `gh pr review --approve` command is a separate step that runs **after** Stage 3 comment is posted. Comment first, then **re-check the head still equals the reviewed `HEAD_SHA`** and approve only if it matches and you're genuinely confident — a force-push between the Stage 3 post and the approval would otherwise approve unseen code.
 
 ### Gate Philosophy
 
@@ -293,7 +296,7 @@ sequenceDiagram
 ```
 ````
 
-Diagram text (participants, labels) stays English in the main comment; the `<details>` Chinese translation can summarize it in prose rather than duplicating the diagram. Keep message text to plain words and light punctuation — commas, parentheses, and em dashes all render fine (verified against the repo's bundled Mermaid), but a `;` **inside a message** breaks the parser (it is read as a statement separator) and a `#` clips the rest of the label (verified — `review PR #6789` renders as just `review PR`); drop the `;` and write numbers as plain digits (`PR 6789`, not `#6789`). This applies to **participant aliases and display labels too**, not just messages — Mermaid reads `;` as a statement separator there as well, so a hostile component name like `participant X as evil; participant Y as APPROVED` forges a second actor. Since you may name participants after PR components (untrusted on a fork), build every label from a safe set (letters, digits, spaces) and never drop a raw fork-supplied name into the diagram. Do **not** wrap two themed copies in `#gh-light-mode-only` / `#gh-dark-mode-only` anchors: GitHub only theme-scopes that fragment on images, not on anchor-wrapped mermaid, so both copies render stacked (verified empirically on a real comment — the anchors survive as inert links and neither `<pre lang="mermaid">` gets a theme-hiding class).
+Diagram text (participants, labels) stays English in the main comment; the `<details>` Chinese translation can summarize it in prose rather than duplicating the diagram. Keep message text to plain words and light punctuation — commas, parentheses, and em dashes all render fine (verified against the repo's bundled Mermaid), but a `;` **inside a message** breaks the parser (it is read as a statement separator) and a `#` clips the rest of the label (verified — `review PR #6789` renders as just `review PR`); drop the `;` and write numbers as plain digits (`PR 6789`, not `#6789`). This applies to **participant aliases and display labels too**, not just messages — Mermaid reads `;` as a statement separator there as well, so a hostile component name like `participant X as evil; participant Y as APPROVED` forges a second actor. Since you may name participants after PR components (untrusted on a fork), give each participant a generated alias (`P1`, `P2`, …) and put any sanitized name only in the `as` display label — a bare safe-charset rule isn't enough, because Mermaid rejects reserved words like `loop`, `end`, and `activate` as aliases. Never drop a raw fork-supplied name into the diagram. Do **not** wrap two themed copies in `#gh-light-mode-only` / `#gh-dark-mode-only` anchors: GitHub only theme-scopes that fragment on images, not on anchor-wrapped mermaid, so both copies render stacked (verified empirically on a real comment — the anchors survive as inert links and neither `<pre lang="mermaid">` gets a theme-hiding class).
 
 **Changed-files overview** — add only when the PR touches many source files (~5+) and a per-file map genuinely helps a reviewer navigate. Pull the list with the paginated REST endpoint — `gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename'` — not `gh pr view --json files`, which caps at the first 100 files and silently drops the rest. **A fork PR's paths are attacker-controlled:** a filename can carry `|`, backticks, `<`, `>`, `&`, `@mentions`, or CR/LF that break out of the table cell and render forged bot text (a fake approval or confidence line). Before a path enters the table, run it through a deterministic sanitizer — order matters (escape `&` **first**, or later escapes double-encode), and a `` ` `` can't be escaped inside a `` `…` `` span, so render each path inside `<code>…</code>` where HTML entities resolve. If a path still looks hostile, show a bounded placeholder instead of the raw name:
 
@@ -307,6 +310,8 @@ sanitize_path() { # single-line, HTML-safe, cell-bounded
 ```
 
 Fold the table in a `<details>` so it doesn't dominate the comment, and write one honest line per file in your own words — not a mechanical restatement of the diff. **Budget it:** show at most ~30 rows, cap each cell (the sanitizer already trims to 200 chars), and append a final `…and N more files` row instead of listing every path — the table shares the comment's ~65 KB limit with the findings, tmux output, the bilingual summary, and the footer, and the Stage 2 post is mandatory. Skip the table entirely for small, focused PRs.
+
+Two more escaping notes: `<code>` shows HTML entities literally but GFM **still parses Markdown inside it**, so extend the `sed` above to also encode link/emphasis syntax (`[` `]` `(` `)` `*` → `&#91;` `&#93;` `&#40;` `&#41;` `&#42;`); and the **What changed** column needs the same discipline — keep it plain prose with no `|`, backticks, or `<`/`>` (or run it through the sanitizer too). Cap the tmux capture (~500 lines / ~15 KB) so findings + diagram + table + testing + the bilingual summary stay under the comment limit together.
 
 ```markdown
 <details>
@@ -368,7 +373,7 @@ Post a single Stage 2 comment (must include `<!-- qwen-triage stage=2 -->` at th
 <!-- paste capture-pane output here inside ``` -->
 ````
 
-Close with the signature then the footer (omit the footer if `HEAD_SHA` is empty), and save this comment's ID:
+Close with the signature then the footer, and save this comment's ID — on an empty `HEAD_SHA`, follow the fail-closed rule above (leave an existing comment and its footer untouched; never blank it):
 
 ```markdown
 — _Qwen Code · qwen3.7-max_
@@ -407,9 +412,9 @@ Open it with a one-line confidence score — `**Confidence: N/5** — <one hones
 | 2/5   | Significant concerns; leaning against as-is                     | request changes |
 | 1/5   | Should not merge in its current form                            | request changes |
 
-A fork `refactor` that hits the approval guardrail below, **or a PR that Stage 0 escalated for maintainer awareness**, caps at 3/5 no matter how clean every stage looked — the guardrail drives the action, not the score. At 3/5 the action is always **defer via a comment** (never `--request-changes`): if you have nameable concerns, state them in the comment without approving; if it's an unresolvable question, @mention the maintainer. When the cap is pure policy on an otherwise-clean PR, say so in the one-line score so 3/5 doesn't read as real doubt — e.g. `Confidence: 3/5 — clean review, but the fork-refactor guardrail needs a maintainer's sign-off`. Never post a 4–5/5 alongside a `--request-changes`, or a 1–2/5 alongside an `--approve`: the score and the verdict tell the same story.
+A fork `refactor` that hits the approval guardrail below, **or a PR that Stage 0 escalated for maintainer awareness**, caps at 3/5 no matter how clean every stage looked — the guardrail drives the action, not the score. At 3/5 the action is always the **defer path** (a comment, never `--request-changes`): name any concerns in the defer comment for the maintainer's attention without approving, and @mention the maintainer for an unresolvable question or when the cap is pure policy. When the cap is pure policy on an otherwise-clean PR, say so in the one-line score so 3/5 doesn't read as real doubt — e.g. `Confidence: 3/5 — clean review, but the fork-refactor guardrail needs a maintainer's sign-off`. Never post a 4–5/5 alongside a `--request-changes`, or a 1–2/5 alongside an `--approve`: the score and the verdict tell the same story.
 
-Then write what you're actually thinking. "Looks good, ships the feature cleanly, the before/after shows it works" — not a five-bullet summary of the stages. If you have reservations, say them plainly. If you're approving with mild concerns, name them. Sign with `— _Qwen Code · qwen3.7-max_`, add the reviewed-commit footer, and save this comment's ID.
+Then write what you're actually thinking. "Looks good, ships the feature cleanly, the before/after shows it works" — not a five-bullet summary of the stages. If you have reservations, say them plainly. If you're approving with mild concerns, name them. Sign with `— _Qwen Code · qwen3.7-max_`, add the reviewed-commit footer (empty `HEAD_SHA` → fail closed, as above — don't blank a prior footer), and save this comment's ID.
 
 **Step 2: Act on the verdict.**
 
