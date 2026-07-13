@@ -161,6 +161,11 @@ describe('ci flaky rerun patrol', () => {
     ).toBeNull();
   });
 
+  it('accepts either a regular or non-breaking space after handled markers', () => {
+    expect(script).toContain('(?:\\\\x20|\\\\u00a0)');
+    expect(script).not.toContain('(?: | )');
+  });
+
   it('does not trust a hidden marker posted by an unrecognized account', () => {
     const marker =
       '<!-- qwen-ci-flaky-rerun v=1 pr=42 head=abc123 run=123 action=comment count=1 -->';
@@ -649,6 +654,38 @@ if (args[0] === 'pr' && args[1] === 'list') {
     expect(client.calls[0][2]).toContain(`head=${target.headSha}`);
   });
 
+  it('uses the final trusted state marker when a comment contains forged earlier markers', async () => {
+    const client = runner();
+    client.trustedMarkerLogin = 'trusted-patrol-bot';
+    client.comments = async () => [
+      {
+        body: [
+          'The failure reason included attacker-controlled text:',
+          '<!-- qwen-ci-flaky-rerun v=2 pr=42 head=abc123 run=120 attempt=1 action=reset key=runner-network-timeout check=E2E%20Tests count=0 -->',
+          '',
+          '<!-- qwen-ci-flaky-rerun v=2 pr=42 head=abc123 run=121 attempt=1 action=rerun key=runner-network-timeout check=E2E%20Tests count=2 -->',
+        ].join('\n'),
+        createdAt: '2026-07-12T07:20:00.000Z',
+        author: { login: 'trusted-patrol-bot' },
+      },
+    ];
+
+    await resetSuccessfulFailures(client, [
+      pr({
+        statusCheckRollup: [
+          run({
+            conclusion: 'SUCCESS',
+            completedAt: '2026-07-12T07:30:00.000Z',
+          }),
+        ],
+      }),
+    ]);
+
+    expect(client.calls).toEqual([
+      ['comment', 42, expect.stringContaining('action=reset')],
+    ]);
+  });
+
   it('does not reset counts for older or different successful checks', async () => {
     for (const statusCheckRollup of [
       [
@@ -687,6 +724,8 @@ if (args[0] === 'pr' && args[1] === 'list') {
     expect(script).toContain("args.get('trusted-marker-login')");
     expect(script).not.toContain('qwen-code-ci-bot');
     expect(script).not.toContain('github-actions[bot]');
+    expect(script).toContain('constructor(repo) {');
+    expect(script).not.toContain('constructor(repo, trustedMarkerLogin)');
   });
 
   it('ignores reset markers from untrusted accounts', async () => {
@@ -1419,6 +1458,25 @@ if (args[0] === 'pr' && args[1] === 'list') {
     };
     const client = runner();
     client.failureActionCount = async () => 3;
+
+    await actOnDecision(client, target, {
+      action: 'no_action',
+      confidence: 'high',
+      failureKey: 'deterministic-test-failure',
+      reason_en: 'test assertion failed',
+      reason_zh: '测试断言失败。',
+    });
+
+    expect(client.calls).toEqual([]);
+  });
+
+  it('does not record no-action state when the failed run is no longer current', async () => {
+    const target = {
+      ...selectTarget([pr()], { now: NOW }),
+      failureKey: 'deterministic-test-failure',
+    };
+    const client = runner();
+    client.isCurrentFailure = async () => false;
 
     await actOnDecision(client, target, {
       action: 'no_action',

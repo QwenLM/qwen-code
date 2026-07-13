@@ -34,6 +34,9 @@ describe('ci flaky rerun workflow', () => {
     expect(workflow).not.toContain('update-branch');
     expect(workflow).toContain('persist-credentials: false');
     expect(workflow).toContain('set -o pipefail');
+    expect(workflow).toContain(
+      'act always runs so reset can clean stale markers',
+    );
   });
 
   it('checks out one captured trusted main commit in classify and act', () => {

@@ -49,10 +49,10 @@ function markerComments(pr, options = {}) {
 
 function alreadyHandled(pr, target, options) {
   const attemptPattern = new RegExp(
-    `<!-- ${MARKER} v=2 pr=${target.prNumber} head=${target.headSha} run=${target.runId} attempt=${target.runAttempt ?? 1}(?: | )`,
+    `<!-- ${MARKER} v=2 pr=${target.prNumber} head=${target.headSha} run=${target.runId} attempt=${target.runAttempt ?? 1}(?:\\x20|\\u00a0)`,
   );
   const legacyPattern = new RegExp(
-    `<!-- ${MARKER} v=1 pr=${target.prNumber} head=${target.headSha} run=${target.runId}(?: | )`,
+    `<!-- ${MARKER} v=1 pr=${target.prNumber} head=${target.headSha} run=${target.runId}(?:\\x20|\\u00a0)`,
   );
   return markerComments(pr, options).some(
     (comment) =>
@@ -86,13 +86,15 @@ function fingerprint(target, log) {
 function stateMarkers(comments, prNumber, trustedMarkerLogin) {
   const marker = new RegExp(
     `<!-- ${MARKER} v=2 pr=${prNumber} head=(\\S+) run=(\\d+) attempt=(\\d+) action=(\\S+) key=([a-z0-9._-]+) check=(\\S+) count=(\\d+) -->`,
+    'g',
   );
   return comments
     .filter(
       (comment) => String(comment.author?.login ?? '') === trustedMarkerLogin,
     )
     .map((comment) => {
-      const match = marker.exec(String(comment.body ?? ''));
+      const matches = [...String(comment.body ?? '').matchAll(marker)];
+      const match = matches.at(-1);
       if (!match) return null;
       return {
         headSha: match[1],
@@ -399,9 +401,8 @@ export async function writeSkillInputs(
 }
 
 class GhClient {
-  constructor(repo, trustedMarkerLogin) {
+  constructor(repo) {
     this.repo = repo;
-    this.trustedMarkerLogin = trustedMarkerLogin;
   }
 
   async gh(args, options = {}) {

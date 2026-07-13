@@ -135,6 +135,7 @@ jobs:
   act:
     name: 'Apply validated PR CI action'
     needs: ['identity', 'classify']
+    # act always runs so reset can clean stale markers; download/act steps self-gate on target_found.
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
