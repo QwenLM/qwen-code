@@ -540,6 +540,18 @@ describe('coverage caps the verdict', () => {
     expect(r.body).toContain('security');
   });
 
+  it('caps on a diff-induced uncoverable chunk from the coverage report', () => {
+    // The type declared missingChunks/whiffedAgents/ok but the code also reads
+    // coverage.uncoverableChunks — untyped and untested, so a regression there
+    // was invisible. An uncoverable chunk forbids an Approve.
+    const r = composeReview({
+      ...base,
+      coverage: { ok: true, uncoverableChunks: [5] },
+    });
+    expect(r.event).not.toBe('APPROVE');
+    expect(r.body).toContain('chunk 5');
+  });
+
   it('still approves a clean, fully covered run', () => {
     const r = composeReview({
       ...base,

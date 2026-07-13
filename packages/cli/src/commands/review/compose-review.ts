@@ -75,6 +75,13 @@ export interface ComposeReviewInput {
   coverage?: {
     missingChunks?: number[];
     whiffedAgents?: string[];
+    /**
+     * Chunks the diff itself made uncoverable (a line longer than one read).
+     * Read at runtime and folded into the uncoverable cap, but it was missing
+     * from this type — so it worked through JSON yet a TypeScript caller could
+     * not pass it, and no test exercised it.
+     */
+    uncoverableChunks?: number[];
     ok?: boolean;
   };
   /** Step 1's lightweight `pr-context` fetch failed. */
