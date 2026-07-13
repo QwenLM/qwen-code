@@ -828,10 +828,10 @@ Recommended poll cadence: aligned with whatever already polls `/workspace/mcp`; 
 ```
 
 `level` is one of `project`, `user`, `extension`, or `bundled`.
-`userInvocable` is omitted for normal skills (meaning `true`) and is present
-only as `false` when the skill cannot be invoked manually or toggled through
-the skill API. `modelInvocable` is independent: `false` means the skill remains
-manually available but is hidden from model invocation.
+`userInvocable` (boolean, optional) is omitted for normal skills (meaning
+`true`) and is present only as `false` when the skill cannot be invoked manually
+or toggled through the skill API. `modelInvocable` is independent: `false`
+means the skill remains manually available but is hidden from model invocation.
 `installedPath` is the existing absolute path to the skill's `SKILL.md`; the
 daemon returns it as stored without separately resolving symlinks or
 canonicalizing it. Current daemons emit it for every skill, while clients must
@@ -2058,7 +2058,7 @@ Response (200):
 }
 ```
 
-`activation` is `applied` when every active session refreshed, `deferred` when no ACP child exists (the persisted setting is used when one starts), and `partial` when at least one active session failed to refresh. Busy sessions are included. The daemon reloads workspace settings for the ACP child and every active session, notifies SkillManager consumers, and pushes `available_commands_update`. A request already sent to the model is not rewritten; subsequent validation, command snapshots, and model contexts use the new state. If persistence fails, no refresh or event is emitted. If a session refresh fails, the committed setting is retained.
+`activation` is `applied` when every active session refreshed, `deferred` when no ACP child exists (the persisted setting is used when one starts), and `partial` when at least one active session failed to refresh. Busy sessions are included. The daemon reloads workspace settings for the ACP child and every active session, notifies SkillManager consumers, and pushes `available_commands_update`. A request already sent to the model is not rewritten; subsequent validation, command snapshots, and model contexts use the new state. If persistence fails, no refresh or event is emitted. If a session refresh fails, the committed setting is retained. When the child returns per-session results, the session counts are exact. If the refresh control itself fails before returning those results, `sessionsFailed: 1` is a conservative lower bound indicating that the refresh request failed.
 
 Errors:
 
@@ -2066,7 +2066,7 @@ Errors:
 - `400 {code: 'invalid_enabled_flag'}` — `enabled` missing or non-boolean.
 - `403 {code: 'untrusted_workspace'}` — the selected workspace is not trusted.
 - `404 {code: 'skill_not_found'}` — no loaded skill matches the name.
-- `409 {code: 'skill_not_toggleable', reason: 'not_user_invocable' | 'inactive_extension' | 'locked', lockedScope?}` — the CLI panel would not allow the target to be toggled.
+- `409 {code: 'skill_not_toggleable', reason: 'not_user_invocable' | 'inactive_extension' | 'locked', lockedScope?: 'system' | 'user' | 'systemDefaults'}` — the CLI panel would not allow the target to be toggled. `lockedScope` is present only when `reason` is `locked`.
 
 The mutation reuses the workspace-scoped `settings_changed` event with `key: 'skills.disabled'`; it does not add a new event type.
 

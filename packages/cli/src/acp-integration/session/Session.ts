@@ -3821,11 +3821,14 @@ export class Session implements SessionContext {
 
   async refreshSkillsFromSettings(): Promise<void> {
     this.settings.reloadScopeFromDisk(SettingScope.Workspace);
-    await this.sendAvailableCommandsUpdateOrThrow();
     const skillManager = this.config.getSkillManager();
-    if (skillManager) {
-      skillManager.suppressNextSlashReload();
-      await skillManager.notifyConfigChanged();
+    try {
+      await this.sendAvailableCommandsUpdateOrThrow();
+    } finally {
+      if (skillManager) {
+        skillManager.suppressNextSlashReload();
+        await skillManager.notifyConfigChanged();
+      }
     }
   }
 

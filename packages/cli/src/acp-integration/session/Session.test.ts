@@ -1965,6 +1965,29 @@ describe('Session', () => {
       expect(suppressNextSlashReload).toHaveBeenCalledTimes(1);
       expect(notifyConfigChanged).toHaveBeenCalledTimes(1);
     });
+
+    it('notifies SkillManager when the command update fails', async () => {
+      const suppressNextSlashReload = vi.fn();
+      const notifyConfigChanged = vi.fn().mockResolvedValue(undefined);
+      mockConfig.getSkillManager = vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([]),
+        suppressNextSlashReload,
+        notifyConfigChanged,
+      });
+      vi.mocked(mockClient.sessionUpdate).mockRejectedValueOnce(
+        new Error('client update failed'),
+      );
+
+      await expect(session.refreshSkillsFromSettings()).rejects.toThrow(
+        'client update failed',
+      );
+
+      expect(mockSettings.reloadScopeFromDisk).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+      );
+      expect(suppressNextSlashReload).toHaveBeenCalledTimes(1);
+      expect(notifyConfigChanged).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('prompt', () => {

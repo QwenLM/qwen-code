@@ -40,7 +40,7 @@ The scope lock check and workspace read-modify-write happen inside the daemon's 
 2. Under the workspace settings lock, re-read every scope, reject higher-scope locks, and commit the canonical workspace list.
 3. Invalidate the daemon's cached skill status.
 4. If an ACP child is live, invoke `qwen/control/workspace/skills/refresh`.
-5. The child reloads its bootstrap workspace settings and refreshes every active session, including busy sessions.
+5. The child reloads workspace-scope settings and refreshes every active session, including busy sessions.
 6. Each session reloads its own workspace settings, rebuilds and pushes `available_commands_update`, and notifies SkillManager consumers.
 7. Publish the existing workspace `settings_changed` event for `skills.disabled`.
 
