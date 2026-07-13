@@ -36,7 +36,13 @@
 
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import {
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+  lstatSync,
+} from 'node:fs';
 import { dirname, join, isAbsolute, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 
@@ -293,6 +299,44 @@ function existsAtRev(cwd: string, rev: string, path: string): boolean {
   if (r.error) throw r.error;
   return r.status === 0;
 }
+/**
+ * Remove `join(worktree, relPath)` without following a PR-controlled symlink.
+ *
+ * `rmSync` follows symlinks in the path PREFIX, and the revert set is
+ * PR-controlled: a diff that turns `dir` into a symlink to an outside directory
+ * and has the probe delete `dir/victim` would make `rmSync` follow `dir` and
+ * delete the outside file — a real P0 a reviewer reproduced. The lexical
+ * `escapes the worktree` guard cannot catch it, because `dir/victim` is lexically
+ * inside the tree; the escape happens at runtime through the link.
+ *
+ * So walk every component from the worktree root down and refuse if any
+ * ANCESTOR is a symlink — the target must be reachable through real directories
+ * only. The final component being a symlink is fine: `rmSync` unlinks the link
+ * itself, not what it points at, which is exactly what reverting an added
+ * symlink should do. A missing component means there is nothing to remove
+ * (`force` rm is already a no-op there), so return quietly.
+ */
+export function safeRmWithin(worktree: string, relPath: string): void {
+  const parts = relPath.split(/[/\\]+/).filter((s) => s && s !== '.');
+  let cur = worktree;
+  for (let i = 0; i < parts.length; i++) {
+    cur = join(cur, parts[i]);
+    let st;
+    try {
+      st = lstatSync(cur);
+    } catch {
+      return;
+    }
+    if (st.isSymbolicLink() && i < parts.length - 1) {
+      throw new Error(
+        `refusing to delete through a symlink: ${relPath} ` +
+          `(ancestor ${parts.slice(0, i + 1).join('/')} is a symlink)`,
+      );
+    }
+  }
+  rmSync(cur, { force: true });
+}
+
 const existsAtBase = (cwd: string, base: string, path: string) =>
   existsAtRev(cwd, base, path);
 /** A file the PR DELETED does not exist at HEAD — restoring it means removing it. */
@@ -385,7 +429,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       // An added file's base state is "absent". Removing it is the honest
       // revert; the probe usually then fails to compile, which is
       // `inconclusive` — not a verdict, but an honest one.
-      for (const p of added) rmSync(join(worktree, p), { force: true });
+      for (const p of added) safeRmWithin(worktree, p);
 
       const r = spawnSync(
         'npx',
@@ -458,7 +502,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           // working tree, so removing the file leaves a staged phantom add
           // behind (`AD` in `git status`). Reset those index entries to HEAD —
           // where the path does not exist, which is exactly the state we want.
-          for (const p of notAtHead) rmSync(join(worktree, p), { force: true });
+          for (const p of notAtHead) safeRmWithin(worktree, p);
           git(worktree, 'reset', '-q', 'HEAD', '--', ...notAtHead);
         }
       } catch (e) {

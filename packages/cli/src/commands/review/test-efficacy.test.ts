@@ -9,7 +9,18 @@ import {
   isWorkspaceMember,
   planTestEfficacy,
   classifyProbeRun,
+  safeRmWithin,
 } from './test-efficacy.js';
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  symlinkSync,
+  existsSync,
+  readFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // The real root `package.json` workspace list.
 const GLOBS = [
@@ -142,6 +153,50 @@ describe('planTestEfficacy', () => {
     );
     expect(plan.probes).toEqual([]);
     expect(plan.revert).toEqual([]);
+  });
+});
+
+describe('safeRmWithin', () => {
+  // A reviewer reproduced a P0: the revert set is PR-controlled, and `rmSync`
+  // follows symlinks in the path prefix, so a PR that turns `dir` into a symlink
+  // to an outside directory and has the probe delete `dir/victim` deleted the
+  // OUTSIDE file. These pin the guard that closed it.
+  const setup = () => {
+    const root = mkdtempSync(join(tmpdir(), 'saferm-root-'));
+    const outside = mkdtempSync(join(tmpdir(), 'saferm-outside-'));
+    writeFileSync(join(outside, 'victim'), 'must survive');
+    return { root, outside };
+  };
+
+  it('removes a file reachable through real directories', () => {
+    const { root } = setup();
+    mkdirSync(join(root, 'realdir'));
+    writeFileSync(join(root, 'realdir', 'f'), 'x');
+    safeRmWithin(root, 'realdir/f');
+    expect(existsSync(join(root, 'realdir', 'f'))).toBe(false);
+  });
+
+  it('refuses to delete through a symlinked ancestor, sparing the outside file', () => {
+    const { root, outside } = setup();
+    // `dir` is a symlink to an outside directory; deleting `dir/victim` must not
+    // follow it. This is the exact P0 shape.
+    symlinkSync(outside, join(root, 'dir'));
+    expect(() => safeRmWithin(root, 'dir/victim')).toThrow(/through a symlink/);
+    expect(readFileSync(join(outside, 'victim'), 'utf8')).toBe('must survive');
+  });
+
+  it('unlinks a symlink that is itself the target, not what it points at', () => {
+    const { root, outside } = setup();
+    // Reverting an ADDED symlink means removing the link — never its target.
+    symlinkSync(outside, join(root, 'addedlink'));
+    safeRmWithin(root, 'addedlink');
+    expect(existsSync(join(root, 'addedlink'))).toBe(false);
+    expect(existsSync(join(outside, 'victim'))).toBe(true);
+  });
+
+  it('is a no-op on a missing path (force rm never threw there either)', () => {
+    const { root } = setup();
+    expect(() => safeRmWithin(root, 'nope/gone')).not.toThrow();
   });
 });
 
