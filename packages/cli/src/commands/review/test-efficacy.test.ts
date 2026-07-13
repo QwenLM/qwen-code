@@ -95,21 +95,30 @@ describe('planTestEfficacy', () => {
     ]);
   });
 
-  it('does not revert non-executable source (a .md/.json fixture)', () => {
-    // classifyPath labels a fixture under a src tree `source`. Reverting it is
-    // meaningless (no behaviour) and destructive — this PR ships a .md fixture
-    // that pr-context.test.ts loads; deleting it makes that test fail to load
-    // and the probe inconclusive because of the probe itself.
+  it('excludes fixture-directory data but keeps runtime-loaded source', () => {
+    // The discriminator is the directory, not the extension. A `.md` fixture
+    // under `__fixtures__/` is test-support data — reverting it breaks the test
+    // that loads it. But an executable skill prompt (`SKILL.md`) and a config
+    // JSON a test validates against are production source that a test can
+    // genuinely gate, so they stay revertable.
     const plan = planTestEfficacy(
       [
         { path: 'packages/cli/src/x.ts', kind: 'source' },
         { path: 'packages/cli/src/__fixtures__/body.md', kind: 'source' },
-        { path: 'packages/cli/src/data.json', kind: 'source' },
+        {
+          path: 'packages/core/src/skills/bundled/review/SKILL.md',
+          kind: 'source',
+        },
+        { path: 'packages/cli/src/config/schema.json', kind: 'source' },
         { path: 'packages/cli/src/x.test.ts', kind: 'test' },
       ],
       GLOBS,
     );
-    expect(plan.revert).toEqual(['packages/cli/src/x.ts']);
+    expect(plan.revert).toEqual([
+      'packages/cli/src/x.ts',
+      'packages/core/src/skills/bundled/review/SKILL.md',
+      'packages/cli/src/config/schema.json',
+    ]);
   });
 
   it('probes nothing on a source-only diff (no tests to run)', () => {

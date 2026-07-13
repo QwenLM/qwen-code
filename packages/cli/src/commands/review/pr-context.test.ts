@@ -651,11 +651,17 @@ describe('carriesBlockerSignal', () => {
     expect(carriesBlockerSignal('非阻塞观察：建议后续跟进')).toBe(false);
   });
 
-  it('guards the Chinese non-blocking prefix 非/并非', () => {
-    // `非阻塞` is the Chinese "non-blocking" — the CJK twin of the non-blocking
-    // lookbehind. Without the guard, "非阻塞问题" promoted and ate the budget.
+  it('guards the Chinese non-blocking forms, adjacent or not', () => {
+    // `非阻塞` is the Chinese "non-blocking". The first guard was an adjacency
+    // lookbehind (`(?<!非)阻塞`), which missed a `非` with words between it and
+    // the signal and wrongly suppressed `除非` ("unless"). The negation-window
+    // redesign handles all three.
     expect(carriesBlockerSignal('非阻塞问题：建议后续跟进')).toBe(false);
-    expect(carriesBlockerSignal('这是并非阻塞项的小建议')).toBe(false);
+    expect(carriesBlockerSignal('并非一个阻塞项')).toBe(false); // non-adjacent 非
+    expect(carriesBlockerSignal('绝非一个阻塞问题')).toBe(false);
+    // `除非阻塞X解决否则不能合并` — "unless X is resolved" — X IS a blocker.
+    // The `非` in `除非` must not suppress it.
+    expect(carriesBlockerSignal('除非阻塞问题解决，否则不能合并')).toBe(true);
     // The bare blocker still promotes.
     expect(carriesBlockerSignal('这是阻塞问题，必须修复')).toBe(true);
   });
@@ -683,35 +689,38 @@ describe('carriesBlockerSignal', () => {
     ).toBe(false);
   });
 
-  it('does not let a negation reach across a comma either', () => {
-    // Both Codex and qwen flagged this: the stop-set had `;:—` but not `,`, so
-    // "No other concerns, but auth is a blocker" suppressed the real assertion
-    // across the comma — a false negative, the costly direction. Adding `,，、`
-    // to the stop-set left recall 2/2 and false positives 6/36 on the corpus.
+  it('resets a negation at an adversative, but not at a bare comma', () => {
+    // The distinction a comma-stop-set got backwards. `but`/`但` reverses — the
+    // clause after it is asserting — so the blocker promotes. A bare comma
+    // coordinates, so a negated list stays negated. Both directions matter:
+    // the first was a false negative (real blocker suppressed), the second a
+    // false positive (a "No X, Y, or Z" list promoted).
     expect(
       carriesBlockerSignal('No other concerns, but auth is a blocker'),
     ).toBe(true);
-    // A negation whose clause genuinely covers the signal still negates — the
-    // negation word is in the SAME clause as the matched pattern, no comma
-    // between them. (`No blockers found` would be a vacuous check here: the
-    // plural `blockers` matches no pattern at all, so it proves nothing about
-    // the negation window.)
+    expect(carriesBlockerSignal('没有其他问题，但这是阻塞问题')).toBe(true);
+    // Coordinated negated list — the `No` distributes across the commas.
+    expect(
+      carriesBlockerSignal('No blocking, must-fix, or critical issues.'),
+    ).toBe(false);
+    // Plain same-clause negation still negates.
     expect(carriesBlockerSignal('This is not a blocker')).toBe(false);
     expect(carriesBlockerSignal('没有阻塞问题，一切正常')).toBe(false);
   });
-  it('does not let a negation reach across a clause separator', () => {
-    // The negation guard scans back 40 characters for a negation word, and its
-    // stop-set only had `.!?`. "No blockers; the cache path is a (blocker)"
-    // therefore suppressed the real assertion — a false negative, which is the
-    // costly direction.
+  it('breaks the negation window at a semicolon or colon (new clause)', () => {
+    // `;` and `:` start an independent clause, so a negation before one does not
+    // carry into it — "No blockers; the cache path is a blocker" promotes. This
+    // is the opposite of a bare comma, which only coordinates a list (see the
+    // adversative test above). Both are false-negative-avoiding.
     expect(
-      carriesBlockerSignal('No blockers; the cache path is a (blocker)'),
+      carriesBlockerSignal('No blockers; the cache path is a blocker'),
     ).toBe(true);
     expect(
-      carriesBlockerSignal('No blockers: the cache path is a (blocker)'),
+      carriesBlockerSignal('No blockers: the cache path is a blocker'),
     ).toBe(true);
-    // …and the plain negation still negates.
+    // …and the plain same-clause negation still negates.
     expect(carriesBlockerSignal('No critical blockers. LGTM.')).toBe(false);
+    // A CJK negation whose clause ends at `：` before the signal still negates.
     expect(carriesBlockerSignal('没有阻塞问题：一切正常')).toBe(false);
   });
 

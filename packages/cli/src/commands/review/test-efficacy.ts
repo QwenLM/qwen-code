@@ -97,17 +97,21 @@ export interface EfficacyPlan {
 }
 
 /**
- * Executable source that can carry a behavioural change worth reverting.
- * `classifyPath` labels everything under a `src` tree that is not a test,
- * doc, or generated file `source` — which includes non-executable data a test
- * imports: JSON fixtures, `.md` fixture bodies (this PR ships one:
- * `__fixtures__/pr-6486-comment-4942713150.md`), snapshots. Reverting those to
- * base deletes a file `pr-context.test.ts` then fails to load — an inconclusive
- * probe caused by the probe itself. Only revert code that actually holds the
- * behaviour under test.
+ * Test-support data a test file imports: fixtures, mocks, snapshots. Reverting
+ * one is both meaningless (it holds no behaviour) and destructive — this PR
+ * ships `__fixtures__/pr-6486-comment-4942713150.md`, and deleting it makes
+ * `pr-context.test.ts` fail to load, an inconclusive probe caused by the probe
+ * itself.
+ *
+ * The discriminator is the **directory**, not the extension. An earlier cut
+ * whitelisted executable extensions, which also dropped runtime-loaded sources
+ * that a test genuinely gates: an executable skill prompt
+ * (`packages/core/src/skills/**\/SKILL.md`), a settings-schema JSON a test
+ * validates against. Those are production source and must stay revertable;
+ * only test-support data under a fixtures/mocks/snapshots path is excluded.
  */
-const REVERTABLE_SOURCE_RE =
-  /\.(tsx?|jsx?|mjs|cjs|vue|svelte|py|go|rs|java|kt|rb|c|cc|cpp|h|hpp|cs|php|swift|scala)$/;
+const FIXTURE_DIR_RE =
+  /(^|\/)(__fixtures__|__mocks__|__snapshots__|fixtures)\//;
 
 /**
  * Split the diff into what to report and what to run.
@@ -121,11 +125,12 @@ export function planTestEfficacy(
 ): EfficacyPlan {
   const tests = files.filter((f) => f.kind === 'test').map((f) => f.path);
   // `kind === 'source'` is the diff-plan bucket for "not test/doc/generated",
-  // which sweeps in data files a test imports. Reverting a fixture is both
-  // meaningless (it holds no behaviour) and destructive (a test that loads it
-  // then fails), so gate on an executable-source extension too.
+  // which sweeps in test-support data a test imports. Reverting a fixture is
+  // meaningless and destructive (a test that loads it then fails), so exclude
+  // the fixture/mock directories — but keep everything else, including
+  // runtime-loaded prompts and config a test genuinely gates.
   const revert = files
-    .filter((f) => f.kind === 'source' && REVERTABLE_SOURCE_RE.test(f.path))
+    .filter((f) => f.kind === 'source' && !FIXTURE_DIR_RE.test(f.path))
     .map((f) => f.path);
   const unreachable = tests.filter(
     (t) => !isWorkspaceMember(t, workspaceGlobs),
@@ -327,8 +332,14 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     // that could not run fails the probe rather than silently reading as a
     // clean tree — the fail-OPEN outcome would defeat the whole guard, which
     // exists to prevent data loss.
+    // `--ignored` too: a revert-set path can be gitignored at HEAD (a generated
+    // or locally-recreated file), and a plain `status --porcelain` says nothing
+    // about it — the base checkout would then overwrite a file the user has and
+    // git will not restore.
     const dirty = revert.filter(
-      (p) => gitOut(worktree, 'status', '--porcelain', '--', p).length > 0,
+      (p) =>
+        gitOut(worktree, 'status', '--porcelain', '--ignored', '--', p).length >
+        0,
     );
     if (dirty.length > 0) {
       throw new Error(

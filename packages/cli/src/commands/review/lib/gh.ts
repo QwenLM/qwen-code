@@ -110,9 +110,16 @@ export function ghApiAll(path: string): unknown[] {
  * `--paginate --jq '.<key>[]'` applies the jq to every page and streams each
  * element as a newline-delimited JSON value (NDJSON), so the result is parsed
  * line by line rather than as one array. (`gh api` has no `--slurp`.)
+ *
+ * `strict` parsing here: a check-runs snapshot feeds CI classification, and
+ * dropping a malformed line could hide a *failing* run — the same fail-open the
+ * pagination fix closed, reintroduced by lenient parsing. A parse failure
+ * throws.
  */
 export function ghApiAllNested(path: string, key: string): unknown[] {
-  return parseNdjson(gh('api', '--paginate', path, '--jq', `.${key}[]`));
+  return parseNdjson(gh('api', '--paginate', path, '--jq', `.${key}[]`), {
+    strict: true,
+  });
 }
 
 /**
@@ -120,15 +127,25 @@ export function ghApiAllNested(path: string, key: string): unknown[] {
  * one JSON value per non-blank line. Split out and exported so the parse is
  * unit-testable without spawning `gh` (the spawn is covered by the commands'
  * own runs, per this module's testing note above).
+ *
+ * `strict` (default) throws on any non-JSON line — correct when a dropped
+ * record would change a safety-relevant answer (e.g. hiding a failing check
+ * run). Non-strict skips a stray line, for the rare caller that genuinely
+ * expects interleaved human-readable notices and can tolerate a lost record.
  */
-export function parseNdjson(out: string): unknown[] {
+export function parseNdjson(
+  out: string,
+  opts: { strict?: boolean } = {},
+): unknown[] {
+  const strict = opts.strict ?? true;
   if (!out) return [];
   const values: unknown[] = [];
   for (const line of out.split('\n')) {
     if (line.trim().length === 0) continue;
-    // Skip a line that is not JSON rather than throwing away every value
-    // already parsed — `gh` occasionally prints an update/deprecation notice
-    // to stdout, and one stray line should not lose the whole page.
+    if (strict) {
+      values.push(JSON.parse(line));
+      continue;
+    }
     try {
       values.push(JSON.parse(line));
     } catch {

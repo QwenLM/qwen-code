@@ -287,28 +287,52 @@ const BLOCKER_PATTERNS: RegExp[] = [
   // `blocking` on its own, because that is how people actually write it: a
   // "blocking gap", a "🔴 Blocking:" heading. Naming the nouns (`blocking
   // issue|defect|bug`) looked precise and missed a real blocker — see below.
-  // The lookbehind is what keeps "non-blocking" out, which matters: our own
-  // verification reports file their nits under "🟡 Non-blocking observations".
-  /(?<!non-)(?<!non )\bblocking\b/,
+  // The patterns stay bare (no negation lookbehind): negation is handled
+  // uniformly by the NEGATION window, so `non-blocking` / `非阻塞` are one
+  // mechanism, not per-pattern special cases that each open a new hole.
+  /\bblocking\b/,
   /\bmust[ -]fix\b/,
   /\bstill (?:reproducible|repro|broken|fails?)\b/,
-  // `非阻塞` / `并非阻塞` is the Chinese "non-blocking" — the CJK twin of the
-  // `non-blocking` lookbehind above. Without it, "非阻塞问题" promoted.
-  /(?<![非])(?<!并非)阻塞(?:项|问题|点)/,
+  /阻塞(?:项|问题|点)/,
 ];
 /**
- * Words shortly before a signal that mean the opposite. "No critical blockers."
- * is the qwen triage bot's own template line, and it fired the old whole-body
- * keyword scan on every PR it ever commented on.
+ * Is a blocker signal negated by the text leading up to it?
  *
- * Both languages, because the signal list is bilingual and the guard was not:
- * `阻塞项` promoted while "没有阻塞项" — the Chinese half of that same template —
- * promoted too, on a repo whose PR discussion is substantially Chinese. A guard
- * that only defends the language it was written in is a guard with a hole in it.
- * (The CJK clause takes no `\b`: there are no word boundaries to anchor to.)
+ * Applied to the slice *before* a matched signal. It is deliberately a narrow
+ * heuristic — its job is to kill the triage bot's "No critical blockers" line
+ * and its Chinese twin "没有阻塞项", not to parse natural language. Every attempt
+ * to make it more than that opened a hole in the other direction, so this
+ * version is redesigned around two ideas rather than a growing lookbehind pile:
+ *
+ * 1. A **negation word** within ~40 chars of the signal, in either language.
+ *    English negators sit on word boundaries; the CJK ones do not. `非` is a
+ *    negation EXCEPT in `除非` ("unless"), which introduces a real blocking
+ *    condition — hence `(?<!除)非`. `非-blocking`/`non-blocking` fold in here as
+ *    the glued forms `non[- ]` / (the bare `非` clause), not as pattern
+ *    lookbehinds.
+ * 2. An **adversative** between the negation and the signal RESETS it: in
+ *    "No concerns, but auth is a blocker" the clause after `but` is asserting,
+ *    not negating. This is why a bare comma is NOT a boundary — a comma
+ *    coordinates ("No blocking, must-fix, or critical issues" stays negated)
+ *    while `but`/`但` reverses. The earlier comma-stop-set got this backwards
+ *    and promoted coordinated negated lists.
+ *
+ * Prior regressions this closes, all from real review comments: `除非阻塞`
+ * (unless-blocker, was suppressed), `并非一个阻塞项` (non-adjacent 非, was
+ * promoted), and the coordinated list above (was promoted).
  */
-const NEGATION =
-  /(?:\b(?:no|not|zero|without|never)\b|没有|不是|无|未发现|不存在)[^.!?。！？;:；：，,、—\n]{0,40}$/;
+const NEG_WORD =
+  '\\b(?:no|not|zero|without|never|non[- ])|没有|不是|无|未发现|不存在|并非|绝非|(?<!除)非';
+const ADVERSATIVE = '\\b(?:but|however|although|though)\\b|但是|但|然而|不过';
+const NEGATION = new RegExp(
+  // negation word, then ≤40 clause chars — none of which start an adversative,
+  // and none of which is a hard clause break (`.!?;:` and CJK equivalents) —
+  // then end-of-slice (i.e. the signal follows immediately). A `;` or `:`
+  // starts a new independent clause ("No blockers; the cache is a blocker" →
+  // promote), so it breaks the window; a bare `,` only coordinates a list
+  // ("No blocking, must-fix, or critical" → stay negated), so it does not.
+  `(?:${NEG_WORD})(?:(?!${ADVERSATIVE})[^.!?。！？;:；：\\n]){0,40}$`,
+);
 
 export function carriesBlockerSignal(body: string | undefined): boolean {
   const b = (body ?? '').toLowerCase();

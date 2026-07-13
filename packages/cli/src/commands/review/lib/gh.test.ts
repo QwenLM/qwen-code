@@ -57,11 +57,22 @@ describe('parseNdjson (the paginated check-runs decode)', () => {
     ]);
   });
 
-  it('skips a non-JSON line instead of losing the whole page', () => {
-    // gh can print an update/deprecation notice to stdout. One stray line must
-    // not throw away every record already parsed.
-    expect(
+  it('is strict by default — a non-JSON line throws rather than fail open', () => {
+    // A check-runs snapshot feeds CI classification, and silently dropping a
+    // malformed line could hide a *failing* run — the fail-open the pagination
+    // fix closed, reintroduced by lenient parsing. So the default throws.
+    expect(() =>
       parseNdjson('{"name":"a"}\ngh version 2.x available\n{"name":"b"}'),
+    ).toThrow();
+  });
+
+  it('skips a non-JSON line only when explicitly non-strict', () => {
+    // The opt-in for a caller that genuinely expects interleaved notices and
+    // can tolerate a lost record — not the check-runs path.
+    expect(
+      parseNdjson('{"name":"a"}\ngh version 2.x available\n{"name":"b"}', {
+        strict: false,
+      }),
     ).toEqual([{ name: 'a' }, { name: 'b' }]);
   });
 
