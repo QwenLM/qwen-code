@@ -197,8 +197,7 @@ export const ThinkingMessage = memo(function ThinkingMessage({
   const { t } = useI18n();
   const compactMode = useContext(CompactModeContext);
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
-  const thinkingSummaryKey = getThinkingSummaryKey({ isStreaming });
-  const thinkingActive = thinkingSummaryKey === 'thinking.running';
+  const thinkingActive = isStreaming === true;
   const startTimeRef = useRef(timestamp ?? Date.now());
   const sawActiveRef = useRef(thinkingActive);
   const [now, setNow] = useState(() => Date.now());
@@ -223,11 +222,17 @@ export const ThinkingMessage = memo(function ThinkingMessage({
     }
   }, [content, finishedAt, thinkingActive]);
 
+  const thinkingDurationMs =
+    thinkingActive || finishedAt !== null
+      ? (thinkingActive ? now : finishedAt!) - startTimeRef.current
+      : undefined;
+  const thinkingSummaryKey = getThinkingSummaryKey({
+    isStreaming,
+    durationMs: thinkingDurationMs,
+  });
   const thinkingDuration =
-    thinkingActive || finishedAt
-      ? formatThinkingDuration(
-          (thinkingActive ? now : finishedAt!) - startTimeRef.current,
-        )
+    thinkingDurationMs !== undefined
+      ? formatThinkingDuration(thinkingDurationMs)
       : '';
 
   const handleToggle = useCallback(() => {
@@ -264,7 +269,7 @@ export const ThinkingMessage = memo(function ThinkingMessage({
               >
                 {t(
                   thinkingSummaryKey,
-                  thinkingActive ? { duration: thinkingDuration } : {},
+                  thinkingDuration ? { duration: thinkingDuration } : {},
                 )}
               </span>
               <span
@@ -302,10 +307,15 @@ export const ThinkingMessage = memo(function ThinkingMessage({
 
 export function getThinkingSummaryKey({
   isStreaming,
+  durationMs,
 }: {
   isStreaming?: boolean;
-}): 'thinking.running' | 'thinking.done' {
-  return isStreaming ? 'thinking.running' : 'thinking.done';
+  durationMs?: number;
+}): 'thinking.running' | 'thinking.done' | 'thinking.doneBriefly' {
+  if (isStreaming) return 'thinking.running';
+  return durationMs !== undefined && durationMs < 1_000
+    ? 'thinking.doneBriefly'
+    : 'thinking.done';
 }
 
 export function formatThinkingDuration(ms: number): string {
