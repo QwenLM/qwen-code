@@ -364,7 +364,6 @@ export function registerWorkspaceExtensionRoutes(
       const ctrl = resolve(req, res, false);
       if (!ctrl) return;
       try {
-        ctrl.buildWorkspaceCtx(`GET ${base}`);
         res.status(200).json(await ctrl.buildLocalExtensionsStatus());
       } catch (err) {
         sendBridgeError(res, err, { route: `GET ${base}` });
@@ -375,7 +374,6 @@ export function registerWorkspaceExtensionRoutes(
       const ctrl = resolve(req, res, false);
       if (!ctrl) return;
       try {
-        ctrl.buildWorkspaceCtx(`GET ${base}/operations/:operationId`);
         const operationId = req.params['operationId'];
         if (!operationId) {
           res.status(400).json({ error: 'Missing extension operation id' });
@@ -962,7 +960,6 @@ export function registerWorkspaceExtensionRoutes(
 
   app.get('/extensions', async (_req, res) => {
     try {
-      primaryController.buildWorkspaceCtx('GET /extensions');
       const manager = primaryController.createExtensionManager(
         boundWorkspace,
         true,

@@ -564,6 +564,31 @@ describe('extension management v2 REST', () => {
     }
   });
 
+  it('retries generation reconciliation after a runtime refresh fails', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    vi.mocked(h.secondary.bridge.refreshExtensionsForAllSessions)
+      .mockRejectedValueOnce(new Error('refresh failed'))
+      .mockResolvedValue({ refreshed: 1, failed: 0 });
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('reconciles a runtime added after the generation stabilizes', async () => {
     vi.useFakeTimers();
     const h = await makeHarness();

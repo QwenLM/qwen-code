@@ -9,7 +9,6 @@ import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { spawn } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
 import lockfile from 'proper-lockfile';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -178,9 +177,7 @@ describe('ExtensionStore', () => {
     const id = 'd2'.repeat(32);
     const store = makeStore();
     await store.ensureInitialized([{ id, name: 'demo' }]);
-    const moduleUrl = pathToFileURL(
-      path.resolve('src/extension/extension-store.ts'),
-    ).href;
+    const moduleUrl = new URL('./extension-store.ts', import.meta.url).href;
     const runChild = async (workspacePath: string, activation: string) => {
       const source = `
         import { ExtensionStore } from ${JSON.stringify(moduleUrl)};

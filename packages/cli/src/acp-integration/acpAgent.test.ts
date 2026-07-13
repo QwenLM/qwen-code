@@ -11199,9 +11199,83 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
-  it('refreshes extension commands for the live session', async () => {
+  it('refreshes extension state and system instruction for the live session', async () => {
     const extensionManager = {
       refreshCache: vi.fn().mockResolvedValue(undefined),
+      refreshTools: vi.fn().mockResolvedValue(undefined),
+    };
+    const skillManager = {
+      refreshCache: vi.fn().mockResolvedValue(undefined),
+    };
+    const refreshHierarchicalMemory = vi.fn().mockResolvedValue(undefined);
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-ext'),
+      getExtensionManager: vi.fn().mockReturnValue(extensionManager),
+      getSkillManager: vi.fn().mockReturnValue(skillManager),
+      refreshHierarchicalMemory,
+    });
+    const refreshSystemInstruction = vi.mocked(
+      cfg.getGeminiClient().refreshSystemInstruction,
+    );
+    const sendAvailableCommandsUpdate = vi.fn().mockResolvedValue(undefined);
+
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: { mcpServers: {} },
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-ext'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          sendAvailableCommandsUpdate,
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      { merged: { mcpServers: {} } } as unknown as LoadedSettings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/ext', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh, {
+        sessionId: 's-ext',
+      }),
+    ).resolves.toEqual({ ok: true });
+
+    expect(extensionManager.refreshCache).toHaveBeenCalledOnce();
+    expect(skillManager.refreshCache).toHaveBeenCalledOnce();
+    expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
+    expect(refreshHierarchicalMemory).toHaveBeenCalledOnce();
+    expect(refreshSystemInstruction).toHaveBeenCalledOnce();
+    expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
+    expect(refreshHierarchicalMemory.mock.invocationCallOrder[0]).toBeLessThan(
+      refreshSystemInstruction.mock.invocationCallOrder[0]!,
+    );
+    expect(refreshSystemInstruction.mock.invocationCallOrder[0]).toBeLessThan(
+      sendAvailableCommandsUpdate.mock.invocationCallOrder[0]!,
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('propagates extension cache refresh failures', async () => {
+    const extensionManager = {
+      refreshCache: vi.fn().mockRejectedValue(new Error('bad extension cache')),
       refreshTools: vi.fn().mockResolvedValue(undefined),
     };
     const skillManager = {
@@ -11249,12 +11323,13 @@ describe('sessionLanguage multi-session propagation', () => {
       agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh, {
         sessionId: 's-ext',
       }),
-    ).resolves.toEqual({ ok: true });
+    ).rejects.toThrow('bad extension cache');
 
     expect(extensionManager.refreshCache).toHaveBeenCalledOnce();
     expect(skillManager.refreshCache).toHaveBeenCalledOnce();
-    expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
-    expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
+    expect(extensionManager.refreshTools).not.toHaveBeenCalled();
+    expect(cfg.refreshHierarchicalMemory).not.toHaveBeenCalled();
+    expect(sendAvailableCommandsUpdate).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -11315,6 +11390,7 @@ describe('sessionLanguage multi-session propagation', () => {
     expect(extensionManager.refreshCache).toHaveBeenCalledOnce();
     expect(skillManager.refreshCache).toHaveBeenCalledOnce();
     expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
+    expect(cfg.refreshHierarchicalMemory).not.toHaveBeenCalled();
     expect(sendAvailableCommandsUpdate).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();

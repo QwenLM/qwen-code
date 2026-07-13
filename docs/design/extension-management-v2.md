@@ -149,7 +149,9 @@ while a stale update of the same artifact fails with `extension_conflict`.
 
 A successful commit invalidates local status and refreshes affected runtimes.
 Global artifact/default changes reconcile all runtimes in this daemon; an exact
-workspace override reconciles only its target. Per-workspace generation
+workspace override reconciles only its target. Runtime reconciliation refreshes
+extension and skill caches, extension tools, hierarchical memory, active chat
+system instructions, and available commands. Per-workspace generation
 coalescing means applying generation N also satisfies waiters for older
 generations; a late lower-generation refresh therefore cannot move the applied
 generation backwards. Partial refresh failure or post-commit reload/cleanup

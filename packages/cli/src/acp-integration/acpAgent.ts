@@ -7542,13 +7542,16 @@ class QwenAgent implements Agent {
       case SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh: {
         const sessionId = params['sessionId'] as string;
         const session = this.sessionOrThrow(sessionId);
-        const extensionManager = session.getConfig().getExtensionManager();
-        const skillManager = session.getConfig().getSkillManager();
+        const config = session.getConfig();
+        const extensionManager = config.getExtensionManager();
+        const skillManager = config.getSkillManager();
         await Promise.all([
           extensionManager.refreshCache(),
           skillManager?.refreshCache(),
         ]);
         await extensionManager.refreshTools();
+        await config.refreshHierarchicalMemory();
+        await config.getGeminiClient()?.refreshSystemInstruction();
         await session.sendAvailableCommandsUpdate();
         return { ok: true };
       }
