@@ -159,16 +159,15 @@ afterEach(() => {
 });
 
 describe('ExtensionsManagerPage', () => {
-  it('refreshes daemon sessions before reloading the extension list', async () => {
-    actions.refreshExtensions.mockResolvedValue({ refreshed: 1, failed: 0 });
+  it('reloads the extension list without refreshing daemon sessions', async () => {
     await mount();
 
     actions.loadExtensionsStatus.mockClear();
     click(buttonIncluding('refresh'));
     await flush();
 
-    expect(actions.refreshExtensions).toHaveBeenCalledWith('client-1');
     expect(actions.loadExtensionsStatus).toHaveBeenCalledOnce();
+    expect(actions.refreshExtensions).not.toHaveBeenCalled();
   });
 
   it('disables adding another extension while an install is pending', async () => {

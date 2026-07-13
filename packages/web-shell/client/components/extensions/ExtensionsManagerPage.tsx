@@ -244,6 +244,7 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
   const [pendingMutation, setPendingMutation] = useState<{
     operationId: string;
     name: string;
+    suppressMessage?: boolean;
   } | null>(null);
 
   const load = useCallback(
@@ -418,17 +419,21 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
           operation.status === 'succeeded' ||
           operation.status === 'succeeded_with_refresh_error'
         ) {
-          setMessage(
-            operation.status === 'succeeded_with_refresh_error'
-              ? t('extensions.manage.refreshFailed', {
-                  error: operation.result?.error ?? '',
-                })
-              : mutationSuccessMessage(
-                  operation.operation,
-                  pendingMutation.name,
-                  t,
-                ),
-          );
+          if (operation.status === 'succeeded_with_refresh_error') {
+            setMessage(
+              t('extensions.manage.refreshFailed', {
+                error: operation.result?.error ?? '',
+              }),
+            );
+          } else if (!pendingMutation.suppressMessage) {
+            setMessage(
+              mutationSuccessMessage(
+                operation.operation,
+                pendingMutation.name,
+                t,
+              ),
+            );
+          }
           setPendingMutation(null);
           if (operation.operation === 'uninstall') {
             setSelectedName(null);
@@ -443,9 +448,11 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
           void load(true);
           return;
         }
-        setMessage(
-          mutationMessage(operation.operation, pendingMutation.name, t),
-        );
+        if (!pendingMutation.suppressMessage) {
+          setMessage(
+            mutationMessage(operation.operation, pendingMutation.name, t),
+          );
+        }
         timer = setTimeout(() => void poll(), 1000);
       } catch (error) {
         if (cancelled) return;
@@ -463,21 +470,8 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
 
   const refreshList = useCallback(() => {
     setMessage(null);
-    actions
-      .refreshExtensions(connection.clientId)
-      .then((result) => {
-        setMessage(
-          t('extensions.manage.refreshed', {
-            refreshed: result.refreshed,
-            failed: result.failed,
-          }),
-        );
-        return load(true).then(checkAllUpdates);
-      })
-      .catch((error: unknown) => {
-        setMessage(error instanceof Error ? error.message : String(error));
-      });
-  }, [actions, checkAllUpdates, connection.clientId, load, t]);
+    void load();
+  }, [load]);
 
   const checkUpdates = useCallback(
     (name: string) => {
@@ -525,7 +519,10 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
     (
       name: string,
       run: (clientId?: string) => Promise<unknown>,
-      options: { allowWithoutClientId?: boolean } = {},
+      options: {
+        allowWithoutClientId?: boolean;
+        suppressMessage?: boolean;
+      } = {},
     ) => {
       const clientId = connection.clientId;
       if (!clientId && !options.allowWithoutClientId) {
@@ -546,10 +543,16 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
               : undefined;
           if (operationId) {
             startedPolling = true;
-            setPendingMutation({ operationId, name });
+            setPendingMutation({
+              operationId,
+              name,
+              suppressMessage: options.suppressMessage,
+            });
             return;
           }
-          setMessage(t('extensions.manage.queued', { name }));
+          if (!options.suppressMessage) {
+            setMessage(t('extensions.manage.queued', { name }));
+          }
         })
         .catch((error: unknown) => {
           setMessage(error instanceof Error ? error.message : String(error));
@@ -631,7 +634,7 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
                 { scope },
                 clientId,
               ),
-        { allowWithoutClientId: true },
+        { allowWithoutClientId: true, suppressMessage: true },
       );
     const commands = details?.commands ?? [];
     const skills = details?.skills ?? [];
@@ -653,7 +656,14 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
                   {extensionTitle(selectedExtension)}
                 </h1>
                 <Badge variant="outline">v{selectedExtension.version}</Badge>
-                <Badge variant="secondary">
+                <Badge
+                  variant="secondary"
+                  className={
+                    selectedExtension.isActive
+                      ? 'bg-[var(--success-bg)] text-[var(--success-color)]'
+                      : undefined
+                  }
+                >
                   {statusLabel(selectedExtension, t)}
                 </Badge>
               </div>
@@ -990,7 +1000,14 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
                       </CardTitle>
                       <div className="flex shrink-0 flex-wrap justify-end gap-2">
                         <Badge variant="outline">v{extension.version}</Badge>
-                        <Badge variant="secondary">
+                        <Badge
+                          variant="secondary"
+                          className={
+                            extension.isActive
+                              ? 'bg-[var(--success-bg)] text-[var(--success-color)]'
+                              : undefined
+                          }
+                        >
                           {statusLabel(extension, t)}
                         </Badge>
                         {state === UPDATE_AVAILABLE ? (
@@ -1056,7 +1073,7 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
       </div>
 
       <AlertDialog open={installOpen} onOpenChange={setInstallOpen}>
-        <AlertDialogContent>
+        <AlertDialogContent size="middle">
           <AlertDialogHeader className="place-items-start text-left">
             <AlertDialogTitle>{t('extensions.manage.add')}</AlertDialogTitle>
             <AlertDialogDescription>
