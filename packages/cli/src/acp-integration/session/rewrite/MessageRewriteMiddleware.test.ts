@@ -96,6 +96,19 @@ describe('MessageRewriteMiddleware', () => {
           content: { type: 'text', text: 'rewritten text' },
           _meta: { rewritten: true, turnIndex: 1 },
         });
+
+        const { LlmRewriter } = await import('./LlmRewriter.js');
+        const rewriter = vi.mocked(LlmRewriter).mock.results[0]?.value as {
+          rewrite: ReturnType<typeof vi.fn>;
+        };
+        expect(rewriter.rewrite).toHaveBeenCalledWith(
+          {
+            thoughts: [],
+            messages: ['Normal model response.'],
+            hasToolCalls: false,
+          },
+          expect.any(AbortSignal),
+        );
       },
     );
 
