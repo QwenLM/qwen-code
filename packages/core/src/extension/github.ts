@@ -154,19 +154,20 @@ export async function cloneFromGit(
 ): Promise<void> {
   const redactedSource = redactUrlCredentials(installMetadata.source);
   try {
+    let networkConfig: string[] = [];
     if (installMetadata.networkPolicy === 'public') {
       if (!/^https:/i.test(installMetadata.source)) {
         throw new Error('Public extension Git installs must use HTTPS.');
       }
       await assertPinnedGitSupported();
+      const networkTarget = await resolveNetworkTarget(
+        installMetadata.source,
+        installMetadata.networkPolicy,
+      );
+      networkConfig = networkTarget.curlResolve
+        ? createPinnedGitConfig(networkTarget.curlResolve)
+        : [];
     }
-    const networkTarget = await resolveNetworkTarget(
-      installMetadata.source,
-      installMetadata.networkPolicy,
-    );
-    const networkConfig = networkTarget.curlResolve
-      ? createPinnedGitConfig(networkTarget.curlResolve)
-      : [];
     const git = restrictGitEnvironment(
       simpleGit(destination, {
         ...(signal ? { abort: signal } : {}),
@@ -415,25 +416,23 @@ export async function checkForExtensionUpdate(
         );
         return ExtensionUpdateState.ERROR;
       }
-      let resolutionUrl = remoteUrl;
+      let networkConfig: string[] = [];
       if (installMetadata.networkPolicy === 'public') {
         const parsedRemote = new URL(remoteUrl);
         parsedRemote.username = '';
         parsedRemote.password = '';
-        resolutionUrl = parsedRemote.toString();
+        const remoteTarget = await resolveNetworkTarget(
+          parsedRemote,
+          installMetadata.networkPolicy,
+        );
+        networkConfig = remoteTarget.curlResolve
+          ? createPinnedGitConfig(remoteTarget.curlResolve)
+          : [];
       }
-      const remoteTarget = await resolveNetworkTarget(
-        resolutionUrl,
-        installMetadata.networkPolicy,
-      );
       const git = restrictGitEnvironment(
         simpleGit(extension.path, {
           ...(signal ? { abort: signal } : {}),
-          ...(remoteTarget.curlResolve
-            ? {
-                config: createPinnedGitConfig(remoteTarget.curlResolve),
-              }
-            : {}),
+          ...(networkConfig.length > 0 ? { config: networkConfig } : {}),
         }),
         installMetadata.networkPolicy,
       );
@@ -703,7 +702,7 @@ async function fetchJson<T>(
           res.on('error', rejectRequest);
           if (res.statusCode !== 200) {
             res.resume();
-            return reject(
+            return rejectRequest(
               new Error(`Request failed with status code ${res.statusCode}`),
             );
           }

@@ -3583,6 +3583,9 @@ describe('runQwenServe runtime startup failures', () => {
     }
 
     expect(stopExtensionGenerationReconciler).toHaveBeenCalledOnce();
+    expect(
+      stopExtensionGenerationReconciler.mock.invocationCallOrder[0],
+    ).toBeLessThan(vi.mocked(bridge.shutdown).mock.invocationCallOrder[0]!);
   });
 
   it('does not cancel deferred runtime once startup is already running', async () => {

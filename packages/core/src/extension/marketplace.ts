@@ -16,6 +16,10 @@ import { isScopedNpmPackage } from './npm.js';
 import { redactUrlCredentials } from './redaction.js';
 import { clientForUrl } from './http-client.js';
 import { resolveNetworkTarget } from './network-policy.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import { getErrorMessage } from '../utils/errors.js';
+
+const debugLogger = createDebugLogger('EXT_MARKETPLACE');
 
 export interface MarketplaceInstallOptions {
   marketplaceUrl: string;
@@ -146,7 +150,10 @@ async function fetchUrl(
   let target;
   try {
     target = await resolveNetworkTarget(url, networkPolicy);
-  } catch {
+  } catch (error) {
+    debugLogger.debug(
+      `Failed to resolve marketplace network target: ${redactUrlCredentials(getErrorMessage(error))}`,
+    );
     return null;
   }
   return new Promise((resolve) => {

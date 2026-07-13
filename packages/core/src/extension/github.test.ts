@@ -299,6 +299,23 @@ describe('git extension helpers', () => {
       expect(mockGit.clone).not.toHaveBeenCalled();
     });
 
+    it('allows SCP-like SSH Git sources without the public network policy', async () => {
+      const source = 'git@github.com:owner/repo.git';
+      mockGit.getRemotes.mockResolvedValue([
+        { name: 'origin', refs: { fetch: source } },
+      ]);
+
+      await cloneFromGit({ source, type: 'git' }, '/dest');
+
+      expect(mockGit.clone).toHaveBeenCalledWith(source, './', [
+        '-c',
+        'core.symlinks=true',
+        '--depth',
+        '1',
+      ]);
+      expect(mockGit.fetch).toHaveBeenCalledWith(source, 'HEAD');
+    });
+
     it('should throw if no remotes are found', async () => {
       const installMetadata = {
         source: 'http://my-repo.com',
@@ -564,6 +581,26 @@ describe('git extension helpers', () => {
         'https://github.com/owner/repo.git',
         'HEAD',
       ]);
+    });
+
+    it('checks SCP-like SSH Git remotes without the public network policy', async () => {
+      const source = 'git@github.com:owner/repo.git';
+      const extension = createExtension({
+        installMetadata: { type: 'git', source },
+      });
+      mockGit.getRemotes.mockResolvedValue([
+        { name: 'origin', refs: { fetch: source } },
+      ]);
+      mockGit.listRemote.mockResolvedValue('same-hash\tHEAD');
+      mockGit.revparse.mockResolvedValue('same-hash');
+
+      const result = await checkForExtensionUpdate(
+        extension,
+        mockExtensionManager,
+      );
+
+      expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
+      expect(mockGit.listRemote).toHaveBeenCalledWith([source, 'HEAD']);
     });
 
     it('should return UP_TO_DATE when remote and local hashes are the same', async () => {
@@ -996,6 +1033,25 @@ describe('git extension helpers', () => {
       }) as IncomingMessage;
       Object.assign(response, { statusCode: 200, headers: {} });
       mockHttpsGet.mockImplementationOnce(((_url, options, callback) => {
+        callResponseCallback(options, callback, response);
+        return createRequestMock();
+      }) as typeof https.get);
+
+      await expect(
+        downloadFromGitHubRelease(
+          { source: 'owner/repo', type: 'github-release' },
+          tempDir,
+          controller.signal,
+        ),
+      ).rejects.toBe(abortReason);
+    });
+
+    it('preserves the abort reason for release metadata status errors', async () => {
+      const controller = new AbortController();
+      const abortReason = new Error('release check cancelled');
+      const response = createResponse('missing', 404);
+      mockHttpsGet.mockImplementationOnce(((_url, options, callback) => {
+        controller.abort(abortReason);
         callResponseCallback(options, callback, response);
         return createRequestMock();
       }) as typeof https.get);

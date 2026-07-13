@@ -2421,10 +2421,10 @@ export async function runQwenServe(
     );
   const shutdownBridges = new WeakSet<AcpSessionBridge>();
   const disposedRuntimeApps = new WeakSet<Application>();
-  const disposeRuntimeAppResources = (app: Application | undefined): void => {
-    if (!app || disposedRuntimeApps.has(app)) return;
-    disposedRuntimeApps.add(app);
-
+  const stoppedExtensionReconcilers = new WeakSet<Application>();
+  const stopExtensionReconciler = (app: Application | undefined): void => {
+    if (!app || stoppedExtensionReconcilers.has(app)) return;
+    stoppedExtensionReconcilers.add(app);
     const stopExtensionGenerationReconciler = app.locals?.[
       'stopExtensionGenerationReconciler'
     ] as (() => void) | undefined;
@@ -2437,6 +2437,11 @@ export async function runQwenServe(
         }`,
       );
     }
+  };
+  const disposeRuntimeAppResources = (app: Application | undefined): void => {
+    if (!app || disposedRuntimeApps.has(app)) return;
+    disposedRuntimeApps.add(app);
+    stopExtensionReconciler(app);
 
     // Cancel IdP polling before disposing transports that may share its HTTP
     // agents.
@@ -4496,6 +4501,7 @@ export async function runQwenServe(
             (
               app.locals as { stopWorkspaceGitState?: () => void }
             ).stopWorkspaceGitState?.();
+            stopExtensionReconciler(runtimeApp ?? runtimeAppForCleanup);
             // Same rationale for the create_sub_session launchers: stop accepting
             // new sub-session spawns before the bridges are torn down. Calls
             // every workspace's launcher stop (primary + secondaries).

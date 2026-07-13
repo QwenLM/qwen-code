@@ -158,6 +158,48 @@ describe('createExtensionsController', () => {
     expect(refreshCache).toHaveBeenCalledOnce();
   });
 
+  it('reports an accepted operation as running while its cache refreshes', async () => {
+    let finishRefresh!: () => void;
+    const refreshPending = new Promise<void>((resolve) => {
+      finishRefresh = resolve;
+    });
+    const manager = {
+      refreshCache: vi.fn(async () => await refreshPending),
+    } as unknown as ExtensionManager;
+    const responseBody = vi.fn();
+    const response = {
+      status: vi.fn().mockReturnThis(),
+      location: vi.fn().mockReturnThis(),
+      set: vi.fn().mockReturnThis(),
+      json: responseBody,
+    } as unknown as Response;
+    const controller = createExtensionsController({
+      boundWorkspace: '/work/bound',
+      bridge: {} as AcpSessionBridge,
+      workspace: {} as DaemonWorkspaceService,
+    });
+
+    controller.runQueuedExtensionMutation(
+      'install',
+      { name: 'demo' },
+      response,
+      async () => ({ status: 'installed', name: 'demo', updated: false }),
+      { manager, skipRefresh: true },
+    );
+    const operationId = responseBody.mock.calls[0]?.[0].operationId as string;
+
+    await vi.waitFor(() => expect(manager.refreshCache).toHaveBeenCalledOnce());
+    expect(controller.getOperation(operationId)).toMatchObject({
+      status: 'running',
+      phase: 'preparing',
+    });
+
+    finishRefresh();
+    await vi.waitFor(() =>
+      expect(controller.getOperation(operationId)?.status).toBe('succeeded'),
+    );
+  });
+
   it('aborts timed-out preparation without committing and releases its slot', async () => {
     vi.useFakeTimers();
     vi.spyOn(process.stderr, 'write').mockReturnValue(true);

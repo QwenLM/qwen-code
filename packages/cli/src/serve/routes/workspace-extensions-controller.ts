@@ -385,6 +385,10 @@ export function createExtensionsController(
       const commitWarnings: NonNullable<ExtensionOperationStatus['warnings']> =
         [];
       try {
+        updateExtensionOperation(operationId, {
+          status: 'running',
+          phase: 'preparing',
+        });
         const extensionManager = options.manager ?? createExtensionManager();
         const deadlineController = new AbortController();
         let deadlineStarted = false;
