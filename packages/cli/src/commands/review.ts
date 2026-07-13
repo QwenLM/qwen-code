@@ -12,10 +12,14 @@ import type { Argv, CommandModule } from 'yargs';
 import { parseArgsCommand } from './review/parse-args.js';
 import { composeReviewCommand } from './review/compose-review.js';
 import { fetchPrCommand } from './review/fetch-pr.js';
+import { captureLocalCommand } from './review/capture-local.js';
 import { planDiffCommand } from './review/plan-diff.js';
 import { prContextCommand } from './review/pr-context.js';
 import { loadRulesCommand } from './review/load-rules.js';
 import { presubmitCommand } from './review/presubmit.js';
+import { resolveAnchorsCommand } from './review/resolve-anchors.js';
+import { checkCoverageCommand } from './review/check-coverage.js';
+import { submitCommand } from './review/submit.js';
 import { testEfficacyCommand } from './review/test-efficacy.js';
 import { cleanupCommand } from './review/cleanup.js';
 
@@ -27,16 +31,20 @@ export const reviewCommand: CommandModule = {
     yargs
       .command(parseArgsCommand)
       .command(fetchPrCommand)
+      .command(captureLocalCommand)
       .command(planDiffCommand)
       .command(prContextCommand)
       .command(loadRulesCommand)
+      .command(resolveAnchorsCommand)
+      .command(checkCoverageCommand)
       .command(presubmitCommand)
       .command(testEfficacyCommand)
       .command(composeReviewCommand)
+      .command(submitCommand)
       .command(cleanupCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: parse-args, fetch-pr, plan-diff, pr-context, load-rules, presubmit, test-efficacy, compose-review, or cleanup.',
+        'Specify a subcommand: parse-args, fetch-pr, capture-local, plan-diff, pr-context, load-rules, resolve-anchors, check-coverage, presubmit, test-efficacy, compose-review, submit, or cleanup.',
       )
       .version(false),
   handler: () => {
