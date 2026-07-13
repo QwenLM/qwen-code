@@ -13,8 +13,10 @@ function makeSkill(overrides: Partial<SkillConfig> = {}): SkillConfig {
     name: 'review',
     description: 'Review changed code',
     level: 'bundled',
+    filePath: '/skills/review/SKILL.md',
+    body: 'Review instructions',
     ...overrides,
-  } as SkillConfig;
+  };
 }
 
 describe('mapSkillConfigToStatus', () => {
@@ -31,6 +33,7 @@ describe('mapSkillConfigToStatus', () => {
       level: 'bundled',
       modelInvocable: true,
       argumentHint: '[pr-number]',
+      installedPath: '/skills/review/SKILL.md',
     });
   });
 
