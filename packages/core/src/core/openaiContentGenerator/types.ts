@@ -86,11 +86,6 @@ export interface RequestContext {
    */
   pendingUntrustedResponseParts?: Part[];
   /**
-   * Tracks whether structured reasoning has already carried a raw thinking tag,
-   * making a matching visible tag suspicious at stream finish.
-   */
-  hasUntrustedThoughtTag?: boolean;
-  /**
    * Request-scoped scanner state for raw thinking tags inside structured
    * reasoning text. This catches tags split across reasoning deltas.
    */

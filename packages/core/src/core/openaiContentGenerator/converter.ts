@@ -1087,7 +1087,6 @@ function hasThoughtPart(parts: Part[]): boolean {
   return parts.some((part) => part.thought === true);
 }
 
-const THINKING_TAG_PATTERN = /<\/?think(?:ing)?\s*>/i;
 const COMPLETE_THINKING_TAG_PATTERN = /^<\/?think(?:ing)?\s*>$/i;
 const SPACED_THINKING_TAG_PREFIX_PATTERN = /^<\/?think(?:ing)?\s+$/;
 const THINKING_TAGS = [
@@ -1429,9 +1428,6 @@ export function convertOpenAIChunkToGemini(
           normalizedReasoningText,
           thoughtThinkingTagState,
         );
-        if (thoughtThinkingTagState.hasTag) {
-          requestContext.hasUntrustedThoughtTag = true;
-        }
       }
       if (
         normalizedReasoningText &&
@@ -1527,20 +1523,8 @@ export function convertOpenAIChunkToGemini(
       });
     const hasStructuredReasoning =
       requestContext.hasStructuredReasoningContent === true;
-    if (
-      hasStructuredReasoning &&
-      !requestContext.hasUntrustedThoughtTag &&
-      parts.some(
-        (part) =>
-          part.thought === true &&
-          typeof part.text === 'string' &&
-          THINKING_TAG_PATTERN.test(part.text),
-      )
-    ) {
-      requestContext.hasUntrustedThoughtTag = true;
-    }
     const hasMatchingThoughtTag =
-      requestContext.hasUntrustedThoughtTag === true;
+      requestContext.thoughtThinkingTagState?.hasTag === true;
     const hasSuspiciousThoughtTag =
       hasMatchingThoughtTag ||
       Boolean(requestContext.thoughtThinkingTagState?.pendingTag);
