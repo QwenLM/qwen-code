@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import {
   actOnDecision,
   actOnDecisions,
+  fingerprint,
   resetSuccessfulFailures,
   selectCandidateTargets,
   selectTarget,
@@ -940,6 +941,18 @@ if (args[0] === 'pr' && args[1] === 'list') {
     expect(client.calls).toEqual([]);
   });
 
+  it('does not rerun without a failure explanation', async () => {
+    const client = runner();
+
+    await actOnDecision(client, selectTarget([pr()], { now: NOW }), {
+      action: 'rerun',
+      confidence: 'high',
+      reason_zh: '日志显示 runner 网络超时。',
+    });
+
+    expect(client.calls).toEqual([]);
+  });
+
   it('records a marker only after rerunning failed jobs', async () => {
     const client = runner();
     client.comment = async () => {
@@ -1432,6 +1445,7 @@ if (args[0] === 'pr' && args[1] === 'list') {
               `Failure: xoxb-${'a'.repeat(24)}`,
               `Failure: ghr_${'c'.repeat(24)}`,
               `Failure: sk-proj-${'b'.repeat(32)}`,
+              `Failure: npm_${'d'.repeat(36)}`,
               'Error: https://user:password@example.com/path',
               'Error: download timed out with Bearer abcdefghijklmnopqrstuvwxyz',
             ].join('\n');
@@ -1455,12 +1469,27 @@ if (args[0] === 'pr' && args[1] === 'list') {
       expect(log).not.toContain(`xoxb-${'a'.repeat(24)}`);
       expect(log).not.toContain(`ghr_${'c'.repeat(24)}`);
       expect(log).not.toContain(`sk-proj-${'b'.repeat(32)}`);
+      expect(log).not.toContain(`npm_${'d'.repeat(36)}`);
       expect(log).not.toContain('user:password@');
       expect(log).not.toContain('abcdefghijklmnopqrstuvwxyz');
       expect(log).toContain('download timed out');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('normalizes failure fingerprints deterministically', () => {
+    const target = selectTarget([pr()], { now: NOW });
+
+    expect(fingerprint(target, 'Error: 0x1a2b3c4d at line 123')).toBe(
+      fingerprint(target, 'error: 0xdeadbeef at line 456'),
+    );
+    expect(fingerprint(target, 'Error: timeout')).toBe(
+      fingerprint(target, 'Error: timeout'),
+    );
+    expect(fingerprint(target, 'Error: timeout')).not.toBe(
+      fingerprint({ ...target, workflowName: 'Lint' }, 'Error: timeout'),
+    );
   });
 
   it('writes an empty skill log when a failed check has no job URL', async () => {
@@ -1553,5 +1582,45 @@ if (args[0] === 'pr' && args[1] === 'list') {
     });
 
     expect(client.calls).toEqual([]);
+  });
+
+  it('does not record no-action state when the PR is closed, draft, or retargeted', async () => {
+    for (const currentPr of [
+      {
+        state: 'CLOSED',
+        isDraft: false,
+        baseRefName: 'main',
+        headRefOid: 'abc123',
+      },
+      {
+        state: 'OPEN',
+        isDraft: true,
+        baseRefName: 'main',
+        headRefOid: 'abc123',
+      },
+      {
+        state: 'OPEN',
+        isDraft: false,
+        baseRefName: 'release',
+        headRefOid: 'abc123',
+      },
+    ]) {
+      const client = runner();
+      client.currentPr = async () => currentPr;
+
+      await actOnDecision(
+        client,
+        {
+          ...selectTarget([pr()], { now: NOW }),
+          failureKey: 'deterministic-test-failure',
+        },
+        {
+          action: 'no_action',
+          failureKey: 'deterministic-test-failure',
+        },
+      );
+
+      expect(client.calls).toEqual([]);
+    }
   });
 });

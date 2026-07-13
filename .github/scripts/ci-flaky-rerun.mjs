@@ -75,7 +75,7 @@ function failureKey(target, decision) {
   return decision?.failureKey === target.failureKey ? target.failureKey : null;
 }
 
-function fingerprint(target, log) {
+export function fingerprint(target, log) {
   const normalized = log
     .toLowerCase()
     .replace(/[a-f0-9]{8,}/g, '#')
@@ -127,7 +127,8 @@ function redactLogLine(line) {
       /\b([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL)[A-Za-z0-9_]*)\s*[:=]\s*\S+/gi,
       '$1=[redacted]',
     )
-    .replace(/\b([a-z][a-z0-9+.-]{0,31}:\/\/)(?:[^/\s]+@)+/gi, '$1[redacted]@');
+    .replace(/\b([a-z][a-z0-9+.-]{0,31}:\/\/)(?:[^/\s]+@)+/gi, '$1[redacted]@')
+    .replace(/\bnpm_[A-Za-z0-9]{20,}/g, '[redacted]');
 }
 
 function skillLog(log) {
@@ -261,6 +262,7 @@ export async function actOnDecision(client, target, decision) {
   const nextTarget = { ...target, actionCount };
 
   if (decision.action === 'rerun') {
+    if (!decision.reason_en) return;
     await client.rerunFailedJobs(target.runId);
     await client.comment(
       target.prNumber,
