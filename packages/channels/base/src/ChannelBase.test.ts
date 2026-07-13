@@ -8213,6 +8213,80 @@ describe('ChannelBase', () => {
       expect(ch.sent.length).toBeGreaterThanOrEqual(1);
     });
 
+    it('block-streams slash-command output', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit(
+            'slashCommandOutput',
+            sid,
+            'Context compressed.',
+          );
+          return Promise.resolve('Context compressed.');
+        },
+      );
+      const ch = createChannel({
+        blockStreaming: 'on',
+        blockStreamingChunk: { minChars: 100, maxChars: 1000 },
+        blockStreamingCoalesce: { idleMs: 0 },
+      });
+
+      await ch.handleInbound(envelope());
+
+      expect(ch.sent.map((message) => message.text)).toEqual([
+        'Context compressed.',
+      ]);
+    });
+
+    it('prefers model text over slash-command output when block streaming', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit(
+            'slashCommandOutput',
+            sid,
+            'Slash output',
+          );
+          (bridge as unknown as EventEmitter).emit(
+            'textChunk',
+            sid,
+            'Model text',
+          );
+          return Promise.resolve('Model text');
+        },
+      );
+      const ch = createChannel({
+        blockStreaming: 'on',
+        blockStreamingChunk: { minChars: 100, maxChars: 1000 },
+        blockStreamingCoalesce: { idleMs: 0 },
+      });
+
+      await ch.handleInbound(envelope());
+
+      expect(ch.sent.map((message) => message.text)).toEqual(['Model text']);
+    });
+
+    it('does not stream slash-command output cleared at a response boundary', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit(
+            'slashCommandOutput',
+            sid,
+            'Stale slash output',
+          );
+          (bridge as unknown as EventEmitter).emit('responseBoundary', sid);
+          return Promise.resolve('');
+        },
+      );
+      const ch = createChannel({
+        blockStreaming: 'on',
+        blockStreamingChunk: { minChars: 1, maxChars: 1000 },
+        blockStreamingCoalesce: { idleMs: 0 },
+      });
+
+      await ch.handleInbound(envelope());
+
+      expect(ch.sent).toEqual([]);
+    });
+
     it('drops buffered block stream text at response boundaries', async () => {
       (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
         (sid: string) => {
