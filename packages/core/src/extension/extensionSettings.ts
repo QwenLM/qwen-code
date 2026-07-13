@@ -171,7 +171,10 @@ async function applyOrDeferKeychainMutations(
   defer: boolean,
 ): Promise<(() => Promise<void>) | undefined> {
   if (mutations.length === 0) return undefined;
+  let applied = false;
   const apply = async () => {
+    if (applied) return;
+    applied = true;
     for (const mutation of mutations) await mutation();
   };
   if (defer) return apply;

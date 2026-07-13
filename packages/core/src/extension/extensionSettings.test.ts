@@ -167,6 +167,9 @@ describe('extensionSettings', () => {
       expect(await keychain.getSecret('API_KEY')).toBeNull();
       await commit?.();
       expect(await keychain.getSecret('API_KEY')).toBe('mock-API_KEY');
+      await keychain.setSecret('API_KEY', 'rotated');
+      await commit?.();
+      expect(await keychain.getSecret('API_KEY')).toBe('rotated');
     });
 
     it('defers clearing sensitive settings until commit', async () => {
