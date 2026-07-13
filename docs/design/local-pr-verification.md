@@ -43,7 +43,9 @@ without creating the temporary worktree.
 
 On POSIX systems, the owned container is created below the canonical `/tmp`
 path. This avoids both macOS `/var` aliases and excessively long per-user
-temporary paths while keeping every generated file inside the owned container.
+temporary paths. Build outputs and verifier-owned temporary files stay inside
+the container; npm may still reuse the caller's cache, and Git temporarily
+registers the detached worktree in repository metadata until cleanup.
 
 Installation forces lifecycle scripts to run so the build and bundle cannot
 be skipped by caller npm settings, while disabling Husky setup to avoid

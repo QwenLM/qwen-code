@@ -23,6 +23,29 @@ import { classifyChangedFiles } from '../.github/scripts/ci/classify-profile.mjs
 
 const SETTINGS_SCHEMA_PATH =
   'packages/vscode-ide-companion/schemas/settings.schema.json';
+const TEST_AUTH_ENV_KEYS = [
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'BAILIAN_CODING_PLAN_API_KEY',
+  'BAILIAN_TOKEN_PLAN_API_KEY',
+  'DASHSCOPE_API_KEY',
+  'DEEPSEEK_API_KEY',
+  'GEMINI_API_KEY',
+  'GOOGLE_API_KEY',
+  'GOOGLE_APPLICATION_CREDENTIALS',
+  'IDEALAB_API_KEY',
+  'MINIMAX_API_KEY',
+  'MODELSCOPE_API_KEY',
+  'OPENAI_API_KEY',
+  'OPENCODE_GO_API_KEY',
+  'OPENROUTER_API_KEY',
+  'QWEN_API_KEY',
+  'QWEN_DAEMON_TOKEN',
+  'QWEN_DEFAULT_AUTH_TYPE',
+  'QWEN_SERVER_TOKEN',
+  'REQUESTY_API_KEY',
+  'ZAI_API_KEY',
+];
 
 export function parseArgs(argv) {
   const options = {
@@ -300,6 +323,9 @@ export function createValidationSteps({ prettierFiles = [], profile }) {
     ]) {
       steps.find((candidate) => candidate.name === name).isolatedHome = true;
     }
+    for (const name of ['Run unit tests', 'Run script tests']) {
+      steps.find((candidate) => candidate.name === name).boundedVitest = true;
+    }
     steps.find(({ name }) => name === 'Run web shell smoke tests').playwright =
       true;
   }
@@ -415,17 +441,15 @@ export function createStepEnvironment({ baseEnv, home, playwrightPort, step }) {
       CI: 'true',
       NO_COLOR: 'true',
     });
-    for (const key of [
-      'ANTHROPIC_API_KEY',
-      'OPENAI_API_KEY',
-      'DASHSCOPE_API_KEY',
-      'QWEN_API_KEY',
-      'GEMINI_API_KEY',
-      'GOOGLE_API_KEY',
-      'QWEN_DEFAULT_AUTH_TYPE',
-    ]) {
-      delete env[key];
+    for (const key of TEST_AUTH_ENV_KEYS) delete env[key];
+    for (const key of Object.keys(env)) {
+      if (key.startsWith('QWEN_CUSTOM_API_KEY_')) delete env[key];
     }
+  }
+
+  if (step.boundedVitest) {
+    env.VITEST_MIN_THREADS = '1';
+    env.VITEST_MAX_THREADS = '4';
   }
 
   if (step.isolatedHome) {

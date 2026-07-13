@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
+import { resolveConfig as resolveVitestConfig } from 'vitest/node';
 
 import {
   assertNode22,
@@ -362,6 +363,11 @@ describe('validation profiles', () => {
         testEnvironment: true,
       });
     }
+    for (const name of ['Run unit tests', 'Run script tests']) {
+      expect(steps.find((candidate) => candidate.name === name)).toMatchObject({
+        boundedVitest: true,
+      });
+    }
     expect(
       steps.find(({ name }) => name === 'Run web shell smoke tests'),
     ).toMatchObject({ playwright: true, testEnvironment: true });
@@ -420,15 +426,33 @@ describe('step execution', () => {
     const testSteps = createValidationSteps({ profile: 'full' }).filter(
       ({ testEnvironment }) => testEnvironment,
     );
+    const credentialKeys = [
+      'ANTHROPIC_API_KEY',
+      'ANTHROPIC_AUTH_TOKEN',
+      'BAILIAN_CODING_PLAN_API_KEY',
+      'BAILIAN_TOKEN_PLAN_API_KEY',
+      'DASHSCOPE_API_KEY',
+      'DEEPSEEK_API_KEY',
+      'GEMINI_API_KEY',
+      'GOOGLE_API_KEY',
+      'GOOGLE_APPLICATION_CREDENTIALS',
+      'IDEALAB_API_KEY',
+      'MINIMAX_API_KEY',
+      'MODELSCOPE_API_KEY',
+      'OPENAI_API_KEY',
+      'OPENCODE_GO_API_KEY',
+      'OPENROUTER_API_KEY',
+      'QWEN_API_KEY',
+      'QWEN_DAEMON_TOKEN',
+      'QWEN_DEFAULT_AUTH_TYPE',
+      'QWEN_SERVER_TOKEN',
+      'REQUESTY_API_KEY',
+      'ZAI_API_KEY',
+    ];
     const baseEnv = {
-      ANTHROPIC_API_KEY: 'anthropic',
-      DASHSCOPE_API_KEY: 'dashscope',
-      GEMINI_API_KEY: 'gemini',
-      GOOGLE_API_KEY: 'google',
+      ...Object.fromEntries(credentialKeys.map((key) => [key, 'secret'])),
       HOME: '/caller/home',
-      OPENAI_API_KEY: 'openai',
-      QWEN_API_KEY: 'qwen',
-      QWEN_DEFAULT_AUTH_TYPE: 'oauth',
+      QWEN_CUSTOM_API_KEY_OPENAI_EXAMPLE: 'custom-secret',
       SAFE: 'kept',
       USERPROFILE: '/caller/profile',
     };
@@ -452,17 +476,47 @@ describe('step execution', () => {
         step.playwright ? '/caller/profile' : '/tmp/verify-pr-home',
       );
       for (const key of [
-        'ANTHROPIC_API_KEY',
-        'DASHSCOPE_API_KEY',
-        'GEMINI_API_KEY',
-        'GOOGLE_API_KEY',
-        'OPENAI_API_KEY',
-        'QWEN_API_KEY',
-        'QWEN_DEFAULT_AUTH_TYPE',
+        ...credentialKeys,
+        'QWEN_CUSTOM_API_KEY_OPENAI_EXAMPLE',
       ]) {
         expect(env).not.toHaveProperty(key);
       }
+      expect(env.VITEST_MIN_THREADS).toBe(step.boundedVitest ? '1' : undefined);
+      expect(env.VITEST_MAX_THREADS).toBe(step.boundedVitest ? '4' : undefined);
       expect(env.PLAYWRIGHT_PORT).toBe(step.playwright ? '43123' : undefined);
+    }
+  });
+
+  it('overrides fixed Vitest pool thread counts for bounded test steps', async () => {
+    const unitStep = createValidationSteps({ profile: 'full' }).find(
+      ({ name }) => name === 'Run unit tests',
+    );
+    const env = createStepEnvironment({
+      baseEnv: {},
+      home: '/temporary-home',
+      step: unitStep,
+    });
+    const previousMin = process.env.VITEST_MIN_THREADS;
+    const previousMax = process.env.VITEST_MAX_THREADS;
+
+    process.env.VITEST_MIN_THREADS = env.VITEST_MIN_THREADS;
+    process.env.VITEST_MAX_THREADS = env.VITEST_MAX_THREADS;
+    try {
+      const { vitestConfig } = await resolveVitestConfig({
+        config: false,
+        poolOptions: {
+          threads: { minThreads: 8, maxThreads: 16 },
+        },
+      });
+      expect(vitestConfig.poolOptions?.threads).toMatchObject({
+        minThreads: 1,
+        maxThreads: 4,
+      });
+    } finally {
+      if (previousMin === undefined) delete process.env.VITEST_MIN_THREADS;
+      else process.env.VITEST_MIN_THREADS = previousMin;
+      if (previousMax === undefined) delete process.env.VITEST_MAX_THREADS;
+      else process.env.VITEST_MAX_THREADS = previousMax;
     }
   });
 
