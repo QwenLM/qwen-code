@@ -15,7 +15,6 @@ import { writeFileSync, readFileSync } from 'node:fs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import {
   gh,
-  ghApi,
   ghApiAll,
   ghApiAllNested,
   currentUser,
@@ -264,10 +263,13 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
     `repos/${owner}/${repo}/commits/${commitSha}/check-runs`,
     'check_runs',
   ) as CheckRun[];
-  const statusResp = ghApi(
+  // Paginate the legacy combined-status endpoint too (default 30 per page):
+  // same first-page-only gap as check-runs — a failing or pending status on
+  // page 2 would otherwise be invisible and let the review approve past it.
+  const statuses = ghApiAllNested(
     `repos/${owner}/${repo}/commits/${commitSha}/status`,
-  ) as { statuses?: CommitStatus[] } | null;
-  const statuses = statusResp?.statuses ?? [];
+    'statuses',
+  ) as CommitStatus[];
   const ciStatus = classifyCi(checkRuns, statuses);
 
   // --- Existing Qwen Code comments --------------------------------------

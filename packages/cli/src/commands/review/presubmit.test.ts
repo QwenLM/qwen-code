@@ -243,14 +243,15 @@ describe('presubmitCommand', () => {
     // — the boolean compose-review actually acts on — did not. The disclosure was
     // written and the downgrade never fired. A reason nobody reads is not a gate,
     // so the assertion is on the boolean, through the real command.
-    ghApiAllNestedMock.mockReturnValue([
-      { name: 'Test', status: 'completed', conclusion: 'skipped' },
-      { name: 'Lint', status: 'completed', conclusion: 'skipped' },
-    ]);
-    ghApiMock.mockImplementation((path: string) => {
-      if (path.endsWith('/status')) return { statuses: [] };
-      return null;
-    });
+    ghApiAllNestedMock.mockImplementation((path: string) =>
+      path.endsWith('/check-runs')
+        ? [
+            { name: 'Test', status: 'completed', conclusion: 'skipped' },
+            { name: 'Lint', status: 'completed', conclusion: 'skipped' },
+          ]
+        : [],
+    );
+    ghApiMock.mockReturnValue(null);
 
     const handler = presubmitCommand.handler;
     if (!handler) throw new Error('presubmit handler missing');
@@ -267,26 +268,25 @@ describe('presubmitCommand', () => {
   });
 
   it('ignores the running Qwen PR review check when deciding whether CI is still pending', async () => {
-    ghApiAllNestedMock.mockReturnValue([
-      {
-        name: 'Test (ubuntu-latest, Node 22.x)',
-        status: 'completed',
-        conclusion: 'success',
-      },
-      {
-        name: 'review-pr',
-        status: 'in_progress',
-        conclusion: null,
-        details_url:
-          'https://github.com/QwenLM/qwen-code/actions/runs/28788268483/job/85362025778',
-      },
-    ]);
-    ghApiMock.mockImplementation((path: string) => {
-      if (path.endsWith('/status')) {
-        return { statuses: [] };
-      }
-      return null;
-    });
+    ghApiAllNestedMock.mockImplementation((path: string) =>
+      path.endsWith('/check-runs')
+        ? [
+            {
+              name: 'Test (ubuntu-latest, Node 22.x)',
+              status: 'completed',
+              conclusion: 'success',
+            },
+            {
+              name: 'review-pr',
+              status: 'in_progress',
+              conclusion: null,
+              details_url:
+                'https://github.com/QwenLM/qwen-code/actions/runs/28788268483/job/85362025778',
+            },
+          ]
+        : [],
+    );
+    ghApiMock.mockReturnValue(null);
 
     const handler = presubmitCommand.handler;
     if (!handler) throw new Error('presubmit handler missing');

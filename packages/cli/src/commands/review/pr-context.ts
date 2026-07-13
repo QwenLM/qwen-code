@@ -193,8 +193,15 @@ export function fullIssueCommentBody(
 // word-character transition, so `@scope/pkg/index.ts` extracted as
 // `scope/pkg/index.ts` and `../lib/b.ts` as `lib/b.ts` — a path whose meaning
 // is not the path that was cited.
+// The path body is `[\w./@-]{0,200}[\w-]` — a bounded run ending in a name
+// char — NOT `[\w./@-]*[\w-]+`. The two overlapping greedy quantifiers in the
+// old form backtracked catastrophically when the trailing `\.ext` failed: a
+// long extensionless token (`"(blocker)\n" + "a".repeat(n)`) was O(n²), ~7 s at
+// 80k chars, a real ReDoS on an untrusted comment body. The single bounded
+// class cannot split, and {0,200} caps a real code path well above any genuine
+// one while making the scan linear.
 const CODE_REF_RE =
-  /(?<![\w./@-])[\w./@-]*[\w-]+\.(?:tsx?|jsx?|mjs|cjs|vue|svelte|py|go|rs|java|kt|rb|c|cc|cpp|h|hpp|cs|php|swift|scala|sh|sql|graphql|gql|proto|gradle|ya?ml|json|toml|md)(?::\d+(?:-\d+)?)?\b/g;
+  /(?<![\w./@-])[\w./@-]{0,200}[\w-]\.(?:tsx?|jsx?|mjs|cjs|vue|svelte|py|go|rs|java|kt|rb|c|cc|cpp|h|hpp|cs|php|swift|scala|sh|sql|graphql|gql|proto|gradle|ya?ml|json|toml|md)(?::\d+(?:-\d+)?)?\b/g;
 const MAX_CODE_REFS = 12;
 export function extractCodeRefs(body: string | undefined): string[] {
   const all = [
@@ -323,7 +330,12 @@ const BLOCKER_PATTERNS: RegExp[] = [
  */
 const NEG_WORD =
   '\\b(?:no|not|zero|without|never|non[- ])|没有|不是|无|未发现|不存在|并非|绝非|(?<!除)非';
-const ADVERSATIVE = '\\b(?:but|however|although|though)\\b|但是|但|然而|不过';
+// …plus a space-surrounded hyphen run (` - ` / ` -- `), an informal clause
+// separator: "No blockers - auth is still broken" starts a new clause after the
+// dash. Space-surrounded on purpose, so `must-fix` / `non-blocking` (no
+// surrounding spaces) are untouched.
+const ADVERSATIVE =
+  '\\b(?:but|however|although|though)\\b|但是|但|然而|不过|\\s-{1,2}\\s';
 const NEGATION = new RegExp(
   // negation word, then ≤40 clause chars — none of which start an adversative,
   // and none of which is a hard clause break (`.!?;:` and CJK equivalents) —
@@ -420,6 +432,7 @@ export function isReviewWorthShowing(body: string | undefined): boolean {
 
 export interface InlineThreads {
   openRoots: RawComment[];
+  openBlockerRoots: RawComment[];
   repliedBlockerRoots: RawComment[];
   repliedRoots: RawComment[];
   repliesByRoot: Map<number, RawComment[]>;
@@ -456,25 +469,37 @@ export function classifyInlineThreads(inline: RawComment[]): InlineThreads {
   const roots = inline.filter(
     (c) => c.in_reply_to_id === undefined || c.in_reply_to_id === null,
   );
-  const allRepliedRoots = roots.filter((c) => repliesByRoot.has(c.id));
-  // A reply alone does not retire a blocker — "I disagree" is a reply. Any
-  // replied thread whose root asserts a blocking defect is pulled out of
-  // "Already discussed" into its own mandatory re-check section. Promotion is
-  // fail-safe in this direction: a third party can only ADD their thread to
-  // the re-check list, never hide one.
+  // A root asserting a blocking defect is pulled into the mandatory re-check
+  // section, rendered first and in full — WHETHER OR NOT it has a reply. An
+  // earlier cut only promoted *replied* roots, so a fresh un-replied `[Critical]`
+  // went straight into "Open inline comments" as a 240-char snippet: exactly the
+  // "blocker past the read window" failure this whole change exists to close,
+  // left open for the un-replied half. Promotion is fail-safe either way — a
+  // third party can only ADD a thread to the re-check list, never hide one.
   //
-  // This used to key on the literal `[Critical]` marker, which only /review
-  // emits — so a human blocker phrased any other way settled into the section
-  // headed "do NOT re-report". `carriesBlockerSignal` is the semantic test.
-  const repliedBlockerRoots = allRepliedRoots.filter((c) =>
-    carriesBlockerSignal(c.body),
+  // (This used to key on the literal `[Critical]` marker, which only /review
+  // emits — a human blocker phrased any other way settled into "do NOT
+  // re-report". `carriesBlockerSignal` is the semantic test.)
+  const repliedBlockerRoots = roots.filter(
+    (c) => repliesByRoot.has(c.id) && carriesBlockerSignal(c.body),
   );
-  const repliedRoots = allRepliedRoots.filter(
-    (c) => !carriesBlockerSignal(c.body),
+  const openBlockerRoots = roots.filter(
+    (c) => !repliesByRoot.has(c.id) && carriesBlockerSignal(c.body),
   );
-  const openRoots = roots.filter((c) => !repliesByRoot.has(c.id));
+  const repliedRoots = roots.filter(
+    (c) => repliesByRoot.has(c.id) && !carriesBlockerSignal(c.body),
+  );
+  const openRoots = roots.filter(
+    (c) => !repliesByRoot.has(c.id) && !carriesBlockerSignal(c.body),
+  );
 
-  return { openRoots, repliedBlockerRoots, repliedRoots, repliesByRoot };
+  return {
+    openRoots,
+    openBlockerRoots,
+    repliedBlockerRoots,
+    repliedRoots,
+    repliesByRoot,
+  };
 }
 
 /**
@@ -609,8 +634,16 @@ export function buildMarkdown(
   issue: RawComment[],
   reviews: RawReview[],
 ): string {
-  const { openRoots, repliedBlockerRoots, repliedRoots, repliesByRoot } =
-    classifyInlineThreads(inline);
+  const {
+    openRoots,
+    openBlockerRoots,
+    repliedBlockerRoots,
+    repliedRoots,
+    repliesByRoot,
+  } = classifyInlineThreads(inline);
+  // Both replied and un-replied blocker roots go to the re-check section,
+  // rendered first and in full. Un-replied ones simply have no reply chain.
+  const allBlockerRoots = [...repliedBlockerRoots, ...openBlockerRoots];
   const ctx: RefContext = { ownerRepo, prNumber };
 
   // Issue-level comments are the channel a maintainer's out-of-band review
@@ -654,7 +687,7 @@ export function buildMarkdown(
   // section existed and nobody could see it, which is the PR #5738 failure this
   // file already carries a comment about, reintroduced one section further down.
   parts.push(
-    ...blockerSection(repliedBlockerRoots, blockerIssue, repliesByRoot, ctx),
+    ...blockerSection(allBlockerRoots, blockerIssue, repliesByRoot, ctx),
   );
 
   parts.push('## Description');
@@ -835,8 +868,10 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   ).length;
   // Same walk buildMarkdown just rendered from — never a re-implementation,
   // so this count cannot silently diverge from the file's contents.
+  const threads = classifyInlineThreads(inline);
   const blockerCount =
-    classifyInlineThreads(inline).repliedBlockerRoots.length +
+    threads.repliedBlockerRoots.length +
+    threads.openBlockerRoots.length +
     issue.filter((c) => carriesBlockerSignal(c.body)).length;
   writeStdoutLine(
     `Wrote PR context to ${out} (${inline.length} inline, ${issue.length} issue comments, ${blockerCount} blocker(s) to re-check, ${meaningfulReviewCount}/${reviews.length} review summaries — review bodies and blocker bodies rendered in full)`,

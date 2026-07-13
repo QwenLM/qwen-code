@@ -37,7 +37,7 @@
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, isAbsolute, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 
 export type ProbeVerdict = 'gated' | 'inert' | 'inconclusive';
@@ -314,6 +314,22 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     globs,
   );
 
+  // The report JSON is untrusted input, and `revert` paths become both git
+  // pathspecs and `join(worktree, …)` filesystem targets we check out and
+  // delete. Reject anything that is not a plain repository-relative path — an
+  // absolute path, or one that normalises outside the worktree (`../`, or a
+  // `a/../../b` that looks clean per-segment) — before it can point the
+  // checkout/delete at a file outside the tree.
+  for (const p of revert) {
+    const norm = join(worktree, p);
+    const root = join(worktree, '.');
+    if (isAbsolute(p) || (norm !== root && !norm.startsWith(root + sep))) {
+      throw new Error(
+        `refusing to run: revert path escapes the worktree: ${JSON.stringify(p)}`,
+      );
+    }
+  }
+
   const results: Array<{
     file: string;
     verdict: ProbeVerdict;
@@ -482,10 +498,14 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     writeStdoutLine(`  [test] ${f.kind}: ${f.file}`);
   }
   if (restoreFailure) {
-    // Loud, and on stderr: every subsequent step of the review is now reading
-    // base code out of this worktree, and a line buried in a JSON field is not
-    // going to stop it.
+    // Loud, on stderr, AND a non-zero exit. The worktree is now on base code,
+    // so every later review step reads the wrong source; a line in a JSON
+    // field the workflow does not consume would let it proceed anyway (the
+    // fail-open the whole guard exists to prevent). The report is already
+    // written, so the caller still has the findings — it just cannot mistake
+    // this for a clean run.
     writeStderrLine(`ERROR: ${restoreFailure}`);
+    process.exitCode = 1;
   }
 }
 

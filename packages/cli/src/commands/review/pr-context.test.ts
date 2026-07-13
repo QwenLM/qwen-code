@@ -318,7 +318,10 @@ describe('buildMarkdown — truncation refs are copy-runnable with real coordina
         user: { login: 'r' },
         path: 'a.ts',
         line: 1,
-        body: `Must fix: ${'x'.repeat(400)}`,
+        // A non-blocker open root (a plain nit) — one carrying a blocker signal
+        // would now be promoted to the re-check section and rendered in full,
+        // not left as an open-section snippet.
+        body: `Please rename this helper: ${'x'.repeat(400)}`,
       },
     ];
     const issue = [{ id: 31, user: { login: 'r' }, body: 'y'.repeat(400) }];
@@ -395,7 +398,11 @@ describe('buildMarkdown — truncation refs are copy-runnable with real coordina
 // re-check section never appears in the body at all — the finding is headed
 // "🔴 Finding 1".
 //
-// The fixture is the real comment body, byte for byte.
+// The fixture is the real #6486 comment body. It DOES contain `[Critical]`
+// (inside doudouOUC's quoted text) and is not byte-identical to the live
+// thread — the point it proves is that a maintainer's blocker filed as an
+// ISSUE comment gets promoted and rendered in full past the 25k cut, which the
+// literal-marker gate would have missed.
 describe('buildMarkdown — a markerless maintainer blocker must not render as an endorsement (PR #6486 regression)', () => {
   const realBody = readFileSync(
     join(
@@ -707,6 +714,23 @@ describe('carriesBlockerSignal', () => {
     expect(carriesBlockerSignal('This is not a blocker')).toBe(false);
     expect(carriesBlockerSignal('没有阻塞问题，一切正常')).toBe(false);
   });
+
+  it('resets a negation at a space-surrounded hyphen, not at must-fix', () => {
+    // ` - ` / ` -- ` is an informal clause separator (like an em dash), so the
+    // clause after it is asserting. Space-surrounded on purpose: `must-fix` and
+    // `non-blocking` have no surrounding spaces and are untouched.
+    expect(
+      carriesBlockerSignal(
+        'No blockers - auth is still broken and is a blocker',
+      ),
+    ).toBe(true);
+    expect(carriesBlockerSignal('No issues -- the cache is a blocker')).toBe(
+      true,
+    );
+    expect(carriesBlockerSignal('This is a must-fix issue')).toBe(true);
+    expect(carriesBlockerSignal('🟡 Non-blocking observations')).toBe(false);
+  });
+
   it('breaks the negation window at a semicolon or colon (new clause)', () => {
     // `;` and `:` start an independent clause, so a negation before one does not
     // carry into it — "No blockers; the cache path is a blocker" promotes. This
@@ -886,12 +910,57 @@ describe('classifyInlineThreads', () => {
       { id: 3, user: { login: 'r' }, body: '**[Suggestion]** nit' },
       { id: 4, user: { login: 'a' }, in_reply_to_id: 3, body: 'done' },
       { id: 5, user: { login: 'r' }, body: 'open question' },
+      // A fresh un-replied blocker: must NOT fall into openRoots.
+      { id: 6, user: { login: 'r' }, body: '**[Critical]** open blocker' },
     ];
     const t = classifyInlineThreads(inline);
     expect(t.repliedBlockerRoots.map((c) => c.id)).toEqual([1]);
+    expect(t.openBlockerRoots.map((c) => c.id)).toEqual([6]);
     expect(t.repliedRoots.map((c) => c.id)).toEqual([3]);
     expect(t.openRoots.map((c) => c.id)).toEqual([5]);
     expect(t.repliesByRoot.get(1)!.map((c) => c.id)).toEqual([2]);
+  });
+
+  it('promotes an un-replied blocker root to the re-check section, in full', () => {
+    // The gap this closes: a fresh `[Critical]` with no reply used to go
+    // straight into "Open inline comments" as a 240-char snippet, past the read
+    // window — the exact failure the whole change exists to prevent, left open
+    // for the un-replied half.
+    const meta = {
+      title: 'T',
+      body: 'D',
+      author: { login: 'a' },
+      baseRefName: 'main',
+      headRefName: 'b',
+      headRefOid: 's',
+      additions: 1,
+      deletions: 1,
+      changedFiles: 1,
+      state: 'OPEN',
+    } as PrMetadata;
+    const md = buildMarkdown(
+      '1',
+      'o/r',
+      meta,
+      [
+        {
+          id: 1,
+          user: { login: 'rev' },
+          path: 'a.ts',
+          line: 3,
+          body: '**[Critical]** the cache is never invalidated',
+        },
+      ],
+      [],
+      [],
+    );
+    const section = md.indexOf('## Blockers to re-check');
+    const body = md.indexOf('the cache is never invalidated');
+    expect(section).toBeGreaterThanOrEqual(0);
+    expect(body).toBeGreaterThan(section);
+    // Rendered before any Open/Already-discussed section, i.e. inside the read
+    // window, not as a trailing snippet.
+    expect(md).not.toContain('## Open inline comments');
   });
 });
 
