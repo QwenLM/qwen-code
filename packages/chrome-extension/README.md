@@ -59,6 +59,8 @@ package. When `QWEN_CDP_MCP_COMMAND` is unset, the extension can still open the
 Web Shell, but the daemon will not register browser automation MCP tools.
 Install the adapter separately and point the daemon at its executable:
 
+The pinned adapter requires Node.js 22.12 or newer.
+
 ```bash
 npm install -g chrome-devtools-mcp@1.5.0
 QWEN_CDP_MCP_COMMAND=chrome-devtools-mcp \

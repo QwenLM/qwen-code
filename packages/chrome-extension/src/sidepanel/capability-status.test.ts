@@ -95,6 +95,30 @@ describe('deriveCapabilityStatus', () => {
     });
   });
 
+  it('warns while the tunnel-backed runtime MCP is connecting', () => {
+    expect(
+      deriveCapabilityStatus(
+        true,
+        ['allow_origin', 'cdp_tunnel_over_ws', 'browser_automation_mcp'],
+        {
+          servers: [
+            {
+              name: 'chrome-devtools',
+              mcpStatus: 'connecting',
+              config: {
+                args: ['--wsEndpoint', 'ws://127.0.0.1:4170/cdp'],
+              },
+            },
+          ],
+        },
+      ),
+    ).toEqual({
+      state: 'automation-pending',
+      shellReady: true,
+      warning: 'Browser tools are configured but the adapter is not connected.',
+    });
+  });
+
   it('warns when an existing chrome-devtools configuration shadows the tunnel', () => {
     expect(
       deriveCapabilityStatus(
