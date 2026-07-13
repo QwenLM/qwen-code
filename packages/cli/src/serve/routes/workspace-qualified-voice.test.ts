@@ -19,29 +19,45 @@ import {
   createWorkspaceRegistry,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
+import type { VoiceAdmissionResult } from '../voice/workspace-voice-coordinator.js';
 
 const homes: string[] = [];
 
 function runtime(
   workspaceId: string,
   workspaceCwd: string,
-  opts: { primary?: boolean; trusted?: boolean } = {},
+  opts: {
+    primary?: boolean;
+    trusted?: boolean;
+    effectiveEnv?: Readonly<Record<string, string | undefined>>;
+  } = {},
 ): WorkspaceRuntime {
   return {
     workspaceId,
     workspaceCwd,
     primary: opts.primary === true,
     trusted: opts.trusted !== false,
-    env: { mode: 'runtime-overlay', overlayKeys: [], effectiveEnv: {} },
+    env: {
+      mode: 'runtime-overlay',
+      overlayKeys: [],
+      effectiveEnv: opts.effectiveEnv ?? {},
+    },
     bridge: { publishWorkspaceEvent: vi.fn() },
   } as unknown as WorkspaceRuntime;
 }
 
-async function createApp(): Promise<{
+async function createApp(
+  opts: {
+    acquireVoiceLease?: () => VoiceAdmissionResult;
+    transcribe?: ReturnType<typeof vi.fn>;
+  } = {},
+): Promise<{
   app: express.Application;
   secondary: WorkspaceRuntime;
   untrusted: WorkspaceRuntime;
   persistSetting: ReturnType<typeof vi.fn>;
+  acquireVoiceLease: ReturnType<typeof vi.fn>;
+  transcribe: ReturnType<typeof vi.fn>;
 }> {
   const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-voice-home-'));
   homes.push(home);
@@ -56,7 +72,9 @@ async function createApp(): Promise<{
   process.env['QWEN_HOME'] = home;
   resetHomeEnvBootstrapForTesting();
 
-  const secondary = runtime('secondary-id', secondaryCwd);
+  const secondary = runtime('secondary-id', secondaryCwd, {
+    effectiveEnv: { SECONDARY_VOICE_KEY: 'secondary-secret' },
+  });
   const untrusted = runtime('untrusted-id', untrustedCwd, { trusted: false });
   const registry = createWorkspaceRegistry([
     runtime('primary-id', primaryCwd, { primary: true }),
@@ -64,6 +82,20 @@ async function createApp(): Promise<{
     untrusted,
   ]);
   const persistSetting = vi.fn(async () => undefined);
+  const acquireVoiceLease = vi.fn(
+    opts.acquireVoiceLease ??
+      (() => ({
+        kind: 'admitted' as const,
+        lease: { signal: new AbortController().signal, release: () => {} },
+      })),
+  );
+  const transcribe =
+    opts.transcribe ??
+    vi.fn(async () => ({
+      text: 'secondary transcript',
+      model: 'secondary-asr',
+      transport: 'qwen-asr-chat' as const,
+    }));
   const app = express();
   app.use(express.json());
   registerWorkspaceQualifiedVoiceRoutes(app, {
@@ -71,14 +103,33 @@ async function createApp(): Promise<{
     mutate: () => (_req, _res, next) => next(),
     safeBody: (req) => req.body as Record<string, unknown>,
     persistSetting,
-    acquireVoiceLease: () => ({
-      kind: 'admitted',
-      lease: { signal: new AbortController().signal, release: () => {} },
-    }),
+    acquireVoiceLease: () => acquireVoiceLease(),
+    transcribe,
     parseAndValidateClientId: () => undefined,
     invalidateServeFeaturesCache: vi.fn(),
   });
-  return { app, secondary, untrusted, persistSetting };
+  return {
+    app,
+    secondary,
+    untrusted,
+    persistSetting,
+    acquireVoiceLease,
+    transcribe,
+  };
+}
+
+async function enableSecondaryVoice(runtime: WorkspaceRuntime): Promise<void> {
+  await fsp.mkdir(path.join(runtime.workspaceCwd, '.qwen'), {
+    recursive: true,
+  });
+  await fsp.writeFile(
+    path.join(runtime.workspaceCwd, '.qwen', 'settings.json'),
+    JSON.stringify({
+      voiceModel: 'secondary-asr',
+      general: { voice: { enabled: true } },
+    }),
+    'utf8',
+  );
 }
 
 describe('workspace-qualified Voice routes', () => {
@@ -130,7 +181,7 @@ describe('workspace-qualified Voice routes', () => {
   });
 
   it('rejects an unknown selector before reading settings and untrusted targets without fallback', async () => {
-    const { app } = await createApp();
+    const { app, acquireVoiceLease } = await createApp();
 
     await expect(
       request(app).get('/workspaces/missing/voice'),
@@ -144,5 +195,44 @@ describe('workspace-qualified Voice routes', () => {
       status: 403,
       body: { code: 'untrusted_workspace' },
     });
+    expect(acquireVoiceLease).not.toHaveBeenCalled();
+  });
+
+  it('transcribes with the selected runtime cwd and effective environment', async () => {
+    const { app, secondary, transcribe } = await createApp();
+    await enableSecondaryVoice(secondary);
+
+    const response = await request(app)
+      .post('/workspaces/secondary-id/voice/transcribe')
+      .set('Content-Type', 'audio/wav')
+      .send(Buffer.from([1, 2, 3]));
+
+    expect(response.status).toBe(200);
+    expect(transcribe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceCwd: secondary.workspaceCwd,
+        env: secondary.env.effectiveEnv,
+        voiceModel: 'secondary-asr',
+        abortSignal: expect.any(AbortSignal),
+      }),
+    );
+  });
+
+  it('rejects capacity before reading the audio body', async () => {
+    const { app, secondary, transcribe, acquireVoiceLease } = await createApp({
+      acquireVoiceLease: () => ({ kind: 'rejected', reason: 'capacity' }),
+    });
+    await enableSecondaryVoice(secondary);
+
+    const response = await request(app)
+      .post('/workspaces/secondary-id/voice/transcribe')
+      .set('Content-Type', 'audio/wav')
+      .send(Buffer.from([1, 2, 3]));
+
+    expect(response.status).toBe(503);
+    expect(response.headers['retry-after']).toBe('5');
+    expect(response.body.code).toBe('voice_capacity_exceeded');
+    expect(acquireVoiceLease).toHaveBeenCalledOnce();
+    expect(transcribe).not.toHaveBeenCalled();
   });
 });

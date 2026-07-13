@@ -177,6 +177,40 @@ describe('DaemonClient voice helpers', () => {
     expect(calls[2]?.headers['x-qwen-client-id']).toBe('client-3');
   });
 
+  it('applies a custom timeout to qualified Voice transcription', async () => {
+    vi.useFakeTimers();
+    try {
+      let requestSignal: AbortSignal | null | undefined;
+      const fetch = vi.fn(
+        async (_input: RequestInfo | URL, init?: RequestInit) => {
+          requestSignal = init?.signal;
+          return await new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              'abort',
+              () => reject(init.signal?.reason),
+              { once: true },
+            );
+          });
+        },
+      ) as unknown as typeof globalThis.fetch;
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = client
+        .workspaceById('secondary-id')
+        .transcribeWorkspaceVoice(new Uint8Array([1]), {
+          mimeType: 'audio/wav',
+          timeoutMs: 25,
+        });
+      const settled = result.catch(() => undefined);
+
+      await vi.advanceTimersByTimeAsync(25);
+      await settled;
+
+      expect(requestSignal?.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('uses the REST endpoint for binary voice audio when ACP transport is configured', async () => {
     const response = {
       v: 1,

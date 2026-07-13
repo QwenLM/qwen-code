@@ -260,6 +260,7 @@ export function createVoiceWsConnectionHandler(
     let bufferedBytes = 0;
     let queuedBytes = 0;
     let pendingOperations = 0;
+    const operationController = new AbortController();
     // Serialize message handling so async start/push/finalize never interleave.
     let chain: Promise<void> = Promise.resolve();
 
@@ -290,6 +291,9 @@ export function createVoiceWsConnectionHandler(
     function cleanup(): void {
       state = 'closed';
       clearTimeout(hardTimer);
+      if (!operationController.signal.aborted) {
+        operationController.abort(new Error('Voice connection closed.'));
+      }
       if (session) {
         try {
           session.abort();
@@ -358,7 +362,7 @@ export function createVoiceWsConnectionHandler(
             fail(GENERIC_TRANSCRIPTION_ERROR);
           },
         };
-        const opening = openStream(ctx, callbacks, lease.signal);
+        const opening = openStream(ctx, callbacks, operationController.signal);
         sessionPromise = opening;
         const opened = await opening;
         if (state === 'closed') {
@@ -395,12 +399,13 @@ export function createVoiceWsConnectionHandler(
         transcript = await transcribe(
           ctx!,
           Buffer.concat(pcmChunks),
-          lease.signal,
+          operationController.signal,
         );
       }
       sendJson({ type: 'final', text: transcript });
       writeStderrLine('qwen serve: voice websocket finalized successfully');
       cleanup();
+      releaseSlotWhenIdle();
       try {
         ws.close(1000, 'done');
       } catch {

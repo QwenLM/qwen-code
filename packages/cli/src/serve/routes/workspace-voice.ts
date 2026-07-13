@@ -360,217 +360,241 @@ function readBinaryBody(req: Request): Uint8Array | undefined {
   return undefined;
 }
 
+function sendUnsupportedVoiceContentType(res: Response): void {
+  res.status(415).json({
+    error:
+      'Content-Type must be audio/* or application/octet-stream for voice transcription',
+    code: 'unsupported_voice_content_type',
+  });
+}
+
+function handleVoiceStatus(
+  res: Response,
+  deps: WorkspaceVoiceRouteDeps,
+  route: string,
+): void {
+  try {
+    res
+      .status(200)
+      .json(
+        buildWorkspaceVoiceStatus(deps.boundWorkspace, loadVoiceSettings(deps)),
+      );
+  } catch (err) {
+    writeStderrLine(
+      `qwen serve: ${route} error: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    res.status(500).json({
+      error: 'Failed to load voice settings',
+      code: 'internal_error',
+    });
+  }
+}
+
+async function handleVoiceUpdate(
+  req: Request,
+  res: Response,
+  deps: WorkspaceVoiceRouteDeps,
+  route: string,
+): Promise<void> {
+  if (!deps.persistSettings && !deps.persistSetting) {
+    res.status(501).json({
+      error: 'Workspace voice settings persistence is not available',
+      code: 'not_implemented',
+    });
+    return;
+  }
+  const parsed = parseWorkspaceVoiceUpdateParams(deps.safeBody(req));
+  if ('error' in parsed) {
+    res.status(400).json(parsed);
+    return;
+  }
+  const settings = loadVoiceSettings(deps);
+  try {
+    validateWorkspaceVoiceState(settings, parsed, { env: deps.env });
+  } catch (err) {
+    if (sendVoiceError(res, err)) return;
+    throw err;
+  }
+  const clientId = deps.parseAndValidateClientId(req, res);
+  if (clientId === null) return;
+  try {
+    const workspaceTrusted =
+      getWorkspaceTrustStatus(settings.merged, deps.boundWorkspace).effective
+        .state === 'trusted';
+    await persistVoiceUpdate(
+      deps,
+      settings,
+      parsed,
+      clientId,
+      workspaceTrusted,
+    );
+  } catch (err) {
+    writeStderrLine(
+      `qwen serve: ${route} persist error (workspace=${deps.boundWorkspace}): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    res.status(500).json({
+      error: 'Failed to persist voice settings',
+      code: 'persist_error',
+    });
+    return;
+  }
+  res
+    .status(200)
+    .json(
+      buildWorkspaceVoiceStatus(deps.boundWorkspace, loadVoiceSettings(deps)),
+    );
+}
+
+async function handleVoiceTranscription(
+  req: Request,
+  res: Response,
+  deps: WorkspaceVoiceRouteDeps,
+  route: string,
+): Promise<void> {
+  const contentType = normalizeContentType(req);
+  if (!isSupportedAudioContentType(contentType)) {
+    sendUnsupportedVoiceContentType(res);
+    return;
+  }
+  if (admissionLease(req)?.signal.aborted) {
+    sendWorkspaceDraining(res);
+    return;
+  }
+  const clientId = deps.parseAndValidateClientId(req, res);
+  if (clientId === null) return;
+  const data = readBinaryBody(req);
+  if (!data || data.byteLength === 0) {
+    res.status(400).json({
+      error: 'Voice audio body must be non-empty binary data',
+      code: 'invalid_voice_audio',
+    });
+    return;
+  }
+  const settings = loadVoiceSettings(deps);
+  if (!isVoiceEnabled(settings)) {
+    res.status(403).json({
+      error: 'Voice transcription is disabled for this workspace',
+      code: 'voice_disabled',
+    });
+    return;
+  }
+  const queryVoiceModel = req.query['voiceModel'];
+  if (queryVoiceModel !== undefined && typeof queryVoiceModel !== 'string') {
+    res.status(400).json({
+      error: '`voiceModel` query parameter must be a string',
+      code: 'invalid_voice_model',
+    });
+    return;
+  }
+  const requestedVoiceModel =
+    typeof queryVoiceModel === 'string' ? queryVoiceModel.trim() : '';
+  if (
+    requestedVoiceModel &&
+    requestedVoiceModel.length > MAX_VOICE_MODEL_LENGTH
+  ) {
+    res.status(400).json({
+      error: `\`voiceModel\` exceeds the ${MAX_VOICE_MODEL_LENGTH}-character limit`,
+      code: 'invalid_voice_model',
+    });
+    return;
+  }
+  const voiceModel = requestedVoiceModel || readVoiceModel(settings);
+  if (!voiceModel) {
+    res.status(400).json({
+      error: 'A valid voiceModel is required before transcription.',
+      code: 'voice_model_required',
+    });
+    return;
+  }
+  try {
+    const result = await (deps.transcribe ?? transcribeWorkspaceVoiceAudio)({
+      data,
+      mimeType: contentType,
+      voiceModel,
+      settings,
+      workspaceCwd: deps.boundWorkspace,
+      env: deps.env,
+      abortSignal: combinedAbortSignal(req, res),
+    });
+    if (admissionLease(req)?.signal.aborted) {
+      sendWorkspaceDraining(res);
+      return;
+    }
+    res.status(200).json({ v: 1, ...result });
+  } catch (err) {
+    if (admissionLease(req)?.signal.aborted) {
+      sendWorkspaceDraining(res);
+      return;
+    }
+    if (sendVoiceError(res, err)) return;
+    const message = sanitizeVoiceErrorMessage(
+      err instanceof Error ? err.message : String(err),
+    );
+    writeStderrLine(
+      `qwen serve: ${route} error (workspace=${deps.boundWorkspace}): ${message}`,
+    );
+    res.status(502).json({
+      error: 'Voice transcription failed',
+      code: 'voice_transcription_failed',
+    });
+  }
+}
+
+function admitVoiceTranscription(
+  req: Request,
+  res: Response,
+  deps: WorkspaceVoiceRouteDeps,
+): boolean {
+  if (!isSupportedAudioContentType(normalizeContentType(req))) {
+    sendUnsupportedVoiceContentType(res);
+    return false;
+  }
+  return installAdmissionLease(req, res, deps);
+}
+
+function voiceAudioBodyParser(): import('express').RequestHandler {
+  return express.raw({
+    type: (req) =>
+      isSupportedAudioContentType(
+        req.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase(),
+      ),
+    limit: '10mb',
+  });
+}
+
 export function registerWorkspaceVoiceRoutes(
   app: Application,
   deps: WorkspaceVoiceRouteDeps,
 ): void {
-  const transcribe = deps.transcribe ?? transcribeWorkspaceVoiceAudio;
-
-  app.get('/workspace/voice', (_req: Request, res: Response) => {
-    try {
-      res
-        .status(200)
-        .json(
-          buildWorkspaceVoiceStatus(
-            deps.boundWorkspace,
-            loadVoiceSettings(deps),
-          ),
-        );
-    } catch (err) {
-      writeStderrLine(
-        `qwen serve: GET /workspace/voice error: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-      res.status(500).json({
-        error: 'Failed to load voice settings',
-        code: 'internal_error',
-      });
-    }
-  });
+  app.get('/workspace/voice', (_req: Request, res: Response) =>
+    handleVoiceStatus(res, deps, 'GET /workspace/voice'),
+  );
 
   app.post(
     '/workspace/voice',
     deps.mutate({ strict: true }),
-    async (req: Request, res: Response) => {
-      if (!deps.persistSettings && !deps.persistSetting) {
-        res.status(501).json({
-          error: 'Workspace voice settings persistence is not available',
-          code: 'not_implemented',
-        });
-        return;
-      }
-
-      const parsed = parseWorkspaceVoiceUpdateParams(deps.safeBody(req));
-      if ('error' in parsed) {
-        res.status(400).json(parsed);
-        return;
-      }
-
-      const settings = loadVoiceSettings(deps);
-      try {
-        validateWorkspaceVoiceState(settings, parsed, { env: deps.env });
-      } catch (err) {
-        if (sendVoiceError(res, err)) return;
-        throw err;
-      }
-
-      const clientId = deps.parseAndValidateClientId(req, res);
-      if (clientId === null) return;
-
-      try {
-        const workspaceTrusted =
-          getWorkspaceTrustStatus(settings.merged, deps.boundWorkspace)
-            .effective.state === 'trusted';
-        await persistVoiceUpdate(
-          deps,
-          settings,
-          parsed,
-          clientId,
-          workspaceTrusted,
-        );
-      } catch (err) {
-        writeStderrLine(
-          `qwen serve: POST /workspace/voice persist error (workspace=${deps.boundWorkspace}): ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-        res.status(500).json({
-          error: 'Failed to persist voice settings',
-          code: 'persist_error',
-        });
-        return;
-      }
-
-      res
-        .status(200)
-        .json(
-          buildWorkspaceVoiceStatus(
-            deps.boundWorkspace,
-            loadVoiceSettings(deps),
-          ),
-        );
-    },
+    (req: Request, res: Response) =>
+      handleVoiceUpdate(req, res, deps, 'POST /workspace/voice'),
   );
 
   app.post(
     '/workspace/voice/transcribe',
     deps.mutate({ strict: true }),
     (req: Request, res: Response, next: import('express').NextFunction) => {
-      if (!isSupportedAudioContentType(normalizeContentType(req))) {
-        res.status(415).json({
-          error:
-            'Content-Type must be audio/* or application/octet-stream for voice transcription',
-          code: 'unsupported_voice_content_type',
-        });
-        return;
-      }
-      if (!installAdmissionLease(req, res, deps)) return;
-      next();
+      if (admitVoiceTranscription(req, res, deps)) next();
     },
-    express.raw({
-      type: (req) =>
-        isSupportedAudioContentType(
-          req.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase(),
-        ),
-      limit: '10mb',
-    }),
-    async (req: Request, res: Response) => {
-      const contentType = normalizeContentType(req);
-      if (!isSupportedAudioContentType(contentType)) {
-        res.status(415).json({
-          error:
-            'Content-Type must be audio/* or application/octet-stream for voice transcription',
-          code: 'unsupported_voice_content_type',
-        });
-        return;
-      }
-      const audioContentType = contentType;
-
-      const clientId = deps.parseAndValidateClientId(req, res);
-      if (clientId === null) return;
-
-      const data = readBinaryBody(req);
-      if (!data || data.byteLength === 0) {
-        res.status(400).json({
-          error: 'Voice audio body must be non-empty binary data',
-          code: 'invalid_voice_audio',
-        });
-        return;
-      }
-
-      const settings = loadVoiceSettings(deps);
-      if (!isVoiceEnabled(settings)) {
-        res.status(403).json({
-          error: 'Voice transcription is disabled for this workspace',
-          code: 'voice_disabled',
-        });
-        return;
-      }
-      const queryVoiceModel = req.query['voiceModel'];
-      if (
-        queryVoiceModel !== undefined &&
-        typeof queryVoiceModel !== 'string'
-      ) {
-        res.status(400).json({
-          error: '`voiceModel` query parameter must be a string',
-          code: 'invalid_voice_model',
-        });
-        return;
-      }
-      const requestedVoiceModel =
-        typeof queryVoiceModel === 'string' ? queryVoiceModel.trim() : '';
-      if (
-        requestedVoiceModel &&
-        requestedVoiceModel.length > MAX_VOICE_MODEL_LENGTH
-      ) {
-        res.status(400).json({
-          error: `\`voiceModel\` exceeds the ${MAX_VOICE_MODEL_LENGTH}-character limit`,
-          code: 'invalid_voice_model',
-        });
-        return;
-      }
-      const voiceModel = requestedVoiceModel || readVoiceModel(settings);
-      if (!voiceModel) {
-        res.status(400).json({
-          error: 'A valid voiceModel is required before transcription.',
-          code: 'voice_model_required',
-        });
-        return;
-      }
-
-      try {
-        const result = await transcribe({
-          data,
-          mimeType: audioContentType,
-          voiceModel,
-          settings,
-          workspaceCwd: deps.boundWorkspace,
-          env: deps.env,
-          abortSignal: combinedAbortSignal(req, res),
-        });
-        if (admissionLease(req)?.signal.aborted) {
-          sendWorkspaceDraining(res);
-          return;
-        }
-        res.status(200).json({ v: 1, ...result });
-      } catch (err) {
-        if (sendVoiceError(res, err)) return;
-        const message =
-          err instanceof Error
-            ? sanitizeVoiceErrorMessage(err.message)
-            : sanitizeVoiceErrorMessage(String(err));
-        writeStderrLine(
-          `qwen serve: POST /workspace/voice/transcribe error (workspace=${deps.boundWorkspace}): ${
-            message
-          }`,
-        );
-        res.status(502).json({
-          error: 'Voice transcription failed',
-          code: 'voice_transcription_failed',
-        });
-      }
-    },
+    voiceAudioBodyParser(),
+    (req: Request, res: Response) =>
+      handleVoiceTranscription(
+        req,
+        res,
+        deps,
+        'POST /workspace/voice/transcribe',
+      ),
   );
 }
 
@@ -592,12 +616,12 @@ function createRuntimeVoiceDeps(
     scopeOverride: SettingScope.Workspace,
     acquireVoiceLease: () => deps.acquireVoiceLease(runtime),
     broadcastSettingsChanged: (key, value, scope, clientId) => {
+      if (runtime.primary) deps.invalidateServeFeaturesCache();
       runtime.bridge.publishWorkspaceEvent({
         type: 'settings_changed',
         data: { key, value, scope },
         originatorClientId: clientId,
       });
-      if (runtime.primary) deps.invalidateServeFeaturesCache();
     },
     parseAndValidateClientId: (req, res) =>
       deps.parseAndValidateClientId(req, res, runtime),
@@ -626,31 +650,10 @@ export function registerWorkspaceQualifiedVoiceRoutes(
   app: Application,
   deps: WorkspaceQualifiedVoiceRouteDeps,
 ): void {
-  const transcribe = deps.transcribe ?? transcribeWorkspaceVoiceAudio;
-
   app.get('/workspaces/:workspace/voice', (req: Request, res: Response) => {
     const target = resolveQualifiedVoiceTarget(req, res, deps);
     if (!target) return;
-    try {
-      res
-        .status(200)
-        .json(
-          buildWorkspaceVoiceStatus(
-            target.boundWorkspace,
-            loadVoiceSettings(target),
-          ),
-        );
-    } catch (err) {
-      writeStderrLine(
-        `qwen serve: GET /workspaces/:workspace/voice error: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-      res.status(500).json({
-        error: 'Failed to load voice settings',
-        code: 'internal_error',
-      });
-    }
+    handleVoiceStatus(res, target, 'GET /workspaces/:workspace/voice');
   });
 
   app.post(
@@ -659,58 +662,12 @@ export function registerWorkspaceQualifiedVoiceRoutes(
     async (req: Request, res: Response) => {
       const target = resolveQualifiedVoiceTarget(req, res, deps);
       if (!target) return;
-      if (!target.persistSettings && !target.persistSetting) {
-        res.status(501).json({
-          error: 'Workspace voice settings persistence is not available',
-          code: 'not_implemented',
-        });
-        return;
-      }
-      const parsed = parseWorkspaceVoiceUpdateParams(target.safeBody(req));
-      if ('error' in parsed) {
-        res.status(400).json(parsed);
-        return;
-      }
-      const settings = loadVoiceSettings(target);
-      try {
-        validateWorkspaceVoiceState(settings, parsed, { env: target.env });
-      } catch (err) {
-        if (sendVoiceError(res, err)) return;
-        throw err;
-      }
-      const clientId = target.parseAndValidateClientId(req, res);
-      if (clientId === null) return;
-      try {
-        const workspaceTrusted =
-          getWorkspaceTrustStatus(settings.merged, target.boundWorkspace)
-            .effective.state === 'trusted';
-        await persistVoiceUpdate(
-          target,
-          settings,
-          parsed,
-          clientId,
-          workspaceTrusted,
-        );
-      } catch (err) {
-        writeStderrLine(
-          `qwen serve: POST /workspaces/:workspace/voice persist error (workspace=${target.boundWorkspace}): ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-        res.status(500).json({
-          error: 'Failed to persist voice settings',
-          code: 'persist_error',
-        });
-        return;
-      }
-      res
-        .status(200)
-        .json(
-          buildWorkspaceVoiceStatus(
-            target.boundWorkspace,
-            loadVoiceSettings(target),
-          ),
-        );
+      await handleVoiceUpdate(
+        req,
+        res,
+        target,
+        'POST /workspaces/:workspace/voice',
+      );
     },
   );
 
@@ -724,112 +681,19 @@ export function registerWorkspaceQualifiedVoiceRoutes(
     ) => {
       const target = resolveQualifiedVoiceTarget(req, res, deps);
       if (!target) return;
-      const contentType = normalizeContentType(req);
-      if (!isSupportedAudioContentType(contentType)) {
-        res.status(415).json({
-          error:
-            'Content-Type must be audio/* or application/octet-stream for voice transcription',
-          code: 'unsupported_voice_content_type',
-        });
-        return;
-      }
       req.voiceRouteDeps = target;
-      if (!installAdmissionLease(req, res, target)) return;
-      next();
+      if (admitVoiceTranscription(req, res, target)) next();
     },
-    express.raw({
-      type: (req) =>
-        isSupportedAudioContentType(
-          req.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase(),
-        ),
-      limit: '10mb',
-    }),
+    voiceAudioBodyParser(),
     async (req: QualifiedVoiceRequest, res: Response) => {
       const target = req.voiceRouteDeps;
       if (!target) return;
-      const contentType = normalizeContentType(req);
-      if (!isSupportedAudioContentType(contentType)) return;
-      const clientId = target.parseAndValidateClientId(req, res);
-      if (clientId === null) return;
-      const data = readBinaryBody(req);
-      if (!data || data.byteLength === 0) {
-        res.status(400).json({
-          error: 'Voice audio body must be non-empty binary data',
-          code: 'invalid_voice_audio',
-        });
-        return;
-      }
-      const settings = loadVoiceSettings(target);
-      if (!isVoiceEnabled(settings)) {
-        res.status(403).json({
-          error: 'Voice transcription is disabled for this workspace',
-          code: 'voice_disabled',
-        });
-        return;
-      }
-      const queryVoiceModel = req.query['voiceModel'];
-      if (
-        queryVoiceModel !== undefined &&
-        typeof queryVoiceModel !== 'string'
-      ) {
-        res.status(400).json({
-          error: '`voiceModel` query parameter must be a string',
-          code: 'invalid_voice_model',
-        });
-        return;
-      }
-      const requestedVoiceModel =
-        typeof queryVoiceModel === 'string' ? queryVoiceModel.trim() : '';
-      if (
-        requestedVoiceModel &&
-        requestedVoiceModel.length > MAX_VOICE_MODEL_LENGTH
-      ) {
-        res.status(400).json({
-          error: `\`voiceModel\` exceeds the ${MAX_VOICE_MODEL_LENGTH}-character limit`,
-          code: 'invalid_voice_model',
-        });
-        return;
-      }
-      const voiceModel = requestedVoiceModel || readVoiceModel(settings);
-      if (!voiceModel) {
-        res.status(400).json({
-          error: 'A valid voiceModel is required before transcription.',
-          code: 'voice_model_required',
-        });
-        return;
-      }
-      try {
-        const result = await transcribe({
-          data,
-          mimeType: contentType,
-          voiceModel,
-          settings,
-          workspaceCwd: target.boundWorkspace,
-          env: target.env,
-          abortSignal: combinedAbortSignal(req, res),
-        });
-        if (admissionLease(req)?.signal.aborted) {
-          sendWorkspaceDraining(res);
-          return;
-        }
-        res.status(200).json({ v: 1, ...result });
-      } catch (err) {
-        if (sendVoiceError(res, err)) return;
-        if (admissionLease(req)?.signal.aborted) {
-          sendWorkspaceDraining(res);
-          return;
-        }
-        const message = sanitizeVoiceErrorMessage(
-          err instanceof Error ? err.message : String(err),
-        );
-        writeStderrLine(
-          `qwen serve: POST /workspaces/:workspace/voice/transcribe error (workspace=${target.boundWorkspace}): ${message}`,
-        );
-        res.status(502).json({
-          error: 'Voice transcription failed',
-          code: 'voice_transcription_failed',
-        });
-      }
+      await handleVoiceTranscription(
+        req,
+        res,
+        target,
+        'POST /workspaces/:workspace/voice/transcribe',
+      );
     },
   );
 }

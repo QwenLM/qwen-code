@@ -3065,6 +3065,7 @@ export async function runQwenServe(
       internalRuntimeBridgesForCleanup.push(bridge);
     }
     runtimeBridges.push(bridge);
+    let invalidatePrimaryServeFeaturesCache = () => {};
     const workspaceService = runtime.createDaemonWorkspaceService({
       boundWorkspace,
       contextFilename: contextFilenameForInit ?? 'QWEN.md',
@@ -3147,7 +3148,15 @@ export async function runQwenServe(
         bridge.invokeWorkspaceCommand(method, params, invokeOpts),
       refreshExtensionsForAllSessions: () =>
         bridge.refreshExtensionsForAllSessions(),
-      publishWorkspaceEvent: (event) => bridge.publishWorkspaceEvent(event),
+      publishWorkspaceEvent: (event) => {
+        if (
+          event.type === 'settings_changed' ||
+          event.type === 'settings_reloaded'
+        ) {
+          invalidatePrimaryServeFeaturesCache();
+        }
+        bridge.publishWorkspaceEvent(event);
+      },
     });
 
     const workspaceRuntimes: WorkspaceRuntime[] = [
@@ -4109,6 +4118,12 @@ export async function runQwenServe(
           },
         ),
     });
+    invalidatePrimaryServeFeaturesCache =
+      (
+        app.locals as {
+          invalidateServeFeaturesCache?: () => void;
+        }
+      ).invalidateServeFeaturesCache ?? invalidatePrimaryServeFeaturesCache;
     // Park the sub-session launcher's stop on app.locals so the close handler
     // can flip it off before tearing down the bridge it spawns into (symmetric
     // with stopScheduledTaskKeepalive). Defensive: a launch during drain would

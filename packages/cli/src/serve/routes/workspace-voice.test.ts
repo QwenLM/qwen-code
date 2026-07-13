@@ -935,6 +935,51 @@ describe('workspace voice routes', () => {
     expect(stderrOutput).not.toContain('top-secret');
   });
 
+  it('POST /workspace/voice/transcribe reports draining when an active lease is aborted', async () => {
+    await writeVoiceModelSettings(h);
+    const leaseController = new AbortController();
+    const release = vi.fn();
+    const transcribe = vi.fn(
+      async (input: { abortSignal?: AbortSignal }): Promise<never> =>
+        await new Promise<never>((_resolve, reject) => {
+          input.abortSignal?.addEventListener(
+            'abort',
+            () => reject(new Error('aborted')),
+            { once: true },
+          );
+        }),
+    );
+    const app = express();
+    registerWorkspaceVoiceRoutes(app, {
+      boundWorkspace: h.workspace,
+      mutate: () => (_req: Request, _res: Response, next: NextFunction) =>
+        next(),
+      safeBody: (req) => req.body as Record<string, unknown>,
+      persistSetting: h.persistSetting,
+      broadcastSettingsChanged: vi.fn(),
+      parseAndValidateClientId: () => undefined,
+      acquireVoiceLease: () => ({
+        kind: 'admitted',
+        lease: { signal: leaseController.signal, release },
+      }),
+      transcribe,
+    });
+
+    const response = request(app)
+      .post('/workspace/voice/transcribe')
+      .set('Content-Type', 'audio/wav')
+      .send(Buffer.from([1]))
+      .then((result) => result);
+    await vi.waitFor(() => expect(transcribe).toHaveBeenCalledOnce());
+    leaseController.abort();
+
+    await expect(response).resolves.toMatchObject({
+      status: 503,
+      body: { code: 'workspace_draining' },
+    });
+    expect(release).toHaveBeenCalledOnce();
+  });
+
   it('POST /workspace/voice/transcribe rejects unsupported content types', async () => {
     const res = await request(h.app)
       .post('/workspace/voice/transcribe')

@@ -695,6 +695,11 @@ export function createServeApp(
         deps.workspaceRuntimeRemoval !== undefined,
       ...(primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {}),
     });
+  (
+    app.locals as {
+      invalidateServeFeaturesCache?: () => void;
+    }
+  ).invalidateServeFeaturesCache = invalidateServeFeaturesCache;
   const statusProvider =
     deps.statusProvider ??
     createDaemonStatusProvider(

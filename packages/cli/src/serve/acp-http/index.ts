@@ -122,12 +122,12 @@ function rawRequestPathname(reqUrl: string | undefined): string {
 }
 
 /**
- * Match `/workspaces/<selector>/acp` (with an optional single trailing slash)
- * against a RAW request-target pathname and return the still-encoded selector,
- * or null when the shape does not match. Rejects empty selectors, extra path
- * segments (slash/backslash), and dot-segment traversal shapes -- including
- * percent-encoded variants -- so decoding afterwards can never reintroduce a
- * `/` or `..` that bypassed classification.
+ * Match `/workspaces/<selector><suffix>` (with an optional single trailing
+ * slash) against a RAW request-target pathname and return the still-encoded
+ * selector, or null when the shape does not match. Rejects empty selectors,
+ * extra path segments (slash/backslash), and dot-segment traversal shapes --
+ * including percent-encoded variants -- so decoding afterwards can never
+ * reintroduce a `/` or `..` that bypassed classification.
  */
 function pluralWorkspaceRawSelector(
   rawPath: string,
@@ -1392,7 +1392,8 @@ export function mountAcpHttp(
       // rather than `url.pathname`. WHATWG URL normalizes dot-segments, so
       // `/workspaces/%2e%2e/acp` would collapse to `/acp` and silently bind to
       // the primary mount. `rawRequestPathname` keeps it un-normalized and
-      // `pluralAcpRawSelector` rejects traversal / backslash / empty selectors.
+      // `pluralWorkspaceRawSelector` rejects traversal / backslash / empty
+      // selectors for both ACP and Voice workspace-qualified routes.
       const rawPath = rawRequestPathname(req.url);
       const isCdpPath =
         opts.cdpTunnelOverWs === true &&

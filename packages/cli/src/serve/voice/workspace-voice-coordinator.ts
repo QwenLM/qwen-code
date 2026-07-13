@@ -22,6 +22,7 @@ interface RuntimeVoiceState {
   draining: boolean;
   completed: boolean;
   leases: Set<Lease>;
+  idleWaiters: Set<() => void>;
 }
 
 class Lease implements VoiceAdmissionLease {
@@ -44,9 +45,13 @@ class Lease implements VoiceAdmissionLease {
 
 export class WorkspaceVoiceCoordinator {
   private readonly states = new Map<WorkspaceRuntime, RuntimeVoiceState>();
+  private readonly disposed = new WeakSet<WorkspaceRuntime>();
   private active = 0;
 
   acquire(runtime: WorkspaceRuntime): VoiceAdmissionResult {
+    if (this.disposed.has(runtime)) {
+      return { kind: 'rejected', reason: 'draining' };
+    }
     const state = this.stateFor(runtime);
     if (state.draining) return { kind: 'rejected', reason: 'draining' };
     if (this.active >= MAX_CONCURRENT_VOICE_SESSIONS) {
@@ -69,6 +74,7 @@ export class WorkspaceVoiceCoordinator {
   }
 
   completeWorkspaceDrain(runtime: WorkspaceRuntime): void {
+    this.disposed.add(runtime);
     const state = this.states.get(runtime);
     if (!state) return;
     state.draining = true;
@@ -84,7 +90,9 @@ export class WorkspaceVoiceCoordinator {
     runtime: WorkspaceRuntime,
     reason: 'daemon_shutdown' | 'workspace_removed',
   ): Promise<void> {
-    const state = this.stateFor(runtime);
+    this.disposed.add(runtime);
+    const state = this.states.get(runtime);
+    if (!state) return;
     state.draining = true;
     const abortReason = new Error(
       reason === 'workspace_removed'
@@ -93,16 +101,34 @@ export class WorkspaceVoiceCoordinator {
     );
     for (const lease of state.leases) lease.abort(abortReason);
     if (state.leases.size === 0) return;
-    await Promise.race([
-      this.waitForIdle(runtime, state),
-      new Promise<void>((resolve) => setTimeout(resolve, DISPOSE_WAIT_MS)),
-    ]);
+    let resolveIdle: (() => void) | undefined;
+    const idle = new Promise<void>((resolve) => {
+      resolveIdle = resolve;
+      state.idleWaiters.add(resolve);
+    });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        idle,
+        new Promise<void>((resolve) => {
+          timeout = setTimeout(resolve, DISPOSE_WAIT_MS);
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      if (resolveIdle) state.idleWaiters.delete(resolveIdle);
+    }
   }
 
   private stateFor(runtime: WorkspaceRuntime): RuntimeVoiceState {
     let state = this.states.get(runtime);
     if (!state) {
-      state = { draining: false, completed: false, leases: new Set() };
+      state = {
+        draining: false,
+        completed: false,
+        leases: new Set(),
+        idleWaiters: new Set(),
+      };
       this.states.set(runtime, state);
     }
     return state;
@@ -112,16 +138,11 @@ export class WorkspaceVoiceCoordinator {
     const state = this.states.get(runtime);
     if (!state || !state.leases.delete(lease)) return;
     this.active--;
-    this.deleteIfIdle(runtime, state);
-  }
-
-  private async waitForIdle(
-    runtime: WorkspaceRuntime,
-    state: RuntimeVoiceState,
-  ): Promise<void> {
-    while (state.leases.size > 0 && this.states.get(runtime) === state) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    if (state.leases.size === 0) {
+      for (const resolve of state.idleWaiters) resolve();
+      state.idleWaiters.clear();
     }
+    this.deleteIfIdle(runtime, state);
   }
 
   private deleteIfIdle(

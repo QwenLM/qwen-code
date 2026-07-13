@@ -42,7 +42,7 @@ export interface DaemonWorkspaceRemovalActivity {
   acpConnections: number;
   memoryTasks: number;
   channelWorkers: number;
-  voiceSessions: number;
+  voiceSessions?: number;
 }
 
 export interface DaemonWorkspaceRemovalResult {
@@ -2069,6 +2069,7 @@ export interface DaemonWorkspaceVoiceTranscribeOptions {
   mimeType: string;
   voiceModel?: string;
   clientId?: string;
+  timeoutMs?: number;
 }
 
 export interface DaemonWorkspaceVoiceTranscriptionResult {

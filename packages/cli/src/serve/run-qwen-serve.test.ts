@@ -493,6 +493,82 @@ describe('runQwenServe telemetry validation', () => {
     }
   });
 
+  it('invalidates primary voice capabilities when its workspace service publishes settings changes', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-voice-capability-')),
+    );
+    const workspace = path.join(tmpDir, 'workspace');
+    fs.mkdirSync(workspace);
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeRuntimeBridge(),
+    );
+    const originalCreateWorkspaceService =
+      workspaceServiceRuntime.createDaemonWorkspaceService;
+    let publishWorkspaceEvent:
+      | Parameters<
+          typeof workspaceServiceRuntime.createDaemonWorkspaceService
+        >[0]['publishWorkspaceEvent']
+      | undefined;
+    vi.spyOn(
+      workspaceServiceRuntime,
+      'createDaemonWorkspaceService',
+    ).mockImplementation((deps) => {
+      if (deps.boundWorkspace === canonicalizeWorkspace(workspace)) {
+        publishWorkspaceEvent = deps.publishWorkspaceEvent;
+      }
+      return originalCreateWorkspaceService(deps);
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace,
+        serveWebShell: false,
+      },
+      {
+        preheatBridge: false,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    try {
+      const before = (await (
+        await fetch(`${handle.url}/capabilities`)
+      ).json()) as { features: string[] };
+      expect(before.features).not.toContain('workspace_voice_transcription');
+
+      fs.mkdirSync(path.join(workspace, '.qwen'));
+      fs.writeFileSync(
+        path.join(workspace, '.qwen', 'settings.json'),
+        JSON.stringify({
+          modelProviders: {
+            openai: [
+              {
+                id: 'qwen3-asr-flash',
+                baseUrl: 'http://127.0.0.1:65535/v1',
+              },
+            ],
+          },
+        }),
+        'utf8',
+      );
+      expect(publishWorkspaceEvent).toBeTypeOf('function');
+      publishWorkspaceEvent?.({ type: 'settings_changed', data: {} });
+
+      const after = (await (
+        await fetch(`${handle.url}/capabilities`)
+      ).json()) as { features: string[] };
+      expect(after.features).toContain('workspace_voice_transcription');
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('adds, advertises, and hot-removes a dynamic workspace runtime', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hot-remove-')),

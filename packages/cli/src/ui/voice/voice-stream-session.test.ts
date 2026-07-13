@@ -145,6 +145,29 @@ describe('voice-stream-session', () => {
     );
   });
 
+  it('aborts an upstream connection while it is opening', async () => {
+    const socket = new FakeSocket();
+    const controller = new AbortController();
+    const sessionPromise = openVoiceStream(
+      {
+        baseUrl: 'https://dashscope.example/v1',
+        model: 'paraformer-realtime-v2',
+      },
+      {},
+      {
+        createWebSocket: () => socket,
+        abortSignal: controller.signal,
+      },
+    );
+
+    controller.abort();
+
+    await expect(sessionPromise).rejects.toThrow(
+      'Voice stream opening was aborted.',
+    );
+    expect(socket.readyState).toBe(3);
+  });
+
   it('resolves finish when task-finished arrives before finish is called', async () => {
     const socket = new FakeSocket();
     const session = await startSession(socket);

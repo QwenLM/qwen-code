@@ -604,6 +604,32 @@ describe('DELETE /workspaces/:workspace', () => {
     expect(deps.workspaceRegistry.beginDrain).not.toHaveBeenCalled();
   });
 
+  it('blocks non-force removal while a Voice operation is active', async () => {
+    const runtime = makeRuntime(REAL_DIR);
+    const runtimeRemoval = createRemovalController();
+    vi.mocked(runtimeRemoval.getActivity).mockReturnValue({
+      pendingSessionStarts: 0,
+      channelWorkers: 0,
+      voiceSessions: 1,
+    });
+    const { app, deps } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      runtimeRemoval,
+    });
+
+    const res = await request(app).delete(
+      `/workspaces/${encodeURIComponent(runtime.workspaceId)}`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({
+      code: 'workspace_busy',
+      activity: { voiceSessions: 1 },
+    });
+    expect(runtimeRemoval.beginDrain).not.toHaveBeenCalled();
+    expect(deps.workspaceRegistry.beginDrain).not.toHaveBeenCalled();
+  });
+
   it('rolls every gate back when the final frozen snapshot becomes busy', async () => {
     const runtime = makeRuntime(REAL_DIR);
     const runtimeRemoval = createRemovalController();
@@ -655,8 +681,16 @@ describe('DELETE /workspaces/:workspace', () => {
     const runtime = makeRuntime(REAL_DIR);
     const runtimeRemoval = createRemovalController();
     vi.mocked(runtimeRemoval.getActivity)
-      .mockReturnValueOnce({ pendingSessionStarts: 0, channelWorkers: 0 })
-      .mockReturnValueOnce({ pendingSessionStarts: 1, channelWorkers: 0 });
+      .mockReturnValueOnce({
+        pendingSessionStarts: 0,
+        channelWorkers: 0,
+        voiceSessions: 0,
+      })
+      .mockReturnValueOnce({
+        pendingSessionStarts: 1,
+        channelWorkers: 0,
+        voiceSessions: 0,
+      });
     vi.mocked(runtimeRemoval.cancelDrain).mockImplementation(() => {
       throw new Error('controller rollback failed');
     });

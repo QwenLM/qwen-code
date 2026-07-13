@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
 import {
   MAX_CONCURRENT_VOICE_SESSIONS,
@@ -51,5 +51,61 @@ describe('WorkspaceVoiceCoordinator', () => {
     expect(admitted.lease.signal.aborted).toBe(true);
     admitted.lease.release();
     await dispose;
+  });
+
+  it('stops disposal waiting after five seconds without releasing an active lease', async () => {
+    vi.useFakeTimers();
+    try {
+      const coordinator = new WorkspaceVoiceCoordinator();
+      const target = runtime('target');
+      const admitted = coordinator.acquire(target);
+      if (admitted.kind !== 'admitted') throw new Error('expected lease');
+
+      const dispose = coordinator.disposeRuntime(target, 'workspace_removed');
+      await vi.advanceTimersByTimeAsync(5_000);
+      await dispose;
+
+      expect(coordinator.getWorkspaceActivity(target)).toBe(1);
+      expect(vi.getTimerCount()).toBe(0);
+      admitted.lease.release();
+      expect(coordinator.getWorkspaceActivity(target)).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a re-added runtime generation independent from old leases', async () => {
+    const coordinator = new WorkspaceVoiceCoordinator();
+    const oldRuntime = runtime('same-id');
+    const newRuntime = runtime('same-id');
+    const oldAdmission = coordinator.acquire(oldRuntime);
+    if (oldAdmission.kind !== 'admitted') throw new Error('expected lease');
+
+    coordinator.beginWorkspaceDrain(oldRuntime);
+    const newAdmission = coordinator.acquire(newRuntime);
+    expect(newAdmission.kind).toBe('admitted');
+    const disposal = coordinator.disposeRuntime(
+      oldRuntime,
+      'workspace_removed',
+    );
+    oldAdmission.lease.release();
+    await disposal;
+
+    expect(coordinator.getWorkspaceActivity(oldRuntime)).toBe(0);
+    expect(coordinator.getWorkspaceActivity(newRuntime)).toBe(1);
+    if (newAdmission.kind === 'admitted') newAdmission.lease.release();
+  });
+
+  it('rejects a disposed runtime that never acquired a lease', async () => {
+    const coordinator = new WorkspaceVoiceCoordinator();
+    const target = runtime('failed-construction');
+
+    await coordinator.disposeRuntime(target, 'workspace_removed');
+
+    expect(coordinator.getWorkspaceActivity(target)).toBe(0);
+    expect(coordinator.acquire(target)).toEqual({
+      kind: 'rejected',
+      reason: 'draining',
+    });
   });
 });

@@ -2447,7 +2447,7 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonWorkspaceVoiceTranscriptionResult;
       },
-      VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS,
+      opts.timeoutMs ?? VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS,
       'rest',
     );
   }
