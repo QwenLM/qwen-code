@@ -905,9 +905,10 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     );
   });
 
-  it('accepts correlation replies while rejecting new work during drain', async () => {
-    const reply = await new Promise<Record<string, unknown>>(
+  it('rejects unowned and spoofed correlation frames during drain', async () => {
+    const replies = await new Promise<Array<Record<string, unknown>>>(
       (resolve, reject) => {
+        const received: Array<Record<string, unknown>> = [];
         const ws = new WebSocket(
           `ws://127.0.0.1:${port}/workspaces/secondary-id/acp`,
           { handshakeTimeout: 2000 },
@@ -922,6 +923,17 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
             handle!.beginWorkspaceDrain('secondary-id');
             ws.send(JSON.stringify({ jsonrpc: '2.0', id: 99, result: {} }));
             ws.send(
+              JSON.stringify({ type: 'cdp_result', requestId: 'unknown' }),
+            );
+            ws.send(
+              JSON.stringify({
+                type: 'mcp_message',
+                id: 'unknown',
+                server: 'missing',
+                payload: {},
+              }),
+            );
+            ws.send(
               JSON.stringify({
                 jsonrpc: '2.0',
                 id: 2,
@@ -930,18 +942,22 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
             );
             return;
           }
+          received.push(message);
           if (message['id'] === 2) {
             ws.close();
-            resolve(message);
+            resolve(received);
           }
         });
         ws.on('error', reject);
       },
     );
 
-    expect(reply).toMatchObject({
-      error: { data: { code: 'workspace_draining' } },
-    });
+    expect(replies).toHaveLength(4);
+    for (const reply of replies) {
+      expect(reply).toMatchObject({
+        error: { data: { code: 'workspace_draining' } },
+      });
+    }
   });
 
   it('rejects a raw WS upgrade whose selector is a dot-segment (%2e%2e)', async () => {

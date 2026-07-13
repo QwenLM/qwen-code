@@ -857,6 +857,12 @@ export function createServeApp(
   const workspaceGitState = new WorkspaceGitState();
   (app.locals as { stopWorkspaceGitState?: () => void }).stopWorkspaceGitState =
     () => workspaceGitState.dispose();
+  (
+    app.locals as {
+      stopWorkspaceGitStateForWorkspace?: (workspaceCwd: string) => void;
+    }
+  ).stopWorkspaceGitStateForWorkspace = (workspaceCwd) =>
+    workspaceGitState.disposeWorkspace(workspaceCwd);
   const workspaceQualifiedAcpEnabled = resolveAcpHttpEnabled();
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
@@ -1507,21 +1513,21 @@ export function createServeApp(
     // its own cron file + bridge, so a bound task created through the
     // workspace-qualified route fires (and survives a restart) exactly like a
     // primary-workspace one — otherwise a secondary workspace's tasks would be
-    // written to disk but silently never revived. The registry is fully
-    // populated (primary + every `--workspace`) before createServeApp runs.
-    // A workspace ADDED at runtime (Phase 4 add-workspace) isn't looped here, so
-    // its bound-task sessions aren't kept resident for the rest of this process;
-    // once persisted it registers as a boot workspace and is covered on the next
-    // restart, which is when its rehydration matters most anyway.
-    const keepaliveStops = workspaceRegistry.list().map((runtime) => {
+    // written to disk but silently never revived.
+    const keepaliveStops = new Map<string, () => void>();
+    const startKeepaliveForWorkspace = (runtime: WorkspaceRuntime) => {
+      if (keepaliveStops.has(runtime.workspaceCwd)) return;
       const keepalive = startScheduledTaskKeepalive({
         bridge: runtime.bridge,
         boundWorkspace: runtime.workspaceCwd,
         intervalMs: keepaliveIntervalMs,
       });
       rehydrateWorkspace(runtime.bridge, runtime.workspaceCwd);
-      return keepalive.stop;
-    });
+      keepaliveStops.set(runtime.workspaceCwd, keepalive.stop);
+    };
+    for (const runtime of workspaceRegistry.list()) {
+      startKeepaliveForWorkspace(runtime);
+    }
 
     // Park a combined stop fn on `app.locals` (same pattern as `fsFactory` /
     // `boundWorkspace` / `acpHandle` above) so the shutdown sequence in
@@ -1530,8 +1536,24 @@ export function createServeApp(
     (
       app.locals as { stopScheduledTaskKeepalive?: () => void }
     ).stopScheduledTaskKeepalive = () => {
-      for (const stop of keepaliveStops) stop();
+      for (const stop of keepaliveStops.values()) stop();
+      keepaliveStops.clear();
     };
+    (
+      app.locals as {
+        stopScheduledTaskKeepaliveForWorkspace?: (workspaceCwd: string) => void;
+      }
+    ).stopScheduledTaskKeepaliveForWorkspace = (workspaceCwd) => {
+      keepaliveStops.get(workspaceCwd)?.();
+      keepaliveStops.delete(workspaceCwd);
+    };
+    (
+      app.locals as {
+        startScheduledTaskKeepaliveForWorkspace?: (
+          runtime: WorkspaceRuntime,
+        ) => void;
+      }
+    ).startScheduledTaskKeepaliveForWorkspace = startKeepaliveForWorkspace;
   }
 
   registerPermissionRoutes(app, {

@@ -242,7 +242,7 @@ describe('WorkspaceRegistrationStore', () => {
     await expect(fs.stat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it('does not report failure after a committed write when lock release fails', async () => {
+  it('reports lock release failure after a committed write', async () => {
     const home = await tempHome();
     vi.resetModules();
     vi.doMock('proper-lockfile', () => ({
@@ -272,7 +272,9 @@ describe('WorkspaceRegistrationStore', () => {
         store.removeByIds([
           storeModule.workspaceRegistrationId('/work/secondary'),
         ]),
-      ).resolves.toBe(1);
+      ).rejects.toBeInstanceOf(
+        storeModule.WorkspaceRegistrationStoreCommittedError,
+      );
       expect(
         JSON.parse(await fs.readFile(store.filePath, 'utf8')),
       ).toMatchObject({ workspaces: [] });

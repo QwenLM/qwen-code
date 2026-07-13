@@ -2201,7 +2201,11 @@ describe('runQwenServe runtime startup failures', () => {
       tmpDir,
       'restored-secondary-alias',
     );
-    fs.symlinkSync(restoredSecondary, restoredSecondaryAlias, 'dir');
+    fs.symlinkSync(
+      restoredSecondary,
+      restoredSecondaryAlias,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
     const canonicalPrimary = canonicalizeWorkspace(primary);
     const canonicalExplicitSecondary = canonicalizeWorkspace(explicitSecondary);
     const canonicalRestoredSecondary = canonicalizeWorkspace(restoredSecondary);
@@ -4273,6 +4277,8 @@ describe('runQwenServe runtime startup failures', () => {
           'daemon_status',
           'workspace_settings',
           'workspace_reload',
+          'persistent_workspace_registration',
+          'workspace_runtime_removal',
         ]),
         modelServices: [],
         workspaceCwd: boundWorkspace,
@@ -5525,6 +5531,112 @@ describe('runQwenServe channel worker supervisor', () => {
     expect(supervisorFactory).not.toHaveBeenCalled();
   });
 
+  it('records a secondary-only worker added to a primary-only daemon', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-dynamic-worker-pidfile-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+    const primaryCwd = canonicalizeWorkspace(primary);
+    const secondaryCwd = canonicalizeWorkspace(secondary);
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
+      (workspace) =>
+        ({
+          merged: {
+            channels:
+              canonicalizeWorkspace(String(workspace)) === secondaryCwd
+                ? { feishu: { type: 'feishu' } }
+                : { telegram: { type: 'telegram' } },
+          },
+        }) as unknown as ReturnType<typeof settingsRuntime.loadSettings>,
+    );
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeFakeBridge(),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 5678,
+      channels: ['feishu'],
+    });
+    const workerFactory = makeReadyWorkerFactory(worker);
+    const pidfile = makePidfileDeps();
+    const store = {
+      read: vi.fn().mockResolvedValue({
+        schemaVersion: 1,
+        primaryWorkspace: primaryCwd,
+        workspaces: [],
+      }),
+      add: vi.fn().mockResolvedValue(true),
+    } as unknown as WorkspaceRegistrationStore;
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: primary,
+        token: 'dynamic-worker-token',
+        serveWebShell: false,
+      },
+      {
+        preheatBridge: false,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        channelWorkerSupervisorFactory: workerFactory,
+        channelServicePidfile: pidfile,
+        workspaceRegistrationStore: store,
+      },
+    );
+    const headers = {
+      Authorization: 'Bearer dynamic-worker-token',
+      'Content-Type': 'application/json',
+    };
+
+    try {
+      await handle.runtimeReady;
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ cwd: secondary }),
+      });
+      expect(added.status).toBe(201);
+
+      const enabled = await fetch(`${handle.url}/workspace/channel`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({
+          selection: { mode: 'names', names: ['feishu'] },
+        }),
+      });
+      expect(enabled.status).toBe(201);
+      expect(workerFactory).toHaveBeenCalledOnce();
+      expect(workerFactory).toHaveBeenCalledWith(
+        expect.objectContaining({ workspace: secondaryCwd }),
+      );
+      expect(pidfile.writeServeServiceInfo).toHaveBeenLastCalledWith({
+        channels: ['feishu'],
+        servePid: process.pid,
+        workers: [
+          expect.objectContaining({
+            workspaceCwd: secondaryCwd,
+            channels: ['feishu'],
+            workerPid: 5678,
+          }),
+        ],
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('orchestrates, persists, and hot-removes distinct workspace workers', async () => {
     const previousSharedSecret = process.env['QWEN_SHARED_WEBHOOK_SECRET'];
     process.env['QWEN_SHARED_WEBHOOK_SECRET'] = 'primary-secret';
@@ -5706,7 +5818,6 @@ describe('runQwenServe channel worker supervisor', () => {
         },
       );
       expect(crossWorkspaceSecretResponse.status).toBe(401);
-      expect(supervisorFactory).not.toHaveBeenCalled();
 
       const webhookResponse = await fetch(
         `${handle.url}/channels/feishu/webhooks/github-ci`,
@@ -5820,6 +5931,20 @@ describe('runQwenServe channel worker supervisor', () => {
           }),
         ],
       });
+
+      const removedWebhook = await fetch(
+        `${handle.url}/channels/feishu/webhooks/github-ci`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer worker-remove-token',
+            'content-type': 'application/json',
+            'x-qwen-webhook-secret': 'secondary-secret',
+          },
+          body: JSON.stringify({ eventType: 'check_failed' }),
+        },
+      );
+      expect(removedWebhook.status).not.toBe(202);
 
       const failedSecondary: ChannelWorkerSnapshot = {
         enabled: true,

@@ -961,6 +961,8 @@ function currentServeFeaturesForRunQwenServe(
     reloadAvailable: true,
     channelReloadAvailable: opts.channelSelection !== undefined,
     channelControlAvailable: true,
+    persistentWorkspaceRegistrationAvailable: true,
+    workspaceRuntimeRemovalAvailable: true,
     // Advertise the same WS feature flags as the runtime path (serve-features.ts)
     // so the bootstrap `/capabilities` window doesn't briefly under-report them.
     clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
@@ -2509,6 +2511,7 @@ export async function runQwenServe(
   // a single entry) keeps concurrent per-worker updates from losing each other.
   const isLiveWorker = (snapshot: ChannelWorkerGroupSnapshot): boolean =>
     snapshot.state === 'running' || snapshot.state === 'starting';
+  let channelWorkerPidfileUsesWorkers = workspaceInputs.length > 1;
   const writeChannelWorkerPidfile = (): void => {
     if (runtimeStartupError !== undefined) return;
     if (!channelPidfileReserved || !channelServicePidfile) return;
@@ -2529,7 +2532,11 @@ export async function runQwenServe(
     const primary = snapshots.find((snapshot) => snapshot.primary);
     // Only surface the per-workspace worker list in multi-workspace mode; a
     // single-workspace daemon keeps the byte-identical channels/workerPid shape.
-    const includeWorkers = workspaceInputs.length > 1 && workers.length > 0;
+    if (workers.length > 1 || snapshots.some((snapshot) => !snapshot.primary)) {
+      channelWorkerPidfileUsesWorkers = true;
+    }
+    const includeWorkers =
+      channelWorkerPidfileUsesWorkers && workers.length > 0;
     try {
       channelServicePidfile.writeServeServiceInfo({
         channels,
@@ -3838,11 +3845,17 @@ export async function runQwenServe(
 
     const workspaceRuntimeRemoval = {
       async runtimeAdded(runtimeAdded: WorkspaceRuntime): Promise<void> {
+        const app = runtimeApp ?? runtimeAppForCleanup;
+        const startScheduledTaskKeepaliveForWorkspace = app?.locals?.[
+          'startScheduledTaskKeepaliveForWorkspace'
+        ] as ((runtime: WorkspaceRuntime) => void) | undefined;
+        startScheduledTaskKeepaliveForWorkspace?.(runtimeAdded);
         if (!channelWorkerManager) return;
         try {
           await channelWorkerManager.restoreWorkspace(
             runtimeAdded.workspaceCwd,
           );
+          await channelWorkerManager.refreshWorkspaces();
         } catch (err) {
           daemonLog.error(
             'workspace channel worker startup error',
@@ -3900,7 +3913,33 @@ export async function runQwenServe(
                   err instanceof Error ? err : null,
                 );
               });
+            try {
+              await channelWorkerManager.refreshWorkspaces();
+            } catch (err) {
+              channelWorkspaceGroups = (channelWorkspaceGroups ?? []).filter(
+                (group) => group.workspaceCwd !== runtimeToDrain.workspaceCwd,
+              );
+              channelWebhookConfigVersion += 1;
+              refreshChannelWebhookConfigs?.();
+              daemonLog.error(
+                'workspace channel worker topology refresh error',
+                err instanceof Error ? err : null,
+              );
+            }
             writeChannelWorkerPidfile();
+          }
+          if (reason === 'workspace_removed') {
+            const app = runtimeApp ?? runtimeAppForCleanup;
+            const stopWorkspaceGitStateForWorkspace = app?.locals?.[
+              'stopWorkspaceGitStateForWorkspace'
+            ] as ((workspaceCwd: string) => void) | undefined;
+            const stopScheduledTaskKeepaliveForWorkspace = app?.locals?.[
+              'stopScheduledTaskKeepaliveForWorkspace'
+            ] as ((workspaceCwd: string) => void) | undefined;
+            stopWorkspaceGitStateForWorkspace?.(runtimeToDrain.workspaceCwd);
+            stopScheduledTaskKeepaliveForWorkspace?.(
+              runtimeToDrain.workspaceCwd,
+            );
           }
           let bridgeStopped = false;
           try {

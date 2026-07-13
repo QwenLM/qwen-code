@@ -417,23 +417,24 @@ export function createChannelWorkerGroup(
           ),
         );
       }
+      if (drainingWorkspaces.size > 0) {
+        return Promise.reject(
+          new ChannelWorkerReconcileError(
+            'Channel worker configuration cannot change while a workspace is draining.',
+            { rolledBack: true },
+          ),
+        );
+      }
       if (reconciling) return reconciling;
       reconciling = (async () => {
         const targets = new Map(
-          targetGroups
-            .filter((target) => !drainingWorkspaces.has(target.workspaceCwd))
-            .map((target) => [target.workspaceCwd, target]),
+          targetGroups.map((target) => [target.workspaceCwd, target]),
         );
         const unchanged = new Map<string, ChannelWorkerGroupEntry>();
         const oldAffected: ChannelWorkerGroupEntry[] = [];
         const newEntries: ChannelWorkerGroupEntry[] = [];
 
         for (const [workspaceCwd, entry] of entries) {
-          if (drainingWorkspaces.has(workspaceCwd)) {
-            unchanged.set(workspaceCwd, entry);
-            targets.delete(workspaceCwd);
-            continue;
-          }
           const target = targets.get(workspaceCwd);
           const healthy = entry.supervisor.snapshot().state === 'running';
           if (
@@ -495,6 +496,11 @@ export function createChannelWorkerGroup(
               );
             }
           }
+          if (drainingWorkspaces.size > 0) {
+            throw new Error(
+              'Workspace drained during channel worker reconcile.',
+            );
+          }
         } catch (error) {
           reconcileOptions?.onRollingBack?.();
           const cleanup = await stopEntriesForRollback(startedNew);
@@ -525,10 +531,7 @@ export function createChannelWorkerGroup(
           targetGroups.map((target) => target.workspaceCwd),
         );
         for (const workspaceCwd of groupsByWorkspace.keys()) {
-          if (
-            !targetWorkspaceCwds.has(workspaceCwd) &&
-            !drainingWorkspaces.has(workspaceCwd)
-          ) {
+          if (!targetWorkspaceCwds.has(workspaceCwd)) {
             groupsByWorkspace.delete(workspaceCwd);
           }
         }
@@ -576,8 +579,12 @@ export function createChannelWorkerGroup(
       if (pendingGenerations.has(workspaceCwd)) return 1;
       const entry = entries.get(workspaceCwd);
       if (!entry) return 0;
-      const state = entry.supervisor.snapshot().state;
-      return state === 'starting' || state === 'running' ? 1 : 0;
+      const snapshot = entry.supervisor.snapshot();
+      return snapshot.state === 'starting' ||
+        snapshot.state === 'running' ||
+        snapshot.nextRestartAt !== undefined
+        ? 1
+        : 0;
     },
     removeWorkspace(workspaceCwd) {
       const existing = removalPromises.get(workspaceCwd);

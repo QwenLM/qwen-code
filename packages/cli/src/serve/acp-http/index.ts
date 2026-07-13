@@ -39,10 +39,12 @@ import { SessionArchiveCoordinator } from '../server/session-archive.js';
 import {
   RPC,
   error as rpcError,
+  isNotification,
   isRequest,
   isResponse,
   logSafe,
   parseInbound,
+  type JsonRpcInbound,
 } from './json-rpc.js';
 import { parseLastEventId } from '../sse-last-event-id.js';
 import {
@@ -70,6 +72,33 @@ export const ACP_SESSION_HEADER = 'acp-session-id';
 
 /** Pathname of the Plan C CDP-tunnel endpoint (issue #5626). */
 const CDP_PATH = '/cdp';
+
+function isActiveDrainCorrelation(
+  registry: ConnectionRegistry,
+  conn: AcpConnection,
+  message: JsonRpcInbound,
+): boolean {
+  if (isResponse(message) && typeof message.id === 'string') {
+    const pending = registry.findPendingClientRequest(message.id);
+    return (
+      pending !== undefined &&
+      (pending.conn === conn || conn.ownsSession(pending.req.sessionId))
+    );
+  }
+  if (
+    !(isRequest(message) || isNotification(message)) ||
+    message.method !== 'session/cancel'
+  ) {
+    return false;
+  }
+  const params =
+    message.params !== null && typeof message.params === 'object'
+      ? (message.params as { sessionId?: unknown })
+      : undefined;
+  return (
+    typeof params?.sessionId === 'string' && conn.ownsSession(params.sessionId)
+  );
+}
 
 /** Prefix/suffix of the Phase 4 workspace-qualified ACP WS path. */
 const PLURAL_ACP_WS_PREFIX = '/workspaces/';
@@ -773,7 +802,7 @@ export function mountAcpHttp(
     req: Request,
     res: Response,
   ): Promise<void> => {
-    if (rejectIfUnavailable(mount, res)) return;
+    if (rejectIfDisposed(res)) return;
     // RFD: Content-Type MUST be application/json; otherwise 415.
     const ct = req.headers['content-type'];
     if (!ct || !ct.startsWith('application/json')) {
@@ -796,6 +825,18 @@ export function mountAcpHttp(
       return;
     }
     const message = parsed.message;
+    const cleanupMessage =
+      (isRequest(message) || isNotification(message)) &&
+      message.method === 'session/cancel';
+    if (mount.draining && !isResponse(message) && !cleanupMessage) {
+      res.set('Retry-After', '5');
+      res.status(503).json({
+        error: 'Workspace runtime is being removed',
+        code: 'workspace_draining',
+        workspaceCwd: mount.workspaceCwd,
+      });
+      return;
+    }
 
     // `initialize` mints a connection and replies inline (200 + JSON).
     if (isRequest(message) && message.method === 'initialize') {
@@ -865,6 +906,17 @@ export function mountAcpHttp(
           ),
         );
       return;
+    }
+    if (mount.draining) {
+      if (!isActiveDrainCorrelation(mount.registry, conn, message)) {
+        res.set('Retry-After', '5');
+        res.status(503).json({
+          error: 'Workspace runtime is being removed',
+          code: 'workspace_draining',
+          workspaceCwd: mount.workspaceCwd,
+        });
+        return;
+      }
     }
 
     // Rate limit ACP HTTP POST (mirrors the WS checkRate path).
@@ -1622,11 +1674,38 @@ export function mountAcpHttp(
             parsed !== null && typeof parsed === 'object'
               ? (parsed as { type?: unknown }).type
               : undefined;
-          const correlationOnly =
-            isResponse(parsed) ||
-            frameType === 'mcp_message' ||
-            isCdpInboundFrameType(frameType);
-          if (activeMount.draining && !correlationOnly) {
+          if (
+            activeMount.draining &&
+            frameType === 'mcp_message' &&
+            clientMcp !== undefined &&
+            parsed !== null &&
+            typeof parsed === 'object'
+          ) {
+            const result = await clientMcp.handleFrame(
+              parsed as Record<string, unknown>,
+            );
+            if (result.kind === 'message_resolved') return;
+          }
+          if (
+            activeMount.draining &&
+            !(
+              connRef !== undefined &&
+              (isResponse(parsed) ||
+                isRequest(parsed) ||
+                isNotification(parsed)) &&
+              isActiveDrainCorrelation(activeMount.registry, connRef, parsed)
+            )
+          ) {
+            if (
+              opts.cdpTunnelOverWs === true &&
+              cdpEndpoint !== undefined &&
+              parsed !== null &&
+              typeof parsed === 'object' &&
+              isCdpInboundFrameType(frameType) &&
+              cdpEndpoint.routeInbound(parsed as Record<string, unknown>)
+            ) {
+              return;
+            }
             ws.send(
               JSON.stringify(
                 rpcError(
@@ -2108,12 +2187,18 @@ export function mountAcpHttp(
       drainingWorkspaceIds.delete(workspaceId);
       const mount = secondaryMounts.get(workspaceId);
       if (!mount) return;
-      mount.workspaceRememberLane.dispose();
-      for (const ws of mount.webSockets) {
-        ws.close(1012, 'Workspace removed');
-      }
-      mount.registry.dispose();
       secondaryMounts.delete(workspaceId);
+      try {
+        mount.workspaceRememberLane.dispose();
+      } finally {
+        try {
+          for (const ws of mount.webSockets) {
+            ws.close(1012, 'Workspace removed');
+          }
+        } finally {
+          mount.registry.dispose();
+        }
+      }
     },
     getSnapshot: () => {
       const perMount = [

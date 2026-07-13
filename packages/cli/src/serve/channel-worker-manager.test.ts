@@ -143,6 +143,23 @@ describe('createChannelWorkerManager', () => {
     });
   });
 
+  it('refreshes workspace topology without forcing unchanged workers', async () => {
+    const test = setup();
+    const selection: ServeChannelSelection = {
+      mode: 'names',
+      names: ['telegram'],
+    };
+    await test.manager.setSelection(selection);
+
+    await test.manager.refreshWorkspaces();
+
+    expect(test.resolveGroups).toHaveBeenLastCalledWith(selection, 'reload');
+    expect(test.group.reconcile).toHaveBeenCalledWith(
+      workspaceGroups(selection),
+    );
+    expect(test.onCommittedSelection).toHaveBeenCalledTimes(2);
+  });
+
   it('starts the initial selection through the boot-time path', async () => {
     const test = setup();
     const selection: ServeChannelSelection = {

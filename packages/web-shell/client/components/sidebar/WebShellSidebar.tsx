@@ -517,6 +517,7 @@ export function WebShellSidebar({
     useState<DaemonWorkspaceRemovalActivity | null>(null);
   const [workspaceRemovalSubmitting, setWorkspaceRemovalSubmitting] =
     useState(false);
+  const workspaceRemovalMountedRef = useRef(false);
   const workspaceRemovalDismissedRef = useRef(false);
   const [
     workspaceRemovalRemoteInProgress,
@@ -533,6 +534,14 @@ export function WebShellSidebar({
   // their 10s interval. Stable identity — safe (and required) in consumer deps.
   const bumpWorkspaceReload = useCallback(() => {
     setWorkspaceSessionsReloadToken((v) => v + 1);
+  }, []);
+
+  useEffect(() => {
+    workspaceRemovalMountedRef.current = true;
+    return () => {
+      workspaceRemovalMountedRef.current = false;
+      workspaceRemovalDismissedRef.current = true;
+    };
   }, []);
   const [searchQuery, setSearchQuery] = useState('');
   const [isResizing, setIsResizing] = useState(false);
@@ -994,18 +1003,20 @@ export function WebShellSidebar({
 
   const reconcileRemovedWorkspace = useCallback(
     async (removed: DaemonWorkspaceCapability) => {
+      if (!workspaceRemovalMountedRef.current) return;
       if (selectedWorkspaceCwd === removed.cwd) {
         onSelectWorkspace?.(undefined);
       }
-      setWorkspaceRemovalCandidate(null);
-      setWorkspaceRemovalActivity(null);
-      setWorkspaceRemovalRemoteInProgress(false);
       setWorkspaceSessionsReloadToken((token) => token + 1);
       try {
         await workspace.refreshCapabilities?.();
       } catch {
         // The mutation already converged; a later refresh will reconcile.
       }
+      if (!workspaceRemovalMountedRef.current) return;
+      setWorkspaceRemovalCandidate(null);
+      setWorkspaceRemovalActivity(null);
+      setWorkspaceRemovalRemoteInProgress(false);
       void reload().catch(() => undefined);
       void reloadArchived().catch(() => undefined);
     },
@@ -1045,6 +1056,7 @@ export function WebShellSidebar({
       await workspaceActions.removeWorkspace(candidate.id, { force });
       await reconcileRemovedWorkspace(candidate);
     } catch (error) {
+      if (!workspaceRemovalMountedRef.current) return;
       if (error instanceof DaemonHttpError) {
         const body = error.body as
           | {
@@ -1066,31 +1078,81 @@ export function WebShellSidebar({
         }
         if (
           error.status === 409 &&
-          body?.code === 'workspace_removal_in_progress'
+          (body?.code === 'workspace_removal_in_progress' ||
+            body?.code === 'workspace_registration_in_progress')
         ) {
           setWorkspaceRemovalRemoteInProgress(true);
+          let lastError: unknown = error;
+          let exhaustedTransientRetries = true;
           for (let attempt = 0; attempt < 20; attempt++) {
-            if (workspaceRemovalDismissedRef.current) return;
-            try {
-              const capabilities = await workspace.refreshCapabilities?.();
-              if (
-                capabilities?.workspaces &&
-                !capabilities.workspaces.some(
-                  (entry) => entry.id === candidate.id,
-                )
-              ) {
-                await reconcileRemovedWorkspace(candidate);
-                return;
-              }
-            } catch {
-              // Keep polling; the original removal continues server-side.
+            if (
+              !workspaceRemovalMountedRef.current ||
+              workspaceRemovalDismissedRef.current
+            ) {
+              return;
             }
             await new Promise((resolve) => window.setTimeout(resolve, 250));
+            if (
+              !workspaceRemovalMountedRef.current ||
+              workspaceRemovalDismissedRef.current
+            ) {
+              return;
+            }
+            try {
+              await workspaceActions.removeWorkspace(candidate.id, { force });
+              await reconcileRemovedWorkspace(candidate);
+              return;
+            } catch (retryError) {
+              if (!workspaceRemovalMountedRef.current) return;
+              lastError = retryError;
+              if (retryError instanceof DaemonHttpError) {
+                const retryBody = retryError.body as
+                  | {
+                      code?: unknown;
+                      activity?: DaemonWorkspaceRemovalActivity;
+                    }
+                  | undefined;
+                if (
+                  retryError.status === 400 &&
+                  retryBody?.code === 'workspace_mismatch'
+                ) {
+                  await reconcileRemovedWorkspace(candidate);
+                  return;
+                }
+                if (
+                  retryError.status === 409 &&
+                  retryBody?.code === 'workspace_busy' &&
+                  retryBody.activity
+                ) {
+                  setWorkspaceRemovalRemoteInProgress(false);
+                  setWorkspaceRemovalActivity(retryBody.activity);
+                  return;
+                }
+                if (
+                  retryError.status === 409 &&
+                  (retryBody?.code === 'workspace_removal_in_progress' ||
+                    retryBody?.code === 'workspace_registration_in_progress')
+                ) {
+                  continue;
+                }
+              }
+              exhaustedTransientRetries = false;
+              break;
+            }
           }
-          if (workspaceRemovalDismissedRef.current) return;
+          if (
+            !workspaceRemovalMountedRef.current ||
+            workspaceRemovalDismissedRef.current
+          ) {
+            return;
+          }
           setWorkspaceRemovalRemoteInProgress(false);
           onError(
-            new Error('Workspace removal remained in progress after retries.'),
+            exhaustedTransientRetries
+              ? new Error(
+                  'Workspace removal remained in progress after retries.',
+                )
+              : lastError,
             t('sidebar.removeWorkspaceError'),
           );
           return;
@@ -1098,7 +1160,9 @@ export function WebShellSidebar({
       }
       onError(error, t('sidebar.removeWorkspaceError'));
     } finally {
-      setWorkspaceRemovalSubmitting(false);
+      if (workspaceRemovalMountedRef.current) {
+        setWorkspaceRemovalSubmitting(false);
+      }
     }
   }, [
     connection.sessionId,
@@ -1107,7 +1171,6 @@ export function WebShellSidebar({
     reconcileRemovedWorkspace,
     t,
     workspaceActions,
-    workspace,
     workspaceRemovalActivity,
     workspaceRemovalCandidate,
     workspaceRemovalSubmitting,
@@ -2652,10 +2715,10 @@ export function WebShellSidebar({
               <p className={styles.confirmDescription}>
                 {workspaceRemovalActivity
                   ? t('sidebar.removeWorkspaceBusy', {
-                      name: getWorkspaceName(workspaceRemovalCandidate.cwd),
+                      name: workspaceRemovalCandidate.cwd,
                     })
                   : t('sidebar.removeWorkspaceConfirm', {
-                      name: getWorkspaceName(workspaceRemovalCandidate.cwd),
+                      name: workspaceRemovalCandidate.cwd,
                     })}
               </p>
               {workspaceRemovalActivity && (
@@ -3159,6 +3222,9 @@ export function WebShellSidebar({
                                       <DropdownMenuContent align="end">
                                         <DropdownMenuItem
                                           variant="destructive"
+                                          aria-label={`${t(
+                                            'sidebar.removeWorkspace',
+                                          )}: ${ws.cwd}`}
                                           onSelect={() =>
                                             requestWorkspaceRemoval(ws)
                                           }

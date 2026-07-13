@@ -3623,6 +3623,7 @@ export class WorkspaceDaemonClient {
         ...(options?.timeoutMs !== undefined
           ? { timeoutMs: options.timeoutMs }
           : {}),
+        mode: 'rest',
       },
     );
   }

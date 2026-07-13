@@ -79,4 +79,34 @@ describe('workspace actions', () => {
       'Remove workspace failed: DaemonClient is not connected',
     );
   });
+
+  it('preserves zero as the disabled timeout sentinel', async () => {
+    vi.useFakeTimers();
+    const removal = {
+      removed: true as const,
+      workspaceId: 'secondary',
+      workspaceCwd: '/ws/secondary',
+      forced: false,
+      persistedRegistrationRemoved: false,
+      activity: {
+        sessions: 0,
+        activePrompts: 0,
+        pendingSessionStarts: 0,
+        acpConnections: 0,
+        memoryTasks: 0,
+        channelWorkers: 0,
+      },
+    };
+    const remove = vi.fn().mockResolvedValue(removal);
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ workspaceById: () => ({ remove }) }) as never,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+
+    await expect(
+      actions.removeWorkspace('secondary', { timeoutMs: 0 }),
+    ).resolves.toEqual(removal);
+    expect(remove).toHaveBeenCalledWith({ timeoutMs: 0 });
+  });
 });

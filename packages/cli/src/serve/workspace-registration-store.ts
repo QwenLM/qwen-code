@@ -45,6 +45,8 @@ export class WorkspaceRegistrationStoreError extends Error {
 
 export class WorkspaceRegistrationStoreLimitError extends WorkspaceRegistrationStoreError {}
 
+export class WorkspaceRegistrationStoreCommittedError extends WorkspaceRegistrationStoreError {}
+
 function normalizedScopePath(primaryWorkspace: string): string {
   return os.platform() === 'win32'
     ? primaryWorkspace.toLowerCase()
@@ -389,7 +391,13 @@ export class WorkspaceRegistrationStore {
       try {
         await lock.release();
       } catch (err) {
-        if (!committed) releaseError = err;
+        releaseError = committed
+          ? new WorkspaceRegistrationStoreCommittedError(
+              `Workspace registration update committed but lock release failed: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            )
+          : err;
       }
       if (
         workError instanceof Error &&

@@ -4943,7 +4943,22 @@ describe('DaemonClient', () => {
         },
       };
       const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
-      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const transportFetch = vi.fn(async () =>
+        jsonResponse(404, { error: 'transport route not mapped' }),
+      );
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
 
       await expect(
         client.workspaceById('workspace/id').remove({ force: true }),
@@ -4960,6 +4975,7 @@ describe('DaemonClient', () => {
         ],
         ['DELETE', 'http://daemon/workspaces/%2Ftmp%2Fwork%20space', null],
       ]);
+      expect(transportFetch).not.toHaveBeenCalled();
     });
   });
 

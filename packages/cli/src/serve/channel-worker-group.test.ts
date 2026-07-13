@@ -178,8 +178,10 @@ describe('createChannelWorkerGroup', () => {
     await expect(group.enqueueWebhookTask(webhookTask)).rejects.toMatchObject({
       code: 'channel_worker_unavailable',
     });
-    await group.reconcile(groups, { force: true });
-    expect(recorded).toHaveLength(3);
+    await expect(group.reconcile(groups, { force: true })).rejects.toThrow(
+      'cannot change while a workspace is draining',
+    );
+    expect(recorded).toHaveLength(2);
     expect(recorded[1]!.supervisor.stop).not.toHaveBeenCalled();
     expect(recorded[1]!.supervisor.start).not.toHaveBeenCalled();
 
@@ -198,7 +200,7 @@ describe('createChannelWorkerGroup', () => {
     await firstRemoval;
 
     expect(recorded[1]!.supervisor.stop).toHaveBeenCalledOnce();
-    expect(recorded[0]!.supervisor.stop).toHaveBeenCalledOnce();
+    expect(recorded[0]!.supervisor.stop).not.toHaveBeenCalled();
     expect(group.workspaceActivity(SECONDARY)).toBe(0);
     expect(group.snapshots()).toEqual([
       expect.objectContaining({ workspaceCwd: PRIMARY }),
@@ -210,7 +212,29 @@ describe('createChannelWorkerGroup', () => {
     await group.stop();
     expect(recorded[0]!.supervisor.stop).toHaveBeenCalledOnce();
     expect(recorded[1]!.supervisor.stop).toHaveBeenCalledOnce();
-    expect(recorded[2]!.supervisor.stop).toHaveBeenCalledOnce();
+  });
+
+  it('counts a scheduled restart as workspace activity', () => {
+    const registry = fakeRegistry([fakeRuntime(SECONDARY, false)]);
+    const { createSupervisor } = makeCreateSupervisor(() =>
+      snapshot({
+        state: 'failed',
+        nextRestartAt: new Date(Date.now() + 1_000).toISOString(),
+      }),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        {
+          workspaceCwd: SECONDARY,
+          selection: { mode: 'names', names: ['telegram'] },
+        },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+
+    expect(group.workspaceActivity(SECONDARY)).toBe(1);
   });
 
   it('falls back to synchronous kill when target worker stop fails', async () => {

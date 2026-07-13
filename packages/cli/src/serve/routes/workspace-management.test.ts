@@ -318,7 +318,30 @@ describe('POST /workspaces', () => {
       .send({ cwd: REAL_DIR, persist: true });
     expect(res.status).toBe(200);
     expect(res.body.persisted).toBe(true);
-    expect(add).toHaveBeenCalledWith(REAL_DIR);
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it('does not duplicate a persisted alias when promoting its runtime', async () => {
+    const alias = '/raw/workspace-alias';
+    const add = vi.fn();
+    const runtime = makeRuntime(REAL_DIR, {
+      registrationIds: [workspaceRegistrationId(alias)],
+    });
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      workspaceRegistrationStore: {
+        add,
+        read: vi.fn().mockResolvedValue({ workspaces: [alias] }),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app)
+      .post('/workspaces')
+      .send({ cwd: REAL_DIR, persist: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.persisted).toBe(true);
+    expect(add).not.toHaveBeenCalled();
   });
 
   it('promotes an existing workspace without a dynamic runtime factory', async () => {
@@ -781,7 +804,11 @@ describe('DELETE /workspaces/:workspace', () => {
   it('canonicalizes a symlink cwd selector before removal', async () => {
     const selectorRoot = await mkdtemp(join(REAL_DIR, 'qws-selector-'));
     const selector = join(selectorRoot, 'workspace-alias');
-    await symlink(REAL_DIR, selector, 'dir');
+    await symlink(
+      REAL_DIR,
+      selector,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
     const runtime = makeRuntime(REAL_DIR);
     const { app, deps } = createApp({
       workspaceRegistry: createMockRegistry([runtime]),
@@ -1046,6 +1073,30 @@ describe('persistent workspace registrations', () => {
     });
   });
 
+  it('does not require restart when forgetting an alias of a static runtime', async () => {
+    const aliasId = workspaceRegistrationId('/raw/static-alias');
+    const active = makeRuntime(REAL_DIR, {
+      removable: false,
+      registrationIds: [aliasId],
+    });
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([active]),
+      workspaceRegistrationStore: {
+        removeById: vi.fn().mockResolvedValue(true),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app).delete(
+      `/workspace-registrations/${aliasId}`,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      active: true,
+      restartRequired: false,
+    });
+  });
+
   it('treats a draining runtime registration as active', async () => {
     const active = makeRuntime(REAL_DIR);
     const registry = createMockRegistry([active]);
@@ -1071,6 +1122,7 @@ describe('persistent workspace registrations', () => {
   it('returns 404 when a registration does not exist', async () => {
     const { app } = createApp({
       workspaceRegistrationStore: {
+        read: vi.fn().mockResolvedValue({ workspaces: [] }),
         removeById: vi.fn().mockResolvedValue(false),
       } as unknown as WorkspaceRegistrationStore,
     });
@@ -1097,6 +1149,7 @@ describe('persistent workspace registrations', () => {
   it('returns a store error when a registration cannot be forgotten', async () => {
     const { app } = createApp({
       workspaceRegistrationStore: {
+        read: vi.fn().mockResolvedValue({ workspaces: [] }),
         removeById: vi.fn().mockRejectedValue(new Error('write failed')),
       } as unknown as WorkspaceRegistrationStore,
     });
@@ -1126,6 +1179,7 @@ describe('persistent workspace registrations', () => {
       workspaceRegistry: createMockRegistry([runtime]),
       runtimeRemoval: createRemovalController(),
       workspaceRegistrationStore: {
+        read: vi.fn().mockResolvedValue({ workspaces: [] }),
         removeById,
         removeByIds,
       } as unknown as WorkspaceRegistrationStore,
@@ -1160,6 +1214,37 @@ describe('persistent workspace registrations', () => {
     expect((await removalResult).status).toBe(200);
   });
 
+  it('serializes an inactive forget with adding the same workspace', async () => {
+    const registrationId = workspaceRegistrationId(REAL_DIR);
+    let finishForget!: () => void;
+    const forgetting = new Promise<boolean>((resolve) => {
+      finishForget = () => resolve(true);
+    });
+    const removeById = vi.fn().mockReturnValue(forgetting);
+    const { app, deps } = createApp({
+      workspaceRegistry: createMockRegistry([makeRuntime('/some-other-dir')]),
+      workspaceRegistrationStore: {
+        read: vi.fn().mockResolvedValue({ workspaces: [REAL_DIR] }),
+        removeById,
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const pendingForget = request(app).delete(
+      `/workspace-registrations/${registrationId}`,
+    );
+    const forgetResult = pendingForget.then((res) => res);
+    await vi.waitFor(() => expect(removeById).toHaveBeenCalledOnce());
+    const addWhileForgetting = await request(app)
+      .post('/workspaces')
+      .send({ cwd: REAL_DIR });
+
+    expect(addWhileForgetting.status).toBe(409);
+    expect(addWhileForgetting.body.code).toBe('workspace_exists');
+    expect(deps.createWorkspaceRuntime).not.toHaveBeenCalled();
+    finishForget();
+    expect((await forgetResult).status).toBe(200);
+  });
+
   it('waits for an in-flight forget after sealing and rejects another one', async () => {
     let finishForget!: () => void;
     const forgetting = new Promise<boolean>((resolve) => {
@@ -1168,6 +1253,7 @@ describe('persistent workspace registrations', () => {
     const removeById = vi.fn().mockReturnValueOnce(forgetting);
     const { app, handle } = createApp({
       workspaceRegistrationStore: {
+        read: vi.fn().mockResolvedValue({ workspaces: [] }),
         removeById,
       } as unknown as WorkspaceRegistrationStore,
     });

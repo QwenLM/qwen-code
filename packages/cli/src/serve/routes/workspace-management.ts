@@ -23,6 +23,7 @@ import {
 } from '../workspace-route-runtime.js';
 import {
   workspaceRegistrationId,
+  WorkspaceRegistrationStoreCommittedError,
   WorkspaceRegistrationStoreLimitError,
   type WorkspaceRegistrationStore,
 } from '../workspace-registration-store.js';
@@ -262,10 +263,14 @@ export function registerWorkspaceManagementRoutes(
         operationStarted();
         try {
           const snapshot = await workspaceRegistrationStore!.read();
-          const alreadyPersisted = snapshot.workspaces.some((stored) =>
-            process.platform === 'win32'
-              ? stored.toLowerCase() === canonical.toLowerCase()
-              : stored === canonical,
+          const alreadyPersisted = snapshot.workspaces.some(
+            (stored) =>
+              existingRuntime.registrationIds?.includes(
+                workspaceRegistrationId(stored),
+              ) === true ||
+              (process.platform === 'win32'
+                ? stored.toLowerCase() === canonical.toLowerCase()
+                : stored === canonical),
           );
           if (
             !alreadyPersisted &&
@@ -277,7 +282,20 @@ export function registerWorkspaceManagementRoutes(
             });
             return;
           }
-          await workspaceRegistrationStore!.add(canonical);
+          if (!alreadyPersisted) {
+            try {
+              await workspaceRegistrationStore!.add(canonical);
+            } catch (err) {
+              if (!(err instanceof WorkspaceRegistrationStoreCommittedError)) {
+                throw err;
+              }
+              try {
+                writeStderrLine(`qwen serve: ${err.message}`);
+              } catch {
+                // The registration is committed; diagnostics are best-effort.
+              }
+            }
+          }
           res.status(200).json({
             id: existingRuntime.workspaceId,
             cwd: existingRuntime.workspaceCwd,
@@ -369,8 +387,22 @@ export function registerWorkspaceManagementRoutes(
         try {
           if (persist) {
             try {
-              persistedRecordAdded =
-                await workspaceRegistrationStore!.add(canonical);
+              try {
+                persistedRecordAdded =
+                  await workspaceRegistrationStore!.add(canonical);
+              } catch (err) {
+                if (
+                  !(err instanceof WorkspaceRegistrationStoreCommittedError)
+                ) {
+                  throw err;
+                }
+                persistedRecordAdded = true;
+                try {
+                  writeStderrLine(`qwen serve: ${err.message}`);
+                } catch {
+                  // The registration is committed; diagnostics are best-effort.
+                }
+              }
             } catch (err) {
               persistenceFailed = true;
               throw err;
@@ -380,11 +412,15 @@ export function registerWorkspaceManagementRoutes(
           try {
             await runtimeRemoval?.runtimeAdded?.(runtime);
           } catch (err) {
-            writeStderrLine(
-              `qwen serve: runtime adapter rejected post-registration callback: ${
-                err instanceof Error ? err.message : String(err)
-              }`,
-            );
+            try {
+              writeStderrLine(
+                `qwen serve: workspace runtime adapter notification failed after registry add: ${
+                  err instanceof Error ? err.message : String(err)
+                }`,
+              );
+            } catch {
+              // The runtime is registered; diagnostics are best-effort.
+            }
           }
         } catch (err) {
           if (persistedRecordAdded) {
@@ -678,10 +714,22 @@ export function registerWorkspaceManagementRoutes(
               ...(runtime.registrationIds ?? []),
               workspaceRegistrationId(runtime.workspaceCwd),
             ]);
-            persistedRegistrationRemoved =
-              (await workspaceRegistrationStore.removeByIds([
-                ...registrationIds,
-              ])) > 0;
+            try {
+              persistedRegistrationRemoved =
+                (await workspaceRegistrationStore.removeByIds([
+                  ...registrationIds,
+                ])) > 0;
+            } catch (err) {
+              if (!(err instanceof WorkspaceRegistrationStoreCommittedError)) {
+                throw err;
+              }
+              persistedRegistrationRemoved = true;
+              try {
+                writeStderrLine(`qwen serve: ${err.message}`);
+              } catch {
+                // Persistence committed; diagnostics are best-effort.
+              }
+            }
           } catch (err) {
             rollbackDrain();
             writeStderrLine(
@@ -791,7 +839,7 @@ export function registerWorkspaceManagementRoutes(
         return;
       }
       const registrationId = String(req.params['id']);
-      const runtime = workspaceRegistry
+      let runtime = workspaceRegistry
         .listManaged()
         .find(
           (candidate) =>
@@ -799,7 +847,35 @@ export function registerWorkspaceManagementRoutes(
               registrationId ||
             candidate.registrationIds?.includes(registrationId) === true,
         );
-      const operationCwd = runtime?.workspaceCwd;
+      let operationCwd = runtime?.workspaceCwd;
+      if (!operationCwd) {
+        let storedCwd: string | undefined;
+        try {
+          const snapshot = await workspaceRegistrationStore.read();
+          storedCwd = snapshot.workspaces.find(
+            (workspace) =>
+              workspaceRegistrationId(workspace) === registrationId,
+          );
+        } catch (err) {
+          writeStderrLine(
+            `qwen serve: failed to read workspace registration before forget: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+          res.status(500).json({
+            error: 'Failed to read workspace registration',
+            code: 'workspace_registration_store_error',
+          });
+          return;
+        }
+        if (storedCwd) {
+          try {
+            operationCwd = realpathSync.native(resolve(storedCwd));
+          } catch {
+            operationCwd = resolve(storedCwd);
+          }
+        }
+      }
       const operation = operationCwd ? inFlight.get(operationCwd) : undefined;
       if (operation) {
         res.status(409).json({
@@ -817,9 +893,25 @@ export function registerWorkspaceManagementRoutes(
       if (operationCwd) inFlight.set(operationCwd, 'forget');
       operationStarted();
       try {
+        runtime =
+          (operationCwd
+            ? workspaceRegistry.getManagedByWorkspaceCwd(operationCwd)
+            : undefined) ?? runtime;
         const active = registrationIsActive(registrationId);
-        const removed =
-          await workspaceRegistrationStore.removeById(registrationId);
+        let removed: boolean;
+        try {
+          removed = await workspaceRegistrationStore.removeById(registrationId);
+        } catch (err) {
+          if (!(err instanceof WorkspaceRegistrationStoreCommittedError)) {
+            throw err;
+          }
+          removed = true;
+          try {
+            writeStderrLine(`qwen serve: ${err.message}`);
+          } catch {
+            // The forget committed; diagnostics are best-effort.
+          }
+        }
         if (!removed) {
           res.status(404).json({
             error: 'Workspace registration not found',
@@ -830,7 +922,7 @@ export function registerWorkspaceManagementRoutes(
         res.json({
           removed: true,
           active,
-          restartRequired: active,
+          restartRequired: active && runtime?.removable === true,
         });
       } catch (err) {
         writeStderrLine(

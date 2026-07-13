@@ -101,6 +101,7 @@ export interface ChannelWorkerManager {
   workspaceActivity(workspaceCwd: string): number;
   removeWorkspace(workspaceCwd: string): Promise<void>;
   restoreWorkspace(workspaceCwd: string): Promise<void>;
+  refreshWorkspaces(): Promise<void>;
   workerChanged(): void;
   shutdown(): Promise<void>;
   killAllSync(): void;
@@ -474,6 +475,17 @@ export function createChannelWorkerManager(
       return enqueue(async () => {
         await group?.restoreWorkspace(workspaceCwd);
         notify();
+      });
+    },
+    refreshWorkspaces() {
+      return enqueue(async () => {
+        if (!group || !committedSelection) return;
+        const targetGroups = await opts.resolveGroups(
+          committedSelection,
+          'reload',
+        );
+        await group.reconcile(targetGroups);
+        commit(committedSelection, targetGroups);
       });
     },
     workerChanged: notify,
