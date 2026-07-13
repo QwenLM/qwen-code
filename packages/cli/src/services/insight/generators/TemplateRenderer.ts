@@ -10,6 +10,11 @@ import type { InsightData } from '../types/StaticInsightTypes.js';
 export class TemplateRenderer {
   // Render the complete HTML file
   async renderInsightHTML(insights: InsightData): Promise<string> {
+    // Escape `<` so a `</script>` (or `<script`, `<!--`) inside the report data
+    // — chat summaries, file/tool names, LLM output — cannot terminate the
+    // inline <script> that carries it. The `<` escape is valid JSON and
+    // parses back to `<`, so the data reaching the page is unchanged.
+    const insightJson = JSON.stringify(insights).replace(/</g, '\\u003c');
     const html = `<!doctype html>
 <html lang="en">
   <head>
@@ -37,7 +42,7 @@ export class TemplateRenderer {
 
     <!-- Application Data -->
     <script>
-      window.INSIGHT_DATA = ${JSON.stringify(insights)};
+      window.INSIGHT_DATA = ${insightJson};
     </script>
 
     <!-- App Script -->
