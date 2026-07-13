@@ -557,10 +557,17 @@ vi.doMock('./components/dialogs/ScheduledTasksDialog', async () => {
 vi.doMock('./components/extensions/ExtensionsManagerPage', async () => {
   const React = await import('react');
   return {
-    ExtensionsManagerPage: () =>
-      React.createElement('div', {
-        'data-testid': 'extensions-manager-page',
-      }),
+    ExtensionsManagerPage: (props: {
+      backButtonRef?: React.Ref<HTMLButtonElement>;
+    }) =>
+      React.createElement(
+        'div',
+        { 'data-testid': 'extensions-manager-page' },
+        React.createElement('button', {
+          ref: props.backButtonRef,
+          'data-testid': 'extensions-manager-back',
+        }),
+      ),
   };
 });
 mockComponent('./components/dialogs/ThemeDialog', 'ThemeDialog');
@@ -1454,6 +1461,9 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="extensions-manager-page"]'),
     ).not.toBeNull();
+    expect(document.activeElement).toBe(
+      container.querySelector('[data-testid="extensions-manager-back"]'),
+    );
   });
 
   it('auto-closes an open panel when an AskUserQuestion approval becomes pending', async () => {

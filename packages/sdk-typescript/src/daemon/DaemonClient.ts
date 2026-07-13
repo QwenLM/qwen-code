@@ -130,6 +130,7 @@ import type {
   ExtensionInstallResponse,
   ExtensionInteractionResponse,
   ExtensionInteractionResponseResult,
+  ExtensionActiveOperations,
   ExtensionOperationStatus,
   ExtensionScopeRequest,
   ExtensionRefreshResponse,
@@ -972,6 +973,13 @@ export class DaemonClient {
     return await this.jsonRequest<ExtensionOperationStatus>(
       `/workspace/extensions/operations/${urlEncode(operationId)}`,
       'GET /workspace/extensions/operations/:operationId',
+    );
+  }
+
+  async activeExtensionOperations(): Promise<ExtensionActiveOperations> {
+    return await this.jsonRequest<ExtensionActiveOperations>(
+      '/workspace/extensions/operations',
+      'GET /workspace/extensions/operations',
     );
   }
 

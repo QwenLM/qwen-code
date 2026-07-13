@@ -3,6 +3,24 @@ import { describe, expect, it, vi } from 'vitest';
 import { createDaemonWorkspaceActions } from './actions';
 
 describe('createDaemonWorkspaceActions extension interactions', () => {
+  it('loads active extension operations from the daemon client', async () => {
+    const activeExtensionOperations = vi
+      .fn()
+      .mockResolvedValue({ v: 1, operations: [] });
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({ activeExtensionOperations }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/workspace',
+      baseUrl: 'http://daemon',
+    });
+
+    await expect(actions.activeExtensionOperations()).resolves.toEqual({
+      v: 1,
+      operations: [],
+    });
+    expect(activeExtensionOperations).toHaveBeenCalledOnce();
+  });
+
   it('forwards an extension interaction response to the daemon client', async () => {
     const respondToExtensionInteraction = vi
       .fn()

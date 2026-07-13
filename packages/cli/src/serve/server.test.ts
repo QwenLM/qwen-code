@@ -3820,7 +3820,6 @@ describe('createServeApp', () => {
           });
           interactionId = poll.body.interaction.id as string;
         });
-        expect(JSON.stringify(res.body)).not.toContain('super-secret');
         const answer = await request(app)
           .post(
             `/workspace/extensions/operations/${encodeURIComponent(
@@ -3833,6 +3832,17 @@ describe('createServeApp', () => {
           .send({ value: 'super-secret' });
         expect(answer.status).toBe(200);
         expect(answer.body).toEqual({ accepted: true });
+        const completedOperation = await request(app)
+          .get(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              res.body.operationId as string,
+            )}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(JSON.stringify(completedOperation.body)).not.toContain(
+          'super-secret',
+        );
         await vi.waitFor(() => {
           expect(bridge.extensionEvents.at(-1)).toMatchObject({
             status: 'installed',
@@ -3907,7 +3917,7 @@ describe('createServeApp', () => {
             plugins: [
               {
                 name: 'example-plugin',
-                source: 'https://example.com/plugin',
+                source: 'https://user:token@example.com/plugin',
                 category: 'tools',
                 tags: ['example'],
               },
@@ -3949,12 +3959,14 @@ describe('createServeApp', () => {
               plugins: [
                 {
                   name: 'example-plugin',
+                  source: 'https://***REDACTED***@example.com/plugin',
                   category: 'tools',
                   tags: ['example'],
                 },
               ],
             },
           });
+          expect(JSON.stringify(poll.body)).not.toContain('user:token');
           interactionId = poll.body.interaction.id as string;
         });
         const invalid = await request(app)
@@ -3996,6 +4008,52 @@ describe('createServeApp', () => {
           expect(bridge.extensionEvents.at(-1)).toMatchObject({
             status: 'installed',
             name: 'example-plugin',
+          });
+        });
+      } finally {
+        restore();
+      }
+    });
+
+    it('fails an install when a marketplace has no plugins', async () => {
+      const restore = mockExtensionManagerMethods({
+        async installExtension() {
+          const manager = this as unknown as {
+            requestChoicePlugin?: (marketplace: {
+              name: string;
+              owner: { name: string; email: string };
+              plugins: [];
+            }) => Promise<string>;
+          };
+          await manager.requestChoicePlugin?.({
+            name: 'empty-marketplace',
+            owner: { name: 'Example', email: 'example@example.com' },
+            plugins: [],
+          });
+          return testExtension('unreachable');
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge() },
+        );
+        const install = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send({ source: 'https://example.com/marketplace', consent: true });
+
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(`/workspace/extensions/operations/${install.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body).toMatchObject({
+            status: 'failed',
+            error: expect.stringContaining('has no plugins'),
           });
         });
       } finally {
@@ -4072,7 +4130,12 @@ describe('createServeApp', () => {
       const timeoutSpy = vi
         .spyOn(globalThis, 'setTimeout')
         .mockImplementation(((handler, timeout, ...args) => {
-          if (timeout === 10 * 60_000 && typeof handler === 'function') {
+          if (
+            typeof timeout === 'number' &&
+            timeout > 9 * 60_000 &&
+            timeout <= 10 * 60_000 &&
+            typeof handler === 'function'
+          ) {
             expireInteraction = () => handler(...args);
             return -1 as unknown as ReturnType<typeof setTimeout>;
           }
@@ -4201,6 +4264,95 @@ describe('createServeApp', () => {
       }
     });
 
+    it('does not cancel a pending interaction when the queue is full', async () => {
+      let installCount = 0;
+      const restore = mockExtensionManagerMethods({
+        async installExtension() {
+          installCount += 1;
+          if (installCount === 1) {
+            const manager = this as unknown as {
+              requestChoicePlugin?: (marketplace: {
+                name: string;
+                owner: { name: string; email: string };
+                plugins: Array<{ name: string; source: string }>;
+              }) => Promise<string>;
+            };
+            await manager.requestChoicePlugin?.({
+              name: 'example-marketplace',
+              owner: { name: 'Example', email: 'example@example.com' },
+              plugins: [{ name: 'plugin', source: '.' }],
+            });
+          }
+          return testExtension(`installed-${installCount}`);
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+        const install = (index: number) =>
+          request(app)
+            .post('/workspace/extensions/install')
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret')
+            .send({
+              source: `https://example.com/extension-${index}`,
+              consent: true,
+            });
+
+        const first = await install(0);
+        let interactionId = '';
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(`/workspace/extensions/operations/${first.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body.status).toBe('waiting_for_input');
+          interactionId = poll.body.interaction.id as string;
+        });
+
+        const queued = await Promise.all(
+          Array.from({ length: 9 }, () =>
+            request(app)
+              .post('/workspace/extensions/TEST-EXT/enable')
+              .set('Host', `127.0.0.1:${tokenOpts.port}`)
+              .set('Authorization', 'Bearer secret')
+              .send({ scope: 'user' }),
+          ),
+        );
+        expect(queued.every((response) => response.status === 202)).toBe(true);
+        const rejected = await install(10);
+        expect(rejected.status).toBe(429);
+
+        const stillWaiting = await request(app)
+          .get(`/workspace/extensions/operations/${first.body.operationId}`)
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(stillWaiting.body.status).toBe('waiting_for_input');
+
+        await request(app)
+          .post(
+            `/workspace/extensions/operations/${first.body.operationId}/interactions/${interactionId}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send({ cancelled: true });
+        await vi.waitFor(() => {
+          expect(
+            bridge.extensionEvents.filter(
+              (event) => event.status === 'enabled',
+            ),
+          ).toHaveLength(9);
+        });
+      } finally {
+        restore();
+      }
+    });
+
     it('reports queued and running extension operation states', async () => {
       let releaseInstall: (() => void) | undefined;
       const installBlocker = new Promise<void>((resolve) => {
@@ -4264,6 +4416,24 @@ describe('createServeApp', () => {
           status: 'queued',
           source: 'https://example.com/second-ext',
         });
+
+        const active = await request(app)
+          .get('/workspace/extensions/operations')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(active.status).toBe(200);
+        expect(active.body.operations).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              operationId: first.body.operationId,
+              status: 'running',
+            }),
+            expect.objectContaining({
+              operationId: second.body.operationId,
+              status: 'queued',
+            }),
+          ]),
+        );
 
         releaseInstall!();
         await vi.waitFor(() => {
@@ -4341,6 +4511,96 @@ describe('createServeApp', () => {
         restore();
       }
     }, 15_000);
+
+    it('preserves a waiting operation while evicting terminal history', async () => {
+      let installCount = 0;
+      const restore = mockExtensionManagerMethods({
+        async installExtension() {
+          installCount += 1;
+          if (installCount === 3) {
+            const manager = this as unknown as {
+              requestSetting?: (setting: {
+                name: string;
+                description: string;
+                envVar: string;
+              }) => Promise<string>;
+            };
+            await manager.requestSetting?.({
+              name: 'API key',
+              description: 'Enter an API key',
+              envVar: 'API_KEY',
+            });
+          }
+          return testExtension(`installed-${installCount}`);
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge(), maxExtensionOperationHistory: 2 },
+        );
+        const install = async (index: number) => {
+          const response = await request(app)
+            .post('/workspace/extensions/install')
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret')
+            .send({
+              source: `https://example.com/extension-${index}`,
+              consent: true,
+            });
+          return response.body.operationId as string;
+        };
+        const firstId = await install(1);
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(`/workspace/extensions/operations/${firstId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body.status).toBe('succeeded');
+        });
+        const secondId = await install(2);
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(`/workspace/extensions/operations/${secondId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body.status).toBe('succeeded');
+        });
+        const waitingId = await install(3);
+        let interactionId = '';
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(`/workspace/extensions/operations/${waitingId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body.status).toBe('waiting_for_input');
+          interactionId = poll.body.interaction.id as string;
+        });
+
+        const evicted = await request(app)
+          .get(`/workspace/extensions/operations/${firstId}`)
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(evicted.status).toBe(404);
+        const retained = await request(app)
+          .get(`/workspace/extensions/operations/${waitingId}`)
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(retained.body.status).toBe('waiting_for_input');
+
+        await request(app)
+          .post(
+            `/workspace/extensions/operations/${waitingId}/interactions/${interactionId}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send({ cancelled: true });
+      } finally {
+        restore();
+      }
+    });
 
     it('returns 404 for unknown extension operation ids', async () => {
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };

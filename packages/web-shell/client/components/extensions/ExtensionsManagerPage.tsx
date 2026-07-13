@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Ref,
+} from 'react';
 import {
   AlertCircleIcon,
   ArrowLeftIcon,
@@ -15,10 +22,11 @@ import {
   SettingsIcon,
   SparklesIcon,
 } from 'lucide-react';
-import type {
-  DaemonExtensionEntry,
-  DaemonExtensionUpdateState,
-  ExtensionPendingInteraction,
+import {
+  DaemonHttpError,
+  type DaemonExtensionEntry,
+  type DaemonExtensionUpdateState,
+  type ExtensionPendingInteraction,
 } from '@qwen-code/sdk/daemon';
 import {
   useConnection,
@@ -90,11 +98,21 @@ import {
 type Scope = 'user' | 'workspace';
 type Mutation = 'enable' | 'disable';
 type T = ReturnType<typeof useI18n>['t'];
+type InteractionResponse =
+  | { pluginName: string }
+  | { value: string }
+  | { cancelled: true };
+type PendingInteractionState = {
+  operationId: string;
+  interaction: ExtensionPendingInteraction;
+  owner: 'install' | 'mutation';
+};
 
 const UPDATE_AVAILABLE: DaemonExtensionUpdateState = 'update available';
 
 interface ExtensionsManagerPageProps {
   onClose: () => void;
+  backButtonRef?: Ref<HTMLButtonElement>;
 }
 
 function extensionTitle(extension: DaemonExtensionEntry): string {
@@ -128,7 +146,8 @@ function updateLabel(
       return t('extensions.manage.restartRequired');
     case 'error':
       return t('extensions.manage.updateError');
-    default:
+    case 'unknown':
+    case undefined:
       return t('extensions.manage.unknownUpdate');
   }
 }
@@ -210,7 +229,153 @@ function CapabilityList({
   );
 }
 
-export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
+function ExtensionInteractionDialog({
+  pendingInteraction,
+  submitting,
+  selectedPlugin,
+  interactionValue,
+  setSelectedPlugin,
+  setInteractionValue,
+  submit,
+  t,
+}: {
+  pendingInteraction: PendingInteractionState | null;
+  submitting: boolean;
+  selectedPlugin: string;
+  interactionValue: string;
+  setSelectedPlugin: (value: string) => void;
+  setInteractionValue: (value: string) => void;
+  submit: (response: InteractionResponse) => void;
+  t: T;
+}) {
+  return (
+    <AlertDialog
+      open={Boolean(pendingInteraction)}
+      onOpenChange={(open) => {
+        if (!open && pendingInteraction && !submitting) {
+          submit({ cancelled: true });
+        }
+      }}
+    >
+      <AlertDialogContent size="lg">
+        <AlertDialogHeader className="place-items-start px-3 text-left">
+          <AlertDialogTitle>
+            {pendingInteraction?.interaction.kind === 'setting'
+              ? pendingInteraction.interaction.setting.name
+              : t('extensions.manage.selectExtension')}
+          </AlertDialogTitle>
+          <AlertDialogDescription>
+            {pendingInteraction?.interaction.kind === 'marketplace_plugin'
+              ? t('extensions.manage.installSelectPluginDescription', {
+                  marketplace: pendingInteraction.interaction.marketplace.name,
+                })
+              : pendingInteraction?.interaction.setting.description}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        {pendingInteraction?.interaction.kind === 'marketplace_plugin' ? (
+          <RadioGroup
+            aria-label={t('extensions.manage.selectExtension')}
+            value={selectedPlugin}
+            onValueChange={setSelectedPlugin}
+            className="flex flex-col gap-2 px-3"
+          >
+            {pendingInteraction.interaction.plugins.map((plugin) => {
+              const id = `marketplace-plugin-${plugin.name}`;
+              return (
+                <div
+                  key={plugin.name}
+                  className="flex items-start gap-3 rounded-md border border-border p-3 has-data-[state=checked]:bg-accent/50"
+                >
+                  <RadioGroupItem
+                    id={id}
+                    value={plugin.name}
+                    disabled={submitting}
+                    className="mt-0.5"
+                  />
+                  <label
+                    htmlFor={id}
+                    className="flex min-w-0 flex-1 cursor-pointer flex-col gap-1"
+                  >
+                    <span className="font-medium">{plugin.name}</span>
+                    <span className="text-sm text-muted-foreground">
+                      {plugin.description ??
+                        plugin.category ??
+                        (plugin.source === '.' || plugin.source === './'
+                          ? t('extensions.manage.marketplaceRoot')
+                          : plugin.source) ??
+                        t('extensions.manage.noDescription')}
+                    </span>
+                    {plugin.tags?.length ? (
+                      <span className="text-xs text-muted-foreground">
+                        {plugin.tags.join(' · ')}
+                      </span>
+                    ) : null}
+                  </label>
+                </div>
+              );
+            })}
+          </RadioGroup>
+        ) : null}
+        {pendingInteraction?.interaction.kind === 'marketplace_plugin' ? (
+          <AlertDialogFooter>
+            <Button
+              variant="outline"
+              disabled={submitting}
+              onClick={() => submit({ cancelled: true })}
+            >
+              {t('common.cancel')}
+            </Button>
+            <Button
+              disabled={submitting || !selectedPlugin}
+              onClick={() => submit({ pluginName: selectedPlugin })}
+            >
+              {submitting ? <Spinner /> : null}
+              {pendingInteraction.owner === 'mutation'
+                ? t('extensions.manage.update')
+                : t('extensions.manage.install')}
+            </Button>
+          </AlertDialogFooter>
+        ) : pendingInteraction?.interaction.kind === 'setting' ? (
+          <>
+            <Input
+              aria-label={pendingInteraction.interaction.setting.name}
+              type={
+                pendingInteraction.interaction.setting.sensitive
+                  ? 'password'
+                  : 'text'
+              }
+              value={interactionValue}
+              onChange={(event) => setInteractionValue(event.target.value)}
+            />
+            <AlertDialogFooter>
+              <Button
+                variant="outline"
+                disabled={submitting}
+                onClick={() => submit({ cancelled: true })}
+              >
+                {t('common.cancel')}
+              </Button>
+              <Button
+                disabled={submitting}
+                onClick={() => submit({ value: interactionValue })}
+              >
+                {submitting ? <Spinner /> : null}
+                {pendingInteraction.owner === 'mutation'
+                  ? t('extensions.manage.update')
+                  : t('extensions.manage.install')}
+              </Button>
+            </AlertDialogFooter>
+          </>
+        ) : null}
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+export function ExtensionsManagerPage({
+  onClose,
+  backButtonRef,
+}: ExtensionsManagerPageProps) {
   const { t } = useI18n();
   const connection = useConnection();
   const actions = useWorkspaceActions();
@@ -234,10 +399,9 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
     operationId: string;
     source: string;
   } | null>(null);
-  const [pendingInteraction, setPendingInteraction] = useState<{
-    operationId: string;
-    interaction: ExtensionPendingInteraction;
-  } | null>(null);
+  const [pendingInteraction, setPendingInteraction] =
+    useState<PendingInteractionState | null>(null);
+  const interactionIdRef = useRef<string | null>(null);
   const [interactionValue, setInteractionValue] = useState('');
   const [selectedPlugin, setSelectedPlugin] = useState('');
   const [submittingInteraction, setSubmittingInteraction] = useState(false);
@@ -246,6 +410,29 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
     name: string;
     suppressMessage?: boolean;
   } | null>(null);
+
+  const clearInteraction = useCallback(() => {
+    interactionIdRef.current = null;
+    setPendingInteraction(null);
+    setInteractionValue('');
+    setSelectedPlugin('');
+  }, []);
+
+  const showInteraction = useCallback(
+    (
+      operationId: string,
+      interaction: ExtensionPendingInteraction,
+      owner: 'install' | 'mutation',
+    ) => {
+      if (interactionIdRef.current !== interaction.id) {
+        setInteractionValue('');
+        setSelectedPlugin('');
+        interactionIdRef.current = interaction.id;
+      }
+      setPendingInteraction({ operationId, interaction, owner });
+    },
+    [],
+  );
 
   const load = useCallback(
     (preserveMessage = false) => {
@@ -284,6 +471,50 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
   }, [load]);
 
   useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const recover = async () => {
+      try {
+        const { operations } = await actions.activeExtensionOperations();
+        if (cancelled) return;
+        const activeInstall = operations.find(
+          (operation) => operation.operation === 'install',
+        );
+        if (activeInstall) {
+          setPendingInstall(
+            (current) =>
+              current ?? {
+                operationId: activeInstall.operationId,
+                source:
+                  activeInstall.source ?? activeInstall.name ?? 'extension',
+              },
+          );
+        }
+        const activeMutation = operations.find(
+          (operation) => operation.operation !== 'install',
+        );
+        if (activeMutation) {
+          setPendingMutation(
+            (current) =>
+              current ?? {
+                operationId: activeMutation.operationId,
+                name: activeMutation.name ?? 'extension',
+              },
+          );
+          setBusyName((current) => current ?? activeMutation.name ?? null);
+        }
+      } catch {
+        if (!cancelled) timer = setTimeout(() => void recover(), 2000);
+      }
+    };
+    void recover();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [actions]);
+
+  useEffect(() => {
     if ((signals?.extensionsVersion ?? 0) > 0) {
       setUpdateStates({});
       void load(true);
@@ -300,20 +531,25 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
 
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let retryDelay = 1000;
     const poll = async () => {
       try {
         const operation = await actions.extensionOperationStatus(
           pendingInstall.operationId,
         );
         if (cancelled) return;
+        retryDelay = 1000;
         if (operation.status === 'waiting_for_input') {
           if (operation.interaction) {
-            setPendingInteraction({
-              operationId: operation.operationId,
-              interaction: operation.interaction,
-            });
+            showInteraction(
+              operation.operationId,
+              operation.interaction,
+              'install',
+            );
+            timer = setTimeout(() => void poll(), 5000);
           } else {
             setMessage(t('extensions.manage.operationFailed'));
+            clearInteraction();
             setPendingInstall(null);
           }
           return;
@@ -325,7 +561,7 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
               error: operation.error ?? '',
             }),
           );
-          setPendingInteraction(null);
+          clearInteraction();
           setPendingInstall(null);
           return;
         }
@@ -342,7 +578,7 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
                   name: operation.result?.name ?? pendingInstall.source,
                 }),
           );
-          setPendingInteraction(null);
+          clearInteraction();
           setPendingInstall(null);
           void load(true);
           return;
@@ -356,7 +592,13 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
       } catch (error) {
         if (cancelled) return;
         setMessage(error instanceof Error ? error.message : String(error));
-        setPendingInstall(null);
+        if (error instanceof DaemonHttpError && error.status === 404) {
+          clearInteraction();
+          setPendingInstall(null);
+          return;
+        }
+        timer = setTimeout(() => void poll(), retryDelay);
+        retryDelay = Math.min(retryDelay * 2, 30_000);
       }
     };
 
@@ -365,16 +607,12 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [actions, load, pendingInstall, t]);
+  }, [actions, clearInteraction, load, pendingInstall, showInteraction, t]);
 
   const submitInteraction = useCallback(
-    (
-      response:
-        | { pluginName: string }
-        | { value: string }
-        | { cancelled: true },
-    ) => {
+    (response: InteractionResponse) => {
       if (!pendingInteraction) return;
+      const owner = pendingInteraction.owner;
       setSubmittingInteraction(true);
       actions
         .respondToExtensionInteraction(
@@ -384,19 +622,33 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
           connection.clientId,
         )
         .then(() => {
-          setPendingInteraction(null);
-          setInteractionValue('');
-          setSelectedPlugin('');
-          setPendingInstall((current) => (current ? { ...current } : current));
+          clearInteraction();
+          if (owner === 'install') {
+            setPendingInstall((current) =>
+              current ? { ...current } : current,
+            );
+          } else {
+            setPendingMutation((current) =>
+              current ? { ...current } : current,
+            );
+          }
         })
         .catch((error: unknown) => {
           setMessage(error instanceof Error ? error.message : String(error));
-          setPendingInteraction(null);
-          setPendingInstall((current) => (current ? { ...current } : current));
+          clearInteraction();
+          if (owner === 'install') {
+            setPendingInstall((current) =>
+              current ? { ...current } : current,
+            );
+          } else {
+            setPendingMutation((current) =>
+              current ? { ...current } : current,
+            );
+          }
         })
         .finally(() => setSubmittingInteraction(false));
     },
-    [actions, connection.clientId, pendingInteraction],
+    [actions, clearInteraction, connection.clientId, pendingInteraction],
   );
 
   useEffect(() => {
@@ -404,15 +656,35 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
 
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let retryDelay = 1000;
     const poll = async () => {
       try {
         const operation = await actions.extensionOperationStatus(
           pendingMutation.operationId,
         );
         if (cancelled) return;
+        retryDelay = 1000;
+        if (operation.status === 'waiting_for_input') {
+          if (operation.interaction) {
+            showInteraction(
+              operation.operationId,
+              operation.interaction,
+              'mutation',
+            );
+            timer = setTimeout(() => void poll(), 5000);
+          } else {
+            setMessage(t('extensions.manage.operationFailed'));
+            clearInteraction();
+            setPendingMutation(null);
+            setBusyName(null);
+          }
+          return;
+        }
         if (operation.status === 'failed') {
           setMessage(operation.error ?? t('extensions.manage.operationFailed'));
+          clearInteraction();
           setPendingMutation(null);
+          setBusyName(null);
           return;
         }
         if (
@@ -434,7 +706,9 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
               ),
             );
           }
+          clearInteraction();
           setPendingMutation(null);
+          setBusyName(null);
           if (operation.operation === 'uninstall') {
             setSelectedName(null);
           }
@@ -457,7 +731,14 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
       } catch (error) {
         if (cancelled) return;
         setMessage(error instanceof Error ? error.message : String(error));
-        setPendingMutation(null);
+        if (error instanceof DaemonHttpError && error.status === 404) {
+          clearInteraction();
+          setPendingMutation(null);
+          setBusyName(null);
+          return;
+        }
+        timer = setTimeout(() => void poll(), retryDelay);
+        retryDelay = Math.min(retryDelay * 2, 30_000);
       }
     };
 
@@ -466,7 +747,7 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [actions, load, pendingMutation, t]);
+  }, [actions, clearInteraction, load, pendingMutation, showInteraction, t]);
 
   const refreshList = useCallback(() => {
     setMessage(null);
@@ -499,7 +780,7 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
   const installExtension = useCallback(() => {
     const source = installSource.trim();
     const clientId = connection.clientId;
-    if (!source || pendingInstall) return;
+    if (!source || pendingInstall || pendingMutation) return;
     setInstalling(true);
     setMessage(null);
     actions
@@ -513,7 +794,13 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
         setMessage(error instanceof Error ? error.message : String(error));
       })
       .finally(() => setInstalling(false));
-  }, [actions, connection.clientId, installSource, pendingInstall]);
+  }, [
+    actions,
+    connection.clientId,
+    installSource,
+    pendingInstall,
+    pendingMutation,
+  ]);
 
   const runMutation = useCallback(
     (
@@ -525,6 +812,7 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
       } = {},
     ) => {
       const clientId = connection.clientId;
+      if (pendingInstall || pendingMutation) return;
       if (!clientId && !options.allowWithoutClientId) {
         setMessage(t('extensions.install.waitForSession'));
         return;
@@ -558,11 +846,13 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
           setMessage(error instanceof Error ? error.message : String(error));
         })
         .finally(() => {
-          setBusyName(null);
-          if (!startedPolling) void load(true);
+          if (!startedPolling) {
+            setBusyName(null);
+            void load(true);
+          }
         });
     },
-    [connection.clientId, load, t],
+    [connection.clientId, load, pendingInstall, pendingMutation, t],
   );
 
   const selectedExtension = useMemo(
@@ -580,6 +870,7 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
       <BreadcrumbList className="text-base">
         <BreadcrumbItem>
           <Button
+            ref={backButtonRef}
             variant="ghost"
             size="icon"
             onClick={onClose}
@@ -614,7 +905,8 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
     const details = selectedExtension.details;
     const updateState =
       updateStates[selectedExtension.name] ?? selectedExtension.updateState;
-    const busy = busyName === selectedExtension.name;
+    const busy =
+      busyName === selectedExtension.name || pendingMutation !== null;
     const checking = checkingName === selectedExtension.name;
     const mutation: Mutation = selectedExtension.isActive
       ? 'disable'
@@ -695,10 +987,7 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
                   {busy || checking ? <Spinner /> : <EllipsisVerticalIcon />}
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent
-                align="end"
-                onCloseAutoFocus={(event) => event.preventDefault()}
-              >
+              <DropdownMenuContent align="end">
                 <DropdownMenuGroup>
                   <DropdownMenuItem
                     disabled={busy || checkingName !== null}
@@ -916,6 +1205,16 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
+        <ExtensionInteractionDialog
+          pendingInteraction={pendingInteraction}
+          submitting={submittingInteraction}
+          selectedPlugin={selectedPlugin}
+          interactionValue={interactionValue}
+          setSelectedPlugin={setSelectedPlugin}
+          setInteractionValue={setInteractionValue}
+          submit={submitInteraction}
+          t={t}
+        />
       </div>
     );
   }
@@ -943,7 +1242,7 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
               {t('common.refresh')}
             </Button>
             <Button
-              disabled={Boolean(pendingInstall)}
+              disabled={Boolean(pendingInstall || pendingMutation)}
               onClick={() => setInstallOpen(true)}
             >
               <PlusIcon data-icon="inline-start" />
@@ -987,8 +1286,16 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
                 <Card
                   key={extension.id || extension.name}
                   size="sm"
-                  className="cursor-pointer transition-colors hover:bg-accent/30"
+                  role="button"
+                  tabIndex={0}
+                  className="cursor-pointer transition-colors hover:bg-accent/30 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
                   onClick={() => setSelectedName(extension.name)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      setSelectedName(extension.name);
+                    }
+                  }}
                 >
                   <CardHeader className="block">
                     <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
@@ -1104,122 +1411,16 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
         </AlertDialogContent>
       </AlertDialog>
 
-      <AlertDialog
-        open={Boolean(pendingInteraction)}
-        onOpenChange={(open) => {
-          if (!open && pendingInteraction && !submittingInteraction) {
-            submitInteraction({ cancelled: true });
-          }
-        }}
-      >
-        <AlertDialogContent size="lg">
-          <AlertDialogHeader className="place-items-start px-3 text-left">
-            <AlertDialogTitle>
-              {t('extensions.manage.selectExtension')}
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              {pendingInteraction?.interaction.kind === 'marketplace_plugin'
-                ? t('extensions.manage.installSelectPluginDescription', {
-                    marketplace:
-                      pendingInteraction.interaction.marketplace.name,
-                  })
-                : pendingInteraction?.interaction.setting.description}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          {pendingInteraction?.interaction.kind === 'marketplace_plugin' ? (
-            <RadioGroup
-              value={selectedPlugin}
-              onValueChange={setSelectedPlugin}
-              className="flex flex-col gap-2 px-3"
-            >
-              {pendingInteraction.interaction.plugins.map((plugin) => {
-                const id = `marketplace-plugin-${plugin.name}`;
-                return (
-                  <div
-                    key={plugin.name}
-                    className="flex items-start gap-3 rounded-md border border-border p-3 has-data-[state=checked]:bg-accent/50"
-                  >
-                    <RadioGroupItem
-                      id={id}
-                      value={plugin.name}
-                      disabled={submittingInteraction}
-                      className="mt-0.5"
-                    />
-                    <label
-                      htmlFor={id}
-                      className="flex min-w-0 flex-1 cursor-pointer flex-col gap-1"
-                    >
-                      <span className="font-medium">{plugin.name}</span>
-                      <span className="text-sm text-muted-foreground">
-                        {plugin.description ??
-                          plugin.category ??
-                          (plugin.source === '.' || plugin.source === './'
-                            ? t('extensions.manage.marketplaceRoot')
-                            : plugin.source) ??
-                          t('extensions.manage.noDescription')}
-                      </span>
-                      {plugin.tags?.length ? (
-                        <span className="text-xs text-muted-foreground">
-                          {plugin.tags.join(' · ')}
-                        </span>
-                      ) : null}
-                    </label>
-                  </div>
-                );
-              })}
-            </RadioGroup>
-          ) : null}
-          {pendingInteraction?.interaction.kind === 'marketplace_plugin' ? (
-            <AlertDialogFooter>
-              <Button
-                variant="outline"
-                disabled={submittingInteraction}
-                onClick={() => submitInteraction({ cancelled: true })}
-              >
-                {t('common.cancel')}
-              </Button>
-              <Button
-                disabled={submittingInteraction || !selectedPlugin}
-                onClick={() =>
-                  submitInteraction({ pluginName: selectedPlugin })
-                }
-              >
-                {submittingInteraction ? <Spinner /> : null}
-                {t('extensions.manage.install')}
-              </Button>
-            </AlertDialogFooter>
-          ) : pendingInteraction?.interaction.kind === 'setting' ? (
-            <>
-              <Input
-                aria-label={pendingInteraction.interaction.setting.name}
-                type={
-                  pendingInteraction.interaction.setting.sensitive
-                    ? 'password'
-                    : 'text'
-                }
-                value={interactionValue}
-                onChange={(event) => setInteractionValue(event.target.value)}
-              />
-              <AlertDialogFooter>
-                <Button
-                  variant="outline"
-                  disabled={submittingInteraction}
-                  onClick={() => submitInteraction({ cancelled: true })}
-                >
-                  {t('common.cancel')}
-                </Button>
-                <Button
-                  disabled={submittingInteraction || !interactionValue}
-                  onClick={() => submitInteraction({ value: interactionValue })}
-                >
-                  {submittingInteraction ? <Spinner /> : null}
-                  {t('extensions.manage.install')}
-                </Button>
-              </AlertDialogFooter>
-            </>
-          ) : null}
-        </AlertDialogContent>
-      </AlertDialog>
+      <ExtensionInteractionDialog
+        pendingInteraction={pendingInteraction}
+        submitting={submittingInteraction}
+        selectedPlugin={selectedPlugin}
+        interactionValue={interactionValue}
+        setSelectedPlugin={setSelectedPlugin}
+        setInteractionValue={setInteractionValue}
+        submit={submitInteraction}
+        t={t}
+      />
     </div>
   );
 }

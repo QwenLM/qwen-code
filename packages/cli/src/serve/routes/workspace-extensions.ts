@@ -389,7 +389,15 @@ export function registerWorkspaceExtensionRoutes(
   const waitForExtensionInteraction = (
     operationId: string,
     interaction: ExtensionInteractionRequest,
+    operationDeadline: number,
   ): Promise<string> => {
+    const timeoutMs = Math.min(
+      EXTENSION_INTERACTION_TIMEOUT_MS,
+      operationDeadline - Date.now(),
+    );
+    if (timeoutMs <= 0) {
+      return Promise.reject(new Error('Extension operation timed out'));
+    }
     const pendingInteraction = {
       ...interaction,
       id: crypto.randomUUID(),
@@ -402,7 +410,7 @@ export function registerWorkspaceExtensionRoutes(
           interaction: undefined,
         });
         reject(new Error('Extension interaction timed out'));
-      }, EXTENSION_INTERACTION_TIMEOUT_MS);
+      }, timeoutMs);
       pendingExtensionInteractions.set(operationId, {
         interaction: pendingInteraction,
         resolve,
@@ -415,36 +423,54 @@ export function registerWorkspaceExtensionRoutes(
       });
     });
   };
-  const extensionInteractionHandlers = (operationId: string) => ({
+  const extensionInteractionHandlers = (
+    operationId: string,
+    operationDeadline: number,
+  ) => ({
     requestSetting: (setting: ExtensionSetting) =>
-      waitForExtensionInteraction(operationId, {
-        kind: 'setting',
-        setting: {
-          name: setting.name,
-          description: setting.description,
-          envVar: setting.envVar,
-          sensitive: setting.sensitive === true,
+      waitForExtensionInteraction(
+        operationId,
+        {
+          kind: 'setting',
+          setting: {
+            name: setting.name,
+            description: setting.description,
+            envVar: setting.envVar,
+            sensitive: setting.sensitive === true,
+          },
         },
-      }),
-    requestChoicePlugin: (marketplace: ClaudeMarketplaceConfig) =>
-      waitForExtensionInteraction(operationId, {
-        kind: 'marketplace_plugin',
-        marketplace: { name: marketplace.name },
-        plugins: marketplace.plugins.map((plugin) => ({
-          name: plugin.name,
-          ...(plugin.description ? { description: plugin.description } : {}),
-          source:
-            typeof plugin.source === 'string'
-              ? plugin.source
-              : plugin.source.source === 'github'
-                ? plugin.source.repo
-                : plugin.source.source === 'git-subdir'
-                  ? plugin.source.path
-                  : plugin.source.url,
-          ...(plugin.category ? { category: plugin.category } : {}),
-          ...(plugin.tags ? { tags: plugin.tags } : {}),
-        })),
-      }),
+        operationDeadline,
+      ),
+    requestChoicePlugin: (marketplace: ClaudeMarketplaceConfig) => {
+      if (marketplace.plugins.length === 0) {
+        return Promise.reject(
+          new Error(`Marketplace "${marketplace.name}" has no plugins`),
+        );
+      }
+      return waitForExtensionInteraction(
+        operationId,
+        {
+          kind: 'marketplace_plugin',
+          marketplace: { name: marketplace.name },
+          plugins: marketplace.plugins.map((plugin) => ({
+            name: plugin.name,
+            ...(plugin.description ? { description: plugin.description } : {}),
+            source: redactUrlCredentials(
+              typeof plugin.source === 'string'
+                ? plugin.source
+                : plugin.source.source === 'github'
+                  ? plugin.source.repo
+                  : plugin.source.source === 'git-subdir'
+                    ? plugin.source.path
+                    : plugin.source.url,
+            ),
+            ...(plugin.category ? { category: plugin.category } : {}),
+            ...(plugin.tags ? { tags: plugin.tags } : {}),
+          })),
+        },
+        operationDeadline,
+      );
+    },
   });
   const runQueuedExtensionMutation = (
     operation: string,
@@ -476,15 +502,18 @@ export function registerWorkspaceExtensionRoutes(
     void enqueueExtensionInstall(async () => {
       try {
         updateExtensionOperation(operationId, { status: 'running' });
+        const operationTimeoutMs =
+          operation === 'install' || operation === 'update'
+            ? EXTENSION_INSTALL_TIMEOUT_MS
+            : EXTENSION_MUTATION_TIMEOUT_MS;
+        const operationDeadline = Date.now() + operationTimeoutMs;
         const extensionManager = createExtensionManager(
-          extensionInteractionHandlers(operationId),
+          extensionInteractionHandlers(operationId, operationDeadline),
         );
         await extensionManager.refreshCache();
         const event = await withExtensionTimeout(
           run(extensionManager),
-          operation === 'install' || operation === 'update'
-            ? EXTENSION_INSTALL_TIMEOUT_MS
-            : EXTENSION_MUTATION_TIMEOUT_MS,
+          operationTimeoutMs,
           `extension ${operation}`,
         );
         extensionsStatusCache = undefined;
@@ -692,6 +721,22 @@ export function registerWorkspaceExtensionRoutes(
     }
   });
 
+  app.get('/workspace/extensions/operations', async (_req, res) => {
+    try {
+      buildWorkspaceCtx('GET /workspace/extensions/operations');
+      res.status(200).json({
+        v: 1,
+        operations: [...extensionOperations.values()].filter(
+          (operation) => !isTerminalExtensionOperation(operation),
+        ),
+      });
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /workspace/extensions/operations',
+      });
+    }
+  });
+
   app.get('/workspace/extensions/operations/:operationId', async (req, res) => {
     try {
       buildWorkspaceCtx('GET /workspace/extensions/operations/:operationId');
@@ -871,6 +916,11 @@ export function registerWorkspaceExtensionRoutes(
           return;
         }
         if (!validateExtensionSourceHost(sourceValue, res)) {
+          return;
+        }
+
+        if (extensionInstallQueueDepth >= MAX_EXTENSION_INSTALL_QUEUE_DEPTH) {
+          sendExtensionQueueFull(res);
           return;
         }
 

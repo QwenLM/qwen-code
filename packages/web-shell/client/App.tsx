@@ -5784,7 +5784,10 @@ export function App({
                     ) : activePanel === 'status' ? (
                       <DaemonStatusDialog />
                     ) : activePanel === 'extensions' ? (
-                      <ExtensionsManagerPage onClose={closePanel} />
+                      <ExtensionsManagerPage
+                        onClose={closePanel}
+                        backButtonRef={panelBackRef}
+                      />
                     ) : (
                       <SessionOverviewPanel
                         onOpenSession={handleOpenSessionFromOverview}

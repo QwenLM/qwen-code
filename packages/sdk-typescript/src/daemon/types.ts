@@ -2941,6 +2941,11 @@ export interface ExtensionOperationStatus {
   error?: string;
 }
 
+export interface ExtensionActiveOperations {
+  v: 1;
+  operations: ExtensionOperationStatus[];
+}
+
 export type ExtensionPendingInteraction =
   | ExtensionMarketplacePluginInteraction
   | ExtensionSettingInteraction;

@@ -1207,10 +1207,6 @@ const EN: Messages = {
   'extensions.manage.install': 'Install',
   'extensions.manage.installDescription':
     'Enter a GitHub, Git, or npm extension source.',
-  'extensions.manage.installQueued': (v) =>
-    `Installation queued for "${v?.source ?? 'extension'}".`,
-  'extensions.manage.installWaitingForInput':
-    'Installation is waiting for input.',
   'extensions.manage.installSelectPluginDescription': (v) =>
     `Choose a plugin from "${v?.marketplace ?? 'this marketplace'}".`,
   'extensions.manage.selectExtension': 'Choose an extension',
@@ -3050,9 +3046,6 @@ const ZH: Messages = {
   'extensions.manage.footer.select': '↑↓ 导航 · Enter 选择 · Esc 返回',
   'extensions.manage.install': '安装',
   'extensions.manage.installDescription': '输入 GitHub、Git 或 npm 扩展来源。',
-  'extensions.manage.installQueued': (v) =>
-    `已提交安装 "${v?.source ?? '扩展'}" 的任务。`,
-  'extensions.manage.installWaitingForInput': '安装正在等待输入。',
   'extensions.manage.installSelectPluginDescription': (v) =>
     `从「${v?.marketplace ?? '此市场'}」中选择插件。`,
   'extensions.manage.selectExtension': '请选择扩展',

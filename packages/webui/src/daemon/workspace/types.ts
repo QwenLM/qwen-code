@@ -22,6 +22,7 @@ import type {
   ExtensionInteractionResponse,
   ExtensionInteractionResponseResult,
   ExtensionOperationStatus,
+  ExtensionActiveOperations,
   ExtensionRefreshResponse,
   ExtensionScopeRequest,
   ExtensionInstallRequest,
@@ -406,6 +407,7 @@ export interface DaemonWorkspaceActions {
   extensionOperationStatus(
     operationId: string,
   ): Promise<ExtensionOperationStatus>;
+  activeExtensionOperations(): Promise<ExtensionActiveOperations>;
   respondToExtensionInteraction(
     operationId: string,
     interactionId: string,

@@ -24,8 +24,8 @@ existing extension settings mechanism remains responsible for storing them.
 
 ## Lifetime
 
-Each interaction expires after ten minutes. Installation operations reserve an
-additional ten minutes for a single interaction window; other extension
-mutations keep their existing timeout. A waiting install remains in the
-existing serialized mutation queue, so no other extension mutation can observe
-partially installed state.
+Install and update operations have a shared twenty-minute lifetime. Each
+interaction may use up to ten minutes of the operation's remaining lifetime.
+Other extension mutations keep their existing timeout. A waiting operation
+remains in the existing serialized mutation queue, so no other extension
+mutation can observe partially installed state.

@@ -556,6 +556,7 @@ export type {
   ExtensionOperationResult,
   ExtensionOperationState,
   ExtensionOperationStatus,
+  ExtensionActiveOperations,
   ExtensionRefreshResponse,
   ExtensionScope,
   ExtensionScopeRequest,
