@@ -11,7 +11,7 @@
 // is in the prompt, the read call is in the prompt, and the agent is not handed a
 // sentence to recite when it finds nothing.
 
-import { describe, it, expect, vi, type Mock } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -194,6 +194,13 @@ describe('buildChunkAgentPrompt — refuses a plan it cannot build from', () => 
 });
 
 describe('agent-prompt (command boundary)', () => {
+  // Without this, `calls[0]` is the first call *ever* made to the mock across the
+  // file — correct today only because nothing earlier invokes the handler, and
+  // silently wrong the moment something does.
+  beforeEach(() => {
+    (writeStdoutLine as unknown as Mock).mockClear();
+  });
+
   it('prints the prompt for the chunk it was asked for', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ap-cmd-'));
     try {
@@ -203,7 +210,9 @@ describe('agent-prompt (command boundary)', () => {
         plan,
         chunk: 13,
       });
-      const printed = (writeStdoutLine as unknown as Mock).mock.calls[0][0];
+      const calls = (writeStdoutLine as unknown as Mock).mock.calls;
+      expect(calls).toHaveLength(1);
+      const printed = calls[0][0];
       expect(printed).toContain('offset=3807');
       expect(printed).toContain(PLAN.diffPathAbsolute);
     } finally {
@@ -218,5 +227,46 @@ describe('agent-prompt (command boundary)', () => {
         chunk: 1,
       }),
     ).toThrow(/cannot read the plan/);
+  });
+  it('injects the project rules the review loaded', () => {
+    // They were loaded, written to a file, and dropped: `buildChunkAgentPrompt`
+    // took a `rules` argument that the CLI had no flag to supply. The review
+    // enforced no project rule at all and said nothing about it.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-rules-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      const rules = join(dir, 'rules.md');
+      writeFileSync(rules, 'No `any` in new code.\n');
+
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        chunk: 13,
+        rules,
+      });
+
+      const printed = (writeStdoutLine as unknown as Mock).mock.calls[0][0];
+      expect(printed).toContain('Project rules');
+      expect(printed).toContain('No `any` in new code.');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a rules path that does not resolve, rather than reviewing without them', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-rules2-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      expect(() =>
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan,
+          chunk: 13,
+          rules: join(dir, 'no-such-rules.md'),
+        }),
+      ).toThrow(/cannot read the rules/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

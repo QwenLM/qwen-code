@@ -45,6 +45,7 @@ import { READ_FILE_CHAR_CAP, type DiffChunk } from './lib/diff-plan.js';
 interface AgentPromptArgs {
   plan: string;
   chunk: number;
+  rules?: string;
 }
 
 /** The plan report, as far as this command needs it. */
@@ -250,7 +251,27 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       `agent-prompt: cannot read the plan ${args.plan}: ${(err as Error).message}`,
     );
   }
-  writeStdoutLine(buildChunkAgentPrompt(report, args.chunk));
+
+  // The project rules Step 2 loaded. They belong in the agent's prompt — the
+  // skill now says this command builds it and to pass what it prints verbatim, so
+  // there is no longer a later step in which the orchestrator would staple them
+  // on. Without this flag they were loaded, written to a file, and silently
+  // dropped: the review would enforce no project rule at all and say nothing.
+  let rules: string | undefined;
+  if (args.rules) {
+    try {
+      rules = readFileSync(args.rules, 'utf8');
+    } catch (err) {
+      throw new Error(
+        `agent-prompt: cannot read the rules ${args.rules}: ` +
+          `${(err as Error).message}. Omit --rules if this review has none; ` +
+          'passing a path that does not resolve would silently review without ' +
+          'the project rules it was told to enforce.',
+      );
+    }
+  }
+
+  writeStdoutLine(buildChunkAgentPrompt(report, args.chunk, rules));
 }
 
 export const agentPromptCommand: CommandModule = {
@@ -270,6 +291,12 @@ export const agentPromptCommand: CommandModule = {
         type: 'number',
         demandOption: true,
         describe: 'Which chunk id this agent owns',
+      })
+      .option('rules', {
+        type: 'string',
+        describe:
+          'Path to the project rules file from `load-rules` (omit when the ' +
+          'review has none)',
       }),
   handler: (argv) => {
     runAgentPrompt(argv as unknown as AgentPromptArgs);

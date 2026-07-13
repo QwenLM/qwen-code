@@ -252,10 +252,13 @@ Eleven agents all reading the same diff (every 3A agent except Build & Test walk
 **Chunk agents — one per entry in `chunks[]`.** Each is a `general-purpose` subagent. **Do not write its prompt. Ask for it:**
 
 ```bash
-qwen review agent-prompt --plan <the plan report from Step 1> --chunk <id>
+qwen review agent-prompt \
+  --plan <the plan report from Step 1> \
+  --chunk <id> \
+  [--rules <the rules file from Step 2, if the project has any>]
 ```
 
-Pass what it prints to the agent **verbatim**. It already carries the diff path, the agent's exact `offset`/`limit`, its `files[]`, the paging rule, the uncoverable rule, and the severity definitions.
+Pass what it prints to the agent **verbatim**. It already carries the diff path, the agent's exact `offset`/`limit`, its `files[]`, the paging rule, the uncoverable rule, the severity definitions, and the project rules. **Pass `--rules` whenever Step 2 found any** — this command builds the whole prompt, so there is no later step in which you would staple them on, and a review that silently enforces no project rule is one of the things this skill exists to prevent.
 
 Why this is a command and not a paragraph: **the agents were launched blind.** Measured against the harness's own record of what they were actually started with — the first record of each subagent transcript, written at launch — **23 of 23 chunk agents got a prompt that named no diff file at all**: no path, no `read_file`, no offset. They were handed a _description_ of a chunk they had no way to open ("The changes are in chunk 13 of 23, covering lines 3808-4024 of the diff") and a sentence to say if they found nothing ("If you find no issues, say `No issues found — reviewed chunk 13 (…)`"). All 23 made **zero tool calls**, and all 23 said the sentence. The receipts that looked like proof of work were in the prompt that launched them. This paragraph used to say what the prompt must contain; saying it was not enough.
 
