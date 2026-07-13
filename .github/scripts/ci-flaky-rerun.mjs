@@ -623,18 +623,13 @@ async function trustedMarkerLogin(args, client) {
   return login;
 }
 
-async function skillCandidate(client, candidate, prs, options, mainEvidence) {
-  const pr = prs.find((item) => item.number === candidate.prNumber);
-  const target = {
-    ...candidate,
-    runAttempt: await client.runAttempt(candidate.runId),
-  };
-  const comments = await client.comments(candidate.prNumber);
-  if (!canAct({ ...pr, comments }, target, options)) return null;
+async function skillCandidate(client, target) {
+  const log =
+    target.jobId === null ? '' : skillLog(await client.jobLog(target.jobId));
   return {
     ...target,
-    behindBy: await client.behindBy(target.headSha),
-    ...mainEvidence,
+    log,
+    failureKey: fingerprint(target, log),
   };
 }
 
@@ -657,31 +652,32 @@ async function scan(args) {
     Number.isSafeInteger(requestedMax) && requestedMax > 0
       ? requestedMax
       : DEFAULT_MAX_CANDIDATES_PER_RUN;
-  const mainEvidence = await client.mainEvidence();
-  const targets = [];
+  const inputs = [];
+  let mainEvidence;
   for (const candidate of candidates) {
-    if (targets.length >= maxCandidates) break;
+    if (inputs.length >= maxCandidates) break;
     try {
-      const target = await skillCandidate(
-        client,
-        candidate,
-        prs,
-        options,
-        mainEvidence,
-      );
-      if (target) targets.push(target);
+      const pr = prs.find((item) => item.number === candidate.prNumber);
+      const target = {
+        ...candidate,
+        runAttempt: await client.runAttempt(candidate.runId),
+      };
+      const comments = await client.comments(candidate.prNumber);
+      if (!canAct({ ...pr, comments }, target, options)) continue;
+      const input = await skillCandidate(client, target);
+      mainEvidence ??= await client.mainEvidence();
+      inputs.push({
+        ...input,
+        behindBy: await client.behindBy(input.headSha),
+        ...mainEvidence,
+      });
     } catch (error) {
       process.stderr.write(
         `scan: skipping PR ${candidate.prNumber}: ${error.message}\n`,
       );
     }
   }
-  const inputs = await writeSkillInputs(
-    client,
-    targets,
-    args.get('workdir'),
-    maxCandidates,
-  );
+  writeJson(args.get('workdir'), 'ci-flaky-input.json', { candidates: inputs });
   process.stdout.write(
     `target_found=${inputs.length > 0 ? 'true' : 'false'}\n`,
   );

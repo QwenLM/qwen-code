@@ -15,7 +15,13 @@ import {
   writeSkillInput,
   writeSkillInputs,
 } from '../../.github/scripts/ci-flaky-rerun.mjs';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -228,9 +234,94 @@ describe('ci flaky rerun patrol', () => {
     expect(script).toContain('maxCandidates = Infinity');
     expect(script).toContain('if (candidates.length >= maxCandidates) break;');
     expect(script).toContain('async function skillCandidate');
-    expect(script).toContain('const targets = [];');
+    expect(script).toContain('const inputs = [];');
     expect(script).toContain('await skillCandidate(');
   });
+
+  it('continues scanning when an early candidate has an expired job log', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ci-flaky-scan-'));
+    try {
+      const fakeGh = join(dir, 'gh');
+      writeFileSync(
+        fakeGh,
+        `#!/usr/bin/env node
+const args = process.argv.slice(2);
+function pr(number, head, run, job) {
+  return {
+    number,
+    isDraft: false,
+    baseRefName: 'main',
+    headRefOid: head,
+    updatedAt: '2026-07-12T07:30:00.000Z',
+    statusCheckRollup: [{
+      databaseId: job,
+      name: 'E2E Tests',
+      status: 'COMPLETED',
+      conclusion: 'FAILURE',
+      completedAt: '2026-07-12T07:20:00.000Z',
+      detailsUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/' + run + '/jobs/' + job,
+    }],
+  };
+}
+if (args[0] === 'pr' && args[1] === 'list') {
+  process.stdout.write(JSON.stringify([pr(42, 'old-head', 123, 1), pr(43, 'new-head', 124, 2)]));
+} else if (args[0] === 'pr' && args[1] === 'view') {
+  process.stdout.write('[]');
+} else if (args[0] === 'run' && args[1] === 'list') {
+  process.stdout.write(JSON.stringify([{ databaseId: 456, headSha: 'main-head', conclusion: 'success' }]));
+} else if (args[0] === 'api' && args[1].includes('/commits/main')) {
+  process.stdout.write('main-head\\n');
+} else if (args[0] === 'api' && args[1].includes('/compare/')) {
+  process.stdout.write('1\\n');
+} else if (args[0] === 'api' && args[1].includes('/actions/runs/')) {
+  process.stdout.write('1\\n');
+} else if (args[0] === 'api' && args[1].includes('/actions/jobs/1/logs')) {
+  process.exit(1);
+} else if (args[0] === 'api' && args[1].includes('/actions/jobs/2/logs')) {
+  process.stdout.write('Error: runner network timeout\\n');
+} else {
+  process.stderr.write('unexpected gh call: ' + args.join(' ') + '\\n');
+  process.exit(1);
+}
+`,
+      );
+      chmodSync(fakeGh, 0o755);
+
+      const output = execFileSync(
+        'node',
+        [
+          '.github/scripts/ci-flaky-rerun.mjs',
+          'scan',
+          '--repo',
+          'QwenLM/qwen-code',
+          '--workdir',
+          dir,
+          '--stale-minutes',
+          '30',
+          '--active-days',
+          '7',
+          '--max-candidates',
+          '1',
+          '--trusted-marker-login',
+          'trusted-patrol-bot',
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
+        },
+      );
+
+      expect(output).toContain('target_found=true');
+      const input = JSON.parse(readFileSync(join(dir, 'ci-flaky-input.json')));
+      expect(input.candidates).toHaveLength(1);
+      expect(input.candidates[0]).toMatchObject({
+        prNumber: 43,
+        runId: 124,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
 
   it('can rank candidates before fetching comments', () => {
     expect(selectCandidateTargets([pr()], { now: NOW })).toMatchObject([
