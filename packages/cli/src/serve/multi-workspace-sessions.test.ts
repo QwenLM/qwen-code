@@ -43,6 +43,8 @@ import {
 const PRIMARY_CWD = path.resolve(path.sep, 'work', 'primary');
 const SECONDARY_CWD = path.resolve(path.sep, 'work', 'secondary');
 const UNKNOWN_CWD = path.resolve(path.sep, 'work', 'unknown');
+const TEST_TOKEN = 'test-token';
+const TEST_AUTHORIZATION = `Bearer ${TEST_TOKEN}`;
 
 const baseOpts: ServeOptions = {
   hostname: '127.0.0.1',
@@ -89,6 +91,32 @@ interface FakeBridge extends AcpSessionBridge {
     opts: { persist?: boolean };
     context?: BridgeClientRequestContext;
   }>;
+  readonly metadataCalls: Array<{
+    sessionId: string;
+    metadata: { displayName?: string };
+    context?: BridgeClientRequestContext;
+  }>;
+  readonly recapCalls: Array<{
+    sessionId: string;
+    context?: BridgeClientRequestContext;
+  }>;
+  readonly btwCalls: Array<{
+    sessionId: string;
+    question: string;
+    signal?: AbortSignal;
+    context?: BridgeClientRequestContext;
+  }>;
+  readonly midTurnMessageCalls: Array<{
+    sessionId: string;
+    message: string;
+    context?: BridgeClientRequestContext;
+  }>;
+  readonly taskCancelCalls: Array<{
+    sessionId: string;
+    taskId: string;
+    taskKind: 'agent' | 'shell' | 'monitor';
+  }>;
+  readonly goalClearCalls: string[];
 }
 
 function makeSummary(
@@ -204,6 +232,12 @@ function makeBridge(
   const summaryCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
   const setApprovalModeCalls: FakeBridge['setApprovalModeCalls'] = [];
+  const metadataCalls: FakeBridge['metadataCalls'] = [];
+  const recapCalls: FakeBridge['recapCalls'] = [];
+  const btwCalls: FakeBridge['btwCalls'] = [];
+  const midTurnMessageCalls: FakeBridge['midTurnMessageCalls'] = [];
+  const taskCancelCalls: FakeBridge['taskCancelCalls'] = [];
+  const goalClearCalls: string[] = [];
   const bridge = {
     permissionPolicy: 'first-responder' as const,
     spawnCalls,
@@ -221,6 +255,12 @@ function makeBridge(
     summaryCalls,
     setModelCalls,
     setApprovalModeCalls,
+    metadataCalls,
+    recapCalls,
+    btwCalls,
+    midTurnMessageCalls,
+    taskCancelCalls,
+    goalClearCalls,
     get sessionCount() {
       return live.size;
     },
@@ -343,6 +383,68 @@ function makeBridge(
         persisted: opts?.persist === true,
       };
     },
+    updateSessionMetadata(
+      sessionId: string,
+      metadata: { displayName?: string },
+      context?: BridgeClientRequestContext,
+    ) {
+      metadataCalls.push({
+        sessionId,
+        metadata,
+        ...(context ? { context } : {}),
+      });
+      return {
+        displayName: `${workspaceCwd}:${metadata.displayName ?? ''}`,
+      };
+    },
+    async generateSessionRecap(
+      sessionId: string,
+      context?: BridgeClientRequestContext,
+    ) {
+      recapCalls.push({ sessionId, ...(context ? { context } : {}) });
+      return { sessionId, recap: `${workspaceCwd}:recap` };
+    },
+    async generateSessionBtw(
+      sessionId: string,
+      question: string,
+      signal?: AbortSignal,
+      context?: BridgeClientRequestContext,
+    ) {
+      btwCalls.push({
+        sessionId,
+        question,
+        ...(signal ? { signal } : {}),
+        ...(context ? { context } : {}),
+      });
+      return { sessionId, answer: `${workspaceCwd}:answer` };
+    },
+    enqueueMidTurnMessage(
+      sessionId: string,
+      message: string,
+      context?: BridgeClientRequestContext,
+    ) {
+      midTurnMessageCalls.push({
+        sessionId,
+        message,
+        ...(context ? { context } : {}),
+      });
+      return { accepted: workspaceCwd === SECONDARY_CWD };
+    },
+    async cancelSessionTask(
+      sessionId: string,
+      taskId: string,
+      taskKind: 'agent' | 'shell' | 'monitor',
+    ) {
+      taskCancelCalls.push({ sessionId, taskId, taskKind });
+      return { cancelled: workspaceCwd === SECONDARY_CWD };
+    },
+    async clearSessionGoal(sessionId: string) {
+      goalClearCalls.push(sessionId);
+      return {
+        cleared: workspaceCwd === SECONDARY_CWD,
+        condition: workspaceCwd,
+      };
+    },
     async cancelSession(sessionId: string) {
       cancelCalls.push(sessionId);
     },
@@ -441,6 +543,7 @@ function makeHarness(opts?: {
   secondaryChannelLive?: boolean;
   daemonLog?: DaemonLogger;
   secondarySummaries?: BridgeSessionSummary[];
+  token?: string;
 }) {
   const primaryBridge = makeBridge(
     PRIMARY_CWD,
@@ -471,7 +574,11 @@ function makeHarness(opts?: {
     }),
   ]);
   const app = createServeApp(
-    { ...baseOpts, workspace: PRIMARY_CWD },
+    {
+      ...baseOpts,
+      workspace: PRIMARY_CWD,
+      ...(opts?.token !== undefined ? { token: opts.token } : {}),
+    },
     undefined,
     {
       workspaceRegistry: registry,
@@ -947,6 +1054,256 @@ describe('multi-workspace session dispatch', () => {
     expect(approvalRes.status).toBe(403);
     expect(approvalRes.body.code).toBe('untrusted_workspace');
     expect(secondaryBridge.setApprovalModeCalls).toEqual([]);
+  });
+
+  it('routes owner-local actions to the owning non-primary workspace bridge', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      token: TEST_TOKEN,
+    });
+
+    const metadataRes = await request(app)
+      .patch('/session/secondary-session/metadata')
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .set('X-Qwen-Client-Id', 'secondary-client')
+      .send({ displayName: 'renamed' });
+    expect(metadataRes.status).toBe(200);
+    expect(metadataRes.body).toEqual({
+      sessionId: 'secondary-session',
+      displayName: `${SECONDARY_CWD}:renamed`,
+    });
+
+    const recapRes = await request(app)
+      .post('/session/secondary-session/recap')
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .set('X-Qwen-Client-Id', 'secondary-client')
+      .send({});
+    expect(recapRes.status).toBe(200);
+    expect(recapRes.body).toEqual({
+      sessionId: 'secondary-session',
+      recap: `${SECONDARY_CWD}:recap`,
+    });
+
+    const btwRes = await request(app)
+      .post('/session/secondary-session/btw')
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .set('X-Qwen-Client-Id', 'secondary-client')
+      .send({ question: '  why?  ' });
+    expect(btwRes.status).toBe(200);
+    expect(btwRes.body).toEqual({
+      sessionId: 'secondary-session',
+      answer: `${SECONDARY_CWD}:answer`,
+    });
+
+    const midTurnRes = await request(app)
+      .post('/session/secondary-session/mid-turn-message')
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .set('X-Qwen-Client-Id', 'secondary-client')
+      .send({ message: '  remember this  ' });
+    expect(midTurnRes.status).toBe(200);
+    expect(midTurnRes.body).toEqual({ accepted: true });
+
+    const taskCancelRes = await request(app)
+      .post('/session/secondary-session/tasks/task-1/cancel')
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .send({ kind: 'shell' });
+    expect(taskCancelRes.status).toBe(200);
+    expect(taskCancelRes.body).toEqual({ cancelled: true });
+
+    const goalClearRes = await request(app)
+      .post('/session/secondary-session/goal/clear')
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .send({});
+    expect(goalClearRes.status).toBe(200);
+    expect(goalClearRes.body).toEqual({
+      cleared: true,
+      condition: SECONDARY_CWD,
+    });
+
+    expect(secondaryBridge.metadataCalls).toEqual([
+      {
+        sessionId: 'secondary-session',
+        metadata: { displayName: 'renamed' },
+        context: { clientId: 'secondary-client' },
+      },
+    ]);
+    expect(secondaryBridge.recapCalls).toEqual([
+      {
+        sessionId: 'secondary-session',
+        context: { clientId: 'secondary-client' },
+      },
+    ]);
+    expect(secondaryBridge.btwCalls).toEqual([
+      expect.objectContaining({
+        sessionId: 'secondary-session',
+        question: 'why?',
+        signal: expect.any(AbortSignal),
+        context: { clientId: 'secondary-client' },
+      }),
+    ]);
+    expect(secondaryBridge.btwCalls[0]?.signal?.aborted).toBe(false);
+    expect(secondaryBridge.midTurnMessageCalls).toEqual([
+      {
+        sessionId: 'secondary-session',
+        message: 'remember this',
+        context: { clientId: 'secondary-client' },
+      },
+    ]);
+    expect(secondaryBridge.taskCancelCalls).toEqual([
+      {
+        sessionId: 'secondary-session',
+        taskId: 'task-1',
+        taskKind: 'shell',
+      },
+    ]);
+    expect(secondaryBridge.goalClearCalls).toEqual(['secondary-session']);
+
+    for (const calls of [
+      primaryBridge.metadataCalls,
+      primaryBridge.recapCalls,
+      primaryBridge.btwCalls,
+      primaryBridge.midTurnMessageCalls,
+      primaryBridge.taskCancelCalls,
+      primaryBridge.goalClearCalls,
+    ]) {
+      expect(calls).toEqual([]);
+    }
+  });
+
+  it('preserves primary routing for owner-local actions', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      token: TEST_TOKEN,
+    });
+
+    const res = await request(app)
+      .patch('/session/primary-session/metadata')
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .send({ displayName: 'primary renamed' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.displayName).toBe(`${PRIMARY_CWD}:primary renamed`);
+    expect(primaryBridge.metadataCalls).toEqual([
+      {
+        sessionId: 'primary-session',
+        metadata: { displayName: 'primary renamed' },
+      },
+    ]);
+    expect(secondaryBridge.metadataCalls).toEqual([]);
+  });
+
+  it('keeps strict owner-local actions behind bearer authentication', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      token: TEST_TOKEN,
+    });
+
+    const res = await request(app)
+      .patch('/session/secondary-session/metadata')
+      .set('Host', host())
+      .send({ displayName: 'unauthorized' });
+
+    expect(res.status).toBe(401);
+    expect(primaryBridge.metadataCalls).toEqual([]);
+    expect(secondaryBridge.metadataCalls).toEqual([]);
+  });
+
+  it('rejects invalid secondary owner-local inputs before bridge actions', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      token: TEST_TOKEN,
+    });
+
+    const responses = await Promise.all([
+      request(app)
+        .patch('/session/secondary-session/metadata')
+        .set('Host', host())
+        .set('Authorization', TEST_AUTHORIZATION)
+        .send({ displayName: 42 }),
+      request(app)
+        .post('/session/secondary-session/btw')
+        .set('Host', host())
+        .set('Authorization', TEST_AUTHORIZATION)
+        .send({ question: '   ' }),
+      request(app)
+        .post('/session/secondary-session/mid-turn-message')
+        .set('Host', host())
+        .set('Authorization', TEST_AUTHORIZATION)
+        .send({ message: '   ' }),
+      request(app)
+        .post('/session/secondary-session/tasks/task-1/cancel')
+        .set('Host', host())
+        .set('Authorization', TEST_AUTHORIZATION)
+        .send({ kind: 'invalid' }),
+    ]);
+
+    expect(responses.map((response) => response.status)).toEqual([
+      400, 400, 400, 400,
+    ]);
+    for (const bridge of [primaryBridge, secondaryBridge]) {
+      expect(bridge.metadataCalls).toEqual([]);
+      expect(bridge.btwCalls).toEqual([]);
+      expect(bridge.midTurnMessageCalls).toEqual([]);
+      expect(bridge.taskCancelCalls).toEqual([]);
+    }
+  });
+
+  it('rejects all owner-local actions for an untrusted non-primary owner', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      secondaryTrusted: false,
+      token: TEST_TOKEN,
+    });
+
+    const responses = await Promise.all([
+      request(app)
+        .patch('/session/secondary-session/metadata')
+        .set('Host', host())
+        .set('Authorization', TEST_AUTHORIZATION)
+        .send({ displayName: 'blocked' }),
+      request(app)
+        .post('/session/secondary-session/recap')
+        .set('Host', host())
+        .set('Authorization', TEST_AUTHORIZATION)
+        .send({}),
+      request(app)
+        .post('/session/secondary-session/btw')
+        .set('Host', host())
+        .set('Authorization', TEST_AUTHORIZATION)
+        .send({ question: 'blocked?' }),
+      request(app)
+        .post('/session/secondary-session/mid-turn-message')
+        .set('Host', host())
+        .set('Authorization', TEST_AUTHORIZATION)
+        .send({ message: 'blocked' }),
+      request(app)
+        .post('/session/secondary-session/tasks/task-1/cancel')
+        .set('Host', host())
+        .set('Authorization', TEST_AUTHORIZATION)
+        .send({ kind: 'agent' }),
+      request(app)
+        .post('/session/secondary-session/goal/clear')
+        .set('Host', host())
+        .set('Authorization', TEST_AUTHORIZATION)
+        .send({}),
+    ]);
+
+    expect(responses.map((response) => response.status)).toEqual([
+      403, 403, 403, 403, 403, 403,
+    ]);
+    for (const response of responses) {
+      expect(response.body.code).toBe('untrusted_workspace');
+    }
+    for (const bridge of [primaryBridge, secondaryBridge]) {
+      expect(bridge.metadataCalls).toEqual([]);
+      expect(bridge.recapCalls).toEqual([]);
+      expect(bridge.btwCalls).toEqual([]);
+      expect(bridge.midTurnMessageCalls).toEqual([]);
+      expect(bridge.taskCancelCalls).toEqual([]);
+      expect(bridge.goalClearCalls).toEqual([]);
+    }
   });
 
   it('lists active persisted and live non-primary workspace sessions by workspace id', async () => {
