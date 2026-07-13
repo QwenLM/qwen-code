@@ -394,10 +394,11 @@ describe('OpenAIContentConverter', () => {
         stream,
       );
 
-      const fn = result.candidates?.[0]?.content?.parts?.find(
+      const fnParts = result.candidates?.[0]?.content?.parts?.filter(
         (p: Part) => p.functionCall,
-      )?.functionCall;
-      expect(fn?.name).toBe('edit');
+      );
+      expect(fnParts).toHaveLength(1);
+      expect(fnParts?.[0]?.functionCall?.name).toBe('edit');
       expect(result.candidates?.[0]?.finishReason).toBeDefined();
     });
 
@@ -462,6 +463,7 @@ describe('OpenAIContentConverter', () => {
       expect(
         converter.convertOpenAIChunkToGemini(
           streamChunk('nameless-arguments', {
+            content: 'visible text that should be held',
             tool_calls: [
               {
                 index: 0,
@@ -721,6 +723,57 @@ describe('OpenAIContentConverter', () => {
         { text: '</think> text.' },
       ]);
       expect(finish.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+    });
+
+    it('preserves held balanced inline thinking tags when a temporary nameless tool call receives a name', () => {
+      const stream = withStreamParser(new StreamingToolCallParser());
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning-before-held-literal', {
+          reasoning_content: 'hidden reasoning',
+        }),
+        stream,
+      );
+
+      const held = converter.convertOpenAIChunkToGemini(
+        streamChunk('held-literal-start', {
+          content: 'Use <think>literal',
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_edit',
+              type: 'function',
+              function: { arguments: '' },
+            },
+          ],
+        }),
+        stream,
+      );
+      const released = converter.convertOpenAIChunkToGemini(
+        streamChunk('held-literal-end', {
+          content: '</think> text.',
+          tool_calls: [
+            {
+              index: 0,
+              type: 'function',
+              function: { name: 'edit', arguments: '' },
+            },
+          ],
+        }),
+        stream,
+      );
+      const finish = converter.convertOpenAIChunkToGemini(
+        streamChunk('held-literal-finish', {}, 'tool_calls'),
+        stream,
+      );
+
+      expect(held.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(released.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'Use <think>literal' },
+        { text: '</think> text.' },
+      ]);
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
+        { functionCall: { id: 'call_edit', name: 'edit', args: {} } },
+      ]);
     });
 
     it.each([

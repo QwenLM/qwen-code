@@ -250,6 +250,10 @@ export class StreamingToolCallParser {
     return this.toolCallMeta.get(index) || {};
   }
 
+  /**
+   * Returns true while a real in-flight tool call has arguments or an ID but no
+   * function name. Phantom empty slots are ignored.
+   */
   hasNamelessToolCall(): boolean {
     return this.namelessToolCallIndices.size > 0;
   }

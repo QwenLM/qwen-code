@@ -27,6 +27,7 @@ import {
   MAX_STREAM_IDLE_TIMEOUT_MS,
   QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
 } from './constants.js';
+import { InvalidStreamError } from '../invalid-stream-error.js';
 
 // Mock dependencies
 vi.mock('./converter.js', () => ({
@@ -1724,6 +1725,46 @@ describe('ContentGenerationPipeline', () => {
         request,
       );
       expect(testError.message).not.toContain('user:pass');
+    });
+
+    it('should propagate InvalidStreamError without wrapping it', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const invalidStreamError = new InvalidStreamError(
+        'Malformed stream',
+        'MALFORMED_TOOL_CALL',
+      );
+      const mockChunk = {
+        id: 'chunk-1',
+        choices: [{ delta: { content: 'bad' }, finish_reason: null }],
+      } as OpenAI.Chat.ChatCompletionChunk;
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield mockChunk;
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+        () => {
+          throw invalidStreamError;
+        },
+      );
+
+      const resultGenerator = await pipeline.executeStream(request, 'test-id');
+      await expect(
+        (async () => {
+          for await (const _result of resultGenerator) {
+            // consume stream
+          }
+        })(),
+      ).rejects.toBe(invalidStreamError);
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
 
     it('should redact proxy credentials before stream errors reach the error handler', async () => {

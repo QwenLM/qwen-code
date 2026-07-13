@@ -324,6 +324,14 @@ describe('StreamingToolCallParser', () => {
       expect(parser.hasNamelessToolCall()).toBe(false);
     });
 
+    it('tracks streamed arguments with no id as a real nameless tool call', () => {
+      parser.addChunk(0, '{"path":"/tmp/file"}');
+      expect(parser.hasNamelessToolCall()).toBe(true);
+
+      parser.addChunk(0, '', undefined, 'write_file');
+      expect(parser.hasNamelessToolCall()).toBe(false);
+    });
+
     it('should detect new tool call with same index and reassign to new index', () => {
       // First tool call
       const result1 = parser.addChunk(

@@ -79,9 +79,23 @@ export interface RequestContext {
    * emitted after the reasoning thought if no tagged thought appears.
    */
   pendingContentParts?: Part[];
+  /**
+   * Parts buffered while a streamed attempt may still become malformed. They
+   * are released only after the suspicious protocol text or nameless tool call
+   * is disambiguated.
+   */
   pendingUntrustedResponseParts?: Part[];
+  /**
+   * Tracks whether structured reasoning has already carried a raw thinking tag,
+   * making a matching visible tag suspicious at stream finish.
+   */
   hasUntrustedThoughtTag?: boolean;
+  /** Tracks whether this stream used structured reasoning deltas. */
   hasStructuredReasoningContent?: boolean;
+  /**
+   * Rolling scanner state for raw thinking tags in visible text. It is
+   * request-scoped so split tags can be detected across streamed chunks.
+   */
   visibleThinkingTagState?: {
     pendingTag: string;
     openTagCount: number;
