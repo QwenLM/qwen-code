@@ -73,28 +73,31 @@ describe('MessageRewriteMiddleware', () => {
   });
 
   describe('interceptUpdate — target filtering', () => {
-    it('does not carry slash-command metadata into the next message rewrite', async () => {
-      const { middleware, mockSendUpdate } = createMiddleware('message');
+    it.each(['message', 'all'] as const)(
+      'does not carry slash-command metadata into the next %s rewrite',
+      async (target) => {
+        const { middleware, mockSendUpdate } = createMiddleware(target);
 
-      await middleware.interceptUpdate({
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'Context compressed.' },
-        _meta: { source: 'slash_command' },
-      } as unknown as SessionUpdate);
-      await middleware.interceptUpdate({
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'Normal model response.' },
-      } as unknown as SessionUpdate);
+        await middleware.interceptUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Context compressed.' },
+          _meta: { source: 'slash_command' },
+        } as unknown as SessionUpdate);
+        await middleware.interceptUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Normal model response.' },
+        } as unknown as SessionUpdate);
 
-      await middleware.flushTurn();
-      await middleware.waitForPendingRewrites();
+        await middleware.flushTurn();
+        await middleware.waitForPendingRewrites();
 
-      expect(mockSendUpdate).toHaveBeenNthCalledWith(3, {
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'rewritten text' },
-        _meta: { rewritten: true, turnIndex: 1 },
-      });
-    });
+        expect(mockSendUpdate).toHaveBeenNthCalledWith(3, {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'rewritten text' },
+          _meta: { rewritten: true, turnIndex: 1 },
+        });
+      },
+    );
 
     it('should accumulate messages when target is "message"', async () => {
       const { middleware, mockSendUpdate } = createMiddleware('message');
