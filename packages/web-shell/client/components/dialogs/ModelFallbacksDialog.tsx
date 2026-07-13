@@ -25,7 +25,21 @@ export function ModelFallbacksDialog({
   onClose,
 }: ModelFallbacksDialogProps) {
   const { t } = useI18n();
-  const [selected, setSelected] = useState<string[]>(current);
+  // Normalize the persisted value on open — trim, drop blanks/dupes, and apply
+  // max — so a hand-edited or oversized setting doesn't open as N/max and get
+  // written back verbatim.
+  const [selected, setSelected] = useState<string[]>(() => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const raw of current) {
+      const id = raw.trim();
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      out.push(id);
+      if (out.length >= max) break;
+    }
+    return out;
+  });
 
   // Show the available models plus any already-configured fallback whose model
   // is no longer available, so the user can still see and remove it.

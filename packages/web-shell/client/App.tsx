@@ -2943,17 +2943,24 @@ export function App({
   }, [workspaceSettings, modelSettingScope]);
   // Fallback candidates are the selectable (non-runtime) models, keyed by their
   // base id — the same value shape the modelFallbacks setting stores.
-  const fallbackModelOptions = useMemo(
-    () =>
-      (connection.models ?? [])
-        .filter(isVisibleComposerModel)
-        .filter((m) => !m.isRuntime)
-        .map((m) => ({
-          baseId: m.baseModelId ?? extractBareModelId(m.id),
-          label: getModelDisplayName(m.label || m.baseModelId || m.id),
-        })),
-    [connection.models],
-  );
+  const fallbackModelOptions = useMemo(() => {
+    // modelFallbacks stores bare ids and the dialog keys rows by baseId, so
+    // dedupe here — multiple endpoints can expose the same base model id.
+    const seen = new Set<string>();
+    const options: Array<{ baseId: string; label: string }> = [];
+    for (const m of (connection.models ?? [])
+      .filter(isVisibleComposerModel)
+      .filter((m) => !m.isRuntime)) {
+      const baseId = m.baseModelId ?? extractBareModelId(m.id);
+      if (seen.has(baseId)) continue;
+      seen.add(baseId);
+      options.push({
+        baseId,
+        label: getModelDisplayName(m.label || m.baseModelId || m.id),
+      });
+    }
+    return options;
+  }, [connection.models]);
   const [compactMode, setCompactMode] = useState(false);
   const compactModeRef = useRef(compactMode);
   compactModeRef.current = compactMode;
@@ -2985,9 +2992,15 @@ export function App({
   }, [providedLanguage, languageSetting?.values.effective]);
 
   const handleSettingsLanguageChange = useCallback(
-    (nextLanguage: WebShellLanguage) => {
+    (nextLanguage: WebShellLanguage, scope: 'user' | 'workspace' = 'user') => {
       const previousLanguage = selectedLanguage;
-      const command = `/language ui ${nextLanguage}`;
+      // Forward the settings tab's scope to the command so a Workspace-tab edit
+      // persists to workspace settings instead of always writing user scope
+      // (the /language command otherwise defaults to user). The command still
+      // switches the daemon's live locale so command descriptions re-localize —
+      // which a plain scoped settings write wouldn't do.
+      const scopeFlag = scope === 'workspace' ? ' --project' : ' --global';
+      const command = `/language ui ${nextLanguage}${scopeFlag}`;
       handleLanguageChange(nextLanguage);
       const refreshSettings = () => {
         return Promise.all([
@@ -4954,6 +4967,11 @@ export function App({
         setPendingModel(modelId);
         return;
       }
+      // Drive the shared busy flag so the model-management rows disable while a
+      // selection is in flight — rapid Set current clicks would otherwise launch
+      // concurrent setModel calls that can resolve out of order and leave a
+      // model other than the user's last click active.
+      setModelActionBusy(true);
       sessionActions
         .setModel(modelId)
         .then((result) => {
@@ -4970,7 +4988,8 @@ export function App({
         })
         .catch((error: unknown) => {
           reportError(error, t('model.switch'));
-        });
+        })
+        .finally(() => setModelActionBusy(false));
     },
     [sessionActions, store, reportError, t, setPendingModel],
   );
@@ -5082,7 +5101,13 @@ export function App({
       // Closing first returns them to the chat to see it in context (matching
       // the pre-panel modal behavior).
       closePanel();
-      sendPrompt(`/model --fast ${modelId}`)
+      // Persist to the scope the picker was opened for (matching the silent
+      // vision/voice pickers). `/model` parses --global/--project as the persist
+      // scope; without a flag the command would default to its own scope logic
+      // and ignore the user's User-vs-Workspace choice.
+      const scopeFlag =
+        modelSettingScope === 'user' ? ' --global' : ' --project';
+      sendPrompt(`/model --fast ${modelId}${scopeFlag}`)
         .then(() => {
           // sendPrompt resolves only after the `/model --fast` turn *completes*
           // (actions.ts → waitForAcceptedPromptCompletion), so the change is
@@ -5110,6 +5135,7 @@ export function App({
       streamingState,
       reportError,
       reloadWorkspaceSettings,
+      modelSettingScope,
     ],
   );
 
@@ -5742,9 +5768,13 @@ export function App({
                                   prev === null ? 'voice' : prev,
                                 );
                               })
-                              .catch((error: unknown) =>
-                                reportError(error, t('model.setVoice')),
-                              );
+                              .catch((error: unknown) => {
+                                reportError(error, t('model.setVoice'));
+                                // No dialog opened, so the reset effect won't
+                                // run — clear the recorded scope so a later
+                                // command-launched picker defaults to workspace.
+                                setModelSettingScope('workspace');
+                              });
                           } else if (key === 'modelFallbacks')
                             setShowFallbacksDialog(true);
                           else if (key === 'tools.approvalMode')

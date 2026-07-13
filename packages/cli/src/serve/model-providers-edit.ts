@@ -22,6 +22,13 @@ export interface RemoveModelTarget {
 export interface RemoveModelResult {
   next: ModelProvidersConfig;
   removed: boolean;
+  /**
+   * The `baseUrl` stored on the removed provider entry (raw, unsanitized), or
+   * `undefined` when the entry had none / nothing was removed. Callers compare
+   * this against the raw `model.baseUrl` in settings — the request's `baseUrl`
+   * is sanitized by the providers status endpoint and would not match.
+   */
+  removedBaseUrl?: string;
 }
 
 /**
@@ -71,7 +78,9 @@ function buildRemoval(
   key: string,
   index: number,
 ): RemoveModelResult {
-  const nextModels = (modelProviders[key] ?? []).filter((_, i) => i !== index);
+  const models = modelProviders[key] ?? [];
+  const removedBaseUrl = models[index]?.baseUrl;
+  const nextModels = models.filter((_, i) => i !== index);
   const next: ModelProvidersConfig = { ...modelProviders };
   // Keep the (possibly empty) provider key rather than deleting it: the settings
   // writer merges the modelProviders object per key and only replaces arrays
@@ -79,7 +88,11 @@ function buildRemoval(
   // while an emptied array is written correctly. An empty provider contributes
   // no models and is hidden from the model list.
   next[key] = nextModels;
-  return { next, removed: true };
+  return {
+    next,
+    removed: true,
+    ...(removedBaseUrl ? { removedBaseUrl } : {}),
+  };
 }
 
 /**

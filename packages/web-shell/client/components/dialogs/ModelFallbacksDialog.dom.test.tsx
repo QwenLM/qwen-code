@@ -99,4 +99,27 @@ describe('ModelFallbacksDialog', () => {
     // 4 available + 1 extra unavailable = 5 options.
     expect(options(container)).toHaveLength(5);
   });
+
+  it('normalizes a persisted list that is oversized and has duplicates/blanks', () => {
+    // Hand-edited/legacy value: duplicates, whitespace, blanks, and more than
+    // max. Confirming without touching anything must write the trimmed, deduped,
+    // capped list — not the raw four+ entries.
+    const { container, props } = renderDialog({
+      current: [' gpt-4o ', 'gpt-4o', '', 'deepseek-v4', 'qwen3-coder'],
+    });
+    clickConfirm(container);
+    expect(props.onConfirm).toHaveBeenCalledWith([
+      'gpt-4o',
+      'deepseek-v4',
+      'qwen3-coder',
+    ]);
+  });
+
+  it('shows the normalized count immediately on open', () => {
+    const { container } = renderDialog({
+      current: ['gpt-4o', 'gpt-4o', 'deepseek-v4'],
+    });
+    // Deduped to 2 of 3, not 3/3.
+    expect(container.textContent).toContain('2/3');
+  });
 });

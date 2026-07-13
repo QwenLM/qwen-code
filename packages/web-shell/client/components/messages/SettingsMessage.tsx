@@ -30,7 +30,7 @@ type ChatWidthMode = '1000' | 'wide';
 
 interface SettingsMessageProps {
   settingsState: SettingsMessageSettingsState;
-  onLanguageChange: (language: WebShellLanguage) => void;
+  onLanguageChange: (language: WebShellLanguage, scope: Scope) => void;
   onSubDialog: (settingKey: string, scope: Scope) => void;
   onThemeChange: (theme: WebShellTheme) => void;
   chatWidthMode: ChatWidthMode;
@@ -262,14 +262,6 @@ export function SettingsMessage({
   const [restartPending, setRestartPending] = useState(false);
 
   const showInitialLoading = loading && !status;
-  const themeSetting = settings.find((s) => s.key === THEME_SETTING_KEY);
-  const themeValue = themeSettingToWebShellTheme(
-    themeSetting?.values.effective,
-  );
-  const languageSetting = settings.find((s) => s.key === LANGUAGE_SETTING_KEY);
-  const languageValue = languageSettingToWebShellLanguage(
-    languageSetting?.values.effective,
-  );
 
   const categories = useMemo(() => {
     const visibleSettings = settings.filter(
@@ -422,8 +414,10 @@ export function SettingsMessage({
     const isEditing = editMode?.key === setting.key;
 
     if (setting.key === THEME_SETTING_KEY) {
+      // Reflect the value for the SELECTED scope, not the effective merge, so the
+      // control matches which scope the write below targets.
       return renderSelect(
-        themeValue ?? WebShellThemeId.Dark,
+        themeSettingToWebShellTheme(value) ?? WebShellThemeId.Dark,
         (next) => {
           const theme = next as WebShellTheme;
           onThemeChange(theme);
@@ -439,8 +433,10 @@ export function SettingsMessage({
 
     if (setting.key === LANGUAGE_SETTING_KEY) {
       return renderSelect(
-        languageValue ?? 'zh-CN',
-        (next) => onLanguageChange(next as WebShellLanguage),
+        languageSettingToWebShellLanguage(value) ?? 'zh-CN',
+        // Persist to the selected scope (the change handler forwards the scope to
+        // the /language command) rather than always writing user settings.
+        (next) => onLanguageChange(next as WebShellLanguage, scope),
         WEB_SHELL_LANGUAGES.map((language) => ({
           value: language,
           label: languageLabel(language),

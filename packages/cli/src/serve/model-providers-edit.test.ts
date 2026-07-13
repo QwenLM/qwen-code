@@ -81,6 +81,19 @@ describe('removeModelFromProviders', () => {
     });
     expect(result.removed).toBe(true);
     expect(result.next).toEqual({ openai: [] });
+    // The removed entry's stored (raw, credential-bearing) baseUrl is reported
+    // so callers compare active selection against it, not the sanitized request.
+    expect(result.removedBaseUrl).toBe('https://user:pass@api.example');
+  });
+
+  it('reports no removedBaseUrl when the removed entry had none', () => {
+    const providers = { openai: [{ id: 'gpt-4o' }] };
+    const result = removeModelFromProviders(providers, undefined, {
+      authType: 'openai',
+      modelId: 'gpt-4o',
+    });
+    expect(result.removed).toBe(true);
+    expect(result.removedBaseUrl).toBeUndefined();
   });
 
   it('prefers the exact baseUrl match over the id-only fallback', () => {

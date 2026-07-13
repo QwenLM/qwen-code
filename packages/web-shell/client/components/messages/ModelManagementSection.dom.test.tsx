@@ -176,6 +176,110 @@ describe('ModelManagementSection', () => {
     expect(container.textContent).toContain('Current');
   });
 
+  it('marks only the qualified variant current when base ids collide across endpoints', () => {
+    // Two endpoints expose the same base id; the current id is provider/endpoint
+    // qualified, so exactly one row must be current (not both).
+    const dupProviders: DaemonWorkspaceProviderStatus[] = [
+      {
+        kind: 'model_provider',
+        status: 'ok',
+        authType: 'openai',
+        current: true,
+        models: [
+          {
+            modelId: 'gpt-4o(openai)',
+            baseModelId: 'gpt-4o',
+            name: 'GPT-4o Primary',
+            baseUrl: 'https://a.example',
+            isCurrent: false,
+            isRuntime: false,
+          },
+        ],
+      },
+      {
+        kind: 'model_provider',
+        status: 'ok',
+        authType: 'azure',
+        current: false,
+        models: [
+          {
+            modelId: 'gpt-4o(azure)',
+            baseModelId: 'gpt-4o',
+            name: 'GPT-4o Azure',
+            baseUrl: 'https://b.example',
+            isCurrent: false,
+            isRuntime: false,
+          },
+        ],
+      },
+    ];
+    const { container } = renderSection({
+      providers: dupProviders,
+      currentModelId: 'gpt-4o(openai)',
+    });
+    const currentBadges = Array.from(
+      container.querySelectorAll<HTMLSpanElement>('span'),
+    ).filter((s) => s.textContent?.trim() === 'Current');
+    expect(currentBadges).toHaveLength(1);
+    // The Azure variant (same base id) stays selectable.
+    const setButtons = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).filter((b) => b.textContent?.trim() === 'Set current');
+    expect(setButtons).toHaveLength(1);
+  });
+
+  it('marks only one row current for a bare current id shared by variants', () => {
+    // A bare current id matches several variants' base id; only the first wins,
+    // so the list never shows multiple "Current" badges.
+    const dupProviders: DaemonWorkspaceProviderStatus[] = [
+      {
+        kind: 'model_provider',
+        status: 'ok',
+        authType: 'openai',
+        current: true,
+        models: [
+          {
+            modelId: 'gpt-4o(openai)',
+            baseModelId: 'gpt-4o',
+            name: 'GPT-4o A',
+            baseUrl: 'https://a.example',
+            isCurrent: false,
+            isRuntime: false,
+          },
+          {
+            modelId: 'gpt-4o(openai)',
+            baseModelId: 'gpt-4o',
+            name: 'GPT-4o B',
+            baseUrl: 'https://b.example',
+            isCurrent: false,
+            isRuntime: false,
+          },
+        ],
+      },
+    ];
+    const { container } = renderSection({
+      providers: dupProviders,
+      currentModelId: 'gpt-4o',
+    });
+    const currentBadges = Array.from(
+      container.querySelectorAll<HTMLSpanElement>('span'),
+    ).filter((s) => s.textContent?.trim() === 'Current');
+    expect(currentBadges).toHaveLength(1);
+  });
+
+  it('labels each row action with the model identity for screen readers', () => {
+    const { container } = renderSection();
+    // DeepSeek V4 is selectable and deletable; its buttons name the model.
+    const setCurrent = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Set current DeepSeek V4"]',
+    );
+    const del = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Delete DeepSeek V4"]',
+    );
+    expect(setCurrent).toBeTruthy();
+    expect(del).toBeTruthy();
+  });
+
   it('omits baseUrl from the delete target for a model without one', () => {
     const { container, props } = renderSection();
     // DeepSeek V4 has no baseUrl; its Delete is the second (GPT-4o is first).

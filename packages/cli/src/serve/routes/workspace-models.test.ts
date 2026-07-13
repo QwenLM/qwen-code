@@ -44,10 +44,25 @@ function readWorkspaceSettings(): Record<string, unknown> {
   );
 }
 
-function makeApp() {
+function makeApp(
+  overrides: {
+    parseAndValidateClientId?: (
+      req: express.Request,
+      res: express.Response,
+    ) => string | undefined | null;
+  } = {},
+) {
   const app = express();
   app.use(express.json());
   const broadcastSettingsChanged = vi.fn();
+  // Spy on the mutation wrapper so tests can assert the route requests strict
+  // mutation gating (a regression that dropped `{ strict: true }` would
+  // otherwise pass unnoticed with an unconditional pass-through).
+  const mutate = vi.fn(
+    (_opts?: { strict?: boolean }) =>
+      (_req: express.Request, _res: express.Response, next: () => void) =>
+        next(),
+  );
   // Real persistence: mirrors the daemon's batch persist (setValues).
   const persistSettings = vi.fn(async (ws: string, writes) => {
     const fresh = loadSettings(ws);
@@ -55,14 +70,15 @@ function makeApp() {
   });
   registerWorkspaceModelsRoutes(app, {
     boundWorkspace: workspace,
-    mutate: () => (_req, _res, next) => next(),
+    mutate,
     safeBody: (req) =>
       req.body && typeof req.body === 'object' ? req.body : {},
     persistSettings,
     broadcastSettingsChanged,
-    parseAndValidateClientId: () => undefined,
+    parseAndValidateClientId:
+      overrides.parseAndValidateClientId ?? (() => undefined),
   });
-  return { app, persistSettings, broadcastSettingsChanged };
+  return { app, mutate, persistSettings, broadcastSettingsChanged };
 }
 
 beforeEach(() => {
@@ -148,6 +164,54 @@ describe('DELETE /workspace/models', () => {
     const saved = readUserSettings();
     expect((saved['model'] as { name?: string }).name).toBe('');
     expect(saved['modelProviders']).toEqual({ openai: [] });
+  });
+
+  it('registers the route behind strict mutation gating', async () => {
+    writeUserSettings({ modelProviders: { openai: [{ id: 'gpt-4o' }] } });
+    const { app, mutate } = makeApp();
+    // Force registration to run the handler at least once.
+    await request(app)
+      .delete('/workspace/models')
+      .send({ authType: 'openai', modelId: 'gpt-4o' });
+    expect(mutate).toHaveBeenCalledWith({ strict: true });
+  });
+
+  it('aborts without persisting when client-id validation rejects', async () => {
+    writeUserSettings({ modelProviders: { openai: [{ id: 'gpt-4o' }] } });
+    const { app, persistSettings, broadcastSettingsChanged } = makeApp({
+      // Emulate the daemon writing a 4xx and returning null to signal "handled".
+      parseAndValidateClientId: (_req, res) => {
+        res.status(400).json({ error: 'bad client id' });
+        return null;
+      },
+    });
+
+    const res = await request(app)
+      .delete('/workspace/models')
+      .send({ authType: 'openai', modelId: 'gpt-4o' });
+
+    expect(res.status).toBe(400);
+    expect(persistSettings).not.toHaveBeenCalled();
+    expect(broadcastSettingsChanged).not.toHaveBeenCalled();
+  });
+
+  it('forwards the validated client id to broadcasts so the origin is skipped', async () => {
+    writeUserSettings({ modelProviders: { openai: [{ id: 'gpt-4o' }] } });
+    const { app, broadcastSettingsChanged } = makeApp({
+      parseAndValidateClientId: () => 'client-123',
+    });
+
+    const res = await request(app)
+      .delete('/workspace/models')
+      .send({ authType: 'openai', modelId: 'gpt-4o' });
+
+    expect(res.status).toBe(200);
+    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+      'modelProviders',
+      { openai: [] },
+      'user',
+      'client-123',
+    );
   });
 
   it('returns 404 when the model is not configured', async () => {
@@ -301,6 +365,88 @@ describe('DELETE /workspace/models', () => {
       'modelFallbacks',
       'deepseek-v4',
       'user',
+      undefined,
+    );
+  });
+
+  it('clears a workspace-scoped active selection when providers are user-owned', async () => {
+    // modelProviders live in user scope, but the active model selection lives in
+    // workspace scope. Clearing must target the workspace scope, since a
+    // user-scope tombstone wouldn't override the higher-precedence workspace
+    // value.
+    writeUserSettings({ modelProviders: { openai: [{ id: 'gpt-4o' }] } });
+    writeWorkspaceSettings({ model: { name: 'gpt-4o' } });
+    const { app, broadcastSettingsChanged } = makeApp();
+
+    const res = await request(app)
+      .delete('/workspace/models')
+      .send({ authType: 'openai', modelId: 'gpt-4o' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.clearedActiveModel).toBe(true);
+    // Providers emptied in user scope; active selection cleared in workspace.
+    expect(readUserSettings()['modelProviders']).toEqual({ openai: [] });
+    expect((readWorkspaceSettings()['model'] as { name?: string }).name).toBe(
+      '',
+    );
+    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+      'model.name',
+      '',
+      'workspace',
+      undefined,
+    );
+  });
+
+  it('clears the active model when the stored baseUrl carries credentials the request sanitized', async () => {
+    // The providers status sanitizes credential-bearing URLs, so the delete
+    // target's baseUrl differs from the stored one. Removal still succeeds via
+    // the id-only fallback, and the active clear must compare against the stored
+    // (raw) baseUrl — not the sanitized request — to recognize the selection.
+    writeUserSettings({
+      modelProviders: {
+        openai: [{ id: 'gpt-4o', baseUrl: 'https://key@api.example.com' }],
+      },
+      model: { name: 'gpt-4o', baseUrl: 'https://key@api.example.com' },
+    });
+    const { app } = makeApp();
+
+    const res = await request(app).delete('/workspace/models').send({
+      authType: 'openai',
+      modelId: 'gpt-4o',
+      baseUrl: 'https://api.example.com',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.clearedActiveModel).toBe(true);
+    const model = readUserSettings()['model'] as {
+      name?: string;
+      baseUrl?: string;
+    };
+    expect(model.name).toBe('');
+    expect(model.baseUrl).toBe('');
+  });
+
+  it('scrubs modelFallbacks in its own owning scope, not the providers scope', async () => {
+    // Providers are user-owned but modelFallbacks lives in workspace scope; the
+    // scrub must read and rewrite the workspace value.
+    writeUserSettings({
+      modelProviders: { openai: [{ id: 'gpt-4o' }, { id: 'deepseek-v4' }] },
+    });
+    writeWorkspaceSettings({ modelFallbacks: 'gpt-4o,deepseek-v4' });
+    const { app, broadcastSettingsChanged } = makeApp();
+
+    const res = await request(app)
+      .delete('/workspace/models')
+      .send({ authType: 'openai', modelId: 'gpt-4o' });
+
+    expect(res.status).toBe(200);
+    expect(readWorkspaceSettings()['modelFallbacks']).toBe('deepseek-v4');
+    // The user scope never carried modelFallbacks, so it isn't written there.
+    expect(readUserSettings()['modelFallbacks']).toBeUndefined();
+    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+      'modelFallbacks',
+      'deepseek-v4',
+      'workspace',
       undefined,
     );
   });

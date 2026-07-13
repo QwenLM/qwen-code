@@ -6,7 +6,11 @@
 
 import type { Application, Request, Response } from 'express';
 import { loadSettings, SettingScope } from '../../config/settings.js';
-import { getModelProvidersOwnerScope } from '../../config/modelProvidersScope.js';
+import {
+  getModelProvidersOwnerScope,
+  getOwnKeyScope,
+  getWritableScopes,
+} from '../../config/modelProvidersScope.js';
 import { getSettingDefinition } from '../../utils/settingsUtils.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
@@ -134,9 +138,9 @@ export function registerWorkspaceModelsRoutes(
       try {
         const loaded = loadSettings(boundWorkspace);
         const scope = getModelProvidersOwnerScope(loaded) ?? SettingScope.User;
-        const scopeSettings = loaded.forScope(scope).settings;
-        const modelProviders = scopeSettings.modelProviders ?? {};
-        const { next, removed } = removeModelFromProviders(
+        const modelProviders =
+          loaded.forScope(scope).settings.modelProviders ?? {};
+        const { next, removed, removedBaseUrl } = removeModelFromProviders(
           modelProviders,
           loaded.merged.providerProtocol,
           parsed,
@@ -151,29 +155,56 @@ export function registerWorkspaceModelsRoutes(
 
         writes = [{ scope, key: 'modelProviders', value: next }];
 
-        const active = isActiveModelSelection(
-          loaded.merged.model?.name,
-          loaded.merged.model?.baseUrl,
-          parsed,
-        );
-        if (active) {
-          writes.push({ scope, key: 'model.name', value: '' });
-          writes.push({ scope, key: 'model.baseUrl', value: '' });
+        // `model.name`/`model.baseUrl` are scoped independently of
+        // `modelProviders`, so clear the active selection in EVERY writable
+        // scope whose own selection points at the removed model — a tombstone
+        // written only to the providers-owner scope wouldn't override a
+        // higher-precedence scope that still names the deleted model. Compare
+        // against the removed entry's stored (unsanitized) baseUrl, since the
+        // request's baseUrl is sanitized and would miss a credential-bearing
+        // stored URL.
+        const activeTarget: RemoveModelTarget = {
+          authType: parsed.authType,
+          modelId: parsed.modelId,
+          ...(removedBaseUrl ? { baseUrl: removedBaseUrl } : {}),
+        };
+        for (const activeScope of getWritableScopes(loaded)) {
+          const scopeModel = loaded.forScope(activeScope).settings.model;
+          if (
+            isActiveModelSelection(
+              scopeModel?.name,
+              scopeModel?.baseUrl,
+              activeTarget,
+            )
+          ) {
+            writes.push({ scope: activeScope, key: 'model.name', value: '' });
+            writes.push({
+              scope: activeScope,
+              key: 'model.baseUrl',
+              value: '',
+            });
+          }
         }
 
         // Drop the deleted model from modelFallbacks so it doesn't linger as a
         // dangling fallback reference the runtime/UI would show as unavailable.
         // Fallbacks store bare model ids, so only scrub when no other provider
         // still configures a model with the same id (else the fallback may have
-        // been intended for that other provider's variant).
+        // been intended for that other provider's variant). `modelFallbacks` is
+        // scoped independently of `modelProviders`, so resolve and rewrite it in
+        // its own owning scope.
         const stillConfigured = Object.values(next).some(
           (models) =>
             Array.isArray(models) &&
             models.some((model) => model.id === parsed.modelId),
         );
-        const fallbacks = scopeSettings.modelFallbacks;
+        const fallbacksScope = getOwnKeyScope(loaded, 'modelFallbacks');
+        const fallbacks = fallbacksScope
+          ? loaded.forScope(fallbacksScope).settings.modelFallbacks
+          : undefined;
         if (
           !stillConfigured &&
+          fallbacksScope &&
           typeof fallbacks === 'string' &&
           fallbacks.length > 0
         ) {
@@ -184,7 +215,7 @@ export function registerWorkspaceModelsRoutes(
           const kept = original.filter((id) => id !== parsed.modelId);
           if (kept.length !== original.length) {
             writes.push({
-              scope,
+              scope: fallbacksScope,
               key: 'modelFallbacks',
               value: kept.join(','),
             });

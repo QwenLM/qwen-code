@@ -25,19 +25,38 @@ export interface ModelManagementProps {
   onAddModel: () => void;
 }
 
-function isCurrentModel(
+function rowKeyFor(
+  provider: DaemonWorkspaceProviderStatus,
   model: DaemonWorkspaceProviderModel,
+): string {
+  return `${provider.authType}:${model.modelId}:${model.baseUrl ?? ''}`;
+}
+
+/**
+ * Resolves the single row that is "current", returning its row key. Preferring a
+ * provider-qualified `modelId` match means a bare `currentModelId` (which can
+ * equal several endpoint variants' `baseModelId`) marks only ONE row current
+ * instead of every same-base-id variant. Falls back to the persisted `isCurrent`
+ * flag when no live current id is available yet (the live id is updated
+ * optimistically on select, so it's authoritative while present).
+ */
+function findCurrentRowKey(
+  providers: DaemonWorkspaceProviderStatus[],
   currentModelId: string | undefined,
-): boolean {
-  // The live current id (updated optimistically on select) is authoritative so
-  // switching models doesn't briefly show two "current" badges; fall back to
-  // the persisted `isCurrent` only when no live id is available yet.
+): string | undefined {
+  const all = providers.flatMap((provider) =>
+    provider.models.map((model) => ({ provider, model })),
+  );
   if (currentModelId) {
-    return (
-      currentModelId === model.modelId || currentModelId === model.baseModelId
+    const exact = all.find(({ model }) => model.modelId === currentModelId);
+    if (exact) return rowKeyFor(exact.provider, exact.model);
+    const byBase = all.find(
+      ({ model }) => model.baseModelId === currentModelId,
     );
+    return byBase ? rowKeyFor(byBase.provider, byBase.model) : undefined;
   }
-  return model.isCurrent;
+  const flagged = all.find(({ model }) => model.isCurrent);
+  return flagged ? rowKeyFor(flagged.provider, flagged.model) : undefined;
 }
 
 export function ModelManagementSection({
@@ -54,6 +73,7 @@ export function ModelManagementSection({
   const [confirmKey, setConfirmKey] = useState<string | null>(null);
 
   const hasModels = providers.some((p) => p.models.length > 0);
+  const currentRowKey = findCurrentRowKey(providers, currentModelId);
 
   return (
     <div className={styles.section} data-testid="model-management">
@@ -82,11 +102,12 @@ export function ModelManagementSection({
           <div className={styles.provider} key={provider.authType}>
             <div className={styles.providerName}>{provider.authType}</div>
             {provider.models.map((model) => {
-              const current = isCurrentModel(model, currentModelId);
-              const rowKey = `${provider.authType}:${model.modelId}:${
-                model.baseUrl ?? ''
-              }`;
+              const rowKey = rowKeyFor(provider, model);
+              const current = rowKey === currentRowKey;
               const confirming = confirmKey === rowKey;
+              // Screen-reader label so identically-named row actions are
+              // distinguishable by which model they target.
+              const modelLabel = model.name || model.baseModelId;
               return (
                 <div className={styles.modelRow} key={rowKey}>
                   <div className={styles.modelInfo}>
@@ -115,6 +136,7 @@ export function ModelManagementSection({
                         type="button"
                         className={styles.actionButton}
                         disabled={busy}
+                        aria-label={`${t('settings.models.setCurrent')} ${modelLabel}`}
                         onClick={() => onSelectModel(model.modelId)}
                       >
                         {t('settings.models.setCurrent')}
@@ -127,6 +149,7 @@ export function ModelManagementSection({
                             type="button"
                             className={styles.confirmButton}
                             disabled={busy}
+                            aria-label={`${t('settings.models.confirmDelete')} ${modelLabel}`}
                             onClick={() => {
                               setConfirmKey(null);
                               onDeleteModel({
@@ -154,6 +177,7 @@ export function ModelManagementSection({
                           type="button"
                           className={styles.deleteButton}
                           disabled={busy}
+                          aria-label={`${t('settings.models.delete')} ${modelLabel}`}
                           onClick={() => setConfirmKey(rowKey)}
                         >
                           {t('settings.models.delete')}

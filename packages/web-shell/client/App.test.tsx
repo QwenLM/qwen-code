@@ -292,7 +292,9 @@ vi.mock('./components/MessageList', async () => {
 vi.mock('./components/messages/SettingsMessage', async () => {
   const React = await import('react');
   return {
-    SettingsMessage: (props: { onSubDialog?: (key: string) => void }) =>
+    SettingsMessage: (props: {
+      onSubDialog?: (key: string, scope: 'user' | 'workspace') => void;
+    }) =>
       React.createElement(
         'div',
         { 'data-testid': 'settings-message' },
@@ -301,7 +303,9 @@ vi.mock('./components/messages/SettingsMessage', async () => {
           {
             'data-testid': 'open-fast-model',
             type: 'button',
-            onClick: () => props.onSubDialog?.('fastModel'),
+            // The real panel forwards the active tab's scope; default is
+            // workspace, which drives the `--project` flag below.
+            onClick: () => props.onSubDialog?.('fastModel', 'workspace'),
           },
           'fast model',
         ),
@@ -2397,7 +2401,9 @@ describe('App session callbacks', () => {
 
     expect(
       mockSessionActions.sendPrompt.mock.calls.some(
-        (c) => c[0] === '/model --fast fast-model-x',
+        // Workspace tab → the command carries the --project scope flag so the
+        // fast-model choice persists to workspace settings, not the default.
+        (c) => c[0] === '/model --fast fast-model-x --project',
       ),
     ).toBe(true);
     expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
