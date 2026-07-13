@@ -1511,7 +1511,8 @@ export function convertOpenAIChunkToGemini(
     const malformedThinkingTagLeak =
       Boolean(choice.finish_reason) &&
       hasStructuredReasoning &&
-      (visibleThinkingTagState.leaked ||
+      (requestContext.hasUntrustedThoughtTag === true ||
+        visibleThinkingTagState.leaked ||
         isTerminalThinkingTagLeak(
           visibleThinkingTagState,
           hasMatchingThoughtTag,
@@ -1529,20 +1530,22 @@ export function convertOpenAIChunkToGemini(
     if (malformedThinkingTagLeak) {
       requestContext.pendingUntrustedResponseParts = undefined;
       throw new InvalidStreamError(
-        'Model response leaked thinking tags into visible content.',
+        'Model response leaked thinking tags.',
         'PROTOCOL_TAG_LEAK',
       );
     }
-    const shouldDropMalformedAttempt =
-      malformedNamelessToolCall || malformedEmptyToolCallFinish;
+    if (malformedNamelessToolCall || malformedEmptyToolCallFinish) {
+      requestContext.pendingUntrustedResponseParts = undefined;
+      throw new InvalidStreamError(
+        'Model response contained a malformed tool call.',
+        'MALFORMED_TOOL_CALL',
+      );
+    }
     const shouldHoldUntrustedParts =
       toolCallWithoutName ||
       (!choice.finish_reason && hasUntrustedProtocolText);
 
-    if (shouldDropMalformedAttempt) {
-      parts.length = 0;
-      requestContext.pendingUntrustedResponseParts = undefined;
-    } else if (shouldHoldUntrustedParts) {
+    if (shouldHoldUntrustedParts) {
       (requestContext.pendingUntrustedResponseParts ??= []).push(...parts);
       parts.length = 0;
     } else if (requestContext.pendingUntrustedResponseParts) {
@@ -1552,7 +1555,7 @@ export function convertOpenAIChunkToGemini(
 
     // Only emit function calls when streaming is complete (finish_reason is present)
     let toolCallsTruncated = false;
-    if (choice.finish_reason && !shouldDropMalformedAttempt) {
+    if (choice.finish_reason) {
       // Detect truncation the provider may not report correctly.
       // Some providers (e.g. DashScope/Qwen) send "stop" or "tool_calls"
       // even when output was cut off mid-JSON due to max_tokens.
@@ -1575,11 +1578,8 @@ export function convertOpenAIChunkToGemini(
 
     // If tool call JSON was truncated, override to "length" so downstream
     // (turn.ts) correctly sets wasOutputTruncated=true.
-    // Withhold the finish signal so the existing invalid-stream retry drops
-    // the buffered attempt instead of accepting a silently lost tool call.
-    const effectiveFinishReason = shouldDropMalformedAttempt
-      ? undefined
-      : toolCallsTruncated && choice.finish_reason !== 'length'
+    const effectiveFinishReason =
+      toolCallsTruncated && choice.finish_reason !== 'length'
         ? 'length'
         : choice.finish_reason;
 
