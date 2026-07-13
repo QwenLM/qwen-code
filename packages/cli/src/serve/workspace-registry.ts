@@ -87,7 +87,7 @@ export interface WorkspaceRegistry {
   completeDrain(runtime: WorkspaceRuntime): void;
 }
 
-export type WorkspaceRuntimeState = 'active' | 'draining' | 'removed';
+type WorkspaceRuntimeState = 'active' | 'draining' | 'removed';
 
 export interface WorkspaceRegistryOptions {
   readonly sessionOwnerIndex?: WorkspaceSessionOwnerIndex;

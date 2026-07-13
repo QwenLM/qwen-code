@@ -430,13 +430,16 @@ describe('createChannelWorkerGroup', () => {
     const group = createChannelWorkerGroup({
       groups: [
         { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
-        { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
       ],
       registry,
       createSupervisor,
       shared,
     });
     await group.start();
+    await group.reconcile([
+      { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+      { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
+    ]);
     await group.removeWorkspace(SECONDARY);
     runtimes.splice(1, 1, fakeRuntime(SECONDARY, false, { VERSION: 'new' }));
 

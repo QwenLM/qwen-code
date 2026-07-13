@@ -36,4 +36,47 @@ describe('workspace actions', () => {
     });
     expect(remove).toHaveBeenCalledWith({ force: true, timeoutMs: 10 });
   });
+
+  it('forwards successful workspace removal results', async () => {
+    const removal = {
+      removed: true as const,
+      workspaceId: 'secondary',
+      workspaceCwd: '/ws/secondary',
+      forced: false,
+      persistedRegistrationRemoved: true,
+      activity: {
+        sessions: 0,
+        activePrompts: 0,
+        pendingSessionStarts: 0,
+        acpConnections: 0,
+        memoryTasks: 0,
+        channelWorkers: 0,
+      },
+    };
+    const remove = vi.fn().mockResolvedValue(removal);
+    const workspaceById = vi.fn(() => ({ remove }));
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ workspaceById }) as never,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+
+    await expect(
+      actions.removeWorkspace('secondary', { force: false }),
+    ).resolves.toEqual(removal);
+    expect(workspaceById).toHaveBeenCalledWith('secondary');
+    expect(remove).toHaveBeenCalledWith({ force: false });
+  });
+
+  it('rejects workspace removal without a connected client', async () => {
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => undefined,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+
+    await expect(actions.removeWorkspace('secondary')).rejects.toThrow(
+      'Remove workspace failed: DaemonClient is not connected',
+    );
+  });
 });

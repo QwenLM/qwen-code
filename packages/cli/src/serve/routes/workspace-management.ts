@@ -242,7 +242,9 @@ export function registerWorkspaceManagementRoutes(
           ...workspaceRegistry
             .listManaged()
             .map((runtime) => runtime.workspaceCwd),
-          ...inFlight.keys(),
+          ...[...inFlight].flatMap(([cwd, operation]) =>
+            operation === 'addition' || operation === 'promotion' ? [cwd] : [],
+          ),
         ].some(
           (boundCwd) =>
             boundCwd !== canonical &&
@@ -379,7 +381,7 @@ export function registerWorkspaceManagementRoutes(
             await runtimeRemoval?.runtimeAdded?.(runtime);
           } catch (err) {
             writeStderrLine(
-              `qwen serve: workspace runtime registered without optional runtime adapter: ${
+              `qwen serve: runtime adapter rejected post-registration callback: ${
                 err instanceof Error ? err.message : String(err)
               }`,
             );

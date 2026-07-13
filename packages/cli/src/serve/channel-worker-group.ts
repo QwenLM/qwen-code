@@ -521,6 +521,20 @@ export function createChannelWorkerGroup(
           committed.set(entry.workspaceCwd, entry);
         }
         entries = committed;
+        const targetWorkspaceCwds = new Set(
+          targetGroups.map((target) => target.workspaceCwd),
+        );
+        for (const workspaceCwd of groupsByWorkspace.keys()) {
+          if (
+            !targetWorkspaceCwds.has(workspaceCwd) &&
+            !drainingWorkspaces.has(workspaceCwd)
+          ) {
+            groupsByWorkspace.delete(workspaceCwd);
+          }
+        }
+        for (const target of targetGroups) {
+          groupsByWorkspace.set(target.workspaceCwd, target);
+        }
         return { changed: true, workers: entrySnapshots() };
       })().finally(() => {
         pendingEntries.clear();
