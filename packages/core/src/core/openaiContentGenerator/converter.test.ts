@@ -364,6 +364,43 @@ describe('OpenAIContentConverter', () => {
       expect(fn?.id).toBe('call_noargs');
     });
 
+    it('does not drop a turn when a phantom nameless tool-call slot appears', () => {
+      // Regression: a nameless buffer slot with no id and no argument
+      // content is a phantom created by trailing structural deltas. It
+      // must not trigger a whole-attempt drop, which would suppress
+      // finish_reason and break legitimate tool-call responses.
+      const stream = withStreamParser(new StreamingToolCallParser());
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('phantom-open', {
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_edit',
+              type: 'function',
+              function: { name: 'edit', arguments: '' },
+            },
+            {
+              index: 1,
+              type: 'function',
+              function: {},
+            },
+          ],
+        }),
+        stream,
+      );
+      const result = converter.convertOpenAIChunkToGemini(
+        streamChunk('phantom-finish', {}, 'tool_calls'),
+        stream,
+      );
+
+      const fn = result.candidates?.[0]?.content?.parts?.find(
+        (p: Part) => p.functionCall,
+      )?.functionCall;
+      expect(fn?.name).toBe('edit');
+      expect(result.candidates?.[0]?.finishReason).toBeDefined();
+    });
+
     it('discards a response whose tool call never provides a function name', () => {
       const stream = withStreamParser(new StreamingToolCallParser());
 

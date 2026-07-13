@@ -261,8 +261,15 @@ export class StreamingToolCallParser {
   }
 
   hasNamelessToolCall(): boolean {
-    for (const index of this.buffers.keys()) {
-      if (!this.toolCallMeta.get(index)?.name) {
+    for (const [index, buffer] of this.buffers.entries()) {
+      const meta = this.toolCallMeta.get(index);
+      // A nameless tool call only counts as malformed when the provider
+      // actually started a real call — signaled by an assigned id or
+      // streamed argument content. Pure phantom slots (no name, id, or
+      // content) are created by trailing structural deltas and must not
+      // trigger a whole-attempt drop, which would suppress finish_reason
+      // and break legitimate tool-call responses.
+      if (!meta?.name && (meta?.id || buffer.trim())) {
         return true;
       }
     }
