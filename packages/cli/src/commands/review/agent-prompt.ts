@@ -137,7 +137,15 @@ export function buildChunkAgentPrompt(
   const offset = chunk.startLine - 1;
   const limit = chunk.endLine - chunk.startLine + 1;
 
-  const files = (chunk.files ?? [])
+  // The plan is parsed off disk with an unchecked cast, so guard the elements too,
+  // not just the array. A malformed entry would otherwise render as
+  // `- undefined (new-side lines undefined-undefined)` and send the agent looking
+  // for a file that does not exist.
+  const files = (Array.isArray(chunk.files) ? chunk.files : [])
+    .filter(
+      (f): f is DiffChunk['files'][number] =>
+        !!f && typeof f.path === 'string' && f.path.length > 0,
+    )
     .map((f) => `- ${f.path} (new-side lines ${f.newStart}-${f.newEnd})`)
     .join('\n');
 

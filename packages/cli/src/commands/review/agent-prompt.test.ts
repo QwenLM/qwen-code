@@ -116,6 +116,34 @@ describe('buildChunkAgentPrompt — what the real launches left out', () => {
     expect(p).not.toContain('Covered: chunk 15');
   });
 
+  it('drops a malformed files[] entry instead of rendering "undefined"', () => {
+    // The plan is cast off disk unchecked. A bad entry would otherwise print
+    // `- undefined (new-side lines undefined-undefined)` and send the agent
+    // looking for a file that does not exist.
+    const plan = {
+      diffPathAbsolute: '/d.txt',
+      chunks: [
+        {
+          id: 1,
+          startLine: 1,
+          endLine: 10,
+          lines: 10,
+          chars: 100,
+          maxLineChars: 50,
+          oversized: false,
+          files: [
+            null,
+            { newStart: 1, newEnd: 2 },
+            { path: 'real.ts', newStart: 1, newEnd: 9 },
+          ],
+        },
+      ],
+    } as never;
+    const p = buildChunkAgentPrompt(plan, 1);
+    expect(p).not.toContain('undefined');
+    expect(p).toContain('real.ts');
+  });
+
   it('handles a chunk with no recorded files', () => {
     const plan = {
       diffPathAbsolute: '/d.txt',
