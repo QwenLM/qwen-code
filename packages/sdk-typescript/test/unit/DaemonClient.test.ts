@@ -504,6 +504,87 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('setWorkspaceSetting', () => {
+    it('POSTs the scope/key/value body and forwards the client id', async () => {
+      const result = { key: 'general.language', value: 'zh-CN', scope: 'user' };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.setWorkspaceSetting('user', 'general.language', 'zh-CN', {
+          clientId: 'client-9',
+        }),
+      ).resolves.toEqual(result);
+
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.url).toBe('http://daemon/workspace/settings');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        scope: 'user',
+        key: 'general.language',
+        value: 'zh-CN',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-9');
+    });
+
+    it('propagates a non-2xx response as a DaemonHttpError', async () => {
+      const body = { error: 'invalid scope', code: 'invalid_scope' };
+      const { fetch } = recordingFetch(() => jsonResponse(400, body));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const err = await client
+        .setWorkspaceSetting('workspace', 'ui.theme', 'Qwen Dark')
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(DaemonHttpError);
+      expect((err as DaemonHttpError).status).toBe(400);
+      expect((err as DaemonHttpError).body).toEqual(body);
+    });
+  });
+
+  describe('deleteModel', () => {
+    it('DELETEs /workspace/models with the target body and client id', async () => {
+      const result = {
+        removed: true,
+        clearedActiveModel: true,
+        requiresRestart: false,
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.deleteModel(
+          {
+            authType: 'openai',
+            modelId: 'gpt-4o',
+            baseUrl: 'https://api.openai.com',
+          },
+          { clientId: 'client-42' },
+        ),
+      ).resolves.toEqual(result);
+
+      expect(calls[0]?.method).toBe('DELETE');
+      expect(calls[0]?.url).toBe('http://daemon/workspace/models');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        authType: 'openai',
+        modelId: 'gpt-4o',
+        baseUrl: 'https://api.openai.com',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-42');
+    });
+
+    it('propagates a non-2xx response as a DaemonHttpError', async () => {
+      const body = { error: 'model not found', code: 'model_not_found' };
+      const { fetch } = recordingFetch(() => jsonResponse(404, body));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const err = await client
+        .deleteModel({ authType: 'openai', modelId: 'missing' })
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(DaemonHttpError);
+      expect((err as DaemonHttpError).status).toBe(404);
+      expect((err as DaemonHttpError).body).toEqual(body);
+    });
+  });
+
   describe('read-only status routes', () => {
     it('GETs workspace status routes and returns payloads unchanged', async () => {
       const mcp: DaemonWorkspaceMcpStatus = {

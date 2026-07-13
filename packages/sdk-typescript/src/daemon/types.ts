@@ -1994,9 +1994,23 @@ export interface DaemonWorkspaceSettingsStatus {
 
 export interface DaemonSettingUpdateResult {
   key: string;
-  scope: 'workspace';
+  scope: 'workspace' | 'user';
   value: unknown;
   requiresRestart: boolean;
+}
+
+/** Identifies a configured model to remove from `modelProviders`. */
+export interface DaemonModelDeleteRequest {
+  authType: string;
+  modelId: string;
+  baseUrl?: string;
+}
+
+export interface DaemonModelDeleteResult {
+  removed: boolean;
+  clearedActiveModel: boolean;
+  /** True when a committed write targets a restart-required setting. */
+  requiresRestart?: boolean;
 }
 
 export type DaemonVoiceMode = 'hold' | 'tap';

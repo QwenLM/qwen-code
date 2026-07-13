@@ -162,6 +162,13 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
     reload: settingsReload,
     loading: false,
   }),
+  useProviders: () => ({
+    providers: [],
+    current: undefined,
+    loading: false,
+    error: undefined,
+    reload: vi.fn().mockResolvedValue(undefined),
+  }),
   useStreamingState: () => testState.streamingState,
   useTranscriptBlocks: () => testState.blocks,
   useTranscriptStore: () => mockStore,
@@ -299,7 +306,13 @@ vi.mock('./components/MessageList', async () => {
 vi.mock('./components/messages/SettingsMessage', async () => {
   const React = await import('react');
   return {
-    SettingsMessage: (props: { onSubDialog?: (key: string) => void }) =>
+    SettingsMessage: (props: {
+      onSubDialog?: (key: string, scope: 'user' | 'workspace') => void;
+      onLanguageChange?: (
+        language: string,
+        scope: 'user' | 'workspace',
+      ) => void;
+    }) =>
       React.createElement(
         'div',
         { 'data-testid': 'settings-message' },
@@ -308,9 +321,31 @@ vi.mock('./components/messages/SettingsMessage', async () => {
           {
             'data-testid': 'open-fast-model',
             type: 'button',
-            onClick: () => props.onSubDialog?.('fastModel'),
+            // The real panel forwards the active tab's scope; default is
+            // workspace, which drives the `--project` flag below.
+            onClick: () => props.onSubDialog?.('fastModel', 'workspace'),
           },
           'fast model',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'open-fast-model-user',
+            type: 'button',
+            // User tab → drives the `--global` flag.
+            onClick: () => props.onSubDialog?.('fastModel', 'user'),
+          },
+          'fast model (user)',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'change-language-workspace',
+            type: 'button',
+            // Workspace tab language change → /language ui en --project.
+            onClick: () => props.onLanguageChange?.('en', 'workspace'),
+          },
+          'language (workspace)',
         ),
       ),
   };
@@ -2628,11 +2663,67 @@ describe('App session callbacks', () => {
 
     expect(
       mockSessionActions.sendPrompt.mock.calls.some(
-        (c) => c[0] === '/model --fast fast-model-x',
+        // Workspace tab → the command carries the --project scope flag so the
+        // fast-model choice persists to workspace settings, not the default.
+        (c) => c[0] === '/model --fast fast-model-x --project',
       ),
     ).toBe(true);
     expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
     expect(settingsReload).toHaveBeenCalled();
+  });
+
+  it('sends /model --fast with --global when the fast-model picker is opened from the User tab', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-fast-model-user"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="model-select"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      mockSessionActions.sendPrompt.mock.calls.some(
+        (c) => c[0] === '/model --fast fast-model-x --global',
+      ),
+    ).toBe(true);
+  });
+
+  it('sends /language ui --project for a workspace-scoped language change from Settings', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="change-language-workspace"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      mockSessionActions.sendPrompt.mock.calls.some(
+        (c) => c[0] === '/language ui en --project',
+      ),
+    ).toBe(true);
   });
 
   it('marks the chat view aria-hidden while a panel is shown', async () => {
