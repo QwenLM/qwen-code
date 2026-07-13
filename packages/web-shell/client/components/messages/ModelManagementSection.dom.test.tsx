@@ -137,6 +137,28 @@ describe('ModelManagementSection', () => {
     });
   });
 
+  it('cancels the delete confirmation without deleting and restores the Delete button', () => {
+    const { container, props } = renderSection();
+    const deletes = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).filter((b) => b.textContent?.trim() === 'Delete');
+    act(() => deletes[1]!.click()); // DeepSeek V4 enters confirm mode
+    // Confirm + Cancel now shown for that row.
+    expect(buttonByText(container, 'Confirm')).toBeTruthy();
+    act(() => buttonByText(container, 'Cancel').click());
+    // Back to the default state: Delete buttons restored, nothing deleted.
+    expect(props.onDeleteModel).not.toHaveBeenCalled();
+    const deletesAfter = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).filter((b) => b.textContent?.trim() === 'Delete');
+    expect(deletesAfter).toHaveLength(2);
+    expect(
+      Array.from(container.querySelectorAll('button')).some(
+        (b) => b.textContent?.trim() === 'Confirm',
+      ),
+    ).toBe(false);
+  });
+
   it('does not offer delete for runtime models', () => {
     const { container } = renderSection();
     // Scope to the runtime model's row (span.modelName → div.modelInfo →

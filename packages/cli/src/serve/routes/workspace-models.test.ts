@@ -269,6 +269,12 @@ describe('DELETE /workspace/models', () => {
       { authType: 'openai', modelId: 'gpt-4o', baseUrl: 42 },
       'invalid_base_url',
     ],
+    // A too-long baseUrl reports invalid_base_url (not the misleading
+    // "must be a string") — length and type are validated separately.
+    [
+      { authType: 'openai', modelId: 'gpt-4o', baseUrl: 'a'.repeat(2000) },
+      'invalid_base_url',
+    ],
     [{ authType: 'a'.repeat(2000), modelId: 'gpt-4o' }, 'invalid_field'],
   ];
   it.each(invalidCases)('rejects invalid input (%o)', async (payload, code) => {

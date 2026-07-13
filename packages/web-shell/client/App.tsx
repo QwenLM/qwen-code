@@ -1947,8 +1947,10 @@ export function App({
 
   const [modelDialogMode, setModelDialogMode] =
     useState<ModelDialogMode | null>(null);
-  // Mirror of modelDialogMode for reading the latest value inside the async
-  // voice loadProviders callback (see the voiceModel branch in onSubDialog).
+  // Mirror of modelDialogMode (and the fallbacks/auth dialog flags below) for
+  // reading the latest values inside the async voice loadProviders callback, so
+  // it doesn't open the voice picker on top of a surface opened while loading
+  // (see the voiceModel branch in onSubDialog).
   const modelDialogModeRef = useRef<ModelDialogMode | null>(modelDialogMode);
   // Scope a model sub-dialog opened from the Settings panel persists to. Set
   // when opening from the User/Workspace settings tab; reset to 'workspace'
@@ -1958,6 +1960,7 @@ export function App({
     'workspace' | 'user'
   >('workspace');
   const [showFallbacksDialog, setShowFallbacksDialog] = useState(false);
+  const showFallbacksDialogRef = useRef(showFallbacksDialog);
   const [voiceModels, setVoiceModels] = useState<VoiceModelOption[]>([]);
   const [showApprovalModeDialog, setShowApprovalModeDialog] = useState(false);
   const [showResumeDialog, setShowResumeDialog] = useState(false);
@@ -2240,6 +2243,7 @@ export function App({
   }, [toolApprovalOverlayVisible]);
   const [showMemoryDialog, setShowMemoryDialog] = useState(false);
   const [showAuthDialog, setShowAuthDialog] = useState(false);
+  const showAuthDialogRef = useRef(showAuthDialog);
   const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
   const [memoryAddSignal, setMemoryAddSignal] = useState(0);
   const [externalInteractionBlockCount, setExternalInteractionBlockCount] =
@@ -3114,7 +3118,9 @@ export function App({
 
   useEffect(() => {
     modelDialogModeRef.current = modelDialogMode;
-  }, [modelDialogMode]);
+    showFallbacksDialogRef.current = showFallbacksDialog;
+    showAuthDialogRef.current = showAuthDialog;
+  }, [modelDialogMode, showFallbacksDialog, showAuthDialog]);
 
   useEffect(() => {
     let retryableTurnErrorId: string | null = null;
@@ -5054,8 +5060,14 @@ export function App({
   const handleCloseAuthDialog = useCallback(() => {
     setShowAuthDialog(false);
     // The provider install flow doesn't broadcast a settings change, so refresh
-    // the model list on close to surface any newly added models.
-    reloadProviders().catch(() => null);
+    // the model list on close to surface any newly added models. Log a failed
+    // reload (leaves stale model data) rather than swallowing it.
+    reloadProviders().catch((err: unknown) => {
+      console.warn(
+        '[web-shell] failed to reload providers after auth dialog close',
+        err,
+      );
+    });
   }, [reloadProviders]);
 
   const handleFallbacksConfirm = useCallback(
@@ -5789,7 +5801,14 @@ export function App({
                               .loadProviders()
                               .then((status) => {
                                 setVoiceModels(extractVoiceModels(status));
-                                if (modelDialogModeRef.current === null) {
+                                // "No other surface opened meanwhile" — mirror the
+                                // reset effect's condition so the voice picker
+                                // never opens on top of a fallbacks/auth dialog.
+                                if (
+                                  modelDialogModeRef.current === null &&
+                                  !showFallbacksDialogRef.current &&
+                                  !showAuthDialogRef.current
+                                ) {
                                   setModelSettingScope(scope);
                                   setModelDialogMode('voice');
                                 }

@@ -1761,6 +1761,8 @@ const EN: Messages = {
   'settings.models.fallbacks.confirm': 'Confirm',
   'settings.models.fallbacks.empty': 'No selectable models.',
   'settings.models.fallbacks.saveFailed': 'Failed to save fallback models',
+  'settings.models.fallbacks.limitReached': (v) =>
+    `Maximum of ${v?.max ?? 3} fallback models selected; deselect one to choose another.`,
   'settings.corrupted': (v) =>
     `Settings file was corrupted${v?.recovered === 'true' ? ' (recovered from backup)' : ''}`,
   'settings.label.ui.chatWidth': 'Chat width',
@@ -3476,6 +3478,8 @@ const ZH: Messages = {
   'settings.models.fallbacks.confirm': '确认',
   'settings.models.fallbacks.empty': '暂无可选模型。',
   'settings.models.fallbacks.saveFailed': '保存回退模型失败',
+  'settings.models.fallbacks.limitReached': (v) =>
+    `最多可选 ${v?.max ?? 3} 个回退模型；请先取消一个再选择其他。`,
   'settings.corrupted': (v) =>
     `设置文件已损坏${v?.recovered === 'true' ? '（已从备份恢复）' : ''}`,
   'settings.label.ui.chatWidth': '屏宽',

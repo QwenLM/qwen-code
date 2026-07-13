@@ -97,9 +97,14 @@ export function ModelManagementSection({
         <div className={styles.empty}>{t('settings.models.empty')}</div>
       )}
 
-      {providers.map((provider) =>
+      {providers.map((provider, providerIndex) =>
         provider.models.length === 0 ? null : (
-          <div className={styles.provider} key={provider.authType}>
+          // Include the index: two providers can share an authType (e.g. two
+          // OpenAI-compatible endpoints), which would collide on authType alone.
+          <div
+            className={styles.provider}
+            key={`${provider.authType}:${providerIndex}`}
+          >
             <div className={styles.providerName}>{provider.authType}</div>
             {provider.models.map((model) => {
               const rowKey = rowKeyFor(provider, model);

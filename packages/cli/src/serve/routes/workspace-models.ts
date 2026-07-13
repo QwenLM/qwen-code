@@ -63,11 +63,14 @@ function parseTarget(
   if (typeof modelId !== 'string' || !modelId.trim()) {
     return { error: '`modelId` is required', code: 'invalid_model_id' };
   }
-  if (
-    baseUrl !== undefined &&
-    (typeof baseUrl !== 'string' || baseUrl.length > MAX_MODEL_FIELD_LENGTH)
-  ) {
+  if (baseUrl !== undefined && typeof baseUrl !== 'string') {
     return { error: '`baseUrl` must be a string', code: 'invalid_base_url' };
+  }
+  if (typeof baseUrl === 'string' && baseUrl.length > MAX_MODEL_FIELD_LENGTH) {
+    return {
+      error: '`baseUrl` exceeds length limit',
+      code: 'invalid_base_url',
+    };
   }
   if (
     authType.length > MAX_MODEL_FIELD_LENGTH ||

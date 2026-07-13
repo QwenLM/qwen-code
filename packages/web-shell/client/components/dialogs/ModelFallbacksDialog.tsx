@@ -60,7 +60,12 @@ export function ModelFallbacksDialog({
   };
 
   return (
-    <div className={styles.body} data-keyboard-scope>
+    // No data-keyboard-scope here: the wrapping DialogShell already provides the
+    // keyboard scope + role="dialog". A second scope on this inner div becomes
+    // the last [data-keyboard-scope] match in DialogShell's close cleanup, whose
+    // role="dialog" lookup then fails (it's the parent <section>), dropping focus
+    // when this dialog closes while another DialogShell is stacked.
+    <div className={styles.body}>
       <div className={styles.hint}>
         {t('settings.models.fallbacks.hint', { max })}
       </div>
@@ -85,6 +90,11 @@ export function ModelFallbacksDialog({
               aria-pressed={isSelected}
               className={`${styles.row} ${isSelected ? styles.rowSelected : ''}`}
               disabled={atLimit}
+              title={
+                atLimit
+                  ? t('settings.models.fallbacks.limitReached', { max })
+                  : undefined
+              }
               onClick={() => toggle(model.baseId)}
             >
               <span className={styles.badge}>

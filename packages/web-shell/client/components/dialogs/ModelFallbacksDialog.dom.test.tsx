@@ -123,6 +123,17 @@ describe('ModelFallbacksDialog', () => {
     expect(container.textContent).toContain('2/3');
   });
 
+  it('invokes onClose when Cancel is clicked', () => {
+    const { container, props } = renderDialog();
+    const cancel = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((b) => b.textContent?.trim() === 'Cancel');
+    if (!cancel) throw new Error('Cancel button not found');
+    act(() => cancel.click());
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+    expect(props.onConfirm).not.toHaveBeenCalled();
+  });
+
   it('groups the toggle options with an accessible name for screen readers', () => {
     const { container } = renderDialog();
     const group = container.querySelector<HTMLDivElement>('[role="group"]');

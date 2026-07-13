@@ -126,6 +126,24 @@ describe('POST /workspace/settings', () => {
     expect(persistSetting).not.toHaveBeenCalled();
   });
 
+  it('rejects a security-sensitive key even at user scope', async () => {
+    // Enabling user-scope writes must not expose SECURITY_SENSITIVE_SETTINGS
+    // (e.g. tools.approvalMode) — getAllowedKeys() filters them out regardless
+    // of scope. Guards against a future allowlist change leaking them.
+    const { app, persistSetting } = makeApp();
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'tools.approvalMode',
+      value: 'yolo',
+    });
+
+    expect(res.status).toBe(400);
+    // 'disallowed_key' (recognized but blocked), not 'invalid_key' (unknown).
+    expect(res.body).toMatchObject({ code: 'disallowed_key' });
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
+
   it('rejects non-positive general.sessionRecapAwayThresholdMinutes values', async () => {
     const { app, persistSetting, broadcastSettingsChanged } = makeApp();
 

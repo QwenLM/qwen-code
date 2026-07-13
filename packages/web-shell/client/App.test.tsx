@@ -294,6 +294,10 @@ vi.mock('./components/messages/SettingsMessage', async () => {
   return {
     SettingsMessage: (props: {
       onSubDialog?: (key: string, scope: 'user' | 'workspace') => void;
+      onLanguageChange?: (
+        language: string,
+        scope: 'user' | 'workspace',
+      ) => void;
     }) =>
       React.createElement(
         'div',
@@ -318,6 +322,16 @@ vi.mock('./components/messages/SettingsMessage', async () => {
             onClick: () => props.onSubDialog?.('fastModel', 'user'),
           },
           'fast model (user)',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'change-language-workspace',
+            type: 'button',
+            // Workspace tab language change → /language ui en --project.
+            onClick: () => props.onLanguageChange?.('en', 'workspace'),
+          },
+          'language (workspace)',
         ),
       ),
   };
@@ -2446,6 +2460,30 @@ describe('App session callbacks', () => {
     expect(
       mockSessionActions.sendPrompt.mock.calls.some(
         (c) => c[0] === '/model --fast fast-model-x --global',
+      ),
+    ).toBe(true);
+  });
+
+  it('sends /language ui --project for a workspace-scoped language change from Settings', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="change-language-workspace"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      mockSessionActions.sendPrompt.mock.calls.some(
+        (c) => c[0] === '/language ui en --project',
       ),
     ).toBe(true);
   });
