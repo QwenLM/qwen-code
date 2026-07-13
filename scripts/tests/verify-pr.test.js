@@ -358,17 +358,19 @@ describe('validation profiles', () => {
 });
 
 describe('step execution', () => {
-  it('isolates test HOME and clears authentication variables', () => {
+  it('keeps caller HOME for Playwright while isolating other tests', () => {
     const testSteps = createValidationSteps({ profile: 'full' }).filter(
       ({ testEnvironment }) => testEnvironment,
     );
     const baseEnv = {
       DASHSCOPE_API_KEY: 'dashscope',
       GEMINI_API_KEY: 'gemini',
+      HOME: '/caller/home',
       OPENAI_API_KEY: 'openai',
       QWEN_API_KEY: 'qwen',
       QWEN_DEFAULT_AUTH_TYPE: 'oauth',
       SAFE: 'kept',
+      USERPROFILE: '/caller/profile',
     };
 
     for (const step of testSteps) {
@@ -380,11 +382,15 @@ describe('step execution', () => {
       });
       expect(env).toMatchObject({
         CI: 'true',
-        HOME: '/tmp/verify-pr-home',
         NO_COLOR: 'true',
         SAFE: 'kept',
-        USERPROFILE: '/tmp/verify-pr-home',
       });
+      expect(env.HOME).toBe(
+        step.playwright ? '/caller/home' : '/tmp/verify-pr-home',
+      );
+      expect(env.USERPROFILE).toBe(
+        step.playwright ? '/caller/profile' : '/tmp/verify-pr-home',
+      );
       for (const key of [
         'DASHSCOPE_API_KEY',
         'GEMINI_API_KEY',
@@ -760,6 +766,7 @@ describe('verification orchestration', () => {
     await verifyPullRequest(
       { base: 'origin/main', cwd: '/caller', requestedProfile: 'full' },
       {
+        baseEnv: { RUNNER_TEMP: '/caller/temp', SAFE: 'kept' },
         inspect: () => ({
           baseSha: '1'.repeat(40),
           changedFiles: ['packages/sdk-python/src/client.py'],
@@ -773,6 +780,7 @@ describe('verification orchestration', () => {
         },
         temporaryWorktree: async ({ validate }) =>
           validate({
+            container: '/owned/container',
             home: '/owned/home',
             pythonRoot: '/owned/python',
             worktree: '/owned/worktree',
@@ -782,6 +790,10 @@ describe('verification orchestration', () => {
 
     expect(execution.cwd).toBe('/owned/worktree');
     expect(execution.home).toBe('/owned/home');
+    expect(execution.baseEnv).toMatchObject({
+      RUNNER_TEMP: '/owned/container',
+      SAFE: 'kept',
+    });
     expect(execution.steps).toHaveLength(39);
     expect(execution.steps[0].command.join(' ')).toBe(
       'npm ci --prefer-offline --no-audit --progress=false --ignore-scripts=false',

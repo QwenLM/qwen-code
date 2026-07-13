@@ -216,6 +216,9 @@ export function createValidationSteps({ profile }) {
   if (profile === 'full') {
     steps[0].installEnvironment = true;
     for (const testStep of steps.slice(14)) testStep.testEnvironment = true;
+    for (const isolatedHomeStep of steps.slice(14, 16)) {
+      isolatedHomeStep.isolatedHome = true;
+    }
     steps[16].playwright = true;
   }
   return steps;
@@ -328,9 +331,7 @@ export function createStepEnvironment({ baseEnv, home, playwrightPort, step }) {
   if (step.testEnvironment) {
     Object.assign(env, {
       CI: 'true',
-      HOME: home,
       NO_COLOR: 'true',
-      USERPROFILE: home,
     });
     for (const key of [
       'OPENAI_API_KEY',
@@ -341,6 +342,11 @@ export function createStepEnvironment({ baseEnv, home, playwrightPort, step }) {
     ]) {
       delete env[key];
     }
+  }
+
+  if (step.isolatedHome) {
+    env.HOME = home;
+    env.USERPROFILE = home;
   }
 
   if (step.playwright) env.PLAYWRIGHT_PORT = String(playwrightPort);
@@ -558,14 +564,14 @@ export async function verifyPullRequest(
     await temporaryWorktree({
       cwd,
       reportCleanup: error,
-      validate: async ({ home, pythonRoot, worktree }) => {
+      validate: async ({ container, home, pythonRoot, worktree }) => {
         const steps = createValidationSteps({ profile });
         if (profile === 'full' && needsPythonChecks(repository.changedFiles)) {
           steps.push(...createPythonSteps({ pythonRoot }));
         }
         await runValidationSteps({
           allocatePort,
-          baseEnv,
+          baseEnv: { ...baseEnv, RUNNER_TEMP: container },
           cwd: worktree,
           home,
           log,

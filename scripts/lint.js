@@ -10,7 +10,7 @@ import { execSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 
 const ACTIONLINT_VERSION = '1.7.12';
 const SHELLCHECK_VERSION = '0.11.0';
@@ -126,22 +126,37 @@ const LINTERS = {
   },
   yamllint: {
     check: 'command -v yamllint',
-    installer: `pip3 install --user "yamllint==${YAMLLINT_VERSION}"`,
+    installer: `python3 -m pip install --target "${TEMP_DIR}/yamllint" "yamllint==${YAMLLINT_VERSION}"`,
     run: "git ls-files | grep -E '\\.(yaml|yml)' | xargs yamllint --format github",
   },
 };
 
+export function createLinterEnvironment({
+  cwd = process.cwd(),
+  env = process.env,
+  tempDir = TEMP_DIR,
+} = {}) {
+  const yamllintTarget = join(tempDir, 'yamllint');
+  return {
+    ...env,
+    PATH: [
+      join(cwd, 'node_modules', '.bin'),
+      join(tempDir, 'actionlint'),
+      join(tempDir, 'shellcheck'),
+      join(yamllintTarget, 'bin'),
+      env.PATH,
+    ]
+      .filter(Boolean)
+      .join(delimiter),
+    PYTHONPATH: [yamllintTarget, env.PYTHONPATH]
+      .filter(Boolean)
+      .join(delimiter),
+  };
+}
+
 function runCommand(command, stdio = 'inherit') {
   try {
-    const env = { ...process.env };
-    const nodeBin = join(process.cwd(), 'node_modules', '.bin');
-    env.PATH = `${nodeBin}:${TEMP_DIR}/actionlint:${TEMP_DIR}/shellcheck:${env.PATH}`;
-    if (process.platform === 'darwin') {
-      env.PATH = `${env.PATH}:${process.env.HOME}/Library/Python/3.12/bin`;
-    } else if (process.platform === 'linux') {
-      env.PATH = `${env.PATH}:${process.env.HOME}/.local/bin`;
-    }
-    execSync(command, { stdio, env });
+    execSync(command, { stdio, env: createLinterEnvironment() });
     return true;
   } catch (_e) {
     return false;

@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import path from 'node:path';
 
 describe('getLinterTempDir', () => {
   const originalArgv = process.argv;
@@ -63,5 +64,33 @@ describe('getLinterTempDir', () => {
     expect(first).toMatch(/\/qwen-code-linters\/local-[a-f0-9]{16}$/);
     expect(second).toMatch(/\/qwen-code-linters\/local-[a-f0-9]{16}$/);
     expect(first).not.toBe(second);
+  });
+
+  it('uses the owned yamllint target without a version-specific user path', async () => {
+    const { createLinterEnvironment } = await import('../lint.js');
+
+    const environment = createLinterEnvironment({
+      cwd: '/workspace',
+      env: {
+        HOME: '/caller/home',
+        PATH: '/usr/bin',
+        PYTHONPATH: '/caller/python',
+      },
+      tempDir: '/owned/linters',
+    });
+
+    expect(environment.PATH.split(path.delimiter)).toEqual([
+      '/workspace/node_modules/.bin',
+      '/owned/linters/actionlint',
+      '/owned/linters/shellcheck',
+      '/owned/linters/yamllint/bin',
+      '/usr/bin',
+    ]);
+    expect(environment.PYTHONPATH).toBe(
+      ['/owned/linters/yamllint', '/caller/python'].join(path.delimiter),
+    );
+    expect(Object.values(environment).join(path.delimiter)).not.toContain(
+      'Python/3.12',
+    );
   });
 });
