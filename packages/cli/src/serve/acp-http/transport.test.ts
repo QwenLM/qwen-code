@@ -1169,6 +1169,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(result.agentCapabilities._meta.qwen.methods).toContain(
       '_qwen/session/shell',
     );
+    expect(result.agentCapabilities._meta.qwen.methods).not.toContain(
+      '_qwen/session/rewind',
+    );
   });
 
   it('initialize advertises _qwen/session/lsp', async () => {

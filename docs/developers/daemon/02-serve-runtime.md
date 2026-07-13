@@ -20,7 +20,7 @@
 
 **App factory**: `createServeApp(opts, getPort, deps)` in `packages/cli/src/serve/server.ts`. Builds the Express `Application`. Direct embedders and tests call it without the bootstrap wrapper.
 
-**Capability registry**: `SERVE_CAPABILITY_REGISTRY` in `packages/cli/src/serve/capabilities.ts`. Each tag has a `since` version and optional `modes`. Ten conditional tags (`require_auth`, `mcp_workspace_pool`, `mcp_pool_restart`, `allow_origin`, `prompt_absolute_deadline`, `writer_idle_timeout`, `workspace_settings`, `session_shell_command`, `rate_limit`, `workspace_reload`) are omitted when their corresponding toggle is off. See [`11-capabilities-versioning.md`](./11-capabilities-versioning.md).
+**Capability registry**: `SERVE_CAPABILITY_REGISTRY` in `packages/cli/src/serve/capabilities.ts`. Each tag has a `since` version and optional `modes`. Conditional tags are omitted when their deployment or runtime predicate is false; the registry and predicate map are the source of truth. See [`11-capabilities-versioning.md`](./11-capabilities-versioning.md).
 
 **Middleware** (`packages/cli/src/serve/auth.ts` and `server.ts`):
 

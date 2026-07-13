@@ -273,6 +273,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Multi-workspace sessions closed loop (issue #6378 Phase 2a). Advertised
   // only when one daemon hosts more than one registered workspace runtime.
   multi_workspace_sessions: { since: 'v1' },
+  // Singular session rewind routes resolve the owning live workspace runtime.
+  multi_workspace_session_rewind: { since: 'v1' },
+  // Singular session shell routes resolve the owning live workspace runtime.
+  multi_workspace_session_shell: { since: 'v1' },
   persistent_workspace_registration: { since: 'v1' },
   // Workspace-qualified core REST routes under `/workspaces/:workspace/...`.
   // Covers core file/status/permissions/trust/lifecycle/MCP/tool, memory,
@@ -449,6 +453,16 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'multi_workspace_sessions',
     (toggles) => toggles.multiWorkspaceSessionsEnabled === true,
+  ],
+  [
+    'multi_workspace_session_rewind',
+    (toggles) => toggles.multiWorkspaceSessionsEnabled === true,
+  ],
+  [
+    'multi_workspace_session_shell',
+    (toggles) =>
+      toggles.multiWorkspaceSessionsEnabled === true &&
+      toggles.sessionShellCommandEnabled === true,
   ],
   [
     'persistent_workspace_registration',

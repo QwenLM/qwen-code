@@ -2887,9 +2887,9 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/shell',
     mutate({ strict: true }),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/shell',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         if (!sessionShellCommandEnabled) {
           sendBridgeError(res, new SessionShellDisabledError(), {
             route: 'POST /session/:id/shell',
@@ -2922,7 +2922,7 @@ export function registerSessionRoutes(
         };
         res.once('close', onResClose);
         try {
-          const result = await bridge.executeShellCommand(
+          const result = await runtime.bridge.executeShellCommand(
             sessionId,
             command.trim(),
             abort.signal,
@@ -2933,6 +2933,8 @@ export function registerSessionRoutes(
               sessionId,
               clientId,
               exitCode: result.exitCode,
+              workspaceId: runtime.workspaceId,
+              workspaceCwd: runtime.workspaceCwd,
             });
           }
           res.status(200).json(result);
@@ -2955,30 +2957,24 @@ export function registerSessionRoutes(
     ),
   );
 
-  app.get('/session/:id/rewind/snapshots', async (req, res) => {
-    const sessionId = req.params['id'];
-    if (!sessionId) {
-      res
-        .status(400)
-        .json({ error: '`sessionId` route parameter is required' });
-      return;
-    }
-    try {
-      res.status(200).json(await bridge.getRewindSnapshots(sessionId));
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'GET /session/:id/rewind/snapshots',
-        sessionId,
-      });
-    }
-  });
+  app.get(
+    '/session/:id/rewind/snapshots',
+    withOwnerReadSession(
+      'GET /session/:id/rewind/snapshots',
+      async (_req, res, sessionId, runtime) => {
+        res
+          .status(200)
+          .json(await runtime.bridge.getRewindSnapshots(sessionId));
+      },
+    ),
+  );
 
   app.post(
     '/session/:id/rewind',
     mutate({ strict: true }),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/rewind',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         const promptId = body['promptId'];
         if (typeof promptId !== 'string' || promptId.length === 0) {
@@ -2988,11 +2984,19 @@ export function registerSessionRoutes(
           });
           return;
         }
+        const rewindFiles = body['rewindFiles'];
+        if (rewindFiles !== undefined && typeof rewindFiles !== 'boolean') {
+          res.status(400).json({
+            error: '`rewindFiles` must be a boolean when provided',
+            code: 'invalid_rewind_files_flag',
+          });
+          return;
+        }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        const response = await bridge.rewindSession(
+        const response = await runtime.bridge.rewindSession(
           sessionId,
-          { promptId, rewindFiles: body['rewindFiles'] !== false },
+          { promptId, rewindFiles: rewindFiles !== false },
           clientId !== undefined ? { clientId } : undefined,
         );
         res.status(200).json(response);

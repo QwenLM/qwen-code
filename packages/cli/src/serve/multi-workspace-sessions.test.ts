@@ -16,6 +16,8 @@ import {
   setDebugLogSession,
 } from '@qwen-code/qwen-code-core';
 import {
+  InvalidRewindTargetError,
+  SessionBusyError,
   SessionNotFoundError,
   type AcpSessionBridge,
   type BridgeClientRequestContext,
@@ -117,6 +119,18 @@ interface FakeBridge extends AcpSessionBridge {
     taskKind: 'agent' | 'shell' | 'monitor';
   }>;
   readonly goalClearCalls: string[];
+  readonly rewindSnapshotCalls: string[];
+  readonly rewindCalls: Array<{
+    sessionId: string;
+    req: Parameters<AcpSessionBridge['rewindSession']>[1];
+    context?: BridgeClientRequestContext;
+  }>;
+  readonly shellCalls: Array<{
+    sessionId: string;
+    command: string;
+    signal?: AbortSignal;
+    context?: BridgeClientRequestContext;
+  }>;
 }
 
 function makeSummary(
@@ -212,7 +226,11 @@ async function withRuntimeDir<T>(fn: () => Promise<T>): Promise<T> {
 function makeBridge(
   workspaceCwd: string,
   summaries: BridgeSessionSummary[] = [],
-  options: { channelLive?: boolean } = {},
+  options: {
+    channelLive?: boolean;
+    rewindImpl?: AcpSessionBridge['rewindSession'];
+    shellImpl?: AcpSessionBridge['executeShellCommand'];
+  } = {},
 ): FakeBridge {
   const live = new Map(
     summaries.map((summary) => [summary.sessionId, summary]),
@@ -238,6 +256,9 @@ function makeBridge(
   const midTurnMessageCalls: FakeBridge['midTurnMessageCalls'] = [];
   const taskCancelCalls: FakeBridge['taskCancelCalls'] = [];
   const goalClearCalls: string[] = [];
+  const rewindSnapshotCalls: string[] = [];
+  const rewindCalls: FakeBridge['rewindCalls'] = [];
+  const shellCalls: FakeBridge['shellCalls'] = [];
   const bridge = {
     permissionPolicy: 'first-responder' as const,
     spawnCalls,
@@ -261,6 +282,9 @@ function makeBridge(
     midTurnMessageCalls,
     taskCancelCalls,
     goalClearCalls,
+    rewindSnapshotCalls,
+    rewindCalls,
+    shellCalls,
     get sessionCount() {
       return live.size;
     },
@@ -445,6 +469,60 @@ function makeBridge(
         condition: workspaceCwd,
       };
     },
+    async getRewindSnapshots(sessionId: string) {
+      rewindSnapshotCalls.push(sessionId);
+      return {
+        snapshots: [
+          {
+            promptId: `${workspaceCwd}-prompt`,
+            turnIndex: 0,
+            timestamp: '2026-07-08T00:00:00.000Z',
+            diffStats: {
+              filesChanged: 1,
+              insertions: 1,
+              deletions: 0,
+            },
+          },
+        ],
+      };
+    },
+    async rewindSession(
+      sessionId: string,
+      req: Parameters<AcpSessionBridge['rewindSession']>[1],
+      context?: BridgeClientRequestContext,
+    ) {
+      rewindCalls.push({
+        sessionId,
+        req,
+        ...(context ? { context } : {}),
+      });
+      if (options.rewindImpl) {
+        return options.rewindImpl(sessionId, req, context);
+      }
+      return {
+        rewound: true,
+        targetTurnIndex: 0,
+        filesChanged: req.rewindFiles === false ? [] : ['tracked.txt'],
+        filesFailed: [],
+      };
+    },
+    async executeShellCommand(
+      sessionId: string,
+      command: string,
+      signal?: AbortSignal,
+      context?: BridgeClientRequestContext,
+    ) {
+      shellCalls.push({
+        sessionId,
+        command,
+        ...(signal ? { signal } : {}),
+        ...(context ? { context } : {}),
+      });
+      if (options.shellImpl) {
+        return options.shellImpl(sessionId, command, signal, context);
+      }
+      return { exitCode: 0, output: workspaceCwd, aborted: false };
+    },
     async cancelSession(sessionId: string) {
       cancelCalls.push(sessionId);
     },
@@ -542,12 +620,16 @@ function makeHarness(opts?: {
   secondaryTrusted?: boolean;
   secondaryChannelLive?: boolean;
   daemonLog?: DaemonLogger;
+  primarySummaries?: BridgeSessionSummary[];
   secondarySummaries?: BridgeSessionSummary[];
   token?: string;
+  secondaryRewindImpl?: AcpSessionBridge['rewindSession'];
+  secondaryShellImpl?: AcpSessionBridge['executeShellCommand'];
+  serveOptions?: Partial<ServeOptions>;
 }) {
   const primaryBridge = makeBridge(
     PRIMARY_CWD,
-    [makeSummary('primary-session', PRIMARY_CWD)],
+    opts?.primarySummaries ?? [makeSummary('primary-session', PRIMARY_CWD)],
     { channelLive: true },
   );
   const secondaryBridge = makeBridge(
@@ -555,7 +637,15 @@ function makeHarness(opts?: {
     opts?.secondarySummaries ?? [
       makeSummary('secondary-session', SECONDARY_CWD),
     ],
-    { channelLive: opts?.secondaryChannelLive ?? true },
+    {
+      channelLive: opts?.secondaryChannelLive ?? true,
+      ...(opts?.secondaryRewindImpl
+        ? { rewindImpl: opts.secondaryRewindImpl }
+        : {}),
+      ...(opts?.secondaryShellImpl
+        ? { shellImpl: opts.secondaryShellImpl }
+        : {}),
+    },
   );
   const registry = createWorkspaceRegistry([
     makeRuntime({
@@ -578,6 +668,7 @@ function makeHarness(opts?: {
       ...baseOpts,
       workspace: PRIMARY_CWD,
       ...(opts?.token !== undefined ? { token: opts.token } : {}),
+      ...opts?.serveOptions,
     },
     undefined,
     {
@@ -600,6 +691,8 @@ describe('multi-workspace session dispatch', () => {
     expect(res.status).toBe(200);
     expect(res.body.workspaceCwd).toBe(PRIMARY_CWD);
     expect(res.body.features).toContain('multi_workspace_sessions');
+    expect(res.body.features).toContain('multi_workspace_session_rewind');
+    expect(res.body.features).not.toContain('multi_workspace_session_shell');
     expect(res.body.features).toContain('workspace_persisted_transcript');
     expect(res.body.workspaces).toEqual([
       { id: 'primary-id', cwd: PRIMARY_CWD, primary: true, trusted: true },
@@ -612,6 +705,20 @@ describe('multi-workspace session dispatch', () => {
     ]);
     expect(res.body.limits.maxSessionsPerWorkspace).toBe(20);
     expect(res.body.limits.maxTotalSessions).toBeNull();
+  });
+
+  it('advertises multi-workspace shell only when effective session shell is enabled', async () => {
+    const { app } = makeHarness({
+      serveOptions: { token: 'secret', enableSessionShell: true },
+    });
+    const res = await request(app)
+      .get('/capabilities')
+      .set('Host', host())
+      .set('Authorization', 'Bearer secret');
+
+    expect(res.status).toBe(200);
+    expect(res.body.features).toContain('session_shell_command');
+    expect(res.body.features).toContain('multi_workspace_session_shell');
   });
 
   it('aggregates daemon status session count and exposes workspace metadata', async () => {
@@ -786,6 +893,367 @@ describe('multi-workspace session dispatch', () => {
     expect(secondaryBridge.cancelCalls).toEqual(['secondary-session']);
     expect(secondaryBridge.heartbeatCalls).toEqual(['secondary-session']);
     expect(secondaryBridge.detachCalls).toEqual(['secondary-session']);
+  });
+
+  it('routes secondary rewind snapshots, rewind, and shell only to the owner bridge', async () => {
+    const daemonLog = makeDaemonLog();
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      daemonLog,
+      serveOptions: { token: 'secret', enableSessionShell: true },
+    });
+    const auth = (test: request.Test) =>
+      test.set('Host', host()).set('Authorization', 'Bearer secret');
+
+    const snapshots = await auth(
+      request(app).get('/session/secondary-session/rewind/snapshots'),
+    );
+    expect(snapshots.status).toBe(200);
+    expect(snapshots.body.snapshots[0].promptId).toBe(
+      `${SECONDARY_CWD}-prompt`,
+    );
+
+    const rewind = await auth(
+      request(app).post('/session/secondary-session/rewind'),
+    )
+      .set('X-Qwen-Client-Id', 'client-2')
+      .send({ promptId: 'secondary-prompt', rewindFiles: true });
+    expect(rewind.status).toBe(200);
+    expect(rewind.body.filesChanged).toEqual(['tracked.txt']);
+
+    const shell = await auth(
+      request(app).post('/session/secondary-session/shell'),
+    )
+      .set('X-Qwen-Client-Id', 'client-2')
+      .send({ command: ' pwd ' });
+    expect(shell.status).toBe(200);
+    expect(shell.body.output).toBe(SECONDARY_CWD);
+
+    expect(primaryBridge.rewindSnapshotCalls).toEqual([]);
+    expect(primaryBridge.rewindCalls).toEqual([]);
+    expect(primaryBridge.shellCalls).toEqual([]);
+    expect(secondaryBridge.rewindSnapshotCalls).toEqual(['secondary-session']);
+    expect(secondaryBridge.rewindCalls).toEqual([
+      {
+        sessionId: 'secondary-session',
+        req: { promptId: 'secondary-prompt', rewindFiles: true },
+        context: { clientId: 'client-2' },
+      },
+    ]);
+    expect(secondaryBridge.shellCalls).toEqual([
+      {
+        sessionId: 'secondary-session',
+        command: 'pwd',
+        signal: expect.any(AbortSignal),
+        context: { clientId: 'client-2' },
+      },
+    ]);
+    expect(daemonLog.info).toHaveBeenCalledWith('shell command completed', {
+      sessionId: 'secondary-session',
+      clientId: 'client-2',
+      exitCode: 0,
+      workspaceId: 'secondary-id',
+      workspaceCwd: SECONDARY_CWD,
+    });
+  });
+
+  it('preserves rewindFiles defaults and rejects non-boolean values', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      serveOptions: { token: 'secret' },
+    });
+    const rewind = (body: Record<string, unknown>) =>
+      request(app)
+        .post('/session/secondary-session/rewind')
+        .set('Host', host())
+        .set('Authorization', 'Bearer secret')
+        .send(body);
+
+    for (const [body, expected] of [
+      [{ promptId: 'omitted' }, true],
+      [{ promptId: 'true', rewindFiles: true }, true],
+      [{ promptId: 'false', rewindFiles: false }, false],
+    ] as const) {
+      await rewind(body).expect(200);
+      expect(secondaryBridge.rewindCalls.at(-1)?.req.rewindFiles).toBe(
+        expected,
+      );
+    }
+
+    for (const rewindFiles of ['false', 0, null]) {
+      const response = await rewind({ promptId: 'invalid', rewindFiles });
+      expect(response.status).toBe(400);
+      expect(response.body.code).toBe('invalid_rewind_files_flag');
+    }
+
+    expect(primaryBridge.rewindCalls).toEqual([]);
+    expect(secondaryBridge.rewindCalls).toHaveLength(3);
+  });
+
+  it('fails closed for unknown, untrusted, and ambiguous rewind owners', async () => {
+    const unknown = makeHarness();
+    const unknownRes = await request(unknown.app)
+      .get('/session/missing/rewind/snapshots')
+      .set('Host', host());
+    expect(unknownRes.status).toBe(404);
+    expect(unknownRes.body.code).toBe('session_not_found');
+
+    const untrusted = makeHarness({ secondaryTrusted: false });
+    const untrustedRes = await request(untrusted.app)
+      .get('/session/secondary-session/rewind/snapshots')
+      .set('Host', host());
+    expect(untrustedRes.status).toBe(403);
+    expect(untrustedRes.body.code).toBe('untrusted_workspace');
+    expect(untrusted.secondaryBridge.rewindSnapshotCalls).toEqual([]);
+
+    const duplicate = makeSummary('duplicate-session', PRIMARY_CWD);
+    const ambiguous = makeHarness({
+      primarySummaries: [duplicate],
+      secondarySummaries: [makeSummary('duplicate-session', SECONDARY_CWD)],
+    });
+    const ambiguousRes = await request(ambiguous.app)
+      .get('/session/duplicate-session/rewind/snapshots')
+      .set('Host', host());
+    expect(ambiguousRes.status).toBe(500);
+    expect(ambiguousRes.body.code).toBe('ambiguous_session_owner');
+    expect(ambiguous.primaryBridge.rewindSnapshotCalls).toEqual([]);
+    expect(ambiguous.secondaryBridge.rewindSnapshotCalls).toEqual([]);
+  });
+
+  it('rejects untrusted secondary rewind and shell before bridge execution', async () => {
+    const { app, secondaryBridge } = makeHarness({
+      secondaryTrusted: false,
+      serveOptions: { token: 'secret', enableSessionShell: true },
+    });
+    const auth = (test: request.Test) =>
+      test.set('Host', host()).set('Authorization', 'Bearer secret');
+
+    const rewind = await auth(
+      request(app).post('/session/secondary-session/rewind'),
+    ).send({ promptId: 'secondary-prompt' });
+    expect(rewind.status).toBe(403);
+    expect(rewind.body.code).toBe('untrusted_workspace');
+
+    const shell = await auth(
+      request(app).post('/session/secondary-session/shell'),
+    )
+      .set('X-Qwen-Client-Id', 'client-2')
+      .send({ command: 'pwd' });
+    expect(shell.status).toBe(403);
+    expect(shell.body.code).toBe('untrusted_workspace');
+    expect(secondaryBridge.rewindCalls).toEqual([]);
+    expect(secondaryBridge.shellCalls).toEqual([]);
+  });
+
+  it('aborts only the owning secondary shell when the HTTP client disconnects', async () => {
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    let markAborted: (() => void) | undefined;
+    const aborted = new Promise<void>((resolve) => {
+      markAborted = resolve;
+    });
+    let secondarySignal: AbortSignal | undefined;
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      serveOptions: { token: 'secret', enableSessionShell: true },
+      secondaryShellImpl: async (_sessionId, _command, signal) => {
+        secondarySignal = signal;
+        markStarted?.();
+        await new Promise<void>((resolve) => {
+          signal?.addEventListener(
+            'abort',
+            () => {
+              markAborted?.();
+              resolve();
+            },
+            { once: true },
+          );
+        });
+        return { exitCode: null, output: '', aborted: true };
+      },
+    });
+    const pending = request(app)
+      .post('/session/secondary-session/shell')
+      .set('Host', host())
+      .set('Authorization', 'Bearer secret')
+      .set('X-Qwen-Client-Id', 'client-2')
+      .send({ command: 'sleep 10' });
+    const response = pending.then(
+      () => undefined,
+      () => undefined,
+    );
+
+    await started;
+    pending.abort();
+    await Promise.all([response, aborted]);
+
+    expect(secondarySignal?.aborted).toBe(true);
+    expect(primaryBridge.shellCalls).toEqual([]);
+    expect(secondaryBridge.shellCalls).toHaveLength(1);
+  });
+
+  it('preserves strict shell validation order for a secondary owner', async () => {
+    const disabled = makeHarness({ serveOptions: { token: 'secret' } });
+    const disabledResponse = await request(disabled.app)
+      .post('/session/secondary-session/shell')
+      .set('Host', host())
+      .set('Authorization', 'Bearer secret')
+      .send({ command: '' });
+    expect(disabledResponse.status).toBe(403);
+    expect(disabledResponse.body.code).toBe('session_shell_disabled');
+
+    const enabled = makeHarness({
+      serveOptions: { token: 'secret', enableSessionShell: true },
+    });
+    const tokenRequired = await request(enabled.app)
+      .post('/session/secondary-session/shell')
+      .set('Host', host())
+      .send({ command: 'pwd' });
+    expect(tokenRequired.status).toBe(401);
+    expect(tokenRequired.body.error).toBe('Unauthorized');
+
+    const clientRequired = await request(enabled.app)
+      .post('/session/secondary-session/shell')
+      .set('Host', host())
+      .set('Authorization', 'Bearer secret')
+      .send({ command: '' });
+    expect(clientRequired.status).toBe(403);
+    expect(clientRequired.body.code).toBe('client_id_required');
+
+    const emptyCommand = await request(enabled.app)
+      .post('/session/secondary-session/shell')
+      .set('Host', host())
+      .set('Authorization', 'Bearer secret')
+      .set('X-Qwen-Client-Id', 'client-2')
+      .send({ command: '   ' });
+    expect(emptyCommand.status).toBe(400);
+
+    expect(disabled.secondaryBridge.shellCalls).toEqual([]);
+    expect(enabled.primaryBridge.shellCalls).toEqual([]);
+    expect(enabled.secondaryBridge.shellCalls).toEqual([]);
+  });
+
+  it('keeps primary rewind and shell behavior when multiple runtimes exist', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      serveOptions: { token: 'secret', enableSessionShell: true },
+    });
+
+    await request(app)
+      .get('/session/primary-session/rewind/snapshots')
+      .set('Host', host())
+      .set('Authorization', 'Bearer secret')
+      .expect(200);
+    await request(app)
+      .post('/session/primary-session/rewind')
+      .set('Host', host())
+      .set('Authorization', 'Bearer secret')
+      .send({ promptId: 'primary-prompt', rewindFiles: false })
+      .expect(200);
+    await request(app)
+      .post('/session/primary-session/shell')
+      .set('Host', host())
+      .set('Authorization', 'Bearer secret')
+      .set('X-Qwen-Client-Id', 'client-1')
+      .send({ command: 'pwd' })
+      .expect(200);
+
+    expect(primaryBridge.rewindSnapshotCalls).toEqual(['primary-session']);
+    expect(primaryBridge.rewindCalls).toHaveLength(1);
+    expect(primaryBridge.shellCalls).toHaveLength(1);
+    expect(secondaryBridge.rewindSnapshotCalls).toEqual([]);
+    expect(secondaryBridge.rewindCalls).toEqual([]);
+    expect(secondaryBridge.shellCalls).toEqual([]);
+  });
+
+  it('keeps rewind and shell behavior in a single-workspace daemon', async () => {
+    const bridge = makeBridge(PRIMARY_CWD, [
+      makeSummary('primary-session', PRIMARY_CWD),
+    ]);
+    const app = createServeApp(
+      {
+        ...baseOpts,
+        workspace: PRIMARY_CWD,
+        token: 'secret',
+        enableSessionShell: true,
+      },
+      undefined,
+      { bridge },
+    );
+    const auth = (test: request.Test) =>
+      test.set('Host', host()).set('Authorization', 'Bearer secret');
+
+    const capabilities = await auth(request(app).get('/capabilities'));
+    expect(capabilities.body.features).not.toContain(
+      'multi_workspace_session_rewind',
+    );
+    expect(capabilities.body.features).not.toContain(
+      'multi_workspace_session_shell',
+    );
+
+    await auth(
+      request(app).get('/session/primary-session/rewind/snapshots'),
+    ).expect(200);
+    await auth(request(app).post('/session/primary-session/rewind'))
+      .send({ promptId: 'primary-prompt', rewindFiles: false })
+      .expect(200);
+    await auth(request(app).post('/session/primary-session/shell'))
+      .set('X-Qwen-Client-Id', 'client-1')
+      .send({ command: 'pwd' })
+      .expect(200);
+
+    expect(bridge.rewindSnapshotCalls).toEqual(['primary-session']);
+    expect(bridge.rewindCalls).toHaveLength(1);
+    expect(bridge.shellCalls).toHaveLength(1);
+  });
+
+  it('preserves rewind busy, invalid-target, and partial-restore contracts', async () => {
+    const postRewind = (
+      app: ReturnType<typeof createServeApp>,
+      promptId: string,
+    ) =>
+      request(app)
+        .post('/session/secondary-session/rewind')
+        .set('Host', host())
+        .set('Authorization', 'Bearer secret')
+        .send({ promptId });
+
+    const busy = makeHarness({
+      serveOptions: { token: 'secret' },
+      secondaryRewindImpl: async (sessionId) => {
+        throw new SessionBusyError(sessionId);
+      },
+    });
+    const busyResponse = await postRewind(busy.app, 'busy');
+    expect(busyResponse.status).toBe(409);
+    expect(busyResponse.body.code).toBe('session_busy');
+    expect(busyResponse.headers['retry-after']).toBe('5');
+
+    const invalid = makeHarness({
+      serveOptions: { token: 'secret' },
+      secondaryRewindImpl: async (sessionId) => {
+        throw new InvalidRewindTargetError(sessionId);
+      },
+    });
+    const invalidResponse = await postRewind(invalid.app, 'invalid');
+    expect(invalidResponse.status).toBe(400);
+    expect(invalidResponse.body.code).toBe('invalid_rewind_target');
+
+    const partial = makeHarness({
+      serveOptions: { token: 'secret' },
+      secondaryRewindImpl: async () => ({
+        rewound: false,
+        targetTurnIndex: 1,
+        filesChanged: ['restored.txt'],
+        filesFailed: ['failed.txt'],
+      }),
+    });
+    const partialResponse = await postRewind(partial.app, 'partial');
+    expect(partialResponse.status).toBe(200);
+    expect(partialResponse.body).toEqual({
+      rewound: false,
+      targetTurnIndex: 1,
+      filesChanged: ['restored.txt'],
+      filesFailed: ['failed.txt'],
+    });
   });
 
   it('dispatches secondary events, permissions, pending prompts, and close', async () => {
