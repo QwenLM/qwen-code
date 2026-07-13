@@ -607,15 +607,27 @@ export function registerWorkspaceManagementRoutes(
       let acpDraining = false;
       const rollbackDrain = (): void => {
         if (acpDraining) {
-          getAcpHandle?.()?.cancelWorkspaceDrain(runtime.workspaceId);
+          try {
+            getAcpHandle?.()?.cancelWorkspaceDrain(runtime.workspaceId);
+          } catch {
+            // Continue rolling back the remaining gates.
+          }
           acpDraining = false;
         }
         if (controllerDraining) {
-          runtimeRemoval.cancelDrain(runtime);
+          try {
+            runtimeRemoval.cancelDrain(runtime);
+          } catch {
+            // Continue rolling back the remaining gates.
+          }
           controllerDraining = false;
         }
         if (registryDraining) {
-          workspaceRegistry.cancelDrain(runtime);
+          try {
+            workspaceRegistry.cancelDrain(runtime);
+          } catch {
+            // Every rollback gate has now been attempted.
+          }
           registryDraining = false;
         }
       };

@@ -639,6 +639,46 @@ describe('DELETE /workspaces/:workspace', () => {
     );
   });
 
+  it('continues rolling gates back when cancel hooks throw', async () => {
+    const runtime = makeRuntime(REAL_DIR);
+    const runtimeRemoval = createRemovalController();
+    vi.mocked(runtimeRemoval.getActivity)
+      .mockReturnValueOnce({ pendingSessionStarts: 0, channelWorkers: 0 })
+      .mockReturnValueOnce({ pendingSessionStarts: 1, channelWorkers: 0 });
+    vi.mocked(runtimeRemoval.cancelDrain).mockImplementation(() => {
+      throw new Error('controller rollback failed');
+    });
+    const acpHandle = {
+      beginWorkspaceDrain: vi.fn(),
+      cancelWorkspaceDrain: vi.fn(() => {
+        throw new Error('ACP rollback failed');
+      }),
+      getWorkspaceActivity: vi.fn(() => ({
+        acpConnections: 0,
+        memoryTasks: 0,
+      })),
+    };
+    const { app, deps } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      runtimeRemoval,
+      getAcpHandle: () => acpHandle as never,
+    });
+
+    const res = await request(app).delete(
+      `/workspaces/${encodeURIComponent(runtime.workspaceId)}`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(acpHandle.cancelWorkspaceDrain).toHaveBeenCalledWith(
+      runtime.workspaceId,
+    );
+    expect(runtimeRemoval.cancelDrain).toHaveBeenCalledWith(runtime);
+    expect(deps.workspaceRegistry.cancelDrain).toHaveBeenCalledWith(runtime);
+    expect(deps.workspaceRegistry.getByWorkspaceId(runtime.workspaceId)).toBe(
+      runtime,
+    );
+  });
+
   it('rolls drain back when persistent identity removal fails', async () => {
     const runtime = makeRuntime(REAL_DIR);
     const runtimeRemoval = createRemovalController();
