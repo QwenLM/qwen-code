@@ -998,32 +998,50 @@
 }
 
 @container (max-width: 699px) {
-  /* Keep the leading controls on a single row on narrow screens. The branch
-     chip yields space first — truncating via its ellipsis, down to just the
-     icon if needed — instead of pushing the mode/model buttons onto a second
-     line and making the composer taller (#6753). */
   .toolbarLeft {
     flex-wrap: nowrap;
+    gap: 2px;
   }
 
   .toolbarLeft .dropdownWrapper {
-    flex: 0 0 auto;
+    width: 28px;
+    flex: 0 0 28px;
   }
 
   .gitBranchChip {
-    max-width: 140px;
-    flex-shrink: 1;
+    width: 28px;
+    max-width: 28px;
+    flex: 0 0 28px;
+    gap: 0;
+    padding: 0 6px;
   }
 
-  /* Keep the workspace name legible in a narrow split pane — it is the pane's
-     identity, so unlike the action buttons it never collapses to an icon; it
-     only tightens and truncates (the full cwd stays in the tooltip). It yields
-     space the same way the branch chip does so the row never wraps. */
-  .toolbarLeft .workspaceChip {
-    max-width: 108px;
-    flex-shrink: 1;
+  .gitBranchText,
+  .workspaceChipText,
+  .modeToolBtn .toolBtnText,
+  .modelToolBtn .toolBtnText,
+  .modeToolBtn .toolBtnArrow,
+  .modelToolBtn .toolBtnArrow {
+    display: none;
+  }
+
+  .toolbarLeft .workspaceChip,
+  .workspaceSelectTooltipTrigger,
+  .workspaceSelectTrigger,
+  .modeToolBtn,
+  .modelToolBtn {
+    width: 28px;
+    max-width: 28px;
+    flex: 0 0 28px;
+    gap: 0;
     padding: 0 6px;
-    gap: 4px;
+    justify-content: center;
+    box-sizing: border-box;
+  }
+
+  .toolbarLeft .workspaceSelectTrigger [data-slot='select-value'],
+  .workspaceSelectTrigger > svg:last-child {
+    display: none;
   }
 }
 
@@ -1211,6 +1229,41 @@
 .toolBtn:hover {
   background: var(--chat-editor-bg-tertiary);
   color: var(--chat-editor-text-primary);
+}
+
+.workspaceSelectTrigger {
+  min-width: 0;
+  max-width: 176px;
+  align-items: center;
+  box-shadow: none;
+}
+
+.workspaceSelectTrigger[data-disabled] {
+  cursor: default;
+  opacity: 1;
+}
+
+.workspaceSelectTrigger > svg {
+  display: block;
+  flex-shrink: 0;
+  align-self: center;
+}
+
+.workspaceSelectTooltipTrigger {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 176px;
+}
+
+.workspaceSelectTrigger [data-slot='select-value'] {
+  display: block;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-self: center;
+  line-height: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .toolBtn[data-tooltip]:hover::after,
