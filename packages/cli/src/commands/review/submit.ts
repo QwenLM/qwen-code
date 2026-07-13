@@ -28,7 +28,7 @@
 import type { CommandModule } from 'yargs';
 import { readFileSync } from 'node:fs';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { gh, setGhHost } from './lib/gh.js';
+import { ghWithInput, setGhHost } from './lib/gh.js';
 import { parseReviewArgs } from './parse-args.js';
 import {
   skillArgsPath,
@@ -390,9 +390,13 @@ export function runSubmit(args: SubmitArgs): void {
     return;
   }
 
-  // `--input` so the body's newlines reach GitHub as newlines. Building the
-  // request with `-f body=...` re-escapes them and the footer arrives as text.
-  gh('api', target, '--input', args.review);
+  // Send the bytes we validated, over stdin — not the pathname. `--input <file>`
+  // re-opens the file here, so another workspace process (or a symlink swap)
+  // could replace or truncate it between the validation above and this call, and
+  // GitHub would receive a payload that never passed the gate. `--input -` posts
+  // exactly the object we parsed and checked. (Still `--input`, never `-f body=`,
+  // so the body's newlines reach GitHub as newlines.)
+  ghWithInput(JSON.stringify(payload), 'api', target, '--input', '-');
   writeStderrLine(
     `Posted ${payload.event} to ${args.repo}#${args.pr} — ${auth.why}.`,
   );

@@ -67,6 +67,27 @@ export function gh(...args: string[]): string {
 }
 
 /**
+ * Run `gh` with `input` on its stdin. Returns stdout, trimmed.
+ *
+ * Exists so a caller can send bytes it already holds in memory instead of a
+ * pathname `gh` would re-open. Passing `--input <file>` re-reads the file at
+ * call time, so a swap or truncation between validating that file and posting it
+ * sends GitHub something other than what passed validation — a review the author
+ * did not write, or a 422. Sending the validated bytes over stdin (`--input -`)
+ * closes that window: the bytes checked are the bytes posted.
+ */
+export function ghWithInput(input: string, ...args: string[]): string {
+  return execFileSync('gh', args, {
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    env: ghEnv(),
+    input,
+  })
+    .replace(/\r\n/g, '\n')
+    .trim();
+}
+
+/**
  * Run `gh api <path>` (optionally with `--jq <expr>`) and JSON-parse the
  * result. Returns null when the response is empty (e.g. 204 / no content).
  */

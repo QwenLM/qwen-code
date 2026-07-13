@@ -253,6 +253,33 @@ describe('captureLocalDiff — untracked files', () => {
     expect(res.text).not.toContain('dirlink');
   });
 
+  it('does not capture the review own .qwen/tmp scratch files', () => {
+    // The review writes its args/parse-args/diff/plan under .qwen/tmp before this
+    // capture runs; in a repo that does not ignore .qwen they would show up as
+    // the user's untracked work and the review would report on its own plumbing.
+    write('.qwen/tmp/qwen-skill-args-review.txt', '6771 --comment\n');
+    write('.qwen/tmp/qwen-review-local-plan.json', '{}\n');
+    write('real.ts', 'export const r = 1;\n');
+
+    const res = capture();
+    expect(res.untracked).toEqual(['real.ts']);
+    expect(res.text).not.toContain('.qwen/tmp');
+  });
+
+  it('reports an oversized tracked diff instead of inlining it', () => {
+    // The aggregate budget covered only untracked files; a tracked diff could
+    // grow to the 512 MiB gitRaw buffer. Stage one big tracked file past the
+    // whole-capture cap and confirm it is skipped, not concatenated.
+    const big =
+      'export const x = "' + 'y'.repeat(MAX_UNTRACKED_TOTAL_BYTES) + '";\n';
+    write('huge.ts', big);
+    git('add', 'huge.ts');
+
+    const res = capture();
+    expect(res.skipped.some((f) => f.path === 'tracked changes')).toBe(true);
+    expect(res.text).not.toContain('huge.ts');
+  });
+
   it('reviews a dangling symlink instead of skipping it', () => {
     // Git renders a symlink as its **link text** at mode 120000, and the link
     // text does not depend on the target existing. A symlink pointing nowhere is

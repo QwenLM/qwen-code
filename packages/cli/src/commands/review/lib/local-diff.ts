@@ -314,13 +314,39 @@ export function captureLocalDiff(opts: {
     base,
   ];
   if (pathspec) trackedArgs.push('--', pathspec);
-  const parts: Buffer[] = [gitRaw(...trackedArgs)];
+  const trackedDiff = gitRaw(...trackedArgs);
 
   const untracked: string[] = [];
   const skipped: SkippedFile[] = [];
 
+  // The aggregate budget covered only untracked files; the tracked diff could
+  // still grow to `gitRaw`'s 512 MiB buffer and then be concatenated, decoded,
+  // and re-split by the planner. A tracked diff over the whole-capture cap is
+  // itself the pathology the cap exists for — a generated file committed, a
+  // vendored tree staged — so it is reported, not inlined.
+  const parts: Buffer[] = [];
+  if (trackedDiff.length > MAX_UNTRACKED_TOTAL_BYTES) {
+    skipped.push({
+      path: 'tracked changes',
+      bytes: trackedDiff.length,
+      reason:
+        `the tracked diff is ${Math.round(trackedDiff.length / 1_000_000)} MB, ` +
+        `over the ${Math.round(MAX_UNTRACKED_TOTAL_BYTES / 1_000_000)} MB ` +
+        `capture cap — review it in smaller commits`,
+    });
+  } else {
+    parts.push(trackedDiff);
+  }
+
   if (includeUntracked) {
-    const candidates = listUntracked(repoRoot, pathspec);
+    // The review writes its own scratch files under `.qwen/tmp` — the args
+    // record, the parsed-args verdict, the diff, the plan — *before* this
+    // capture runs. In a repo that does not ignore `.qwen`, `ls-files --others`
+    // lists them as the user's untracked work, and the review would report on
+    // its own plumbing. They are never the change under review; drop them.
+    const candidates = listUntracked(repoRoot, pathspec).filter(
+      (p) => !p.startsWith('.qwen/tmp/') && p !== '.qwen/tmp',
+    );
 
     if (candidates.length > MAX_UNTRACKED_FILES) {
       // Checked before the loop: the whole point is to spend zero spawns on a

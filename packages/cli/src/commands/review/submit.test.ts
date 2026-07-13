@@ -16,7 +16,8 @@ import { join } from 'node:path';
 
 const ghMock = vi.hoisted(() => vi.fn(() => ''));
 vi.mock('./lib/gh.js', () => ({
-  gh: ghMock,
+  ghWithInput: ghMock,
+  gh: vi.fn(() => ''),
   setGhHost: vi.fn(),
 }));
 
@@ -167,11 +168,14 @@ describe('the posting gate', () => {
 
     expect(ghMock).toHaveBeenCalledOnce();
     const call = ghMock.mock.calls[0] as unknown as string[];
+    // First arg is the JSON payload sent over stdin — the validated bytes, not a
+    // pathname `gh` would re-open (the TOCTOU a review found).
+    expect(JSON.parse(call[0]).event).toBe('COMMENT');
     expect(call).toContain('api');
     expect(call).toContain('repos/QwenLM/qwen-code/pulls/6771/reviews');
-    // `--input`, never `-f body=` — the latter re-escapes the newlines and the
-    // footer arrives in the posted text as a literal `\n`.
+    // `--input -` (stdin), never `-f body=` which re-escapes newlines.
     expect(call).toContain('--input');
+    expect(call).toContain('-');
   });
 
   it('posts when the user asked for it in so many words', () => {
