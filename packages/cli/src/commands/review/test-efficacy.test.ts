@@ -10,6 +10,7 @@ import {
   planTestEfficacy,
   classifyProbeRun,
   safeRmWithin,
+  probeCreateFailureDetail,
 } from './test-efficacy.js';
 import {
   mkdtempSync,
@@ -153,6 +154,38 @@ describe('planTestEfficacy', () => {
     );
     expect(plan.probes).toEqual([]);
     expect(plan.revert).toEqual([]);
+  });
+});
+
+describe('probeCreateFailureDetail', () => {
+  // The branch this string is built on fires only when `git worktree add` fails,
+  // which no real-git test can force portably (the one lever — an unwritable
+  // `.git/worktrees` — is bypassed by root and differs under CI's unprivileged
+  // user). The composition is the part with logic in it, so it is pinned here.
+  it('names the add failure, and folds in the sweep stderr that explains it', () => {
+    const got = probeCreateFailureDetail(
+      new Error("fatal: '/w/wt-probe' already exists"),
+      "fatal: '/w/wt-probe' is not a working tree\n",
+    );
+    expect(got).toContain('probe worktree could not be created');
+    expect(got).toContain("fatal: '/w/wt-probe' already exists");
+    // The sweep is usually the explanation for the add failure — keep it.
+    expect(got).toContain(
+      "(stale-tree sweep also reported: fatal: '/w/wt-probe' is not a working tree)",
+    );
+  });
+
+  it('omits the sweep clause when the sweep said nothing', () => {
+    // The normal case: no stale tree, so the sweep is silent. A dangling empty
+    // "(stale-tree sweep also reported: )" would be noise in the report.
+    const got = probeCreateFailureDetail(new Error('disk full'), '   \n');
+    expect(got).toBe('probe worktree could not be created: disk full');
+  });
+
+  it('survives a non-Error throw', () => {
+    expect(probeCreateFailureDetail('boom', '')).toBe(
+      'probe worktree could not be created: boom',
+    );
   });
 });
 

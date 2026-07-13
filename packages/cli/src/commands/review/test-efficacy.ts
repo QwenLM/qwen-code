@@ -342,6 +342,31 @@ export function safeRmWithin(worktree: string, relPath: string): void {
 const existsAtBase = (cwd: string, base: string, path: string) =>
   existsAtRev(cwd, base, path);
 
+/**
+ * The `inconclusive` detail for a probe worktree that could not be created.
+ *
+ * Pure, and extracted for that reason: the branch it lives on fires only when
+ * `git worktree add` fails, and there is no portable way to force that in a
+ * real-git test — the one lever (making `.git/worktrees` unwritable) is bypassed
+ * by root and behaves differently under CI's unprivileged user, so a test built
+ * on it would assert one thing locally and another in CI. The composition is the
+ * part with logic in it, so it is testable here on its own.
+ *
+ * The stale-sweep's stderr is folded in because it is usually the explanation:
+ * when `add` fails on a leftover the sweep could not clear, the sweep is what
+ * says why.
+ */
+export function probeCreateFailureDetail(
+  err: unknown,
+  sweepStderr: string,
+): string {
+  const sweepErr = sweepStderr.trim();
+  return (
+    `probe worktree could not be created: ${err instanceof Error ? err.message : String(err)}` +
+    (sweepErr ? ` (stale-tree sweep also reported: ${sweepErr})` : '')
+  );
+}
+
 async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   const { report, worktree, base, out } = args;
   const plan = JSON.parse(readFileSync(report, 'utf8')) as {
@@ -431,13 +456,8 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     } catch (e) {
       // Could not isolate — probe nothing rather than fall back to mutating the
       // shared tree. Probes are inconclusive; the unreachable findings, which
-      // need no probe, still ship. Surface the stale-sweep's stderr too: when the
-      // `add` fails on a leftover the sweep could not clear, that is the context
-      // that explains why.
-      const sweepErr = String(sweep?.stderr ?? '').trim();
-      const detail =
-        `probe worktree could not be created: ${e instanceof Error ? e.message : String(e)}` +
-        (sweepErr ? ` (stale-tree sweep also reported: ${sweepErr})` : '');
+      // need no probe, still ship.
+      const detail = probeCreateFailureDetail(e, String(sweep?.stderr ?? ''));
       for (const file of probes) {
         results.push({ file, verdict: 'inconclusive' as const, detail });
       }
