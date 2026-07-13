@@ -974,7 +974,7 @@ describe('modelConfigResolver', () => {
       });
 
       expect(result.config.model).toBe('claude-opus-4-6');
-      expect(result.config.contextWindowSize).toBe(200_000);
+      expect(result.config.contextWindowSize).toBe(1_000_000);
       expect(result.sources['contextWindowSize'].kind).toBe('computed');
     });
 

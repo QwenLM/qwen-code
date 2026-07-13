@@ -25,7 +25,10 @@ import type { BridgeEvent, EventBus } from './eventBus.js';
 // so a rename can't silently break the protocol.
 import { MID_TURN_MESSAGE_INJECTED_EVENT } from './daemonEventTypes.js';
 import { MID_TURN_QUEUE_DRAIN_METHOD } from './bridgeTypes.js';
-import type { MidTurnQueueEntry } from './bridgeTypes.js';
+import type {
+  BridgePendingInteraction,
+  MidTurnQueueEntry,
+} from './bridgeTypes.js';
 import { SERVE_CONTROL_EXT_METHODS } from './status.js';
 import type {
   ClientMcpMessageSender,
@@ -89,6 +92,88 @@ function isFsErrorShape(err: unknown): err is FsErrorShape {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function pendingInteractionOptions(
+  options: RequestPermissionRequest['options'],
+): BridgePendingInteraction['options'] {
+  return options.map((option) => ({
+    optionId: String((option as { optionId?: unknown }).optionId ?? ''),
+    ...(typeof (option as { name?: unknown }).name === 'string'
+      ? { label: (option as { name: string }).name }
+      : {}),
+    ...(typeof (option as { kind?: unknown }).kind === 'string'
+      ? { kind: (option as { kind: string }).kind }
+      : {}),
+  }));
+}
+
+function pendingInteractionFromRequest(
+  requestId: string,
+  params: RequestPermissionRequest,
+): BridgePendingInteraction {
+  const toolCall = params.toolCall as unknown as Record<string, unknown>;
+  const meta = isRecord(toolCall['_meta']) ? toolCall['_meta'] : undefined;
+  const rawInput = toolCall['rawInput'];
+  const options = pendingInteractionOptions(
+    Array.isArray(params.options) ? params.options : [],
+  );
+  const isUserQuestion = meta?.['qwenInteractionKind'] === 'user_question';
+
+  if (isUserQuestion) {
+    const rawQuestions = Array.isArray(meta?.['qwenQuestions'])
+      ? meta['qwenQuestions']
+      : isRecord(rawInput) && Array.isArray(rawInput['questions'])
+        ? rawInput['questions']
+        : [];
+    return {
+      requestId,
+      kind: 'user_question',
+      createdAt: new Date().toISOString(),
+      ...(typeof toolCall['title'] === 'string'
+        ? { title: toolCall['title'] }
+        : {}),
+      questions: rawQuestions.flatMap((question, index) =>
+        isRecord(question) ? [{ ...question, answerKey: String(index) }] : [],
+      ),
+      options,
+    };
+  }
+
+  return {
+    requestId,
+    kind: 'permission',
+    createdAt: new Date().toISOString(),
+    action: {
+      ...(typeof toolCall['kind'] === 'string'
+        ? { type: toolCall['kind'] }
+        : {}),
+      ...(typeof toolCall['title'] === 'string'
+        ? { title: toolCall['title'] }
+        : {}),
+      ...(toolCall['content'] !== undefined
+        ? { content: toolCall['content'] }
+        : {}),
+      ...(toolCall['locations'] !== undefined
+        ? { locations: toolCall['locations'] }
+        : {}),
+      ...(rawInput !== undefined ? { input: rawInput } : {}),
+    },
+    options,
+  };
+}
+
+function fallbackPendingPermissionInteraction(
+  requestId: string,
+  options: RequestPermissionRequest['options'],
+): BridgePendingInteraction {
+  return {
+    requestId,
+    kind: 'permission',
+    createdAt: new Date().toISOString(),
+    action: {},
+    options: pendingInteractionOptions(options),
+  };
 }
 
 function artifactPayloadFields(
@@ -235,7 +320,8 @@ function isTrustedArtifactToolUpdate(
  */
 function preserveFsErrorOverAcp(err: unknown): never {
   if (isFsErrorShape(err)) {
-    throw new RequestError(-32603, err.message, {
+    const code = err.kind === 'parse_error' ? -32602 : -32603;
+    throw new RequestError(code, err.message, {
       errorKind: err.kind,
       ...(err.hint !== undefined ? { hint: err.hint } : {}),
       ...(err.status !== undefined ? { status: err.status } : {}),
@@ -268,9 +354,9 @@ function resolutionToAcpResponse(
  * Bounded buffering for ACP `extNotification` frames that arrive on
  * `BridgeClient` before the matching session has been registered in
  * `byId`. The bridge populates `byId` only AFTER `connection.newSession`
- * returns, but the child's MCP discovery runs INSIDE `newSession` and
- * may fire budget events synchronously before the response makes it
- * back. Without buffering, those frames are silently dropped.
+ * returns, but child initialization may fire notifications synchronously
+ * before the response makes it back. Without buffering, those frames are
+ * silently dropped.
  *
  * The triple bound (max sessions x max events per session x TTL)
  * caps worst-case heap retention even if a malicious / buggy child
@@ -354,8 +440,8 @@ function sliceLineRange(
  * structurally satisfies this interface, so no explicit conversion
  * is required.
  *
- * Only four fields cross the boundary: `sessionId`, `events`,
- * `pendingPermissionIds`, `activePromptOriginatorClientId`. New fields
+ * Only five fields cross the boundary: `sessionId`, `events`,
+ * `pendingPermissionIds`, `pendingInteractions`, `activePromptOriginatorClientId`. New fields
  * BridgeClient grows must be added here too (and the factory's
  * `SessionEntry` is required to provide them — TS enforces the
  * structural match at the callback signature).
@@ -364,7 +450,10 @@ export interface BridgeClientSessionEntry {
   sessionId: string;
   events: EventBus;
   artifacts: SessionArtifactStore;
+  recordingDegraded: boolean;
   pendingPermissionIds: Set<string>;
+  /** Pollable pending human interactions, keyed by permission request id. */
+  pendingInteractions: Map<string, BridgePendingInteraction>;
   /**
    * Mid-turn user messages queued by the browser, drained here when the ACP
    * child calls the `craft/drainMidTurnQueue` ext-method. Owned by the full
@@ -542,10 +631,9 @@ export class BridgeClient implements Client {
     // this prompt. The mediator validates the voter's `optionId`
     // against this set so a malicious client can't forge an option
     // (e.g. `ProceedAlways*`) the agent intentionally hid.
+    const options = Array.isArray(params.options) ? params.options : [];
     const allowedOptionIds = new Set(
-      params.options.map((o: { optionId?: unknown }) =>
-        String(o.optionId ?? ''),
-      ),
+      options.map((o: { optionId?: unknown }) => String(o.optionId ?? '')),
     );
     allowedOptionIds.delete('');
 
@@ -573,7 +661,7 @@ export class BridgeClient implements Client {
         requestId,
         sessionId: entry.sessionId,
         toolCall: params.toolCall,
-        options: params.options,
+        options,
       },
       ...(entry.activePromptOriginatorClientId
         ? { originatorClientId: entry.activePromptOriginatorClientId }
@@ -585,7 +673,22 @@ export class BridgeClient implements Client {
     // path doesn't need to roll back. The mediator's
     // `forgetSession` is the only thing that drains this index (via
     // the bridge's `cancelPendingForSession`).
+    let interaction: BridgePendingInteraction | undefined;
+    try {
+      interaction = pendingInteractionFromRequest(requestId, {
+        ...params,
+        options,
+      });
+    } catch (error) {
+      writeStderrLine(
+        `qwen serve: failed to snapshot pending interaction ${requestId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      interaction = fallbackPendingPermissionInteraction(requestId, options);
+    }
     entry.pendingPermissionIds.add(requestId);
+    if (interaction) entry.pendingInteractions.set(requestId, interaction);
     try {
       const record: PermissionRequestRecord = {
         requestId,
@@ -601,6 +704,7 @@ export class BridgeClient implements Client {
       return resolutionToAcpResponse(resolution);
     } finally {
       entry.pendingPermissionIds.delete(requestId);
+      entry.pendingInteractions.delete(requestId);
     }
   }
 
@@ -783,11 +887,12 @@ export class BridgeClient implements Client {
   }
 
   /**
-   * Bounded early-event buffer. Frames are keyed by sessionId; each
-   * entry tracks its `expiresAt` for lazy TTL-based eviction in
-   * `bufferEarlyEvent`. Drained by `drainEarlyEvents` whenever the
-   * bridge registers a session with a matching id. See
-   * MAX_EARLY_EVENT_* constants for capacity bounds.
+   * Bounded early-event buffer. The map is scoped to this BridgeClient and
+   * therefore to one channel; a stale channel cannot seed a fresh channel's
+   * future session. Frames are keyed by sessionId; each entry tracks its
+   * `expiresAt` for lazy TTL-based eviction in `bufferEarlyEvent`. Drained by
+   * `drainEarlyEvents` whenever the bridge registers a session with a matching
+   * id. See MAX_EARLY_EVENT_* constants for capacity bounds.
    */
   private readonly earlyEvents = new Map<
     string,
@@ -820,7 +925,7 @@ export class BridgeClient implements Client {
   /**
    * Allow-list of sessionIds currently being restored via
    * `session/load` / `session/resume`. Bypasses the tombstone check
-   * in `bufferEarlyEvent` so restore-time guardrail events for a
+   * in `bufferEarlyEvent` so restore-time events for a
    * previously-closed id flow through to the future
    * `createSessionEntry -> drainEarlyEvents` call.
    *
@@ -1046,6 +1151,9 @@ export class BridgeClient implements Client {
       ...(result.stopReason !== undefined
         ? { stopReason: result.stopReason }
         : {}),
+      ...(result.parentSessionPersisted !== undefined
+        ? { parentSessionPersisted: result.parentSessionPersisted }
+        : {}),
     };
   }
 
@@ -1054,6 +1162,7 @@ export class BridgeClient implements Client {
    * `qwen/notify/session/model-update`,
    * `qwen/notify/session/mode-update`,
    * `qwen/notify/session/title-update` (auto/in-process session titles),
+   * `qwen/notify/session/recording-degraded`,
    * `qwen/notify/session/prompt-suggestion` (followup assist),
    * `qwen/notify/session/artifact-event` (hook artifacts),
    * `qwen/notify/session/terminal-sequence`, and
@@ -1099,6 +1208,33 @@ export class BridgeClient implements Client {
       } catch {
         /* bus already closed */
       }
+      return;
+    }
+    if (method === 'qwen/notify/session/recording-degraded') {
+      const sessionId = params['sessionId'];
+      if (
+        params['v'] !== 1 ||
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0 ||
+        params['reason'] !== 'write_failed'
+      ) {
+        writeStderrLine(
+          `[demux] session=${typeof sessionId === 'string' ? sessionId : '<missing>'} type=session_recording_degraded action=dropped reason=malformed`,
+        );
+        return;
+      }
+      const entry = this.resolveEntry(sessionId);
+      if (entry && !this.ownsSession(sessionId)) {
+        writeStderrLine(
+          `[demux] session=${sessionId} type=session_recording_degraded action=dropped reason=session_not_owned`,
+        );
+        return;
+      }
+      if (entry) entry.recordingDegraded = true;
+      this.publishExtNotification(sessionId, 'session_recording_degraded', {
+        sessionId,
+        reason: 'write_failed',
+      });
       return;
     }
     if (method === 'qwen/notify/session/prompt-suggestion') {
@@ -1267,7 +1403,7 @@ export class BridgeClient implements Client {
     // No entry yet — buffer for `drainEarlyEvents`. The bridge calls
     // `drainEarlyEvents` immediately after `byId.set(sessionId, entry)`
     // in `createSessionEntry`; if the session never registers (spawn
-    // failure), the entry is GC'd by TTL after EARLY_EVENT_TTL_MS.
+    // failure), the event is GC'd by TTL after EARLY_EVENT_TTL_MS.
     this.bufferEarlyEvent(sessionId, frame);
   }
 
@@ -1470,14 +1606,14 @@ export class BridgeClient implements Client {
     //
     // Skip the tombstone check for ids currently being restored so a
     // `close -> load same id` sequence within 60s doesn't lose
-    // restore-time guardrail events.
+    // restore-time early events.
     this.sweepExpiredTombstones(now);
     if (
       this.tombstonedSessionIds.has(sessionId) &&
       !this.inFlightRestoreIds.has(sessionId)
     ) {
       writeStderrLine(
-        `qwen serve: dropping mcp guardrail extNotification ` +
+        `qwen serve: dropping early extNotification ` +
           `for tombstoned session ${JSON.stringify(sessionId)} ` +
           `(post-close stale event)`,
       );
@@ -1490,7 +1626,7 @@ export class BridgeClient implements Client {
         // Hitting this cap means the daemon is under notification
         // pressure from 64+ concurrent sessions — worth surfacing.
         writeStderrLine(
-          `qwen serve: dropping mcp guardrail extNotification — ` +
+          `qwen serve: dropping early extNotification — ` +
             `early-event buffer at MAX_EARLY_EVENT_SESSIONS ` +
             `(${MAX_EARLY_EVENT_SESSIONS}); possible session-id fanout abuse`,
         );
@@ -1501,7 +1637,7 @@ export class BridgeClient implements Client {
     }
     if (buf.frames.length >= MAX_EARLY_EVENTS_PER_SESSION) {
       writeStderrLine(
-        `qwen serve: dropping mcp guardrail extNotification ` +
+        `qwen serve: dropping early extNotification ` +
           `for session ${JSON.stringify(sessionId)} — per-session ` +
           `cap (${MAX_EARLY_EVENTS_PER_SESSION}) reached`,
       );
@@ -1548,7 +1684,7 @@ export class BridgeClient implements Client {
    * Mark a sessionId as currently being restored via `session/load` /
    * `session/resume`. While in this set, `bufferEarlyEvent` accepts
    * frames for the id even if it's tombstoned — so restore-time
-   * guardrail events from the freshly-restored child reach
+   * early events from the freshly-restored child reach
    * `drainEarlyEvents` instead of being rejected by the tombstone.
    *
    * Bridge factory calls this BEFORE awaiting the ACP restore call.
@@ -1590,7 +1726,12 @@ export class BridgeClient implements Client {
     this.tombstonedSessionIds.delete(sessionId);
     const buf = this.earlyEvents.get(sessionId);
     if (!buf) return;
-    for (const frame of buf.frames) entry.events.publish(frame);
+    for (const frame of buf.frames) {
+      if (frame.type === 'session_recording_degraded') {
+        entry.recordingDegraded = true;
+      }
+      entry.events.publish(frame);
+    }
     this.earlyEvents.delete(sessionId);
   }
 
@@ -1773,6 +1914,26 @@ export class BridgeClient implements Client {
     // bytes wanted".
     if (typeof params.limit === 'number' && params.limit <= 0) {
       return { content: '' };
+    }
+    if (
+      typeof params.limit === 'number' &&
+      params.limit > 0 &&
+      !Number.isSafeInteger(params.limit)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`limit\` must be a positive integer, got ${params.limit}`,
+      );
+    }
+    if (
+      typeof params.line === 'number' &&
+      params.line > 0 &&
+      !Number.isSafeInteger(params.line)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`line\` must be a positive integer, got ${params.line}`,
+      );
     }
     // BSA0E: cap the file size we'll buffer into RSS at 100 MiB so a
     // request like `{ line: 1, limit: 10 }` against a 500 MB log

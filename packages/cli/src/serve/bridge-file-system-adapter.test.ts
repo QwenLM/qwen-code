@@ -365,6 +365,28 @@ describe('createBridgeFileSystemAdapter', () => {
       });
       expect(response.content).toBe('x\ny\n');
     });
+
+    it('readText surfaces workspace-file-system parse_error for fractional positive limits', async () => {
+      const target = path.join(tmpDir, 'fractional-limit.txt');
+      await fsp.writeFile(target, 'x\ny\nz\n', 'utf8');
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+      );
+
+      const err = await adapter
+        .readText({
+          path: target,
+          sessionId: 'sess:test',
+          line: 1,
+          limit: 1.5,
+        })
+        .catch((e: unknown) => e);
+
+      expect((err as { kind?: string }).kind).toBe('parse_error');
+      expect((err as Error).message).toContain(
+        'limit must be a positive integer',
+      );
+    });
   });
 
   describe('boundary enforcement', () => {

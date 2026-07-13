@@ -986,6 +986,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   async function writeStoredSession(
     sessionId: string,
     state: 'active' | 'archived' = 'active',
+    parentSessionId?: string,
   ): Promise<void> {
     const chatsDir = path.join(
       new Storage('/ws').getProjectDir(),
@@ -993,9 +994,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       ...(state === 'archived' ? ['archive'] : []),
     );
     await fs.mkdir(chatsDir, { recursive: true });
-    await fs.writeFile(
-      path.join(chatsDir, `${sessionId}.jsonl`),
-      `${JSON.stringify({
+    const lines = [
+      JSON.stringify({
         uuid: `${sessionId}-user-1`,
         parentUuid: null,
         sessionId,
@@ -1003,7 +1003,28 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         type: 'user',
         message: { role: 'user', parts: [{ text: 'hello' }] },
         cwd: '/ws',
-      })}\n`,
+      }),
+    ];
+    if (parentSessionId !== undefined) {
+      // Mirror ChatRecordingService.recordParentSession: one `parent_session`
+      // system record near the head of the transcript that SessionService
+      // rehydrates into the summary's parentSessionId.
+      lines.push(
+        JSON.stringify({
+          uuid: `${sessionId}-parent-1`,
+          parentUuid: `${sessionId}-user-1`,
+          sessionId,
+          timestamp: '2026-06-30T00:00:00.000Z',
+          type: 'system',
+          subtype: 'parent_session',
+          systemPayload: { parentSessionId },
+          cwd: '/ws',
+        }),
+      );
+    }
+    await fs.writeFile(
+      path.join(chatsDir, `${sessionId}.jsonl`),
+      `${lines.join('\n')}\n`,
       'utf8',
     );
   }
@@ -3669,6 +3690,61 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       reader.close();
     });
   });
+
+  it.each(['session/load', 'session/resume'] as const)(
+    '%s re-seeds the persisted parent lineage into the bridge restore call',
+    async (method) => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440130';
+        const parentId = '550e8400-e29b-41d4-a716-446655440131';
+        // A restored sub-session carries its parent only on disk; the bridge
+        // creates the live entry without it, so the dispatcher must recover it
+        // from the transcript and pass it to load/resume.
+        await writeStoredSession(sessionId, 'active', parentId);
+
+        let loadParent: unknown = 'unset';
+        let resumeParent: unknown = 'unset';
+        bridge.loadSession = async (req) => {
+          loadParent = (req as { parentSessionId?: string }).parentSessionId;
+          return {
+            sessionId: req.sessionId,
+            workspaceCwd: '/ws',
+            attached: true,
+            clientId: 'client-load',
+            state: { replayed: true },
+          };
+        };
+        bridge.resumeSession = async (req) => {
+          resumeParent = (req as { parentSessionId?: string }).parentSessionId;
+          return {
+            sessionId: req.sessionId,
+            workspaceCwd: '/ws',
+            attached: true,
+            clientId: 'client-resume',
+            state: { resumed: true },
+          };
+        };
+
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 214,
+          method,
+          params: { sessionId },
+        });
+        expect(await reader.next()).toMatchObject({ id: 214 });
+        reader.close();
+
+        if (method === 'session/load') {
+          expect(loadParent).toBe(parentId);
+        } else {
+          expect(resumeParent).toBe(parentId);
+        }
+      });
+    },
+  );
 
   it('session/prompt holds archive gate while prompt is in flight', async () => {
     await withRuntimeDir(async () => {
@@ -6453,13 +6529,20 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           jsonrpc: '2.0',
           id: 70,
           method: '_qwen/workspace/session_groups/create',
-          params: { workspaceCwd: '/ws', name: 'Frontend', color: 'blue' },
+          params: {
+            workspaceCwd: '/ws',
+            name: 'Frontend',
+            color: '#12ABEF',
+          },
         });
         const createFrame = (await reader.next()) as {
           result: { group: { id: string; name: string; color: string } };
         };
         const group = createFrame.result.group;
-        expect(group).toMatchObject({ name: 'Frontend', color: 'blue' });
+        expect(group).toMatchObject({
+          name: 'Frontend',
+          color: '#12abef',
+        });
 
         await post(connId, {
           jsonrpc: '2.0',
@@ -6689,6 +6772,91 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           code: -32602,
           message: '`group` requires `view` to be "organized"',
         },
+      });
+    });
+
+    it('session/list rejects an empty parentSessionId', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 76,
+        method: 'session/list',
+        params: {
+          workspaceCwd: '/ws',
+          parentSessionId: '',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        id: 76,
+        error: {
+          code: -32602,
+          message: '`parentSessionId` must be a non-empty string',
+        },
+      });
+    });
+
+    it('session/list rejects parentSessionId with the organized view', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 77,
+        method: 'session/list',
+        params: {
+          workspaceCwd: '/ws',
+          view: 'organized',
+          parentSessionId: 'parent-1',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        id: 77,
+        error: {
+          code: -32602,
+          message: '`parentSessionId` is not supported with `view` "organized"',
+        },
+      });
+    });
+
+    it('session/list?parentSessionId returns only that parent’s children, each tagged with parentSessionId', async () => {
+      await withRuntimeDir(async () => {
+        const parentId = '550e8400-e29b-41d4-a716-446655440020';
+        const otherParentId = '550e8400-e29b-41d4-a716-446655440021';
+        const childOfParent = '550e8400-e29b-41d4-a716-446655440022';
+        const childOfOther = '550e8400-e29b-41d4-a716-446655440023';
+        await writeStoredSession(parentId);
+        await writeStoredSession(childOfParent, 'active', parentId);
+        await writeStoredSession(childOfOther, 'active', otherParentId);
+
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 78,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            parentSessionId: parentId,
+            _meta: { size: 20 },
+          },
+        });
+        const frames = (await takeFrames(await streamRes, 1)) as Array<{
+          id: number;
+          result: {
+            sessions: Array<{ sessionId: string; parentSessionId?: string }>;
+          };
+        }>;
+        expect(frames[0].id).toBe(78);
+        const sessions = frames[0].result.sessions;
+        // Only the child of the requested parent surfaces — not the parent
+        // itself and not the sibling under a different parent.
+        expect(sessions.map((s) => s.sessionId)).toEqual([childOfParent]);
+        expect(sessions[0]!.parentSessionId).toBe(parentId);
       });
     });
 

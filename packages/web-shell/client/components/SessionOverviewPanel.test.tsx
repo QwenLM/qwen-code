@@ -30,6 +30,11 @@ let sessionsState: {
 let statusState: {
   report?: { full?: { sessions: DaemonStatusReportSession[] } };
 };
+// Live sessions the mock daemon returns per non-primary workspace cwd.
+let otherWorkspaceSessions: Record<string, DaemonSessionSummary[]>;
+// Stable client object (per test) so the other-workspace hook's load callback
+// keeps a stable identity and its effect doesn't loop.
+let workspaceClient: { listWorkspaceSessions: ReturnType<typeof vi.fn> };
 
 const sessionsReload = vi.fn(async () => sessionsState.sessions);
 const statusReload = vi.fn(async () => statusState.report);
@@ -38,6 +43,10 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useConnection: () => connectionState,
   useSessions: () => ({ ...sessionsState, reload: sessionsReload }),
   useStatusReport: () => ({ ...statusState, reload: statusReload }),
+  useWorkspace: () => ({
+    client: workspaceClient,
+    capabilities: connectionState.capabilities,
+  }),
 }));
 
 const { SessionOverviewPanel, deriveSessionCards } = await import(
@@ -89,6 +98,12 @@ beforeEach(() => {
   };
   sessionsState = { sessions: [], loading: false };
   statusState = { report: { full: { sessions: [] } } };
+  otherWorkspaceSessions = {};
+  workspaceClient = {
+    listWorkspaceSessions: vi.fn(
+      async (cwd: string) => otherWorkspaceSessions[cwd] ?? [],
+    ),
+  };
   sessionsReload.mockClear();
   statusReload.mockClear();
   onOpenSession = vi.fn();
@@ -125,6 +140,16 @@ function rerender(props: { onOpenSplit?: (ids: string[]) => void } = {}): void {
       </I18nProvider>,
     ),
   );
+}
+
+// Flush the other-workspace hook's async fan-out (Promise.allSettled + the
+// effect's `.then` setState). Three ticks so the state update lands in `act`.
+async function flushAsync(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
 }
 
 function cardLabels(): string[] {
@@ -176,6 +201,22 @@ describe('deriveSessionCards', () => {
   it('treats sessions absent from the status report as idle', () => {
     const cards = deriveSessionCards([session('cold')], [], undefined);
     expect(cards[0].status).toBe('idle');
+  });
+
+  it('flags sessions in a non-primary workspace against the primary cwd', () => {
+    const cards = deriveSessionCards(
+      [
+        session('a', { workspaceCwd: '/w' }),
+        session('b', { workspaceCwd: '/wsB' }),
+      ],
+      [],
+      undefined,
+      '/w',
+    );
+    const byId = new Map(cards.map((c) => [c.sessionId, c]));
+    expect(byId.get('a')?.isNonPrimary).toBe(false);
+    expect(byId.get('b')?.isNonPrimary).toBe(true);
+    expect(byId.get('b')?.workspaceCwd).toBe('/wsB');
   });
 
   it('labels with displayName, falling back to a short id, and flags current', () => {
@@ -398,6 +439,38 @@ describe('SessionOverviewPanel', () => {
     );
     expect(onOpenSplit.mock.calls[0][0]).toHaveLength(6);
   });
+
+  it('lists an other-workspace session as a card with a workspace badge', async () => {
+    connectionState.capabilities = {
+      features: [],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    sessionsState.sessions = [session('s-run', { displayName: 'Alpha' })];
+    otherWorkspaceSessions['/wsB'] = [
+      session('b1', { workspaceCwd: '/wsB', displayName: 'Beta' }),
+    ];
+    render();
+    await flushAsync(); // let the other-workspace fan-out resolve
+    // The non-primary session shows up as its own card…
+    expect(cardLabels()).toContain('Beta');
+    // …tagged with its workspace basename…
+    expect(container!.textContent).toContain('wsB');
+    // …while the primary card carries the localized "primary" badge.
+    expect(container!.textContent).toContain('primary');
+  });
+
+  it('does not query other workspaces on a single-workspace daemon', async () => {
+    sessionsState.sessions = [session('s-run', { displayName: 'Alpha' })];
+    render();
+    await flushAsync();
+    expect(workspaceClient.listWorkspaceSessions).not.toHaveBeenCalled();
+    // No workspace badge on a single-workspace daemon.
+    expect(container!.textContent).not.toContain('wsB');
+  });
 });
 
 describe('SessionOverviewPanel polling', () => {
@@ -464,6 +537,32 @@ describe('SessionOverviewPanel polling', () => {
       // …but crossing the 10s status cadence does, exactly once.
       await vi.advanceTimersByTimeAsync(7000);
       expect(statusReload).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('re-queries other workspaces on each list poll (multi-workspace)', async () => {
+    connectionState.capabilities = {
+      features: [],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    sessionsState.sessions = [session('a')];
+    otherWorkspaceSessions['/wsB'] = [session('b1', { workspaceCwd: '/wsB' })];
+    vi.useFakeTimers();
+    try {
+      render();
+      await vi.advanceTimersByTimeAsync(10); // settle the initial fan-out
+      workspaceClient.listWorkspaceSessions.mockClear();
+      await vi.advanceTimersByTimeAsync(3100); // one list-poll tick
+      expect(workspaceClient.listWorkspaceSessions).toHaveBeenCalledWith(
+        '/wsB',
+        expect.objectContaining({ archiveState: 'active' }),
+      );
     } finally {
       vi.useRealTimers();
     }

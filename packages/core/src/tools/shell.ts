@@ -2070,8 +2070,20 @@ export class ShellToolInvocation extends BaseToolInvocation<
       return this.executeBackground(signal, shellExecutionConfig);
     }
 
+    // Precedence: an explicit per-call `timeout` wins; otherwise fall back
+    // to the configured `tools.shell.defaultTimeoutMs` setting; otherwise
+    // the built-in default. A value of 0 disables the timeout, but only at
+    // the settings/default level — the per-call `timeout` param is validated
+    // to be > 0 by `validateToolParamValues`, so 0 never arrives that way.
     const effectiveTimeout =
-      this.params.timeout ?? DEFAULT_FOREGROUND_TIMEOUT_MS;
+      this.params.timeout ??
+      this.config.getShellDefaultTimeoutMs() ??
+      DEFAULT_FOREGROUND_TIMEOUT_MS;
+    debugLogger.debug('resolved foreground shell timeout', {
+      perCallTimeout: this.params.timeout ?? null,
+      configuredDefault: this.config.getShellDefaultTimeoutMs() ?? null,
+      effectiveTimeout,
+    });
 
     // Create combined signal with timeout AND promote-trigger for
     // foreground execution. The promoteAbortController is exposed to
@@ -2631,8 +2643,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // Fires on both successful and naturally-failed completions since
     // the advice ("next time, background it") is the same in both.
     const elapsedMs = performance.now() - executionStartTime;
-    const longRunThreshold = longRunThresholdFor(effectiveTimeout);
+    // When the timeout is disabled (effectiveTimeout === 0) there is no
+    // meaningful "half the timeout" threshold: `longRunThresholdFor(0)` would
+    // return its 1000ms floor and fire the hint on every foreground command
+    // over ~1s. Suppress the long-run hint entirely in that case.
+    const longRunThreshold =
+      effectiveTimeout === 0 ? null : longRunThresholdFor(effectiveTimeout);
     const shouldAppendLongRunHint =
+      longRunThreshold !== null &&
       !result.aborted &&
       result.signal === null &&
       elapsedMs >= longRunThreshold;
@@ -2642,7 +2660,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // (aborted / signal / under-threshold) plus the actual elapsed and
     // computed threshold. No PII — just timing + result flags.
     debugLogger.debug(
-      `long-run hint: elapsed=${Math.round(elapsedMs)}ms threshold=${longRunThreshold}ms ` +
+      `long-run hint: elapsed=${Math.round(elapsedMs)}ms threshold=${longRunThreshold === null ? 'disabled' : `${longRunThreshold}ms`} ` +
         `aborted=${result.aborted} signal=${result.signal} → ${shouldAppendLongRunHint ? 'fire' : 'suppress'}`,
     );
 

@@ -17,6 +17,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
+import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type { Message, ACPToolCall, TurnCollapseHead } from '../adapters/types';
 import type { PermissionRequest } from '../adapters/types';
 import {
@@ -24,16 +25,28 @@ import {
   isSubAgentToolCall,
 } from '../adapters/toolClassification';
 import { CompactModeContext } from '../App';
-import { useWebShellCustomization } from '../customization';
+import {
+  useWebShellCustomization,
+  type WebShellAssistantTurnFooterRenderInfo,
+} from '../customization';
 import { useI18n } from '../i18n';
+import { useWebShellPortalRoot } from '../portalRoot';
 import { MessageItem } from './MessageItem';
 import { MessageTimestamp } from './MessageTimestamp';
+import {
+  TurnOutputs,
+  type TurnOutputFileChange,
+  type TurnOutputOpenRequest,
+  type TurnOutputScheduledTask,
+} from './artifacts/TurnOutputs';
 import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
 import { useSharedNow } from '../hooks/useSharedNow';
 import { toolContainsCallId } from './messages/toolFormatting';
 import turnCollapseStyles from './TurnCollapseRow.module.css';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
+
+const noopTurnOutputAction = () => undefined;
 
 interface MessageListProps {
   messages: Message[];
@@ -48,6 +61,7 @@ interface MessageListProps {
    */
   isResponding?: boolean;
   welcomeHeader?: ReactNode;
+  centerWelcomeHeader?: boolean;
   workspaceCwd?: string;
   tailContent?: ReactNode;
   tailKey?: string;
@@ -70,6 +84,16 @@ interface MessageListProps {
   onRetryClick?: () => void;
   onBranchSession?: () => void;
   onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
+  turnFileChanges?: ReadonlyMap<string, readonly TurnOutputFileChange[]>;
+  turnArtifacts?: ReadonlyMap<string, readonly DaemonSessionArtifact[]>;
+  turnScheduledTasks?: ReadonlyMap<string, readonly TurnOutputScheduledTask[]>;
+  onReviewChanges?: (
+    changes: readonly TurnOutputFileChange[],
+    selectedPath?: string,
+  ) => void;
+  onOpenArtifact?: (artifactId: string, previewContent?: string) => void;
+  onOpenScheduledTask?: (task: TurnOutputScheduledTask) => void;
+  onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
 }
 
 function getLastUserMessageId(messages: Message[]): string | null {
@@ -115,12 +139,21 @@ export type DisplayItem =
   | {
       type: 'parallel_agents';
       key: string;
+      turnId: string;
       agents: ACPToolCall[];
       /**
        * Wall-clock time of the first grouped launch, carried so the grouped
        * box reveals its time on hover exactly like a standalone message row.
        */
       timestamp?: number;
+    }
+  | {
+      type: 'turn_outputs';
+      key: string;
+      turnId: string;
+      changes: readonly TurnOutputFileChange[];
+      artifacts: readonly DaemonSessionArtifact[];
+      scheduledTasks: readonly TurnOutputScheduledTask[];
     };
 
 interface LocateFlashTarget {
@@ -301,6 +334,7 @@ export function groupParallelAgents(messages: Message[]): DisplayItem[] {
         items.push({
           type: 'parallel_agents',
           key: `par-${grouped[0].id}`,
+          turnId: grouped[0].id,
           agents: grouped.map((m) => (m as { tools: ACPToolCall[] }).tools[0]),
           timestamp: grouped[0].timestamp,
         });
@@ -317,6 +351,7 @@ export function groupParallelAgents(messages: Message[]): DisplayItem[] {
         items.push({
           type: 'parallel_agents',
           key: `par-${grouped[0].id}`,
+          turnId: grouped[0].id,
           agents: grouped.map((m) => (m as { tools: ACPToolCall[] }).tools[0]),
           timestamp: grouped[0].timestamp,
         });
@@ -341,6 +376,7 @@ export function groupParallelAgents(messages: Message[]): DisplayItem[] {
 
 export function getDisplayItemVirtualKey(item: DisplayItem): string {
   if (item.type === 'parallel_agents') return `group:${item.key}`;
+  if (item.type === 'turn_outputs') return `outputs:${item.key}`;
   if (item.type === 'turn_collapse') {
     const liveKey = item.turnCollapse.liveStartedAt;
     return liveKey === undefined
@@ -349,6 +385,61 @@ export function getDisplayItemVirtualKey(item: DisplayItem): string {
   }
   if (item.type === 'turn_content') return `turn-content:${item.key}`;
   return `msg:${item.key}`;
+}
+
+export function attachTurnOutputs(
+  items: DisplayItem[],
+  isResponding: boolean,
+  turnFileChanges?: ReadonlyMap<string, readonly TurnOutputFileChange[]>,
+  turnArtifacts?: ReadonlyMap<string, readonly DaemonSessionArtifact[]>,
+  turnScheduledTasks?: ReadonlyMap<string, readonly TurnOutputScheduledTask[]>,
+): DisplayItem[] {
+  if (
+    (!turnFileChanges || turnFileChanges.size === 0) &&
+    (!turnArtifacts || turnArtifacts.size === 0) &&
+    (!turnScheduledTasks || turnScheduledTasks.size === 0)
+  ) {
+    return items;
+  }
+
+  const result: DisplayItem[] = [];
+  let currentTurnId: string | null = null;
+  const pushTurnOutputs = (turnId: string | null, isFinalTurn: boolean) => {
+    if (isFinalTurn && isResponding) return;
+    if (!turnId) return;
+    const changes = turnFileChanges?.get(turnId) ?? [];
+    const artifacts = turnArtifacts?.get(turnId) ?? [];
+    const scheduledTasks = turnScheduledTasks?.get(turnId) ?? [];
+    if (
+      changes.length === 0 &&
+      artifacts.length === 0 &&
+      scheduledTasks.length === 0
+    ) {
+      return;
+    }
+    result.push({
+      type: 'turn_outputs',
+      key: turnId,
+      turnId,
+      changes,
+      artifacts,
+      scheduledTasks,
+    });
+  };
+
+  for (const item of items) {
+    if (item.type === 'message' && isTurnStartMessage(item.message)) {
+      pushTurnOutputs(currentTurnId, false);
+      currentTurnId = item.message.id;
+    } else if (!currentTurnId && item.type === 'message') {
+      currentTurnId = item.message.id;
+    } else if (!currentTurnId && item.type === 'parallel_agents') {
+      currentTurnId = item.turnId;
+    }
+    result.push(item);
+  }
+  pushTurnOutputs(currentTurnId, true);
+  return result;
 }
 
 export interface ApplyTurnCollapseOptions {
@@ -405,10 +496,10 @@ function findFinalAnswerIndex(
   return -1;
 }
 
-function collectFinalAssistantIdsByTurn(
+function collectFinalAssistantTurnIds(
   items: readonly DisplayItem[],
   isResponding: boolean,
-): ReadonlySet<string> {
+): ReadonlyMap<string, string> {
   const userIdxs: number[] = [];
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
@@ -417,19 +508,24 @@ function collectFinalAssistantIdsByTurn(
     }
   }
 
-  const ids = new Set<string>();
+  const turnIdByAssistantId = new Map<string, string>();
   for (let k = 0; k < userIdxs.length; k++) {
     if (k === userIdxs.length - 1 && isResponding) continue;
     const start = userIdxs[k];
     const end = (k + 1 < userIdxs.length ? userIdxs[k + 1] : items.length) - 1;
+    const turnHead = items[start];
     const answerIdx = findFinalAnswerIndex(items, start, end);
     if (answerIdx < 0) continue;
     const item = items[answerIdx];
-    if (item.type === 'message' && item.message.role === 'assistant') {
-      ids.add(item.message.id);
+    if (
+      turnHead?.type === 'message' &&
+      item.type === 'message' &&
+      item.message.role === 'assistant'
+    ) {
+      turnIdByAssistantId.set(item.message.id, turnHead.message.id);
     }
   }
-  return ids;
+  return turnIdByAssistantId;
 }
 
 /**
@@ -439,6 +535,7 @@ function collectFinalAssistantIdsByTurn(
  */
 function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
   if (item.type === 'parallel_agents') return true;
+  if (item.type === 'turn_outputs') return false;
   if (item.type === 'turn_collapse') return false;
   if (item.type === 'turn_content') {
     return item.items.some((child) => isHideableStep(child, isFinalAnswer));
@@ -494,6 +591,7 @@ export function getTurnTimelineNode(
       label: t ? t('timeline.parallelAgents') : 'Parallel agents',
     };
   }
+  if (item.type === 'turn_outputs') return { kind: 'none' };
   if (item.type !== 'message') return { kind: 'none' };
 
   const { message } = item;
@@ -702,6 +800,7 @@ function timelineDetailSnippetForItem(
       ? t('timeline.parallelAgentsDetail', { count })
       : `${count} parallel agent${count === 1 ? '' : 's'}`;
   }
+  if (item.type === 'turn_outputs') return '';
   if (item.type !== 'message') return '';
   return timelineDetailSnippetForMessage(item.message, t);
 }
@@ -898,6 +997,7 @@ export function getSessionTimelineSignature(
 
 function isExecutionWorkStep(item: DisplayItem): boolean {
   if (item.type === 'parallel_agents') return true;
+  if (item.type === 'turn_outputs') return false;
   if (item.type === 'turn_collapse') return false;
   if (item.type === 'turn_content') return item.items.some(isExecutionWorkStep);
   return item.message.role === 'tool_group' || item.message.role === 'plan';
@@ -917,6 +1017,8 @@ function activeExecutionKey(item: DisplayItem): string | null {
     }
     return null;
   }
+
+  if (item.type === 'turn_outputs') return null;
 
   if (item.type === 'turn_collapse') {
     if (item.turnCollapse.liveStartedAt === undefined) return null;
@@ -1000,6 +1102,7 @@ function itemAssistantUsage(item: DisplayItem):
 
 function itemToolCallCount(item: DisplayItem): number {
   if (item.type === 'parallel_agents') return item.agents.length;
+  if (item.type === 'turn_outputs') return 0;
   if (item.type === 'turn_collapse') return 0;
   if (item.type === 'turn_content') {
     return item.items.reduce((sum, child) => sum + itemToolCallCount(child), 0);
@@ -1385,6 +1488,8 @@ export function findDisplayItemIndex(
       findDisplayItemIndex(item.items, messageId, callId) >= 0
     ) {
       return i;
+    } else if (item.type === 'turn_outputs') {
+      continue;
     }
   }
   return -1;
@@ -1414,6 +1519,7 @@ function displayItemMatchesLocateTarget(
       displayItemMatchesLocateTarget(child, target),
     );
   }
+  if (item.type === 'turn_outputs') return false;
   return false;
 }
 
@@ -1640,6 +1746,7 @@ const TurnCollapseRow = memo(function TurnCollapseRow({
 
 function getChatRowClassName(item: DisplayItem): string | undefined {
   if (item.type === 'turn_collapse') return styles.turnStatusRow;
+  if (item.type === 'turn_outputs') return styles.turnContentRow;
   if (item.type === 'turn_content') {
     return styles.turnContentRow;
   }
@@ -1708,6 +1815,7 @@ const SessionTimeline = memo(function SessionTimeline({
   hidden: boolean;
   onSelect: (turnId: string) => void;
 }) {
+  const portalRoot = useWebShellPortalRoot();
   const { t } = useI18n();
   const panelRef = useRef<HTMLElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -2000,7 +2108,7 @@ const SessionTimeline = memo(function SessionTimeline({
                 {tooltip.entry.detail}
               </span>
             </div>,
-            document.body,
+            portalRoot ?? document.body,
           )}
       </nav>
     </div>
@@ -2067,6 +2175,7 @@ export const MessageList = memo(
       isResponding = false,
       activeTurnStartedAt,
       welcomeHeader,
+      centerWelcomeHeader = false,
       workspaceCwd,
       tailContent,
       tailKey = 'tail',
@@ -2078,6 +2187,13 @@ export const MessageList = memo(
       onRetryClick,
       onBranchSession,
       onCanScrollToBottomChange,
+      turnFileChanges,
+      turnArtifacts,
+      turnScheduledTasks,
+      onReviewChanges,
+      onOpenArtifact,
+      onOpenScheduledTask,
+      onTurnOutputOpen,
     },
     ref,
   ) {
@@ -2091,8 +2207,21 @@ export const MessageList = memo(
       [compactMode, messages, pendingApproval],
     );
     const displayItems = useMemo(
-      () => groupParallelAgents(mergedMessages),
-      [mergedMessages],
+      () =>
+        attachTurnOutputs(
+          groupParallelAgents(mergedMessages),
+          isResponding,
+          turnFileChanges,
+          turnArtifacts,
+          turnScheduledTasks,
+        ),
+      [
+        mergedMessages,
+        isResponding,
+        turnFileChanges,
+        turnArtifacts,
+        turnScheduledTasks,
+      ],
     );
     const [isSessionTimelineVisible, setIsSessionTimelineVisible] =
       useState(false);
@@ -2156,8 +2285,8 @@ export const MessageList = memo(
       }
       return null;
     }, [isResponding, mergedMessages]);
-    const finalAssistantIdsByTurn = useMemo(
-      () => collectFinalAssistantIdsByTurn(displayItems, isResponding),
+    const finalAssistantTurnIdByAssistantId = useMemo(
+      () => collectFinalAssistantTurnIds(displayItems, isResponding),
       [displayItems, isResponding],
     );
 
@@ -3116,6 +3245,24 @@ export const MessageList = memo(
             );
           }
 
+          if (displayItem.type === 'turn_outputs') {
+            return (
+              <TurnOutputs
+                changes={displayItem.changes}
+                turnId={displayItem.turnId}
+                artifacts={displayItem.artifacts}
+                scheduledTasks={displayItem.scheduledTasks}
+                workspaceCwd={workspaceCwd}
+                onOpenRequest={onTurnOutputOpen}
+                onReviewChanges={onReviewChanges ?? noopTurnOutputAction}
+                onOpenArtifact={onOpenArtifact ?? noopTurnOutputAction}
+                onOpenScheduledTask={
+                  onOpenScheduledTask ?? noopTurnOutputAction
+                }
+              />
+            );
+          }
+
           if (displayItem.type === 'turn_collapse') {
             return (
               <TurnCollapseRow
@@ -3140,6 +3287,28 @@ export const MessageList = memo(
             );
           }
 
+          const finalAssistantTurnId =
+            displayItem.message.role === 'assistant'
+              ? finalAssistantTurnIdByAssistantId.get(displayItem.message.id)
+              : undefined;
+          let assistantTurnFooterInfo:
+            | WebShellAssistantTurnFooterRenderInfo
+            | undefined;
+          if (
+            displayItem.message.role === 'assistant' &&
+            finalAssistantTurnId
+          ) {
+            assistantTurnFooterInfo = {
+              turnId: finalAssistantTurnId,
+              message: {
+                id: displayItem.message.id,
+                content: displayItem.message.content,
+                isStreaming: displayItem.message.isStreaming,
+                timestamp: displayItem.message.timestamp,
+              },
+            };
+          }
+
           return (
             <MessageItem
               message={displayItem.message}
@@ -3152,7 +3321,7 @@ export const MessageList = memo(
               onBranchSession={onBranchSession}
               showAssistantActions={
                 displayItem.message.role === 'assistant' &&
-                finalAssistantIdsByTurn.has(displayItem.message.id)
+                finalAssistantTurnIdByAssistantId.has(displayItem.message.id)
               }
               showAssistantBranch={
                 displayItem.message.role === 'assistant' &&
@@ -3162,6 +3331,7 @@ export const MessageList = memo(
                 displayItem,
                 flashTarget,
               )}
+              assistantTurnFooterInfo={assistantTurnFooterInfo}
             />
           );
         };
@@ -3191,13 +3361,17 @@ export const MessageList = memo(
         headerOffset,
         visibleItems,
         flashTarget,
-        finalAssistantIdsByTurn,
+        finalAssistantTurnIdByAssistantId,
         lastCompletedAssistantId,
         workspaceCwd,
         showRetryHint,
         onRetryClick,
         onBranchSession,
         handleToggleCollapse,
+        onOpenArtifact,
+        onOpenScheduledTask,
+        onReviewChanges,
+        onTurnOutputOpen,
       ],
     );
 
@@ -3252,7 +3426,12 @@ export const MessageList = memo(
     return (
       <div
         ref={containerRef}
-        className={styles.list}
+        className={joinClassNames(
+          styles.list,
+          hasHeader && centerWelcomeHeader
+            ? styles.listWithWelcomeHeader
+            : undefined,
+        )}
         data-web-shell-message-list
         onClickCapture={handleDisclosureClickCapture}
       >

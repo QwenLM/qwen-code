@@ -7,7 +7,11 @@
 import { renderWithProviders } from '../../test-utils/render.js';
 import { waitFor, act } from '@testing-library/react';
 import type { InputPromptProps } from './InputPrompt.js';
-import { InputPrompt, classifyPastedImagePaths } from './InputPrompt.js';
+import {
+  InputPrompt,
+  classifyPastedImagePaths,
+  expandPendingPastePlaceholders,
+} from './InputPrompt.js';
 import { useTextBuffer, type TextBuffer } from './shared/text-buffer.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
@@ -42,6 +46,10 @@ import {
   useBackgroundTaskViewActions,
   useBackgroundTaskViewState,
 } from '../contexts/BackgroundTaskViewContext.js';
+import {
+  clearPromptStash,
+  savePromptStash,
+} from '../../services/prompt-stash.js';
 
 const mockViewActions = vi.hoisted(() => ({
   setAgentTabBarFocused: vi.fn(),
@@ -58,6 +66,7 @@ vi.mock('../hooks/useInputHistory.js');
 vi.mock('../hooks/useReverseSearchCompletion.js');
 vi.mock('../hooks/use-voice-input.js');
 vi.mock('../utils/clipboardUtils.js');
+vi.mock('../../services/prompt-stash.js');
 vi.mock('../contexts/UIStateContext.js', () => ({
   useUIState: vi.fn(() => ({ isFeedbackDialogOpen: false, messageQueue: [] })),
 }));
@@ -188,9 +197,13 @@ describe('InputPrompt', () => {
     useReverseSearchCompletion,
   );
   const mockedUseVoiceInput = vi.mocked(useVoiceInput);
+  const mockedSavePromptStash = vi.mocked(savePromptStash);
+  const mockedClearPromptStash = vi.mocked(clearPromptStash);
 
   beforeEach(() => {
     vi.resetAllMocks();
+    mockedSavePromptStash.mockReturnValue(true);
+    mockedClearPromptStash.mockReturnValue(true);
     mockViewActions.setAgentTabBarFocused.mockReset();
     mockViewActions.setBgPillFocused.mockReset();
     mockViewActions.setLivePanelFocused.mockReset();
@@ -360,6 +373,54 @@ describe('InputPrompt', () => {
       focus: true,
       placeholder: '  Type your message or @path/to/file',
     };
+  });
+
+  it('stashes non-empty input on Ctrl+S', async () => {
+    props.buffer.setText('draft prompt');
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+    act(() => {
+      stdin.write('\x13');
+    });
+
+    await waitFor(() => {
+      expect(mockedSavePromptStash).toHaveBeenCalledWith(
+        path.join('test', 'project', 'src'),
+        'draft prompt',
+      );
+    });
+    expect(props.onSubmit).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('clears the stash when the prompt is submitted', async () => {
+    props.buffer.setText('send this');
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+    act(() => {
+      stdin.write('\r');
+    });
+
+    await waitFor(() => {
+      expect(mockedClearPromptStash).toHaveBeenCalledWith(
+        path.join('test', 'project', 'src'),
+      );
+      expect(props.onSubmit).toHaveBeenCalledWith('send this');
+    });
+    unmount();
+  });
+
+  it('expands large paste placeholders before stashing', () => {
+    const pending = new Map([
+      ['[Pasted Content 1200 chars]', 'full pasted content'],
+    ]);
+
+    expect(
+      expandPendingPastePlaceholders(
+        'before [Pasted Content 1200 chars] after',
+        pending,
+      ),
+    ).toBe('before full pasted content after');
   });
 
   it('routes Space through voice input when the prompt is empty', async () => {
@@ -1338,6 +1399,58 @@ describe('InputPrompt', () => {
       expect(clipboardUtils.saveClipboardImage).not.toHaveBeenCalled();
       expect(mockBuffer.setText).not.toHaveBeenCalled();
       unmount();
+    });
+
+    it('should show the native clipboard error only once across remounts', async () => {
+      const addItem = vi.fn();
+      const clipboardUnavailableShownRef = { current: false };
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: [],
+        pendingGeminiHistoryItems: [],
+        historyManager: { addItem },
+      } as unknown as ReturnType<typeof useUIState>);
+      vi.mocked(clipboardUtils.clipboardHasImage).mockImplementation(
+        async (onUnavailable) => {
+          onUnavailable?.();
+          return false;
+        },
+      );
+
+      const first = renderWithProviders(
+        <InputPrompt
+          {...props}
+          clipboardUnavailableShownRef={clipboardUnavailableShownRef}
+        />,
+      );
+      await wait();
+
+      const pasteKey = isWindows ? '\x1Bv' : '\x16';
+      first.stdin.write(pasteKey);
+      await wait();
+      first.stdin.write(pasteKey);
+      await wait();
+      first.unmount();
+
+      const second = renderWithProviders(
+        <InputPrompt
+          {...props}
+          clipboardUnavailableShownRef={clipboardUnavailableShownRef}
+        />,
+      );
+      await wait();
+      second.stdin.write(pasteKey);
+      await wait();
+
+      expect(addItem).toHaveBeenCalledTimes(1);
+      expect(addItem).toHaveBeenCalledWith(
+        {
+          type: 'error',
+          text: 'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
+        },
+        expect.any(Number),
+      );
+      second.unmount();
     });
 
     it('should handle image save failure gracefully', async () => {

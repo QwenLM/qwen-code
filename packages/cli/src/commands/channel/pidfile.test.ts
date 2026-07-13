@@ -16,6 +16,7 @@ const fsFds = vi.hoisted(() => {
   return fds;
 });
 const mockGlobalQwenDir = vi.hoisted(() => '/tmp/qwen-pidfile-test/.qwen');
+const fsControls = vi.hoisted(() => ({ failUnlink: false }));
 
 vi.mock('node:fs', () => {
   const mock = {
@@ -76,6 +77,7 @@ vi.mock('node:fs', () => {
     },
     mkdirSync: () => {},
     unlinkSync: (p: string) => {
+      if (fsControls.failUnlink) throw new Error('EPERM');
       delete fsStore[p];
     },
     constants: {
@@ -116,6 +118,7 @@ beforeEach(() => {
   for (const k of Object.keys(fsFds.paths)) delete fsFds.paths[Number(k)];
   for (const k of Object.keys(fsFds.flags)) delete fsFds.flags[Number(k)];
   fsFds.openedFlags.length = 0;
+  fsControls.failUnlink = false;
 });
 
 afterEach(() => {
@@ -176,6 +179,33 @@ describe('writeServiceInfo + readServiceInfo', () => {
       workerPid: 8765,
       channels: ['telegram', 'feishu'],
     });
+  });
+
+  it('round-trips multi-workspace worker metadata', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+    const workers = [
+      {
+        workspaceId: 'primary',
+        workspaceCwd: '/work/primary',
+        channels: ['telegram'],
+        workerPid: 8765,
+      },
+      {
+        workspaceId: 'secondary',
+        workspaceCwd: '/work/secondary',
+        channels: ['feishu'],
+      },
+    ];
+
+    writeServeServiceInfo({
+      channels: ['telegram', 'feishu'],
+      servePid: 4321,
+      workerPid: 8765,
+      workers,
+    });
+
+    expect(readServiceInfo()).toMatchObject({ workers });
   });
 
   it('updates a matching serve-owned reservation with worker metadata', () => {
@@ -382,6 +412,30 @@ describe('writeServiceInfo + readServiceInfo', () => {
       { pid: 1234, startedAt: 'not-a-date', channels: ['telegram'] },
       { pid: 1234, startedAt: new Date().toISOString(), channels: 'telegram' },
       { pid: 1234, startedAt: new Date().toISOString(), channels: [42] },
+      {
+        pid: 1234,
+        startedAt: new Date().toISOString(),
+        channels: [],
+        workers: 'invalid',
+      },
+      {
+        pid: 1234,
+        startedAt: new Date().toISOString(),
+        channels: [],
+        workers: [{}],
+      },
+      {
+        pid: 1234,
+        startedAt: new Date().toISOString(),
+        channels: [],
+        workers: [{ channels: [], workspaceId: 42 }],
+      },
+      {
+        pid: 1234,
+        startedAt: new Date().toISOString(),
+        channels: [],
+        workers: [{ channels: [], workerPid: 0 }],
+      },
     ];
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -459,6 +513,19 @@ describe('removeServeServiceInfo', () => {
     expect(readServiceInfo()).toMatchObject({
       owner: 'channel',
       pid: process.pid,
+    });
+  });
+
+  it('returns false when the owned pidfile cannot be unlinked', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+    writeServeServiceInfo({ channels: ['telegram'], servePid: 4321 });
+    fsControls.failUnlink = true;
+
+    expect(removeServeServiceInfo(4321)).toBe(false);
+    expect(readServiceInfo()).toMatchObject({
+      owner: 'serve',
+      servePid: 4321,
     });
   });
 });

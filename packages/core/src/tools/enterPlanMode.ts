@@ -20,7 +20,15 @@ import {
 
 const debugLogger = createDebugLogger('ENTER_PLAN_MODE');
 
-export type EnterPlanModeParams = Record<string, never>;
+export interface EnterPlanModeParams {
+  /**
+   * Set to `true` only when the user explicitly asked for plan mode in this
+   * turn (or explicitly confirmed they want it). Distinguishes a genuine
+   * user-requested entry from the model deciding to plan on its own, which
+   * matters when the session is in YOLO mode — see the guard in `execute()`.
+   */
+  userRequested?: boolean;
+}
 
 const enterPlanModeToolDescription = `Use this tool only after the user explicitly asks to switch into plan mode or confirms they want plan mode. Entering plan mode is a privilege reduction, so it does not require user confirmation at execution time.
 
@@ -38,7 +46,13 @@ const enterPlanModeToolSchemaData: FunctionDeclaration = {
   description: enterPlanModeToolDescription,
   parametersJsonSchema: {
     type: 'object',
-    properties: {},
+    properties: {
+      userRequested: {
+        type: 'boolean',
+        description:
+          'Set to true ONLY when the user explicitly asked for plan mode in this turn, or explicitly confirmed they want it. Leave unset (or false) when you are deciding to plan on your own without the user asking. In YOLO mode, an explicit user request will not take effect unless this is true.',
+      },
+    },
     additionalProperties: false,
     $schema: 'http://json-schema.org/draft-07/schema#',
   },
@@ -74,6 +88,33 @@ class EnterPlanModeToolInvocation extends BaseToolInvocation<
         'EnterPlanModeTool',
         debugLogger,
       );
+    }
+
+    // A model-initiated entry from YOLO (not requested by the user this
+    // turn) is a no-op. The user explicitly chose YOLO for low-friction
+    // execution; silently switching to the read-only Plan mode surprises
+    // them and then blocks the reads/writes they expected to proceed
+    // (#5970). This tool is ALSO the only door into plan mode in
+    // headless/ACP sessions — `/plan` is `interactive`-only and there is no
+    // Shift+Tab there — so a blanket YOLO guard would make a genuine,
+    // explicit user request unreachable in those sessions. `userRequested`
+    // lets the model tell the two apart: only gate the no-op when the
+    // entry is NOT user-requested. Keep the current mode and tell the
+    // model to continue planning without switching, or to retry with
+    // `userRequested: true` if the user did explicitly ask.
+    if (
+      this.config.getApprovalMode() === ApprovalMode.YOLO &&
+      !this.params.userRequested
+    ) {
+      debugLogger.info(
+        'Blocked model-initiated plan entry from YOLO (userRequested=%s)',
+        this.params.userRequested,
+      );
+      return {
+        llmContent:
+          'Plan mode was not entered: the session is in YOLO mode, which the user explicitly chose for low-friction execution. Continue investigating and presenting your plan in the current mode without switching. If the user explicitly asked for plan mode in this turn, retry this tool call with userRequested: true.',
+        returnDisplay: 'Stayed in YOLO mode (plan mode not entered).',
+      };
     }
 
     // In headless (non-interactive) mode without ACP support, the gate

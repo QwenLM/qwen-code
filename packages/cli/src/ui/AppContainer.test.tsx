@@ -68,6 +68,7 @@ import {
 import {
   type HistoryItem,
   type HistoryItemWithoutId,
+  MessageType,
   StreamingState,
   ToolCallStatus,
 } from './types.js';
@@ -572,6 +573,50 @@ describe('AppContainer State Management', () => {
   };
 
   describe('Basic Rendering', () => {
+    it('shows recording failures as warnings and unsubscribes on unmount', async () => {
+      const addItem = vi.fn();
+      mockedUseHistory.mockReturnValue({
+        history: [],
+        addItem,
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      let listener:
+        | ((event: { sessionId: string; error: Error }) => void)
+        | undefined;
+      const unsubscribe = vi.fn();
+      vi.spyOn(mockConfig, 'onChatRecordingFailure').mockImplementation(
+        (nextListener) => {
+          listener = nextListener;
+          return unsubscribe;
+        },
+      );
+
+      const { unmount } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      await act(async () => {
+        listener?.({ sessionId: 's-1', error: new Error('EACCES') });
+      });
+
+      expect(addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.WARNING,
+          text: expect.stringContaining('Session recording stopped'),
+        }),
+        expect.any(Number),
+      );
+      unmount();
+      expect(unsubscribe).toHaveBeenCalledOnce();
+    });
+
     it('renders without crashing with minimal props', () => {
       expect(() => {
         render(
@@ -2779,12 +2824,15 @@ describe('AppContainer State Management', () => {
         },
       } as unknown as LoadedSettings;
 
-      let titleRecordedCallback: ((customTitle: string) => void) | undefined;
-      let registeredTitleRecordedCallback:
-        | ((customTitle: string) => void)
-        | undefined;
+      type TitleRecordedCallback = (
+        customTitle: string,
+        source: string,
+        sessionId: string,
+      ) => void;
+      let titleRecordedCallback: TitleRecordedCallback | undefined;
+      let registeredTitleRecordedCallback: TitleRecordedCallback | undefined;
       const setTitleRecordedCallback = vi.fn(
-        (callback: ((customTitle: string) => void) | undefined) => {
+        (callback: TitleRecordedCallback | undefined) => {
           titleRecordedCallback = callback;
           if (callback) {
             registeredTitleRecordedCallback = callback;
@@ -2838,8 +2886,13 @@ describe('AppContainer State Management', () => {
       expect(registeredTitleRecordedCallback).toStrictEqual(
         expect.any(Function),
       );
+      const currentSessionId = mockConfig.getSessionId();
       await act(async () => {
-        registeredTitleRecordedCallback!('Fix terminal title');
+        registeredTitleRecordedCallback!(
+          'Fix terminal title',
+          'manual',
+          currentSessionId,
+        );
       });
       // The initial render wrote the default title; after the callback
       // the next writeTerminalTitle call (when effects flush) should
@@ -2874,13 +2927,14 @@ describe('AppContainer State Management', () => {
       } as unknown as LoadedSettings;
 
       const existingCallback = vi.fn();
-      let titleRecordedCallback:
-        | ((customTitle: string, source: string) => void)
-        | undefined;
+      type TitleRecordedCallback = (
+        customTitle: string,
+        source: string,
+        sessionId: string,
+      ) => void;
+      let titleRecordedCallback: TitleRecordedCallback | undefined;
       const setTitleRecordedCallback = vi.fn(
-        (
-          callback: ((customTitle: string, source: string) => void) | undefined,
-        ) => {
+        (callback: TitleRecordedCallback | undefined) => {
           titleRecordedCallback = callback;
         },
       );
@@ -2923,12 +2977,25 @@ describe('AppContainer State Management', () => {
 
       // Invoke the chained callback — it should call both the existing
       // ACP callback AND the new setSessionName setter
+      const currentSessionId = mockConfig.getSessionId();
       await act(async () => {
-        titleRecordedCallback!('Test title', 'rename');
+        titleRecordedCallback!('Test title', 'rename', currentSessionId);
       });
 
       // The existing ACP callback was called (preserved by chaining)
-      expect(existingCallback).toHaveBeenCalledWith('Test title', 'rename');
+      expect(existingCallback).toHaveBeenCalledWith(
+        'Test title',
+        'rename',
+        currentSessionId,
+      );
+      await act(async () => {
+        titleRecordedCallback!('Stale title', 'auto', 'old-session-id');
+      });
+      expect(existingCallback).toHaveBeenLastCalledWith(
+        'Stale title',
+        'auto',
+        'old-session-id',
+      );
 
       unmount();
       // After unmount, the callback should be restored to the original

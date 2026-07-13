@@ -13,6 +13,7 @@ import { getErrorMessage } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { MemoryDiagnosticsDumper } from './memoryDiagnosticsDumper.js';
 import { microcompactHistory } from './microcompaction/microcompact.js';
+import { isManagedMemoryPath } from '../memory/paths.js';
 import {
   recordMemoryUsage,
   recordCpuUsage,
@@ -716,13 +717,23 @@ export class MemoryPressureMonitor extends EventEmitter {
           const chat = client.getChat();
           const history = chat.getHistoryShallow?.() ?? chat.getHistory();
           const settings = this.coreConfig.getClearContextOnIdle();
-          const result = microcompactHistory(history, Date.now() - 1, {
-            ...settings,
-            toolResultsThresholdMinutes:
-              (settings.toolResultsThresholdMinutes ?? 0) < 0
-                ? settings.toolResultsThresholdMinutes
-                : 0,
-          });
+          const projectRoot = this.coreConfig.getProjectRoot();
+          const targetDir = this.coreConfig.getTargetDir?.() ?? projectRoot;
+          const result = microcompactHistory(
+            history,
+            Date.now() - 1,
+            {
+              ...settings,
+              toolResultsThresholdMinutes:
+                (settings.toolResultsThresholdMinutes ?? 0) < 0
+                  ? settings.toolResultsThresholdMinutes
+                  : 0,
+            },
+            {
+              preserveReadFileResult: (filePath) =>
+                isManagedMemoryPath(filePath, projectRoot, targetDir),
+            },
+          );
           if (result.meta) {
             chat.setHistory(result.history);
             // Explicitly clear fileReadCache here instead of relying on

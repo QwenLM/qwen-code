@@ -2212,4 +2212,93 @@ describe('startInteractiveUI', () => {
       { connectIde: false, initializeTelemetry: false },
     );
   });
+
+  describe('periodic memory-pressure check', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    // Regression: the tool scheduler only checks after a tool call, so a
+    // long conversation with no tool calls would never reclaim and could
+    // OOM on quit. The interactive UI must run a periodic check itself.
+    it('runs performCheck on an interval without any tool calls', async () => {
+      const performCheck = vi.fn();
+      const config = {
+        ...mockConfig,
+        getMemoryPressureMonitor: () => ({ performCheck }),
+      } as unknown as Config;
+      const settings = {
+        merged: { ui: { hideWindowTitle: true } },
+      } as unknown as LoadedSettings;
+
+      await startInteractiveUI(
+        config,
+        settings,
+        mockStartupWarnings,
+        mockWorkspaceRoot,
+        {
+          authError: null,
+          themeError: null,
+          shouldOpenAuthDialog: false,
+          geminiMdFileCount: 0,
+        },
+      );
+
+      expect(performCheck).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(performCheck).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(performCheck).toHaveBeenCalledTimes(2);
+    });
+
+    it('clears the interval and runs a final check before unmount', async () => {
+      const performCheck = vi.fn();
+      const unmount = vi.fn();
+      const config = {
+        ...mockConfig,
+        getMemoryPressureMonitor: () => ({ performCheck }),
+      } as unknown as Config;
+      const settings = {
+        merged: { ui: { hideWindowTitle: true } },
+      } as unknown as LoadedSettings;
+      // An earlier describe's vi.restoreAllMocks() wipes the shared ink
+      // render mock's return value in the full run, so re-arm it here.
+      const { render } = await import('ink');
+      vi.mocked(render).mockReturnValue({ unmount } as never);
+
+      await startInteractiveUI(
+        config,
+        settings,
+        mockStartupWarnings,
+        mockWorkspaceRoot,
+        {
+          authError: null,
+          themeError: null,
+          shouldOpenAuthDialog: false,
+          geminiMdFileCount: 0,
+        },
+      );
+      await vi.advanceTimersByTimeAsync(30_000);
+      const beforeCleanup = performCheck.mock.calls.length;
+      expect(beforeCleanup).toBeGreaterThan(0);
+
+      const { registerCleanup } = await import('./utils/cleanup.js');
+      const cleanupFn = vi.mocked(registerCleanup).mock.calls.at(-1)?.[0] as
+        | (() => Promise<void> | void)
+        | undefined;
+      expect(cleanupFn).toBeTypeOf('function');
+      await cleanupFn?.();
+
+      // Final pre-unmount reclaim ran, then Ink was unmounted, and the
+      // interval was cleared (no further checks fire).
+      expect(performCheck.mock.calls.length).toBeGreaterThan(beforeCleanup);
+      expect(unmount).toHaveBeenCalledTimes(1);
+      const afterCleanup = performCheck.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(performCheck.mock.calls.length).toBe(afterCleanup);
+    });
+  });
 });

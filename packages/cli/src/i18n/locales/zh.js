@@ -19,6 +19,8 @@ export default {
 
   'User level': '用户级',
   'Project level': '项目级',
+  'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.':
+    '剪贴板图片粘贴不可用，因为原生剪贴板模块加载失败。请重新安装 Qwen Code，或改用 npm 安装方式。',
 
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)
@@ -223,7 +225,9 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Shell 模式',
   'YOLO mode': 'YOLO 模式',
-  'Auto mode': 'Auto 模式',
+  'Auto mode': '自动模式',
+  'auto_mode.entry_notice':
+    '已启用自动模式。\n   LLM 分类器会评估每次工具调用 — 安全操作将自动批准，\n   有风险的操作将被阻止。退出：Shift+Tab 或 /approval-mode default。',
   'plan mode': '规划模式',
   'auto-accept edits': '自动接受编辑',
   'Accepting edits': '接受编辑',
@@ -2455,4 +2459,21 @@ export default {
     '扩展内容刷新失败。运行 /reload-plugins 来应用更新。',
   'Extension reload did not complete. Run /reload-plugins to try again.':
     '扩展重新加载未完成。运行 /reload-plugins 重试。',
+  'Precondition check': '前置条件检查',
+  'Precondition not met — this scheduled run was skipped.':
+    '前置条件不满足 —— 已跳过本次定时运行。',
+  'The precondition check was cancelled — this scheduled run was skipped.':
+    '前置条件检查已取消 —— 已跳过本次定时运行。',
+  'The precondition check was interrupted — this scheduled run was skipped.':
+    '前置条件检查被中断 —— 已跳过本次定时运行。',
+  'The precondition check failed — this scheduled run was skipped.':
+    '前置条件检查失败 —— 已跳过本次定时运行。',
+  'Running this scheduled task in a new session: {{link}}':
+    '正在新会话中运行该定时任务：{{link}}',
+  'This scheduled run could not be started: {{error}}':
+    '本次定时运行无法启动：{{error}}',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.':
+    '会话录制因写入失败而停止。受影响会话中的新消息将不会被保存。请检查磁盘空间和权限，然后创建一个新会话以恢复录制。详情请查看调试日志。',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
+    '会话录制因写入失败而停止。受影响会话中的新消息将不会被保存。请检查磁盘空间和权限，然后运行 `/clear` 创建一个新的可录制会话。详情请查看调试日志。',
 };

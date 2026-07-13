@@ -238,7 +238,7 @@ auth provider when one is available.
 The SDK also exports `packages/sdk-typescript/src/daemon/ui/`, a host-neutral
 set of primitives that turn daemon events into transcript blocks:
 
-- `normalizeDaemonEvent(evt)` maps the 47 known daemon wire events into 42 UI-friendly `DaemonUiEventType` values; unmodeled or malformed events normalize to `debug`.
+- `normalizeDaemonEvent(evt)` maps the 53 known daemon wire events into 43 UI-friendly `DaemonUiEventType` values; unmodeled or malformed events normalize to `debug`.
 - `createDaemonTranscriptState()` plus `reduceDaemonTranscriptEvents(state, events)` projects UI events into `DaemonTranscriptBlock[]`.
 - `createDaemonTranscriptStore()` wraps subscribe / dispatch.
 - `render.ts` / `terminal.ts` provide HTML and terminal baseline renderers, while `toolPreview.ts` produces tool-call summaries.
@@ -341,6 +341,10 @@ async function resilientSubscribe(session: DaemonSessionClient) {
 ```
 
 On reconnect the daemon replays events with `id > lastSeenEventId` from its bounded ring (default 8000 events). If the gap exceeds the ring, a `state_resync_required` frame signals the client to call `loadSession` and rebuild from the current bounded replay snapshot window. That snapshot may begin with `history_truncated`; treat it as an operator-visible status marker, not as another resync request.
+
+`history_truncated.fullTranscriptAvailable` is a boolean capability flag. When it is `true`, callers can page the full active persisted replay with `DaemonClient.getSessionTranscriptPage(sessionId, { cursor, limit })`; when it is `false`, clients should keep rendering the bounded replay normally.
+
+When `workspace_persisted_transcript` is advertised, `client.workspaceById(workspaceId).getSessionTranscriptPage(sessionId, { cursor, limit })` reads the selected registered workspace without attaching to ACP. The workspace-qualified method always uses native REST even if the client has a replaceable transport; its cursor expires when the daemon restarts.
 
 ### Seeding `lastEventId` at Construction
 

@@ -86,6 +86,10 @@ export interface SessionListItem {
    * chose.
    */
   titleSource?: TitleSource;
+  /** Id of the session that spawned this one (via `create_sub_session`), if
+   * any. Read from the transcript's `parent_session` record. Absent for a
+   * top-level session. */
+  parentSessionId?: string;
   /** True when the item was read from the archive directory. */
   isArchived?: boolean;
 }
@@ -396,6 +400,40 @@ export class SessionService {
     }
   }
 
+  /**
+   * Reads the persisted `parentSessionId` for a single session (active or
+   * archived), or undefined when it has no parent. Used to re-seed a live entry
+   * on restore/resume so a restored sub-session's status still reports its
+   * lineage after a daemon restart. Best-effort: a read failure returns
+   * undefined rather than throwing — a missing link must never fail a restore.
+   */
+  async readParentSessionId(sessionId: string): Promise<string | undefined> {
+    for (const state of ['active', 'archived'] as const) {
+      const filePath = this.getSessionFilePath(sessionId, state);
+      try {
+        const records = await jsonl.readLines<ChatRecord>(
+          filePath,
+          MAX_PROMPT_SCAN_LINES,
+        );
+        if (records.length === 0) continue;
+        if (
+          !(await this.sessionBelongsToCurrentProject(
+            records[0].sessionId,
+            records[0].cwd,
+          ))
+        ) {
+          continue;
+        }
+        const parent = this.extractParentSessionIdFromRecords(records);
+        if (parent) return parent;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        this.warn(`readParentSessionId: failed to read ${sessionId}: ${error}`);
+      }
+    }
+    return undefined;
+  }
+
   async getSessionLocation(sessionId: string): Promise<SessionLocation> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
       return undefined;
@@ -435,6 +473,13 @@ export class SessionService {
         this.removeFileIfExists(sidecar);
       }
     }
+  }
+
+  private removeFileHistoryBackups(sessionId: string): void {
+    fs.rmSync(
+      path.join(Storage.getGlobalQwenDir(), FILE_HISTORY_DIR, sessionId),
+      { recursive: true, force: true },
+    );
   }
 
   private async removeSessionOrganization(sessionId: string): Promise<void> {
@@ -544,6 +589,30 @@ export class SessionService {
     const source =
       rawSource === 'auto' || rawSource === 'manual' ? rawSource : undefined;
     return { title, source };
+  }
+
+  /**
+   * Extracts the `parent_session` record's `parentSessionId` from records
+   * ALREADY read for the listing (the first {@link MAX_PROMPT_SCAN_LINES}), or
+   * undefined when the session has no parent. The record is written once right
+   * after the sub-session is created — before any prompt — so it is reliably
+   * within that window. No extra file open, unlike the title (which re-anchors
+   * at EOF and needs its own tail-then-head scan).
+   */
+  private extractParentSessionIdFromRecords(
+    records: ChatRecord[],
+  ): string | undefined {
+    for (const record of records) {
+      if (record.type === 'system' && record.subtype === 'parent_session') {
+        const payload = record.systemPayload as
+          | { parentSessionId?: unknown }
+          | undefined;
+        if (typeof payload?.parentSessionId === 'string') {
+          return payload.parentSessionId;
+        }
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -851,6 +920,7 @@ export class SessionService {
       const prompt = this.extractFirstPromptFromRecords(records);
 
       const titleInfo = this.readSessionTitleInfoFromFile(filePath, tailBuffer);
+      const parentSessionId = this.extractParentSessionIdFromRecords(records);
       items.push({
         sessionId: firstRecord.sessionId,
         cwd: firstRecord.cwd,
@@ -863,6 +933,7 @@ export class SessionService {
         // and `countSessionMessages` for the rationale.
         customTitle: titleInfo.title,
         titleSource: titleInfo.source,
+        ...(parentSessionId ? { parentSessionId } : {}),
         isArchived,
       });
     }
@@ -1146,6 +1217,7 @@ export class SessionService {
           this.removeFileIfExists(archivedPath);
         }
         this.removeWorktreeSidecars(sessionId);
+        this.removeFileHistoryBackups(sessionId);
         return true;
       }
       const archivedPath = this.getSessionFilePath(sessionId, 'archived');
@@ -1158,6 +1230,7 @@ export class SessionService {
       }
       this.removeFileIfExists(archivedPath);
       this.removeWorktreeSidecars(sessionId);
+      this.removeFileHistoryBackups(sessionId);
       return true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -1476,6 +1549,13 @@ export class SessionService {
     const sourceRecords = includeActiveSideArtifactRecords(
       records,
       activeMessages,
+    ).filter(
+      // A fork is a fresh top-level session, NOT a `create_sub_session` child.
+      // Copying the source's `parent_session` record would make the fork report
+      // the original's parent as its own, so `?parentSessionId=` lists the fork
+      // as a direct child of a session that never spawned it. Drop the lineage.
+      (record) =>
+        !(record.type === 'system' && record.subtype === 'parent_session'),
     );
     if (sourceRecords.length === 0) {
       throw new Error(`Source session not found or empty: ${sourceSessionId}`);
@@ -1557,13 +1637,34 @@ export class SessionService {
       }
       throw err;
     }
+    let targetComplete = false;
     try {
-      fs.writeFileSync(fd, body, { encoding: 'utf8' });
-    } finally {
-      fs.closeSync(fd);
-    }
+      try {
+        fs.writeFileSync(fd, body, { encoding: 'utf8' });
+      } finally {
+        fs.closeSync(fd);
+      }
 
-    await copyFileHistoryBackups(sourceSessionId, newSessionId);
+      await copyFileHistoryBackups(sourceSessionId, newSessionId);
+      targetComplete = true;
+    } finally {
+      if (!targetComplete) {
+        try {
+          this.removeFileIfExists(targetPath);
+        } catch (cleanupError) {
+          this.warn(
+            `forkSession: failed to clean up incomplete target ${newSessionId}: ${cleanupError}`,
+          );
+        }
+        try {
+          this.removeFileHistoryBackups(newSessionId);
+        } catch (cleanupError) {
+          this.warn(
+            `forkSession: failed to clean up file history for incomplete target ${newSessionId}: ${cleanupError}`,
+          );
+        }
+      }
+    }
 
     return { filePath: targetPath, copiedCount: forked.length };
   }

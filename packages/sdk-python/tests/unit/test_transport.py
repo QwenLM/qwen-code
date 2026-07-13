@@ -82,6 +82,51 @@ def test_cli_argument_precedence_prefers_resume_then_continue_then_session_id() 
     assert "--session-id" not in args
 
 
+def test_build_cli_arguments_maps_all_consolidated_options() -> None:
+    args = build_cli_arguments(
+        QueryOptions(
+            fork_session=True,
+            max_tool_calls=50,
+            max_subagent_depth=3,
+            include_directories=["/extra/dir1", "/extra/dir2"],
+            extensions=["ext1", "ext2"],
+            allowed_mcp_server_names=["server1"],
+            fallback_model=["qwen-plus", "qwen-turbo"],
+            proxy="http://proxy:8080",
+            sandbox=True,
+            safe_mode=True,
+            insecure=True,
+            worktree=True,
+            disabled_slash_commands=["/init", "/vim"],
+            extra_args=["--custom-flag", "value"],
+        )
+    )
+
+    assert "--fork-session" in args
+    assert "--max-tool-calls" in args
+    assert args[args.index("--max-tool-calls") + 1] == "50"
+    assert "--max-subagent-depth" in args
+    assert args[args.index("--max-subagent-depth") + 1] == "3"
+    assert "--include-directories" in args
+    assert args[args.index("--include-directories") + 1] == "/extra/dir1,/extra/dir2"
+    assert "--extensions" in args
+    assert args[args.index("--extensions") + 1] == "ext1,ext2"
+    assert "--allowed-mcp-server-names" in args
+    assert args[args.index("--allowed-mcp-server-names") + 1] == "server1"
+    assert "--fallback-model" in args
+    assert args[args.index("--fallback-model") + 1] == "qwen-plus,qwen-turbo"
+    assert "--proxy" in args
+    assert args[args.index("--proxy") + 1] == "http://proxy:8080"
+    assert "--sandbox" in args
+    assert "--safe-mode" in args
+    assert "--insecure" in args
+    assert "--worktree" in args
+    assert "--disabled-slash-commands" in args
+    assert args[args.index("--disabled-slash-commands") + 1] == "/init,/vim"
+    assert "--custom-flag" in args
+    assert args[args.index("--custom-flag") + 1] == "value"
+
+
 def test_prepare_spawn_info_uses_runtime_for_python_scripts(tmp_path: Path) -> None:
     script_path = tmp_path / "fake-qwen.py"
     script_path.write_text("print('ok')\n", encoding="utf-8")

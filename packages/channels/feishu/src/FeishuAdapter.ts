@@ -216,6 +216,12 @@ export class FeishuChannel extends ChannelBase {
       await this.connectWebhook(webhookPort, verificationToken, encryptKey);
     } else {
       // WebSocket mode (default, like DingTalk Stream)
+      const token = await this.getTenantAccessToken();
+      if (!token) {
+        throw new Error(
+          `Channel "${this.name}" failed to authenticate Feishu credentials.`,
+        );
+      }
       await this.connectWebSocket();
     }
 
@@ -1060,6 +1066,22 @@ export class FeishuChannel extends ChannelBase {
         }
       }, delay);
     }
+  }
+
+  protected override onResponseBoundary(
+    _chatId: string,
+    sessionId: string,
+  ): void {
+    if (this.config.blockStreaming === 'on') return;
+    const inboundMsgId = this.sessionToInboundMsg.get(sessionId);
+    if (!inboundMsgId) return;
+    const cardState = this.cardSessions.get(inboundMsgId);
+    if (!cardState || cardState.stopped) return;
+    if (cardState.pendingUpdateTimer) {
+      clearTimeout(cardState.pendingUpdateTimer);
+      cardState.pendingUpdateTimer = undefined;
+    }
+    cardState.accumulatedText = '';
   }
 
   private isKnownInboundMessageId(messageId: string): boolean {

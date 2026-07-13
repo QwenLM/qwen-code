@@ -35,7 +35,7 @@ import type {
   LoopTickResult,
   ToolArtifact,
   VisionBridgeResult,
-  SubSessionSpawner,
+  MemoryWriteCandidate,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -75,13 +75,12 @@ import {
   createHookOutput,
   generateToolUseId,
   MessageBusType,
+  MessageDisplayDispatcher,
   getPlanModeSystemReminder,
   getArenaSystemReminder,
   getStartupContextLength,
   isSystemReminderContent,
-  detectTurnInterruption,
-  buildSyntheticToolResponseParts,
-  ORPHAN_TOOL_USE_REPAIR_REASON,
+  buildSessionRecoveryPlanFromApiHistory,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
   getEffectivePermissionForConfirmation,
@@ -116,6 +115,7 @@ import {
   LoopDetectedEvent,
   LoopType,
   acquireSleepInhibitor,
+  refreshMemoryAfterManagedWrite,
   clearGoalTerminalObserver,
   setGoalTerminalObserver,
   sessionIdContext,
@@ -207,13 +207,14 @@ import type {
   SessionContext,
   ToolCallStartParams,
 } from './types.js';
-import { HistoryReplayer } from './HistoryReplayer.js';
-import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
+import { HistoryReplayer } from './history-replayer.js';
+import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
 import {
   buildPermissionRequestContent,
+  interactionMetaFields,
   toPermissionOptions,
 } from './permissionUtils.js';
 import {
@@ -242,6 +243,7 @@ type RunToolResult = {
   stopAfterPermissionCancel: boolean;
   repeatedDuplicateProviderToolCall?: boolean;
   loopDetected?: boolean;
+  memoryWriteCandidates?: MemoryWriteCandidate[];
 };
 
 type DaemonToolLoopState = {
@@ -602,6 +604,19 @@ interface BackgroundNotificationQueueItem {
   status: string;
   kind: 'agent' | 'monitor' | 'shell';
   toolUseId?: string;
+}
+
+/** The slice of `CronJob` a fire delivers to this session. Structural, not the
+ * imported type, so core stays a type-only dependency of the fire path. */
+interface CronFire {
+  id?: string;
+  prompt: string;
+  cronExpr?: string;
+  missed?: boolean;
+  /** The minute this fire was stamped for. The scheduler assigns it before
+   * calling `onFire` and writes the run record under the same value, so it
+   * identifies this fire's entry in `runs[]`. */
+  lastFiredAt?: number;
 }
 
 interface CronQueueItem {
@@ -975,6 +990,7 @@ export class Session implements SessionContext {
   // or session reload), which would otherwise execute orphaned cron prompts
   // on a session whose registries are already unregistered.
   private disposed = false;
+  private unsubscribeChatRecordingFailure?: () => void;
 
   // Modular components
   private readonly historyReplayer: HistoryReplayer;
@@ -1025,10 +1041,9 @@ export class Session implements SessionContext {
 
   /**
    * Wire the sub-session spawner to the daemon over the ACP `extMethod` request
-   * channel. Two callers: the `create_sub_session` tool (model-initiated) and
-   * `#dispatchIsolatedCronFire` (scheduler-initiated). ONLY the ACP/daemon
-   * session wires it, so the tool is inert (reports daemon-only) in interactive
-   * TUI / headless, where no bridge exists.
+   * channel. The `create_sub_session` tool (model-initiated) is its caller. ONLY
+   * the ACP/daemon session wires it, so the tool is inert (reports daemon-only)
+   * in interactive TUI / headless, where no bridge exists.
    *
    * A tool-initiated request runs while the caller's turn is suspended in the
    * tool await — safe because the ACP channel supports concurrent bidirectional
@@ -1058,6 +1073,9 @@ export class Session implements SessionContext {
           : {}),
         ...(typeof resp['stopReason'] === 'string'
           ? { stopReason: resp['stopReason'] }
+          : {}),
+        ...(typeof resp['parentSessionPersisted'] === 'boolean'
+          ? { parentSessionPersisted: resp['parentSessionPersisted'] }
           : {}),
       };
     });
@@ -1135,6 +1153,8 @@ export class Session implements SessionContext {
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
     this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);
     this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
+    this.unsubscribeChatRecordingFailure?.();
+    this.unsubscribeChatRecordingFailure = undefined;
     this.config.setSubSessionSpawner(undefined);
     clearGoalTerminalObserver(this.sessionId);
   }
@@ -1509,17 +1529,23 @@ export class Session implements SessionContext {
     // not need to structuredClone the whole history. The authoritative
     // re-detection inside the fired prompt() reads full history for the strip.
     const chat = this.#getCurrentChat();
-    const detection = detectTurnInterruption(
-      chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
+    const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
+      sessionId: this.sessionId,
+      apiHistory:
+        chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
         chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT),
-    );
-    if (detection.kind === 'none') {
+    });
+    if (!recoveryPlan.continuation) {
       return { accepted: false, interruption: 'none' };
     }
+    const interruption =
+      recoveryPlan.kind === 'interrupted_prompt'
+        ? 'interrupted_prompt'
+        : 'interrupted_turn';
     // A prompt (or an earlier continuation) is still in flight: there is no
     // settled turn to continue. Reject rather than abort the live turn.
     if (this.pendingPrompt && !this.pendingPrompt.signal.aborted) {
-      return { accepted: false, interruption: detection.kind };
+      return { accepted: false, interruption };
     }
 
     // Accepted. This method only classifies — the daemon bridge drives the
@@ -1530,7 +1556,7 @@ export class Session implements SessionContext {
     // daemon would report the session idle and a racing prompt could abort the
     // continuation), which is exactly what routing through the bridge fixes.
 
-    return { accepted: true, interruption: detection.kind };
+    return { accepted: true, interruption };
   }
 
   /**
@@ -1712,10 +1738,11 @@ export class Session implements SessionContext {
             let strippedOrphanEntries: Content[] | null = null;
             let orphanPushCountSnapshot = 0;
             if (isContinue) {
-              const detection = detectTurnInterruption(
-                this.#getCurrentChat().getHistory(),
-              );
-              if (detection.kind === 'none') {
+              const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
+                sessionId: this.sessionId,
+                apiHistory: this.#getCurrentChat().getHistory(),
+              });
+              if (!recoveryPlan.continuation) {
                 // History moved between continueLastTurn()'s accept and this
                 // re-detection (e.g. a concurrent turn settled it). Nothing to
                 // continue; log so an abandoned continuation is diagnosable.
@@ -1734,18 +1761,15 @@ export class Session implements SessionContext {
                 );
                 return { stopReason: 'end_turn' };
               }
-              if (detection.kind === 'interrupted_prompt') {
+              if (recoveryPlan.continuation.mode === 'retry_user_parts') {
                 strippedOrphanEntries =
                   this.#getCurrentChat().stripOrphanedUserEntriesFromHistory() ??
                   null;
                 orphanPushCountSnapshot =
                   this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
-                continuationParts = detection.parts;
+                continuationParts = recoveryPlan.continuation.parts;
               } else {
-                continuationParts = buildSyntheticToolResponseParts(
-                  detection.danglingCalls,
-                  ORPHAN_TOOL_USE_REPAIR_REASON,
-                );
+                continuationParts = recoveryPlan.continuation.parts;
               }
             }
 
@@ -1794,10 +1818,13 @@ export class Session implements SessionContext {
                 return { stopReason: 'end_turn' };
               }
             } else {
-              // Normal processing for non-slash commands
+              // Normal processing for non-slash commands. promptLast keeps the
+              // user's instruction the final, prominent part when referenced
+              // file/editor content is appended (issue: ACP + local qwen).
               parts = await this.#resolvePrompt(
                 params.prompt,
                 pendingSend.signal,
+                { promptLast: true },
               );
             }
 
@@ -1938,6 +1965,9 @@ export class Session implements SessionContext {
                 let usageMetadata: GenerateContentResponseUsageMetadata | null =
                   null;
                 const streamStartTime = Date.now();
+                const messageDisplay = this.#createMessageDisplayDispatcher(
+                  pendingSend.signal,
+                );
 
                 try {
                   const sendResult =
@@ -1982,6 +2012,9 @@ export class Session implements SessionContext {
                           'assistant',
                           part.thought,
                         );
+                        if (!part.thought) {
+                          messageDisplay?.addChunk(part.text);
+                        }
                       }
                     }
 
@@ -2065,6 +2098,11 @@ export class Session implements SessionContext {
                   }
 
                   throw error;
+                } finally {
+                  // Deliver is_final (skipped on abort) and drain before the
+                  // turn proceeds, on every exit: normal end-of-stream,
+                  // cancellation returns, and thrown stream errors alike.
+                  await messageDisplay?.finish();
                 }
 
                 if (usageMetadata) {
@@ -2267,6 +2305,9 @@ export class Session implements SessionContext {
           const functionCalls: FunctionCall[] = [];
           let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
           const streamStartTime = Date.now();
+          const messageDisplay = this.#createMessageDisplayDispatcher(
+            pendingSend.signal,
+          );
 
           try {
             const continueSendResult =
@@ -2304,6 +2345,9 @@ export class Session implements SessionContext {
                     'assistant',
                     part.thought,
                   );
+                  if (!part.thought) {
+                    messageDisplay?.addChunk(part.text);
+                  }
                 }
               }
 
@@ -2357,6 +2401,10 @@ export class Session implements SessionContext {
             }
 
             throw error;
+          } finally {
+            // Same contract as the main prompt loop: is_final (skipped on
+            // abort) is delivered and drained on every exit path.
+            await messageDisplay?.finish();
           }
 
           if (usageMetadata) {
@@ -2424,6 +2472,35 @@ export class Session implements SessionContext {
    * stop reason when the provider send should be skipped because the request
    * was cancelled or the session token limit was exceeded.
    */
+  /**
+   * Create the MessageDisplay hook dispatcher for one model call's streamed
+   * reply, or null when the hook isn't registered (the common case — keeps
+   * the streaming loops zero-cost). The ACP surface consumes GeminiChat's
+   * raw stream directly rather than going through
+   * GeminiClient.sendMessageStream, so it has to fire this hook itself —
+   * with the same contract as the terminal UI path in client.ts: debounced
+   * cumulative text, one message_id per model call, and an is_final firing
+   * on every non-aborted exit (delivered by awaiting `finish()` in a
+   * finally around each streaming loop).
+   */
+  #createMessageDisplayDispatcher(
+    signal: AbortSignal,
+  ): MessageDisplayDispatcher | null {
+    const messageBus = this.config.getMessageBus?.();
+    if (
+      this.config.getDisableAllHooks?.() ||
+      !messageBus ||
+      !this.config.hasHooksForEvent?.('MessageDisplay')
+    ) {
+      return null;
+    }
+    // The dispatcher mirrors warnings to console.warn itself; this sink
+    // only adds them to the debug-log file.
+    return new MessageDisplayDispatcher(messageBus, signal, (message) =>
+      debugLogger.warn(message),
+    );
+  }
+
   async #sendMessageStreamWithAutoCompression(
     promptId: string,
     message: Part[],
@@ -2919,77 +2996,15 @@ export class Session implements SessionContext {
 
     if (!scheduler.hasPendingWork) return;
 
-    scheduler.start(
-      (job: {
-        prompt: string;
-        cronExpr?: string;
-        missed?: boolean;
-        runMode?: 'shared' | 'isolated';
-      }) => {
-        if (this.cronDisabledByTokenLimit) return;
-        if (job.missed && detectAutonomousSentinel(job.prompt)) return;
-        // An `isolated` task gets a FRESH sub-session per fire instead of
-        // accumulating in this bound session. Dispatch it straight to the
-        // daemon rather than asking the model to call `create_sub_session`:
-        // that tool's permission is 'ask', and under the default approval mode
-        // an unattended fire has nobody to answer the prompt — the call would
-        // hang until the daemon's permission timeout cancels it. A `missed`
-        // one-shot keeps the in-session confirm-first path.
-        if (!job.missed && job.runMode === 'isolated') {
-          const spawner = this.config.getSubSessionSpawner();
-          if (spawner) {
-            void this.#dispatchIsolatedCronFire(spawner, job.prompt);
-            return;
-          }
-          // Defensive: an isolated task can only be created through the daemon's
-          // REST route, which binds it to a session that always has a spawner
-          // (and a bound task fires nowhere else). Should that ever change, run
-          // the fire in-session — losing the task is worse than losing isolation.
-        }
-        this.cronQueue.push({
-          prompt: job.prompt,
-          source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
-        });
-        void this.#drainCronQueue();
-      },
-    );
-  }
-
-  /**
-   * Runs one `isolated` scheduled fire in a fresh sub-session. Fire-and-forget:
-   * `'sent'` resolves once the prompt is dispatched, and the daemon-side
-   * launcher holds a concurrency slot until that sub-session's turn drains.
-   *
-   * A dispatch failure (concurrency cap reached, bridge gone, daemon shutting
-   * down) is logged and the fire is dropped. It deliberately does NOT fall back
-   * to an in-session run: the prompt may already have been dispatched, and
-   * silently running an isolated task inside the bound session would defeat the
-   * isolation the user asked for.
-   */
-  async #dispatchIsolatedCronFire(
-    spawner: SubSessionSpawner,
-    prompt: string,
-  ): Promise<void> {
-    try {
-      const { sessionId } = await spawner({ prompt, completion: 'sent' });
-      debugLogger.info(
-        `Isolated scheduled task dispatched into sub-session ${sessionId} [session ${this.sessionId}]`,
-      );
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      // Must reach stderr. `debugLogger.warn` writes nothing unless a debug log
-      // session is active, and the scheduler has already persisted this fire as
-      // a run — so a dropped dispatch would otherwise look like a successful
-      // one, with no trace anywhere. The daemon forwards child stderr.
-      writeStderrLine(
-        `qwen serve: isolated scheduled task dispatch failed — the fire was ` +
-          `dropped [session ${this.sessionId}]: ${detail}`,
-      );
-      debugLogger.warn(
-        `Isolated scheduled task dispatch failed — the fire was dropped ` +
-          `[session ${this.sessionId}]: ${detail}`,
-      );
-    }
+    scheduler.start((job: CronFire) => {
+      if (this.cronDisabledByTokenLimit) return;
+      if (job.missed && detectAutonomousSentinel(job.prompt)) return;
+      this.cronQueue.push({
+        prompt: job.prompt,
+        source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
+      });
+      void this.#drainCronQueue();
+    });
   }
 
   /**
@@ -3267,42 +3282,54 @@ export class Session implements SessionContext {
                   this.loopTickResolver?.markDelivered();
                 }
                 nextMessage = null;
+                const messageDisplay = this.#createMessageDisplayDispatcher(
+                  ac.signal,
+                );
 
-                for await (const resp of responseStream) {
-                  if (ac.signal.aborted) return;
+                try {
+                  for await (const resp of responseStream) {
+                    if (ac.signal.aborted) return;
 
-                  if (
-                    resp.type === StreamEventType.CHUNK &&
-                    resp.value.candidates &&
-                    resp.value.candidates.length > 0
-                  ) {
-                    const candidate = resp.value.candidates[0];
-                    for (const part of candidate.content?.parts ?? []) {
-                      if (!part.text) continue;
-                      this.messageEmitter.emitMessage(
-                        part.text,
-                        'assistant',
-                        part.thought,
-                      );
+                    if (
+                      resp.type === StreamEventType.CHUNK &&
+                      resp.value.candidates &&
+                      resp.value.candidates.length > 0
+                    ) {
+                      const candidate = resp.value.candidates[0];
+                      for (const part of candidate.content?.parts ?? []) {
+                        if (!part.text) continue;
+                        this.messageEmitter.emitMessage(
+                          part.text,
+                          'assistant',
+                          part.thought,
+                        );
+                        if (!part.thought) {
+                          messageDisplay?.addChunk(part.text);
+                        }
+                      }
+                    }
+
+                    if (
+                      resp.type === StreamEventType.CHUNK &&
+                      resp.value.usageMetadata
+                    ) {
+                      usageMetadata = resp.value.usageMetadata;
+                    }
+
+                    if (
+                      resp.type === StreamEventType.CHUNK &&
+                      resp.value.functionCalls
+                    ) {
+                      functionCalls.push(...resp.value.functionCalls);
+                    }
+                    if (resp.type === StreamEventType.MODEL_FALLBACK) {
+                      functionCalls.length = 0;
                     }
                   }
-
-                  if (
-                    resp.type === StreamEventType.CHUNK &&
-                    resp.value.usageMetadata
-                  ) {
-                    usageMetadata = resp.value.usageMetadata;
-                  }
-
-                  if (
-                    resp.type === StreamEventType.CHUNK &&
-                    resp.value.functionCalls
-                  ) {
-                    functionCalls.push(...resp.value.functionCalls);
-                  }
-                  if (resp.type === StreamEventType.MODEL_FALLBACK) {
-                    functionCalls.length = 0;
-                  }
+                } finally {
+                  // is_final (skipped on abort) delivered and drained on
+                  // every exit path, same as the interactive prompt loops.
+                  await messageDisplay?.finish();
                 }
 
                 if (usageMetadata) {
@@ -3438,11 +3465,11 @@ export class Session implements SessionContext {
     // new title on their next poll.
     this.config
       .getChatRecordingService()
-      ?.setTitleRecordedCallback((customTitle, titleSource) => {
+      ?.setTitleRecordedCallback((customTitle, titleSource, sessionId) => {
         void this.client
           .extNotification('qwen/notify/session/title-update', {
             v: 1,
-            sessionId: this.sessionId,
+            sessionId,
             title: customTitle,
             titleSource,
           })
@@ -3451,6 +3478,20 @@ export class Session implements SessionContext {
             // until the client's next session-list refresh.
           });
       });
+
+    if (typeof this.config.onChatRecordingFailure === 'function') {
+      this.unsubscribeChatRecordingFailure = this.config.onChatRecordingFailure(
+        (event) =>
+          this.client.extNotification(
+            'qwen/notify/session/recording-degraded',
+            {
+              v: 1,
+              sessionId: event.sessionId,
+              reason: 'write_failed',
+            },
+          ),
+      );
+    }
   }
 
   #enqueueBackgroundNotification(item: BackgroundNotificationQueueItem): void {
@@ -3572,49 +3613,59 @@ export class Session implements SessionContext {
 
             const responseStream = sendResult.responseStream;
             nextMessage = null;
+            const messageDisplay = this.#createMessageDisplayDispatcher(
+              ac.signal,
+            );
 
-            for await (const resp of responseStream) {
-              if (ac.signal.aborted) {
-                await this.#emitBackgroundNotificationEndTurn('cancelled');
-                return;
-              }
+            try {
+              for await (const resp of responseStream) {
+                if (ac.signal.aborted) {
+                  await this.#emitBackgroundNotificationEndTurn('cancelled');
+                  return;
+                }
 
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.candidates &&
-                resp.value.candidates.length > 0
-              ) {
-                const candidate = resp.value.candidates[0];
-                for (const part of candidate.content?.parts ?? []) {
-                  if (!part.text) continue;
-                  if (part.thought) {
-                    await this.messageEmitter.emitMessage(
-                      part.text,
-                      'assistant',
-                      true,
-                    );
-                  } else {
-                    responseText += part.text;
+                if (
+                  resp.type === StreamEventType.CHUNK &&
+                  resp.value.candidates &&
+                  resp.value.candidates.length > 0
+                ) {
+                  const candidate = resp.value.candidates[0];
+                  for (const part of candidate.content?.parts ?? []) {
+                    if (!part.text) continue;
+                    if (part.thought) {
+                      await this.messageEmitter.emitMessage(
+                        part.text,
+                        'assistant',
+                        true,
+                      );
+                    } else {
+                      responseText += part.text;
+                      messageDisplay?.addChunk(part.text);
+                    }
                   }
                 }
-              }
 
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.usageMetadata
-              ) {
-                usageMetadata = resp.value.usageMetadata;
-              }
+                if (
+                  resp.type === StreamEventType.CHUNK &&
+                  resp.value.usageMetadata
+                ) {
+                  usageMetadata = resp.value.usageMetadata;
+                }
 
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.functionCalls
-              ) {
-                functionCalls.push(...resp.value.functionCalls);
+                if (
+                  resp.type === StreamEventType.CHUNK &&
+                  resp.value.functionCalls
+                ) {
+                  functionCalls.push(...resp.value.functionCalls);
+                }
+                if (resp.type === StreamEventType.MODEL_FALLBACK) {
+                  functionCalls.length = 0;
+                }
               }
-              if (resp.type === StreamEventType.MODEL_FALLBACK) {
-                functionCalls.length = 0;
-              }
+            } finally {
+              // is_final (skipped on abort) delivered and drained on every
+              // exit path, same as the interactive prompt loops.
+              await messageDisplay?.finish();
             }
 
             if (responseText.length > 0) {
@@ -4195,6 +4246,17 @@ export class Session implements SessionContext {
         parts.push(await recordSkippedToolCall(remainingCall, message));
       }
     };
+    const memoryWriteCandidates: MemoryWriteCandidate[] = [];
+    const collectMemoryWriteCandidates = (result: RunToolResult): void => {
+      if (result.memoryWriteCandidates) {
+        memoryWriteCandidates.push(...result.memoryWriteCandidates);
+      }
+    };
+    const refreshMemoryIfNeeded = async (): Promise<void> => {
+      await refreshMemoryAfterManagedWrite(this.config, memoryWriteCandidates, {
+        logContext: `ACP session ${this.sessionId} memory tool batch`,
+      });
+    };
     // Bounded-concurrency runner: matches core's `runConcurrently`
     // behaviour (`coreToolScheduler.ts:1506`), capped by
     // `QWEN_CODE_MAX_TOOL_CONCURRENCY` (default 10). Results are returned
@@ -4328,103 +4390,117 @@ export class Session implements SessionContext {
     };
 
     const parts: Part[] = [];
-    for (const batch of batches) {
-      if (batch.kind === 'duplicate') {
-        await emitDuplicateBatch(batch);
-        parts.push(...batch.response.responseParts);
-        continue;
-      }
-      if (batch.concurrent && batch.calls.length > 1) {
-        const batchAbortController = new AbortController();
-        let batchStopAfterPermissionCancel = false;
-        const propagateAbort = () => {
-          batchAbortController.abort(abortSignal.reason);
-        };
-        if (abortSignal.aborted) {
-          propagateAbort();
-        } else {
-          abortSignal.addEventListener('abort', propagateAbort, {
-            once: true,
-          });
+    try {
+      for (const batch of batches) {
+        if (batch.kind === 'duplicate') {
+          await emitDuplicateBatch(batch);
+          parts.push(...batch.response.responseParts);
+          continue;
         }
-        const stopBatchAfterPermissionCancel = () => {
-          batchStopAfterPermissionCancel = true;
-          batchAbortController.abort(USER_CANCEL_ABORT_REASON);
-        };
-        let results: RunToolResult[];
-        try {
-          results = await runBounded(
-            batch.calls,
-            batchAbortController.signal,
-            stopBatchAfterPermissionCancel,
-            () => batchAbortController.abort('loop_detected'),
-            () => batchStopAfterPermissionCancel,
-          );
-        } finally {
-          abortSignal.removeEventListener('abort', propagateAbort);
-        }
-        let shouldStop = false;
-        let shouldStopForLoop = false;
-        for (const r of results) {
-          parts.push(...r.parts);
-          shouldStop ||= r.stopAfterPermissionCancel;
-          shouldStopForLoop ||= r.loopDetected === true;
-        }
-        if (shouldStopForLoop) {
-          await appendSkippedAfter(
-            parts,
-            batch.calls[batch.calls.length - 1],
-            LOOP_DETECTED_SKIP_MESSAGE,
-          );
-          return {
-            parts,
-            stopAfterPermissionCancel: false,
-            loopDetected: true,
+        if (batch.concurrent && batch.calls.length > 1) {
+          const batchAbortController = new AbortController();
+          let batchStopAfterPermissionCancel = false;
+          const propagateAbort = () => {
+            batchAbortController.abort(abortSignal.reason);
           };
-        }
-        if (shouldStop) {
-          await appendSkippedAfter(parts, batch.calls[batch.calls.length - 1]);
-          return {
-            parts,
-            stopAfterPermissionCancel: true,
-            repeatedDuplicateProviderToolCall: false,
+          if (abortSignal.aborted) {
+            propagateAbort();
+          } else {
+            abortSignal.addEventListener('abort', propagateAbort, {
+              once: true,
+            });
+          }
+          const stopBatchAfterPermissionCancel = () => {
+            batchStopAfterPermissionCancel = true;
+            batchAbortController.abort(USER_CANCEL_ABORT_REASON);
           };
-        }
-      } else {
-        for (const fc of batch.calls) {
-          const r = await this.runTool(
-            abortSignal,
-            promptId,
-            fc,
-            undefined,
-            toolLoopState,
-            recordSkippedToolCall,
-          );
-          parts.push(...r.parts);
-          if (r.loopDetected) {
-            await appendSkippedAfter(parts, fc, LOOP_DETECTED_SKIP_MESSAGE);
+          let results: RunToolResult[];
+          try {
+            results = await runBounded(
+              batch.calls,
+              batchAbortController.signal,
+              stopBatchAfterPermissionCancel,
+              () => batchAbortController.abort('loop_detected'),
+              () => batchStopAfterPermissionCancel,
+            );
+          } finally {
+            abortSignal.removeEventListener('abort', propagateAbort);
+          }
+          let shouldStop = false;
+          let shouldStopForLoop = false;
+          for (const r of results) {
+            parts.push(...r.parts);
+            collectMemoryWriteCandidates(r);
+            shouldStop ||= r.stopAfterPermissionCancel;
+            shouldStopForLoop ||= r.loopDetected === true;
+          }
+          if (shouldStopForLoop) {
+            await appendSkippedAfter(
+              parts,
+              batch.calls[batch.calls.length - 1],
+              LOOP_DETECTED_SKIP_MESSAGE,
+            );
             return {
               parts,
               stopAfterPermissionCancel: false,
               loopDetected: true,
+              memoryWriteCandidates,
             };
           }
-          if (r.stopAfterPermissionCancel) {
-            await appendSkippedAfter(parts, fc);
+          if (shouldStop) {
+            await appendSkippedAfter(
+              parts,
+              batch.calls[batch.calls.length - 1],
+            );
             return {
               parts,
               stopAfterPermissionCancel: true,
               repeatedDuplicateProviderToolCall: false,
+              memoryWriteCandidates,
             };
+          }
+        } else {
+          for (const fc of batch.calls) {
+            const r = await this.runTool(
+              abortSignal,
+              promptId,
+              fc,
+              undefined,
+              toolLoopState,
+              recordSkippedToolCall,
+            );
+            parts.push(...r.parts);
+            collectMemoryWriteCandidates(r);
+            if (r.loopDetected) {
+              await appendSkippedAfter(parts, fc, LOOP_DETECTED_SKIP_MESSAGE);
+              return {
+                parts,
+                stopAfterPermissionCancel: false,
+                loopDetected: true,
+                memoryWriteCandidates,
+              };
+            }
+            if (r.stopAfterPermissionCancel) {
+              await appendSkippedAfter(parts, fc);
+              return {
+                parts,
+                stopAfterPermissionCancel: true,
+                repeatedDuplicateProviderToolCall: false,
+                memoryWriteCandidates,
+              };
+            }
           }
         }
       }
+      return {
+        parts,
+        stopAfterPermissionCancel: false,
+        repeatedDuplicateProviderToolCall: false,
+        memoryWriteCandidates,
+      };
+    } finally {
+      await refreshMemoryIfNeeded();
     }
-    return {
-      parts,
-      stopAfterPermissionCancel: false,
-      repeatedDuplicateProviderToolCall: false,
-    };
   }
 
   /**
@@ -4975,7 +5051,10 @@ export class Session implements SessionContext {
                   // (e.g. the Agent tool) dedicated permission UI without
                   // relying on a protocol `kind` ACP can't carry. The tool_call
                   // frame already ships _meta.toolName; mirror it here.
-                  _meta: { toolName },
+                  _meta: {
+                    toolName,
+                    ...interactionMetaFields(confirmationDetails),
+                  },
                 },
               };
               const stopAfterPermissionCancel = () => {
@@ -5381,6 +5460,16 @@ export class Session implements SessionContext {
           return {
             parts: responseParts,
             stopAfterPermissionCancel: nestedPermissionCancelled,
+            memoryWriteCandidates:
+              status === 'success'
+                ? [
+                    {
+                      toolName,
+                      args,
+                      status,
+                    },
+                  ]
+                : undefined,
           };
         } catch (e) {
           // Ensure cleanup on error
@@ -5595,10 +5684,12 @@ export class Session implements SessionContext {
 
       case 'no_command':
         // No command was found or executed, resolve the original prompt
-        // through the standard path that handles all block types
+        // through the standard path that handles all block types. promptLast
+        // keeps the user's instruction prominent (matches the normal path).
         return this.#resolvePrompt(
           originalPrompt,
           new AbortController().signal,
+          { promptLast: true },
         );
 
       default: {
@@ -5613,6 +5704,12 @@ export class Session implements SessionContext {
   async #resolvePrompt(
     message: ContentBlock[],
     abortSignal: AbortSignal,
+    // When true, the user's actual instruction text is placed AFTER any
+    // referenced/file content so it stays the final, prominent directive
+    // (see the assembly comment below). Only genuine user prompts pass this;
+    // the mid-turn drain path leaves it false so its synthetic `@uri` marker
+    // stays first and keeps carrying the "[User message received...]" prefix.
+    options: { promptLast?: boolean } = {},
   ): Promise<Part[]> {
     const FILE_URI_SCHEME = 'file://';
 
@@ -5724,7 +5821,19 @@ export class Session implements SessionContext {
       }
     }
 
-    const processedQueryParts: Part[] = [];
+    // Reference/file content is collected separately from the user's actual
+    // instruction so the caller can keep the instruction prominent. When
+    // `options.promptLast` is set (genuine user prompts), the instruction is
+    // placed AFTER this content — mirroring the interactive path, which keeps
+    // the prompt prominent by merging IDE editor context in FRONT of the
+    // prompt via prependToFirstTextPart (client.ts), leaving the instruction
+    // last. Recency-biased providers (e.g. local Ollama qwen models) otherwise
+    // latch onto trailing file content and answer as if it were the task,
+    // ignoring a prompt buried before it. The model correlates each @reference
+    // with its content block by the "@path" token left in the prompt text and
+    // the "--- Content from ... ---" delimiter labels, not by position, so
+    // leading with the content is safe.
+    const referenceParts: Part[] = [...extensionParts, ...mcpServerParts];
 
     // Read files using readManyFiles utility
     if (pathSpecsToRead.length > 0) {
@@ -5740,32 +5849,23 @@ export class Session implements SessionContext {
         ? readResult.contentParts
         : [readResult.contentParts];
 
-      // Add initial query text first
-      processedQueryParts.push({ text: initialQueryText });
-      processedQueryParts.push(...extensionParts);
-      processedQueryParts.push(...mcpServerParts);
-
-      // Then add content parts (preserving binary files as inlineData)
+      // Add content parts (preserving binary files as inlineData)
       for (const part of contentParts) {
         if (typeof part === 'string') {
-          processedQueryParts.push({ text: part });
+          referenceParts.push({ text: part });
         } else if (preserveUnsupportedImageForBridge && hasImageParts([part])) {
-          processedQueryParts.push(part);
+          referenceParts.push(part);
         } else {
-          processedQueryParts.push(clampInlineMediaPart(part));
+          referenceParts.push(clampInlineMediaPart(part));
         }
       }
-    } else {
-      processedQueryParts.push({ text: initialQueryText.trim() });
-      processedQueryParts.push(...extensionParts);
-      processedQueryParts.push(...mcpServerParts);
     }
 
     // Process embedded context from resource blocks
     for (const contextPart of embeddedContext) {
       // Type guard for text resources
       if ('text' in contextPart && contextPart.text) {
-        processedQueryParts.push({
+        referenceParts.push({
           text: `File: ${contextPart.uri}\n${contextPart.text}`,
         });
       }
@@ -5777,13 +5877,26 @@ export class Session implements SessionContext {
             data: contextPart.blob,
           },
         };
-        processedQueryParts.push(
+        referenceParts.push(
           preserveUnsupportedImageForBridge && hasImageParts([inlinePart])
             ? inlinePart
             : clampInlineMediaPart(inlinePart),
         );
       }
     }
+
+    // `initialQueryText` keeps its inline @path tokens (untrimmed) when files
+    // were read so the spacing around them is preserved; the no-file path
+    // trims as before.
+    const promptText =
+      pathSpecsToRead.length > 0 ? initialQueryText : initialQueryText.trim();
+    const promptPart: Part = { text: promptText };
+    // promptLast → instruction trails the reference content (prominence fix).
+    // Default → original order (instruction first), byte-identical to the
+    // pre-change behaviour the mid-turn drain path depends on.
+    const processedQueryParts: Part[] = options.promptLast
+      ? [...referenceParts, promptPart]
+      : [promptPart, ...referenceParts];
 
     return this.#applyBridgeConversionsIfNeeded(
       processedQueryParts,

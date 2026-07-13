@@ -110,6 +110,7 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionTasks: 'qwen/status/session/tasks',
   sessionStats: 'qwen/status/session/stats',
   sessionLspStatus: 'qwen/status/session/lsp',
+  sessionTranscript: 'qwen/status/session/transcript',
   sessionRewindSnapshots: 'qwen/status/session/rewind_snapshots',
   workspaceHooks: 'qwen/status/workspace/hooks',
   sessionHooks: 'qwen/status/session/hooks',
@@ -138,6 +139,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionRewind: 'qwen/control/session/rewind',
   sessionContinue: 'qwen/control/session/continue',
   sessionTitle: 'qwen/control/session/title',
+  sessionParent: 'qwen/control/session/parent',
   sessionArtifactsPersist: 'qwen/control/session/artifacts/persist',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',
@@ -945,6 +947,9 @@ export const IDLE_HOOK_EVENTS: Record<HookEventName, ServeHookEventMeta> = {
   SessionStart: {
     description: 'When a new session is started',
     matcherKind: 'sessionTrigger',
+  },
+  MessageDisplay: {
+    description: 'Repeatedly, as the assistant reply streams',
   },
   Stop: { description: 'Right before Qwen Code concludes its response' },
   SubagentStart: {

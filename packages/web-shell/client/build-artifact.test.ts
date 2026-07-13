@@ -1,11 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import postcss from 'postcss';
 
 const DIST_PATH = resolve(__dirname, '../dist/index.js');
 
 function readBundle(): string {
   return readFileSync(DIST_PATH, 'utf8');
+}
+
+function readInjectedCss(): string {
+  const match = readBundle().match(
+    /^const __qwenWebShellCss=("(?:[^"\\]|\\.)*");/,
+  );
+  if (!match?.[1]) throw new Error('Injected component CSS not found');
+  return JSON.parse(match[1]) as string;
 }
 
 describe('build artifact — package boundary', () => {
@@ -41,5 +50,48 @@ describe('build artifact — package boundary', () => {
     const bundle = readBundle();
     // Should not contain raw SDK implementation
     expect(bundle).not.toMatch(/DaemonSessionClient\s*\{/);
+  });
+
+  it('scopes every component CSS rule to a WebShell root', () => {
+    const unscoped: string[] = [];
+    postcss.parse(readInjectedCss()).walkRules((rule) => {
+      let parent = rule.parent;
+      while (parent) {
+        if (
+          parent.type === 'atrule' &&
+          parent.name.toLowerCase().endsWith('keyframes')
+        ) {
+          return;
+        }
+        parent = parent.parent;
+      }
+      if (
+        !rule.selector.includes('[data-web-shell-root]') &&
+        !rule.selector.includes('[data-web-shell-portal-root]')
+      ) {
+        unscoped.push(rule.selector);
+      }
+    });
+    expect(unscoped).toEqual([]);
+  });
+
+  it('prefixes global CSS registrations and animations', () => {
+    const unscoped: string[] = [];
+    postcss.parse(readInjectedCss()).walkAtRules((atRule) => {
+      const name = atRule.name.toLowerCase();
+      if (
+        name.endsWith('keyframes') &&
+        !atRule.params.startsWith('qwen-web-shell-')
+      ) {
+        unscoped.push(`@${atRule.name} ${atRule.params}`);
+      }
+      if (
+        name === 'property' &&
+        !atRule.params.startsWith('--qwen-web-shell-')
+      ) {
+        unscoped.push(`@property ${atRule.params}`);
+      }
+    });
+    expect(unscoped).toEqual([]);
   });
 });

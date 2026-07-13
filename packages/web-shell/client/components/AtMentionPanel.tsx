@@ -5,15 +5,19 @@ import {
   useState,
   type CSSProperties,
   type RefObject,
+  type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useI18n } from '../i18n';
+import { useWebShellPortalRoot } from '../portalRoot';
 import {
   FILE_PROVIDER_ID,
   sanitizeDisplayText,
   type AtMentionMenuState,
 } from '../hooks/useAtMentionMenu';
+import { cssUrlVar } from '../utils/cssUrlVar';
 import styles from './ChatEditor.module.css';
+import { isSafeImageSrc } from './messages/Markdown';
 
 const AT_PANEL_THEME_VARS = [
   '--chat-editor-accent-color',
@@ -34,6 +38,7 @@ export function AtMentionPanel({
   onAccept,
   onBack,
   onSearch,
+  onSelectTab,
 }: {
   menu: AtMentionMenuState;
   anchorRef: RefObject<HTMLElement | null>;
@@ -42,14 +47,18 @@ export function AtMentionPanel({
   onAccept: (index?: number) => boolean;
   onBack: () => boolean;
   onSearch: (query: string) => boolean;
+  onSelectTab: (tabId: string) => boolean;
 }) {
+  const portalRoot = useWebShellPortalRoot();
   const { t } = useI18n();
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const tabsRef = useRef<HTMLDivElement | null>(null);
   const [anchorRect, setAnchorRect] = useState<{
     left: number;
     bottom: number;
     width: number;
+    maxHeight: number;
   } | null>(null);
   const [themeVars, setThemeVars] = useState<CSSProperties>({});
 
@@ -99,6 +108,12 @@ export function AtMentionPanel({
     const updatePosition = () => {
       const rect = anchor.getBoundingClientRect();
       const panelWidth = panelRef.current?.offsetWidth ?? 360;
+      const computedStyle = getComputedStyle(anchor);
+      const safeTop =
+        Number.parseFloat(
+          computedStyle.getPropertyValue('--web-shell-popover-safe-top'),
+        ) || 48;
+      const maxHeight = Math.max(96, Math.min(300, rect.top - safeTop - 8));
       const next = {
         left: Math.max(
           12,
@@ -106,13 +121,15 @@ export function AtMentionPanel({
         ),
         bottom: window.innerHeight - rect.top + 8,
         width: rect.width,
+        maxHeight,
       };
       setAnchorRect((prev) => {
         if (
           prev &&
           prev.left === next.left &&
           prev.bottom === next.bottom &&
-          prev.width === next.width
+          prev.width === next.width &&
+          prev.maxHeight === next.maxHeight
         ) {
           return prev;
         }
@@ -147,18 +164,28 @@ export function AtMentionPanel({
       ? menu.providers.map((provider) => ({
           id: provider.id,
           label: provider.label,
+          labelTitle: provider.textValue,
           description: provider.description,
           trailing: '›',
+          provider,
         }))
       : menu.items.map((item) => ({
           id: item.id,
           label: item.label,
+          labelTitle: item.label,
+          subtitle: item.subtitle,
           description:
             menu.selectedProviderId === FILE_PROVIDER_ID
               ? undefined
               : (item.description ?? item.detail),
+          icon: item.icon,
+          iconMode: item.iconMode,
+          iconColor: item.iconColor,
+          iconSpin: item.iconSpin,
+          iconTooltip: item.iconTooltip,
           trailing:
             item.kind === 'directory' || item.kind === 'mcp-server' ? '›' : '',
+          item,
         }));
 
   useEffect(() => {
@@ -174,9 +201,13 @@ export function AtMentionPanel({
     menu.itemMode === 'mcpResources' && menu.mcpServerName
       ? (sanitizeDisplayText(menu.mcpServerName) ?? '[invalid]')
       : (selectedProvider?.label ?? '');
+  const panelTitleText =
+    menu.itemMode === 'mcpResources' && menu.mcpServerName
+      ? (sanitizeDisplayText(menu.mcpServerName) ?? '[invalid]')
+      : (selectedProvider?.textValue ?? '');
   const listboxLabel =
     menu.level === 'items'
-      ? (selectedProvider?.label ?? t('at.menu'))
+      ? (selectedProvider?.textValue ?? t('at.menu'))
       : t('at.menu');
   const listboxId = 'at-mention-listbox';
   const activeOptionId =
@@ -196,6 +227,7 @@ export function AtMentionPanel({
             left: anchorRect.left,
             bottom: anchorRect.bottom,
             '--at-anchor-width': `${anchorRect.width}px`,
+            '--at-panel-max-height': `${anchorRect.maxHeight}px`,
           } as CSSProperties
         }
         role="region"
@@ -224,7 +256,9 @@ export function AtMentionPanel({
               >
                 ‹
               </button>
-              <span className={styles.atPanelTitle}>{panelTitle}</span>
+              <span className={styles.atPanelTitle} title={panelTitleText}>
+                {panelTitle}
+              </span>
             </div>
             <input
               ref={searchInputRef}
@@ -275,6 +309,62 @@ export function AtMentionPanel({
                 }
               }}
             />
+            {menu.tabs && menu.tabs.length > 0 && (
+              <div className={styles.atTabsWrap}>
+                <button
+                  type="button"
+                  className={styles.atTabScrollButton}
+                  aria-label="Previous tab"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    scrollTabs(tabsRef.current, 'previous');
+                  }}
+                >
+                  ‹
+                </button>
+                <div ref={tabsRef} className={styles.atTabs} role="tablist">
+                  {menu.tabs.map((tab) => {
+                    const selected = tab.id === menu.selectedTabId;
+                    const tabText =
+                      tab.textValue ??
+                      (typeof tab.label === 'string' ? tab.label : tab.id);
+                    return (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        role="tab"
+                        aria-selected={selected}
+                        disabled={tab.disabled}
+                        className={`${styles.atTab} ${
+                          selected ? styles.atTabActive : ''
+                        }`}
+                        title={tabText}
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          onSelectTab(tab.id);
+                        }}
+                      >
+                        {tab.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <button
+                  type="button"
+                  className={styles.atTabScrollButton}
+                  aria-label="Next tab"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    scrollTabs(tabsRef.current, 'next');
+                  }}
+                >
+                  ›
+                </button>
+              </div>
+            )}
           </div>
         )}
         <div
@@ -292,47 +382,167 @@ export function AtMentionPanel({
               {t('common.noResults')}
             </div>
           ) : (
-            rows.map((row, index) => (
-              <button
-                key={row.id}
-                ref={(node) => {
-                  itemRefs.current[index] = node;
-                }}
-                type="button"
-                id={`at-mention-option-${index}`}
-                role="option"
-                aria-selected={index === menu.selectedIndex}
-                className={`${styles.atItem} ${
-                  index === menu.selectedIndex ? styles.atItemActive : ''
-                } ${row.description ? '' : styles.atItemSingleLine}`}
-                onMouseEnter={() => onSelect(index)}
-                onMouseDown={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                }}
-                onClick={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  onAccept(index);
-                }}
-              >
-                <span className={styles.atItemLabel}>{row.label}</span>
-                {row.description && (
-                  <span className={styles.atItemDescription}>
-                    {row.description}
-                  </span>
-                )}
-                {row.trailing && (
-                  <span className={styles.atItemTrailing} aria-hidden="true">
-                    {row.trailing}
-                  </span>
-                )}
-              </button>
-            ))
+            rows.map((row, index) => {
+              const selected = index === menu.selectedIndex;
+              const provider =
+                'item' in row
+                  ? selectedProvider?.provider
+                  : row.provider.provider;
+              let customItem: ReactNode | undefined;
+              if ('item' in row && provider?.renderItem) {
+                try {
+                  customItem = provider.renderItem({
+                    item: row.item,
+                    provider,
+                    selected,
+                  });
+                } catch (error) {
+                  console.warn(
+                    '[WebShell] at mention item render failed',
+                    error,
+                  );
+                }
+              }
+              const safeIcon =
+                'icon' in row && row.icon && isSafeImageSrc(row.icon)
+                  ? row.icon
+                  : undefined;
+              return (
+                <button
+                  key={row.id}
+                  ref={(node) => {
+                    itemRefs.current[index] = node;
+                  }}
+                  type="button"
+                  id={`at-mention-option-${index}`}
+                  role="option"
+                  aria-selected={selected}
+                  className={`${styles.atItem} ${
+                    selected ? styles.atItemActive : ''
+                  } ${row.description ? '' : styles.atItemSingleLine}`}
+                  style={
+                    {
+                      '--at-item-main-template': getAtItemMainTemplate(
+                        getRowTextValue(row.label, row.labelTitle),
+                        'subtitle' in row ? row.subtitle : undefined,
+                      ),
+                    } as CSSProperties
+                  }
+                  onMouseEnter={() => onSelect(index)}
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                  }}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    onAccept(index);
+                  }}
+                >
+                  {customItem ?? (
+                    <>
+                      <span className={styles.atItemMain}>
+                        <span className={styles.atItemLeading}>
+                          {'icon' in row &&
+                            safeIcon &&
+                            (row.iconMode === 'image' ? (
+                              <img
+                                className={styles.atItemImageIcon}
+                                src={safeIcon}
+                                title={row.iconTooltip}
+                                alt=""
+                                aria-hidden="true"
+                              />
+                            ) : (
+                              <span
+                                className={`${styles.atItemIcon} ${
+                                  row.iconSpin ? styles.atItemIconSpin : ''
+                                }`}
+                                style={{
+                                  ...cssUrlVar('--at-item-icon-url', safeIcon),
+                                  color: row.iconColor,
+                                }}
+                                title={row.iconTooltip}
+                                aria-hidden="true"
+                              />
+                            ))}
+                          <span
+                            className={styles.atItemLabel}
+                            title={row.labelTitle}
+                          >
+                            {row.label}
+                          </span>
+                        </span>
+                        {'subtitle' in row && row.subtitle && (
+                          <span
+                            className={styles.atItemSubtitle}
+                            title={row.subtitle}
+                          >
+                            {row.subtitle}
+                          </span>
+                        )}
+                      </span>
+                      {row.description && (
+                        <span
+                          className={styles.atItemDescription}
+                          title={row.description}
+                        >
+                          {row.description}
+                        </span>
+                      )}
+                    </>
+                  )}
+                  {row.trailing && (
+                    <span className={styles.atItemTrailing} aria-hidden="true">
+                      {row.trailing}
+                    </span>
+                  )}
+                </button>
+              );
+            })
           )}
         </div>
       </div>
     </div>,
-    document.body,
+    portalRoot ?? document.body,
   );
+}
+
+function scrollTabs(
+  element: HTMLDivElement | null,
+  direction: 'previous' | 'next',
+): void {
+  if (!element) return;
+  const delta = Math.max(96, element.clientWidth * 0.75);
+  element.scrollBy({
+    left: direction === 'previous' ? -delta : delta,
+    behavior: 'smooth',
+  });
+}
+
+function getAtItemMainTemplate(
+  label: string,
+  subtitle: string | undefined,
+): string {
+  if (!subtitle) return 'minmax(0, 1fr)';
+  const labelLength = getDisplayLength(label);
+  const subtitleLength = getDisplayLength(subtitle);
+  if (subtitleLength <= 12) return 'minmax(0, 1fr) max-content';
+  if (labelLength <= 18) return 'max-content minmax(0, 1fr)';
+  return 'minmax(0, 3fr) minmax(0, 2fr)';
+}
+
+function getRowTextValue(
+  label: ReactNode,
+  fallback: string | undefined,
+): string {
+  if (typeof label === 'string') return label;
+  if (typeof label === 'number') return String(label);
+  return fallback || '';
+}
+
+function getDisplayLength(value: string): number {
+  return Array.from(value).reduce((total, char) => {
+    return total + (char.charCodeAt(0) > 255 ? 2 : 1);
+  }, 0);
 }

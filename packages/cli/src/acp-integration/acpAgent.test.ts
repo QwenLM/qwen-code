@@ -167,6 +167,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   },
   ToolNames: {
     AGENT: 'agent',
+    SKILL: 'skill',
   },
   FORK_SUBAGENT_TYPE: 'fork',
   IMAGE_CAPABILITY: Object.freeze({
@@ -174,6 +175,22 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     maxBytes: 10380902,
     maxImagesPerTurn: 4,
   }),
+  SESSION_TRANSCRIPT_MAX_LIMIT: 500,
+  InvalidSessionTranscriptCursorError: class InvalidSessionTranscriptCursorError extends Error {},
+  SessionTranscriptSnapshotUnavailableError: class SessionTranscriptSnapshotUnavailableError extends Error {},
+  SessionTranscriptTooLargeError: class SessionTranscriptTooLargeError extends Error {
+    constructor(
+      readonly sessionId: string,
+      readonly snapshotSize: number,
+      readonly maxBytes: number,
+    ) {
+      super('Transcript snapshot is too large');
+    }
+  },
+  encodeSessionTranscriptCursor: vi.fn((state: unknown) =>
+    Buffer.from(JSON.stringify(state), 'utf8').toString('base64url'),
+  ),
+  SessionTranscriptReader: vi.fn(),
   ALL_PROVIDERS: [
     {
       id: 'deepseek',
@@ -316,6 +333,8 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     StopFailure: 'StopFailure',
     TodoCreated: 'TodoCreated',
     TodoCompleted: 'TodoCompleted',
+    MessageDisplay: 'MessageDisplay',
+    InstructionsLoaded: 'InstructionsLoaded',
   },
   buildInstallPlan: vi.fn((provider, inputs) => {
     const authType = inputs.protocol ?? provider.protocol;
@@ -339,6 +358,25 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   },
   runManagedRememberByAgent: mockRunManagedRememberByAgent,
   runManagedAutoMemoryDream: mockRunManagedAutoMemoryDream,
+  refreshMemoryInstruction: vi.fn(
+    async (config: {
+      refreshHierarchicalMemory?: () => Promise<void>;
+      getGeminiClient?: () =>
+        | { refreshSystemInstruction?: () => Promise<void> }
+        | undefined;
+    }) => {
+      try {
+        await config.refreshHierarchicalMemory?.();
+      } catch {
+        // Best-effort, matching the real helper.
+      }
+      try {
+        await config.getGeminiClient?.()?.refreshSystemInstruction?.();
+      } catch {
+        // Best-effort, matching the real helper.
+      }
+    },
+  ),
   clearCachedCredentialFile: vi.fn(),
   getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
   getAutoMemoryRoot: vi.fn(
@@ -487,10 +525,25 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
 const { mockHistoryReplay } = vi.hoisted(() => ({
   mockHistoryReplay: vi.fn(),
 }));
-vi.mock('./session/HistoryReplayer.js', () => ({
+const { mockHistoryReplayPage } = vi.hoisted(() => ({
+  mockHistoryReplayPage: vi.fn(),
+}));
+type MockPendingToolCall = {
+  callId: string;
+  toolName: string;
+  timestamp?: string;
+  recordId: string;
+};
+const { mockHistoryPendingToolCalls } = vi.hoisted(() => ({
+  mockHistoryPendingToolCalls: vi.fn((): MockPendingToolCall[] => []),
+}));
+vi.mock('./session/history-replayer.js', () => ({
   HistoryReplayer: vi.fn().mockImplementation((context: unknown) => ({
     replay: (messages: unknown, gaps: unknown) =>
       mockHistoryReplay(context, messages, gaps),
+    replayPage: (messages: unknown, options: unknown) =>
+      mockHistoryReplayPage(context, messages, options),
+    getPendingToolCalls: () => mockHistoryPendingToolCalls(),
   })),
 }));
 
@@ -648,6 +701,11 @@ import {
   buildInstallPlan,
   applyProviderInstallPlan,
   Storage,
+  SessionTranscriptReader,
+  InvalidSessionTranscriptCursorError,
+  SessionTranscriptSnapshotUnavailableError,
+  SessionTranscriptTooLargeError,
+  encodeSessionTranscriptCursor,
   unregisterGoalHook,
   startEventLoopLagMonitor,
   registerAcpEventLoopLagGauge,
@@ -1264,6 +1322,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockExtensionManagerState.refreshCache.mockResolvedValue(undefined);
     mockRunManagedAutoMemoryDream.mockReset();
     mockRunManagedRememberByAgent.mockReset();
+    mockHistoryPendingToolCalls.mockReturnValue([]);
     lastSessionMock = undefined;
     capturedAgentFactory = undefined;
 
@@ -2079,6 +2138,119 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     ).rejects.toThrowError(/Invalid or missing artifact persist payload/);
 
     expect(recording.recordSessionArtifactEvent).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('sessionParent rejects a missing session id', async () => {
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionParent, {
+        parentSessionId: 'parent-A',
+      }),
+    ).rejects.toThrowError(/Invalid or missing sessionId/);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('sessionParent rejects a missing or empty parent session id', async () => {
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionParent, {
+        sessionId: 'session-A',
+      }),
+    ).rejects.toThrowError(/Invalid or missing parentSessionId/);
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionParent, {
+        sessionId: 'session-A',
+        parentSessionId: '',
+      }),
+    ).rejects.toThrowError(/Invalid or missing parentSessionId/);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('sessionParent records the parent lineage via an awaited durable write', async () => {
+    const sessionId = 'session-A';
+    const recording = {
+      flush: vi.fn().mockResolvedValue(undefined),
+      recordParentSession: vi.fn().mockReturnValue(true),
+    };
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue(recording);
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionParent, {
+        sessionId,
+        parentSessionId: 'parent-A',
+      }),
+    ).resolves.toEqual({
+      sessionId,
+      parentSessionId: 'parent-A',
+      persisted: true,
+    });
+
+    // `recordParentSession` awaits the durable write internally, so the handler
+    // no longer issues a separate `flush()`.
+    expect(recording.recordParentSession).toHaveBeenCalledWith('parent-A');
+    expect(recording.flush).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('sessionParent reports persisted:false when chat recording is unavailable', async () => {
+    const sessionId = 'session-A';
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue(undefined);
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionParent, {
+        sessionId,
+        parentSessionId: 'parent-A',
+      }),
+    ).resolves.toEqual({
+      sessionId,
+      parentSessionId: 'parent-A',
+      persisted: false,
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('sessionParent reports persisted:false when recordParentSession returns false', async () => {
+    const sessionId = 'session-A';
+    const recording = {
+      flush: vi.fn().mockResolvedValue(undefined),
+      recordParentSession: vi.fn().mockReturnValue(false),
+    };
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue(recording);
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionParent, {
+        sessionId,
+        parentSessionId: 'parent-A',
+      }),
+    ).resolves.toEqual({
+      sessionId,
+      parentSessionId: 'parent-A',
+      persisted: false,
+    });
+
+    expect(recording.recordParentSession).toHaveBeenCalledWith('parent-A');
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -3684,9 +3856,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   });
 
   it('runs workspace memory remember without requiring a session', async () => {
+    const refreshHierarchicalMemory = vi.fn().mockResolvedValue(undefined);
+    const refreshSystemInstruction = vi.fn().mockResolvedValue(undefined);
     Object.assign(mockConfig, {
       isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
       getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+      refreshHierarchicalMemory,
+      getGeminiClient: vi.fn().mockReturnValue({
+        refreshSystemInstruction,
+      }),
     });
     mockRunManagedRememberByAgent.mockResolvedValue({
       summary: 'saved',
@@ -3725,6 +3903,242 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         abortSignal: expect.any(AbortSignal),
       }),
     );
+    expect(refreshHierarchicalMemory).not.toHaveBeenCalled();
+    expect(refreshSystemInstruction).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('refreshes live sessions after workspace memory remember', async () => {
+    const sessionRefreshHierarchicalMemory = vi
+      .fn()
+      .mockResolvedValue(undefined);
+    const sessionRefreshSystemInstruction = vi
+      .fn()
+      .mockResolvedValue(undefined);
+    const innerConfig = {
+      ...makeInnerConfig(),
+      getSessionId: vi.fn().mockReturnValue('remember-session'),
+      refreshHierarchicalMemory: sessionRefreshHierarchicalMemory,
+      getGeminiClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(true),
+        initialize: vi.fn().mockResolvedValue(undefined),
+        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+        refreshSystemInstruction: sessionRefreshSystemInstruction,
+      }),
+    };
+    vi.mocked(loadSettings).mockReturnValue(makeSessionSettings());
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('remember-session'),
+          getConfig: vi.fn().mockReturnValue(innerConfig),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          replayHistory: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+    });
+    mockRunManagedRememberByAgent.mockResolvedValue({
+      summary: 'saved',
+      filesTouched: ['/mem/MEMORY.md'],
+      touchedScopes: ['project'],
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.newSession({ cwd: '/workspace', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember, {
+        content: 'Remember the workspace uses vitest.',
+      }),
+    ).resolves.toEqual({
+      summary: 'saved',
+      filesTouched: ['/mem/MEMORY.md'],
+      touchedScopes: ['project'],
+    });
+    expect(sessionRefreshHierarchicalMemory).toHaveBeenCalledTimes(1);
+    expect(sessionRefreshSystemInstruction).toHaveBeenCalledTimes(1);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not refresh live sessions when workspace memory remember writes nothing', async () => {
+    const sessionRefreshHierarchicalMemory = vi
+      .fn()
+      .mockResolvedValue(undefined);
+    const sessionRefreshSystemInstruction = vi
+      .fn()
+      .mockResolvedValue(undefined);
+    const innerConfig = {
+      ...makeInnerConfig(),
+      getSessionId: vi.fn().mockReturnValue('remember-noop-session'),
+      refreshHierarchicalMemory: sessionRefreshHierarchicalMemory,
+      getGeminiClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(true),
+        initialize: vi.fn().mockResolvedValue(undefined),
+        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+        refreshSystemInstruction: sessionRefreshSystemInstruction,
+      }),
+    };
+    vi.mocked(loadSettings).mockReturnValue(makeSessionSettings());
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('remember-noop-session'),
+          getConfig: vi.fn().mockReturnValue(innerConfig),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          replayHistory: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+    });
+    mockRunManagedRememberByAgent.mockResolvedValue({
+      summary: 'No memory files updated.',
+      filesTouched: [],
+      touchedScopes: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.newSession({ cwd: '/workspace', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember, {
+        content: 'Remember the workspace uses vitest.',
+      }),
+    ).resolves.toEqual({
+      summary: 'No memory files updated.',
+      filesTouched: [],
+      touchedScopes: [],
+    });
+    expect(sessionRefreshHierarchicalMemory).not.toHaveBeenCalled();
+    expect(sessionRefreshSystemInstruction).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('keeps workspace memory remember successful when live session refresh fails', async () => {
+    const sessionRefreshHierarchicalMemory = vi
+      .fn()
+      .mockRejectedValue(new Error('memory refresh failed'));
+    const sessionRefreshSystemInstruction = vi
+      .fn()
+      .mockRejectedValue(new Error('system instruction refresh failed'));
+    const innerConfig = {
+      ...makeInnerConfig(),
+      getSessionId: vi.fn().mockReturnValue('remember-fail-session'),
+      refreshHierarchicalMemory: sessionRefreshHierarchicalMemory,
+      getGeminiClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(true),
+        initialize: vi.fn().mockResolvedValue(undefined),
+        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+        refreshSystemInstruction: sessionRefreshSystemInstruction,
+      }),
+    };
+    vi.mocked(loadSettings).mockReturnValue(makeSessionSettings());
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('remember-fail-session'),
+          getConfig: vi.fn().mockReturnValue(innerConfig),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          replayHistory: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+    });
+    mockRunManagedRememberByAgent.mockResolvedValue({
+      summary: 'saved',
+      filesTouched: ['/mem/MEMORY.md'],
+      touchedScopes: ['project'],
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.newSession({ cwd: '/workspace', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember, {
+        content: 'Remember the workspace uses vitest.',
+      }),
+    ).resolves.toEqual({
+      summary: 'saved',
+      filesTouched: ['/mem/MEMORY.md'],
+      touchedScopes: ['project'],
+    });
+    expect(sessionRefreshHierarchicalMemory).toHaveBeenCalledTimes(1);
+    expect(sessionRefreshSystemInstruction).toHaveBeenCalledTimes(1);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -6275,6 +6689,739 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('qwen/status/session/transcript returns id-less replay events from transcript reader pages', async () => {
+    const settings = makeCoreSettings();
+    mockRunExitCleanup.mockResolvedValue(undefined);
+    const gaps = [{ childUuid: 'u1', missingParentUuid: 'missing-a1' }];
+    const transcriptConfig = {
+      ...makeInnerConfig(),
+      enableFileCheckpointing: vi.fn(),
+    };
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      transcriptConfig as unknown as Config,
+    );
+    const readPage = vi.fn().mockResolvedValue({
+      sessionId: VALID_SESSION_ID,
+      records: [{ uuid: 'u1' }],
+      hasMore: true,
+      nextCursorState: {
+        v: 1,
+        sessionId: VALID_SESSION_ID,
+        fileIdentity: { dev: 1, ino: 2 },
+        snapshotSize: 123,
+        position: 1,
+        leafUuid: 'u2',
+        startTime: 'start',
+        lastUpdated: 'end',
+      },
+      gaps,
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockImplementation(
+      async (context: { sendUpdate: (u: unknown) => Promise<void> }) => {
+        await context.sendUpdate({
+          sessionUpdate: 'user_message_chunk',
+          _meta: { timestamp: 4242 },
+        });
+        return {
+          pendingToolCalls: [
+            { callId: 'c1', toolName: 'Read', recordId: 'u1' },
+          ],
+        };
+      },
+    );
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+    const loadCliConfigCallsBefore = vi.mocked(loadCliConfig).mock.calls.length;
+
+    const result = (await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionTranscript,
+      {
+        sessionId: VALID_SESSION_ID,
+        cursor: 'cursor-1',
+        limit: 2,
+      },
+    )) as {
+      events: Array<{
+        id?: number;
+        type: string;
+        data: { timestamp?: number };
+      }>;
+      nextCursor?: string;
+      hasMore: boolean;
+    };
+    const second = (await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionTranscript,
+      {
+        sessionId: VALID_SESSION_ID,
+        cursor: 'cursor-2',
+        limit: 2,
+      },
+    )) as { hasMore: boolean };
+
+    expect(readPage).toHaveBeenCalledWith(VALID_SESSION_ID, {
+      cursor: 'cursor-1',
+      limit: 2,
+    });
+    expect(readPage).toHaveBeenCalledWith(VALID_SESSION_ID, {
+      cursor: 'cursor-2',
+      limit: 2,
+    });
+    expect(result.events).toEqual([
+      {
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'user_message_chunk',
+          _meta: { timestamp: 4242 },
+          timestamp: 4242,
+        },
+      },
+    ]);
+    expect(result.events[0]).not.toHaveProperty('id');
+    expect(result.hasMore).toBe(true);
+    expect(second.hasMore).toBe(true);
+    expect(result.nextCursor).toBeDefined();
+    expect(mockHistoryReplayPage).toHaveBeenCalledWith(
+      expect.anything(),
+      [{ uuid: 'u1' }],
+      expect.objectContaining({ gaps }),
+    );
+    expect(vi.mocked(loadCliConfig).mock.calls.length).toBe(
+      loadCliConfigCallsBefore + 1,
+    );
+    const transcriptConfigArgv = vi
+      .mocked(loadCliConfig)
+      .mock.calls.at(-1)?.[1] as CliArgs | undefined;
+    expect(transcriptConfigArgv?.sessionId).toBeUndefined();
+    expect(transcriptConfigArgv?.resume).toBeUndefined();
+    expect(transcriptConfig.enableFileCheckpointing).not.toHaveBeenCalled();
+    expect(transcriptConfig.initialize).toHaveBeenCalledWith({
+      sendSdkMcpMessage: expect.any(Function),
+      skipMcpDiscovery: true,
+      skipHooks: true,
+      skipSkillManager: true,
+      skipFileCheckpointing: true,
+      lenientToolWarmup: true,
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('disposes a pending transcript config superseded by newer settings', async () => {
+    const oldSettings = makeCoreSettings('English');
+    const newSettings = makeCoreSettings('Japanese');
+    mockRunExitCleanup.mockResolvedValue(undefined);
+    const oldToolRegistry = { stop: vi.fn().mockResolvedValue(undefined) };
+    let releaseOldInitialize!: () => void;
+    const oldInitialize = new Promise<void>((resolve) => {
+      releaseOldInitialize = resolve;
+    });
+    const oldConfig = {
+      ...makeInnerConfig(),
+      initialize: vi.fn(() => oldInitialize),
+      getToolRegistry: vi.fn(() => oldToolRegistry),
+    } as unknown as Config;
+    const newToolRegistry = { stop: vi.fn().mockResolvedValue(undefined) };
+    const newConfig = {
+      ...makeInnerConfig(),
+      getToolRegistry: vi.fn(() => newToolRegistry),
+    } as unknown as Config;
+    vi.mocked(loadCliConfig)
+      .mockResolvedValueOnce(oldConfig)
+      .mockResolvedValueOnce(newConfig);
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage: vi.fn().mockResolvedValue({
+            sessionId: VALID_SESSION_ID,
+            records: [],
+            hasMore: false,
+            startTime: 'start',
+            lastUpdated: 'end',
+          }),
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+    const { agent, agentPromise } = await bootCoreSettingsAgent(oldSettings);
+
+    const first = agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+      sessionId: VALID_SESSION_ID,
+    });
+    await vi.waitFor(() => expect(loadCliConfig).toHaveBeenCalledTimes(1));
+
+    vi.mocked(loadSettings).mockReturnValue(newSettings);
+    const second = agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+      sessionId: VALID_SESSION_ID,
+    });
+    await vi.waitFor(() => expect(loadCliConfig).toHaveBeenCalledTimes(2));
+
+    releaseOldInitialize();
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+    await vi.waitFor(() => expect(oldToolRegistry.stop).toHaveBeenCalledOnce());
+
+    mockConnectionState.resolve();
+    await agentPromise;
+    expect(newToolRegistry.stop).toHaveBeenCalledOnce();
+  });
+
+  it('coalesces concurrent transcript config creation for the same settings', async () => {
+    const settings = makeCoreSettings();
+    mockRunExitCleanup.mockResolvedValue(undefined);
+    let releaseInitialize!: () => void;
+    const initializeGate = new Promise<void>((resolve) => {
+      releaseInitialize = resolve;
+    });
+    const toolRegistry = { stop: vi.fn().mockResolvedValue(undefined) };
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      ...makeInnerConfig(),
+      initialize: vi.fn(() => initializeGate),
+      getToolRegistry: vi.fn(() => toolRegistry),
+    } as unknown as Config);
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage: vi.fn().mockResolvedValue({
+            sessionId: VALID_SESSION_ID,
+            records: [],
+            hasMore: false,
+            startTime: 'start',
+            lastUpdated: 'end',
+          }),
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    const first = agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+      sessionId: VALID_SESSION_ID,
+    });
+    const second = agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+      sessionId: VALID_SESSION_ID,
+    });
+    await vi.waitFor(() => expect(loadCliConfig).toHaveBeenCalledOnce());
+
+    releaseInitialize();
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+    expect(loadCliConfig).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+    expect(toolRegistry.stop).toHaveBeenCalledOnce();
+  });
+
+  it('disposes a pending transcript config that finishes after agent shutdown', async () => {
+    const settings = makeCoreSettings();
+    mockRunExitCleanup.mockResolvedValue(undefined);
+    let releaseInitialize!: () => void;
+    const initializeGate = new Promise<void>((resolve) => {
+      releaseInitialize = resolve;
+    });
+    const toolRegistry = { stop: vi.fn().mockResolvedValue(undefined) };
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      ...makeInnerConfig(),
+      initialize: vi.fn(() => initializeGate),
+      getToolRegistry: vi.fn(() => toolRegistry),
+    } as unknown as Config);
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage: vi.fn().mockResolvedValue({
+            sessionId: VALID_SESSION_ID,
+            records: [],
+            hasMore: false,
+            startTime: 'start',
+            lastUpdated: 'end',
+          }),
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    const request = agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionTranscript,
+      { sessionId: VALID_SESSION_ID },
+    );
+    await vi.waitFor(() => expect(loadCliConfig).toHaveBeenCalledOnce());
+
+    mockConnectionState.resolve();
+    await agentPromise;
+    releaseInitialize();
+
+    await expect(request).rejects.toThrow(
+      'Transcript replay config was invalidated while loading',
+    );
+    await vi.waitFor(() => expect(toolRegistry.stop).toHaveBeenCalledOnce());
+  });
+
+  it('qwen/status/session/transcript rejects malformed cursor and limit params before reading', async () => {
+    const settings = makeCoreSettings();
+    const readPage = vi.fn();
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+        sessionId: VALID_SESSION_ID,
+        cursor: 123,
+      }),
+    ).rejects.toThrow('Invalid transcript cursor');
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+        sessionId: VALID_SESSION_ID,
+        limit: '10',
+      }),
+    ).rejects.toThrow('Invalid transcript limit');
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+        sessionId: VALID_SESSION_ID,
+        limit: 1.5,
+      }),
+    ).rejects.toThrow('Invalid transcript limit');
+    expect(readPage).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/status/session/transcript terminates pagination on replay errors', async () => {
+    const settings = makeCoreSettings();
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      ...makeInnerConfig(),
+      enableFileCheckpointing: vi.fn(),
+    } as unknown as Config);
+    const readPage = vi.fn().mockResolvedValue({
+      sessionId: VALID_SESSION_ID,
+      records: [{ uuid: 'u1' }],
+      hasMore: true,
+      nextCursorState: {
+        v: 1,
+        sessionId: VALID_SESSION_ID,
+        fileIdentity: { dev: 1, ino: 2 },
+        snapshotSize: 123,
+        position: 1,
+        leafUuid: 'u2',
+        startTime: 'start',
+        lastUpdated: 'end',
+      },
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockRejectedValue(new Error('replay boom'));
+    mockHistoryPendingToolCalls.mockReturnValue([
+      {
+        callId: 'call-started-before-error',
+        toolName: 'Read',
+        recordId: 'u1',
+        timestamp: 'start',
+      },
+    ]);
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+    vi.mocked(encodeSessionTranscriptCursor).mockClear();
+
+    const result = (await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionTranscript,
+      {
+        sessionId: VALID_SESSION_ID,
+      },
+    )) as {
+      hasMore: boolean;
+      nextCursor?: string;
+      partial?: boolean;
+      replayError?: string;
+    };
+
+    expect(result.hasMore).toBe(false);
+    // On a replay error the page is partial and must NOT hand back a cursor:
+    // continuing would drop the un-replayed records and carry corrupted
+    // pendingToolCalls forward into the next page.
+    expect(result.nextCursor).toBeUndefined();
+    expect(result.partial).toBe(true);
+    expect(result.replayError).toBe('Replay conversion failed for this page');
+    expect(vi.mocked(encodeSessionTranscriptCursor)).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/status/session/transcript maps oversized snapshots to structured errors', async () => {
+    const settings = makeCoreSettings();
+    const readPage = vi
+      .fn()
+      .mockRejectedValue(
+        new SessionTranscriptTooLargeError(VALID_SESSION_ID, 300, 200),
+      );
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+        sessionId: VALID_SESSION_ID,
+      }),
+    ).rejects.toMatchObject({
+      code: -32011,
+      data: {
+        errorKind: 'transcript_too_large',
+        sessionId: VALID_SESSION_ID,
+        snapshotSize: 300,
+        maxBytes: 200,
+      },
+    });
+    expect(readPage).toHaveBeenCalledWith(VALID_SESSION_ID, {});
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it.each([
+    {
+      name: 'invalid cursors',
+      error: new InvalidSessionTranscriptCursorError(),
+      cursor: undefined,
+      expected: {
+        code: -32602,
+        data: { errorKind: 'invalid_transcript_cursor' },
+      },
+    },
+    {
+      name: 'unavailable snapshots',
+      error: new SessionTranscriptSnapshotUnavailableError(VALID_SESSION_ID),
+      cursor: undefined,
+      expected: {
+        code: -32010,
+        data: {
+          errorKind: 'transcript_snapshot_unavailable',
+          sessionId: VALID_SESSION_ID,
+        },
+      },
+    },
+    {
+      name: 'missing cursor snapshots',
+      error: Object.assign(new Error('missing'), { code: 'ENOENT' }),
+      cursor: 'cursor-1',
+      expected: {
+        code: -32010,
+        data: {
+          errorKind: 'transcript_snapshot_unavailable',
+          sessionId: VALID_SESSION_ID,
+        },
+      },
+    },
+    {
+      name: 'missing first-page transcripts',
+      error: Object.assign(new Error('missing'), { code: 'ENOENT' }),
+      cursor: undefined,
+      expected: {
+        code: -32002,
+        data: { uri: `session:${VALID_SESSION_ID}` },
+      },
+    },
+  ])(
+    'qwen/status/session/transcript maps $name',
+    async ({ error, cursor, expected }) => {
+      const settings = makeCoreSettings();
+      vi.mocked(SessionTranscriptReader).mockImplementation(
+        () =>
+          ({
+            readPage: vi.fn().mockRejectedValue(error),
+          }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+      );
+      const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+      await expect(
+        agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+          sessionId: VALID_SESSION_ID,
+          ...(cursor ? { cursor } : {}),
+        }),
+      ).rejects.toMatchObject(expected);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
+  it('logs and drops malformed pending tool calls from transcript replay state', async () => {
+    const settings = makeCoreSettings();
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      ...makeInnerConfig(),
+      getToolRegistry: vi.fn(() => undefined),
+    } as unknown as Config);
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage: vi.fn().mockResolvedValue({
+            sessionId: VALID_SESSION_ID,
+            records: [],
+            replay: {
+              pendingToolCalls: [
+                { callId: 'valid', toolName: 'Read', recordId: 'u1' },
+                { callId: 123, toolName: 'Read', recordId: 'u2' },
+              ],
+            },
+            hasMore: false,
+            startTime: 'start',
+            lastUpdated: 'end',
+          }),
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+      sessionId: VALID_SESSION_ID,
+    });
+
+    expect(mockHistoryReplayPage).toHaveBeenCalledWith(
+      expect.anything(),
+      [],
+      expect.objectContaining({
+        pendingToolCalls: [
+          { callId: 'valid', toolName: 'Read', recordId: 'u1' },
+        ],
+      }),
+    );
+    expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+      '[transcript] replay state dropped 1 of 2 malformed pending tool calls',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('resets replay state to defaults when the cursor replay field is not an object', async () => {
+    const settings = makeCoreSettings();
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      ...makeInnerConfig(),
+      getToolRegistry: vi.fn(() => undefined),
+    } as unknown as Config);
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage: vi.fn().mockResolvedValue({
+            sessionId: VALID_SESSION_ID,
+            records: [],
+            // A cursor from an older or corrupted daemon can carry a non-object
+            // replay field; parsing must fall back to empty replay state rather
+            // than crash transcript paging.
+            replay: 'garbage',
+            hasMore: false,
+            startTime: 'start',
+            lastUpdated: 'end',
+          }),
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+      sessionId: VALID_SESSION_ID,
+    });
+
+    expect(mockHistoryReplayPage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cumulativeUsage: {
+          apiTimeMs: 0,
+          cachedTokens: 0,
+          candidateTokens: 0,
+          promptTokens: 0,
+        },
+      }),
+      [],
+      expect.objectContaining({ pendingToolCalls: [] }),
+    );
+    expect(mockDebugLogger.warn).not.toHaveBeenCalledWith(
+      expect.stringContaining('malformed pending tool calls'),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('preserves already-emitted events when a mid-page replay error occurs', async () => {
+    const settings = makeCoreSettings();
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      ...makeInnerConfig(),
+      enableFileCheckpointing: vi.fn(),
+    } as unknown as Config);
+    const readPage = vi.fn().mockResolvedValue({
+      sessionId: VALID_SESSION_ID,
+      records: [{ uuid: 'u1' }, { uuid: 'u2' }],
+      hasMore: true,
+      nextCursorState: {
+        v: 1,
+        sessionId: VALID_SESSION_ID,
+        fileIdentity: { dev: 1, ino: 2 },
+        snapshotSize: 123,
+        position: 2,
+        leafUuid: 'u3',
+        startTime: 'start',
+        lastUpdated: 'end',
+      },
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    // First record replays successfully (emitting one update) then the second
+    // throws — mirroring a mid-page conversion failure.
+    mockHistoryReplayPage.mockImplementation(
+      async (context: { sendUpdate: (u: unknown) => Promise<void> }) => {
+        await context.sendUpdate({
+          sessionUpdate: 'user_message_chunk',
+          _meta: { timestamp: 1 },
+        });
+        throw new Error('replay boom on the second record');
+      },
+    );
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    const result = (await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionTranscript,
+      {
+        sessionId: VALID_SESSION_ID,
+      },
+    )) as {
+      events: unknown[];
+      nextCursor?: string;
+      hasMore: boolean;
+      partial?: boolean;
+      replayError?: string;
+    };
+
+    // The events emitted before the failure survive…
+    expect(result.events.length).toBeGreaterThanOrEqual(1);
+    expect(result.partial).toBe(true);
+    expect(result.replayError).toBe('Replay conversion failed for this page');
+    // …and the partial page withholds the cursor so the client cannot paginate
+    // past the dropped records.
+    expect(result.nextCursor).toBeUndefined();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('propagates cumulativeUsage across pages via the cursor', async () => {
+    const settings = makeCoreSettings();
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      ...makeInnerConfig(),
+      enableFileCheckpointing: vi.fn(),
+    } as unknown as Config);
+    // Page 1 carries no incoming replay state; the replay bumps cumulativeUsage
+    // in place, which the handler must fold into the next cursor.
+    const page1 = {
+      sessionId: VALID_SESSION_ID,
+      records: [{ uuid: 'u1' }],
+      hasMore: true,
+      nextCursorState: {
+        v: 1,
+        sessionId: VALID_SESSION_ID,
+        fileIdentity: { dev: 1, ino: 2 },
+        snapshotSize: 123,
+        position: 1,
+        leafUuid: 'u2',
+        startTime: 'start',
+        lastUpdated: 'end',
+      },
+      startTime: 'start',
+      lastUpdated: 'end',
+    };
+    // Page 2's decoded cursor carries the cumulativeUsage produced by page 1.
+    const page2 = {
+      sessionId: VALID_SESSION_ID,
+      records: [{ uuid: 'u2' }],
+      replay: {
+        pendingToolCalls: [],
+        cumulativeUsage: {
+          apiTimeMs: 0,
+          cachedTokens: 0,
+          candidateTokens: 0,
+          promptTokens: 100,
+        },
+      },
+      hasMore: false,
+      startTime: 'start',
+      lastUpdated: 'end',
+    };
+    const readPage = vi
+      .fn()
+      .mockResolvedValueOnce(page1)
+      .mockResolvedValueOnce(page2);
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    // Page 1: spend 100 prompt tokens, mutating the shared usage object in
+    // place exactly as the real replayer does.
+    mockHistoryReplayPage.mockImplementation(
+      async (context: { cumulativeUsage: { promptTokens: number } }) => {
+        context.cumulativeUsage.promptTokens += 100;
+        return { pendingToolCalls: [] };
+      },
+    );
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+      sessionId: VALID_SESSION_ID,
+    });
+    // Page 1 folds the bumped usage into the encoded cursor.
+    expect(vi.mocked(encodeSessionTranscriptCursor)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        replay: expect.objectContaining({
+          cumulativeUsage: expect.objectContaining({ promptTokens: 100 }),
+        }),
+      }),
+      expect.any(String),
+    );
+
+    // Page 2: a non-mutating replay so the received usage is asserted as-is.
+    mockHistoryReplayPage.mockReset();
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+
+    await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+      sessionId: VALID_SESSION_ID,
+      cursor: 'cursor-page-2',
+    });
+    // Page 2 decodes that usage and propagates it into the replay context.
+    expect(mockHistoryReplayPage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cumulativeUsage: expect.objectContaining({ promptTokens: 100 }),
+      }),
+      [{ uuid: 'u2' }],
+      expect.anything(),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('qwen/providers extension methods list and connect model providers', async () => {
     const settings = makeSessionSettings();
     const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
@@ -7497,6 +8644,46 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('marks the artifact snapshot unavailable when rewind flush fails', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const privateError =
+      "EACCES: permission denied, open '/private/transcripts/session.jsonl'";
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      flush: vi.fn().mockRejectedValue(new Error(privateError)),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const response = await agent.extMethod('rewindSession', {
+      sessionId,
+      targetTurnIndex: 1,
+      cwd: '/tmp',
+    });
+
+    expect(response).toMatchObject({
+      success: true,
+      artifactSnapshotUnavailable: 'artifact snapshot unavailable after rewind',
+    });
+    expect(response).not.toHaveProperty('artifactSnapshot');
+    expect(JSON.stringify(response)).not.toContain('/private/transcripts');
+    expect(JSON.stringify(response)).not.toContain('EACCES');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('rewindSession extension method marks artifact snapshot unavailable when session reload is missing', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     await setupSessionMocks(sessionId);
@@ -8248,7 +9435,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
 
   function makeRecordingService() {
     return {
-      recordCustomTitle: vi.fn().mockReturnValue(true),
+      recordCustomTitle: vi.fn().mockResolvedValue(true),
       flush: vi.fn().mockResolvedValue(undefined),
     };
   }
@@ -8347,9 +9534,9 @@ describe('QwenAgent extMethod renameSession routing', () => {
       'New Title',
       'manual',
     );
-    // Awaited so the rename is durable before the response returns —
-    // a follow-up listSessions can't race the queued write.
-    expect(recording.flush).toHaveBeenCalledOnce();
+    // The strict title promise itself is the durability boundary. A later,
+    // unrelated queued record must not be allowed to change this result.
+    expect(recording.flush).not.toHaveBeenCalled();
     // The disk-only fallback must NOT fire when a live session exists,
     // otherwise we'd double-write (and the second writer would be the
     // SessionService that lacks the in-memory cache update).
@@ -8396,7 +9583,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
 
   it('returns success=false when the live ChatRecordingService rejects the title (I/O error)', async () => {
     const recording = makeRecordingService();
-    recording.recordCustomTitle.mockReturnValue(false);
+    recording.recordCustomTitle.mockResolvedValue(false);
     const innerConfig = makeLiveSessionInnerConfig(recording);
     const { agent, agentPromise } = await bootAgent(innerConfig);
 
@@ -8408,11 +9595,103 @@ describe('QwenAgent extMethod renameSession routing', () => {
       title: 'New Title',
     });
 
-    // Even on failure we still flush so the writeChain settles before
-    // responding — keeps subsequent reads consistent and surfaces any
-    // queued earlier failure to the caller.
-    expect(recording.flush).toHaveBeenCalledOnce();
+    expect(recording.flush).not.toHaveBeenCalled();
     expect(result).toEqual({ success: false });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('waits for the live title write itself and ignores unrelated flush state', async () => {
+    const recording = makeRecordingService();
+    let resolveTitle!: (value: boolean) => void;
+    recording.recordCustomTitle.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveTitle = resolve;
+        }),
+    );
+    recording.flush.mockRejectedValue(new Error('flush failed'));
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    let settled = false;
+    const renamePromise = agent
+      .extMethod('renameSession', {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+        title: 'New Title',
+      })
+      .finally(() => {
+        settled = true;
+      });
+    await vi.waitFor(() =>
+      expect(recording.recordCustomTitle).toHaveBeenCalled(),
+    );
+    expect(settled).toBe(false);
+    resolveTitle(true);
+    await expect(renamePromise).resolves.toEqual({ success: true });
+    expect(recording.recordCustomTitle).toHaveBeenCalledWith(
+      'New Title',
+      'manual',
+    );
+    expect(recording.flush).not.toHaveBeenCalled();
+    expect(SessionService).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('returns the durable result from qwen/control/session/title without an extra flush', async () => {
+    const recording = makeRecordingService();
+    recording.recordCustomTitle.mockResolvedValue(false);
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const result = await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.sessionTitle,
+      {
+        sessionId: liveSessionId,
+        displayName: 'Remote Title',
+        titleSource: 'auto',
+      },
+    );
+
+    expect(recording.recordCustomTitle).toHaveBeenCalledWith(
+      'Remote Title',
+      'auto',
+    );
+    expect(recording.flush).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      sessionId: liveSessionId,
+      displayName: 'Remote Title',
+      titleSource: 'auto',
+      persisted: false,
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not branch a live session when its recording flush fails', async () => {
+    const recording = makeRecordingService();
+    recording.flush.mockRejectedValue(new Error('flush failed'));
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+      }),
+    ).rejects.toThrow('flush failed');
+    expect(SessionService).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -8420,7 +9699,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
 
   it('keeps the live session open when strict session close flush fails', async () => {
     const recording = makeRecordingService();
-    recording.flush.mockRejectedValueOnce(new Error('flush failed'));
+    recording.flush.mockRejectedValue(new Error('flush failed'));
     const innerConfig = makeLiveSessionInnerConfig(recording);
     const toolRegistry = { stop: vi.fn().mockResolvedValue(undefined) };
     innerConfig.getToolRegistry.mockReturnValue(toolRegistry);
@@ -8451,6 +9730,16 @@ describe('QwenAgent extMethod renameSession routing', () => {
       agent.extMethod('qwen/control/session/close', {
         sessionId: liveSessionId,
         requireFlush: true,
+      }),
+    ).rejects.toThrow('flush failed');
+    expect(recording.flush).toHaveBeenCalledTimes(2);
+    expect(liveCancelPendingPrompt).not.toHaveBeenCalled();
+    expect(toolRegistry.stop).not.toHaveBeenCalled();
+
+    await expect(
+      agent.extMethod('qwen/control/session/close', {
+        sessionId: liveSessionId,
+        requireFlush: false,
       }),
     ).resolves.toEqual({ sessionId: liveSessionId, closed: true });
     expect(recording.flush).toHaveBeenCalledTimes(3);

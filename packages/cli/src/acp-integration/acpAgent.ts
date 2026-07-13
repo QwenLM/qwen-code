@@ -55,6 +55,12 @@ import {
   InvalidMcpConfigError,
   MCPOAuthProvider,
   MCPOAuthTokenStorage,
+  InvalidSessionTranscriptCursorError,
+  SESSION_TRANSCRIPT_MAX_LIMIT,
+  SessionTranscriptReader,
+  SessionTranscriptSnapshotUnavailableError,
+  SessionTranscriptTooLargeError,
+  encodeSessionTranscriptCursor,
   subagentGenerator,
   redactUrlCredentials,
   computeUniqueBranchTitle,
@@ -70,30 +76,28 @@ import {
   normalizeEventPayload,
   normalizeSnapshotPayload,
   startEventLoopLagMonitor,
+  refreshMemoryInstruction,
+  type AgentParams,
+  type ApprovalMode,
+  type Config,
+  type ConfigInitializeOptions,
+  type DeviceAuthorizationData,
+  type DiscoveredMCPPrompt,
+  type DiscoveredMCPResource,
+  type HookConfig,
+  type McpBudgetEvent,
+  type McpBudgetMode,
+  type McpTransportKind,
+  type ProviderConfig,
+  type ProviderModelConfig,
+  type ProviderSetupInputs,
+  type ResumedSessionData,
+  type SendSdkMcpMessage,
+  type SessionArtifactEventRecordPayload,
+  type SessionArtifactSnapshotRecordPayload,
+  type WorkspaceRememberContextMode,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
-import type {
-  AgentParams,
-  ApprovalMode,
-  Config,
-  DeviceAuthorizationData,
-  HookConfig,
-  McpBudgetEvent,
-  McpBudgetMode,
-  McpTransportKind,
-  ProviderConfig,
-  ProviderModelConfig,
-  ProviderSetupInputs,
-  ResumedSessionData,
-  SendSdkMcpMessage,
-  DiscoveredMCPResource,
-  DiscoveredMCPPrompt,
-  WorkspaceRememberContextMode,
-  SessionArtifactEventRecordPayload,
-  SessionArtifactSnapshotRecordPayload,
-  ChatRecord,
-  HistoryGap,
-} from '@qwen-code/qwen-code-core';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import {
   AgentSideConnection,
@@ -162,11 +166,7 @@ import {
   type PermissionRuleSet,
 } from '../config/permission-settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
-import type {
-  ApprovalModeValue,
-  CumulativeUsage,
-  SessionContext,
-} from './session/types.js';
+import type { ApprovalModeValue } from './session/types.js';
 import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
 import {
@@ -187,7 +187,12 @@ import {
 } from './extension-skills.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
-import { HistoryReplayer } from './session/HistoryReplayer.js';
+import {
+  collectHistoryReplayUpdates,
+  copyCumulativeUsage,
+  createReplayCumulativeUsage,
+  replayTranscriptRecordPage,
+} from './session/history-replay-page.js';
 import {
   formatAcpModelId,
   parseAcpBaseModelId,
@@ -399,77 +404,6 @@ function invalidArtifactPersistPayload(): Error {
 function isBulkLoadReplayRequest(params: LoadSessionRequest): boolean {
   const meta = isObjectRecord(params._meta) ? params._meta : undefined;
   return meta?.[LOAD_REPLAY_MODE_META_KEY] === LOAD_REPLAY_BULK_MODE;
-}
-
-function createReplayCumulativeUsage(): CumulativeUsage {
-  return {
-    promptTokens: 0,
-    cachedTokens: 0,
-    candidateTokens: 0,
-    apiTimeMs: 0,
-  };
-}
-
-function copyCumulativeUsage(
-  target: CumulativeUsage,
-  source: CumulativeUsage,
-): void {
-  target.promptTokens = source.promptTokens;
-  target.cachedTokens = source.cachedTokens;
-  target.candidateTokens = source.candidateTokens;
-  target.apiTimeMs = source.apiTimeMs;
-}
-
-async function collectHistoryReplayUpdates({
-  sessionId,
-  config,
-  records,
-  gaps,
-  cumulativeUsage,
-}: {
-  sessionId: string;
-  config: Config;
-  records: ChatRecord[];
-  gaps?: HistoryGap[];
-  cumulativeUsage: CumulativeUsage;
-}): Promise<{ updates: SessionUpdate[]; replayError?: string }> {
-  const updates: SessionUpdate[] = [];
-  const replayContext: SessionContext = {
-    sessionId,
-    config,
-    sendUpdate: async (update) => {
-      updates.push(update);
-    },
-    cumulativeUsage,
-  };
-
-  try {
-    await new HistoryReplayer(replayContext).replay(records, gaps);
-  } catch (error) {
-    const replayError = error instanceof Error ? error.message : String(error);
-    debugLogger.warn(
-      '[historyReplay] History replay failed for session %s (partial updates: %d):',
-      sessionId,
-      updates.length,
-      error,
-    );
-    return { updates, replayError };
-  }
-
-  return { updates };
-}
-
-function liftSessionUpdateTimestamps(
-  updates: SessionUpdate[],
-): SessionUpdate[] {
-  return updates.map((update) => {
-    const record = update as Record<string, unknown>;
-    const meta = record['_meta'];
-    const timestamp = isObjectRecord(meta) ? meta['timestamp'] : undefined;
-    return typeof timestamp === 'number' || typeof timestamp === 'string'
-      ? ({ ...record, timestamp } as unknown as SessionUpdate)
-      : update;
-  });
 }
 
 function createHiddenWorkspaceMemoryConfig(config: Config): Config {
@@ -2831,8 +2765,18 @@ function parseAcpSessionListCursor(
   return parsedCursor;
 }
 
+interface TranscriptReplayConfigCacheEntry {
+  settings: LoadedSettings;
+  config?: Config;
+  pending?: Promise<Config>;
+}
+
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
+  private readonly transcriptReplayConfigCache = new Map<
+    string,
+    TranscriptReplayConfigCacheEntry
+  >();
   private clientCapabilities: ClientCapabilities | undefined;
   // CPU-usage delta baseline for the daemon's `workspaceResource` extMethod
   // (Daemon Status child-resource chart). The daemon polls this at a fixed
@@ -3000,6 +2944,7 @@ class QwenAgent implements Agent {
       session.dispose();
     }
     this.sessions.clear();
+    this.disposeTranscriptReplayConfigs();
   }
 
   constructor(
@@ -3234,8 +3179,9 @@ class QwenAgent implements Agent {
             records,
             gaps: sessionData?.historyGaps,
             cumulativeUsage: replayUsage,
+            logger: debugLogger,
           });
-          replayUpdates = liftSessionUpdateTimestamps(replay.updates);
+          replayUpdates = replay.updates;
           copyCumulativeUsage(session.cumulativeUsage, replayUsage);
           if (replay.replayError !== undefined) {
             replayEnvelope = {
@@ -4839,6 +4785,22 @@ class QwenAgent implements Agent {
     return session;
   }
 
+  private async refreshLiveSessionMemoryInstructions(
+    logContext: string,
+  ): Promise<void> {
+    const sessions = [...this.sessions.values()];
+    if (sessions.length === 0) {
+      return;
+    }
+    await Promise.all(
+      sessions.map((session) =>
+        refreshMemoryInstruction(session.getConfig(), {
+          logContext: `${logContext} session ${session.getId()}`,
+        }),
+      ),
+    );
+  }
+
   private buildSessionContextStatus(
     sessionId: string,
   ): ServeSessionContextStatus {
@@ -5840,6 +5802,116 @@ class QwenAgent implements Agent {
           unknown
         >;
       }
+      case SERVE_STATUS_EXT_METHODS.sessionTranscript: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const rawCursor = params['cursor'];
+        if (rawCursor !== undefined && typeof rawCursor !== 'string') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid transcript cursor',
+          );
+        }
+        const rawLimit = params['limit'];
+        if (
+          rawLimit !== undefined &&
+          (!Number.isSafeInteger(rawLimit) ||
+            (rawLimit as number) < 1 ||
+            (rawLimit as number) > SESSION_TRANSCRIPT_MAX_LIMIT)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid transcript limit',
+          );
+        }
+
+        try {
+          const settings = loadSettingsCached(cwd);
+          return await runWithAcpRuntimeOutputDir(settings, cwd, async () => {
+            const reader = new SessionTranscriptReader(cwd);
+            const page = await reader.readPage(sessionId, {
+              ...(typeof rawCursor === 'string' ? { cursor: rawCursor } : {}),
+              ...(typeof rawLimit === 'number' ? { limit: rawLimit } : {}),
+            });
+            const config = await this.getTranscriptReplayConfig(cwd, settings);
+            const replay = await replayTranscriptRecordPage({
+              sessionId,
+              page,
+              config,
+              encodeCursor: (state) =>
+                encodeSessionTranscriptCursor(state, cwd),
+              logger: debugLogger,
+            });
+            return {
+              v: 1,
+              sessionId,
+              events: replay.updates.map((update) => ({
+                v: 1,
+                type: 'session_update',
+                data: update,
+              })),
+              ...(replay.nextCursor !== undefined
+                ? { nextCursor: replay.nextCursor }
+                : {}),
+              hasMore: replay.hasMore,
+              startTime: replay.startTime,
+              lastUpdated: replay.lastUpdated,
+              ...(replay.replayError !== undefined
+                ? { partial: true, replayError: replay.replayError }
+                : {}),
+            } as Record<string, unknown>;
+          });
+        } catch (error) {
+          if (
+            error instanceof InvalidSessionTranscriptCursorError ||
+            error instanceof RangeError
+          ) {
+            throw new RequestError(
+              -32602,
+              error instanceof Error ? error.message : 'Invalid transcript',
+              {
+                errorKind:
+                  error instanceof InvalidSessionTranscriptCursorError
+                    ? 'invalid_transcript_cursor'
+                    : 'invalid_transcript_limit',
+              },
+            );
+          }
+          if (error instanceof SessionTranscriptSnapshotUnavailableError) {
+            throw new RequestError(-32010, error.message, {
+              errorKind: 'transcript_snapshot_unavailable',
+              sessionId,
+            });
+          }
+          if (error instanceof SessionTranscriptTooLargeError) {
+            throw new RequestError(-32011, error.message, {
+              errorKind: 'transcript_too_large',
+              sessionId,
+              snapshotSize: error.snapshotSize,
+              maxBytes: error.maxBytes,
+            });
+          }
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            if (typeof rawCursor === 'string') {
+              throw new RequestError(
+                -32010,
+                `Transcript snapshot is unavailable for session ${sessionId}`,
+                {
+                  errorKind: 'transcript_snapshot_unavailable',
+                  sessionId,
+                },
+              );
+            }
+            throw RequestError.resourceNotFound(`session:${sessionId}`);
+          }
+          throw error;
+        }
+      }
       case SERVE_STATUS_EXT_METHODS.sessionStats: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -5963,6 +6035,11 @@ class QwenAgent implements Agent {
             contextMode,
             abortSignal: childSignal,
           });
+          if (result.filesTouched.length > 0) {
+            await this.refreshLiveSessionMemoryInstructions(
+              'workspace memory remember',
+            );
+          }
           return result as unknown as Record<string, unknown>;
         } catch (err) {
           if (err instanceof RequestError) {
@@ -6615,10 +6692,38 @@ class QwenAgent implements Agent {
         const recording = session.getConfig().getChatRecordingService();
         let ok = false;
         if (recording) {
-          ok = recording.recordCustomTitle(displayName, source);
-          await recording.flush();
+          ok = await recording.recordCustomTitle(displayName, source);
         }
         return { sessionId, displayName, titleSource: source, persisted: ok };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionParent: {
+        const sessionId = params['sessionId'];
+        const parentSessionId = params['parentSessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (
+          typeof parentSessionId !== 'string' ||
+          parentSessionId.length === 0
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing parentSessionId',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const recording = session.getConfig().getChatRecordingService();
+        let ok = false;
+        if (recording) {
+          // Awaited: `recordParentSession` resolves only once the record is
+          // durably written, so `persisted` never claims success for a write
+          // that silently failed.
+          ok = await recording.recordParentSession(parentSessionId);
+        }
+        return { sessionId, parentSessionId, persisted: ok };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionClose: {
         const sessionId = params['sessionId'];
@@ -7518,8 +7623,7 @@ class QwenAgent implements Agent {
           ?.getConfig()
           .getChatRecordingService();
         if (liveRecording) {
-          const ok = liveRecording.recordCustomTitle(title, 'manual');
-          await liveRecording.flush();
+          const ok = await liveRecording.recordCustomTitle(title, 'manual');
           return { success: ok };
         }
         const success = await runWithAcpRuntimeOutputDir(
@@ -7667,12 +7771,11 @@ class QwenAgent implements Agent {
             };
           }
         } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
           artifactSnapshotUnavailable =
-            err instanceof Error ? err.message : String(err);
+            'artifact snapshot unavailable after rewind';
           debugLogger.warn(
-            `[ACP] Failed to rebuild artifact snapshot after rewind for session=${sessionId}: ${
-              artifactSnapshotUnavailable
-            }`,
+            `[ACP] Failed to rebuild artifact snapshot after rewind for session=${sessionId}: ${reason}`,
           );
         }
 
@@ -7715,10 +7818,11 @@ class QwenAgent implements Agent {
           records: sessionData.conversation.messages,
           gaps: sessionData.historyGaps,
           cumulativeUsage: createReplayCumulativeUsage(),
+          logger: debugLogger,
         });
 
         return {
-          updates: liftSessionUpdateTimestamps(replay.updates),
+          updates: replay.updates,
           startTime: sessionData.conversation.startTime,
           lastUpdated: sessionData.conversation.lastUpdated,
           // Signal to the client that replay aborted partway so it doesn't
@@ -8275,12 +8379,97 @@ class QwenAgent implements Agent {
       deliverClientMcpMessage(this.connection, serverName, message, sessionId);
   }
 
+  private disposeTranscriptReplayConfig(config: Config): void {
+    try {
+      void Promise.resolve(config.getToolRegistry()?.stop()).catch((err) => {
+        debugLogger.debug(
+          `Transcript replay config tool registry stop failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      });
+    } catch (err) {
+      debugLogger.debug(
+        `Transcript replay config tool registry stop failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  private disposeTranscriptReplayConfigs(): void {
+    for (const entry of this.transcriptReplayConfigCache.values()) {
+      if (entry.config) {
+        this.disposeTranscriptReplayConfig(entry.config);
+      }
+    }
+    this.transcriptReplayConfigCache.clear();
+  }
+
+  private async getTranscriptReplayConfig(
+    cwd: string,
+    settings: LoadedSettings,
+  ): Promise<Config> {
+    const key = path.resolve(cwd);
+    const cached = this.transcriptReplayConfigCache.get(key);
+    if (cached?.settings === settings) {
+      if (cached.config) {
+        return cached.config;
+      }
+      if (cached.pending) {
+        return cached.pending;
+      }
+    } else if (cached?.config) {
+      this.disposeTranscriptReplayConfig(cached.config);
+    }
+
+    const entry: TranscriptReplayConfigCacheEntry = { settings };
+    const pending = this.newSessionConfig(cwd, [], settings, undefined, false, {
+      skipMcpDiscovery: true,
+      skipHooks: true,
+      skipSkillManager: true,
+      skipFileCheckpointing: true,
+      // Read-only replay: tolerate tools that cannot construct without the
+      // subsystems skipped above (e.g. SkillTool needs the SkillManager). The
+      // registry is only consulted for optional tool_call metadata during
+      // replay, and ToolCallEmitter falls back to the recorded tool name.
+      lenientToolWarmup: true,
+    });
+    entry.pending = pending;
+    this.transcriptReplayConfigCache.set(key, entry);
+    try {
+      const config = await pending;
+      const current = this.transcriptReplayConfigCache.get(key);
+      if (current !== entry) {
+        this.disposeTranscriptReplayConfig(config);
+        if (current?.config) {
+          return current.config;
+        }
+        if (current?.pending) {
+          return current.pending;
+        }
+        throw new Error(
+          'Transcript replay config was invalidated while loading',
+        );
+      }
+      entry.config = config;
+      entry.pending = undefined;
+      return config;
+    } catch (error) {
+      if (this.transcriptReplayConfigCache.get(key) === entry) {
+        this.transcriptReplayConfigCache.delete(key);
+      }
+      throw error;
+    }
+  }
+
   private async newSessionConfig(
     cwd: string,
     mcpServers: McpServer[],
     settings: LoadedSettings,
     sessionId?: string,
     resume?: boolean,
+    initializeOptions: ConfigInitializeOptions = {},
   ): Promise<Config> {
     // ACP/IDE-injected servers are session-level: they must outrank a project
     // `.mcp.json` and stay un-gated. Collect them separately and pass them as
@@ -8344,9 +8533,13 @@ class QwenAgent implements Agent {
 
     const mergedSettings = settings.merged;
 
+    const sessionArg =
+      resume === true
+        ? { resume: sessionId, sessionId: undefined }
+        : { sessionId, resume: undefined };
     const argvForSession = {
       ...this.argv,
-      ...(resume ? { resume: sessionId } : { sessionId }),
+      ...sessionArg,
       continue: false,
     };
 
@@ -8375,7 +8568,10 @@ class QwenAgent implements Agent {
     // ACP sessions run with piped stdio (non-TTY), so the default
     // interactive-based gating disables file checkpointing. Enable it
     // explicitly so /rewind works across daemon session resume.
-    if (typeof config.enableFileCheckpointing === 'function') {
+    if (
+      !initializeOptions.skipFileCheckpointing &&
+      typeof config.enableFileCheckpointing === 'function'
+    ) {
       config.enableFileCheckpointing();
     }
     // Reverse tool channel (issue #5626, Phase 2). Runtime-added MCP servers
@@ -8445,6 +8641,7 @@ class QwenAgent implements Agent {
       });
     }
     await config.initialize({
+      ...initializeOptions,
       // Reverse tool channel (issue #5626, Phase 2): bind the session
       // manager's SDK MCP callback to the `client_mcp/message` ext-method so a
       // client-hosted (extension) MCP server added at runtime reaches the

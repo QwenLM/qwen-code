@@ -1490,6 +1490,9 @@ export async function loadCliConfig(
   settingsWatcher?: { stopWatching(): void },
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
+  if (debugMode && process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
+    process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+  }
   const bareMode = isBareMode(argv.bare);
   const safeMode =
     argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv();
@@ -2161,6 +2164,7 @@ export async function loadCliConfig(
     useRipgrep: settings.tools?.useRipgrep,
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
+    shellDefaultTimeoutMs: settings.tools?.shell?.defaultTimeoutMs,
     preventSystemSleep: settings.general?.preventSystemSleep ?? true,
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
     skipWorkflowUsageWarning: settings.model?.skipWorkflowUsageWarning ?? false,

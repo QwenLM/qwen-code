@@ -2,6 +2,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
+import type {
+  WebShellSidebarBranding,
+  WebShellSidebarFooterItem,
+} from './WebShellSidebar';
 
 const {
   mockConnection,
@@ -11,6 +16,7 @@ const {
   renameSessionSpy,
   mockExportSession,
   mockWorkspaceActions,
+  mockWorkspace,
 } = vi.hoisted(() => {
   const makeStore = () => ({
     sessions: [] as MockSession[],
@@ -36,7 +42,11 @@ const {
       sessionId: null as string | null,
       workspaceCwd: '/tmp/project',
       capabilities: { qwenCodeVersion: '1.2.3', features: [] as string[] } as
-        | { qwenCodeVersion?: string; features?: string[] }
+        | {
+            qwenCodeVersion?: string;
+            features?: string[];
+            workspaces?: DaemonWorkspaceCapability[];
+          }
         | undefined,
     },
     mockUseSessions,
@@ -53,6 +63,23 @@ const {
       updateSessionGroup: vi.fn(),
       deleteSessionGroup: vi.fn(),
       updateSessionOrganization: vi.fn(),
+      addWorkspace: vi.fn().mockResolvedValue({ persisted: true }),
+    },
+    mockWorkspace: {
+      client: {
+        listWorkspaceSessions: vi.fn().mockResolvedValue([]),
+      },
+      capabilities: {
+        qwenCodeVersion: '1.2.3',
+        features: [] as string[],
+      } as
+        | {
+            qwenCodeVersion?: string;
+            features?: string[];
+            workspaces?: DaemonWorkspaceCapability[];
+          }
+        | undefined,
+      getCapabilities: vi.fn(),
     },
   };
 });
@@ -75,6 +102,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useConnection: () => mockConnection,
   useActions: () => ({ renameSession: renameSessionSpy }),
   useWorkspaceActions: () => mockWorkspaceActions,
+  useWorkspace: () => mockWorkspace,
   useSessions: (options?: { archiveState?: 'active' | 'archived' }) =>
     mockUseSessions(options),
 }));
@@ -96,7 +124,9 @@ function makeSession(
 }
 
 const { I18nProvider } = await import('../../i18n');
-const { WebShellSidebar } = await import('./WebShellSidebar');
+const { WebShellSidebar, getSidebarTooltipPosition } = await import(
+  './WebShellSidebar'
+);
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -130,17 +160,25 @@ function renderSidebar(
     onLoadSession: (sessionId: string) => Promise<void> | void;
     onError: (error: unknown, message: string) => void;
     sessionListReloadToken: number;
+    selectedWorkspaceCwd: string;
+    onSelectWorkspace: (workspaceCwd: string | undefined) => void;
+    mobileOpen: boolean;
+    branding: false | WebShellSidebarBranding;
+    footer: false | { items: readonly WebShellSidebarFooterItem[] };
   }> = {},
-): { container: HTMLElement; rerender: (props: typeof overrides) => void } {
+): {
+  container: HTMLElement;
+  rerender: (props: typeof overrides, nextCollapsed?: boolean) => void;
+} {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
-  const doRender = (props: typeof overrides) => {
+  const doRender = (props: typeof overrides, nextCollapsed = collapsed) => {
     act(() => {
       root.render(
         <I18nProvider language="en">
           <WebShellSidebar
-            collapsed={collapsed}
+            collapsed={nextCollapsed}
             onCollapsedChange={noop}
             onOpenSettings={noop}
             onOpenDaemonStatus={noop}
@@ -166,6 +204,10 @@ beforeEach(() => {
   window.localStorage.clear();
   mockConnection.sessionId = null;
   mockConnection.capabilities = { qwenCodeVersion: '1.2.3', features: [] };
+  mockWorkspace.capabilities = { qwenCodeVersion: '1.2.3', features: [] };
+  mockWorkspace.client.listWorkspaceSessions.mockReset();
+  mockWorkspace.client.listWorkspaceSessions.mockResolvedValue([]);
+  mockWorkspace.getCapabilities.mockReset();
   for (const store of [mockActive, mockArchived]) {
     store.sessions = [];
     store.loading = false;
@@ -195,6 +237,8 @@ beforeEach(() => {
   mockWorkspaceActions.updateSessionGroup.mockReset();
   mockWorkspaceActions.deleteSessionGroup.mockReset();
   mockWorkspaceActions.updateSessionOrganization.mockReset();
+  mockWorkspaceActions.addWorkspace.mockReset();
+  mockWorkspaceActions.addWorkspace.mockResolvedValue({ persisted: true });
 });
 
 afterEach(() => {
@@ -202,13 +246,477 @@ afterEach(() => {
     act(() => root.unmount());
     container.remove();
   }
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
+describe('WebShellSidebar — workspace picker', () => {
+  const multiWorkspaceCaps = {
+    qwenCodeVersion: '1.2.3',
+    features: ['multi_workspace_sessions'],
+    workspaces: [
+      { id: 'ws-primary', cwd: '/tmp/project', primary: true, trusted: true },
+      { id: 'ws-second', cwd: '/tmp/other', primary: false, trusted: true },
+      {
+        id: 'ws-untrusted',
+        cwd: '/tmp/danger',
+        primary: false,
+        trusted: false,
+      },
+    ],
+  };
+
+  // Each registered workspace renders as a WorkspaceSection header <button>
+  // whose text contains the workspace's basename. Match on those instead of
+  // the removed <select> picker.
+  function workspaceButtons(container: HTMLElement): HTMLButtonElement[] {
+    return Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).filter((b) =>
+      ['project', 'other', 'danger'].some((name) =>
+        b.textContent?.includes(name),
+      ),
+    );
+  }
+
+  async function submitAddWorkspace(container: HTMLElement): Promise<void> {
+    const addButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.includes('Add workspace'));
+    expect(addButton).toBeDefined();
+    act(() => {
+      addButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const input = document.body.querySelector<HTMLInputElement>(
+      '#add-workspace-path',
+    );
+    expect(input).not.toBeNull();
+    const setInputValue = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      setInputValue?.call(input, '/tmp/new-workspace');
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input!.form!.dispatchEvent(
+        new SubmitEvent('submit', { bubbles: true, cancelable: true }),
+      );
+    });
+  }
+
+  it('renders a workspace entry per registered workspace', () => {
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    const { container } = renderSidebar(false);
+    const labels = workspaceButtons(container).map((b) => b.textContent ?? '');
+    expect(labels.some((l) => l.includes('project'))).toBe(true);
+    expect(labels.some((l) => l.includes('other'))).toBe(true);
+    expect(labels.some((l) => l.includes('danger'))).toBe(true);
+  });
+
+  it('lets an untrusted secondary expand as read-only without selecting or loading it', async () => {
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    mockWorkspace.client.listWorkspaceSessions.mockImplementation(
+      async (cwd: string) =>
+        cwd === '/tmp/danger'
+          ? [makeSession('danger-session', { workspaceCwd: cwd })]
+          : [],
+    );
+    const onSelectWorkspace = vi.fn();
+    const onLoadSession = vi.fn();
+    const { container } = renderSidebar(false, {
+      onSelectWorkspace,
+      onLoadSession,
+    });
+    const buttons = workspaceButtons(container);
+    const untrusted = buttons.find((b) => b.textContent?.includes('danger'));
+    const trusted = buttons.find((b) => b.textContent?.includes('other'));
+    expect(untrusted?.disabled).toBe(false);
+    expect(untrusted?.textContent).toContain('untrusted');
+    expect(untrusted?.textContent).toContain('read-only');
+    expect(trusted?.disabled).toBe(false);
+
+    await act(async () => {
+      untrusted?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await vi.waitFor(() =>
+      expect(mockWorkspace.client.listWorkspaceSessions).toHaveBeenCalledWith(
+        '/tmp/danger',
+        { archiveState: 'active' },
+      ),
+    );
+    expect(onSelectWorkspace).not.toHaveBeenCalled();
+
+    await vi.waitFor(() =>
+      expect(
+        container.querySelector<HTMLElement>('[role="note"]'),
+      ).not.toBeNull(),
+    );
+    const session = container.querySelector<HTMLElement>('[role="note"]')!;
+    expect(session.textContent).toContain('Session danger-session');
+    expect(session.title).toBe('');
+    expect(session.getAttribute('role')).toBe('note');
+    expect(session.getAttribute('aria-disabled')).toBeNull();
+    expect(session.getAttribute('aria-label')).toBe(
+      `Session danger-session, ${new Date(
+        '2026-01-01T00:00:00.000Z',
+      ).toLocaleDateString()}. Trust this workspace to open the session.`,
+    );
+    act(() => {
+      session.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      session.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+      session.dispatchEvent(
+        new KeyboardEvent('keydown', { key: ' ', bubbles: true }),
+      );
+    });
+    expect(onLoadSession).not.toHaveBeenCalled();
+  });
+
+  it('does not poll an expanded read-only workspace and reloads on token change', async () => {
+    vi.useFakeTimers();
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    mockActive.reload.mockResolvedValue(undefined);
+    const onNewSession = vi.fn().mockResolvedValue(true);
+    const { container } = renderSidebar(false, {
+      onSelectWorkspace: vi.fn(),
+      onNewSession,
+    });
+    const untrusted = workspaceButtons(container).find((button) =>
+      button.textContent?.includes('danger'),
+    );
+    await act(async () => {
+      untrusted?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const countWorkspaceCalls = (cwd: string) =>
+      mockWorkspace.client.listWorkspaceSessions.mock.calls.filter(
+        ([calledCwd]) => calledCwd === cwd,
+      ).length;
+    expect(countWorkspaceCalls('/tmp/danger')).toBe(1);
+    expect(countWorkspaceCalls('/tmp/project')).toBe(1);
+
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(countWorkspaceCalls('/tmp/danger')).toBe(1);
+    expect(countWorkspaceCalls('/tmp/project')).toBe(2);
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="New chat"]')
+        ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onNewSession).toHaveBeenCalledOnce();
+    expect(countWorkspaceCalls('/tmp/danger')).toBe(2);
+  });
+
+  it('shows an empty read-only catalog after a dynamically registered workspace appears', async () => {
+    mockWorkspace.capabilities = {
+      ...multiWorkspaceCaps,
+      workspaces: [multiWorkspaceCaps.workspaces[0]!],
+    };
+    const { container, rerender } = renderSidebar(false);
+    expect(
+      workspaceButtons(container).some((button) =>
+        button.textContent?.includes('danger'),
+      ),
+    ).toBe(false);
+
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    rerender({});
+    const untrusted = workspaceButtons(container).find((button) =>
+      button.textContent?.includes('danger'),
+    );
+    expect(untrusted?.disabled).toBe(false);
+    await act(async () => {
+      untrusted?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await vi.waitFor(() =>
+      expect(mockWorkspace.client.listWorkspaceSessions).toHaveBeenCalledWith(
+        '/tmp/danger',
+        { archiveState: 'active' },
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(untrusted?.parentElement?.textContent).toContain('No sessions.'),
+    );
+  });
+
+  it('keeps the read-only empty state when the catalog request fails', async () => {
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    const failure = new Error('catalog unavailable');
+    mockWorkspace.client.listWorkspaceSessions.mockRejectedValue(failure);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { container } = renderSidebar(false);
+    const untrusted = workspaceButtons(container).find((button) =>
+      button.textContent?.includes('danger'),
+    );
+
+    await act(async () => {
+      untrusted?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await vi.waitFor(() =>
+      expect(warn).toHaveBeenCalledWith(
+        '[WorkspaceSection] session poll failed:',
+        failure,
+      ),
+    );
+    expect(untrusted?.parentElement?.textContent).toContain('No sessions.');
+  });
+
+  it('keeps an untrusted primary workspace disabled', () => {
+    mockWorkspace.capabilities = {
+      ...multiWorkspaceCaps,
+      workspaces: [
+        {
+          id: 'ws-primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: false,
+        },
+        ...multiWorkspaceCaps.workspaces.slice(1),
+      ],
+    };
+    const { container } = renderSidebar(false);
+    const primary = workspaceButtons(container).find((button) =>
+      button.textContent?.includes('project'),
+    );
+    expect(primary?.disabled).toBe(true);
+  });
+
+  it('calls onSelectWorkspace with the chosen cwd for a secondary workspace', () => {
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    const onSelectWorkspace = vi.fn();
+    const { container } = renderSidebar(false, { onSelectWorkspace });
+    const other = workspaceButtons(container).find((b) =>
+      b.textContent?.includes('other'),
+    );
+    act(() => {
+      other?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onSelectWorkspace).toHaveBeenCalledWith('/tmp/other');
+  });
+
+  it('maps the primary workspace selection back to undefined', () => {
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    const onSelectWorkspace = vi.fn();
+    const { container } = renderSidebar(false, { onSelectWorkspace });
+    const primary = workspaceButtons(container).find((b) =>
+      b.textContent?.includes('project'),
+    );
+    act(() => {
+      primary?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onSelectWorkspace).toHaveBeenCalledWith(undefined);
+  });
+
+  // Flush the WorkspaceSection async session poll (a resolved promise +
+  // the setState it drives).
+  async function flushSessionPoll(): Promise<void> {
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  const moreActionButtons = (container: HTMLElement): HTMLButtonElement[] =>
+    Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        'div[role="button"] button[aria-label="More actions"]',
+      ),
+    );
+
+  it('gives primary-workspace sessions full actions but keeps non-primary rows read-only', async () => {
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    mockWorkspace.client.listWorkspaceSessions.mockResolvedValue([
+      makeSession('shared'),
+    ]);
+    const { container } = renderSidebar(false);
+    await flushSessionPoll();
+
+    const sessionSpans = () =>
+      Array.from(container.querySelectorAll('span')).filter(
+        (el) => el.textContent === 'Session shared',
+      );
+
+    // The primary workspace is expanded by default: its row renders with the
+    // full action set.
+    expect(sessionSpans().length).toBe(1);
+    expect(moreActionButtons(container)).toHaveLength(1);
+
+    // Expand the non-primary ("other") workspace.
+    const other = workspaceButtons(container).find((b) =>
+      b.textContent?.includes('other'),
+    );
+    act(() => {
+      other?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSessionPoll();
+
+    // The non-primary section now renders the same session (so the row is
+    // present)...
+    expect(sessionSpans().length).toBe(2);
+    // ...but it stays read-only — no extra action button was added, because the
+    // daemon (bound to the primary workspace) can't service mutations for it.
+    expect(moreActionButtons(container)).toHaveLength(1);
+  });
+
+  it('re-polls the workspace session list after a mutation', async () => {
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    mockWorkspace.client.listWorkspaceSessions.mockResolvedValue([
+      makeSession('shared'),
+    ]);
+    const { container } = renderSidebar(false);
+    await flushSessionPoll();
+    const callsBefore =
+      mockWorkspace.client.listWorkspaceSessions.mock.calls.length;
+
+    // Archive the primary workspace's session via its row action button.
+    const archiveButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((b) => b.getAttribute('aria-label') === 'Archive');
+    expect(archiveButton).toBeTruthy();
+    act(() => {
+      archiveButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSessionPoll();
+
+    // The mutation bumps the shared reload token, so the section re-polls
+    // instead of waiting for the 10s interval.
+    expect(
+      mockWorkspace.client.listWorkspaceSessions.mock.calls.length,
+    ).toBeGreaterThan(callsBefore);
+  });
+
+  it('does not open the inline rename form on a read-only (non-primary) row', async () => {
+    mockConnection.sessionId = 'shared';
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    mockWorkspace.client.listWorkspaceSessions.mockResolvedValue([
+      makeSession('shared'),
+    ]);
+    const { container } = renderSidebar(false);
+    await flushSessionPoll();
+
+    // Expand the non-primary workspace so its read-only copy of the shared
+    // session renders too.
+    const other = workspaceButtons(container).find((b) =>
+      b.textContent?.includes('other'),
+    );
+    act(() => {
+      other?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSessionPoll();
+
+    const rows = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).filter((el) => el.textContent?.includes('Session shared'));
+    expect(rows).toHaveLength(2);
+
+    // Double-click the primary (current-session) row to start a rename.
+    act(() => {
+      rows[0].dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    });
+
+    // Only the primary row opens the rename input; the read-only row stays
+    // plain, even though it holds the same (now-editing) session id.
+    expect(container.querySelectorAll('input')).toHaveLength(1);
+  });
+
+  it('does not render secondary workspace entries with a single workspace', () => {
+    mockWorkspace.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['multi_workspace_sessions'],
+      workspaces: [
+        { id: 'ws-primary', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    };
+    const { container } = renderSidebar(false);
+    const secondary = workspaceButtons(container).filter(
+      (b) =>
+        b.textContent?.includes('other') || b.textContent?.includes('danger'),
+    );
+    expect(secondary.length).toBe(0);
+  });
+
+  it('does not render workspace entries when collapsed', () => {
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    const { container } = renderSidebar(true);
+    const secondary = workspaceButtons(container).find((b) =>
+      b.textContent?.includes('other'),
+    );
+    expect(secondary).toBeUndefined();
+  });
+
+  it('persists workspaces when the daemon advertises support', async () => {
+    mockWorkspace.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['persistent_workspace_registration'],
+      workspaces: [
+        { id: 'ws-primary', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    };
+    const { container } = renderSidebar(false);
+    await submitAddWorkspace(container);
+
+    expect(mockWorkspaceActions.addWorkspace).toHaveBeenCalledWith(
+      '/tmp/new-workspace',
+      { persist: true },
+    );
+  });
+
+  it('waits for capabilities before choosing persistence', async () => {
+    mockWorkspace.capabilities = undefined;
+    mockWorkspace.getCapabilities.mockResolvedValue({
+      qwenCodeVersion: '1.2.3',
+      features: ['persistent_workspace_registration'],
+      workspaces: [],
+    });
+    const { container } = renderSidebar(false);
+    await submitAddWorkspace(container);
+
+    expect(mockWorkspace.getCapabilities).toHaveBeenCalledTimes(1);
+    expect(mockWorkspaceActions.addWorkspace).toHaveBeenCalledWith(
+      '/tmp/new-workspace',
+      { persist: true },
+    );
+  });
+
+  it('keeps the legacy one-argument call when persistence is unsupported', async () => {
+    mockWorkspace.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: [],
+      workspaces: [],
+    };
+    const { container } = renderSidebar(false);
+    await submitAddWorkspace(container);
+
+    expect(mockWorkspaceActions.addWorkspace).toHaveBeenCalledWith(
+      '/tmp/new-workspace',
+    );
+  });
+
+  it('rejects success without the persisted confirmation marker', async () => {
+    mockWorkspace.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['persistent_workspace_registration'],
+      workspaces: [],
+    };
+    mockWorkspaceActions.addWorkspace.mockResolvedValue({});
+    const { container } = renderSidebar(false);
+    await submitAddWorkspace(container);
+
+    expect(document.body.textContent).toContain(
+      'The daemon did not confirm persistent workspace registration',
+    );
+  });
+});
+
 describe('WebShellSidebar — version footer', () => {
-  it('shows the settings label and qwen-code version at full footer width', () => {
-    setStoredSidebarWidth(360);
+  it('shows the settings label and current version at full footer width', () => {
+    setStoredSidebarWidth(420);
     const { container } = renderSidebar(false, {
       canOpenSessionsOverview: true,
       canOpenSplitView: true,
@@ -216,71 +724,221 @@ describe('WebShellSidebar — version footer', () => {
     const settingsButton = container.querySelector<HTMLButtonElement>(
       '[aria-label="Settings"]',
     );
-    const badge = container.querySelector('[title="Qwen Code v1.2.3"]');
+    const badge = container.querySelector('[title="Current version: v1.2.3"]');
     expect(settingsButton).not.toBeNull();
     expect(settingsButton?.textContent).toContain('Settings');
     expect(badge).not.toBeNull();
     expect(badge?.textContent).toBe('v1.2.3');
   });
 
-  it('shows the qwen-code version in the footer when expanded', () => {
+  it('shows the current version in the footer when expanded', () => {
+    setStoredSidebarWidth(420);
     const { container } = renderSidebar(false);
-    const badge = container.querySelector('[title="Qwen Code v1.2.3"]');
+    const badge = container.querySelector('[title="Current version: v1.2.3"]');
     expect(badge).not.toBeNull();
     expect(badge?.textContent).toBe('v1.2.3');
   });
 
-  it('hides the settings label first while keeping the settings button accessible', () => {
+  it('moves lower-priority entries into More at compact footer width', () => {
     setStoredSidebarWidth(260);
     const { container } = renderSidebar(false, {
       canOpenSessionsOverview: true,
       canOpenSplitView: true,
     });
-    const settingsButton = container.querySelector<HTMLButtonElement>(
-      '[aria-label="Settings"]',
+    expect(
+      container.querySelector('[title="Current version: v1.2.3"]'),
+    ).toBeNull();
+    const moreButton = container.querySelector<HTMLButtonElement>(
+      '[aria-label="More actions"]',
     );
-    const badge = container.querySelector('[title="Qwen Code v1.2.3"]');
-    expect(settingsButton).not.toBeNull();
-    expect(settingsButton?.title).toBe('Settings');
-    expect(settingsButton?.textContent).not.toContain('Settings');
-    expect(settingsButton?.querySelector('svg')).not.toBeNull();
-    expect(badge).not.toBeNull();
+    expect(moreButton).not.toBeNull();
+    act(() => {
+      moreButton?.click();
+    });
+    const menu = container.querySelector('[role="menu"]');
+    expect(menu?.textContent).toContain('Current version: v1.2.3');
+    expect(menu?.lastElementChild?.getAttribute('role')).toBe('menuitem');
+    expect(menu?.lastElementChild?.getAttribute('aria-disabled')).toBe('true');
   });
 
-  it('hides the version at tight footer width', () => {
+  it.each([
+    [
+      'Escape',
+      () =>
+        document.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+        ),
+    ],
+    [
+      'an outside pointer event',
+      () =>
+        document.body.dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true }),
+        ),
+    ],
+    ['scroll', () => window.dispatchEvent(new Event('scroll'))],
+    ['resize', () => window.dispatchEvent(new Event('resize'))],
+  ])('closes More on %s', (_trigger, dismiss) => {
+    setStoredSidebarWidth(260);
+    const { container } = renderSidebar(false, {
+      canOpenSessionsOverview: true,
+      canOpenSplitView: true,
+    });
+    click(container.querySelector('[aria-label="More actions"]'));
+    expect(container.querySelector('[role="menu"]')).not.toBeNull();
+
+    act(() => {
+      dismiss();
+    });
+    expect(container.querySelector('[role="menu"]')).toBeNull();
+  });
+
+  it('returns focus to More when Escape closes its menu', () => {
+    setStoredSidebarWidth(260);
+    const { container } = renderSidebar(false, {
+      canOpenSessionsOverview: true,
+      canOpenSplitView: true,
+    });
+    const moreButton = container.querySelector<HTMLButtonElement>(
+      '[aria-label="More actions"]',
+    );
+    click(moreButton);
+    expect(container.querySelector('[role="menu"]')).not.toBeNull();
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+    });
+    expect(container.querySelector('[role="menu"]')).toBeNull();
+    expect(document.activeElement).toBe(moreButton);
+  });
+
+  it('focuses and navigates the actionable items in More', async () => {
     setStoredSidebarWidth(220);
     const { container } = renderSidebar(false, {
       canOpenSessionsOverview: true,
       canOpenSplitView: true,
     });
-    const settingsButton = container.querySelector<HTMLButtonElement>(
-      '[aria-label="Settings"]',
+    click(container.querySelector('[aria-label="More actions"]'));
+    const menu = container.querySelector<HTMLElement>('[role="menu"]');
+    const menuItems = Array.from(
+      menu?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [],
     );
-    expect(settingsButton).not.toBeNull();
-    expect(settingsButton?.textContent).not.toContain('Settings');
-    expect(container.querySelector('[title="Qwen Code v1.2.3"]')).toBeNull();
-    expect(container.textContent ?? '').not.toContain('v1.2.3');
+    expect(menuItems.length).toBeGreaterThan(0);
+
+    await act(async () => {
+      await new Promise((resolve) => window.requestAnimationFrame(resolve));
+    });
+    expect(document.activeElement).toBe(menuItems[0]);
+
+    act(() => {
+      menu?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+      );
+    });
+    expect(document.activeElement).toBe(menuItems[0]);
+
+    act(() => {
+      menu?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'End', bubbles: true }),
+      );
+    });
+    expect(document.activeElement).toBe(menuItems.at(-1));
+
+    act(() => {
+      menu?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Home', bubbles: true }),
+      );
+    });
+    expect(document.activeElement).toBe(menuItems[0]);
+
+    act(() => {
+      menu?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }),
+      );
+    });
+    expect(document.activeElement).toBe(menuItems.at(-1));
   });
 
   it('renders a non-semver fallback (e.g. "unknown") without a bogus "v" prefix', () => {
     mockConnection.capabilities = { qwenCodeVersion: 'unknown' };
+    setStoredSidebarWidth(420);
     const { container } = renderSidebar(false);
-    const badge = container.querySelector('[title="Qwen Code unknown"]');
+    const badge = container.querySelector('[title="Current version: unknown"]');
     expect(badge).not.toBeNull();
     expect(badge?.textContent).toBe('unknown');
     expect(container.textContent ?? '').not.toContain('vunknown');
   });
 
-  it('hides the version when the sidebar is collapsed', () => {
+  it('hides Version without adding More when the sidebar is collapsed', () => {
     const { container } = renderSidebar(true);
-    expect(container.querySelector('[title="Qwen Code v1.2.3"]')).toBeNull();
-    expect(container.textContent ?? '').not.toContain('v1.2.3');
+    expect(
+      container.querySelector('[title="Current version: v1.2.3"]'),
+    ).toBeNull();
+    expect(container.querySelector('[aria-label="More actions"]')).toBeNull();
+    expect(container.textContent ?? '').not.toContain(
+      'Current version: v1.2.3',
+    );
   });
 
   it('renders no version badge when the daemon reports none', () => {
     mockConnection.capabilities = undefined;
     const { container } = renderSidebar(false);
     expect(container.textContent ?? '').not.toMatch(/v\d/);
+  });
+
+  it('uses compact footer room for Settings once Version moves into More', () => {
+    setStoredSidebarWidth(260);
+    const { container } = renderSidebar(false, {
+      footer: {
+        items: [
+          'settings',
+          'version',
+          'scheduledTasks',
+          'daemonStatus',
+          'collapse',
+        ],
+      },
+    });
+    const settingsButton = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Settings"]',
+    );
+    expect(settingsButton?.textContent).toContain('Settings');
+    const moreButton = container.querySelector<HTMLButtonElement>(
+      '[aria-label="More actions"]',
+    );
+    act(() => {
+      moreButton?.click();
+    });
+    const versionItem = container.querySelector(
+      '[role="menu"] [role="menuitem"][aria-disabled="true"]',
+    );
+    expect(versionItem?.textContent).toBe('Current version: v1.2.3');
+  });
+
+  it('closes More when collapse changes its overflow layout', () => {
+    setStoredSidebarWidth(260);
+    const footer = {
+      footer: {
+        items: [
+          'settings',
+          'version',
+          'scheduledTasks',
+          'daemonStatus',
+          'collapse',
+        ] as const,
+      },
+    };
+    const { container, rerender } = renderSidebar(false, footer);
+    click(container.querySelector('[aria-label="More actions"]'));
+    expect(container.querySelector('[role="menu"]')).not.toBeNull();
+
+    rerender(footer, true);
+    expect(container.querySelector('[role="menu"]')).toBeNull();
+
+    rerender(footer, false);
+    expect(container.querySelector('[role="menu"]')).toBeNull();
   });
 });
 
@@ -299,6 +957,95 @@ describe('WebShellSidebar — brand logo', () => {
     const { container } = renderSidebar(true);
     expect(container.querySelector('svg path[fill="#6D44E8"]')).toBeNull();
     expect(container.querySelector('[aria-label="New chat"]')).not.toBeNull();
+  });
+
+  it('hides the default brand in the compact drawer and supports host hiding', () => {
+    const compact = renderSidebar(false, { mobileOpen: true });
+    expect(
+      compact.container.querySelector('svg path[fill="#6D44E8"]'),
+    ).toBeNull();
+    const hostHidden = renderSidebar(false, { branding: false });
+    expect(
+      hostHidden.container.querySelector('svg path[fill="#6D44E8"]'),
+    ).toBeNull();
+  });
+
+  it('allows a host to keep branding visible in the compact drawer', () => {
+    const { container } = renderSidebar(false, {
+      mobileOpen: true,
+      branding: { hideWhenCompact: false },
+    });
+    expect(container.querySelector('svg path[fill="#6D44E8"]')).not.toBeNull();
+  });
+
+  it('uses host-provided branding in place of the default mark', () => {
+    const { container } = renderSidebar(false, {
+      branding: {
+        render: () => <span data-testid="custom-brand">Host brand</span>,
+      },
+    });
+    expect(
+      container.querySelector('[data-testid="custom-brand"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('svg path[fill="#6D44E8"]')).toBeNull();
+  });
+});
+
+describe('WebShellSidebar — configuration and tooltip placement', () => {
+  it('can hide every built-in footer entry', () => {
+    const { container } = renderSidebar(false, { footer: false });
+    expect(container.querySelector('[aria-label="Settings"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Daemon Status"]')).toBeNull();
+  });
+
+  it('keeps all enabled actions direct in the collapsed rail', () => {
+    const { container } = renderSidebar(true, {
+      canOpenSessionsOverview: true,
+      canOpenSplitView: true,
+      footer: {
+        items: [
+          'settings',
+          'version',
+          'scheduledTasks',
+          'sessionsOverview',
+          'splitView',
+          'daemonStatus',
+          'collapse',
+        ],
+      },
+    });
+    expect(container.querySelector('[aria-label="Expand"]')).not.toBeNull();
+    expect(
+      container.querySelector('[aria-label="Scheduled Tasks"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[aria-label="Session Overview"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[aria-label="Split View"]')).not.toBeNull();
+    expect(
+      container.querySelector('[aria-label="Daemon Status"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[aria-label="More actions"]')).toBeNull();
+  });
+
+  it('places a tooltip on the left when the right edge has no room', () => {
+    const position = getSidebarTooltipPosition(
+      { top: 100, left: 260, right: 300, height: 30 },
+      { width: 320, height: 600 },
+    );
+    expect(position.placement).toBe('left');
+    expect(position.left).toBeGreaterThanOrEqual(8);
+    expect(position.left + position.maxWidth).toBeLessThanOrEqual(312);
+  });
+
+  it('places a tooltip on the right when the viewport has room', () => {
+    const position = getSidebarTooltipPosition(
+      { top: 100, left: 20, right: 60, height: 30 },
+      { width: 480, height: 600 },
+    );
+    expect(position.placement).toBe('right');
+    expect(position.left).toBe(68);
+    expect(position.maxWidth).toBe(320);
   });
 });
 
@@ -563,6 +1310,332 @@ describe('WebShellSidebar — session organization', () => {
     promptSpy.mockRestore();
   });
 
+  it('creates a named group with a custom Hex color', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    mockWorkspaceActions.createSessionGroup.mockResolvedValue({
+      id: 'group-hex',
+      name: 'Custom',
+      color: '#12abef',
+      order: 0,
+      createdAt: '2026-07-04T00:00:00.000Z',
+      updatedAt: '2026-07-04T00:00:00.000Z',
+    });
+    mockActive.sessions = [
+      makeSession('550e8400-e29b-41d4-a716-446655440000', {
+        displayName: 'Review plan',
+      }),
+    ];
+
+    renderSidebar(false);
+    await act(async () => Promise.resolve());
+    click(
+      document.body.querySelector<HTMLButtonElement>('[aria-label="Group"]'),
+    );
+    click(
+      Array.from(
+        document.body.querySelectorAll<HTMLButtonElement>('button'),
+      ).find((button) => button.textContent?.includes('Create group')) ?? null,
+    );
+
+    const inputs = document.body.querySelectorAll<HTMLInputElement>('input');
+    const nameInput = Array.from(inputs).find(
+      (input) => input.maxLength === 64,
+    );
+    expect(nameInput).toBeDefined();
+    const setInputValue = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      setInputValue?.call(nameInput, 'Custom');
+      nameInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    const colorSelect = Array.from(
+      document.body.querySelectorAll<HTMLSelectElement>('select'),
+    ).find((select) => select.value === 'red');
+    expect(colorSelect).toBeDefined();
+    const setSelectValue = Object.getOwnPropertyDescriptor(
+      HTMLSelectElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      setSelectValue?.call(colorSelect, '__custom__');
+      colorSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    const hexInput = Array.from(
+      document.body.querySelectorAll<HTMLInputElement>('input'),
+    ).find((input) => input.maxLength === 7);
+    const picker = document.body.querySelector<HTMLInputElement>(
+      'input[type="color"]',
+    );
+    expect(hexInput).toBeDefined();
+    expect(picker).not.toBeNull();
+    const saveButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'save');
+    act(() => {
+      setInputValue?.call(picker, '#12abef');
+      picker!.dispatchEvent(new Event('input', { bubbles: true }));
+      picker!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(hexInput?.value).toBe('#12abef');
+    act(() => {
+      setInputValue?.call(hexInput, '12ab');
+      hexInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    // A bare value is auto-prefixed with '#'; four digits stay invalid.
+    expect(hexInput?.value).toBe('#12ab');
+    expect(saveButton?.disabled).toBe(true);
+    expect(picker?.value).toBe('#12abef');
+    expect(
+      document.body.querySelector('[role="alert"]')?.textContent,
+    ).toContain('six-digit Hex color');
+
+    act(() => {
+      setInputValue?.call(hexInput, '12abef');
+      hexInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    // A bare six-digit value is auto-prefixed and becomes valid.
+    expect(hexInput?.value).toBe('#12abef');
+    expect(saveButton?.disabled).toBe(false);
+
+    act(() => {
+      setInputValue?.call(hexInput, ' #12ABEF ');
+      hexInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    await clickAsync(saveButton ?? null);
+
+    expect(mockWorkspaceActions.createSessionGroup).toHaveBeenCalledWith({
+      name: 'Custom',
+      color: '#12abef',
+    });
+
+    click(
+      document.body.querySelector<HTMLButtonElement>('[aria-label="Group"]'),
+    );
+    click(
+      Array.from(
+        document.body.querySelectorAll<HTMLButtonElement>('button'),
+      ).find((button) => button.textContent?.includes('Create group')) ?? null,
+    );
+    const nextColorSelect = Array.from(
+      document.body.querySelectorAll<HTMLSelectElement>('select'),
+    ).find((select) => select.value === 'red');
+    act(() => {
+      setSelectValue?.call(nextColorSelect, '__custom__');
+      nextColorSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(
+      document.body.querySelector<HTMLInputElement>('input[type="color"]')
+        ?.value,
+    ).toBe('#416ef5');
+  });
+
+  it('edits an existing custom group and switches it back to a preset', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    mockWorkspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [
+        {
+          id: 'group-hex',
+          name: 'Custom',
+          color: '#12abef',
+          order: 0,
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    });
+    mockWorkspaceActions.updateSessionGroup.mockResolvedValue({
+      id: 'group-hex',
+      name: 'Custom',
+      color: 'green',
+      order: 0,
+      createdAt: '2026-07-04T00:00:00.000Z',
+      updatedAt: '2026-07-04T00:01:00.000Z',
+    });
+    mockActive.sessions = [
+      makeSession('550e8400-e29b-41d4-a716-446655440000', {
+        displayName: 'Review plan',
+        groupId: 'group-hex',
+      }),
+    ];
+
+    renderSidebar(false);
+    await act(async () => Promise.resolve());
+    click(
+      document.body.querySelector<HTMLButtonElement>(
+        '[aria-label="Rename group"]',
+      ),
+    );
+
+    const colorSelect = Array.from(
+      document.body.querySelectorAll<HTMLSelectElement>('select'),
+    ).find((select) => select.value === '__custom__');
+    const hexInput = document.body.querySelector<HTMLInputElement>(
+      'input[maxlength="7"]',
+    );
+    expect(colorSelect).toBeDefined();
+    expect(hexInput?.value).toBe('#12abef');
+
+    const setSelectValue = Object.getOwnPropertyDescriptor(
+      HTMLSelectElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      setSelectValue?.call(colorSelect, 'green');
+      colorSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(
+      document.body.querySelector<HTMLInputElement>('input[maxlength="7"]'),
+    ).toBeNull();
+
+    const saveButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'save');
+    await clickAsync(saveButton ?? null);
+
+    expect(mockWorkspaceActions.updateSessionGroup).toHaveBeenCalledWith(
+      'group-hex',
+      { name: 'Custom', color: 'green' },
+    );
+  });
+
+  it('keeps the entered custom Hex color when toggling to a preset and back', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    mockWorkspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [
+        {
+          id: 'group-hex',
+          name: 'Custom',
+          color: '#12abef',
+          order: 0,
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    });
+    mockActive.sessions = [
+      makeSession('550e8400-e29b-41d4-a716-446655440000', {
+        displayName: 'Review plan',
+        groupId: 'group-hex',
+      }),
+    ];
+
+    renderSidebar(false);
+    await act(async () => Promise.resolve());
+    click(
+      document.body.querySelector<HTMLButtonElement>(
+        '[aria-label="Rename group"]',
+      ),
+    );
+
+    const colorSelect = Array.from(
+      document.body.querySelectorAll<HTMLSelectElement>('select'),
+    ).find((select) => select.value === '__custom__');
+    expect(colorSelect).toBeDefined();
+    expect(
+      document.body.querySelector<HTMLInputElement>('input[maxlength="7"]')
+        ?.value,
+    ).toBe('#12abef');
+
+    const setSelectValue = Object.getOwnPropertyDescriptor(
+      HTMLSelectElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      setSelectValue?.call(colorSelect, 'green');
+      colorSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(
+      document.body.querySelector<HTMLInputElement>('input[maxlength="7"]'),
+    ).toBeNull();
+
+    act(() => {
+      setSelectValue?.call(colorSelect, '__custom__');
+      colorSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(
+      document.body.querySelector<HTMLInputElement>('input[maxlength="7"]')
+        ?.value,
+    ).toBe('#12abef');
+  });
+
+  it('stays in Custom mode when a preset name is typed into the Hex field', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    mockWorkspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [
+        {
+          id: 'group-hex',
+          name: 'Custom',
+          color: '#12abef',
+          order: 0,
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    });
+    mockActive.sessions = [
+      makeSession('550e8400-e29b-41d4-a716-446655440000', {
+        displayName: 'Review plan',
+        groupId: 'group-hex',
+      }),
+    ];
+
+    renderSidebar(false);
+    await act(async () => Promise.resolve());
+    click(
+      document.body.querySelector<HTMLButtonElement>(
+        '[aria-label="Rename group"]',
+      ),
+    );
+
+    const hexInput = document.body.querySelector<HTMLInputElement>(
+      'input[maxlength="7"]',
+    );
+    expect(hexInput?.value).toBe('#12abef');
+    const setInputValue = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      setInputValue?.call(hexInput, 'blue');
+      hexInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    // The value is '#'-prefixed instead of matching the 'blue' preset, so
+    // the editor stays in Custom mode and flags the value as invalid.
+    const stillHexInput = document.body.querySelector<HTMLInputElement>(
+      'input[maxlength="7"]',
+    );
+    expect(stillHexInput?.value).toBe('#blue');
+    expect(stillHexInput?.getAttribute('aria-invalid')).toBe('true');
+    expect(
+      document.body.querySelector('[role="alert"]')?.textContent,
+    ).toContain('six-digit Hex color');
+    const saveButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'save');
+    expect(saveButton?.disabled).toBe(true);
+  });
+
   it('uses a themed group menu and assigns the selected group', async () => {
     mockConnection.capabilities = {
       qwenCodeVersion: '1.2.3',
@@ -573,7 +1646,7 @@ describe('WebShellSidebar — session organization', () => {
         {
           id: 'group-1',
           name: 'Backend',
-          color: 'green',
+          color: '#12abef',
           order: 0,
           createdAt: '2026-07-04T00:00:00.000Z',
           updatedAt: '2026-07-04T00:00:00.000Z',
@@ -635,6 +1708,9 @@ describe('WebShellSidebar — session organization', () => {
       menu!.querySelectorAll<HTMLButtonElement>('button'),
     ).find((button) => button.textContent?.includes('Backend'));
     expect(groupOption).not.toBeNull();
+    expect(
+      groupOption?.querySelector<HTMLElement>('span')?.style.backgroundColor,
+    ).toBe('rgb(18, 171, 239)');
     await act(async () => {
       groupOption!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });

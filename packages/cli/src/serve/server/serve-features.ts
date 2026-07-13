@@ -8,6 +8,7 @@ import { loadSettings } from '../../config/settings.js';
 import { SUPPORTED_LANGUAGES } from '../../i18n/index.js';
 import { hasConfiguredBatchVoiceTranscriptionModel } from '../../services/voice-service.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { resolveAcpHttpEnabled } from '../acp-http-enabled.js';
 import { getAdvertisedServeFeatures } from '../capabilities.js';
 import { isBrowserAutomationMcpAvailable } from '../cdp-mcp-command.js';
 import type { ServeOptions } from '../types.js';
@@ -43,9 +44,12 @@ interface CreateServeFeaturesDeps {
   persistSettingAvailable: boolean;
   sessionArtifactsPersistenceAvailable: boolean;
   reloadAvailable: boolean;
-  channelReloadAvailable: boolean;
+  channelReloadAvailable: () => boolean;
+  channelControlAvailable: boolean;
   sessionShellCommandEnabled: boolean;
-  multiWorkspaceSessionsEnabled: boolean;
+  multiWorkspaceSessionsEnabled: () => boolean;
+  persistentWorkspaceRegistrationAvailable: boolean;
+  env?: Readonly<Record<string, string | undefined>>;
 }
 
 export interface ServeFeaturesRuntime {
@@ -64,9 +68,12 @@ export function createServeFeatures(
     sessionArtifactsPersistenceAvailable,
     reloadAvailable,
     channelReloadAvailable,
+    channelControlAvailable,
     sessionShellCommandEnabled,
     multiWorkspaceSessionsEnabled,
+    persistentWorkspaceRegistrationAvailable,
   } = deps;
+  const env = deps.env ?? process.env;
   let cachedVoiceTranscriptionAvailable: boolean | undefined;
   const invalidateServeFeaturesCache = () => {
     cachedVoiceTranscriptionAvailable = undefined;
@@ -97,20 +104,23 @@ export function createServeFeatures(
         sessionArtifactsPersistenceAvailable,
         rateLimit: opts.rateLimit === true,
         reloadAvailable,
-        channelReloadAvailable,
-        multiWorkspaceSessionsEnabled,
+        channelReloadAvailable: channelReloadAvailable(),
+        channelControlAvailable,
+        multiWorkspaceSessionsEnabled: multiWorkspaceSessionsEnabled(),
+        persistentWorkspaceRegistrationAvailable,
+        acpHttpEnabled: resolveAcpHttpEnabled(),
         clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
         cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
         browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(
           opts,
-          process.env,
+          env,
         ),
         voiceTranscriptionAvailable: getCachedVoiceTranscriptionAvailable(),
         // Advertised whenever the `/voice/stream` WS endpoint exists (ACP HTTP
         // on). A configured token no longer suppresses it — the browser carries
         // the bearer token via the WS subprotocol, which the upgrade listener
         // verifies (acp-http/index.ts).
-        voiceWsAvailable: process.env['QWEN_SERVE_ACP_HTTP'] !== '0',
+        voiceWsAvailable: resolveAcpHttpEnabled(env),
       }),
   };
 }

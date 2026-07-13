@@ -64,6 +64,72 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('stores input annotations on locally appended user messages', () => {
+    const store = createDaemonTranscriptStore();
+    const inputAnnotations = [
+      {
+        type: 'reference' as const,
+        start: 6,
+        end: 13,
+        text: '@file/a',
+        reference: {
+          id: 'file:@file/a',
+          kind: 'file',
+          value: 'file/a',
+          serialized: '@file/a',
+        },
+      },
+    ];
+
+    store.appendLocalUserMessage('hello @file/a', undefined, {
+      inputAnnotations,
+    });
+
+    expect(store.getSnapshot().blocks[0]).toMatchObject({
+      kind: 'user',
+      meta: { inputAnnotations },
+    });
+  });
+
+  it('stores input annotations from replayed user message chunks', () => {
+    const inputAnnotations = [
+      {
+        type: 'reference' as const,
+        start: 0,
+        end: 7,
+        text: '@file/a',
+        reference: {
+          id: 'file:@file/a',
+          kind: 'file',
+          value: 'file/a',
+          serialized: '@file/a',
+        },
+      },
+    ];
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 's1',
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text: '@file/a' },
+            _meta: { inputAnnotations },
+          },
+        },
+      }),
+      { now: 2 },
+    );
+
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'user',
+      meta: { inputAnnotations },
+    });
+  });
+
   it('preserves assistant message metadata on transcript blocks', () => {
     const events = normalizeDaemonEvent({
       id: 10,
@@ -3275,7 +3341,7 @@ describe('daemon UI reducer state machine (PR-E)', () => {
         retainedEvents: 2,
         maxBytes: 512,
         truncatedTurns: 2,
-        fullTranscriptAvailable: false,
+        fullTranscriptAvailable: true,
       },
     } as never);
 
@@ -3315,7 +3381,7 @@ describe('daemon UI reducer state machine (PR-E)', () => {
         truncatedEvents: '4',
         retainedEvents: 2,
         maxBytes: 512,
-        fullTranscriptAvailable: false,
+        fullTranscriptAvailable: true,
       },
     } as never);
 
@@ -6651,6 +6717,71 @@ describe('parallel subAgent text interleaving — normalizer', () => {
   });
 });
 
+describe('daemon UI normalizer — artifact events', () => {
+  it('normalizes artifact_changed as a structured session event', () => {
+    const events = normalizeDaemonEvent({
+      type: 'artifact_changed',
+      data: {
+        sessionId: 'session-1',
+        change: {
+          action: 'updated',
+          artifactId: 'artifact-1',
+          artifact: {
+            id: 'artifact-1',
+            title: 'Report',
+            kind: 'html',
+            storage: 'workspace',
+            source: 'tool',
+            status: 'available',
+          },
+        },
+      },
+    } as never);
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'session.artifact.changed',
+        sessionId: 'session-1',
+        change: expect.objectContaining({
+          action: 'updated',
+          artifactId: 'artifact-1',
+        }),
+      }),
+    ]);
+  });
+
+  it('falls back to debug for malformed artifact_changed payloads', () => {
+    const events = normalizeDaemonEvent({
+      type: 'artifact_changed',
+      data: { sessionId: 'session-1' },
+    } as never);
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        text: 'artifact_changed: malformed artifact_changed payload',
+      }),
+    ]);
+  });
+
+  it('falls back to debug when artifact_changed change misses required fields', () => {
+    const events = normalizeDaemonEvent({
+      type: 'artifact_changed',
+      data: {
+        sessionId: 'session-1',
+        change: {},
+      },
+    } as never);
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        text: 'artifact_changed: missing action or artifactId',
+      }),
+    ]);
+  });
+});
+
 describe('parallel subAgent text interleaving fix', () => {
   it('T1: separates text chunks by parentToolCallId into independent blocks', () => {
     let state = createDaemonTranscriptState({ now: 1 });
@@ -7365,5 +7496,67 @@ describe('parallel subAgent text interleaving fix', () => {
     expect(allAssistant[1]!.streaming).toBe(false);
     expect(state.activeAssistantBlockId).toBeUndefined();
     expect(state.activeAssistantBlockByParent).toEqual({});
+  });
+
+  it('normalizes live and snapshot recording degradation as recoverable errors', () => {
+    const live = normalizeDaemonEvent({
+      id: 80,
+      v: 1,
+      type: 'session_recording_degraded',
+      data: { sessionId: 's-1', reason: 'write_failed' },
+    });
+    const snapshot = normalizeDaemonEvent({
+      id: 81,
+      v: 1,
+      type: 'session_snapshot',
+      data: { sessionId: 's-1', recordingDegraded: true },
+    });
+
+    expect(live).toMatchObject([
+      {
+        type: 'error',
+        code: 'session_recording_degraded',
+        recoverable: true,
+      },
+    ]);
+    expect(snapshot).toMatchObject([
+      {
+        type: 'error',
+        code: 'session_recording_degraded',
+        recoverable: true,
+      },
+    ]);
+  });
+
+  it('does not turn a healthy recording snapshot into a warning', () => {
+    const events = normalizeDaemonEvent({
+      id: 82,
+      v: 1,
+      type: 'session_snapshot',
+      data: { sessionId: 's-1', recordingDegraded: false },
+    });
+
+    expect(events).toEqual([]);
+  });
+
+  it('normalizes malformed recording snapshots as debug events', () => {
+    for (const data of [
+      { recordingDegraded: false },
+      { sessionId: 's-1', recordingDegraded: 'yes' },
+    ]) {
+      expect(
+        normalizeDaemonEvent({
+          id: 83,
+          v: 1,
+          type: 'session_snapshot',
+          data,
+        }),
+      ).toMatchObject([
+        {
+          type: 'debug',
+          text: expect.stringContaining('malformed recording snapshot'),
+        },
+      ]);
+    }
   });
 });

@@ -174,7 +174,11 @@ import { DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES } from '../utils/qwenIgnoreParser
 import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaults.js';
 import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
 import { Storage } from './storage.js';
-import { ChatRecordingService } from '../services/chatRecordingService.js';
+import {
+  ChatRecordingService,
+  type ChatRecordingFailureEvent,
+  type ChatRecordingFailureListener,
+} from '../services/chatRecordingService.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import {
   clearRuntimeStatus,
@@ -1072,6 +1076,13 @@ export interface ConfigParameters {
   truncateToolOutputThreshold?: number;
   truncateToolOutputLines?: number;
   toolOutputBatchBudget?: number;
+  /**
+   * Default timeout, in ms, for foreground shell commands. A per-call
+   * timeout on the shell tool takes precedence; when both are unset the
+   * shell tool falls back to its built-in default. See
+   * getShellDefaultTimeoutMs.
+   */
+  shellDefaultTimeoutMs?: number;
   eventEmitter?: EventEmitter;
   output?: OutputSettings;
   inputFormat?: InputFormat;
@@ -1368,6 +1379,31 @@ export interface ConfigInitializeOptions {
    * AND closes the 2N subprocess leak.
    */
   skipMcpDiscovery?: boolean;
+  /**
+   * Skip hook system and hook MessageBus initialization. Read-only replay
+   * helpers use this to avoid loading or subscribing user/workspace hooks.
+   */
+  skipHooks?: boolean;
+  /**
+   * Skip SkillManager creation and file watching. Read-only replay helpers do
+   * not need skill discovery and must not start long-lived watchers.
+   */
+  skipSkillManager?: boolean;
+  /**
+   * Force file checkpointing off for read-only replay helpers, even when the
+   * Config was constructed with checkpointing enabled.
+   */
+  skipFileCheckpointing?: boolean;
+  /**
+   * Warm the tool registry in best-effort (non-strict) mode. Read-only replay
+   * Configs set this so a tool whose constructor requires a subsystem this
+   * Config deliberately skipped (e.g. `SkillTool` needs the `SkillManager` that
+   * `skipSkillManager` omits) is logged and skipped instead of aborting
+   * `initialize()`. Replay only needs optional tool_call metadata, and
+   * `ToolCallEmitter` already falls back to the recorded tool name when a tool
+   * is absent from the registry.
+   */
+  lenientToolWarmup?: boolean;
 }
 
 const DEFAULT_BARE_CORE_TOOLS = [
@@ -1461,14 +1497,17 @@ export interface SubSessionSpawnResult {
   sessionId: string;
   result?: string;
   stopReason?: string;
+  /** Whether the parent lineage was durably persisted to the sub-session's
+   * transcript. `false` = live-only (the parent link disappears from the
+   * persisted session list after a daemon restart). Absent when unknown. */
+  parentSessionPersisted?: boolean;
 }
 
 /**
  * Injected capability that spawns a sub-session. Used by the `create_sub_session`
- * tool and by the ACP session's `isolated` scheduled-task dispatch. Wired ONLY by
- * the daemon/ACP session layer (`Session.ts` → `this.client.extMethod`); absent in
- * interactive TUI / headless (no bridge), which is precisely the tool's
- * daemon-only gate.
+ * tool. Wired ONLY by the daemon/ACP session layer (`Session.ts` →
+ * `this.client.extMethod`); absent in interactive TUI / headless (no bridge),
+ * which is precisely the tool's daemon-only gate.
  */
 export type SubSessionSpawner = (
   req: SubSessionSpawnRequest,
@@ -1648,6 +1687,8 @@ export class Config {
   private fileDiscoveryService: FileDiscoveryService | null = null;
   private sessionService: SessionService | undefined = undefined;
   private chatRecordingService: ChatRecordingService | undefined = undefined;
+  private readonly chatRecordingFailureListeners =
+    new Set<ChatRecordingFailureListener>();
   private fileCheckpointingEnabled: boolean;
   // Object (not primitive) so sub-agents via Object.create(parentConfig)
   // share the same budget instance through prototype lookup.
@@ -1735,6 +1776,7 @@ export class Config {
   private readonly truncateToolOutputThreshold: number;
   private readonly truncateToolOutputLines: number;
   private readonly toolOutputBatchBudget: number;
+  private readonly shellDefaultTimeoutMs: number | undefined;
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
   private readonly jsonFd: number | undefined;
@@ -1997,6 +2039,20 @@ export class Config {
       params.truncateToolOutputLines ?? DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES;
     this.toolOutputBatchBudget =
       params.toolOutputBatchBudget ?? DEFAULT_TOOL_OUTPUT_BATCH_BUDGET;
+    // Guard: nothing validates settings.json on the load path (the schema only
+    // runs on the /config write path), so this is the only real gate. The value
+    // reaches `AbortSignal.timeout()`, which requires an integer in [0, 2^31-1];
+    // a negative or fractional value would throw RangeError or silently degrade
+    // to a 1ms timeout. Unlike the vision bridge, 0 is valid here and disables
+    // the timeout. Reject anything the timer can't take and fall back to the
+    // built-in default.
+    this.shellDefaultTimeoutMs =
+      params.shellDefaultTimeoutMs !== undefined &&
+      Number.isInteger(params.shellDefaultTimeoutMs) &&
+      params.shellDefaultTimeoutMs >= 0 &&
+      params.shellDefaultTimeoutMs <= 2_147_483_647
+        ? params.shellDefaultTimeoutMs
+        : undefined;
     this.channel = params.channel;
     this.jsonFd = params.jsonFd;
     this.jsonFile = params.jsonFile;
@@ -2064,7 +2120,7 @@ export class Config {
     }
     this.geminiClient = new GeminiClient(this);
     this.chatRecordingService = this.chatRecordingEnabled
-      ? new ChatRecordingService(this)
+      ? this.createChatRecordingService()
       : undefined;
     this.extensionManager = new ExtensionManager({
       workspaceDir: this.targetDir,
@@ -2125,6 +2181,10 @@ export class Config {
     }
     this.initialized = true;
     this.debugLogger.info('Config initialization started');
+    if (options?.skipFileCheckpointing === true) {
+      this.fileCheckpointingEnabled = false;
+      this.fileHistoryService = undefined;
+    }
 
     // Initialize centralized FileDiscoveryService
     this.getFileService();
@@ -2145,8 +2205,8 @@ export class Config {
     }
     this.debugLogger.debug('Extension manager initialized');
 
-    // Bare mode skips all hook loading and execution.
-    if (!this.getDisableAllHooks()) {
+    // Bare mode and read-only replay helpers skip all hook loading and execution.
+    if (!options?.skipHooks && !this.getDisableAllHooks()) {
       this.hookSystem = new HookSystem(this);
       await this.hookSystem.initialize();
       this.debugLogger.debug('Hook system initialized');
@@ -2218,6 +2278,22 @@ export class Config {
                   ? createHookOutput('Stop', stopResult.finalOutput)
                   : undefined;
                 stopHookCount = stopResult.allOutputs.length;
+                break;
+              }
+              case 'MessageDisplay': {
+                const messageDisplayResult =
+                  await hookSystem.fireMessageDisplayEvent(
+                    (input['message_id'] as string) || '',
+                    (input['displayed_text'] as string) || '',
+                    (input['is_final'] as boolean) || false,
+                    signal,
+                  );
+                result = messageDisplayResult.finalOutput
+                  ? createHookOutput(
+                      'MessageDisplay',
+                      messageDisplayResult.finalOutput,
+                    )
+                  : undefined;
                 break;
               }
               case 'PreToolUse': {
@@ -2349,13 +2425,18 @@ export class Config {
     }
 
     this.subagentManager = new SubagentManager(this);
-    this.skillManager = new SkillManager(this);
-    if (this.getBareMode() || this.isSafeMode()) {
-      await this.skillManager.refreshCache();
+    if (!options?.skipSkillManager) {
+      this.skillManager = new SkillManager(this);
+      if (this.getBareMode() || this.isSafeMode()) {
+        await this.skillManager.refreshCache();
+      } else {
+        await this.skillManager.startWatching();
+      }
+      this.debugLogger.debug('Skill manager initialized');
     } else {
-      await this.skillManager.startWatching();
+      this.skillManager = null;
+      this.debugLogger.debug('Skill manager skipped');
     }
-    this.debugLogger.debug('Skill manager initialized');
 
     this.memoryPressureConfig = loadMemoryPressureConfig();
     this.memoryPressureMonitor = new MemoryPressureMonitor(
@@ -2421,8 +2502,13 @@ export class Config {
     this.modelsConfig.detectAndCaptureRuntimeModel();
 
     // Warm all lazy tool factories so telemetry can access tool metadata synchronously.
-    // Use strict mode so a broken built-in tool surfaces immediately at startup.
-    await this.toolRegistry.warmAll({ strict: true });
+    // Strict by default so a broken built-in tool surfaces immediately at startup;
+    // read-only replay Configs pass `lenientToolWarmup` so a tool that cannot be
+    // constructed under their deliberately-skipped subsystems (e.g. SkillTool without
+    // a SkillManager) is logged and skipped instead of aborting initialize().
+    await this.toolRegistry.warmAll({
+      strict: options?.lenientToolWarmup !== true,
+    });
 
     // Fire-and-forget MCP discovery. Each server's tools land in the
     // registry as it becomes ready; the cli's AppContainer debounces
@@ -3054,7 +3140,7 @@ export class Config {
     setDebugLogSession(this);
     this.debugLogger = createDebugLogger();
     this.chatRecordingService = this.chatRecordingEnabled
-      ? new ChatRecordingService(this)
+      ? this.createChatRecordingService()
       : undefined;
     // The file-read cache is session-scoped: its `file_unchanged`
     // placeholder relies on the model having seen the prior full read
@@ -3564,6 +3650,8 @@ export class Config {
       this.contentGeneratorConfig.contextWindowSize = config.contextWindowSize;
       this.contentGeneratorConfig.enableCacheControl =
         config.enableCacheControl;
+      this.contentGeneratorConfig.forceGlobalCacheScope =
+        config.forceGlobalCacheScope;
       this.contentGeneratorConfig.splitToolMedia = config.splitToolMedia;
       this.contentGeneratorConfig.toolResultContentFormat =
         config.toolResultContentFormat;
@@ -3586,6 +3674,10 @@ export class Config {
       if ('enableCacheControl' in sources) {
         this.contentGeneratorConfigSources['enableCacheControl'] =
           sources['enableCacheControl'];
+      }
+      if ('forceGlobalCacheScope' in sources) {
+        this.contentGeneratorConfigSources['forceGlobalCacheScope'] =
+          sources['forceGlobalCacheScope'];
       }
       if ('contextWindowSize' in sources) {
         this.contentGeneratorConfigSources['contextWindowSize'] =
@@ -3802,8 +3894,15 @@ export class Config {
     oldDir: string,
     opts?: { skipProcessChdir?: boolean },
   ): Promise<void> {
-    this.chatRecordingService?.finalize();
-    await this.chatRecordingService?.flush();
+    try {
+      this.chatRecordingService?.finalize();
+      await this.chatRecordingService?.flush();
+    } catch (error) {
+      this.debugLogger.debug(
+        'Continuing session artifact migration after chat recording settle failed:',
+        error,
+      );
+    }
     await this.flushRuntimeStatusWrites();
     try {
       this.moveCurrentSessionArtifacts(oldStorage, newStorage);
@@ -3971,6 +4070,7 @@ export class Config {
       // Log but don't throw - cleanup should be best-effort
       this.debugLogger.error('Error during Config shutdown:', error);
     } finally {
+      this.chatRecordingFailureListeners.clear();
       if (isTelemetrySdkInitialized()) {
         await shutdownTelemetry();
       }
@@ -5893,6 +5993,16 @@ export class Config {
     return this.truncateToolOutputLines;
   }
 
+  /**
+   * Configured default timeout (ms) for foreground shell commands, or
+   * `undefined` when unset. The shell tool applies the precedence
+   * per-call timeout > this setting > its built-in default, so returning
+   * `undefined` here preserves the built-in fallback.
+   */
+  getShellDefaultTimeoutMs(): number | undefined {
+    return this.shellDefaultTimeoutMs;
+  }
+
   getToolOutputBatchBudget(): number {
     if (this.toolOutputBatchBudget <= 0) {
       return Number.POSITIVE_INFINITY;
@@ -5921,9 +6031,40 @@ export class Config {
       return undefined;
     }
     if (!this.chatRecordingService) {
-      this.chatRecordingService = new ChatRecordingService(this);
+      this.chatRecordingService = this.createChatRecordingService();
     }
     return this.chatRecordingService;
+  }
+
+  onChatRecordingFailure(listener: ChatRecordingFailureListener): () => void {
+    this.chatRecordingFailureListeners.add(listener);
+    return () => {
+      this.chatRecordingFailureListeners.delete(listener);
+    };
+  }
+
+  private createChatRecordingService(): ChatRecordingService {
+    return new ChatRecordingService(this, (event) => {
+      this.notifyChatRecordingFailure(event);
+    });
+  }
+
+  private notifyChatRecordingFailure(event: ChatRecordingFailureEvent): void {
+    for (const listener of [...this.chatRecordingFailureListeners]) {
+      try {
+        const notification = listener(event);
+        if (notification) {
+          void notification.catch((error) => {
+            this.debugLogger.debug(
+              'Chat recording failure listener rejected:',
+              error,
+            );
+          });
+        }
+      } catch (error) {
+        this.debugLogger.debug('Chat recording failure listener threw:', error);
+      }
+    }
   }
 
   /**

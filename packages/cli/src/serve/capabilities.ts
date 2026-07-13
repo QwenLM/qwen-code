@@ -96,6 +96,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_metadata: { since: 'v1' },
   session_organization: { since: 'v1' },
   session_export: { since: 'v1' },
+  session_transcript: { since: 'v1' },
   // Daemon supports the MCP client guardrail surface: an in-process
   // counter exposed on `GET /workspace/mcp`, a `--mcp-client-budget=N`
   // flag with `--mcp-budget-mode={enforce, warn, off}`, and a
@@ -263,12 +264,16 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `POST /workspace/channel/reload`. The worker is stopped and relaunched;
   // on relaunch it re-reads settings.json (channels / proxy / per-channel
   // model), so channel settings changes apply without a full daemon restart.
-  // Advertised CONDITIONALLY — only when the daemon was started with
-  // `--channel` (i.e. a channel worker exists to reload).
+  // Advertised CONDITIONALLY while the runtime manager has a committed or
+  // recoverable channel worker selection.
   channel_reload: { since: 'v1' },
+  // Runtime GET/PUT/DELETE control for daemon-managed channel selection.
+  // The route exists even when no selection was supplied at daemon boot.
+  channel_control: { since: 'v1' },
   // Multi-workspace sessions closed loop (issue #6378 Phase 2a). Advertised
   // only when one daemon hosts more than one registered workspace runtime.
   multi_workspace_sessions: { since: 'v1' },
+  persistent_workspace_registration: { since: 'v1' },
   // Workspace-qualified core REST routes under `/workspaces/:workspace/...`.
   // Covers core file/status/permissions/trust/lifecycle/MCP/tool, memory,
   // workspace agent CRUD, and persisted session organization surfaces.
@@ -277,6 +282,16 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // persistence. ACP/WebSocket, auth, voice, and extensions stay on their
   // existing primary-workspace routes in this phase.
   workspace_qualified_rest_core: { since: 'v1' },
+  // Workspace-qualified, daemon-local persisted transcript paging. The tag is
+  // unconditional because the route also serves a trusted single-workspace
+  // primary; authorization is evaluated for the selected runtime per request.
+  workspace_persisted_transcript: { since: 'v1' },
+  // Workspace-qualified ACP transport (issue #6378 Phase 4):
+  // `/workspaces/:workspace/acp` mounts a per-runtime ACP dispatcher (HTTP +
+  // WebSocket) for each registered workspace, with per-runtime device-flow and
+  // reverse client-MCP. Legacy `/acp` stays bound to the primary runtime.
+  // Advertised only when the daemon hosts more than one workspace runtime.
+  workspace_qualified_acp: { since: 'v1' },
   // Phase 2 "reverse tool channel" (issue #5626). A connected WS client (e.g.
   // the Chrome extension) can host an MCP server that the daemon's agent
   // calls by carrying `mcp_message` JSON-RPC frames over the daemon WS,
@@ -332,10 +347,10 @@ export interface AdvertiseFeatureToggles {
   reloadAvailable?: boolean;
   /**
    * Whether the daemon exposes the channel worker reload route
-   * (`channel_reload`). Set only when the daemon was started with
-   * `--channel`, so a channel worker exists to reload.
+   * (`channel_reload`). Set while the runtime manager is enabled.
    */
   channelReloadAvailable?: boolean;
+  channelControlAvailable?: boolean;
   /**
    * Whether the daemon will accept client-hosted MCP servers over the WS
    * (`client_mcp_over_ws`, issue #5626).
@@ -353,6 +368,12 @@ export interface AdvertiseFeatureToggles {
   browserAutomationMcpAvailable?: boolean;
   voiceWsAvailable?: boolean;
   multiWorkspaceSessionsEnabled?: boolean;
+  persistentWorkspaceRegistrationAvailable?: boolean;
+  /**
+   * Whether the HTTP ACP surface is enabled (default on; opts out via
+   * QWEN_SERVE_ACP_HTTP=0). Workspace-qualified ACP is only advertised when on.
+   */
+  acpHttpEnabled?: boolean;
 }
 
 /**
@@ -424,9 +445,24 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ['rate_limit', (toggles) => toggles.rateLimit === true],
   ['workspace_reload', (toggles) => toggles.reloadAvailable === true],
   ['channel_reload', (toggles) => toggles.channelReloadAvailable === true],
+  ['channel_control', (toggles) => toggles.channelControlAvailable === true],
   [
     'multi_workspace_sessions',
     (toggles) => toggles.multiWorkspaceSessionsEnabled === true,
+  ],
+  [
+    'persistent_workspace_registration',
+    (toggles) => toggles.persistentWorkspaceRegistrationAvailable === true,
+  ],
+  [
+    'workspace_qualified_acp',
+    // The plural routes are pre-mounted for workspaces registered after app
+    // creation, but the capability becomes meaningful only once a secondary
+    // runtime exists. Until then the qualified primary route is only an alias
+    // for the always-available legacy `/acp` surface.
+    (toggles) =>
+      toggles.acpHttpEnabled === true &&
+      toggles.multiWorkspaceSessionsEnabled === true,
   ],
   ['client_mcp_over_ws', (toggles) => toggles.clientMcpOverWsEnabled === true],
   ['cdp_tunnel_over_ws', (toggles) => toggles.cdpTunnelOverWsEnabled === true],

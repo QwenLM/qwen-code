@@ -23,6 +23,8 @@ export default {
   'Shell mode': 'Mode shell',
   'YOLO mode': 'Mode YOLO',
   'Auto mode': 'Mode auto',
+  'auto_mode.entry_notice':
+    "Mode auto activat.\n   Un classificador LLM avalua cada crida d'eina — les accions segures s'aproven automàticament,\n   les arriscades es bloquegen. Sortiu: Shift+Tab o /approval-mode default.",
   'plan mode': 'mode de planificació',
   'auto-accept edits': 'acceptació automàtica de canvis',
   'Accepting edits': 'Acceptant canvis',
@@ -2168,4 +2170,8 @@ export default {
     'Failed to refresh extension content. Run /reload-plugins to apply updates.',
   'Extension reload did not complete. Run /reload-plugins to try again.':
     'Extension reload did not complete. Run /reload-plugins to try again.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.':
+    "L'enregistrament de la sessió s'ha aturat després d'un error d'escriptura. Els missatges nous de la sessió afectada no es desaran. Comproveu l'espai de disc i els permisos i, després, inicieu una sessió nova per reprendre l'enregistrament. Consulteu el registre de depuració per obtenir-ne més informació.",
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
+    "L'enregistrament de la sessió s'ha aturat després d'un error d'escriptura. Els missatges nous de la sessió afectada no es desaran. Comproveu l'espai de disc i els permisos i, després, executeu `/clear` per iniciar una sessió nova que es pugui enregistrar. Consulteu el registre de depuració per obtenir-ne més informació.",
 };

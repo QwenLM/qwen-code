@@ -23,9 +23,11 @@ import {
   type WebShellComposerTag,
   type WebShellComposerTagIconMap,
   type WebShellAtProvider,
+  type WebShellBuiltinAtProvidersConfig,
 } from '../customization';
 import {
   useComposerCore,
+  type ComposerSubmitMetadata,
   type EditorHandle,
   type SlashMenuState,
   getComposerTagDisplay,
@@ -34,26 +36,41 @@ import {
 } from '../hooks/useComposerCore';
 import { AtMentionPanel } from './AtMentionPanel';
 import { cssUrlVar } from '../utils/cssUrlVar';
-import { getComposerTagIconUrl } from './composerTagIcons';
+import { getComposerTagIconUrl } from '../utils/composerTag';
+import { isSafeImageSrc } from './messages/Markdown';
 import { ModeIcon } from './ModeIcon';
 import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { VoiceButton } from '../voice/VoiceButton';
+import { GitBranchIndicator } from './GitBranchIndicator';
+import { WorkspaceIndicator } from './WorkspaceIndicator';
+import {
+  filterToolbarDropdownItems,
+  getToolbarDropdownGeometry,
+  getToolbarLabelVisibility,
+  resolveToolbarModelLabel,
+  type ToolbarDropdownGeometry,
+  type ToolbarDropdownItem,
+} from './toolbarDropdown';
 import styles from './ChatEditor.module.css';
 
 export type ComposerToolbarAction =
   | 'approvalMode'
+  | 'gitBranch'
   | 'model'
   | 'commands'
   | 'files'
   | 'widthMode'
-  | 'voice';
+  | 'voice'
+  | 'workspace';
 
 const ACTIVE_TOOLBAR_ACTIONS = [
   'approvalMode',
+  'gitBranch',
   'model',
   'widthMode',
   'voice',
+  'workspace',
 ] as const satisfies readonly ComposerToolbarAction[];
 const ACTIVE_TOOLBAR_ACTION_SET = new Set<ComposerToolbarAction>(
   ACTIVE_TOOLBAR_ACTIONS,
@@ -64,6 +81,7 @@ interface ChatEditorProps {
     text: string,
     images?: import('../adapters/promptTypes').PromptImage[],
     commitAccepted?: import('../hooks/useComposerCore').ComposerSubmitCommit,
+    metadata?: ComposerSubmitMetadata,
   ) => boolean | void;
   onCycleMode?: () => void;
   onToggleShortcuts?: () => void;
@@ -82,6 +100,11 @@ interface ChatEditorProps {
   onClearQueuedMessages?: () => boolean;
   currentMode?: string;
   currentModel?: string;
+  gitBranch?: string;
+  /** Workspace name shown in the pane composer's `workspace` toolbar chip. */
+  workspaceName?: string;
+  /** Full workspace cwd, used as the chip's tooltip. */
+  workspaceTitle?: string;
   chatWidthMode?: '1000' | 'wide';
   showChatWidthToggle?: boolean;
   chatWidthToggleMin?: number;
@@ -98,6 +121,7 @@ interface ChatEditorProps {
   sessionName?: string;
   composerInput?: WebShellComposerInput;
   composerInputVersion?: number;
+  builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
   atProviders?: readonly WebShellAtProvider[];
   composerTagIcons?: WebShellComposerTagIconMap;
 }
@@ -364,9 +388,7 @@ function ModelIcon() {
   );
 }
 
-interface DropdownItem {
-  id: string;
-  label: string;
+interface DropdownItem extends ToolbarDropdownItem {
   description?: string;
   icon?: ReactNode;
 }
@@ -493,8 +515,12 @@ function ToolbarDropdown({
   onClose,
   onSelect,
   anchorRef,
+  boundaryRef,
   showCheck = false,
   maxHeight,
+  searchable = false,
+  searchLabel,
+  noResultsLabel,
 }: {
   open: boolean;
   items: DropdownItem[];
@@ -502,10 +528,72 @@ function ToolbarDropdown({
   onClose: () => void;
   onSelect: (id: string) => void;
   anchorRef: React.RefObject<HTMLButtonElement | null>;
+  boundaryRef: React.RefObject<HTMLElement | null>;
   showCheck?: boolean;
   maxHeight?: number;
+  searchable?: boolean;
+  searchLabel?: string;
+  noResultsLabel?: (query: string) => string;
 }) {
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [geometry, setGeometry] = useState<ToolbarDropdownGeometry | null>(
+    null,
+  );
+  const hasRichItems = items.some((item) => item.description || item.icon);
+  const preferredWidth = hasRichItems ? 360 : showCheck ? 300 : 160;
+  const visibleItems = searchable
+    ? filterToolbarDropdownItems(items, searchQuery)
+    : items;
+
+  useEffect(() => {
+    if (!open) {
+      setSearchQuery('');
+      setGeometry(null);
+      return;
+    }
+    if (!searchable) return;
+    const animationFrame = window.requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+    });
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, [open, searchable]);
+
+  useLayoutEffect(() => {
+    if (!open) return undefined;
+    const anchor = anchorRef.current;
+    if (!anchor) return undefined;
+    const boundary =
+      anchor.closest<HTMLElement>('[data-web-shell-root]') ??
+      boundaryRef.current;
+    if (!boundary) return undefined;
+
+    const update = () => {
+      setGeometry(
+        getToolbarDropdownGeometry({
+          anchor: anchor.getBoundingClientRect(),
+          boundary: boundary.getBoundingClientRect(),
+          viewportWidth: window.innerWidth,
+          viewportHeight: window.innerHeight,
+          preferredWidth,
+          maxHeight,
+        }),
+      );
+    };
+
+    update();
+    const resizeObserver = new ResizeObserver(update);
+    resizeObserver.observe(anchor);
+    resizeObserver.observe(boundary);
+    window.addEventListener('resize', update);
+    window.addEventListener('scroll', update, true);
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener('resize', update);
+      window.removeEventListener('scroll', update, true);
+    };
+  }, [anchorRef, boundaryRef, maxHeight, open, preferredWidth]);
 
   useEffect(() => {
     if (!open) return;
@@ -536,16 +624,26 @@ function ToolbarDropdown({
         e.preventDefault();
         e.stopPropagation();
         onClose();
+        window.requestAnimationFrame(() => anchorRef.current?.focus());
       }
     };
     window.addEventListener('keydown', onEscape);
     return () => window.removeEventListener('keydown', onEscape);
-  }, [open, onClose]);
+  }, [open, onClose, anchorRef]);
 
   if (!open) return null;
 
-  const hasRichItems = items.some((item) => item.description || item.icon);
   const hasCheckItems = hasRichItems || showCheck;
+  const dropdownStyle = geometry
+    ? {
+        left: geometry.left,
+        width: geometry.width,
+        maxHeight: geometry.maxHeight,
+        ...(geometry.placement === 'above'
+          ? { bottom: geometry.bottom }
+          : { top: geometry.top }),
+      }
+    : undefined;
 
   return (
     <div
@@ -557,42 +655,63 @@ function ToolbarDropdown({
             ? styles.dropdownCheck
             : ''
       }`}
-      style={maxHeight ? { maxHeight, overflowY: 'auto' } : undefined}
+      data-placement={geometry?.placement}
+      style={dropdownStyle}
+      onClick={(event) => event.stopPropagation()}
     >
-      {items.map((item) => (
-        <button
-          key={item.id}
-          type="button"
-          className={`${styles.dropdownItem} ${
-            item.id === activeId ? styles.dropdownItemActive : ''
-          }`}
-          onMouseDown={(e) => {
-            e.preventDefault();
-            onSelect(item.id);
-          }}
-        >
-          {hasCheckItems ? (
-            <>
-              {hasRichItems && (
-                <span className={styles.dropdownItemIcon}>{item.icon}</span>
-              )}
-              <span className={styles.dropdownItemContent}>
-                <span className={styles.dropdownItemLabel}>{item.label}</span>
-                {item.description && (
-                  <span className={styles.dropdownItemDesc}>
-                    {item.description}
-                  </span>
+      {searchable && (
+        <input
+          ref={searchInputRef}
+          type="search"
+          className={styles.dropdownSearch}
+          value={searchQuery}
+          aria-label={searchLabel}
+          placeholder={searchLabel}
+          autoComplete="off"
+          onChange={(event) => setSearchQuery(event.target.value)}
+        />
+      )}
+      <div className={styles.dropdownList}>
+        {visibleItems.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            className={`${styles.dropdownItem} ${
+              item.id === activeId ? styles.dropdownItemActive : ''
+            }`}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              onSelect(item.id);
+            }}
+          >
+            {hasCheckItems ? (
+              <>
+                {hasRichItems && (
+                  <span className={styles.dropdownItemIcon}>{item.icon}</span>
                 )}
-              </span>
-              <span className={styles.dropdownItemCheck}>
-                {item.id === activeId ? <CheckIcon /> : null}
-              </span>
-            </>
-          ) : (
-            item.label
-          )}
-        </button>
-      ))}
+                <span className={styles.dropdownItemContent}>
+                  <span className={styles.dropdownItemLabel}>{item.label}</span>
+                  {item.description && (
+                    <span className={styles.dropdownItemDesc}>
+                      {item.description}
+                    </span>
+                  )}
+                </span>
+                <span className={styles.dropdownItemCheck}>
+                  {item.id === activeId ? <CheckIcon /> : null}
+                </span>
+              </>
+            ) : (
+              item.label
+            )}
+          </button>
+        ))}
+        {visibleItems.length === 0 && noResultsLabel && (
+          <div className={styles.dropdownEmpty} role="status">
+            {noResultsLabel(searchQuery)}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -908,6 +1027,9 @@ export const ChatEditor = memo(
       onPopQueuedMessages,
       currentMode = 'default',
       currentModel = '',
+      gitBranch,
+      workspaceName,
+      workspaceTitle,
       chatWidthMode = '1000',
       showChatWidthToggle = true,
       chatWidthToggleMin,
@@ -924,9 +1046,19 @@ export const ChatEditor = memo(
       sessionName,
       composerInput,
       composerInputVersion,
+      builtinAtProviders,
       atProviders,
       composerTagIcons,
     } = props;
+
+    const {
+      renderComposerToolbarStart: ToolbarStart,
+      renderComposerToolbarEnd: ToolbarEnd,
+      renderComposerToolbarRight: ToolbarRight,
+      renderComposerTag,
+      renderComposerTagTooltip,
+      onComposerTagClick,
+    } = useWebShellCustomization();
 
     const core = useComposerCore({
       onSubmit,
@@ -948,17 +1080,16 @@ export const ChatEditor = memo(
       sessionName,
       composerInput,
       composerInputVersion,
+      builtinAtProviders,
       atProviders,
       composerTagIcons,
+      renderComposerTag,
+      renderComposerTagTooltip,
+      onComposerTagClick,
       editorTheme: CHAT_EDITOR_THEME,
     });
 
     const { t } = useI18n();
-    const {
-      renderComposerToolbarStart: ToolbarStart,
-      renderComposerToolbarEnd: ToolbarEnd,
-      renderComposerToolbarRight: ToolbarRight,
-    } = useWebShellCustomization();
 
     useImperativeHandle(ref, () => core.handle, [core.handle]);
 
@@ -969,9 +1100,21 @@ export const ChatEditor = memo(
     const containerRef = useRef<HTMLDivElement>(null);
     const slashPanelRef = useRef<HTMLDivElement>(null);
     const atPanelRef = useRef<HTMLDivElement>(null);
+    const toolbarRef = useRef<HTMLDivElement>(null);
+    const toolbarLeadingRef = useRef<HTMLDivElement>(null);
+    const toolbarRightRef = useRef<HTMLDivElement>(null);
+    const modeCollapsedMeasureRef = useRef<HTMLSpanElement>(null);
+    const modeExpandedMeasureRef = useRef<HTMLSpanElement>(null);
+    const modelCollapsedMeasureRef = useRef<HTMLSpanElement>(null);
+    const modelExpandedMeasureRef = useRef<HTMLSpanElement>(null);
     const modeBtnRef = useRef<HTMLButtonElement>(null);
     const modelBtnRef = useRef<HTMLButtonElement>(null);
     const [widthToggleFits, setWidthToggleFits] = useState(false);
+    const [toolbarLabelVisibility, setToolbarLabelVisibility] = useState({
+      showModelLabel: false,
+      showModeLabel: false,
+    });
+    const [lastConfirmedModelLabel, setLastConfirmedModelLabel] = useState('');
     const slashMenu = core.slashMenu;
     const closeSlashMenu = core.closeSlashMenu;
     const atMenu = core.atMenu;
@@ -1065,6 +1208,8 @@ export const ChatEditor = memo(
       if (!visibleActionSet) return true;
       return visibleActionSet.has(action);
     };
+    const showModeAction = showToolbarAction('approvalMode');
+    const showModelAction = showToolbarAction('model');
     const commandNames = useMemo(
       () =>
         new Set(commands.map((command) => command.name.replace(/^\/+/, ''))),
@@ -1191,6 +1336,7 @@ export const ChatEditor = memo(
         availableModels.map((m) => ({
           id: m.id,
           label: getModelDisplayName(m.label || m.id),
+          searchText: `${m.label ?? ''}\n${m.id}`,
         })),
       [availableModels],
     );
@@ -1274,19 +1420,30 @@ export const ChatEditor = memo(
     } = core.searchState;
 
     const renderComposerTagContent = (tag: WebShellComposerTag) => {
+      const custom = renderComposerTag?.({
+        tag,
+        placement: 'composer',
+        readonly: false,
+      });
+      if (custom !== undefined && custom !== null) {
+        return custom;
+      }
       const rawTagLabel = getComposerTagLabel(tag);
       const tagValue = getComposerTagValue(tag);
       const tagLabel = tag.kind ? '' : rawTagLabel;
-      const iconUrl = getComposerTagIconUrl(tag.kind, composerTagIcons);
+      const iconUrl =
+        tag.icon ?? getComposerTagIconUrl(tag.kind, composerTagIcons);
+      const safeIconUrl =
+        iconUrl && isSafeImageSrc(iconUrl) ? iconUrl : undefined;
       if (!tagLabel && !tagValue) {
         return <span className={styles.tagLabel}>{tag.id}</span>;
       }
       return (
         <>
-          {iconUrl && (
+          {safeIconUrl && (
             <span
               className={styles.tagIcon}
-              style={cssUrlVar('--composer-tag-icon-url', iconUrl)}
+              style={cssUrlVar('--composer-tag-icon-url', safeIconUrl)}
               aria-hidden="true"
             />
           )}
@@ -1299,12 +1456,114 @@ export const ChatEditor = memo(
     // Mode display label
     const modeLabel = getModeLabel(currentMode, t);
 
-    // Model display label
-    const modelLabel = getModelDisplayName(currentModel);
+    const currentModelLabel = currentModel
+      ? getModelDisplayName(currentModel)
+      : '';
+    const { modelLabel, modelLabelReady } = resolveToolbarModelLabel({
+      currentModelLabel,
+      lastConfirmedModelLabel,
+    });
+
+    useLayoutEffect(() => {
+      if (currentModelLabel && currentModelLabel !== lastConfirmedModelLabel) {
+        setLastConfirmedModelLabel(currentModelLabel);
+      }
+    }, [currentModelLabel, lastConfirmedModelLabel]);
+
+    const { showModelLabel, showModeLabel } = toolbarLabelVisibility;
     const showCancelButton = isRunning && !core.hasContent;
 
+    useLayoutEffect(() => {
+      const toolbar = toolbarRef.current;
+      const toolbarLeading = toolbarLeadingRef.current;
+      const toolbarRight = toolbarRightRef.current;
+      const modeCollapsed = modeCollapsedMeasureRef.current;
+      const modeExpanded = modeExpandedMeasureRef.current;
+      const modelCollapsed = modelCollapsedMeasureRef.current;
+      const modelExpanded = modelExpandedMeasureRef.current;
+      if (
+        !toolbar ||
+        !toolbarLeading ||
+        !toolbarRight ||
+        !modeCollapsed ||
+        !modeExpanded ||
+        !modelCollapsed ||
+        !modelExpanded
+      ) {
+        return undefined;
+      }
+
+      const update = () => {
+        const modeLabelWidth = Math.max(
+          0,
+          modeExpanded.getBoundingClientRect().width -
+            modeCollapsed.getBoundingClientRect().width,
+        );
+        const modelLabelWidth = Math.max(
+          0,
+          modelExpanded.getBoundingClientRect().width -
+            modelCollapsed.getBoundingClientRect().width,
+        );
+        const currentLeadingWidth =
+          toolbarLeading.getBoundingClientRect().width;
+        const baseLeadingWidth =
+          currentLeadingWidth -
+          (showModelLabel ? modelLabelWidth : 0) -
+          (showModeLabel ? modeLabelWidth : 0);
+        const gap = Number.parseFloat(getComputedStyle(toolbar).columnGap) || 0;
+        const availableWidth = Math.max(
+          0,
+          toolbar.getBoundingClientRect().width -
+            toolbarRight.getBoundingClientRect().width -
+            baseLeadingWidth -
+            gap,
+        );
+        const next = getToolbarLabelVisibility({
+          availableWidth,
+          modelLabelWidth,
+          modeLabelWidth,
+          modelLabelReady,
+          modelActionVisible: showModelAction,
+          modeActionVisible: showModeAction,
+        });
+        setToolbarLabelVisibility((current) =>
+          current.showModelLabel === next.showModelLabel &&
+          current.showModeLabel === next.showModeLabel
+            ? current
+            : next,
+        );
+      };
+
+      update();
+      const resizeObserver = new ResizeObserver(update);
+      resizeObserver.observe(toolbar);
+      resizeObserver.observe(toolbarLeading);
+      resizeObserver.observe(toolbarRight);
+      resizeObserver.observe(modeCollapsed);
+      resizeObserver.observe(modeExpanded);
+      resizeObserver.observe(modelCollapsed);
+      resizeObserver.observe(modelExpanded);
+      return () => resizeObserver.disconnect();
+    }, [
+      modelLabel,
+      modelLabelReady,
+      modeLabel,
+      showModelAction,
+      showModeAction,
+      showModelLabel,
+      showModeLabel,
+    ]);
+
     return (
-      <div className={styles.editorShell} data-composer data-web-shell-composer>
+      <div
+        className={`${styles.editorShell} ${
+          modeDropdownOpen || modelDropdownOpen
+            ? styles.editorShellDropdownOpen
+            : ''
+        }`}
+        data-composer
+        data-web-shell-composer
+      >
         <div
           ref={containerRef}
           className={styles.container}
@@ -1377,37 +1636,79 @@ export const ChatEditor = memo(
           <div className={styles.content}>
             {core.composerTags.length > 0 && (
               <div className={styles.tags}>
-                {core.composerTags.map((tag) => (
-                  <span key={tag.id} className={styles.tag}>
-                    {renderComposerTagContent(tag)}
-                    {tag.removable !== false && (
-                      <button
-                        type="button"
-                        className={styles.tagRemove}
-                        aria-label={`Remove ${getComposerTagDisplay(tag)}`}
-                        onMouseDown={(event) => event.preventDefault()}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          core.removeTopTag(tag.id);
-                          core.viewRef.current?.focus();
-                        }}
-                        onKeyDown={(event) => {
-                          if (
-                            event.key !== 'Backspace' &&
-                            event.key !== 'Delete'
-                          ) {
-                            return;
-                          }
-                          event.preventDefault();
-                          core.removeTopTag(tag.id);
-                          core.viewRef.current?.focus();
-                        }}
-                      >
-                        ×
-                      </button>
-                    )}
-                  </span>
-                ))}
+                {core.composerTags.map((tag) => {
+                  const tagInfo = {
+                    tag,
+                    placement: 'composer' as const,
+                    readonly: false,
+                  };
+                  const tooltip = renderComposerTagTooltip?.(tagInfo);
+                  return (
+                    <span
+                      key={tag.id}
+                      className={styles.tag}
+                      role={onComposerTagClick ? 'button' : undefined}
+                      tabIndex={onComposerTagClick ? 0 : undefined}
+                      onClick={(event) => {
+                        if (!onComposerTagClick) return;
+                        event.stopPropagation();
+                        onComposerTagClick({
+                          ...tagInfo,
+                          anchorRect:
+                            event.currentTarget.getBoundingClientRect(),
+                        });
+                      }}
+                      onKeyDown={(event) => {
+                        if (!onComposerTagClick) return;
+                        if (event.key !== 'Enter' && event.key !== ' ') return;
+                        event.preventDefault();
+                        onComposerTagClick({
+                          ...tagInfo,
+                          anchorRect:
+                            event.currentTarget.getBoundingClientRect(),
+                        });
+                      }}
+                    >
+                      {renderComposerTagContent(tag)}
+                      {tag.removable !== false && (
+                        <button
+                          type="button"
+                          className={styles.tagRemove}
+                          aria-label={`Remove ${getComposerTagDisplay(tag)}`}
+                          onMouseDown={(event) => event.preventDefault()}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            core.removeTopTag(tag.id);
+                            core.viewRef.current?.focus();
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.stopPropagation();
+                              return;
+                            }
+                            if (
+                              event.key !== 'Backspace' &&
+                              event.key !== 'Delete'
+                            ) {
+                              return;
+                            }
+                            event.preventDefault();
+                            event.stopPropagation();
+                            core.removeTopTag(tag.id);
+                            core.viewRef.current?.focus();
+                          }}
+                        >
+                          ×
+                        </button>
+                      )}
+                      {tooltip !== undefined && tooltip !== null && (
+                        <span className={styles.tagTooltip} role="tooltip">
+                          {tooltip}
+                        </span>
+                      )}
+                    </span>
+                  );
+                })}
               </div>
             )}
             {core.pastedImages.length > 0 && (
@@ -1455,6 +1756,7 @@ export const ChatEditor = memo(
                   return Boolean(result);
                 }}
                 onSearch={core.updateAtSearch}
+                onSelectTab={core.selectAtTab}
               />
             )}
             <div className={styles.editorArea}>
@@ -1465,8 +1767,8 @@ export const ChatEditor = memo(
               )}
               <div ref={core.containerRef} data-web-shell-composer-editor />
             </div>
-            <div className={styles.toolbar}>
-              <div className={styles.toolbarLeading}>
+            <div ref={toolbarRef} className={styles.toolbar}>
+              <div ref={toolbarLeadingRef} className={styles.toolbarLeading}>
                 {ToolbarStart && (
                   <div className={styles.toolbarStart}>
                     <ToolbarStart
@@ -1479,7 +1781,22 @@ export const ChatEditor = memo(
                   </div>
                 )}
                 <div className={styles.toolbarLeft}>
-                  {showToolbarAction('approvalMode') && (
+                  {workspaceName && showToolbarAction('workspace') && (
+                    <WorkspaceIndicator
+                      name={workspaceName}
+                      title={workspaceTitle ?? workspaceName}
+                      ariaLabel={t('workspace.paneLabel', {
+                        name: workspaceName,
+                      })}
+                    />
+                  )}
+                  {gitBranch && showToolbarAction('gitBranch') && (
+                    <GitBranchIndicator
+                      branch={gitBranch}
+                      ariaLabel={t('git.currentBranch', { branch: gitBranch })}
+                    />
+                  )}
+                  {showModeAction && (
                     <div className={styles.dropdownWrapper}>
                       <ToolbarDropdown
                         open={modeDropdownOpen}
@@ -1488,10 +1805,11 @@ export const ChatEditor = memo(
                         onClose={() => setModeDropdownOpen(false)}
                         onSelect={handleModeSelect}
                         anchorRef={modeBtnRef}
+                        boundaryRef={containerRef}
                       />
                       <button
                         ref={modeBtnRef}
-                        className={styles.toolBtn}
+                        className={`${styles.toolBtn} ${styles.modeToolBtn}`}
                         data-web-shell-mode-button
                         onClick={(e) => {
                           e.stopPropagation();
@@ -1506,14 +1824,18 @@ export const ChatEditor = memo(
                         <span className={styles.toolBtnModeIcon}>
                           <ModeIcon mode={currentMode} />
                         </span>
-                        <span className={styles.toolBtnText}>{modeLabel}</span>
+                        {showModeLabel && (
+                          <span className={styles.toolBtnText}>
+                            {modeLabel}
+                          </span>
+                        )}
                         <span className={styles.toolBtnArrow}>
                           <ChevronDownIcon />
                         </span>
                       </button>
                     </div>
                   )}
-                  {showToolbarAction('model') && (
+                  {showModelAction && (
                     <div className={styles.dropdownWrapper}>
                       <ToolbarDropdown
                         open={modelDropdownOpen}
@@ -1522,12 +1844,18 @@ export const ChatEditor = memo(
                         onClose={() => setModelDropdownOpen(false)}
                         onSelect={handleModelSelect}
                         anchorRef={modelBtnRef}
+                        boundaryRef={containerRef}
                         showCheck
                         maxHeight={300}
+                        searchable
+                        searchLabel={t('common.search')}
+                        noResultsLabel={(query) =>
+                          t('model.noMatch', { query })
+                        }
                       />
                       <button
                         ref={modelBtnRef}
-                        className={styles.toolBtn}
+                        className={`${styles.toolBtn} ${styles.modelToolBtn}`}
                         data-web-shell-model-button
                         onClick={(e) => {
                           e.stopPropagation();
@@ -1542,7 +1870,11 @@ export const ChatEditor = memo(
                         <span className={styles.toolBtnModelIcon}>
                           <ModelIcon />
                         </span>
-                        <span className={styles.toolBtnText}>{modelLabel}</span>
+                        {showModelLabel && (
+                          <span className={styles.toolBtnText}>
+                            {modelLabel}
+                          </span>
+                        )}
                         <span className={styles.toolBtnArrow}>
                           <ChevronDownIcon />
                         </span>
@@ -1562,7 +1894,7 @@ export const ChatEditor = memo(
                   )}
                 </div>
               </div>
-              <div className={styles.toolbarRight}>
+              <div ref={toolbarRightRef} className={styles.toolbarRight}>
                 {showQuickActions && quickActions.length > 0 && (
                   <button
                     className={`${styles.toolBtn} ${styles.quickActionsBtn}`}
@@ -1703,6 +2035,54 @@ export const ChatEditor = memo(
                   {isRunning && cancelArmed ? t('stream.cancelArmed') : ''}
                 </span>
               </div>
+            </div>
+            <div className={styles.toolbarMeasurements} aria-hidden="true">
+              <span
+                ref={modeCollapsedMeasureRef}
+                className={`${styles.toolBtn} ${styles.modeToolBtn}`}
+              >
+                <span className={styles.toolBtnModeIcon}>
+                  <ModeIcon mode={currentMode} />
+                </span>
+                <span className={styles.toolBtnArrow}>
+                  <ChevronDownIcon />
+                </span>
+              </span>
+              <span
+                ref={modeExpandedMeasureRef}
+                className={`${styles.toolBtn} ${styles.modeToolBtn}`}
+              >
+                <span className={styles.toolBtnModeIcon}>
+                  <ModeIcon mode={currentMode} />
+                </span>
+                <span className={styles.toolBtnText}>{modeLabel}</span>
+                <span className={styles.toolBtnArrow}>
+                  <ChevronDownIcon />
+                </span>
+              </span>
+              <span
+                ref={modelCollapsedMeasureRef}
+                className={`${styles.toolBtn} ${styles.modelToolBtn}`}
+              >
+                <span className={styles.toolBtnModelIcon}>
+                  <ModelIcon />
+                </span>
+                <span className={styles.toolBtnArrow}>
+                  <ChevronDownIcon />
+                </span>
+              </span>
+              <span
+                ref={modelExpandedMeasureRef}
+                className={`${styles.toolBtn} ${styles.modelToolBtn}`}
+              >
+                <span className={styles.toolBtnModelIcon}>
+                  <ModelIcon />
+                </span>
+                <span className={styles.toolBtnText}>{modelLabel}</span>
+                <span className={styles.toolBtnArrow}>
+                  <ChevronDownIcon />
+                </span>
+              </span>
             </div>
           </div>
         </div>

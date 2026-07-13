@@ -21,6 +21,8 @@ export default {
 
   'User level': '使用者層級',
   'Project level': '專案層級',
+  'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.':
+    '剪貼簿圖片貼上功能無法使用，因為原生剪貼簿模組載入失敗。請重新安裝 Qwen Code，或改用 npm 安裝方式。',
 
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)
@@ -219,7 +221,9 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Shell 模式',
   'YOLO mode': 'YOLO 模式',
-  'Auto mode': 'Auto 模式',
+  'Auto mode': '自動模式',
+  'auto_mode.entry_notice':
+    '已啟用自動模式。\n   LLM 分類器會評估每次工具呼叫 — 安全操作將自動批准，\n   有風險的操作將被阻止。退出：Shift+Tab 或 /approval-mode default。',
   'plan mode': '規劃模式',
   'auto-accept edits': '自動接受編輯',
   'Accepting edits': '接受編輯',
@@ -2253,4 +2257,21 @@ export default {
     '擴充內容重新整理失敗。執行 /reload-plugins 來套用更新。',
   'Extension reload did not complete. Run /reload-plugins to try again.':
     '擴充重新載入未完成。執行 /reload-plugins 重試。',
+  'Precondition check': '前置條件檢查',
+  'Precondition not met — this scheduled run was skipped.':
+    '前置條件不滿足 —— 已略過本次定時執行。',
+  'The precondition check was cancelled — this scheduled run was skipped.':
+    '前置條件檢查已取消 —— 已略過本次定時執行。',
+  'The precondition check was interrupted — this scheduled run was skipped.':
+    '前置條件檢查被中斷 —— 已略過本次定時執行。',
+  'The precondition check failed — this scheduled run was skipped.':
+    '前置條件檢查失敗 —— 已略過本次定時執行。',
+  'Running this scheduled task in a new session: {{link}}':
+    '正在新會話中執行該定時任務：{{link}}',
+  'This scheduled run could not be started: {{error}}':
+    '本次定時執行無法啟動：{{error}}',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.':
+    '工作階段錄製因寫入失敗而停止。受影響工作階段中的新訊息將不會被儲存。請檢查磁碟空間和權限，然後建立新的工作階段以恢復錄製。詳細資訊請查看偵錯日誌。',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
+    '工作階段錄製因寫入失敗而停止。受影響工作階段中的新訊息將不會被儲存。請檢查磁碟空間和權限，然後執行 `/clear` 建立新的可錄製工作階段。詳細資訊請查看偵錯日誌。',
 };

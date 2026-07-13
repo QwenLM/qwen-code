@@ -2660,12 +2660,21 @@ describe('PR 21 — auth device-flow events', () => {
           retainedEvents: 2,
           maxBytes: 512,
           truncatedTurns: 2,
-          fullTranscriptAvailable: false,
+          fullTranscriptAvailable: true,
         },
       } satisfies DaemonEvent;
 
       const known = asKnownDaemonEvent(event);
       expect(known?.type).toBe('history_truncated');
+      expect(
+        asKnownDaemonEvent({
+          ...event,
+          data: {
+            ...event.data,
+            fullTranscriptAvailable: false,
+          },
+        })?.type,
+      ).toBe('history_truncated');
 
       const state = reduceDaemonSessionEvent(
         createDaemonSessionViewState(),
@@ -2685,7 +2694,7 @@ describe('PR 21 — auth device-flow events', () => {
             reason: 'replay_window_exceeded',
             retainedEvents: 2,
             maxBytes: 512,
-            fullTranscriptAvailable: false,
+            fullTranscriptAvailable: true,
           },
         }),
       ).toBeUndefined();
@@ -2698,7 +2707,7 @@ describe('PR 21 — auth device-flow events', () => {
             truncatedEvents: -1,
             retainedEvents: 2,
             maxBytes: 512,
-            fullTranscriptAvailable: false,
+            fullTranscriptAvailable: true,
           },
         }),
       ).toBeUndefined();
@@ -2711,7 +2720,7 @@ describe('PR 21 — auth device-flow events', () => {
             truncatedEvents: 4,
             retainedEvents: 2.5,
             maxBytes: 512,
-            fullTranscriptAvailable: false,
+            fullTranscriptAvailable: true,
           },
         }),
       ).toBeUndefined();
@@ -2725,7 +2734,7 @@ describe('PR 21 — auth device-flow events', () => {
             retainedEvents: 2,
             maxBytes: 512,
             truncatedTurns: -1,
-            fullTranscriptAvailable: false,
+            fullTranscriptAvailable: true,
           },
         }),
       ).toBeUndefined();
@@ -2738,7 +2747,20 @@ describe('PR 21 — auth device-flow events', () => {
             truncatedEvents: 4,
             retainedEvents: 2,
             maxBytes: 512,
-            fullTranscriptAvailable: false,
+            fullTranscriptAvailable: true,
+          },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'replay_window_exceeded',
+            truncatedEvents: 4,
+            retainedEvents: 2,
+            maxBytes: 512,
+            fullTranscriptAvailable: 'yes',
           },
         }),
       ).toBeUndefined();
@@ -3181,6 +3203,57 @@ describe('PR 21 — auth device-flow events', () => {
   });
 
   describe('session_snapshot (A5 #4511)', () => {
+    it('validates and reduces recording degradation events', () => {
+      const event = {
+        id: 44,
+        v: 1,
+        type: 'session_recording_degraded',
+        data: { sessionId: 's-1', reason: 'write_failed' },
+      } satisfies DaemonEvent;
+
+      expect(asKnownDaemonEvent(event)).toBe(event);
+      const state = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        event,
+      );
+      expect(state.sessionId).toBe('s-1');
+      expect(state.recordingDegraded).toBe(true);
+    });
+
+    it('applies recording degradation while awaiting resync', () => {
+      const state = reduceDaemonSessionEvent(
+        {
+          ...createDaemonSessionViewState(),
+          awaitingResync: true,
+        },
+        {
+          v: 1,
+          type: 'session_recording_degraded',
+          data: { sessionId: 's-1', reason: 'write_failed' },
+        },
+      );
+
+      expect(state.recordingDegraded).toBe(true);
+      expect(state.awaitingResync).toBe(true);
+    });
+
+    it('rejects malformed recording degradation events', () => {
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'session_recording_degraded',
+          data: { sessionId: '', reason: 'write_failed' },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'session_recording_degraded',
+          data: { sessionId: 's-1', reason: 'disk_full' },
+        }),
+      ).toBeUndefined();
+    });
+
     it('asKnownDaemonEvent narrows session_snapshot', () => {
       const event: DaemonEvent = {
         v: 1,
@@ -3209,6 +3282,46 @@ describe('PR 21 — auth device-flow events', () => {
       expect(state.sessionId).toBe('s-1');
       expect(state.currentModelId).toBe('qwen-turbo');
       expect(state.approvalMode).toBe('yolo');
+    });
+
+    it('uses snapshot recording state when present and preserves it for old daemons', () => {
+      const degraded = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        {
+          v: 1,
+          type: 'session_snapshot',
+          data: {
+            sessionId: 's-1',
+            currentModelId: null,
+            currentApprovalMode: null,
+            recordingDegraded: true,
+          },
+        },
+      );
+      expect(degraded.recordingDegraded).toBe(true);
+
+      const legacySnapshot = reduceDaemonSessionEvent(degraded, {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's-1',
+          currentModelId: null,
+          currentApprovalMode: null,
+        },
+      });
+      expect(legacySnapshot.recordingDegraded).toBe(true);
+
+      const recovered = reduceDaemonSessionEvent(legacySnapshot, {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's-1',
+          currentModelId: null,
+          currentApprovalMode: null,
+          recordingDegraded: false,
+        },
+      });
+      expect(recovered.recordingDegraded).toBe(false);
     });
 
     it('reducer does not overwrite model/mode with null snapshot values', () => {
@@ -3267,6 +3380,21 @@ describe('PR 21 — auth device-flow events', () => {
       });
       expect(state.unrecognizedKnownEventCount).toBe(1);
       expect(state.approvalMode).toBeUndefined();
+    });
+
+    it('drops session_snapshot with a non-boolean recordingDegraded', () => {
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's1',
+          currentModelId: null,
+          currentApprovalMode: null,
+          recordingDegraded: 'yes' as unknown as boolean,
+        },
+      });
+      expect(state.unrecognizedKnownEventCount).toBe(1);
+      expect(state.recordingDegraded).toBe(false);
     });
   });
 });

@@ -21,6 +21,10 @@ import {
   resolvePromptDeadlineMs,
 } from './server.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
+import {
+  ChannelWorkerControlError,
+  type ChannelWorkerControlState,
+} from './channel-worker-manager.js';
 import { runQwenServe, type RunHandle } from './run-qwen-serve.js';
 import {
   resolveWebShellDir,
@@ -116,6 +120,7 @@ import type { DaemonLogger } from './daemon-logger.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
 import { getRateLimiter } from './rate-limit.js';
 import type { DaemonWorkspaceService } from './workspace-service/types.js';
+import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
 import {
   createWorkspaceRegistry,
   type WorkspaceRegistry,
@@ -254,6 +259,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_metadata',
   'session_organization',
   'session_export',
+  'session_transcript',
   // Issue #4175 PR 14. Always-on. Daemon supports the MCP client
   // guardrail surface (`--mcp-client-budget`, `clientCount` /
   // `budgets[]` on `/workspace/mcp`, `disabledReason: 'budget'` on
@@ -307,6 +313,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_extensions',
   'session_branch',
   'workspace_qualified_rest_core',
+  'workspace_persisted_transcript',
   // Baseline (always advertised) — presence means the `/voice/stream`
   // endpoint exists; the WS errors if no voice model is configured.
   'voice_transcribe',
@@ -352,6 +359,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_extensions' &&
       f !== 'session_branch' &&
       f !== 'workspace_qualified_rest_core' &&
+      f !== 'workspace_persisted_transcript' &&
       f !== 'voice_transcribe',
   ),
   'workspace_settings',
@@ -383,8 +391,12 @@ const EXPECTED_REGISTERED_FEATURES = [
   'rate_limit',
   'workspace_reload',
   'channel_reload',
+  'channel_control',
   'multi_workspace_sessions',
+  'persistent_workspace_registration',
   'workspace_qualified_rest_core',
+  'workspace_persisted_transcript',
+  'workspace_qualified_acp',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',
   'browser_automation_mcp',
@@ -485,6 +497,7 @@ interface FakeBridgeOpts {
   sessionStatsImpl?: (sessionId: string) => Promise<ServeSessionStatsStatus>;
   sessionTasksImpl?: (sessionId: string) => Promise<ServeSessionTasksStatus>;
   sessionLspImpl?: (sessionId: string) => Promise<ServeSessionLspStatus>;
+  sessionTranscriptImpl?: AcpSessionBridge['getSessionTranscriptPage'];
   cancelSessionTaskImpl?: (
     sessionId: string,
     taskId: string,
@@ -720,6 +733,9 @@ interface FakeBridge extends AcpSessionBridge {
   sessionStatsCalls: string[];
   sessionTasksCalls: string[];
   sessionLspCalls: string[];
+  sessionTranscriptCalls: Array<
+    Parameters<AcpSessionBridge['getSessionTranscriptPage']>[0]
+  >;
   cancelSessionTaskCalls: Array<{
     sessionId: string;
     taskId: string;
@@ -853,6 +869,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionStatsCalls: string[] = [];
   const sessionTasksCalls: string[] = [];
   const sessionLspCalls: string[] = [];
+  const sessionTranscriptCalls: FakeBridge['sessionTranscriptCalls'] = [];
   const cancelSessionTaskCalls: FakeBridge['cancelSessionTaskCalls'] = [];
   const clearSessionGoalCalls: string[] = [];
   const continueSessionCalls: string[] = [];
@@ -1169,6 +1186,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       notStartedServers: 0,
       servers: [],
     }));
+  const sessionTranscriptImpl =
+    opts.sessionTranscriptImpl ??
+    (async (req) => ({
+      v: 1 as const,
+      sessionId: req.sessionId,
+      events: [],
+      hasMore: false,
+    }));
   const cancelSessionTaskImpl =
     opts.cancelSessionTaskImpl ?? (async () => ({ cancelled: true }));
   const clearSessionGoalImpl =
@@ -1348,6 +1373,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionStatsCalls,
     sessionTasksCalls,
     sessionLspCalls,
+    sessionTranscriptCalls,
     cancelSessionTaskCalls,
     clearSessionGoalCalls,
     continueSessionCalls,
@@ -1585,6 +1611,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getSessionLspStatus(sessionId) {
       sessionLspCalls.push(sessionId);
       return sessionLspImpl(sessionId);
+    },
+    async getSessionTranscriptPage(req) {
+      sessionTranscriptCalls.push(req);
+      return sessionTranscriptImpl(req);
     },
     async cancelSessionTask(sessionId, taskId, taskKind) {
       cancelSessionTaskCalls.push({ sessionId, taskId, taskKind });
@@ -2151,6 +2181,20 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'channel_control') {
+          expect(predicate({ channelControlAvailable: true })).toBe(true);
+          expect(predicate({ channelControlAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              channelControlAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'multi_workspace_sessions') {
           expect(predicate({ multiWorkspaceSessionsEnabled: true })).toBe(true);
           expect(predicate({ multiWorkspaceSessionsEnabled: false })).toBe(
@@ -2160,6 +2204,54 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, {
               multiWorkspaceSessionsEnabled: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'persistent_workspace_registration') {
+          expect(
+            predicate({ persistentWorkspaceRegistrationAvailable: true }),
+          ).toBe(true);
+          expect(
+            predicate({ persistentWorkspaceRegistrationAvailable: false }),
+          ).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              persistentWorkspaceRegistrationAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'workspace_qualified_acp') {
+          // Advertised only when BOTH multi-workspace sessions and the HTTP ACP
+          // surface are enabled.
+          expect(
+            predicate({
+              multiWorkspaceSessionsEnabled: true,
+              acpHttpEnabled: true,
+            }),
+          ).toBe(true);
+          expect(
+            predicate({
+              multiWorkspaceSessionsEnabled: true,
+              acpHttpEnabled: false,
+            }),
+          ).toBe(false);
+          expect(predicate({ multiWorkspaceSessionsEnabled: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              multiWorkspaceSessionsEnabled: true,
+              acpHttpEnabled: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
@@ -2553,30 +2645,43 @@ describe('createServeApp', () => {
 
   describe('GET /capabilities', () => {
     it('returns the v1 envelope', async () => {
-      const app = createServeApp(baseOpts);
-      const res = await request(app)
-        .get('/capabilities')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
-      expect(res.status).toBe(200);
-      expect(res.body.v).toBe(CAPABILITIES_SCHEMA_VERSION);
-      expect(res.body.protocolVersions).toEqual(getServeProtocolVersions());
-      expect(res.body.mode).toBe('http-bridge');
-      // F2 (#4175 commit 5): the server.ts call site flips
-      // `mcpPoolActive` to default-ON via `opts.mcpPoolActive !== false`
-      // (so a daemon booted without the kill switch advertises the F2
-      // pool surface by default). Voice transcription is conditional on
-      // a usable batch ASR model, so the default isolated test settings
-      // do not advertise it.
-      expect(res.body.features).toEqual(
-        getAdvertisedServeFeatures(undefined, {
-          mcpPoolActive: true,
-          sessionArtifactsPersistenceAvailable: true,
-        }),
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-capabilities-'),
       );
-      expect(res.body.modelServices).toEqual([]);
-      expect(res.body.limits).toMatchObject({
-        maxPendingPromptsPerSession: 5,
-      });
+      try {
+        process.env['QWEN_HOME'] = tempHome;
+        resetHomeEnvBootstrapForTesting();
+
+        const app = createServeApp(baseOpts);
+        const res = await request(app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(res.status).toBe(200);
+        expect(res.body.v).toBe(CAPABILITIES_SCHEMA_VERSION);
+        expect(res.body.protocolVersions).toEqual(getServeProtocolVersions());
+        expect(res.body.mode).toBe('http-bridge');
+        // F2 (#4175 commit 5): the server.ts call site flips
+        // `mcpPoolActive` to default-ON via `opts.mcpPoolActive !== false`
+        // (so a daemon booted without the kill switch advertises the F2
+        // pool surface by default). Voice transcription is conditional on
+        // a usable batch ASR model, so the isolated test settings do not
+        // advertise it.
+        expect(res.body.features).toEqual(
+          getAdvertisedServeFeatures(undefined, {
+            mcpPoolActive: true,
+            sessionArtifactsPersistenceAvailable: true,
+          }),
+        );
+        expect(res.body.modelServices).toEqual([]);
+        expect(res.body.limits).toMatchObject({
+          maxPendingPromptsPerSession: 5,
+        });
+      } finally {
+        await fsp.rm(tempHome, { recursive: true, force: true });
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        resetHomeEnvBootstrapForTesting();
+      }
     });
 
     it('omits artifact persistence when the durable sink is unavailable', async () => {
@@ -2588,6 +2693,48 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
       expect(res.body.features).not.toContain('session_artifacts_persistence');
+    });
+
+    it('reflects a dynamically added workspace and persistence support', async () => {
+      const primaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary-id',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+      ]);
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: primaryBridge,
+        workspaceRegistry: registry,
+        workspaceRegistrationStore: {} as unknown as WorkspaceRegistrationStore,
+      });
+
+      const before = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(before.status).toBe(200);
+      expect(before.body.features).toContain(
+        'persistent_workspace_registration',
+      );
+      expect(before.body.features).not.toContain('multi_workspace_sessions');
+      expect(before.body.workspaces).toBeUndefined();
+
+      registry.add(
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary-id',
+          workspaceCwd: '/workspace/secondary',
+          primary: false,
+          bridge: fakeBridge(),
+        }),
+      );
+      const after = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(after.status).toBe(200);
+      expect(after.body.features).toContain('multi_workspace_sessions');
+      expect(after.body.workspaces).toHaveLength(2);
     });
 
     it('advertises workspace voice transcription when a batch ASR model is configured', async () => {
@@ -6312,6 +6459,35 @@ describe('createServeApp', () => {
       }
     });
 
+    it('releases restore ownership after invalid approvalMode', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const invalid = await request(app)
+        .post('/session/persisted-approval/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ approvalMode: 'YOLO' });
+      expect(invalid.status).toBe(400);
+      expect(invalid.body.code).toBe('invalid_approval_mode');
+
+      const valid = await request(app)
+        .post('/session/persisted-approval/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(valid.status).toBe(200);
+      expect(bridge.loadCalls).toEqual([
+        {
+          sessionId: 'persisted-approval',
+          workspaceCwd: WS_BOUND,
+          historyReplay: 'response',
+        },
+      ]);
+    });
+
     it('passes explicit primary cwd through to the bridge', async () => {
       const bridge = fakeBridge({
         loadImpl: async (req) => ({
@@ -7037,6 +7213,7 @@ describe('createServeApp', () => {
       prompt: string;
       mtime: Date;
       state?: 'active' | 'archived';
+      parentSessionId?: string;
     }): Promise<void> {
       const chatsDir = path.join(
         new Storage(input.cwd).getProjectDir(),
@@ -7054,7 +7231,24 @@ describe('createServeApp', () => {
         message: { role: 'user', parts: [{ text: input.prompt }] },
         cwd: input.cwd,
       };
-      await fsp.writeFile(filePath, `${JSON.stringify(record)}\n`, 'utf8');
+      const lines = [JSON.stringify(record)];
+      if (input.parentSessionId !== undefined) {
+        // Mirror ChatRecordingService.recordParentSession: a single
+        // `parent_session` system record near the head of the transcript that
+        // SessionService rehydrates into the summary's parentSessionId.
+        const parentRecord = {
+          uuid: `${input.sessionId}-parent-1`,
+          parentUuid: `${input.sessionId}-user-1`,
+          sessionId: input.sessionId,
+          timestamp: input.timestamp,
+          type: 'system',
+          subtype: 'parent_session',
+          systemPayload: { parentSessionId: input.parentSessionId },
+          cwd: input.cwd,
+        };
+        lines.push(JSON.stringify(parentRecord));
+      }
+      await fsp.writeFile(filePath, `${lines.join('\n')}\n`, 'utf8');
       await fsp.utimes(filePath, input.mtime, input.mtime);
     }
 
@@ -7128,6 +7322,58 @@ describe('createServeApp', () => {
         ]),
       );
       expect(bridge.listCalls).toEqual([WS_BOUND]);
+    });
+
+    it('returns runtime state and pending interaction details', async () => {
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: 's-pending',
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: true,
+            isWaitingForPermission: true,
+            pendingInteractionCount: 1,
+            hasTurnError: true,
+            turnError: { message: 'internal path: /private/workspace' },
+            pendingInteractions: [
+              {
+                requestId: 'request-1',
+                kind: 'permission',
+                createdAt: '2026-05-17T12:00:01.000Z',
+                action: { input: { command: 'secret command' } },
+                options: [],
+              },
+            ],
+          },
+        ],
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+
+      const res = await request(app)
+        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.sessions).toEqual([
+        expect.objectContaining({
+          sessionId: 's-pending',
+          isWaitingForPermission: true,
+          pendingInteractionCount: 1,
+          turnError: { message: 'internal path: /private/workspace' },
+          pendingInteractions: [
+            expect.objectContaining({
+              requestId: 'request-1',
+              action: { input: { command: 'secret command' } },
+            }),
+          ],
+        }),
+      ]);
     });
 
     it('supports plural /workspaces/:workspace/sessions for non-primary live sessions', async () => {
@@ -7644,8 +7890,9 @@ describe('createServeApp', () => {
         request(app).post(
           `/workspace/${encodeURIComponent(WS_BOUND)}/session-groups`,
         ),
-      ).send({ name: 'Frontend', color: 'blue' });
+      ).send({ name: 'Frontend', color: '#12ABEF' });
       expect(groupRes.status).toBe(201);
+      expect(groupRes.body.group.color).toBe('#12abef');
       const groupId = groupRes.body.group.id as string;
 
       const updateRes = await host(
@@ -7654,12 +7901,12 @@ describe('createServeApp', () => {
             WS_BOUND,
           )}/session-groups/${encodeURIComponent(groupId)}`,
         ),
-      ).send({ name: 'UI', color: 'purple', order: 4 });
+      ).send({ name: 'UI', color: '#FEDCBA', order: 4 });
       expect(updateRes.status).toBe(200);
       expect(updateRes.body.group).toMatchObject({
         id: groupId,
         name: 'UI',
-        color: 'purple',
+        color: '#fedcba',
         order: 4,
       });
 
@@ -7762,7 +8009,7 @@ describe('createServeApp', () => {
 
       const invalidColorBody = await host(
         request(app).patch(`/session/${sessionId}/organization`),
-      ).send({ color: 'pink' });
+      ).send({ color: '#12abef' });
       expect(invalidColorBody.status).toBe(400);
       expect(invalidColorBody.body).toMatchObject({
         code: 'invalid_session_organization',
@@ -8290,6 +8537,315 @@ describe('createServeApp', () => {
       expect(res.status).toBe(400);
       expect(bridge.listCalls).toHaveLength(0);
     });
+
+    describe('parentSessionId filter', () => {
+      const PARENT = '00000000-0000-4000-8000-0000000000aa';
+      const OTHER_PARENT = '00000000-0000-4000-8000-0000000000bb';
+      // Distinct session ids sharing the writeStoredSessions UUID shape.
+      const childId = (n: number) =>
+        `550e8400-e29b-41d4-a716-44665544${String(n).padStart(4, '0')}`;
+
+      it('returns only the sessions spawned by the given parent', async () => {
+        // Two children of PARENT, one child of OTHER_PARENT, one orphan.
+        await writeStoredSession({
+          sessionId: childId(1),
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:00:00.000Z',
+          prompt: 'child one',
+          mtime: new Date('2026-05-17T12:00:00.000Z'),
+          parentSessionId: PARENT,
+        });
+        await writeStoredSession({
+          sessionId: childId(2),
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:01:00.000Z',
+          prompt: 'child two',
+          mtime: new Date('2026-05-17T12:01:00.000Z'),
+          parentSessionId: PARENT,
+        });
+        await writeStoredSession({
+          sessionId: childId(3),
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:02:00.000Z',
+          prompt: 'other parent',
+          mtime: new Date('2026-05-17T12:02:00.000Z'),
+          parentSessionId: OTHER_PARENT,
+        });
+        await writeStoredSession({
+          sessionId: childId(4),
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:03:00.000Z',
+          prompt: 'orphan',
+          mtime: new Date('2026-05-17T12:03:00.000Z'),
+        });
+
+        const result = await listWorkspaceSessionsForResponse(
+          fakeBridge(),
+          WS_BOUND,
+          { parentSessionId: PARENT },
+        );
+
+        expect(result.sessions.map((s) => s.sessionId).sort()).toEqual([
+          childId(1),
+          childId(2),
+        ]);
+        for (const session of result.sessions) {
+          expect(session.parentSessionId).toBe(PARENT);
+        }
+        expect(result.nextCursor).toBeUndefined();
+      });
+
+      it('returns an empty list when no session has the parent', async () => {
+        await writeStoredSession({
+          sessionId: childId(1),
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:00:00.000Z',
+          prompt: 'orphan',
+          mtime: new Date('2026-05-17T12:00:00.000Z'),
+        });
+        await writeStoredSession({
+          sessionId: childId(2),
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:01:00.000Z',
+          prompt: 'other parent',
+          mtime: new Date('2026-05-17T12:01:00.000Z'),
+          parentSessionId: OTHER_PARENT,
+        });
+
+        const result = await listWorkspaceSessionsForResponse(
+          fakeBridge(),
+          WS_BOUND,
+          { parentSessionId: PARENT },
+        );
+
+        expect(result.sessions).toEqual([]);
+        expect(result.nextCursor).toBeUndefined();
+      });
+
+      it('paginates matches with an opaque cursor across pages', async () => {
+        const matchCount = 5;
+        const pageSize = 3;
+        for (let i = 0; i < matchCount; i++) {
+          const timestamp = new Date(
+            Date.UTC(2026, 4, 17, 12, i, 0),
+          ).toISOString();
+          await writeStoredSession({
+            sessionId: childId(i),
+            cwd: WS_BOUND,
+            timestamp,
+            prompt: `child ${i}`,
+            mtime: new Date(timestamp),
+            parentSessionId: PARENT,
+          });
+        }
+        // A non-matching session that must never appear on either page.
+        await writeStoredSession({
+          sessionId: childId(9),
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T13:00:00.000Z',
+          prompt: 'other parent',
+          mtime: new Date('2026-05-17T13:00:00.000Z'),
+          parentSessionId: OTHER_PARENT,
+        });
+
+        const page1 = await listWorkspaceSessionsForResponse(
+          fakeBridge(),
+          WS_BOUND,
+          { parentSessionId: PARENT, size: pageSize },
+        );
+        expect(page1.sessions).toHaveLength(pageSize);
+        expect(page1.nextCursor).toBeDefined();
+        expect(page1.sessions.every((s) => s.parentSessionId === PARENT)).toBe(
+          true,
+        );
+
+        const page2 = await listWorkspaceSessionsForResponse(
+          fakeBridge(),
+          WS_BOUND,
+          {
+            parentSessionId: PARENT,
+            size: pageSize,
+            cursor: page1.nextCursor,
+          },
+        );
+        expect(page2.sessions).toHaveLength(matchCount - pageSize);
+        expect(page2.nextCursor).toBeUndefined();
+        expect(page2.sessions.every((s) => s.parentSessionId === PARENT)).toBe(
+          true,
+        );
+
+        const seen = [
+          ...page1.sessions.map((s) => s.sessionId),
+          ...page2.sessions.map((s) => s.sessionId),
+        ];
+        expect(new Set(seen).size).toBe(matchCount);
+        const expected = new Set(
+          Array.from({ length: matchCount }, (_, i) => childId(i)),
+        );
+        expect(new Set(seen)).toEqual(expected);
+      });
+
+      // Seeds `count` children of `parent` and returns parent's first-page
+      // nextCursor (page size 2, so >2 children guarantees a next page).
+      async function firstPageCursorFor(
+        parent: string,
+        count = 3,
+      ): Promise<string> {
+        for (let i = 0; i < count; i++) {
+          const timestamp = new Date(
+            Date.UTC(2026, 4, 17, 12, i, 0),
+          ).toISOString();
+          await writeStoredSession({
+            sessionId: childId(i),
+            cwd: WS_BOUND,
+            timestamp,
+            prompt: `child ${i}`,
+            mtime: new Date(timestamp),
+            parentSessionId: parent,
+          });
+        }
+        const page1 = await listWorkspaceSessionsForResponse(
+          fakeBridge(),
+          WS_BOUND,
+          { parentSessionId: parent, size: 2 },
+        );
+        expect(page1.nextCursor).toBeDefined();
+        return page1.nextCursor!;
+      }
+
+      it("rejects parent A's cursor replayed against parent B (cursor is parent-scoped)", async () => {
+        const cursor = await firstPageCursorFor(PARENT);
+        // The cursor is bound to parent A; replaying it against parent B would
+        // otherwise silently skip every B session newer than A's key.
+        await expect(
+          listWorkspaceSessionsForResponse(fakeBridge(), WS_BOUND, {
+            parentSessionId: OTHER_PARENT,
+            size: 2,
+            cursor,
+          }),
+        ).rejects.toThrow(/not a valid parent cursor/);
+      });
+
+      it('rejects a parent cursor reused across archiveState (active → archived)', async () => {
+        const cursor = await firstPageCursorFor(PARENT);
+        // Same parent, but the cursor was minted for the active set — the
+        // archiveState is bound into it, so reusing it on the archived set is
+        // rejected rather than skipping archived matches by an unrelated key.
+        await expect(
+          listWorkspaceSessionsForResponse(fakeBridge(), WS_BOUND, {
+            parentSessionId: PARENT,
+            archiveState: 'archived',
+            size: 2,
+            cursor,
+          }),
+        ).rejects.toThrow(/not a valid parent cursor/);
+      });
+
+      it("HTTP: 400 invalid_cursor when parent A's cursor is replayed against parent B", async () => {
+        for (let i = 0; i < 3; i++) {
+          const timestamp = new Date(
+            Date.UTC(2026, 4, 17, 12, i, 0),
+          ).toISOString();
+          await writeStoredSession({
+            sessionId: childId(i),
+            cwd: WS_BOUND,
+            timestamp,
+            prompt: `child ${i}`,
+            mtime: new Date(timestamp),
+            parentSessionId: PARENT,
+          });
+        }
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge, boundWorkspace: WS_BOUND },
+        );
+        const page1 = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?parentSessionId=${PARENT}&size=2`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(page1.status).toBe(200);
+        expect(page1.body.nextCursor).toBeDefined();
+
+        const reused = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?parentSessionId=${OTHER_PARENT}&size=2&cursor=${encodeURIComponent(
+              page1.body.nextCursor as string,
+            )}`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(reused.status).toBe(400);
+        expect(reused.body.code).toBe('invalid_cursor');
+      });
+
+      it('HTTP: returns the filtered list for ?parentSessionId=P', async () => {
+        await writeStoredSession({
+          sessionId: childId(1),
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:00:00.000Z',
+          prompt: 'child one',
+          mtime: new Date('2026-05-17T12:00:00.000Z'),
+          parentSessionId: PARENT,
+        });
+        await writeStoredSession({
+          sessionId: childId(2),
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:01:00.000Z',
+          prompt: 'other parent',
+          mtime: new Date('2026-05-17T12:01:00.000Z'),
+          parentSessionId: OTHER_PARENT,
+        });
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge, boundWorkspace: WS_BOUND },
+        );
+        const res = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?parentSessionId=${PARENT}`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(res.status).toBe(200);
+        expect(res.body.sessions).toHaveLength(1);
+        expect(res.body.sessions[0].sessionId).toBe(childId(1));
+        expect(res.body.sessions[0].parentSessionId).toBe(PARENT);
+      });
+
+      it('HTTP: 400 invalid_parent_session_filter with view=organized', async () => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge, boundWorkspace: WS_BOUND },
+        );
+        const res = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?parentSessionId=${PARENT}&view=organized`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_parent_session_filter');
+      });
+
+      it('HTTP: 400 invalid_parent_session_id for an empty parentSessionId', async () => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge, boundWorkspace: WS_BOUND },
+        );
+        const res = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?parentSessionId=`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_parent_session_id');
+      });
+    });
   });
 
   describe('GET /session/:id/status', () => {
@@ -8339,6 +8895,42 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(200);
       expect('displayName' in res.body).toBe(false);
+    });
+
+    it('200 includes pending interaction details for a single session', async () => {
+      const summary: BridgeSessionSummary = {
+        sessionId: 's-pending',
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-05-17T12:00:00.000Z',
+        clientCount: 1,
+        hasActivePrompt: true,
+        isWaitingForUserQuestion: true,
+        pendingInteractionCount: 1,
+        pendingInteractions: [
+          {
+            requestId: 'question-1',
+            kind: 'user_question',
+            createdAt: '2026-05-17T12:00:01.000Z',
+            title: 'Choose a direction',
+            questions: [{ question: 'Which path?' }],
+            options: [{ optionId: 'answer', label: 'Answer' }],
+          },
+        ],
+      };
+      const bridge = fakeBridge({ summaryImpl: () => summary });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/session/s-pending/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.pendingInteractions).toEqual(summary.pendingInteractions);
+      expect(res.body.pendingInteractionCount).toBe(1);
     });
 
     it('404 when the session id is unknown to the daemon', async () => {
@@ -9672,6 +10264,314 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('/workspace/channel runtime control', () => {
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+    const disabled = (): ChannelWorkerControlState => ({
+      enabled: false,
+      selection: null,
+      transition: 'idle',
+      workers: [],
+    });
+    const running = (): ChannelWorkerControlState => ({
+      enabled: true,
+      selection: { mode: 'names', names: ['telegram'] },
+      transition: 'idle',
+      workers: [
+        {
+          enabled: true,
+          state: 'running',
+          channels: ['telegram'],
+          workspaceId: 'primary',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+        },
+      ],
+    });
+
+    it('exposes disabled state and advertises control but not reload', async () => {
+      let state = disabled();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerControl: () => state,
+        setChannelWorkerSelection: vi.fn(async (selection) => {
+          state = { ...running(), selection };
+          return {
+            changed: true,
+            replaced: false,
+            partial: false,
+            state,
+          };
+        }),
+        stopChannelWorker: vi.fn(async () => ({ changed: false, state })),
+        reloadChannelWorker: vi.fn(async () => ({
+          enabled: false,
+          state: 'disabled',
+          channels: [],
+        })),
+      });
+
+      const control = await auth(request(app).get('/workspace/channel'));
+      expect(control.status).toBe(200);
+      expect(control.body).toEqual(disabled());
+
+      const capabilities = await auth(request(app).get('/capabilities'));
+      expect(capabilities.body.features).toContain('channel_control');
+      expect(capabilities.body.features).not.toContain('channel_reload');
+    });
+
+    it('does not advertise reload for degraded manager states', async () => {
+      for (const state of [
+        {
+          enabled: true,
+          selection: null,
+          transition: 'idle',
+          workers: [],
+        },
+        {
+          enabled: true,
+          selection: { mode: 'names', names: ['telegram'] },
+          transition: 'idle',
+          workers: [],
+        },
+      ] satisfies ChannelWorkerControlState[]) {
+        const app = createServeApp(tokenOpts, undefined, {
+          bridge: fakeBridge(),
+          boundWorkspace: WS_BOUND,
+          getChannelWorkerControl: () => state,
+          setChannelWorkerSelection: vi.fn(),
+          stopChannelWorker: vi.fn(),
+          reloadChannelWorker: vi.fn(),
+        });
+
+        const capabilities = await auth(request(app).get('/capabilities'));
+        expect(capabilities.body.features).toContain('channel_control');
+        expect(capabilities.body.features).not.toContain('channel_reload');
+      }
+    });
+
+    it('requires a configured token before any runtime channel mutation', async () => {
+      const state = disabled();
+      const setSelection = vi.fn();
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerControl: () => state,
+        setChannelWorkerSelection: setSelection,
+        stopChannelWorker: vi.fn(),
+        reloadChannelWorker: vi.fn(),
+      });
+
+      const response = await request(app)
+        .put('/workspace/channel')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ selection: { mode: 'all' } });
+
+      expect(response.status).toBe(401);
+      expect(response.body.code).toBe('token_required');
+      expect(setSelection).not.toHaveBeenCalled();
+    });
+
+    it('strict-gates PUT and normalizes names without sorting them', async () => {
+      let state = disabled();
+      const setSelection = vi.fn(async (selection) => {
+        state = { ...running(), selection };
+        return {
+          changed: true,
+          replaced: false,
+          partial: false,
+          state,
+          created: true,
+        };
+      });
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerControl: () => state,
+        setChannelWorkerSelection: setSelection,
+        stopChannelWorker: vi.fn(async () => ({ changed: false, state })),
+        reloadChannelWorker: vi.fn(async () => state.workers[0]!),
+      });
+
+      const unauthenticated = await request(app)
+        .put('/workspace/channel')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .send({ selection: { mode: 'all' } });
+      expect(unauthenticated.status).toBe(401);
+      expect(setSelection).not.toHaveBeenCalled();
+
+      const response = await auth(request(app).put('/workspace/channel')).send({
+        selection: {
+          mode: 'names',
+          names: [' discord ', 'telegram', 'discord'],
+        },
+      });
+      expect(response.status).toBe(201);
+      expect(response.body).not.toHaveProperty('created');
+      expect(setSelection).toHaveBeenCalledWith({
+        mode: 'names',
+        names: ['discord', 'telegram'],
+      });
+    });
+
+    it('rejects empty and mixed all selections before changing workers', async () => {
+      const setSelection = vi.fn();
+      const state = disabled();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerControl: () => state,
+        setChannelWorkerSelection: setSelection,
+        stopChannelWorker: vi.fn(async () => ({ changed: false, state })),
+        reloadChannelWorker: vi.fn(async () => ({
+          enabled: false,
+          state: 'disabled',
+          channels: [],
+        })),
+      });
+
+      for (const selection of [
+        { mode: 'names', names: [] },
+        { mode: 'all', names: ['telegram'] },
+      ]) {
+        const response = await auth(
+          request(app).put('/workspace/channel'),
+        ).send({ selection });
+        expect(response.status).toBe(400);
+        expect(response.body.code).toBe('invalid_channel_selection');
+      }
+      expect(setSelection).not.toHaveBeenCalled();
+    });
+
+    it('returns typed start failure details with credential redaction', async () => {
+      const state = running();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerControl: () => state,
+        setChannelWorkerSelection: vi.fn(async () => {
+          throw new ChannelWorkerControlError(
+            'channel_worker_start_failed',
+            'token=start-secret',
+            {
+              rolledBack: false,
+              rollbackError: 'token=rollback-secret',
+            },
+          );
+        }),
+        stopChannelWorker: vi.fn(async () => ({ changed: false, state })),
+        reloadChannelWorker: vi.fn(async () => state.workers[0]!),
+      });
+
+      const response = await auth(request(app).put('/workspace/channel')).send({
+        selection: { mode: 'all' },
+      });
+
+      expect(response.status).toBe(502);
+      expect(response.body).toMatchObject({
+        code: 'channel_worker_start_failed',
+        rolledBack: false,
+        state,
+      });
+      expect(JSON.stringify(response.body)).not.toContain('start-secret');
+      expect(JSON.stringify(response.body)).not.toContain('rollback-secret');
+    });
+
+    it('maps untrusted workspace failures to 403', async () => {
+      const state = disabled();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerControl: () => state,
+        setChannelWorkerSelection: vi.fn(async () => {
+          throw Object.assign(new Error('Workspace is not trusted.'), {
+            code: 'untrusted_workspace',
+          });
+        }),
+        stopChannelWorker: vi.fn(async () => ({ changed: false, state })),
+        reloadChannelWorker: vi.fn(async () => ({
+          enabled: false,
+          state: 'disabled',
+          channels: [],
+        })),
+      });
+
+      const response = await auth(request(app).put('/workspace/channel')).send({
+        selection: { mode: 'all' },
+      });
+
+      expect(response.status).toBe(403);
+      expect(response.body).toEqual({
+        error: 'Workspace is not trusted.',
+        code: 'untrusted_workspace',
+      });
+    });
+
+    it('maps a pre-manager daemon draining gate to the stable 503 error', async () => {
+      const state = disabled();
+      const setSelection = vi.fn();
+      const stopChannelWorker = vi.fn();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerControl: () => state,
+        isChannelControlDraining: () => true,
+        setChannelWorkerSelection: setSelection,
+        stopChannelWorker,
+        reloadChannelWorker: vi.fn(async () => ({
+          enabled: false,
+          state: 'disabled',
+          channels: [],
+        })),
+      });
+
+      const response = await auth(request(app).put('/workspace/channel')).send({
+        selection: { mode: 'all' },
+      });
+
+      expect(response.status).toBe(503);
+      expect(response.body).toMatchObject({
+        code: 'daemon_draining',
+        state,
+      });
+      const stopped = await auth(request(app).delete('/workspace/channel'));
+      expect(stopped.status).toBe(503);
+      expect(stopped.body).toMatchObject({ code: 'daemon_draining', state });
+      expect(setSelection).not.toHaveBeenCalled();
+      expect(stopChannelWorker).not.toHaveBeenCalled();
+    });
+
+    it('stops idempotently and removes channel_reload dynamically', async () => {
+      let state = running();
+      const stop = vi.fn(async () => {
+        const changed = state.enabled;
+        state = disabled();
+        return { changed, state };
+      });
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerControl: () => state,
+        setChannelWorkerSelection: vi.fn(),
+        stopChannelWorker: stop,
+        reloadChannelWorker: vi.fn(async () => state.workers[0]!),
+      });
+
+      const first = await auth(request(app).delete('/workspace/channel'));
+      const second = await auth(request(app).delete('/workspace/channel'));
+      expect(first.body).toMatchObject({ changed: true, state: disabled() });
+      expect(second.body).toMatchObject({ changed: false, state: disabled() });
+
+      const capabilities = await auth(request(app).get('/capabilities'));
+      expect(capabilities.body.features).toContain('channel_control');
+      expect(capabilities.body.features).not.toContain('channel_reload');
+    });
+  });
+
   describe('POST /workspace/channel/reload', () => {
     const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
     const auth = (req: request.Test): request.Test =>
@@ -9750,6 +10650,112 @@ describe('createServeApp', () => {
       expect(reloadChannelWorker).not.toHaveBeenCalled();
     });
 
+    it('returns 503 before the disabled reload precheck while draining', async () => {
+      const reloadChannelWorker = vi.fn(async () => disabledSnapshot);
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => disabledSnapshot,
+        isChannelControlDraining: () => true,
+        reloadChannelWorker,
+      });
+
+      const res = await auth(
+        request(app).post('/workspace/channel/reload'),
+      ).send({});
+
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe('daemon_draining');
+      expect(reloadChannelWorker).not.toHaveBeenCalled();
+    });
+
+    it('waits on reload instead of returning 409 while the manager initializes', async () => {
+      const reloadChannelWorker = vi.fn(async () => runningSnapshot);
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => disabledSnapshot,
+        isChannelControlInitializing: () => true,
+        reloadChannelWorker,
+      });
+
+      const res = await auth(
+        request(app).post('/workspace/channel/reload'),
+      ).send({});
+
+      expect(res.status).toBe(200);
+      expect(reloadChannelWorker).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns 409 when every workspace worker is disabled', async () => {
+      const reloadChannelWorker = vi.fn(async () => disabledSnapshot);
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => runningSnapshot,
+        getChannelWorkerSnapshots: () => [
+          {
+            ...disabledSnapshot,
+            workspaceId: 'primary',
+            workspaceCwd: WS_BOUND,
+            primary: true,
+          },
+        ],
+        reloadChannelWorker,
+      });
+
+      const res = await auth(
+        request(app).post('/workspace/channel/reload'),
+      ).send({});
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('channel_worker_not_enabled');
+      expect(reloadChannelWorker).not.toHaveBeenCalled();
+    });
+
+    it('reloads when only a non-primary workspace worker is enabled', async () => {
+      const secondarySnapshot = {
+        ...runningSnapshot,
+        workspaceId: 'secondary',
+        workspaceCwd: '/work/secondary',
+        primary: false,
+      };
+      const reloadChannelWorker = vi.fn(async () => secondarySnapshot);
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => disabledSnapshot,
+        getChannelWorkerSnapshots: () => [secondarySnapshot],
+        reloadChannelWorker,
+      });
+
+      const res = await auth(
+        request(app).post('/workspace/channel/reload'),
+      ).send({});
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ reloaded: true, worker: secondarySnapshot });
+      expect(reloadChannelWorker).toHaveBeenCalledTimes(1);
+    });
+
+    it('falls back to the legacy snapshot when the worker list is empty', async () => {
+      const reloadChannelWorker = vi.fn(async () => runningSnapshot);
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => runningSnapshot,
+        getChannelWorkerSnapshots: () => [],
+        reloadChannelWorker,
+      });
+
+      const res = await auth(
+        request(app).post('/workspace/channel/reload'),
+      ).send({});
+
+      expect(res.status).toBe(200);
+      expect(reloadChannelWorker).toHaveBeenCalledTimes(1);
+    });
+
     it('maps relaunch failures through sendBridgeError', async () => {
       const reloadChannelWorker = vi.fn(async () => {
         throw new Error('relaunch failed');
@@ -9768,6 +10774,34 @@ describe('createServeApp', () => {
       expect(res.status).toBe(500);
       expect(res.body).toEqual({ error: 'relaunch failed' });
       expect(reloadChannelWorker).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns typed and redacted reload start failures', async () => {
+      const reloadChannelWorker = vi.fn(async () => {
+        throw new ChannelWorkerControlError(
+          'channel_worker_start_failed',
+          'token=reload-secret',
+          { rolledBack: false, rollbackError: 'token=rollback-secret' },
+        );
+      });
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => runningSnapshot,
+        reloadChannelWorker,
+      });
+
+      const res = await auth(
+        request(app).post('/workspace/channel/reload'),
+      ).send({});
+
+      expect(res.status).toBe(502);
+      expect(res.body).toMatchObject({
+        code: 'channel_worker_start_failed',
+        rolledBack: false,
+      });
+      expect(JSON.stringify(res.body)).not.toContain('reload-secret');
+      expect(JSON.stringify(res.body)).not.toContain('rollback-secret');
     });
 
     it('advertises channel_reload only when the reload dep is wired', async () => {
@@ -11197,6 +12231,551 @@ describe('createServeApp', () => {
         code: 'session_archived',
         sessionId: sid,
       });
+    });
+  });
+
+  describe('GET /session/:id/transcript', () => {
+    let previousRuntimeDir: string | undefined;
+    let runtimeDir: string;
+    let wsDir: string;
+
+    beforeEach(async () => {
+      previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+      runtimeDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-serve-session-transcript-'),
+      );
+      process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+      wsDir = realpathSync(runtimeDir);
+    });
+
+    afterEach(async () => {
+      if (previousRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
+      }
+      await fsp.rm(runtimeDir, { recursive: true, force: true });
+    });
+
+    async function writeTranscriptSession(
+      sessionId: string,
+      state: 'active' | 'archived' = 'active',
+      workspaceCwd = wsDir,
+    ): Promise<void> {
+      const chatsDir = path.join(
+        new Storage(workspaceCwd).getProjectDir(),
+        'chats',
+        ...(state === 'archived' ? ['archive'] : []),
+      );
+      await fsp.mkdir(chatsDir, { recursive: true });
+      await fsp.writeFile(
+        path.join(chatsDir, `${sessionId}.jsonl`),
+        JSON.stringify({
+          uuid: `${sessionId}-user-1`,
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-05-28T12:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'hello transcript' }] },
+          cwd: workspaceCwd,
+          version: '1.0.0',
+        }) + '\n',
+      );
+    }
+
+    it('returns a paged transcript and does not expose EventBus cursors', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaaa';
+      const bridge = fakeBridge({
+        sessionTranscriptImpl: async (req) => ({
+          v: 1,
+          sessionId: req.sessionId,
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'hello transcript' },
+              },
+            },
+          ],
+          nextCursor: 'cursor-2',
+          hasMore: true,
+          startTime: '2026-05-28T12:00:00.000Z',
+          lastUpdated: '2026-05-28T12:00:01.000Z',
+        }),
+      });
+      await writeTranscriptSession(sid);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript?limit=2&cursor=cursor-1`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(res.body).toMatchObject({
+        v: 1,
+        sessionId: sid,
+        nextCursor: 'cursor-2',
+        hasMore: true,
+      });
+      expect(res.body).not.toHaveProperty('lastEventId');
+      expect(res.body.events[0]).not.toHaveProperty('id');
+      expect(bridge.sessionTranscriptCalls).toEqual([
+        { sessionId: sid, limit: 2, cursor: 'cursor-1' },
+      ]);
+      expect(bridge.loadCalls).toHaveLength(0);
+      expect(bridge.resumeCalls).toHaveLength(0);
+    });
+
+    it('routes inactive active transcript pages through the owning workspace runtime', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-abababababab';
+      const secondaryDir = path.join(runtimeDir, 'secondary-workspace');
+      await fsp.mkdir(secondaryDir, { recursive: true });
+      const secondaryWs = realpathSync(secondaryDir);
+      await writeTranscriptSession(sid, 'active', secondaryWs);
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge({
+        sessionTranscriptImpl: async (req) => ({
+          v: 1,
+          sessionId: req.sessionId,
+          events: [],
+          hasMore: false,
+        }),
+      });
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary',
+          workspaceCwd: secondaryWs,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        workspaceRegistry: registry,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+      expect(secondaryBridge.sessionTranscriptCalls).toEqual([
+        { sessionId: sid },
+      ]);
+    });
+
+    it('rejects transcript requests with ambiguous live session ownership', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-abcdabcdabcd';
+      const secondaryDir = path.join(runtimeDir, 'ambiguous-secondary');
+      await fsp.mkdir(secondaryDir, { recursive: true });
+      const secondaryWs = realpathSync(secondaryDir);
+      const summaryFor = (workspaceCwd: string): BridgeSessionSummary => ({
+        sessionId: sid,
+        workspaceCwd,
+        createdAt: '2026-05-28T12:00:00.000Z',
+        clientCount: 0,
+        hasActivePrompt: false,
+      });
+      const primaryBridge = fakeBridge({
+        summaryImpl: () => summaryFor(wsDir),
+      });
+      const secondaryBridge = fakeBridge({
+        summaryImpl: () => summaryFor(secondaryWs),
+      });
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary',
+          workspaceCwd: secondaryWs,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        workspaceRegistry: registry,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(500);
+      expect(res.body).toMatchObject({
+        code: 'ambiguous_session_owner',
+        sessionId: sid,
+        workspaceIds: ['primary', 'secondary'],
+      });
+      expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+      expect(secondaryBridge.sessionTranscriptCalls).toEqual([]);
+    });
+
+    it('rejects transcript pages owned by an untrusted secondary workspace', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-acacacacacac';
+      const secondaryDir = path.join(runtimeDir, 'untrusted-secondary');
+      await fsp.mkdir(secondaryDir, { recursive: true });
+      const secondaryWs = realpathSync(secondaryDir);
+      await writeTranscriptSession(sid, 'active', secondaryWs);
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary',
+          workspaceCwd: secondaryWs,
+          primary: false,
+          trusted: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        workspaceRegistry: registry,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({
+        code: 'untrusted_workspace',
+        sessionId: sid,
+        workspaceId: 'secondary',
+      });
+      expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+      expect(secondaryBridge.sessionTranscriptCalls).toEqual([]);
+    });
+
+    it('preserves archived transcript errors during multi-workspace fallback', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-adadadadadad';
+      const secondaryDir = path.join(runtimeDir, 'archived-secondary');
+      await fsp.mkdir(secondaryDir, { recursive: true });
+      const secondaryWs = realpathSync(secondaryDir);
+      await writeTranscriptSession(sid, 'archived', secondaryWs);
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary',
+          workspaceCwd: secondaryWs,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        workspaceRegistry: registry,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'session_archived',
+        sessionId: sid,
+      });
+      expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+      expect(secondaryBridge.sessionTranscriptCalls).toEqual([]);
+    });
+
+    it('prefers structured transcript errors found after generic scan failures', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-afafafafafaf';
+      const secondaryDir = path.join(runtimeDir, 'archived-after-failure');
+      await fsp.mkdir(secondaryDir, { recursive: true });
+      const secondaryWs = realpathSync(secondaryDir);
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary',
+          workspaceCwd: secondaryWs,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const locationSpy = vi
+        .spyOn(SessionService.prototype, 'getSessionLocation')
+        .mockRejectedValueOnce(new Error('EACCES: primary scan failed'))
+        .mockResolvedValueOnce('archived');
+      try {
+        const app = createServeApp(
+          { ...baseOpts, workspace: wsDir },
+          undefined,
+          { workspaceRegistry: registry },
+        );
+
+        const res = await request(app)
+          .get(`/session/${sid}/transcript`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(res.status).toBe(409);
+        expect(res.body).toMatchObject({
+          code: 'session_archived',
+          sessionId: sid,
+        });
+        expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+        expect(secondaryBridge.sessionTranscriptCalls).toEqual([]);
+      } finally {
+        locationSpy.mockRestore();
+      }
+    });
+
+    it('sanitizes multi-workspace transcript scan errors in HTTP responses', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aeaeaeaeaeae';
+      const secondaryDir = path.join(runtimeDir, 'failing-secondary');
+      await fsp.mkdir(secondaryDir, { recursive: true });
+      const secondaryWs = realpathSync(secondaryDir);
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary',
+          workspaceCwd: secondaryWs,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const locationSpy = vi
+        .spyOn(SessionService.prototype, 'getSessionLocation')
+        .mockRejectedValue(
+          new Error(`EACCES: permission denied, stat '${secondaryWs}'`),
+        );
+      try {
+        const app = createServeApp(
+          { ...baseOpts, workspace: wsDir },
+          undefined,
+          {
+            workspaceRegistry: registry,
+          },
+        );
+
+        const res = await request(app)
+          .get(`/session/${sid}/transcript`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(res.status).toBe(500);
+        expect(res.body.error).toContain(
+          'Transcript session resolution failed across 2 workspace(s)',
+        );
+        expect(res.body.error).not.toContain(wsDir);
+        expect(res.body.error).not.toContain(secondaryWs);
+        expect(res.body.error).not.toContain('EACCES: permission denied');
+        expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+        expect(secondaryBridge.sessionTranscriptCalls).toEqual([]);
+      } finally {
+        locationSpy.mockRestore();
+      }
+    });
+
+    it('rejects archived sessions before touching the bridge', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-bbbbbbbbbbbb';
+      const bridge = fakeBridge();
+      await writeTranscriptSession(sid, 'archived');
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(409);
+      expect(bridge.sessionTranscriptCalls).toHaveLength(0);
+    });
+
+    it('returns 404 for missing active sessions before touching the bridge', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-bcdbcdbcdbcd';
+      const bridge = fakeBridge();
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe(sid);
+      expect(bridge.sessionTranscriptCalls).toHaveLength(0);
+    });
+
+    it('returns 409 when a cursor page no longer has an active transcript file', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-bdbdbdbdbdbd';
+      const bridge = fakeBridge();
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript?cursor=stale`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'transcript_snapshot_unavailable',
+        sessionId: sid,
+      });
+      expect(bridge.sessionTranscriptCalls).toHaveLength(0);
+    });
+
+    it.each(['501', '0', 'abc', '-1', '1&limit=2'])(
+      'rejects invalid transcript limit query %s before touching the bridge',
+      async (limitQuery) => {
+        const sid = '55555555-bbbb-cccc-dddd-cccccccccccc';
+        const bridge = fakeBridge();
+        await writeTranscriptSession(sid);
+        const app = createServeApp(
+          { ...baseOpts, workspace: wsDir },
+          undefined,
+          {
+            bridge,
+            boundWorkspace: wsDir,
+          },
+        );
+
+        const res = await request(app)
+          .get(`/session/${sid}/transcript?limit=${limitQuery}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_transcript_limit');
+        expect(bridge.sessionTranscriptCalls).toHaveLength(0);
+      },
+    );
+
+    it('maps child invalid cursor errors to 400', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-dddddddddddd';
+      const bridge = fakeBridge({
+        sessionTranscriptImpl: async () => {
+          throw Object.assign(new Error('Invalid transcript cursor'), {
+            data: { errorKind: 'invalid_transcript_cursor' },
+          });
+        },
+      });
+      await writeTranscriptSession(sid);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript?cursor=not-a-cursor`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_transcript_cursor');
+      expect(bridge.sessionTranscriptCalls).toEqual([
+        { sessionId: sid, cursor: 'not-a-cursor' },
+      ]);
+    });
+
+    it('maps frozen snapshot conflicts to 409', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
+      const bridge = fakeBridge({
+        sessionTranscriptImpl: async () => {
+          throw Object.assign(new Error('Transcript snapshot is unavailable'), {
+            data: {
+              errorKind: 'transcript_snapshot_unavailable',
+              sessionId: sid,
+            },
+          });
+        },
+      });
+      await writeTranscriptSession(sid);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript?cursor=stale`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'transcript_snapshot_unavailable',
+        sessionId: sid,
+      });
+      expect(bridge.sessionTranscriptCalls).toEqual([
+        { sessionId: sid, cursor: 'stale' },
+      ]);
+    });
+
+    it('maps oversized transcript snapshots to 413', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-ffffffffffff';
+      const bridge = fakeBridge({
+        sessionTranscriptImpl: async () => {
+          throw Object.assign(new Error('Transcript snapshot is too large'), {
+            data: {
+              errorKind: 'transcript_too_large',
+              sessionId: sid,
+              snapshotSize: 300,
+              maxBytes: 200,
+            },
+          });
+        },
+      });
+      await writeTranscriptSession(sid);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(413);
+      expect(res.body).toMatchObject({
+        code: 'transcript_too_large',
+        sessionId: sid,
+        snapshotSize: 300,
+        maxBytes: 200,
+      });
+      expect(bridge.sessionTranscriptCalls).toEqual([{ sessionId: sid }]);
     });
   });
 
@@ -12975,6 +14554,567 @@ describe('createServeApp', () => {
         ]),
       );
       expect(bridge.workspaceMcpCalls).toBe(1);
+    });
+  });
+
+  describe('POST /channels/:channelName/webhooks/:source', () => {
+    it('isolates webhook configs across workspace sources', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const previousWebhookSecret = process.env['QWEN_SHARED_WEBHOOK_SECRET'];
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-multi-home-'),
+      );
+      const primary = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-primary-'),
+      );
+      const secondary = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-secondary-'),
+      );
+      try {
+        process.env['QWEN_HOME'] = tempHome;
+        for (const [workspace, channel] of [
+          [primary, 'primary-channel'],
+          [secondary, 'secondary-channel'],
+        ]) {
+          const qwenDir = path.join(workspace, '.qwen');
+          await fsp.mkdir(qwenDir);
+          await fsp.writeFile(
+            path.join(qwenDir, 'settings.json'),
+            JSON.stringify({
+              channels: {
+                [channel]: {
+                  type: 'dingtalk',
+                  webhooks: {
+                    sources: {
+                      ci: {
+                        secretEnv: 'QWEN_SHARED_WEBHOOK_SECRET',
+                        targets: {
+                          default: {
+                            chatId: `${channel}-chat`,
+                            senderId: 'webhook:ci',
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            }),
+            'utf8',
+          );
+        }
+        process.env['QWEN_SHARED_WEBHOOK_SECRET'] = 'primary-secret';
+        resetHomeEnvBootstrapForTesting();
+
+        const enqueueChannelWebhookTask = vi.fn(async () => ({
+          accepted: true as const,
+        }));
+        const app = createServeApp(
+          { ...baseOpts, workspace: primary },
+          undefined,
+          {
+            bridge: fakeBridge(),
+            enqueueChannelWebhookTask,
+            channelWebhookConfigSources: [
+              {
+                workspaceCwd: primary,
+                channelNames: ['primary-channel'],
+                env: { QWEN_SHARED_WEBHOOK_SECRET: 'primary-secret' },
+              },
+              {
+                workspaceCwd: secondary,
+                channelNames: ['secondary-channel'],
+                env: { QWEN_SHARED_WEBHOOK_SECRET: 'secondary-secret' },
+              },
+            ],
+          },
+        );
+
+        const primaryResponse = await request(app)
+          .post('/channels/primary-channel/webhooks/ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('x-qwen-webhook-secret', 'primary-secret')
+          .send({ eventType: 'ci', targetRef: 'default', title: 'Primary' });
+        const secondaryResponse = await request(app)
+          .post('/channels/secondary-channel/webhooks/ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('x-qwen-webhook-secret', 'secondary-secret')
+          .send({ eventType: 'ci', targetRef: 'default', title: 'Secondary' });
+        const leakedSecretResponse = await request(app)
+          .post('/channels/secondary-channel/webhooks/ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('x-qwen-webhook-secret', 'primary-secret')
+          .send({ eventType: 'ci', targetRef: 'default', title: 'Wrong' });
+
+        expect(primaryResponse.status).toBe(202);
+        expect(secondaryResponse.status).toBe(202);
+        expect(leakedSecretResponse.status).toBe(401);
+        expect(enqueueChannelWebhookTask).toHaveBeenNthCalledWith(1, {
+          channelName: 'primary-channel',
+          source: 'ci',
+          eventType: 'ci',
+          targetRef: 'default',
+          title: 'Primary',
+          payload: {},
+        });
+        expect(enqueueChannelWebhookTask).toHaveBeenNthCalledWith(2, {
+          channelName: 'secondary-channel',
+          source: 'ci',
+          eventType: 'ci',
+          targetRef: 'default',
+          title: 'Secondary',
+          payload: {},
+        });
+      } finally {
+        await Promise.all([
+          fsp.rm(tempHome, { recursive: true, force: true }),
+          fsp.rm(primary, { recursive: true, force: true }),
+          fsp.rm(secondary, { recursive: true, force: true }),
+        ]);
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        restoreEnv('QWEN_SHARED_WEBHOOK_SECRET', previousWebhookSecret);
+        resetHomeEnvBootstrapForTesting();
+      }
+    });
+
+    it('refreshes webhook authentication when the manager config version changes', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-runtime-home-'),
+      );
+      const workspace = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-runtime-workspace-'),
+      );
+      try {
+        process.env['QWEN_HOME'] = tempHome;
+        await fsp.mkdir(path.join(workspace, '.qwen'));
+        await fsp.writeFile(
+          path.join(workspace, '.qwen', 'settings.json'),
+          JSON.stringify({
+            channels: {
+              old: {
+                type: 'dingtalk',
+                webhooks: {
+                  sources: {
+                    ci: {
+                      secret: 'old-secret',
+                      targets: {
+                        default: { chatId: 'old-chat', senderId: 'ci' },
+                      },
+                    },
+                  },
+                },
+              },
+              next: {
+                type: 'dingtalk',
+                webhooks: {
+                  sources: {
+                    ci: {
+                      secret: 'next-secret',
+                      targets: {
+                        default: { chatId: 'next-chat', senderId: 'ci' },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          }),
+          'utf8',
+        );
+        resetHomeEnvBootstrapForTesting();
+        let version = 1;
+        let names = ['old'];
+        let failSources = false;
+        let refreshWebhookConfigs: (() => void) | undefined;
+        const enqueueChannelWebhookTask = vi.fn(async () => ({
+          accepted: true as const,
+        }));
+        const app = createServeApp({ ...baseOpts, workspace }, undefined, {
+          bridge: fakeBridge(),
+          enqueueChannelWebhookTask,
+          getChannelWebhookConfigVersion: () => version,
+          getChannelWebhookConfigSources: () => {
+            if (failSources) throw new Error('settings busy');
+            return names.length > 0
+              ? [{ workspaceCwd: workspace, channelNames: names }]
+              : [];
+          },
+          registerChannelWebhookConfigRefresh: (refresh) => {
+            refreshWebhookConfigs = refresh;
+          },
+        });
+        const send = (channel: string, secret: string) =>
+          request(app)
+            .post(`/channels/${channel}/webhooks/ci`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .set('x-qwen-webhook-secret', secret)
+            .send({ eventType: 'ci', targetRef: 'default', title: 'Build' });
+
+        expect((await send('old', 'old-secret')).status).toBe(202);
+
+        failSources = true;
+        version += 1;
+        expect((await send('old', 'old-secret')).status).toBe(401);
+        failSources = false;
+        expect((await send('old', 'old-secret')).status).toBe(202);
+
+        names = ['next'];
+        version += 1;
+        refreshWebhookConfigs!();
+        names = ['old'];
+        expect((await send('old', 'old-secret')).status).toBe(401);
+        expect((await send('next', 'next-secret')).status).toBe(202);
+
+        names = [];
+        version += 1;
+        refreshWebhookConfigs!();
+        expect((await send('next', 'next-secret')).status).toBe(401);
+      } finally {
+        await Promise.all([
+          fsp.rm(tempHome, { recursive: true, force: true }),
+          fsp.rm(workspace, { recursive: true, force: true }),
+        ]);
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        resetHomeEnvBootstrapForTesting();
+      }
+    });
+
+    it('is only mounted when enqueueChannelWebhookTask is available', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-'),
+      );
+      const workspace = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-workspace-'),
+      );
+      try {
+        process.env['QWEN_HOME'] = tempHome;
+        await fsp.writeFile(
+          path.join(tempHome, 'settings.json'),
+          JSON.stringify({
+            channels: {
+              'dingtalk-main': {
+                type: 'dingtalk',
+                webhooks: {
+                  sources: {
+                    'github-ci': {
+                      secret: 'secret-value',
+                      targets: {
+                        default: {
+                          chatId: 'group-1',
+                          senderId: 'webhook:github-ci',
+                          isGroup: true,
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          }),
+          'utf8',
+        );
+        resetHomeEnvBootstrapForTesting();
+
+        const withoutEnqueue = createServeApp(
+          { ...baseOpts, workspace },
+          undefined,
+          { bridge: fakeBridge() },
+        );
+        const notMounted = await request(withoutEnqueue)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            eventType: 'ci_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          });
+        expect(notMounted.status).toBe(404);
+
+        const enqueueChannelWebhookTask = vi.fn(async () => ({
+          accepted: true as const,
+        }));
+        const withEnqueue = createServeApp(
+          { ...baseOpts, workspace },
+          undefined,
+          {
+            bridge: fakeBridge(),
+            enqueueChannelWebhookTask,
+          },
+        );
+        const mounted = await request(withEnqueue)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('x-qwen-webhook-secret', 'secret-value')
+          .send({
+            eventType: 'ci_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          });
+
+        expect(mounted.status).toBe(202);
+        expect(mounted.body).toEqual({ accepted: true });
+        expect(enqueueChannelWebhookTask).toHaveBeenCalledWith({
+          channelName: 'dingtalk-main',
+          source: 'github-ci',
+          eventType: 'ci_failed',
+          targetRef: 'default',
+          title: 'CI failed',
+          payload: {},
+        });
+
+        const withBearerAuth = createServeApp(
+          { ...baseOpts, workspace, token: 'secret' },
+          undefined,
+          {
+            bridge: fakeBridge(),
+            enqueueChannelWebhookTask,
+          },
+        );
+        const webhookSecretOnly = await request(withBearerAuth)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('x-qwen-webhook-secret', 'secret-value')
+          .send({
+            eventType: 'ci_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          });
+        expect(webhookSecretOnly.status).toBe(202);
+
+        const invalidSecretMalformedJson = await request(withBearerAuth)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Content-Type', 'application/json')
+          .set('x-qwen-webhook-secret', 'wrong')
+          .send('{');
+        expect(invalidSecretMalformedJson.status).toBe(401);
+
+        const withBothSecrets = await request(withBearerAuth)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('x-qwen-webhook-secret', 'secret-value')
+          .send({
+            eventType: 'ci_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          });
+        expect(withBothSecrets.status).toBe(202);
+
+        const withCors = createServeApp(
+          {
+            ...baseOpts,
+            workspace,
+            allowOrigins: ['https://hooks.example'],
+          },
+          undefined,
+          {
+            bridge: fakeBridge(),
+            enqueueChannelWebhookTask,
+          },
+        );
+        const preflight = await request(withCors)
+          .options('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Origin', 'https://hooks.example')
+          .set('Access-Control-Request-Method', 'POST')
+          .set(
+            'Access-Control-Request-Headers',
+            'X-Qwen-Webhook-Secret, Content-Type',
+          );
+        expect(preflight.status).toBe(204);
+        expect(preflight.headers['access-control-allow-headers']).not.toContain(
+          'X-Qwen-Webhook-Secret',
+        );
+
+        const rateLimited = createServeApp(
+          {
+            ...baseOpts,
+            workspace,
+            rateLimit: true,
+            rateLimitMutation: 1,
+            rateLimitWindowMs: 60_000,
+          },
+          undefined,
+          {
+            bridge: fakeBridge(),
+            enqueueChannelWebhookTask,
+          },
+        );
+        const firstWebhook = await request(rateLimited)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('x-qwen-webhook-secret', 'secret-value')
+          .send({
+            eventType: 'ci_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          });
+        expect(firstWebhook.status).toBe(202);
+        const secondWebhook = await request(rateLimited)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('X-Qwen-Client-Id', 'rotated-client')
+          .set('x-qwen-webhook-secret', 'secret-value')
+          .send({
+            eventType: 'ci_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          });
+        expect(secondWebhook.status).toBe(429);
+      } finally {
+        await fsp.rm(tempHome, { recursive: true, force: true });
+        await fsp.rm(workspace, { recursive: true, force: true });
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        resetHomeEnvBootstrapForTesting();
+      }
+    });
+
+    it('skips malformed webhook config instead of crashing the server', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-bad-'),
+      );
+      const workspace = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-workspace-'),
+      );
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation((() => true) as typeof process.stderr.write);
+      try {
+        process.env['QWEN_HOME'] = tempHome;
+        await fsp.writeFile(
+          path.join(tempHome, 'settings.json'),
+          JSON.stringify({
+            channels: {
+              'dingtalk-main': {
+                type: 'dingtalk',
+                webhooks: 'invalid',
+              },
+            },
+          }),
+          'utf8',
+        );
+        resetHomeEnvBootstrapForTesting();
+
+        const enqueueChannelWebhookTask = vi.fn(async () => ({
+          accepted: true as const,
+        }));
+        const app = createServeApp({ ...baseOpts, workspace }, undefined, {
+          bridge: fakeBridge(),
+          enqueueChannelWebhookTask,
+        });
+        const res = await request(app)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('x-qwen-webhook-secret', 'secret-value')
+          .send({
+            eventType: 'ci_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          });
+
+        expect(res.status).toBe(401);
+        expect(enqueueChannelWebhookTask).not.toHaveBeenCalled();
+        expect(
+          stderrSpy.mock.calls.some(([chunk]) =>
+            String(chunk).includes(
+              'Skipping malformed webhook config for channel "dingtalk-main"',
+            ),
+          ),
+        ).toBe(true);
+      } finally {
+        stderrSpy.mockRestore();
+        await fsp.rm(tempHome, { recursive: true, force: true });
+        await fsp.rm(workspace, { recursive: true, force: true });
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        resetHomeEnvBootstrapForTesting();
+      }
+    });
+
+    it('keeps valid webhook sources when a sibling source is malformed', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-bad-source-'),
+      );
+      const workspace = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-workspace-'),
+      );
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation((() => true) as typeof process.stderr.write);
+      try {
+        process.env['QWEN_HOME'] = tempHome;
+        await fsp.writeFile(
+          path.join(tempHome, 'settings.json'),
+          JSON.stringify({
+            channels: {
+              'dingtalk-main': {
+                type: 'dingtalk',
+                webhooks: {
+                  sources: {
+                    'github-ci': {
+                      secret: 'secret-value',
+                      targets: {
+                        default: {
+                          chatId: 'group-1',
+                          senderId: 'webhook:github-ci',
+                        },
+                      },
+                    },
+                    jenkins: {
+                      secretEnv: 'QWEN_MISSING_WEBHOOK_SECRET',
+                      targets: {
+                        default: {
+                          chatId: 'group-1',
+                          senderId: 'webhook:jenkins',
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          }),
+          'utf8',
+        );
+        resetHomeEnvBootstrapForTesting();
+
+        const enqueueChannelWebhookTask = vi.fn(async () => ({
+          accepted: true as const,
+        }));
+        const app = createServeApp({ ...baseOpts, workspace }, undefined, {
+          bridge: fakeBridge(),
+          enqueueChannelWebhookTask,
+        });
+        const res = await request(app)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('x-qwen-webhook-secret', 'secret-value')
+          .send({
+            eventType: 'ci_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          });
+
+        expect(res.status).toBe(202);
+        expect(enqueueChannelWebhookTask).toHaveBeenCalledTimes(1);
+        expect(
+          stderrSpy.mock.calls.some(([chunk]) =>
+            String(chunk).includes(
+              'Skipping malformed webhook source "jenkins" for channel "dingtalk-main"',
+            ),
+          ),
+        ).toBe(true);
+      } finally {
+        stderrSpy.mockRestore();
+        await fsp.rm(tempHome, { recursive: true, force: true });
+        await fsp.rm(workspace, { recursive: true, force: true });
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        resetHomeEnvBootstrapForTesting();
+      }
     });
   });
 
@@ -15514,6 +17654,59 @@ describe('auth device-flow routes', () => {
     expect(json).not.toContain('device-1');
     expect(json).not.toContain('pkce-1');
     expect(fakeProvider.startCount()).toBe(1);
+  });
+
+  it('fans device-flow events out only to primary and trusted workspace bridges', async () => {
+    const fakeProvider = makeFakeProvider();
+    const primaryBridge = fakeBridge();
+    const trustedBridge = fakeBridge();
+    const untrustedBridge = fakeBridge();
+    const primaryPublish = vi.spyOn(primaryBridge, 'publishWorkspaceEvent');
+    const trustedPublish = vi.spyOn(trustedBridge, 'publishWorkspaceEvent');
+    const untrustedPublish = vi.spyOn(untrustedBridge, 'publishWorkspaceEvent');
+    const registry = createWorkspaceRegistry([
+      makeWorkspaceRuntimeForTest({
+        workspaceId: 'primary',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge: primaryBridge,
+      }),
+      makeWorkspaceRuntimeForTest({
+        workspaceId: 'trusted',
+        workspaceCwd: WS_DIFFERENT,
+        primary: false,
+        bridge: trustedBridge,
+      }),
+      makeWorkspaceRuntimeForTest({
+        workspaceId: 'untrusted',
+        workspaceCwd: '/work/untrusted',
+        primary: false,
+        trusted: false,
+        bridge: untrustedBridge,
+      }),
+    ]);
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      workspaceRegistry: registry,
+      deviceFlowProviders: [fakeProvider.provider],
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+
+    expect(res.status).toBe(201);
+    expect(primaryPublish).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'auth_device_flow_started' }),
+    );
+    expect(trustedPublish).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'auth_device_flow_started' }),
+    );
+    expect(untrustedPublish).not.toHaveBeenCalled();
+    (
+      app.locals['deviceFlowRegistry'] as DeviceFlowRegistryType | undefined
+    )?.dispose();
   });
 
   it('POST is rejected with 401 token_required on token-less loopback (strict gate)', async () => {

@@ -43,6 +43,7 @@ import { MessageType } from '../../ui/types.js';
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 const debugLoggerDebugSpy = vi.hoisted(() => vi.fn());
 const runVisionBridgeSpy = vi.hoisted(() => vi.fn());
+const refreshMemoryAfterManagedWriteSpy = vi.hoisted(() => vi.fn());
 const transcribeVoiceAudioSpy = vi.hoisted(() => vi.fn());
 // Records every LoopTickResolver construction's deps so a test can assert what
 // Session computed (e.g. the home confinement root) without a private-field peek.
@@ -62,6 +63,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     generatePromptSuggestion: vi.fn(),
     logPromptSuggestion: vi.fn(),
     runVisionBridge: runVisionBridgeSpy,
+    refreshMemoryAfterManagedWrite: refreshMemoryAfterManagedWriteSpy,
     // Transparent recording wrapper: records the constructor deps, then behaves
     // exactly like the real resolver (subclass → instanceof + methods preserved).
     LoopTickResolver: class extends actual.LoopTickResolver {
@@ -378,6 +380,8 @@ describe('Session', () => {
 
   beforeEach(() => {
     runVisionBridgeSpy.mockReset();
+    refreshMemoryAfterManagedWriteSpy.mockReset();
+    refreshMemoryAfterManagedWriteSpy.mockResolvedValue(false);
     transcribeVoiceAudioSpy.mockReset();
     currentModel = 'qwen3-code-plus';
     currentAuthType = AuthType.USE_OPENAI;
@@ -459,6 +463,7 @@ describe('Session', () => {
       getModel: vi.fn().mockImplementation(() => currentModel),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
+      getProjectRoot: vi.fn().mockReturnValue('/repo'),
       // Folder trust gates the project `.qwen/loop.md`; default trusted (the
       // production default). Untrusted-folder tests override to false.
       isTrustedFolder: vi.fn().mockReturnValue(true),
@@ -540,6 +545,59 @@ describe('Session', () => {
     mockToolRegistry = undefined as unknown as typeof mockToolRegistry;
     vi.restoreAllMocks();
     vi.clearAllTimers();
+  });
+
+  it('forwards recording degradation and unsubscribes on dispose', async () => {
+    let recordingFailureListener:
+      | ((event: { sessionId: string; error: Error }) => Promise<void> | void)
+      | undefined;
+    const unsubscribe = vi.fn();
+    session.dispose();
+    mockConfig.onChatRecordingFailure = vi.fn((listener) => {
+      recordingFailureListener = listener;
+      return unsubscribe;
+    });
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+
+    await recordingFailureListener?.({
+      sessionId: 'failed-session-id',
+      error: new Error('private details'),
+    });
+
+    expect(mockClient.extNotification).toHaveBeenCalledWith(
+      'qwen/notify/session/recording-degraded',
+      {
+        v: 1,
+        sessionId: 'failed-session-id',
+        reason: 'write_failed',
+      },
+    );
+    session.dispose();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it('attributes a delayed title notification to the persisted record session', () => {
+    const callback = mockChatRecordingService.setTitleRecordedCallback.mock
+      .calls[0]?.[0] as
+      | ((title: string, source: string, sessionId: string) => void)
+      | undefined;
+
+    callback?.('Durable title', 'auto', 'persisted-session-id');
+
+    expect(mockClient.extNotification).toHaveBeenCalledWith(
+      'qwen/notify/session/title-update',
+      {
+        v: 1,
+        sessionId: 'persisted-session-id',
+        title: 'Durable title',
+        titleSource: 'auto',
+      },
+    );
   });
 
   describe('continueLastTurn', () => {
@@ -1914,6 +1972,89 @@ describe('Session', () => {
       ).toHaveBeenCalledWith(latestSnapshot);
     });
 
+    it('fires MessageDisplay with cumulative non-thought text and is_final on the ACP prompt path', async () => {
+      // Regression: the ACP surface consumes GeminiChat's stream directly
+      // (never entering GeminiClient.sendMessageStream), so it must fire the
+      // MessageDisplay hook itself — without this, an IDE/daemon client sees
+      // the hook advertised but never receives an event.
+      const messageBus = { request: vi.fn().mockResolvedValue({}) };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.hasHooksForEvent = vi
+        .fn()
+        .mockImplementation((event: string) => event === 'MessageDisplay');
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      { text: 'Let me think...', thought: true },
+                      { text: 'Hello, ' },
+                    ],
+                  },
+                },
+              ],
+            },
+          },
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [{ text: 'world.' }] } }],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      const messageDisplayCalls = messageBus.request.mock.calls.filter(
+        ([request]) => request.eventName === 'MessageDisplay',
+      );
+      expect(messageDisplayCalls.length).toBeGreaterThan(0);
+      const finalCall = messageDisplayCalls[messageDisplayCalls.length - 1][0];
+      // Cumulative text of the displayed (non-thought) parts only.
+      expect(finalCall.input).toMatchObject({
+        displayed_text: 'Hello, world.',
+        is_final: true,
+      });
+      expect(finalCall.input.message_id).toEqual(expect.any(String));
+      // Exactly one is_final firing for the message.
+      expect(
+        messageDisplayCalls.filter(([request]) => request.input.is_final),
+      ).toHaveLength(1);
+    });
+
+    it('does not fire MessageDisplay on the ACP prompt path when the hook is not registered', async () => {
+      const messageBus = { request: vi.fn().mockResolvedValue({}) };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(false);
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [{ text: 'Hello.' }] } }],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      expect(messageBus.request).not.toHaveBeenCalled();
+    });
+
     it('drains background task notifications through ACP after the prompt is idle', async () => {
       mockChat.sendMessageStream = vi
         .fn()
@@ -2027,6 +2168,143 @@ describe('Session', () => {
           source: 'background_notification',
         },
       );
+    });
+
+    it('fires MessageDisplay with cumulative text and a single is_final for a background notification response', async () => {
+      // The background-notification loop (Session.ts ~line 3638) creates its
+      // own MessageDisplayDispatcher, independent of the ACP prompt path's —
+      // a regression here would not be caught by the prompt-path test alone.
+      const messageBus = { request: vi.fn().mockResolvedValue({}) };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.hasHooksForEvent = vi
+        .fn()
+        .mockImplementation(
+          (eventName: string) => eventName === 'MessageDisplay',
+        );
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'I saw the background result.' }],
+                    },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+
+      callback(
+        'Background agent "worker" completed.',
+        '<task-notification><status>completed</status></task-notification>',
+        {
+          agentId: 'agent-1',
+          status: 'completed',
+          toolUseId: 'tool-1',
+        },
+      );
+
+      await vi.waitFor(() => {
+        const finals = messageBus.request.mock.calls.filter(
+          ([request]) =>
+            request.eventName === 'MessageDisplay' && request.input.is_final,
+        );
+        expect(finals).toHaveLength(1);
+      });
+
+      const messageDisplayCalls = messageBus.request.mock.calls.filter(
+        ([request]) => request.eventName === 'MessageDisplay',
+      );
+      const finalCall = messageDisplayCalls[messageDisplayCalls.length - 1][0];
+      expect(finalCall.input).toMatchObject({
+        displayed_text: 'I saw the background result.',
+        is_final: true,
+      });
+    });
+
+    it('suppresses is_final for MessageDisplay when a background notification response is cancelled mid-stream', async () => {
+      let releaseNotification: () => void;
+      const notificationGate = new Promise<void>((resolve) => {
+        releaseNotification = resolve;
+      });
+      async function* notificationStream() {
+        yield {
+          type: core.StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              { content: { parts: [{ text: 'partial background reply' }] } },
+            ],
+          },
+        };
+        await notificationGate;
+      }
+
+      const messageBus = { request: vi.fn().mockResolvedValue({}) };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.hasHooksForEvent = vi
+        .fn()
+        .mockImplementation(
+          (eventName: string) => eventName === 'MessageDisplay',
+        );
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(notificationStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+
+      callback('done', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+
+      // Wait until the notification's own streamed send has started (the
+      // dispatcher exists and has received the first chunk) rather than for
+      // a mid-stream MessageDisplay flush, which is debounced (~200ms) and
+      // may not be due yet by the time we cancel.
+      await vi.waitFor(() =>
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
+      );
+
+      await session.cancelPendingPrompt();
+      releaseNotification!();
+
+      const finals = messageBus.request.mock.calls.filter(
+        ([request]) =>
+          request.eventName === 'MessageDisplay' && request.input.is_final,
+      );
+      expect(finals).toHaveLength(0);
     });
 
     it('cancels an in-flight background notification prompt', async () => {
@@ -3031,6 +3309,57 @@ describe('Session', () => {
           ?.parts as Part[];
         expect(bridgeParts.some((part) => 'inlineData' in part)).toBe(true);
         expect(textParts(firstSentMessage())).toContain('[file image]');
+      } finally {
+        readManyFilesSpy.mockRestore();
+      }
+    });
+
+    it('keeps the user prompt as the final part after referenced file content', async () => {
+      // Regression: JetBrains ACP attaches the active editor as a file
+      // reference. Appending its content AFTER the prompt buried the actual
+      // instruction, and recency-biased local models (Ollama qwen) answered as
+      // if the file were the task. The prompt must remain the last, prominent
+      // part. See #resolvePrompt.
+      const readManyFilesSpy = vi
+        .spyOn(core, 'readManyFiles')
+        .mockResolvedValue({
+          contentParts:
+            '\n--- Content from referenced files ---\nContent from @editor.ts:\nexport const answer = 42;\n--- End of content ---',
+          files: [],
+        } as Awaited<ReturnType<typeof core.readManyFiles>>);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'Reverse the string "hello"' },
+            {
+              type: 'resource_link',
+              name: 'editor.ts',
+              uri: 'file://editor.ts',
+            },
+          ],
+        });
+
+        const sent = firstSentMessage();
+        const texts = textParts(sent);
+
+        // The user's instruction is the FINAL text part.
+        expect(texts.at(-1)).toContain('Reverse the string "hello"');
+
+        // File content precedes the instruction (prompt is not buried before
+        // the appended reference content).
+        const fileIndex = texts.findIndex((t) =>
+          t.includes('--- Content from referenced files ---'),
+        );
+        const promptIndex = texts.findIndex((t) =>
+          t.includes('Reverse the string "hello"'),
+        );
+        expect(fileIndex).toBeGreaterThanOrEqual(0);
+        expect(promptIndex).toBeGreaterThan(fileIndex);
       } finally {
         readManyFilesSpy.mockRestore();
       }
@@ -8821,14 +9150,9 @@ describe('Session', () => {
       );
     });
 
-    describe('isolated scheduled tasks', () => {
-      /** Mock scheduler that delivers exactly one job through `start`. */
-      function schedulerFiring(job: {
-        prompt: string;
-        cronExpr?: string;
-        missed?: boolean;
-        runMode?: 'shared' | 'isolated';
-      }) {
+    describe('in-session cron MessageDisplay', () => {
+      /** Mock scheduler that delivers exactly one in-session job through `start`. */
+      function schedulerFiring(job: { prompt: string }) {
         return {
           size: 1,
           hasPendingWork: true,
@@ -8838,160 +9162,118 @@ describe('Session', () => {
         };
       }
 
-      it('dispatches an isolated fire into a sub-session, never into the bound session', async () => {
-        // The whole point of `isolated`: the fire must NOT be relayed through
-        // the model in this session. Relaying it would put the run behind
-        // create_sub_session's 'ask' permission, which an unattended fire has
-        // nobody to answer.
-        const spawner = vi.fn().mockResolvedValue({ sessionId: 'sub-abc' });
-        const scheduler = schedulerFiring({
-          prompt: 'nightly report',
-          runMode: 'isolated',
-        });
+      it('fires MessageDisplay with cumulative text and a single is_final for an in-session cron fire', async () => {
+        // The cron loop (Session.ts #executeCronPromptInner) creates its own
+        // MessageDisplayDispatcher, independent of the ACP prompt path's -
+        // a regression here would not be caught by the prompt-path test alone.
+        const messageBus = { request: vi.fn().mockResolvedValue({}) };
+        const scheduler = schedulerFiring({ prompt: 'nightly report' });
         mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
         mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
-        mockConfig.getSubSessionSpawner = vi.fn().mockReturnValue(spawner);
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation(
+            (eventName: string) => eventName === 'MessageDisplay',
+          );
         mockChat.sendMessageStream = vi
           .fn()
-          .mockResolvedValue(createEmptyStream());
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    { content: { parts: [{ text: 'cron result' }] } },
+                  ],
+                },
+              },
+            ]),
+          );
 
         await session.prompt({
           sessionId: 'test-session-id',
           prompt: [{ type: 'text', text: 'hello' }],
         });
 
-        await vi.waitFor(() => expect(spawner).toHaveBeenCalledTimes(1));
-        // Raw prompt, fire-and-forget — no wrapper instructing the model.
-        expect(spawner).toHaveBeenCalledWith({
-          prompt: 'nightly report',
-          completion: 'sent',
+        await vi.waitFor(() => {
+          const finals = messageBus.request.mock.calls.filter(
+            ([request]) =>
+              request.eventName === 'MessageDisplay' && request.input.is_final,
+          );
+          expect(finals).toHaveLength(1);
         });
-        // Only the user's own turn reached the model; the cron fire did not.
-        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+
+        const messageDisplayCalls = messageBus.request.mock.calls.filter(
+          ([request]) => request.eventName === 'MessageDisplay',
+        );
+        const finalCall =
+          messageDisplayCalls[messageDisplayCalls.length - 1][0];
+        expect(finalCall.input).toMatchObject({
+          displayed_text: 'cron result',
+          is_final: true,
+        });
       });
 
-      it('runs an isolated fire in-session when no sub-session spawner is wired', async () => {
-        // Outside `qwen serve` there is no bridge to spawn into. Losing the
-        // task is worse than losing isolation, so the fire runs inline.
-        const scheduler = schedulerFiring({
-          prompt: 'nightly report',
-          runMode: 'isolated',
+      it('suppresses is_final for MessageDisplay when a cron fire is cancelled mid-stream', async () => {
+        let releaseCron: () => void;
+        const cronGate = new Promise<void>((resolve) => {
+          releaseCron = resolve;
         });
+        async function* cronStream() {
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                { content: { parts: [{ text: 'partial cron result' }] } },
+              ],
+            },
+          };
+          await cronGate;
+        }
+
+        const messageBus = { request: vi.fn().mockResolvedValue({}) };
+        const scheduler = schedulerFiring({ prompt: 'nightly report' });
         mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
         mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
-        mockConfig.getSubSessionSpawner = vi.fn().mockReturnValue(undefined);
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation(
+            (eventName: string) => eventName === 'MessageDisplay',
+          );
         mockChat.sendMessageStream = vi
           .fn()
-          .mockResolvedValue(createEmptyStream());
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(cronStream());
 
         await session.prompt({
           sessionId: 'test-session-id',
           prompt: [{ type: 'text', text: 'hello' }],
         });
 
+        // Wait until the cron fire's own streamed send has started (the
+        // dispatcher exists and has received the first chunk) rather than
+        // for a mid-stream MessageDisplay flush, which is debounced
+        // (~200ms) and may not be due yet by the time we cancel.
         await vi.waitFor(() =>
           expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
         );
-        const cronCall = (
-          mockChat.sendMessageStream as ReturnType<typeof vi.fn>
-        ).mock.calls[1];
-        const text = (cronCall![1].message as Array<{ text?: string }>)
-          .map((p) => p.text ?? '')
-          .join('');
-        expect(text).toContain('nightly report');
-      });
 
-      it('keeps a missed isolated one-shot on the in-session confirm-first path', async () => {
-        const spawner = vi.fn().mockResolvedValue({ sessionId: 'sub-abc' });
-        const scheduler = schedulerFiring({
-          prompt: 'nightly report',
-          runMode: 'isolated',
-          missed: true,
-        });
-        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
-        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
-        mockConfig.getSubSessionSpawner = vi.fn().mockReturnValue(spawner);
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValue(createEmptyStream());
+        await session.cancelPendingPrompt();
+        releaseCron!();
 
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: 'hello' }],
-        });
-
-        await vi.waitFor(() =>
-          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
+        expect(scheduler.stop).toHaveBeenCalled();
+        const finals = messageBus.request.mock.calls.filter(
+          ([request]) =>
+            request.eventName === 'MessageDisplay' && request.input.is_final,
         );
-        expect(spawner).not.toHaveBeenCalled();
-      });
-
-      it('drops the fire (never falls back in-session) when the dispatch fails', async () => {
-        // A failed dispatch may already have sent the prompt, and running an
-        // isolated task inside the bound session would defeat the isolation the
-        // user asked for. Log and drop.
-        //
-        // The scheduler has already persisted this fire as a run, and
-        // `debugLogger.warn` writes nothing unless a debug log session is
-        // active — so the drop MUST also reach stderr, or a nightly task can
-        // fail forever while its history claims it ran.
-        const stderrWrite = vi
-          .spyOn(process.stderr, 'write')
-          .mockReturnValue(true);
-        const spawner = vi.fn().mockRejectedValue(new Error('cap reached'));
-        const scheduler = schedulerFiring({
-          prompt: 'nightly report',
-          runMode: 'isolated',
-        });
-        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
-        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
-        mockConfig.getSubSessionSpawner = vi.fn().mockReturnValue(spawner);
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValue(createEmptyStream());
-
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: 'hello' }],
-        });
-
-        await vi.waitFor(() =>
-          expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
-            expect.stringContaining('Isolated scheduled task dispatch failed'),
-          ),
-        );
-        const stderr = stderrWrite.mock.calls.map((c) => String(c[0])).join('');
-        expect(stderr).toContain('isolated scheduled task dispatch failed');
-        expect(stderr).toContain('cap reached');
-        stderrWrite.mockRestore();
-        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
-      });
-
-      it('leaves a shared fire on the in-session path', async () => {
-        const spawner = vi.fn().mockResolvedValue({ sessionId: 'sub-abc' });
-        const scheduler = schedulerFiring({
-          prompt: 'nightly report',
-          runMode: 'shared',
-        });
-        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
-        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
-        mockConfig.getSubSessionSpawner = vi.fn().mockReturnValue(spawner);
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValue(createEmptyStream());
-
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: 'hello' }],
-        });
-
-        await vi.waitFor(() =>
-          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
-        );
-        expect(spawner).not.toHaveBeenCalled();
+        expect(finals).toHaveLength(0);
       });
     });
-
     describe('hooks', () => {
       describe('PermissionDenied hook', () => {
         it('fires PermissionDenied hooks for AUTO classifier blocks', async () => {
@@ -9370,6 +9652,151 @@ describe('Session', () => {
               },
             },
           });
+        });
+
+        it('fires MessageDisplay with cumulative text and a single is_final during Stop hook continuation', async () => {
+          // The Stop-hook continuation loop (Session.ts ~line 2282) creates
+          // its own MessageDisplayDispatcher, independent of the main prompt
+          // loop's — a regression here would not be caught by the
+          // ACP-prompt-path test alone.
+          let stopHookCalls = 0;
+          const messageBus = {
+            request: vi.fn().mockImplementation(async (request) => {
+              if (request.eventName === 'Stop') {
+                stopHookCalls++;
+                return stopHookCalls === 1
+                  ? {
+                      success: true,
+                      output: { decision: 'block', reason: 'keep going' },
+                    }
+                  : { success: true, output: {} };
+              }
+              return { success: true, output: {} };
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation(
+              (eventName: string) =>
+                eventName === 'Stop' || eventName === 'MessageDisplay',
+            );
+          mockChat.getHistory = vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'response text' }] },
+            ]);
+          mockChat.getLastModelMessageText = vi
+            .fn()
+            .mockReturnValue('response text');
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(createEmptyStream())
+            .mockResolvedValueOnce(
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    candidates: [
+                      { content: { parts: [{ text: 'continued reply' }] } },
+                    ],
+                  },
+                },
+              ]),
+            );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          const messageDisplayCalls = messageBus.request.mock.calls.filter(
+            ([request]) => request.eventName === 'MessageDisplay',
+          );
+          expect(messageDisplayCalls.length).toBeGreaterThan(0);
+          const finalCall =
+            messageDisplayCalls[messageDisplayCalls.length - 1][0];
+          expect(finalCall.input).toMatchObject({
+            displayed_text: 'continued reply',
+            is_final: true,
+          });
+          expect(
+            messageDisplayCalls.filter(([request]) => request.input.is_final),
+          ).toHaveLength(1);
+        });
+
+        it('suppresses is_final for MessageDisplay when the turn is cancelled mid Stop-hook continuation', async () => {
+          let releaseContinuation: () => void;
+          const continuationGate = new Promise<void>((resolve) => {
+            releaseContinuation = resolve;
+          });
+          async function* continuationStream() {
+            yield {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  { content: { parts: [{ text: 'partial continuation' }] } },
+                ],
+              },
+            };
+            await continuationGate;
+          }
+
+          const messageBus = {
+            request: vi.fn().mockImplementation(async (request) => {
+              if (request.eventName === 'Stop') {
+                return {
+                  success: true,
+                  output: { decision: 'block', reason: 'keep going' },
+                };
+              }
+              return { success: true, output: {} };
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation(
+              (eventName: string) =>
+                eventName === 'Stop' || eventName === 'MessageDisplay',
+            );
+          mockChat.getHistory = vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'response text' }] },
+            ]);
+          mockChat.getLastModelMessageText = vi
+            .fn()
+            .mockReturnValue('response text');
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(createEmptyStream())
+            .mockResolvedValueOnce(continuationStream());
+
+          const promptPromise = session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          // Wait until the continuation's own streamed send has started
+          // (the dispatcher exists and has received the first chunk) rather
+          // than for a mid-stream MessageDisplay flush, which is debounced
+          // (~200ms) and may not be due yet by the time we cancel.
+          await vi.waitFor(() =>
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
+          );
+
+          await session.cancelPendingPrompt();
+          releaseContinuation!();
+          await promptPromise;
+
+          const finals = messageBus.request.mock.calls.filter(
+            ([request]) =>
+              request.eventName === 'MessageDisplay' && request.input.is_final,
+          );
+          expect(finals).toHaveLength(0);
         });
       });
 
@@ -10475,6 +10902,43 @@ describe('Session', () => {
         isOutputMarkdown: true,
       };
     }
+
+    it('refreshes managed memory instructions after successful ACP tool writes', async () => {
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'wrote memory',
+        returnDisplay: 'wrote memory',
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool(core.ToolNames.WRITE_FILE, execute),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-memory-write', [
+        {
+          id: 'write_memory',
+          name: core.ToolNames.WRITE_FILE,
+          args: { file_path: '/workspace/.qwen/memory/project.md' },
+        },
+      ]);
+
+      expect(result.stopAfterPermissionCancel).toBe(false);
+      expect(refreshMemoryAfterManagedWriteSpy).toHaveBeenCalledTimes(1);
+      expect(refreshMemoryAfterManagedWriteSpy).toHaveBeenCalledWith(
+        mockConfig,
+        [
+          {
+            toolName: core.ToolNames.WRITE_FILE,
+            args: { file_path: '/workspace/.qwen/memory/project.md' },
+            status: 'success',
+          },
+        ],
+        {
+          logContext: 'ACP session test-session-id memory tool batch',
+        },
+      );
+    });
 
     it('does not fire PostToolBatch hooks from the ACP session path', async () => {
       const messageBus = {

@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import type { WebShellApi } from './App';
 
 type StreamingState = 'idle' | 'responding';
@@ -29,10 +30,12 @@ type ChatEditorTestProps = {
     text: string,
     images?: undefined,
     commitAccepted?: () => void,
+    metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
   ) => boolean | void;
   skills?: Array<{ name: string; description: string }>;
   isPreparing?: boolean;
   dialogOpen?: boolean;
+  placeholderText?: string;
 };
 
 const {
@@ -70,8 +73,8 @@ const {
       sendPrompt: vi.fn().mockResolvedValue(undefined),
       createSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
       attachSession: vi.fn().mockResolvedValue(undefined),
-      closeSession: vi.fn().mockResolvedValue(undefined),
       clearSession: vi.fn().mockResolvedValue(undefined),
+      releaseSession: vi.fn().mockResolvedValue(undefined),
       refreshCommands: vi.fn().mockResolvedValue(undefined),
       setModel: vi.fn().mockResolvedValue(undefined),
       setApprovalMode: vi.fn().mockResolvedValue(undefined),
@@ -82,6 +85,7 @@ const {
       forkSession: vi.fn().mockResolvedValue({ launched: false }),
       sendShellCommand: vi.fn().mockResolvedValue(undefined),
       getStats: vi.fn().mockResolvedValue({}),
+      loadArtifacts: vi.fn().mockResolvedValue({ artifacts: [] }),
       loadSession: vi.fn().mockResolvedValue(undefined),
     },
     mockWorkspaceActions: {
@@ -95,6 +99,7 @@ const {
     },
     mockStore: {
       dispatch: vi.fn(),
+      reset: vi.fn(),
       appendLocalUserMessage: vi.fn(),
       appendLocalAssistantMessage: vi.fn(),
     },
@@ -105,6 +110,7 @@ const {
     },
     testState: {
       prompt: 'hello',
+      inputAnnotations: undefined as DaemonInputAnnotation[] | undefined,
       streamingState: 'idle' as StreamingState,
       blocks: [] as unknown[],
       latestChatEditorProps: null as ChatEditorTestProps | null,
@@ -137,6 +143,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
     onDismissFollowup: mockFollowup.onDismissFollowup,
   }),
   useSessionNotices: () => ({ notices: [], dismissNotice: vi.fn() }),
+  usePromptStatus: () => 'idle',
   useSettings: () => ({
     settings: [],
     setValue: vi.fn().mockResolvedValue(undefined),
@@ -147,11 +154,14 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useTranscriptBlocks: () => testState.blocks,
   useTranscriptStore: () => mockStore,
   useWorkspaceActions: () => mockWorkspaceActions,
-  useWorkspaceEventSignals: () => ({ extensionsVersion: 0 }),
+  useWorkspaceEventSignals: () => ({
+    artifactsVersion: 0,
+    extensionsVersion: 0,
+  }),
 }));
 
-vi.mock('@qwen-code/sdk/daemon', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@qwen-code/sdk/daemon')>()),
+vi.mock('@qwen-code/sdk/daemon', () => ({
+  DAEMON_GOAL_STATUS_SENTINEL_PREFIX: 'qwen-goal-status:',
   isDaemonTurnError: () => false,
 }));
 
@@ -204,8 +214,15 @@ vi.mock('./components/ChatEditor', async () => {
         {
           'data-testid': 'submit',
           'data-preparing': props.isPreparing ? 'true' : 'false',
-          onClick: () =>
-            props.onSubmit(testState.prompt, undefined, editorCommit),
+          onClick: () => {
+            if (testState.inputAnnotations) {
+              props.onSubmit(testState.prompt, undefined, editorCommit, {
+                inputAnnotations: testState.inputAnnotations,
+              });
+              return;
+            }
+            props.onSubmit(testState.prompt, undefined, editorCommit);
+          },
           type: 'button',
         },
         'submit',
@@ -216,6 +233,27 @@ vi.mock('./components/ChatEditor', async () => {
 
 vi.mock('./components/MessageList', async () => {
   const React = await import('react');
+  const { useInteractionBlocker } = await import('./interactionBlockContext');
+  function InteractionBlockerProbe() {
+    const registerInteractionBlocker = useInteractionBlocker();
+    const releaseRef = React.useRef<(() => void) | null>(null);
+    return React.createElement(
+      'button',
+      {
+        'data-testid': 'interaction-blocker',
+        onClick: () => {
+          if (releaseRef.current) {
+            releaseRef.current();
+            releaseRef.current = null;
+          } else {
+            releaseRef.current = registerInteractionBlocker();
+          }
+        },
+        type: 'button',
+      },
+      releaseRef.current ? 'release blocker' : 'register blocker',
+    );
+  }
   return {
     MessageList: React.forwardRef(function MessageList(
       props: { showRetryHint?: boolean; onRetryClick?: () => void },
@@ -225,6 +263,7 @@ vi.mock('./components/MessageList', async () => {
       return React.createElement(
         'div',
         { 'data-testid': 'messages' },
+        React.createElement(InteractionBlockerProbe),
         props.showRetryHint
           ? React.createElement(
               'button',
@@ -299,6 +338,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
   return {
     WebShellSidebar: (props: {
       sessionListReloadToken?: number;
+      collapsed?: boolean;
       onOpenDaemonStatus?: () => void;
       onOpenSessions?: () => void;
       onOpenSplitView?: () => void;
@@ -308,7 +348,10 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
       // exercise those activePanel branches (neither has a slash command).
       return React.createElement(
         'div',
-        { 'data-testid': 'sidebar' },
+        {
+          'data-testid': 'sidebar',
+          'data-collapsed': String(Boolean(props.collapsed)),
+        },
         React.createElement(
           'button',
           {
@@ -367,8 +410,33 @@ vi.doMock('./components/SplitView', async () => {
       onExit?: () => void;
       sessionIds?: string[];
       onPanesChange?: (ids: string[]) => void;
-    }) =>
-      React.createElement(
+      onPaneArtifactsChange?: (
+        sessionId: string,
+        artifacts: unknown[],
+        workspaceActions: unknown,
+      ) => void;
+      onRightPanelOpen?: (request: unknown) => void;
+    }) => {
+      const paneActions = {
+        readWorkspaceFile: vi.fn().mockResolvedValue('<p>pane</p>'),
+      };
+      const artifact = {
+        id: 'pane-artifact',
+        kind: 'report',
+        storage: 'memory',
+        source: 'tool',
+        status: 'available',
+        title: 'Pane artifact',
+        updatedAt: '2026-07-10T00:00:00Z',
+        sizeBytes: 10,
+      };
+      const updatedArtifact = {
+        ...artifact,
+        title: 'Updated pane artifact',
+        updatedAt: '2026-07-10T00:01:00Z',
+        sizeBytes: 20,
+      };
+      return React.createElement(
         'div',
         { 'data-testid': 'split-view-mock' },
         // Surface the seed so a test can assert the App preserved / restored it.
@@ -390,13 +458,71 @@ vi.doMock('./components/SplitView', async () => {
         React.createElement(
           'button',
           {
+            'data-testid': 'split-report-artifact',
+            type: 'button',
+            onClick: () =>
+              props.onPaneArtifactsChange?.(
+                'pane-session',
+                [artifact],
+                paneActions,
+              ),
+          },
+          'artifact',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'split-report-updated-artifact',
+            type: 'button',
+            onClick: () =>
+              props.onPaneArtifactsChange?.(
+                'pane-session',
+                [updatedArtifact],
+                paneActions,
+              ),
+          },
+          'updated artifact',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'split-clear-artifacts',
+            type: 'button',
+            onClick: () =>
+              props.onPaneArtifactsChange?.('pane-session', [], paneActions),
+          },
+          'clear artifacts',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'split-open-artifact',
+            type: 'button',
+            onClick: () =>
+              props.onRightPanelOpen?.({
+                id: 'artifact:pane-artifact:pane-session',
+                kind: 'artifact',
+                title: artifact.title,
+                turnId: 'turn-1',
+                artifactId: artifact.id,
+                artifact,
+                workspaceActions: paneActions,
+                previewContent: '<p>stale</p>',
+              }),
+          },
+          'open artifact',
+        ),
+        React.createElement(
+          'button',
+          {
             'data-testid': 'split-back',
             type: 'button',
             onClick: props.onExit,
           },
           'back',
         ),
-      ),
+      );
+    },
   };
 });
 // Capturing mock: stores the onRunPrompt handler (App's real runTaskManually)
@@ -482,6 +608,20 @@ async function clickSubmit(container: HTMLElement): Promise<void> {
   });
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value?: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value?: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = (value) => res(value as T | PromiseLike<T>);
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 // A transcript block shaped like extractPendingPermission() expects. Defaults to
 // a non-AskUserQuestion tool (→ pendingToolApproval); pass toolName
 // 'ask_user_question' to exercise the pendingAskUserApproval branch instead.
@@ -536,6 +676,7 @@ beforeEach(() => {
   mockConnection.loadingTranscript = false;
   mockConnection.catchingUp = false;
   testState.prompt = 'hello';
+  testState.inputAnnotations = undefined;
   testState.streamingState = 'idle';
   testState.blocks = [];
   testState.latestChatEditorProps = null;
@@ -557,8 +698,8 @@ beforeEach(() => {
     sessionId: 'session-1',
   });
   mockSessionActions.attachSession.mockResolvedValue(undefined);
-  mockSessionActions.closeSession.mockResolvedValue(undefined);
   mockSessionActions.clearSession.mockResolvedValue(undefined);
+  mockSessionActions.releaseSession.mockResolvedValue(undefined);
   mockSessionActions.loadSession.mockResolvedValue(undefined);
   mockSessionActions.refreshCommands.mockResolvedValue(undefined);
   mockSessionActions.setModel.mockResolvedValue(undefined);
@@ -571,6 +712,8 @@ beforeEach(() => {
   mockSessionActions.sendShellCommand.mockResolvedValue(undefined);
   mockSessionActions.getStats.mockResolvedValue({});
   mockSessionActions.loadSession.mockResolvedValue(undefined);
+  mockStore.reset.mockClear();
+  mockStore.dispatch.mockClear();
   mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({ skills: [] });
   mockWorkspaceActions.loadProviders.mockResolvedValue({ current: null });
   mockWorkspaceActions.loadPreflight.mockResolvedValue(null);
@@ -591,6 +734,48 @@ afterEach(() => {
 });
 
 describe('App session callbacks', () => {
+  it('uses configured composer placeholders by state and falls back for blank values', async () => {
+    const composerPlaceholders = {
+      idle: 'Ask a question',
+      loading: 'Preparing chat',
+      processing: 'Working on it',
+    };
+    const { rerender } = renderApp({ composerPlaceholders });
+    await flush();
+
+    expect(testState.latestChatEditorProps?.placeholderText).toBe(
+      'Ask a question',
+    );
+
+    testState.streamingState = 'responding';
+    rerender({ composerPlaceholders });
+    await flush();
+    expect(testState.latestChatEditorProps?.placeholderText).toBe(
+      'Working on it',
+    );
+
+    rerender({ composerPlaceholders: { idle: 'Ask a question' } });
+    await flush();
+    expect(testState.latestChatEditorProps?.placeholderText).toBe(
+      'Processing. New messages will be queued.',
+    );
+
+    mockConnection.catchingUp = true;
+    rerender({ composerPlaceholders });
+    await flush();
+    expect(testState.latestChatEditorProps?.placeholderText).toBe(
+      'Preparing chat',
+    );
+
+    mockConnection.catchingUp = false;
+    testState.streamingState = 'idle';
+    rerender({ composerPlaceholders: { idle: '   ' } });
+    await flush();
+    expect(testState.latestChatEditorProps?.placeholderText).toBe(
+      'Type a message or @ file path',
+    );
+  });
+
   it('filters disabled skills from the web-shell skills list', async () => {
     mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
       skills: [
@@ -792,6 +977,161 @@ describe('App session callbacks', () => {
     expect(sidebarTokens.at(-1)).not.toBe(tokenAfterSubmit);
   });
 
+  it('keeps concurrent programmatic submissions behind session preparation', async () => {
+    mockConnection.sessionId = undefined;
+    const callbackStarted = deferred<void>();
+    const callbackFinished = deferred<void>();
+    mockSessionActions.createSession.mockImplementation(async () => {
+      mockConnection.sessionId = 'session-created';
+      return { sessionId: 'session-created' };
+    });
+    const onSessionCreated = vi.fn(async () => {
+      callbackStarted.resolve();
+      await callbackFinished.promise;
+    });
+    renderApp({ onSessionCreated });
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('first');
+      await callbackStarted.promise;
+    });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('second');
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
+    expect(mockSessionActions.attachSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+
+    await act(async () => {
+      callbackFinished.resolve();
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+      });
+    });
+    expect(mockSessionActions.attachSession).toHaveBeenCalledOnce();
+  });
+
+  it('lets a selected session bypass a stale preparation promise', async () => {
+    mockConnection.sessionId = undefined;
+    const callbackStarted = deferred<void>();
+    const callbackFinished = deferred<void>();
+    mockSessionActions.createSession.mockImplementation(async () => {
+      mockConnection.sessionId = 'session-created';
+      return { sessionId: 'session-created' };
+    });
+    const onSessionCreated = vi.fn(async () => {
+      callbackStarted.resolve();
+      await callbackFinished.promise;
+    });
+    const { rerender } = renderApp({ onSessionCreated });
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('first');
+      await callbackStarted.promise;
+    });
+    mockConnection.sessionId = 'session-selected';
+    rerender({ onSessionCreated });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('second');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    expect(mockSessionActions.attachSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'second',
+      expect.any(Object),
+    );
+
+    await act(async () => {
+      callbackFinished.resolve();
+      await vi.waitFor(() => {
+        expect(mockSessionActions.releaseSession).toHaveBeenCalledWith(
+          'session-created',
+        );
+      });
+    });
+    expect(mockSessionActions.attachSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+  });
+
+  it('lets a selected session bypass creation before its id is allocated', async () => {
+    mockConnection.sessionId = undefined;
+    const creationFinished = deferred<{ sessionId: string }>();
+    mockSessionActions.createSession.mockImplementation(
+      () => creationFinished.promise,
+    );
+    const { rerender } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('first');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
+    });
+    mockConnection.sessionId = 'session-selected';
+    rerender();
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('second');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    expect(mockSessionActions.attachSession).not.toHaveBeenCalled();
+    await act(async () => {
+      creationFinished.resolve({ sessionId: 'session-created' });
+      await vi.waitFor(() => {
+        expect(mockSessionActions.releaseSession).toHaveBeenCalledWith(
+          'session-created',
+        );
+      });
+    });
+    expect(mockSessionActions.attachSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+  });
+
+  it('clears a shared rejected preparation so a later submit can retry', async () => {
+    mockConnection.sessionId = undefined;
+    const firstCreation = deferred<{ sessionId: string }>();
+    mockSessionActions.createSession
+      .mockImplementationOnce(() => firstCreation.promise)
+      .mockImplementationOnce(async () => {
+        mockConnection.sessionId = 'session-retry';
+        return { sessionId: 'session-retry' };
+      });
+    renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('first');
+      testState.latestChatEditorProps?.onSubmit('second');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
+    });
+    firstCreation.reject(new Error('create failed'));
+    await flush();
+    await flush();
+
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('third');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalledTimes(2);
+      });
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+      });
+    });
+  });
+
   it('cancels direct submissions when onSubmitBefore rejects and preserves retry state', async () => {
     const onSubmitBefore = vi.fn((params: { prompt: string }) =>
       params.prompt === 'blocked'
@@ -919,6 +1259,7 @@ describe('App session callbacks', () => {
       'queued',
       undefined,
       undefined,
+      undefined,
     );
     expect(onSessionChange).toHaveBeenCalledWith({
       type: 'submit',
@@ -963,6 +1304,35 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(editorCommit).not.toHaveBeenCalled();
     expect(editorClear).not.toHaveBeenCalled();
+  });
+
+  it('forwards input annotations for /plan prompts in active sessions', async () => {
+    const annotation: DaemonInputAnnotation = {
+      type: 'reference',
+      text: '@.husky/',
+      start: 0,
+      end: 8,
+      reference: {
+        id: '.husky/',
+        value: '.husky/',
+        serialized: '@.husky/',
+      },
+    };
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/plan @.husky/ explain';
+    testState.inputAnnotations = [annotation];
+    await clickSubmit(container);
+    await flush();
+
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('plan');
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      '@.husky/ explain',
+      expect.objectContaining({
+        inputAnnotations: [annotation],
+      }),
+    );
   });
 
   it('dispatches turn_complete only for the session that was streaming', async () => {
@@ -1352,6 +1722,142 @@ describe('App session callbacks', () => {
     expect(panel?.getAttribute('aria-label')).toBe('Session Overview');
   });
 
+  it('forces the compact session drawer from the external shell ref', async () => {
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+
+    const drawer = container.querySelector(
+      '[data-sidebar-shell][role="dialog"]',
+    );
+    expect(drawer).not.toBeNull();
+    expect(drawer?.className).toContain('mobileDrawerForced');
+  });
+
+  it('returns a forced compact drawer to viewport control when the user dismisses it', async () => {
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-sidebar-shell]')?.className,
+    ).toContain('mobileDrawerForced');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLElement>(
+          '[data-sidebar-shell] > div[aria-hidden="true"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-sidebar-shell]')?.className,
+    ).not.toContain('mobileDrawerForced');
+    expect(
+      container.querySelector('[data-sidebar-shell][role="dialog"]'),
+    ).toBeNull();
+  });
+
+  it('returns to chat and clears the current page when the external shell opens the compact drawer', async () => {
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSessionOverview();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+
+    await act(async () => {
+      shellRef.current?.openSplitView();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-sidebar-shell][role="dialog"]'),
+    ).not.toBeNull();
+  });
+
+  it('clears a forced compact drawer after crossing to a wide viewport', async () => {
+    let mobileChangeHandler:
+      | ((event: { matches: boolean }) => void)
+      | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: query.includes('min-width'),
+        media: query,
+        addEventListener: (
+          _type: string,
+          handler: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('max-width')) mobileChangeHandler = handler;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-sidebar-shell]')?.className,
+    ).toContain('mobileDrawerForced');
+
+    await act(async () => {
+      mobileChangeHandler?.({ matches: false });
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-sidebar-shell]')?.className,
+    ).not.toContain('mobileDrawerForced');
+    expect(
+      container.querySelector('[data-sidebar-shell][role="dialog"]'),
+    ).toBeNull();
+  });
+
+  it('lets a host hide the built-in compact sidebar toggle', async () => {
+    const { container } = renderApp({
+      sidebar: { enabled: true, showCompactToggle: false },
+    });
+    await flush();
+
+    expect(container.querySelector('[aria-label="Toggle menu"]')).toBeNull();
+  });
+
   it('returns to the Session Overview when leaving the split view', async () => {
     const { container } = renderApp();
     await flush();
@@ -1449,6 +1955,93 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="split-initial"]')?.textContent,
     ).toBe('s1,s2,s3');
+  });
+
+  it('reconciles split pane artifact snapshots in the right panel', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-report-artifact"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-open-artifact"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('Pane artifact');
+    expect(container.textContent).toContain('10 B');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-report-updated-artifact"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('20 B');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-clear-artifacts"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('Artifact not found.');
+  });
+
+  it('clears split pane artifact snapshots when switching sessions', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-report-artifact"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-open-artifact"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('Pane artifact');
+
+    await act(async () => {
+      mockConnection.sessionId = 'session-2';
+      rerender();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).not.toContain('Pane artifact');
   });
 
   it('enters the split view from a ?split= URL and consumes the param', async () => {
@@ -1581,7 +2174,7 @@ describe('App session callbacks', () => {
           _type: string,
           cb: (event: { matches: boolean }) => void,
         ) => {
-          if (query.includes('min-width')) changeHandler = cb;
+          if (query.includes('1024')) changeHandler = cb;
         },
         removeEventListener: vi.fn(),
       })),
@@ -1625,7 +2218,7 @@ describe('App session callbacks', () => {
           _type: string,
           cb: (event: { matches: boolean }) => void,
         ) => {
-          if (query.includes('min-width')) changeHandler = cb;
+          if (query.includes('1024')) changeHandler = cb;
         },
         removeEventListener: vi.fn(),
       })),
@@ -1654,6 +2247,149 @@ describe('App session callbacks', () => {
     ).toBeNull();
   });
 
+  it('folds the split without switching the chat session on shrink', async () => {
+    let large = true;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('1024')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    mockConnection.sessionId = 'session-1';
+    window.history.replaceState(null, '', '/?split=s1,s2');
+
+    try {
+      const { container } = renderApp();
+      await flush();
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).not.toBeNull();
+
+      await act(async () => {
+        large = false;
+        changeHandler?.({ matches: false });
+        await Promise.resolve();
+      });
+
+      // The split folds back to chat, but folding must leave the chat's own
+      // connection untouched — switching sessions here would drop its session /
+      // git-branch / URL context and break the lossless restore on regrow.
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).toBeNull();
+      expect(mockSessionActions.loadSession).not.toHaveBeenCalled();
+    } finally {
+      window.history.replaceState(null, '', '/');
+    }
+  });
+
+  it('restores the split view when the screen grows back after a shrink', async () => {
+    let large = true;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('1024')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    window.history.replaceState(null, '', '/?split=s1,s2');
+
+    try {
+      const { container } = renderApp();
+      await flush();
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).not.toBeNull();
+
+      // Shrinking below the breakpoint folds the split away...
+      await act(async () => {
+        large = false;
+        changeHandler?.({ matches: false });
+        await Promise.resolve();
+      });
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).toBeNull();
+
+      // ...and growing back past it restores the same split (a transient resize
+      // is lossless, not a permanent drop of the panes).
+      await act(async () => {
+        large = true;
+        changeHandler?.({ matches: true });
+        await Promise.resolve();
+      });
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).not.toBeNull();
+    } finally {
+      window.history.replaceState(null, '', '/');
+    }
+  });
+
+  it('auto-collapses the sidebar in a narrow split and expands it when wide', async () => {
+    let wide = false;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          // Keep the large-screen (>=1024) query true so the split renders;
+          // the >=1200 "sidebar has room" query is the one under test.
+          if (query.includes('1200')) return wide;
+          return query.includes('min-width');
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('1200')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    window.history.replaceState(null, '', '/?split=s1,s2');
+
+    try {
+      const { container } = renderApp();
+      await flush();
+      const sidebar = () => container.querySelector('[data-testid="sidebar"]');
+      // Narrow split (< 1200px): the sidebar collapses to free room for panes.
+      expect(sidebar()?.getAttribute('data-collapsed')).toBe('true');
+
+      // Grow past 1200px: the sidebar expands again.
+      await act(async () => {
+        wide = true;
+        changeHandler?.({ matches: true });
+        await Promise.resolve();
+      });
+      expect(sidebar()?.getAttribute('data-collapsed')).toBe('false');
+    } finally {
+      window.history.replaceState(null, '', '/');
+    }
+  });
+
   it('auto-closes the Session Overview when the screen shrinks below the breakpoint', async () => {
     // Drive isLargeScreen through a controllable media query: open the panel on
     // a large screen, then flip below the breakpoint and confirm it closes.
@@ -1670,7 +2406,7 @@ describe('App session callbacks', () => {
           _type: string,
           cb: (event: { matches: boolean }) => void,
         ) => {
-          if (query.includes('min-width')) changeHandler = cb;
+          if (query.includes('1024')) changeHandler = cb;
         },
         removeEventListener: vi.fn(),
       })),
@@ -1899,6 +2635,43 @@ describe('App session callbacks', () => {
     await clickSubmit(container);
     await flush();
     expect(testState.latestChatEditorProps?.dialogOpen).toBe(true);
+  });
+
+  it('blocks app-level shortcuts while an external modal is registered', async () => {
+    const { container } = renderApp();
+    await flush();
+    expect(testState.latestChatEditorProps?.dialogOpen).toBe(false);
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="interaction-blocker"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(testState.latestChatEditorProps?.dialogOpen).toBe(true);
+
+    act(() => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          ctrlKey: true,
+          key: 'l',
+        }),
+      );
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          ctrlKey: true,
+          key: 'y',
+        }),
+      );
+    });
+
+    expect(mockStore.reset).not.toHaveBeenCalled();
+    expect(mockStore.dispatch).not.toHaveBeenCalled();
   });
 
   it('restores composer focus after an approval resolves following a panel auto-close', async () => {
