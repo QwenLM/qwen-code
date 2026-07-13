@@ -264,13 +264,21 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `POST /workspace/channel/reload`. The worker is stopped and relaunched;
   // on relaunch it re-reads settings.json (channels / proxy / per-channel
   // model), so channel settings changes apply without a full daemon restart.
-  // Advertised CONDITIONALLY — only when the daemon was started with
-  // `--channel` (i.e. a channel worker exists to reload).
+  // Advertised CONDITIONALLY while the runtime manager has a committed or
+  // recoverable channel worker selection.
   channel_reload: { since: 'v1' },
+  // Runtime GET/PUT/DELETE control for daemon-managed channel selection.
+  // The route exists even when no selection was supplied at daemon boot.
+  channel_control: { since: 'v1' },
   // Multi-workspace sessions closed loop (issue #6378 Phase 2a). Advertised
   // only when one daemon hosts more than one registered workspace runtime.
   multi_workspace_sessions: { since: 'v1' },
+  // Singular session rewind routes resolve the owning live workspace runtime.
+  multi_workspace_session_rewind: { since: 'v1' },
+  // Singular session shell routes resolve the owning live workspace runtime.
+  multi_workspace_session_shell: { since: 'v1' },
   persistent_workspace_registration: { since: 'v1' },
+  workspace_runtime_removal: { since: 'v1' },
   // Workspace-qualified core REST routes under `/workspaces/:workspace/...`.
   // Covers core file/status/permissions/trust/lifecycle/MCP/tool, memory,
   // workspace agent CRUD, and persisted session organization surfaces.
@@ -344,10 +352,10 @@ export interface AdvertiseFeatureToggles {
   reloadAvailable?: boolean;
   /**
    * Whether the daemon exposes the channel worker reload route
-   * (`channel_reload`). Set only when the daemon was started with
-   * `--channel`, so a channel worker exists to reload.
+   * (`channel_reload`). Set while the runtime manager is enabled.
    */
   channelReloadAvailable?: boolean;
+  channelControlAvailable?: boolean;
   /**
    * Whether the daemon will accept client-hosted MCP servers over the WS
    * (`client_mcp_over_ws`, issue #5626).
@@ -366,6 +374,7 @@ export interface AdvertiseFeatureToggles {
   voiceWsAvailable?: boolean;
   multiWorkspaceSessionsEnabled?: boolean;
   persistentWorkspaceRegistrationAvailable?: boolean;
+  workspaceRuntimeRemovalAvailable?: boolean;
   /**
    * Whether the HTTP ACP surface is enabled (default on; opts out via
    * QWEN_SERVE_ACP_HTTP=0). Workspace-qualified ACP is only advertised when on.
@@ -442,13 +451,28 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ['rate_limit', (toggles) => toggles.rateLimit === true],
   ['workspace_reload', (toggles) => toggles.reloadAvailable === true],
   ['channel_reload', (toggles) => toggles.channelReloadAvailable === true],
+  ['channel_control', (toggles) => toggles.channelControlAvailable === true],
   [
     'multi_workspace_sessions',
     (toggles) => toggles.multiWorkspaceSessionsEnabled === true,
   ],
   [
+    'multi_workspace_session_rewind',
+    (toggles) => toggles.multiWorkspaceSessionsEnabled === true,
+  ],
+  [
+    'multi_workspace_session_shell',
+    (toggles) =>
+      toggles.multiWorkspaceSessionsEnabled === true &&
+      toggles.sessionShellCommandEnabled === true,
+  ],
+  [
     'persistent_workspace_registration',
     (toggles) => toggles.persistentWorkspaceRegistrationAvailable === true,
+  ],
+  [
+    'workspace_runtime_removal',
+    (toggles) => toggles.workspaceRuntimeRemovalAvailable === true,
   ],
   [
     'workspace_qualified_acp',

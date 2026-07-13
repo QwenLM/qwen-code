@@ -1,4 +1,22 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+const wsMock = vi.hoisted(() => ({
+  close: vi.fn(),
+  start: vi.fn<() => Promise<void>>(),
+}));
+
+vi.mock('@larksuiteoapi/node-sdk', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@larksuiteoapi/node-sdk')>();
+  return {
+    ...actual,
+    WSClient: class {
+      start = wsMock.start;
+      close = wsMock.close;
+    },
+  };
+});
+
 import { FeishuChannel } from './FeishuAdapter.js';
 import type {
   ChannelAgentBridge,
@@ -862,6 +880,52 @@ describe('FeishuChannel', () => {
       });
 
       expect(result).toBe(false);
+    });
+  });
+
+  describe('connect: WebSocket', () => {
+    beforeEach(() => {
+      wsMock.close.mockReset();
+      wsMock.start.mockReset().mockResolvedValue(undefined);
+    });
+
+    function mockSuccessfulTokenFetch(): void {
+      vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+        if (String(input).includes('/tenant_access_token/internal')) {
+          return new Response(
+            JSON.stringify({
+              tenant_access_token: 'test_token',
+              expire: 3600,
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({ bot: { open_id: 'bot_id' } }), {
+          status: 200,
+        });
+      });
+    }
+
+    it('rejects invalid credentials before starting WebSocket', async () => {
+      const channel = createChannel();
+      vi.spyOn(global, 'fetch').mockResolvedValue(
+        new Response(null, { status: 401 }),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'failed to authenticate Feishu credentials',
+      );
+      expect(wsMock.start).not.toHaveBeenCalled();
+    });
+
+    it('resolves after the SDK start promise without waiting for onReady', async () => {
+      const channel = createChannel();
+      mockSuccessfulTokenFetch();
+
+      await channel.connect();
+
+      expect(wsMock.start).toHaveBeenCalledOnce();
+      channel.disconnect();
     });
   });
 

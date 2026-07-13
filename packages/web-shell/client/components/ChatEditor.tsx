@@ -17,6 +17,7 @@ import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/webui/daemon-
 import type { CommandDisplayCategoryOrder } from '../utils/commandDisplay';
 import type { SkillInfo } from '../completions/slashCompletion';
 import { useI18n } from '../i18n';
+import { useWebShellPortalRoot } from '../portalRoot';
 import {
   useWebShellCustomization,
   type WebShellComposerInput,
@@ -44,6 +45,21 @@ import { getModelDisplayName } from '../utils/modelDisplay';
 import { VoiceButton } from '../voice/VoiceButton';
 import { GitBranchIndicator } from './GitBranchIndicator';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
+import { FolderClosedIcon } from 'lucide-react';
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from './ui/select';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from './ui/tooltip';
 import {
   filterToolbarDropdownItems,
   getToolbarDropdownGeometry,
@@ -112,6 +128,16 @@ interface ChatEditorProps {
   availableModels?: Array<{ id: string; label?: string }>;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
+  workspaces?: Array<{
+    id: string;
+    cwd: string;
+    label: string;
+    primary: boolean;
+  }>;
+  selectedWorkspaceCwd?: string;
+  workspaceSelectionDisabled?: boolean;
+  onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
+  atWorkspaceCwd?: string;
   onChatWidthModeChange?: (mode: '1000' | 'wide') => void;
   onFocusFooter?: () => boolean;
   dialogOpen?: boolean;
@@ -729,6 +755,7 @@ function SlashCommandPanel({
   onSelect: (index: number) => boolean;
   onAccept: (index?: number) => boolean;
 }) {
+  const portalRoot = useWebShellPortalRoot();
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const [anchorRect, setAnchorRect] = useState<{
     left: number;
@@ -954,7 +981,7 @@ function SlashCommandPanel({
         </div>
       )}
     </div>,
-    document.body,
+    portalRoot ?? document.body,
   );
 }
 
@@ -1037,6 +1064,11 @@ export const ChatEditor = memo(
       availableModels = [],
       onSelectMode,
       onSelectModel,
+      workspaces,
+      selectedWorkspaceCwd,
+      workspaceSelectionDisabled = false,
+      onSelectWorkspace,
+      atWorkspaceCwd,
       onChatWidthModeChange,
       onFocusFooter,
       dialogOpen = false,
@@ -1082,6 +1114,7 @@ export const ChatEditor = memo(
       composerInputVersion,
       builtinAtProviders,
       atProviders,
+      atWorkspaceCwd,
       composerTagIcons,
       renderComposerTag,
       renderComposerTagTooltip,
@@ -1096,6 +1129,7 @@ export const ChatEditor = memo(
     const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
     const [quickActionsOpen, setQuickActionsOpen] = useState(false);
+    const [workspaceTooltipOpen, setWorkspaceTooltipOpen] = useState(false);
     const [showQuickActions, setShowQuickActions] = useState(isTouchLikeDevice);
     const containerRef = useRef<HTMLDivElement>(null);
     const slashPanelRef = useRef<HTMLDivElement>(null);
@@ -1109,6 +1143,9 @@ export const ChatEditor = memo(
     const modelExpandedMeasureRef = useRef<HTMLSpanElement>(null);
     const modeBtnRef = useRef<HTMLButtonElement>(null);
     const modelBtnRef = useRef<HTMLButtonElement>(null);
+    const workspaceSelectTriggerRef = useRef<HTMLButtonElement>(null);
+    const suppressWorkspaceTooltipRef = useRef(false);
+    const workspaceSelectPointerInsideRef = useRef(false);
     const [widthToggleFits, setWidthToggleFits] = useState(false);
     const [toolbarLabelVisibility, setToolbarLabelVisibility] = useState({
       showModelLabel: false,
@@ -1463,6 +1500,14 @@ export const ChatEditor = memo(
       currentModelLabel,
       lastConfirmedModelLabel,
     });
+    const selectedWorkspace = workspaces?.find((entry) =>
+      selectedWorkspaceCwd ? entry.cwd === selectedWorkspaceCwd : entry.primary,
+    );
+    const selectedWorkspaceLabel = selectedWorkspace
+      ? `${selectedWorkspace.label}${
+          selectedWorkspace.primary ? ` · ${t('sidebar.workspacePrimary')}` : ''
+        }`
+      : '';
 
     useLayoutEffect(() => {
       if (currentModelLabel && currentModelLabel !== lastConfirmedModelLabel) {
@@ -1781,6 +1826,85 @@ export const ChatEditor = memo(
                   </div>
                 )}
                 <div className={styles.toolbarLeft}>
+                  {workspaces && workspaces.length > 1 && onSelectWorkspace && (
+                    <Select
+                      value={selectedWorkspace?.id}
+                      disabled={workspaceSelectionDisabled}
+                      onValueChange={(value) => {
+                        const nextWorkspace = workspaces.find(
+                          (entry) => entry.id === value,
+                        );
+                        if (!nextWorkspace) return;
+                        onSelectWorkspace(
+                          nextWorkspace.primary ? undefined : nextWorkspace.cwd,
+                        );
+                        suppressWorkspaceTooltipRef.current = true;
+                        setWorkspaceTooltipOpen(false);
+                        requestAnimationFrame(() => {
+                          workspaceSelectTriggerRef.current?.blur();
+                        });
+                      }}
+                    >
+                      <TooltipProvider delayDuration={300}>
+                        <Tooltip
+                          open={workspaceTooltipOpen}
+                          onOpenChange={(open) => {
+                            if (
+                              open &&
+                              (suppressWorkspaceTooltipRef.current ||
+                                !workspaceSelectPointerInsideRef.current)
+                            ) {
+                              return;
+                            }
+                            setWorkspaceTooltipOpen(open);
+                          }}
+                        >
+                          <TooltipTrigger asChild>
+                            <span
+                              className={styles.workspaceSelectTooltipTrigger}
+                              onPointerEnter={() => {
+                                workspaceSelectPointerInsideRef.current = true;
+                              }}
+                              onPointerLeave={() => {
+                                workspaceSelectPointerInsideRef.current = false;
+                                suppressWorkspaceTooltipRef.current = false;
+                              }}
+                              onBlur={() => {
+                                if (!workspaceSelectPointerInsideRef.current) {
+                                  suppressWorkspaceTooltipRef.current = false;
+                                }
+                              }}
+                            >
+                              <SelectTrigger
+                                ref={workspaceSelectTriggerRef}
+                                size="sm"
+                                className={`${styles.toolBtn} ${styles.workspaceSelectTrigger}`}
+                                aria-label={t('sidebar.workspaceSelectLabel')}
+                              >
+                                <FolderClosedIcon size={16} strokeWidth={1.2} />
+                                <SelectValue />
+                              </SelectTrigger>
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent side="top">
+                            {selectedWorkspaceLabel}
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                      <SelectContent position="popper" align="start">
+                        <SelectGroup>
+                          {workspaces.map((entry) => (
+                            <SelectItem key={entry.id} value={entry.id}>
+                              {entry.label}
+                              {entry.primary
+                                ? ` · ${t('sidebar.workspacePrimary')}`
+                                : ''}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                  )}
                   {workspaceName && showToolbarAction('workspace') && (
                     <WorkspaceIndicator
                       name={workspaceName}

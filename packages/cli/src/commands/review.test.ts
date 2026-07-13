@@ -48,6 +48,7 @@ describe('reviewCommand', () => {
       'resolve-anchors',
       'check-coverage',
       'presubmit',
+      'test-efficacy',
       'compose-review',
       'submit',
       'cleanup',

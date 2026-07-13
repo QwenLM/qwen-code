@@ -99,10 +99,12 @@ describe('createWorkspaceSkillsStatusProvider', () => {
       {
         name: 'enabled',
         status: 'ok',
+        installedPath: '/skills/enabled/SKILL.md',
       },
       {
         name: 'disabled',
         status: 'disabled',
+        installedPath: '/skills/disabled/SKILL.md',
       },
     ]);
   });

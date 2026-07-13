@@ -47,6 +47,19 @@ export class SessionTranscriptTooLargeError extends Error {
   }
 }
 
+export class SessionTranscriptPageTooLargeError extends Error {
+  constructor(
+    readonly sessionId: string,
+    readonly pageBytes: number,
+    readonly maxBytes: number,
+  ) {
+    super(
+      `Transcript page for session ${sessionId} exceeds the page budget (${pageBytes} bytes, max ${maxBytes} bytes)`,
+    );
+    this.name = 'SessionTranscriptPageTooLargeError';
+  }
+}
+
 export interface SessionTranscriptCursorState {
   v: typeof SESSION_TRANSCRIPT_CURSOR_VERSION;
   sessionId: string;
@@ -62,6 +75,7 @@ export interface SessionTranscriptCursorState {
 export interface SessionTranscriptReadPageOptions {
   cursor?: string;
   limit?: number;
+  maxBytes?: number;
 }
 
 export interface SessionTranscriptRecordPage {
@@ -390,6 +404,47 @@ function normalizeLimit(limit: number | undefined): number {
     );
   }
   return limit;
+}
+
+function normalizeMaxBytes(maxBytes: number | undefined): number | undefined {
+  if (maxBytes === undefined) return undefined;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) {
+    throw new RangeError(
+      'Transcript page byte limit must be a positive integer',
+    );
+  }
+  return maxBytes;
+}
+
+function recordSegmentBytes(index: TranscriptIndex, uuid: string): number {
+  const entry = index.byUuid.get(uuid);
+  return (
+    entry?.segments.reduce((total, segment) => total + segment.length, 0) ?? 0
+  );
+}
+
+function selectPageUuids(
+  index: TranscriptIndex,
+  sessionId: string,
+  position: number,
+  limit: number,
+  maxBytes: number | undefined,
+): string[] {
+  const candidates = index.activeUuids.slice(position, position + limit);
+  if (maxBytes === undefined) return candidates;
+
+  const selected: string[] = [];
+  let selectedBytes = 0;
+  for (const uuid of candidates) {
+    const bytes = recordSegmentBytes(index, uuid);
+    if (selected.length === 0 && bytes > maxBytes) {
+      throw new SessionTranscriptPageTooLargeError(sessionId, bytes, maxBytes);
+    }
+    if (selectedBytes + bytes > maxBytes) break;
+    selected.push(uuid);
+    selectedBytes += bytes;
+  }
+  return selected;
 }
 
 function fileIdentityFromStats(stats: fs.Stats): SessionTranscriptFileIdentity {
@@ -883,6 +938,7 @@ export class SessionTranscriptReader {
     options: SessionTranscriptReadPageOptions = {},
   ): Promise<SessionTranscriptRecordPage> {
     const limit = normalizeLimit(options.limit);
+    const maxBytes = normalizeMaxBytes(options.maxBytes);
     const cursor =
       options.cursor !== undefined
         ? (this.cursorCodec?.decode(options.cursor) ??
@@ -935,8 +991,14 @@ export class SessionTranscriptReader {
       );
       throw new InvalidSessionTranscriptCursorError();
     }
-    const nextPosition = Math.min(position + limit, index.activeUuids.length);
-    const pageUuids = index.activeUuids.slice(position, nextPosition);
+    const pageUuids = selectPageUuids(
+      index,
+      sessionId,
+      position,
+      limit,
+      maxBytes,
+    );
+    const nextPosition = position + pageUuids.length;
     const records = await readAggregatedRecords(index, pageUuids);
     const hasMore = nextPosition < index.activeUuids.length;
     const nextCursorState: SessionTranscriptCursorState | undefined = hasMore

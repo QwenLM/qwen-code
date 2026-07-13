@@ -118,6 +118,64 @@ export function ghApiAll(path: string): unknown[] {
   return Array.isArray(parsed) ? parsed : [];
 }
 
+/**
+ * Paginate an endpoint whose array is nested under a key, e.g.
+ * `check-runs` → `{ total_count, check_runs: [...] }`.
+ *
+ * A plain `ghApiAll` cannot be used here: `--paginate` alone concatenates the
+ * raw per-page objects, so `JSON.parse` sees `}{ ` between pages and throws. On
+ * a commit with more than 30 check runs (a busy CI matrix — one real head had
+ * 508) the un-paginated call silently saw only the first page, which could hide
+ * a failing or skipped run behind the cut and let a review approve past it.
+ *
+ * `--paginate --jq '.<key>[]'` applies the jq to every page and streams each
+ * element as a newline-delimited JSON value (NDJSON), so the result is parsed
+ * line by line rather than as one array. (`gh api` has no `--slurp`.)
+ *
+ * `strict` parsing here: a check-runs snapshot feeds CI classification, and
+ * dropping a malformed line could hide a *failing* run — the same fail-open the
+ * pagination fix closed, reintroduced by lenient parsing. A parse failure
+ * throws.
+ */
+export function ghApiAllNested(path: string, key: string): unknown[] {
+  return parseNdjson(gh('api', '--paginate', path, '--jq', `.${key}[]`), {
+    strict: true,
+  });
+}
+
+/**
+ * Parse the newline-delimited JSON that `gh --paginate --jq '.x[]'` streams:
+ * one JSON value per non-blank line. Split out and exported so the parse is
+ * unit-testable without spawning `gh` (the spawn is covered by the commands'
+ * own runs, per this module's testing note above).
+ *
+ * `strict` (default) throws on any non-JSON line — correct when a dropped
+ * record would change a safety-relevant answer (e.g. hiding a failing check
+ * run). Non-strict skips a stray line, for the rare caller that genuinely
+ * expects interleaved human-readable notices and can tolerate a lost record.
+ */
+export function parseNdjson(
+  out: string,
+  opts: { strict?: boolean } = {},
+): unknown[] {
+  const strict = opts.strict ?? true;
+  if (!out) return [];
+  const values: unknown[] = [];
+  for (const line of out.split('\n')) {
+    if (line.trim().length === 0) continue;
+    if (strict) {
+      values.push(JSON.parse(line));
+      continue;
+    }
+    try {
+      values.push(JSON.parse(line));
+    } catch {
+      // not a JSON record; ignore
+    }
+  }
+  return values;
+}
+
 /** Login of the currently authenticated GitHub user. */
 export function currentUser(): string {
   return gh('api', 'user', '--jq', '.login');

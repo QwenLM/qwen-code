@@ -181,6 +181,9 @@ npm run preflight  # Full check: clean → install → format → lint → build
    pass suffices for a trivial change.
 5. **Code review** — run `/review` when available. Triage each comment:
    valid / false positive / overthinking. Fixes go back through steps 3-4.
+   Here, `/review` means the Codex code-review workflow, not Qwen Review or
+   the `qwen-review` plugin. Do not invoke Qwen Review unless the user
+   explicitly requests it by name.
 
 ### Feature development
 
