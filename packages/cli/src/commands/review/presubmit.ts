@@ -66,6 +66,22 @@ const FAIL_CONCLUSIONS = new Set([
 const FAIL_STATUS_STATES = new Set(['failure', 'error']);
 const PENDING_STATES = new Set(['queued', 'in_progress', 'pending']);
 
+/**
+ * Conclusions that mean the job did not execute. GitHub reports these with
+ * `status: completed`, so they used to fall through both branches of the
+ * classifier and land the run in `all_pass` — a job that never ran was scored
+ * as a job that passed.
+ *
+ * This is not a theoretical hole. `/review` treats green CI as its licence to
+ * approve (see "Why downgrade APPROVE when CI is non-green" in DESIGN.md), and
+ * the whole design delegates runtime truth to CI because the LLM pipeline reads
+ * code statically. On PR #6486 the one job that would have exercised the new
+ * hotkey — `Integration Tests (CLI, No Sandbox)` — was `skipped`, as were the
+ * macOS and Windows `Test` jobs. The delegation returned nothing, and returned
+ * it looking like a pass.
+ */
+const NOT_RUN_CONCLUSIONS = new Set(['skipped', 'neutral', 'stale']);
+
 function isCurrentActionsRunCheck(run: CheckRun): boolean {
   const runId = process.env['GITHUB_RUN_ID'];
   if (!runId) return false;
@@ -84,12 +100,37 @@ interface PresubmitArgs {
   'new-findings'?: string;
 }
 
-function classifyCi(checkRuns: CheckRun[], statuses: CommitStatus[]) {
+export function classifyCi(checkRuns: CheckRun[], statuses: CommitStatus[]) {
   const failedCheckNames: string[] = [];
   let hasPending = false;
   const relevantCheckRuns = checkRuns.filter(
     (run) => !isCurrentActionsRunCheck(run),
   );
+
+  // A job that ran and a job that was skipped can share a name — GitHub emits
+  // one check run per matrix leg and per re-dispatch, and this repo's routing
+  // workflows (`authorize`, `review-pr`, `precheck-pr`) routinely produce both.
+  // So "did it run" is a question about the NAME, not about any single run:
+  // a name counts as executed if ANY of its runs reached a real conclusion.
+  // Without this, every review would disclose a dozen routing jobs as unrun.
+  const executedNames = new Set<string>();
+  const notRunNames = new Set<string>();
+  for (const run of relevantCheckRuns) {
+    if (run.status !== 'completed') continue;
+    if (!run.conclusion || NOT_RUN_CONCLUSIONS.has(run.conclusion)) {
+      // A completed run with NO conclusion produced no verdict about this
+      // commit, which is the same thing `skipped` means for a review. Leaving it
+      // invisible to both tallies made the class fall through to `no_checks`
+      // while `skippedCheckNames` stayed empty — the downgrade then read
+      // "every check was skipped ()", naming nothing.
+      notRunNames.add(run.name);
+    } else {
+      executedNames.add(run.name);
+    }
+  }
+  const skippedCheckNames = [...notRunNames]
+    .filter((n) => !executedNames.has(n))
+    .sort();
 
   for (const run of relevantCheckRuns) {
     if (run.status === 'completed') {
@@ -115,6 +156,11 @@ function classifyCi(checkRuns: CheckRun[], statuses: CommitStatus[]) {
     cls = 'no_checks';
   } else if (hasPending) {
     cls = 'all_pending';
+  } else if (executedNames.size === 0 && statuses.length === 0) {
+    // Every check was skipped. Nothing ran, nothing failed — and the old
+    // classifier called that `all_pass`, licensing an approval on the strength
+    // of a CI run that did not happen.
+    cls = 'no_checks';
   } else {
     cls = 'all_pass';
   }
@@ -122,6 +168,13 @@ function classifyCi(checkRuns: CheckRun[], statuses: CommitStatus[]) {
   return {
     class: cls,
     failedCheckNames,
+    /**
+     * Checks that never executed at this commit. NOT a downgrade on its own —
+     * most are routing jobs, and a docs-only PR legitimately skips the test
+     * matrix. It is a disclosure: Step 7 rules on whether a skipped check is
+     * one that would have exercised THIS diff, which presubmit cannot know.
+     */
+    skippedCheckNames,
     totalChecks: relevantCheckRuns.length + statuses.length,
   };
 }
@@ -237,6 +290,14 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   if (ciStatus.class === 'all_pending') {
     downgradeReasons.push('CI still running');
   }
+  // Checks exist at this commit and NOT ONE of them executed. There is no
+  // green to approve on. (A repo with no CI at all is `no_checks` with
+  // `totalChecks === 0` and is not downgraded — that is a different claim.)
+  if (ciStatus.class === 'no_checks' && ciStatus.totalChecks > 0) {
+    downgradeReasons.push(
+      `CI did not run: every check was skipped (${ciStatus.skippedCheckNames.join(', ')})`,
+    );
+  }
 
   const result = {
     prNumber,
@@ -257,10 +318,15 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
       resolved: buckets.resolved,
       noConflict: buckets.noConflict,
     },
+    // `no_checks` with checks present means not one of them ran — the
+    // downgradeReasons entry above says so, and this is the boolean that makes
+    // compose-review act on it. Omitting it made the whole disclosure inert:
+    // the reason was written and the downgrade never fired.
     downgradeApprove:
       isSelfPr ||
       ciStatus.class === 'any_failure' ||
-      ciStatus.class === 'all_pending',
+      ciStatus.class === 'all_pending' ||
+      (ciStatus.class === 'no_checks' && ciStatus.totalChecks > 0),
     downgradeRequestChanges: isSelfPr,
     downgradeReasons,
     blockOnExistingComments: buckets.overlap.length > 0,

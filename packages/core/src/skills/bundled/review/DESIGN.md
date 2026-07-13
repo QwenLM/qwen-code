@@ -228,6 +228,15 @@ Line-based classification was chosen because it's deterministic, cheap, and catc
 - Any failure → downgrade `APPROVE` to `COMMENT`, body explains.
 - All pending → downgrade to `COMMENT` (don't approve before CI decides), body explains.
 
+**The hole under all of this: a check that never ran looked like a check that passed.** GitHub reports a skipped job as `status: completed, conclusion: skipped`. The classifier tested for failure conclusions and for pending statuses, and `skipped` matched neither — so it fell through into `all_pass`. Every word above delegates runtime truth to CI _because_ the LLM pipeline reads code statically. If the delegation returns nothing, and returns it wearing a green badge, the delegation is worse than not having it.
+
+PR #6486: the one job that would have exercised the new `Ctrl+F` hotkey — `Integration Tests (CLI, No Sandbox)` — was skipped, as were the macOS and Windows `Test` legs. `all_pass`. And even had it run, it would have passed: the test drove a CSI-u sequence into a PTY that never negotiated the kitty protocol, so the keypress was discarded before reaching the handler. A test that cannot fail, in a job that did not run, scored as verification.
+
+`skipped`/`neutral` are now recognised, with two deliberately different consequences:
+
+- **Some checks skipped → a disclosure, not a downgrade.** Empirically this repo emits skipped runs constantly — routing jobs (`authorize`, `review-pr`, `precheck-pr`) that also emit a successful run of the same name, which is why "did it run" is a question about the _name_, not about any single run. And a docs-only PR legitimately skips the test matrix. Auto-downgrading on any skip would downgrade every review in the repo, which is how a gate gets ignored. So presubmit _names_ them and Step 7 rules on them — because whether a skipped check would have exercised **this** diff is a question about the diff, which presubmit cannot see and the reviewer can.
+- **Every check skipped → a downgrade.** Checks exist, not one ran: there is no green here to approve on, and no judgment is required to say so. (A repo with no CI at all is a different claim — `totalChecks === 0`, not downgraded.)
+
 **Why downgrade rather than block:** the reviewer LLM has done substantive work; throwing the review away because CI is red wastes that. Downgrading to `COMMENT` keeps all inline findings, preserves the static review value, and lets GitHub's check status carry the "do not merge" signal naturally.
 
 **Why this stacks with self-PR downgrade:** a self-authored PR with red CI hits **both** downgrade rules. The event is `COMMENT` either way, so stacking is operationally a no-op — but the body should mention both reasons so a future maintainer reading the review knows why an LLM that found no Critical issues did not approve.

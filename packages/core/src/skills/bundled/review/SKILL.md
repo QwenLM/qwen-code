@@ -798,6 +798,7 @@ Read `.qwen/tmp/qwen-review-{target}-presubmit.json`. Schema:
   ciStatus: {
     class: 'all_pass' | 'any_failure' | 'all_pending' | 'no_checks';
     failedCheckNames: string[];  // failing check names — include in body text
+    skippedCheckNames: string[]; // checks that NEVER RAN at this commit — see below
     totalChecks: number;
   };
   existingComments: {
@@ -819,6 +820,12 @@ Read `.qwen/tmp/qwen-review-{target}-presubmit.json`. Schema:
 
 - `blockOnExistingComments=true` → **an overlap is a duplicate; the disposal is deterministic — do not ask the user.** Drop each finding whose `(path, line)` appears in `existingComments.overlap` from your `comments` array (adjusting the counts you hand to `compose-review`: a dropped Critical was already reported on the PR, so it is neither `criticalsInline` nor `bodyCriticals`; a dropped Suggestion joins neither count), list the dropped findings in the terminal summary as "already reported at <path>:<line>", and submit the remainder without pausing. Dogfooding measured this exact decision point improvised as an interactive question in 2 of 6 runs — which stalls a headless run forever — while the other 4 runs proceeded; the Exclusion Criteria already forbid re-reporting discussed issues, so there is nothing to ask. (If dropping overlaps leaves zero findings, that is still not a question: run `compose-review` with the remaining counts like any other submission.)
 - `downgradeApprove` / `downgradeRequestChanges` / `downgradeReasons` → **do not apply these by hand.** Copy them into the `presubmit` field of the `compose-review` input (below); the subcommand owns the semantics its tests pin — a downgrade fires only when the verdict it names is the one on the table (a Suggestion-only review is already Comment, so nothing is downgraded and no "Downgraded" sentence is emitted), the downgrade sentence carries the reasons, and a downgraded Request changes keeps its body Criticals after the sentence so the self-PR downgrade never erases the only copy of a blocker.
+- `ciStatus.skippedCheckNames` → **a green CI is not evidence about a check that never ran.** These are checks that reached `completed` with `skipped`, `neutral`, `stale`, or **no conclusion at all** at this commit — GitHub reports them alongside the passing ones, and this classifier used to score them as passes. Most are routing jobs and are noise; a docs-only PR legitimately skips the test matrix. But **presubmit cannot know which of them would have exercised _this_ diff, and you can** — you have `files[]`. So rule on the list: for each skipped check, ask whether it is the one that would have run the code this PR changes (a test job whose suite covers the changed package; the integration/E2E job for a feature whose only new test lives there). If one is, then **CI verified nothing about this change**, and the review must say so rather than resting on the green:
+  - Name the skipped check in the terminal output, always.
+  - If Agent 7's build/test did not cover that ground either — and it usually does not: a skipped **integration** job is exactly the suite `npm test` excludes — record `build-and-test — <check> was skipped in CI and its suite did not run locally` in `unreviewedDimensions`. That already caps a would-be Approve at `COMMENT`, through machinery that exists.
+
+  This is the hole PR #6486 fell through. The one job that would have exercised the new hotkey, `Integration Tests (CLI, No Sandbox)`, was skipped; so were the macOS and Windows `Test` legs. The classifier called it `all_pass`, and the whole design leans on CI precisely because the LLM pipeline reads code statically (DESIGN.md, "Why downgrade APPROVE when CI is non-green"). The delegation returned nothing, and returned it looking like a pass. **The one case presubmit does decide for you: if checks exist and _not one_ of them ran, `class` is `no_checks` and a downgrade reason is already emitted — there is no green there to approve on.**
+
 - For `stale` / `resolved` / `noConflict` buckets, log to terminal but do not block.
 
 **Why these checks block submission:**
