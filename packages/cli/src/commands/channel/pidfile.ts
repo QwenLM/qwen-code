@@ -129,11 +129,12 @@ function parseServiceInfoWorkers(
   return workers;
 }
 
-function unlinkPidFile(filePath: string): void {
+function unlinkPidFile(filePath: string): boolean {
   try {
     unlinkSync(filePath);
+    return true;
   } catch {
-    // best-effort
+    return false;
   }
 }
 
@@ -324,8 +325,7 @@ export function removeServeServiceInfo(
     return false;
   }
 
-  unlinkPidFile(filePath);
-  return true;
+  return unlinkPidFile(filePath);
 }
 
 /**

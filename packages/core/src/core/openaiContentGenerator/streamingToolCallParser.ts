@@ -260,15 +260,6 @@ export class StreamingToolCallParser {
     return this.toolCallMeta.get(index) || {};
   }
 
-  hasNamelessToolCall(): boolean {
-    for (const index of this.buffers.keys()) {
-      if (!this.toolCallMeta.get(index)?.name) {
-        return true;
-      }
-    }
-    return false;
-  }
-
   /**
    * Gets all completed tool calls that are ready to be emitted
    *

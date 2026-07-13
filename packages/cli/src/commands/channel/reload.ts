@@ -68,7 +68,7 @@ export const reloadCommand: CommandModule<unknown, ReloadArgs> = {
       })
       .option('token', {
         type: 'string',
-        description: `Bearer token (default: $${QWEN_SERVER_TOKEN_ENV})`,
+        description: `Bearer token (default: $${QWEN_SERVER_TOKEN_ENV} or $${QWEN_DAEMON_TOKEN_ENV})`,
       })
       .option('timeout', {
         type: 'number',

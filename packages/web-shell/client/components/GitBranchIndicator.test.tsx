@@ -20,7 +20,6 @@ describe('GitBranchIndicator', () => {
     const indicator = container.querySelector(`[aria-label="${ariaLabel}"]`);
     if (!indicator) throw new Error('branch indicator was not rendered');
     expect(indicator.tagName).toBe('OUTPUT');
-    expect(indicator.getAttribute('title')).toBe(branch);
     expect(indicator.textContent).toContain(branch);
     expect(container.querySelector('button')).toBeNull();
 

@@ -21,6 +21,10 @@ import {
   resolvePromptDeadlineMs,
 } from './server.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
+import {
+  ChannelWorkerControlError,
+  type ChannelWorkerControlState,
+} from './channel-worker-manager.js';
 import { runQwenServe, type RunHandle } from './run-qwen-serve.js';
 import {
   resolveWebShellDir,
@@ -45,6 +49,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   ApprovalMode,
+  BTW_MAX_INPUT_LENGTH,
   ExtensionManager,
   ExtensionUpdateState,
   SessionService,
@@ -387,6 +392,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'rate_limit',
   'workspace_reload',
   'channel_reload',
+  'channel_control',
   'multi_workspace_sessions',
   'persistent_workspace_registration',
   'workspace_qualified_rest_core',
@@ -535,6 +541,12 @@ interface FakeBridgeOpts {
     sessionId: string,
     context?: BridgeClientRequestContext,
   ) => Promise<{ sessionId: string; recap: string | null }>;
+  generateSessionBtwImpl?: (
+    sessionId: string,
+    question: string,
+    signal?: AbortSignal,
+    context?: BridgeClientRequestContext,
+  ) => Promise<{ sessionId: string; answer: string | null }>;
   launchSessionForkAgentImpl?: (
     sessionId: string,
     directive: string,
@@ -764,6 +776,12 @@ interface FakeBridge extends AcpSessionBridge {
   }>;
   generateSessionRecapCalls: Array<{
     sessionId: string;
+    context?: BridgeClientRequestContext;
+  }>;
+  generateSessionBtwCalls: Array<{
+    sessionId: string;
+    question: string;
+    signal?: AbortSignal;
     context?: BridgeClientRequestContext;
   }>;
   forkCalls: Array<{
@@ -1238,6 +1256,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionId,
       recap: 'Default fake recap.',
     }));
+  const generateSessionBtwCalls: FakeBridge['generateSessionBtwCalls'] = [];
+  const generateSessionBtwImpl =
+    opts.generateSessionBtwImpl ??
+    (async (sessionId: string) => ({
+      sessionId,
+      answer: 'mock btw answer',
+    }));
   const forkCalls: FakeBridge['forkCalls'] = [];
   const launchSessionForkAgentImpl =
     opts.launchSessionForkAgentImpl ??
@@ -1379,6 +1404,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     setApprovalModeCalls,
     shellCalls,
     generateSessionRecapCalls,
+    generateSessionBtwCalls,
     forkCalls,
     workspaceMemoryRememberCalls,
     workspaceMemoryForgetCalls,
@@ -1656,8 +1682,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       });
       return generateSessionRecapImpl(sessionId, context);
     },
-    async generateSessionBtw(sessionId, _question, _signal, _context) {
-      return { sessionId, answer: 'mock btw answer' };
+    async generateSessionBtw(sessionId, question, signal, context) {
+      generateSessionBtwCalls.push({
+        sessionId,
+        question,
+        ...(signal ? { signal } : {}),
+        ...(context ? { context } : {}),
+      });
+      return generateSessionBtwImpl(sessionId, question, signal, context);
     },
     async launchSessionForkAgent(sessionId, directive, context) {
       forkCalls.push({
@@ -2169,6 +2201,20 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, {
               channelReloadAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'channel_control') {
+          expect(predicate({ channelControlAvailable: true })).toBe(true);
+          expect(predicate({ channelControlAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              channelControlAvailable: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
@@ -9373,6 +9419,85 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('POST /session/:id/btw', () => {
+    it('trims the question and forwards client identity plus an abort signal', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/btw')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ question: '  what now?  ' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        sessionId: 'session-A',
+        answer: 'mock btw answer',
+      });
+      expect(bridge.generateSessionBtwCalls).toEqual([
+        expect.objectContaining({
+          sessionId: 'session-A',
+          question: 'what now?',
+          signal: expect.any(AbortSignal),
+          context: { clientId: 'client-1' },
+        }),
+      ]);
+      expect(bridge.generateSessionBtwCalls[0]?.signal?.aborted).toBe(false);
+    });
+
+    it('rejects empty and oversized questions before bridge dispatch', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const empty = await request(app)
+        .post('/session/session-A/btw')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ question: '   ' });
+      const oversized = await request(app)
+        .post('/session/session-A/btw')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ question: 'x'.repeat(BTW_MAX_INPUT_LENGTH + 1) });
+
+      expect(empty.status).toBe(400);
+      expect(oversized.status).toBe(400);
+      expect(bridge.generateSessionBtwCalls).toEqual([]);
+    });
+
+    it('rejects a malformed client id before bridge dispatch', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/btw')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'bad client id')
+        .send({ question: 'what now?' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_client_id');
+      expect(bridge.generateSessionBtwCalls).toEqual([]);
+    });
+
+    it('maps bridge errors through the standard route error response', async () => {
+      const bridge = fakeBridge({
+        generateSessionBtwImpl: async () => {
+          throw new Error('btw failed');
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/btw')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ question: 'what now?' });
+
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ error: 'btw failed' });
+      expect(bridge.generateSessionBtwCalls).toHaveLength(1);
+    });
+  });
+
   describe('POST /session/:id/shell', () => {
     const tokenOpts: ServeOptions = {
       ...baseOpts,
@@ -10245,6 +10370,314 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('/workspace/channel runtime control', () => {
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+    const disabled = (): ChannelWorkerControlState => ({
+      enabled: false,
+      selection: null,
+      transition: 'idle',
+      workers: [],
+    });
+    const running = (): ChannelWorkerControlState => ({
+      enabled: true,
+      selection: { mode: 'names', names: ['telegram'] },
+      transition: 'idle',
+      workers: [
+        {
+          enabled: true,
+          state: 'running',
+          channels: ['telegram'],
+          workspaceId: 'primary',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+        },
+      ],
+    });
+
+    it('exposes disabled state and advertises control but not reload', async () => {
+      let state = disabled();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerControl: () => state,
+        setChannelWorkerSelection: vi.fn(async (selection) => {
+          state = { ...running(), selection };
+          return {
+            changed: true,
+            replaced: false,
+            partial: false,
+            state,
+          };
+        }),
+        stopChannelWorker: vi.fn(async () => ({ changed: false, state })),
+        reloadChannelWorker: vi.fn(async () => ({
+          enabled: false,
+          state: 'disabled',
+          channels: [],
+        })),
+      });
+
+      const control = await auth(request(app).get('/workspace/channel'));
+      expect(control.status).toBe(200);
+      expect(control.body).toEqual(disabled());
+
+      const capabilities = await auth(request(app).get('/capabilities'));
+      expect(capabilities.body.features).toContain('channel_control');
+      expect(capabilities.body.features).not.toContain('channel_reload');
+    });
+
+    it('does not advertise reload for degraded manager states', async () => {
+      for (const state of [
+        {
+          enabled: true,
+          selection: null,
+          transition: 'idle',
+          workers: [],
+        },
+        {
+          enabled: true,
+          selection: { mode: 'names', names: ['telegram'] },
+          transition: 'idle',
+          workers: [],
+        },
+      ] satisfies ChannelWorkerControlState[]) {
+        const app = createServeApp(tokenOpts, undefined, {
+          bridge: fakeBridge(),
+          boundWorkspace: WS_BOUND,
+          getChannelWorkerControl: () => state,
+          setChannelWorkerSelection: vi.fn(),
+          stopChannelWorker: vi.fn(),
+          reloadChannelWorker: vi.fn(),
+        });
+
+        const capabilities = await auth(request(app).get('/capabilities'));
+        expect(capabilities.body.features).toContain('channel_control');
+        expect(capabilities.body.features).not.toContain('channel_reload');
+      }
+    });
+
+    it('requires a configured token before any runtime channel mutation', async () => {
+      const state = disabled();
+      const setSelection = vi.fn();
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerControl: () => state,
+        setChannelWorkerSelection: setSelection,
+        stopChannelWorker: vi.fn(),
+        reloadChannelWorker: vi.fn(),
+      });
+
+      const response = await request(app)
+        .put('/workspace/channel')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ selection: { mode: 'all' } });
+
+      expect(response.status).toBe(401);
+      expect(response.body.code).toBe('token_required');
+      expect(setSelection).not.toHaveBeenCalled();
+    });
+
+    it('strict-gates PUT and normalizes names without sorting them', async () => {
+      let state = disabled();
+      const setSelection = vi.fn(async (selection) => {
+        state = { ...running(), selection };
+        return {
+          changed: true,
+          replaced: false,
+          partial: false,
+          state,
+          created: true,
+        };
+      });
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerControl: () => state,
+        setChannelWorkerSelection: setSelection,
+        stopChannelWorker: vi.fn(async () => ({ changed: false, state })),
+        reloadChannelWorker: vi.fn(async () => state.workers[0]!),
+      });
+
+      const unauthenticated = await request(app)
+        .put('/workspace/channel')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .send({ selection: { mode: 'all' } });
+      expect(unauthenticated.status).toBe(401);
+      expect(setSelection).not.toHaveBeenCalled();
+
+      const response = await auth(request(app).put('/workspace/channel')).send({
+        selection: {
+          mode: 'names',
+          names: [' discord ', 'telegram', 'discord'],
+        },
+      });
+      expect(response.status).toBe(201);
+      expect(response.body).not.toHaveProperty('created');
+      expect(setSelection).toHaveBeenCalledWith({
+        mode: 'names',
+        names: ['discord', 'telegram'],
+      });
+    });
+
+    it('rejects empty and mixed all selections before changing workers', async () => {
+      const setSelection = vi.fn();
+      const state = disabled();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerControl: () => state,
+        setChannelWorkerSelection: setSelection,
+        stopChannelWorker: vi.fn(async () => ({ changed: false, state })),
+        reloadChannelWorker: vi.fn(async () => ({
+          enabled: false,
+          state: 'disabled',
+          channels: [],
+        })),
+      });
+
+      for (const selection of [
+        { mode: 'names', names: [] },
+        { mode: 'all', names: ['telegram'] },
+      ]) {
+        const response = await auth(
+          request(app).put('/workspace/channel'),
+        ).send({ selection });
+        expect(response.status).toBe(400);
+        expect(response.body.code).toBe('invalid_channel_selection');
+      }
+      expect(setSelection).not.toHaveBeenCalled();
+    });
+
+    it('returns typed start failure details with credential redaction', async () => {
+      const state = running();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerControl: () => state,
+        setChannelWorkerSelection: vi.fn(async () => {
+          throw new ChannelWorkerControlError(
+            'channel_worker_start_failed',
+            'token=start-secret',
+            {
+              rolledBack: false,
+              rollbackError: 'token=rollback-secret',
+            },
+          );
+        }),
+        stopChannelWorker: vi.fn(async () => ({ changed: false, state })),
+        reloadChannelWorker: vi.fn(async () => state.workers[0]!),
+      });
+
+      const response = await auth(request(app).put('/workspace/channel')).send({
+        selection: { mode: 'all' },
+      });
+
+      expect(response.status).toBe(502);
+      expect(response.body).toMatchObject({
+        code: 'channel_worker_start_failed',
+        rolledBack: false,
+        state,
+      });
+      expect(JSON.stringify(response.body)).not.toContain('start-secret');
+      expect(JSON.stringify(response.body)).not.toContain('rollback-secret');
+    });
+
+    it('maps untrusted workspace failures to 403', async () => {
+      const state = disabled();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerControl: () => state,
+        setChannelWorkerSelection: vi.fn(async () => {
+          throw Object.assign(new Error('Workspace is not trusted.'), {
+            code: 'untrusted_workspace',
+          });
+        }),
+        stopChannelWorker: vi.fn(async () => ({ changed: false, state })),
+        reloadChannelWorker: vi.fn(async () => ({
+          enabled: false,
+          state: 'disabled',
+          channels: [],
+        })),
+      });
+
+      const response = await auth(request(app).put('/workspace/channel')).send({
+        selection: { mode: 'all' },
+      });
+
+      expect(response.status).toBe(403);
+      expect(response.body).toEqual({
+        error: 'Workspace is not trusted.',
+        code: 'untrusted_workspace',
+      });
+    });
+
+    it('maps a pre-manager daemon draining gate to the stable 503 error', async () => {
+      const state = disabled();
+      const setSelection = vi.fn();
+      const stopChannelWorker = vi.fn();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerControl: () => state,
+        isChannelControlDraining: () => true,
+        setChannelWorkerSelection: setSelection,
+        stopChannelWorker,
+        reloadChannelWorker: vi.fn(async () => ({
+          enabled: false,
+          state: 'disabled',
+          channels: [],
+        })),
+      });
+
+      const response = await auth(request(app).put('/workspace/channel')).send({
+        selection: { mode: 'all' },
+      });
+
+      expect(response.status).toBe(503);
+      expect(response.body).toMatchObject({
+        code: 'daemon_draining',
+        state,
+      });
+      const stopped = await auth(request(app).delete('/workspace/channel'));
+      expect(stopped.status).toBe(503);
+      expect(stopped.body).toMatchObject({ code: 'daemon_draining', state });
+      expect(setSelection).not.toHaveBeenCalled();
+      expect(stopChannelWorker).not.toHaveBeenCalled();
+    });
+
+    it('stops idempotently and removes channel_reload dynamically', async () => {
+      let state = running();
+      const stop = vi.fn(async () => {
+        const changed = state.enabled;
+        state = disabled();
+        return { changed, state };
+      });
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerControl: () => state,
+        setChannelWorkerSelection: vi.fn(),
+        stopChannelWorker: stop,
+        reloadChannelWorker: vi.fn(async () => state.workers[0]!),
+      });
+
+      const first = await auth(request(app).delete('/workspace/channel'));
+      const second = await auth(request(app).delete('/workspace/channel'));
+      expect(first.body).toMatchObject({ changed: true, state: disabled() });
+      expect(second.body).toMatchObject({ changed: false, state: disabled() });
+
+      const capabilities = await auth(request(app).get('/capabilities'));
+      expect(capabilities.body.features).toContain('channel_control');
+      expect(capabilities.body.features).not.toContain('channel_reload');
+    });
+  });
+
   describe('POST /workspace/channel/reload', () => {
     const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
     const auth = (req: request.Test): request.Test =>
@@ -10321,6 +10754,43 @@ describe('createServeApp', () => {
       expect(res.status).toBe(409);
       expect(res.body.code).toBe('channel_worker_not_enabled');
       expect(reloadChannelWorker).not.toHaveBeenCalled();
+    });
+
+    it('returns 503 before the disabled reload precheck while draining', async () => {
+      const reloadChannelWorker = vi.fn(async () => disabledSnapshot);
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => disabledSnapshot,
+        isChannelControlDraining: () => true,
+        reloadChannelWorker,
+      });
+
+      const res = await auth(
+        request(app).post('/workspace/channel/reload'),
+      ).send({});
+
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe('daemon_draining');
+      expect(reloadChannelWorker).not.toHaveBeenCalled();
+    });
+
+    it('waits on reload instead of returning 409 while the manager initializes', async () => {
+      const reloadChannelWorker = vi.fn(async () => runningSnapshot);
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => disabledSnapshot,
+        isChannelControlInitializing: () => true,
+        reloadChannelWorker,
+      });
+
+      const res = await auth(
+        request(app).post('/workspace/channel/reload'),
+      ).send({});
+
+      expect(res.status).toBe(200);
+      expect(reloadChannelWorker).toHaveBeenCalledTimes(1);
     });
 
     it('returns 409 when every workspace worker is disabled', async () => {
@@ -10410,6 +10880,34 @@ describe('createServeApp', () => {
       expect(res.status).toBe(500);
       expect(res.body).toEqual({ error: 'relaunch failed' });
       expect(reloadChannelWorker).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns typed and redacted reload start failures', async () => {
+      const reloadChannelWorker = vi.fn(async () => {
+        throw new ChannelWorkerControlError(
+          'channel_worker_start_failed',
+          'token=reload-secret',
+          { rolledBack: false, rollbackError: 'token=rollback-secret' },
+        );
+      });
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => runningSnapshot,
+        reloadChannelWorker,
+      });
+
+      const res = await auth(
+        request(app).post('/workspace/channel/reload'),
+      ).send({});
+
+      expect(res.status).toBe(502);
+      expect(res.body).toMatchObject({
+        code: 'channel_worker_start_failed',
+        rolledBack: false,
+      });
+      expect(JSON.stringify(res.body)).not.toContain('reload-secret');
+      expect(JSON.stringify(res.body)).not.toContain('rollback-secret');
     });
 
     it('advertises channel_reload only when the reload dep is wired', async () => {
@@ -14168,6 +14666,7 @@ describe('createServeApp', () => {
   describe('POST /channels/:channelName/webhooks/:source', () => {
     it('isolates webhook configs across workspace sources', async () => {
       const previousQwenHome = process.env['QWEN_HOME'];
+      const previousWebhookSecret = process.env['QWEN_SHARED_WEBHOOK_SECRET'];
       const tempHome = await fsp.mkdtemp(
         path.join(os.tmpdir(), 'qwen-channel-webhooks-multi-home-'),
       );
@@ -14179,9 +14678,9 @@ describe('createServeApp', () => {
       );
       try {
         process.env['QWEN_HOME'] = tempHome;
-        for (const [workspace, channel, secret] of [
-          [primary, 'primary-channel', 'primary-secret'],
-          [secondary, 'secondary-channel', 'secondary-secret'],
+        for (const [workspace, channel] of [
+          [primary, 'primary-channel'],
+          [secondary, 'secondary-channel'],
         ]) {
           const qwenDir = path.join(workspace, '.qwen');
           await fsp.mkdir(qwenDir);
@@ -14194,7 +14693,7 @@ describe('createServeApp', () => {
                   webhooks: {
                     sources: {
                       ci: {
-                        secret,
+                        secretEnv: 'QWEN_SHARED_WEBHOOK_SECRET',
                         targets: {
                           default: {
                             chatId: `${channel}-chat`,
@@ -14210,6 +14709,7 @@ describe('createServeApp', () => {
             'utf8',
           );
         }
+        process.env['QWEN_SHARED_WEBHOOK_SECRET'] = 'primary-secret';
         resetHomeEnvBootstrapForTesting();
 
         const enqueueChannelWebhookTask = vi.fn(async () => ({
@@ -14222,10 +14722,15 @@ describe('createServeApp', () => {
             bridge: fakeBridge(),
             enqueueChannelWebhookTask,
             channelWebhookConfigSources: [
-              { workspaceCwd: primary, channelNames: ['primary-channel'] },
+              {
+                workspaceCwd: primary,
+                channelNames: ['primary-channel'],
+                env: { QWEN_SHARED_WEBHOOK_SECRET: 'primary-secret' },
+              },
               {
                 workspaceCwd: secondary,
                 channelNames: ['secondary-channel'],
+                env: { QWEN_SHARED_WEBHOOK_SECRET: 'secondary-secret' },
               },
             ],
           },
@@ -14271,6 +14776,110 @@ describe('createServeApp', () => {
           fsp.rm(tempHome, { recursive: true, force: true }),
           fsp.rm(primary, { recursive: true, force: true }),
           fsp.rm(secondary, { recursive: true, force: true }),
+        ]);
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        restoreEnv('QWEN_SHARED_WEBHOOK_SECRET', previousWebhookSecret);
+        resetHomeEnvBootstrapForTesting();
+      }
+    });
+
+    it('refreshes webhook authentication when the manager config version changes', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-runtime-home-'),
+      );
+      const workspace = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-runtime-workspace-'),
+      );
+      try {
+        process.env['QWEN_HOME'] = tempHome;
+        await fsp.mkdir(path.join(workspace, '.qwen'));
+        await fsp.writeFile(
+          path.join(workspace, '.qwen', 'settings.json'),
+          JSON.stringify({
+            channels: {
+              old: {
+                type: 'dingtalk',
+                webhooks: {
+                  sources: {
+                    ci: {
+                      secret: 'old-secret',
+                      targets: {
+                        default: { chatId: 'old-chat', senderId: 'ci' },
+                      },
+                    },
+                  },
+                },
+              },
+              next: {
+                type: 'dingtalk',
+                webhooks: {
+                  sources: {
+                    ci: {
+                      secret: 'next-secret',
+                      targets: {
+                        default: { chatId: 'next-chat', senderId: 'ci' },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          }),
+          'utf8',
+        );
+        resetHomeEnvBootstrapForTesting();
+        let version = 1;
+        let names = ['old'];
+        let failSources = false;
+        let refreshWebhookConfigs: (() => void) | undefined;
+        const enqueueChannelWebhookTask = vi.fn(async () => ({
+          accepted: true as const,
+        }));
+        const app = createServeApp({ ...baseOpts, workspace }, undefined, {
+          bridge: fakeBridge(),
+          enqueueChannelWebhookTask,
+          getChannelWebhookConfigVersion: () => version,
+          getChannelWebhookConfigSources: () => {
+            if (failSources) throw new Error('settings busy');
+            return names.length > 0
+              ? [{ workspaceCwd: workspace, channelNames: names }]
+              : [];
+          },
+          registerChannelWebhookConfigRefresh: (refresh) => {
+            refreshWebhookConfigs = refresh;
+          },
+        });
+        const send = (channel: string, secret: string) =>
+          request(app)
+            .post(`/channels/${channel}/webhooks/ci`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .set('x-qwen-webhook-secret', secret)
+            .send({ eventType: 'ci', targetRef: 'default', title: 'Build' });
+
+        expect((await send('old', 'old-secret')).status).toBe(202);
+
+        failSources = true;
+        version += 1;
+        expect((await send('old', 'old-secret')).status).toBe(401);
+        failSources = false;
+        expect((await send('old', 'old-secret')).status).toBe(202);
+
+        names = ['next'];
+        version += 1;
+        refreshWebhookConfigs!();
+        names = ['old'];
+        expect((await send('old', 'old-secret')).status).toBe(401);
+        expect((await send('next', 'next-secret')).status).toBe(202);
+
+        names = [];
+        version += 1;
+        refreshWebhookConfigs!();
+        expect((await send('next', 'next-secret')).status).toBe(401);
+      } finally {
+        await Promise.all([
+          fsp.rm(tempHome, { recursive: true, force: true }),
+          fsp.rm(workspace, { recursive: true, force: true }),
         ]);
         restoreEnv('QWEN_HOME', previousQwenHome);
         resetHomeEnvBootstrapForTesting();

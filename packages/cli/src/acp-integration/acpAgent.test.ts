@@ -2560,6 +2560,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           level: 'project',
           argumentHint: '[path]',
           modelInvocable: true,
+          installedPath: '/secret/SKILL.md',
         }),
         expect.objectContaining({
           kind: 'skill',
@@ -2577,6 +2578,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           description: 'Disabled by settings',
           level: 'project',
           modelInvocable: true,
+          installedPath: '/disabled/SKILL.md',
         }),
         expect.objectContaining({
           kind: 'skill',
@@ -2595,6 +2597,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           level: 'extension',
           extensionName: 'GSD Core',
           modelInvocable: true,
+          installedPath: '/ext/gsd-core/skills/gsd-display-stale/SKILL.md',
         }),
         expect.objectContaining({
           kind: 'skill',
@@ -2604,6 +2607,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           level: 'extension',
           extensionName: 'GSD Core',
           modelInvocable: true,
+          installedPath: '/ext/gsd-core/skills/gsd-config-only/SKILL.md',
         }),
       ]),
     });
@@ -2622,7 +2626,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(JSON.stringify(skills)).not.toContain('extension secret body');
     expect(JSON.stringify(skills)).not.toContain('display stale body');
     expect(JSON.stringify(skills)).not.toContain('config only body');
-    expect(JSON.stringify(skills)).not.toContain('/secret');
+    expect(JSON.stringify(skills)).not.toContain('"skillRoot"');
     expect(JSON.stringify(skills)).not.toContain('secret-hook');
 
     expect(providers).toMatchObject({

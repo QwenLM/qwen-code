@@ -41,6 +41,7 @@ type ChatEditorTestProps = {
 const {
   mockConnection,
   mockSessionActions,
+  mockWorkspace,
   mockWorkspaceActions,
   mockStore,
   mockFollowup,
@@ -67,14 +68,19 @@ const {
     loadingTranscript: false,
     catchingUp: false,
   };
+  const workspaceClient = {
+    workspaceByCwd: vi.fn(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+    })),
+  };
   return {
     mockConnection: connection,
     mockSessionActions: {
       sendPrompt: vi.fn().mockResolvedValue(undefined),
       createSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
       attachSession: vi.fn().mockResolvedValue(undefined),
-      closeSession: vi.fn().mockResolvedValue(undefined),
       clearSession: vi.fn().mockResolvedValue(undefined),
+      releaseSession: vi.fn().mockResolvedValue(undefined),
       refreshCommands: vi.fn().mockResolvedValue(undefined),
       setModel: vi.fn().mockResolvedValue(undefined),
       setApprovalMode: vi.fn().mockResolvedValue(undefined),
@@ -87,6 +93,12 @@ const {
       getStats: vi.fn().mockResolvedValue({}),
       loadArtifacts: vi.fn().mockResolvedValue({ artifacts: [] }),
       loadSession: vi.fn().mockResolvedValue(undefined),
+    },
+    mockWorkspace: {
+      capabilities: {
+        workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
+      },
+      client: workspaceClient,
     },
     mockWorkspaceActions: {
       loadSkillsStatus: vi.fn().mockResolvedValue({ skills: [] }),
@@ -150,9 +162,17 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
     reload: settingsReload,
     loading: false,
   }),
+  useProviders: () => ({
+    providers: [],
+    current: undefined,
+    loading: false,
+    error: undefined,
+    reload: vi.fn().mockResolvedValue(undefined),
+  }),
   useStreamingState: () => testState.streamingState,
   useTranscriptBlocks: () => testState.blocks,
   useTranscriptStore: () => mockStore,
+  useWorkspace: () => mockWorkspace,
   useWorkspaceActions: () => mockWorkspaceActions,
   useWorkspaceEventSignals: () => ({
     artifactsVersion: 0,
@@ -286,7 +306,13 @@ vi.mock('./components/MessageList', async () => {
 vi.mock('./components/messages/SettingsMessage', async () => {
   const React = await import('react');
   return {
-    SettingsMessage: (props: { onSubDialog?: (key: string) => void }) =>
+    SettingsMessage: (props: {
+      onSubDialog?: (key: string, scope: 'user' | 'workspace') => void;
+      onLanguageChange?: (
+        language: string,
+        scope: 'user' | 'workspace',
+      ) => void;
+    }) =>
       React.createElement(
         'div',
         { 'data-testid': 'settings-message' },
@@ -295,9 +321,31 @@ vi.mock('./components/messages/SettingsMessage', async () => {
           {
             'data-testid': 'open-fast-model',
             type: 'button',
-            onClick: () => props.onSubDialog?.('fastModel'),
+            // The real panel forwards the active tab's scope; default is
+            // workspace, which drives the `--project` flag below.
+            onClick: () => props.onSubDialog?.('fastModel', 'workspace'),
           },
           'fast model',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'open-fast-model-user',
+            type: 'button',
+            // User tab → drives the `--global` flag.
+            onClick: () => props.onSubDialog?.('fastModel', 'user'),
+          },
+          'fast model (user)',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'change-language-workspace',
+            type: 'button',
+            // Workspace tab language change → /language ui en --project.
+            onClick: () => props.onLanguageChange?.('en', 'workspace'),
+          },
+          'language (workspace)',
         ),
       ),
   };
@@ -401,6 +449,8 @@ mockComponent('./components/WelcomeHeader', 'WelcomeHeader');
 mockComponent('./components/dialogs/ApprovalModeDialog', 'ApprovalModeDialog');
 mockComponent('./components/dialogs/ResumeDialog', 'ResumeDialog');
 mockComponent('./components/dialogs/ToolsDialog', 'ToolsDialog');
+mockComponent('./components/tools/ToolsManagerPage', 'ToolsManagerPage');
+mockComponent('./components/skills/SkillsManagerPage', 'SkillsManagerPage');
 mockComponent('./components/dialogs/DaemonStatusDialog', 'DaemonStatusDialog');
 mockComponent('./components/SessionOverviewPanel', 'SessionOverviewPanel');
 vi.doMock('./components/SplitView', async () => {
@@ -608,6 +658,20 @@ async function clickSubmit(container: HTMLElement): Promise<void> {
   });
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value?: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value?: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = (value) => res(value as T | PromiseLike<T>);
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 // A transcript block shaped like extractPendingPermission() expects. Defaults to
 // a non-AskUserQuestion tool (→ pendingToolApproval); pass toolName
 // 'ask_user_question' to exercise the pendingAskUserApproval branch instead.
@@ -684,8 +748,8 @@ beforeEach(() => {
     sessionId: 'session-1',
   });
   mockSessionActions.attachSession.mockResolvedValue(undefined);
-  mockSessionActions.closeSession.mockResolvedValue(undefined);
   mockSessionActions.clearSession.mockResolvedValue(undefined);
+  mockSessionActions.releaseSession.mockResolvedValue(undefined);
   mockSessionActions.loadSession.mockResolvedValue(undefined);
   mockSessionActions.refreshCommands.mockResolvedValue(undefined);
   mockSessionActions.setModel.mockResolvedValue(undefined);
@@ -961,6 +1025,161 @@ describe('App session callbacks', () => {
       vi.advanceTimersByTime(2000);
     });
     expect(sidebarTokens.at(-1)).not.toBe(tokenAfterSubmit);
+  });
+
+  it('keeps concurrent programmatic submissions behind session preparation', async () => {
+    mockConnection.sessionId = undefined;
+    const callbackStarted = deferred<void>();
+    const callbackFinished = deferred<void>();
+    mockSessionActions.createSession.mockImplementation(async () => {
+      mockConnection.sessionId = 'session-created';
+      return { sessionId: 'session-created' };
+    });
+    const onSessionCreated = vi.fn(async () => {
+      callbackStarted.resolve();
+      await callbackFinished.promise;
+    });
+    renderApp({ onSessionCreated });
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('first');
+      await callbackStarted.promise;
+    });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('second');
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
+    expect(mockSessionActions.attachSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+
+    await act(async () => {
+      callbackFinished.resolve();
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+      });
+    });
+    expect(mockSessionActions.attachSession).toHaveBeenCalledOnce();
+  });
+
+  it('lets a selected session bypass a stale preparation promise', async () => {
+    mockConnection.sessionId = undefined;
+    const callbackStarted = deferred<void>();
+    const callbackFinished = deferred<void>();
+    mockSessionActions.createSession.mockImplementation(async () => {
+      mockConnection.sessionId = 'session-created';
+      return { sessionId: 'session-created' };
+    });
+    const onSessionCreated = vi.fn(async () => {
+      callbackStarted.resolve();
+      await callbackFinished.promise;
+    });
+    const { rerender } = renderApp({ onSessionCreated });
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('first');
+      await callbackStarted.promise;
+    });
+    mockConnection.sessionId = 'session-selected';
+    rerender({ onSessionCreated });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('second');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    expect(mockSessionActions.attachSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'second',
+      expect.any(Object),
+    );
+
+    await act(async () => {
+      callbackFinished.resolve();
+      await vi.waitFor(() => {
+        expect(mockSessionActions.releaseSession).toHaveBeenCalledWith(
+          'session-created',
+        );
+      });
+    });
+    expect(mockSessionActions.attachSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+  });
+
+  it('lets a selected session bypass creation before its id is allocated', async () => {
+    mockConnection.sessionId = undefined;
+    const creationFinished = deferred<{ sessionId: string }>();
+    mockSessionActions.createSession.mockImplementation(
+      () => creationFinished.promise,
+    );
+    const { rerender } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('first');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
+    });
+    mockConnection.sessionId = 'session-selected';
+    rerender();
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('second');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    expect(mockSessionActions.attachSession).not.toHaveBeenCalled();
+    await act(async () => {
+      creationFinished.resolve({ sessionId: 'session-created' });
+      await vi.waitFor(() => {
+        expect(mockSessionActions.releaseSession).toHaveBeenCalledWith(
+          'session-created',
+        );
+      });
+    });
+    expect(mockSessionActions.attachSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+  });
+
+  it('clears a shared rejected preparation so a later submit can retry', async () => {
+    mockConnection.sessionId = undefined;
+    const firstCreation = deferred<{ sessionId: string }>();
+    mockSessionActions.createSession
+      .mockImplementationOnce(() => firstCreation.promise)
+      .mockImplementationOnce(async () => {
+        mockConnection.sessionId = 'session-retry';
+        return { sessionId: 'session-retry' };
+      });
+    renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('first');
+      testState.latestChatEditorProps?.onSubmit('second');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
+    });
+    firstCreation.reject(new Error('create failed'));
+    await flush();
+    await flush();
+
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('third');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalledTimes(2);
+      });
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+      });
+    });
   });
 
   it('cancels direct submissions when onSubmitBefore rejects and preserves retry state', async () => {
@@ -1551,142 +1770,6 @@ describe('App session callbacks', () => {
     const panel = container.querySelector('[data-testid="inline-panel"]');
     expect(panel).not.toBeNull();
     expect(panel?.getAttribute('aria-label')).toBe('Session Overview');
-  });
-
-  it('forces the compact session drawer from the external shell ref', async () => {
-    const shellRef = createRef<WebShellApi>();
-    const { container } = renderApp({ sidebar: true, shellRef });
-    await flush();
-
-    await act(async () => {
-      shellRef.current?.openSessionDrawer();
-      await Promise.resolve();
-    });
-
-    const drawer = container.querySelector(
-      '[data-sidebar-shell][role="dialog"]',
-    );
-    expect(drawer).not.toBeNull();
-    expect(drawer?.className).toContain('mobileDrawerForced');
-  });
-
-  it('returns a forced compact drawer to viewport control when the user dismisses it', async () => {
-    const shellRef = createRef<WebShellApi>();
-    const { container } = renderApp({ sidebar: true, shellRef });
-    await flush();
-
-    await act(async () => {
-      shellRef.current?.openSessionDrawer();
-      await Promise.resolve();
-    });
-    expect(
-      container.querySelector('[data-sidebar-shell]')?.className,
-    ).toContain('mobileDrawerForced');
-
-    await act(async () => {
-      container
-        .querySelector<HTMLElement>(
-          '[data-sidebar-shell] > div[aria-hidden="true"]',
-        )
-        ?.click();
-      await Promise.resolve();
-    });
-    expect(
-      container.querySelector('[data-sidebar-shell]')?.className,
-    ).not.toContain('mobileDrawerForced');
-    expect(
-      container.querySelector('[data-sidebar-shell][role="dialog"]'),
-    ).toBeNull();
-  });
-
-  it('returns to chat and clears the current page when the external shell opens the compact drawer', async () => {
-    const shellRef = createRef<WebShellApi>();
-    const { container } = renderApp({ sidebar: true, shellRef });
-    await flush();
-
-    await act(async () => {
-      shellRef.current?.openSessionOverview();
-      await Promise.resolve();
-    });
-    expect(
-      container.querySelector('[data-testid="inline-panel"]'),
-    ).not.toBeNull();
-
-    await act(async () => {
-      shellRef.current?.openSessionDrawer();
-      await Promise.resolve();
-    });
-    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
-
-    await act(async () => {
-      shellRef.current?.openSplitView();
-      await Promise.resolve();
-    });
-    expect(
-      container.querySelector('[data-testid="split-view-page"]'),
-    ).not.toBeNull();
-
-    await act(async () => {
-      shellRef.current?.openSessionDrawer();
-      await Promise.resolve();
-    });
-    expect(
-      container.querySelector('[data-testid="split-view-page"]'),
-    ).toBeNull();
-    expect(
-      container.querySelector('[data-sidebar-shell][role="dialog"]'),
-    ).not.toBeNull();
-  });
-
-  it('clears a forced compact drawer after crossing to a wide viewport', async () => {
-    let mobileChangeHandler:
-      | ((event: { matches: boolean }) => void)
-      | undefined;
-    Object.defineProperty(window, 'matchMedia', {
-      configurable: true,
-      value: vi.fn().mockImplementation((query: string) => ({
-        matches: query.includes('min-width'),
-        media: query,
-        addEventListener: (
-          _type: string,
-          handler: (event: { matches: boolean }) => void,
-        ) => {
-          if (query.includes('max-width')) mobileChangeHandler = handler;
-        },
-        removeEventListener: vi.fn(),
-      })),
-    });
-    const shellRef = createRef<WebShellApi>();
-    const { container } = renderApp({ sidebar: true, shellRef });
-    await flush();
-
-    await act(async () => {
-      shellRef.current?.openSessionDrawer();
-      await Promise.resolve();
-    });
-    expect(
-      container.querySelector('[data-sidebar-shell]')?.className,
-    ).toContain('mobileDrawerForced');
-
-    await act(async () => {
-      mobileChangeHandler?.({ matches: false });
-      await Promise.resolve();
-    });
-    expect(
-      container.querySelector('[data-sidebar-shell]')?.className,
-    ).not.toContain('mobileDrawerForced');
-    expect(
-      container.querySelector('[data-sidebar-shell][role="dialog"]'),
-    ).toBeNull();
-  });
-
-  it('lets a host hide the built-in compact sidebar toggle', async () => {
-    const { container } = renderApp({
-      sidebar: { enabled: true, showCompactToggle: false },
-    });
-    await flush();
-
-    expect(container.querySelector('[aria-label="Toggle menu"]')).toBeNull();
   });
 
   it('returns to the Session Overview when leaving the split view', async () => {
@@ -2580,11 +2663,67 @@ describe('App session callbacks', () => {
 
     expect(
       mockSessionActions.sendPrompt.mock.calls.some(
-        (c) => c[0] === '/model --fast fast-model-x',
+        // Workspace tab → the command carries the --project scope flag so the
+        // fast-model choice persists to workspace settings, not the default.
+        (c) => c[0] === '/model --fast fast-model-x --project',
       ),
     ).toBe(true);
     expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
     expect(settingsReload).toHaveBeenCalled();
+  });
+
+  it('sends /model --fast with --global when the fast-model picker is opened from the User tab', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-fast-model-user"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="model-select"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      mockSessionActions.sendPrompt.mock.calls.some(
+        (c) => c[0] === '/model --fast fast-model-x --global',
+      ),
+    ).toBe(true);
+  });
+
+  it('sends /language ui --project for a workspace-scoped language change from Settings', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="change-language-workspace"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      mockSessionActions.sendPrompt.mock.calls.some(
+        (c) => c[0] === '/language ui en --project',
+      ),
+    ).toBe(true);
   });
 
   it('marks the chat view aria-hidden while a panel is shown', async () => {
@@ -2723,7 +2862,9 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     await act(async () => {
       await expect(run('do the thing', 'session-1')).resolves.toBeUndefined();
     });
-    expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-1');
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-1', {
+      workspaceCwd: undefined,
+    });
   });
 
   it('supersedes an older pending bound run with a newer one', async () => {

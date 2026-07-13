@@ -24,6 +24,11 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', async () => {
       sessionProviderProps.push(props);
       return React.createElement(React.Fragment, null, children);
     },
+    useWorkspace: () => ({
+      capabilities: {
+        workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
+      },
+    }),
   };
 });
 vi.mock('./App', async () => {
@@ -33,9 +38,8 @@ vi.mock('./App', async () => {
   };
 });
 
-// Bare './index' resolves to the sibling index.ts barrel, which doesn't export
-// WebShellWithProviders (see the dual-entry note in the PR). A variable
-// specifier loads index.tsx at runtime without tripping tsc's ts-extension rule.
+// A variable specifier loads the TSX library entry without requiring
+// allowImportingTsExtensions in this test configuration.
 const indexEntry = './index.tsx';
 const { WebShellWithProviders } = await import(indexEntry);
 
