@@ -81,7 +81,7 @@ jobs:
             --active-days "${ACTIVE_DAYS}" \
             --max-candidates "${MAX_CANDIDATES_PER_RUN}" \
             --trusted-marker-login "${{ needs.identity.outputs.bot_login }}" | tee "${WORKDIR}/scan.out"
-          cat "${WORKDIR}/scan.out" >> "${GITHUB_OUTPUT}"
+          grep -E '^(target_found|target_count)=' "${WORKDIR}/scan.out" >> "${GITHUB_OUTPUT}"
           if test -s "${WORKDIR}/ci-flaky-input.json"; then
             input_sha="$(sha256sum "${WORKDIR}/ci-flaky-input.json" | cut -d ' ' -f 1)"
             echo "input_sha=${input_sha}" >> "${GITHUB_OUTPUT}"
@@ -136,7 +136,7 @@ jobs:
     name: 'Apply validated PR CI action'
     needs: ['identity', 'classify']
     # act always runs so reset can clean stale markers; download/act steps self-gate on target_found.
-    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    if: "${{ always() && github.repository == 'QwenLM/qwen-code' && needs.identity.result == 'success' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:

@@ -637,6 +637,11 @@ if (args[0] === 'pr' && args[1] === 'list') {
     expect(script).not.toContain("'run',\n        'list',");
   });
 
+  it('uses compare head...main ahead_by as the main distance', () => {
+    expect(script).toContain('`repos/${this.repo}/compare/${headSha}...main`');
+    expect(script).toContain("'.ahead_by'");
+  });
+
   it('stops after three actions for the same PR failure key', async () => {
     const client = runner();
     client.failureActionCount = async () => 3;
@@ -946,7 +951,7 @@ if (args[0] === 'pr' && args[1] === 'list') {
     expect(client.calls).toEqual([]);
   });
 
-  it('does not rerun without a failure explanation', async () => {
+  it('records no-action state instead of rerunning without a failure explanation', async () => {
     const client = runner();
 
     await actOnDecision(client, selectTarget([pr()], { now: NOW }), {
@@ -955,7 +960,9 @@ if (args[0] === 'pr' && args[1] === 'list') {
       reason_zh: '日志显示 runner 网络超时。',
     });
 
-    expect(client.calls).toEqual([]);
+    expect(client.calls).toEqual([
+      ['comment', 42, expect.stringContaining('action=no_action')],
+    ]);
   });
 
   it('does not rerun when recording the marker fails', async () => {
@@ -995,7 +1002,6 @@ if (args[0] === 'pr' && args[1] === 'list') {
     });
 
     expect(client.calls).toEqual([
-      ['updateBranch', 42, 'abc123'],
       [
         'comment',
         42,
@@ -1003,10 +1009,12 @@ if (args[0] === 'pr' && args[1] === 'list') {
           'qwen-ci-flaky-rerun v=2 pr=42 head=abc123 run=123',
         ),
       ],
+      ['updateBranch', 42, 'abc123'],
     ]);
+    expect(client.calls[0][2]).toContain('action=update_branch');
   });
 
-  it('does not update a branch without a matching main workflow identity', async () => {
+  it('records no-action state without a matching main workflow identity', async () => {
     const client = runner();
     const target = {
       ...selectTarget([pr()], { now: NOW }),
@@ -1023,10 +1031,12 @@ if (args[0] === 'pr' && args[1] === 'list') {
       reason_zh: 'main 包含所需的 CI 修复。',
     });
 
-    expect(client.calls).toEqual([]);
+    expect(client.calls).toEqual([
+      ['comment', 42, expect.stringContaining('action=no_action')],
+    ]);
   });
 
-  it('does not update a branch when a branch-writing guard fails', async () => {
+  it('records no-action state when a branch-writing guard fails', async () => {
     const completeTarget = {
       ...selectTarget([pr()], { now: NOW }),
       mainHeadSha: 'main-head',
@@ -1059,11 +1069,13 @@ if (args[0] === 'pr' && args[1] === 'list') {
         ...testCase.decision,
       });
 
-      expect(client.calls).toEqual([]);
+      expect(client.calls).toEqual([
+        ['comment', 42, expect.stringContaining('action=no_action')],
+      ]);
     }
   });
 
-  it('does not update a branch without a verified successful main run', async () => {
+  it('records no-action state without a verified successful main run', async () => {
     const client = runner();
 
     await actOnDecision(client, selectTarget([pr()], { now: NOW }), {
@@ -1073,7 +1085,9 @@ if (args[0] === 'pr' && args[1] === 'list') {
       reason_zh: '该分支需要同步 main 的 CI 配置。',
     });
 
-    expect(client.calls).toEqual([]);
+    expect(client.calls).toEqual([
+      ['comment', 42, expect.stringContaining('action=no_action')],
+    ]);
   });
 
   it('keeps applying later decisions after one action fails', async () => {
@@ -1123,7 +1137,7 @@ if (args[0] === 'pr' && args[1] === 'list') {
     ]);
   });
 
-  it('does not update a branch when main advanced after classification', async () => {
+  it('records no-action state when main advanced after classification', async () => {
     const client = runner();
     client.mainHeadSha = async () => 'new-main-head';
     const target = {
@@ -1141,7 +1155,9 @@ if (args[0] === 'pr' && args[1] === 'list') {
       reason_zh: 'main 包含所需的 CI 修复。',
     });
 
-    expect(client.calls).toEqual([]);
+    expect(client.calls).toEqual([
+      ['comment', 42, expect.stringContaining('action=no_action')],
+    ]);
   });
 
   it('leaves a bilingual failure explanation when the skill requests a comment', async () => {
@@ -1166,7 +1182,23 @@ if (args[0] === 'pr' && args[1] === 'list') {
     expect(client.calls[0][2]).toContain('i18n 检查发现了多余的语言键。');
   });
 
-  it('does not post blank failure explanations', async () => {
+  it('bounds posted failure explanation length', async () => {
+    const client = runner();
+    const target = selectTarget([pr()], { now: NOW });
+    const longReason = 'x'.repeat(5000);
+
+    await actOnDecision(client, target, {
+      action: 'comment',
+      confidence: 'high',
+      reason_en: longReason,
+      reason_zh: longReason,
+    });
+
+    expect(client.calls[0][2]).toContain(`${'x'.repeat(4000)}…`);
+    expect(client.calls[0][2]).not.toContain('x'.repeat(4500));
+  });
+
+  it('records no-action state instead of posting blank failure explanations', async () => {
     const client = runner();
     const target = selectTarget([pr()], { now: NOW });
 
@@ -1176,7 +1208,9 @@ if (args[0] === 'pr' && args[1] === 'list') {
       reason_en: 'The i18n check found an extra locale key.',
     });
 
-    expect(client.calls).toEqual([]);
+    expect(client.calls).toEqual([
+      ['comment', 42, expect.stringContaining('action=no_action')],
+    ]);
   });
 
   it('does not update a branch after a new push changes its head', async () => {
@@ -1293,11 +1327,13 @@ if (args[0] === 'pr' && args[1] === 'list') {
           prNumber: 42,
           runId: 123,
           log: 'network timeout while downloading package',
+          failureKey: expect.stringMatching(/^check-[a-f0-9]{16}$/),
         },
         {
           prNumber: 43,
           runId: 124,
           log: 'AssertionError: expected generated schema',
+          failureKey: expect.stringMatching(/^check-[a-f0-9]{16}$/),
         },
       ]);
     } finally {
@@ -1447,9 +1483,14 @@ if (args[0] === 'pr' && args[1] === 'list') {
               'Extra key in zh.js (not in en.js): "toolDisplayName.DeferredToolCall"',
               'Error: NODE_AUTH_TOKEN: another-secret',
               'Error: Authorization: Basic c2VjcmV0LWNyZWRlbnRpYWw=',
+              'Error: Authorization: token part1 part2 part3',
               'Failure: AWS key AKIAIOSFODNN7EXAMPLE',
               `Failure: xoxb-${'a'.repeat(24)}`,
+              `Failure: ghp_${'e'.repeat(24)}`,
+              `Failure: gho_${'f'.repeat(24)}`,
+              `Failure: ghs_${'g'.repeat(24)}`,
               `Failure: ghr_${'c'.repeat(24)}`,
+              `Failure: github_pat_${'h'.repeat(32)}`,
               `Failure: sk-proj-${'b'.repeat(32)}`,
               `Failure: npm_${'d'.repeat(36)}`,
               'Error: https://user:password@example.com/path',
@@ -1471,9 +1512,14 @@ if (args[0] === 'pr' && args[1] === 'list') {
       expect(log).not.toContain('prefixed-session-secret');
       expect(log).not.toContain('another-secret');
       expect(log).not.toContain('c2VjcmV0LWNyZWRlbnRpYWw=');
+      expect(log).not.toContain('part3');
       expect(log).not.toContain('AKIAIOSFODNN7EXAMPLE');
       expect(log).not.toContain(`xoxb-${'a'.repeat(24)}`);
+      expect(log).not.toContain(`ghp_${'e'.repeat(24)}`);
+      expect(log).not.toContain(`gho_${'f'.repeat(24)}`);
+      expect(log).not.toContain(`ghs_${'g'.repeat(24)}`);
       expect(log).not.toContain(`ghr_${'c'.repeat(24)}`);
+      expect(log).not.toContain(`github_pat_${'h'.repeat(32)}`);
       expect(log).not.toContain(`sk-proj-${'b'.repeat(32)}`);
       expect(log).not.toContain(`npm_${'d'.repeat(36)}`);
       expect(log).not.toContain('user:password@');

@@ -34,6 +34,10 @@ describe('ci flaky rerun workflow', () => {
     expect(workflow).not.toContain('update-branch');
     expect(workflow).toContain('persist-credentials: false');
     expect(workflow).toContain('set -o pipefail');
+    expect(workflow).toContain("grep -E '^(target_found|target_count)='");
+    expect(workflow).toContain(
+      "if: \"${{ always() && github.repository == 'QwenLM/qwen-code' && needs.identity.result == 'success' }}\"",
+    );
     expect(workflow).toContain(
       'act always runs so reset can clean stale markers',
     );

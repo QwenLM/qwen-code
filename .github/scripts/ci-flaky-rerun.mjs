@@ -17,6 +17,7 @@ const DEFAULT_STALE_MINUTES = 30;
 const DEFAULT_ACTIVE_DAYS = 7;
 const DEFAULT_MAX_CANDIDATES_PER_RUN = 5;
 const MAX_ACTIONS_PER_HEAD = 3;
+const MAX_REASON_CHARS = 4000;
 const MAIN_CI_WORKFLOW = 'ci.yml';
 const MARKER = 'qwen-ci-flaky-rerun';
 
@@ -116,7 +117,7 @@ function redactLogLine(line) {
   return line
     .replace(/((?:Set-)?Cookie:\s*)[^\r\n]*/gi, '$1[redacted]')
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, '$1[redacted]')
-    .replace(/(Authorization:\s*)\S+(?:\s+\S+)?/gi, '$1[redacted]')
+    .replace(/(Authorization:\s*)[^\r\n]*/gi, '$1[redacted]')
     .replace(
       /(?:gh[pousr]_|github_pat_|glpat-|xox[b]-|xox[p]-)[A-Za-z0-9_-]{20,}/g,
       '[redacted]',
@@ -129,6 +130,14 @@ function redactLogLine(line) {
     )
     .replace(/\b([a-z][a-z0-9+.-]{0,31}:\/\/)(?:[^/\s]+@)+/gi, '$1[redacted]@')
     .replace(/\bnpm_[A-Za-z0-9]{20,}/g, '[redacted]');
+}
+
+function boundedReason(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return '';
+  return text.length > MAX_REASON_CHARS
+    ? `${text.slice(0, MAX_REASON_CHARS)}…`
+    : text;
 }
 
 function skillLog(log) {
@@ -230,25 +239,6 @@ async function isActionablePr(client, target) {
 
 export async function actOnDecision(client, target, decision) {
   if (!target) return;
-  if (decision?.action === 'no_action') {
-    if (!(await isActionablePr(client, target))) return;
-    if (!(await client.isCurrentFailure(target))) return;
-    const key = failureKey(target, decision);
-    if (!key) return;
-    const actionCount = await client.failureActionCount(
-      target.prNumber,
-      target.headSha,
-      key,
-    );
-    if (actionCount >= MAX_ACTIONS_PER_HEAD) return;
-    await client.comment(
-      target.prNumber,
-      markerFor(target, 'no_action', key, actionCount + 1),
-    );
-    return;
-  }
-  if (decision?.confidence !== 'high') return;
-  if (!['rerun', 'update_branch', 'comment'].includes(decision.action)) return;
   if (!(await isActionablePr(client, target))) return;
   if (!(await client.isCurrentFailure(target))) return;
   const key = failureKey(target, decision);
@@ -260,13 +250,35 @@ export async function actOnDecision(client, target, decision) {
   );
   if (actionCount >= MAX_ACTIONS_PER_HEAD) return;
   const nextTarget = { ...target, actionCount };
+  const recordNoAction = () =>
+    client.comment(
+      target.prNumber,
+      markerFor(nextTarget, 'no_action', key, actionCount + 1),
+    );
+
+  if (decision?.action === 'no_action') {
+    await recordNoAction();
+    return;
+  }
+  if (decision?.confidence !== 'high') {
+    await recordNoAction();
+    return;
+  }
+  if (!['rerun', 'update_branch', 'comment'].includes(decision.action)) {
+    await recordNoAction();
+    return;
+  }
 
   if (decision.action === 'rerun') {
-    if (!decision.reason_en) return;
+    const reasonEn = boundedReason(decision.reason_en);
+    if (!reasonEn) {
+      await recordNoAction();
+      return;
+    }
     await client.comment(
       target.prNumber,
       [
-        `Rerunning failed jobs because this failure looks flaky: ${decision.reason_en}`,
+        `Rerunning failed jobs because this failure looks flaky: ${reasonEn}`,
         '',
         markerFor(nextTarget, 'rerun', key, actionCount + 1),
       ].join('\n'),
@@ -276,19 +288,31 @@ export async function actOnDecision(client, target, decision) {
   }
 
   if (decision.action === 'update_branch') {
-    if ((await client.behindBy(target.headSha)) <= 0) return;
-    if (!Number.isSafeInteger(decision.mainRunId)) return;
-    if (!target.mainHeadSha) return;
+    if ((await client.behindBy(target.headSha)) <= 0) {
+      await recordNoAction();
+      return;
+    }
+    if (!Number.isSafeInteger(decision.mainRunId)) {
+      await recordNoAction();
+      return;
+    }
+    if (!target.mainHeadSha) {
+      await recordNoAction();
+      return;
+    }
     if (
       decision.mainRunId !== target.mainRunId ||
       (await client.mainHeadSha()) !== target.mainHeadSha
-    )
+    ) {
+      await recordNoAction();
       return;
+    }
     if (
       !(await client.mainRunSucceeded(decision.mainRunId, target.mainWorkflow))
-    )
+    ) {
+      await recordNoAction();
       return;
-    await client.updateBranch(target.prNumber, target.headSha);
+    }
     await client.comment(
       target.prNumber,
       [
@@ -297,20 +321,26 @@ export async function actOnDecision(client, target, decision) {
         markerFor(nextTarget, 'update_branch', key, actionCount + 1),
       ].join('\n'),
     );
+    await client.updateBranch(target.prNumber, target.headSha);
     return;
   }
 
   if (decision.action === 'comment') {
-    if (!decision.reason_en || !decision.reason_zh) return;
+    const reasonEn = boundedReason(decision.reason_en);
+    const reasonZh = boundedReason(decision.reason_zh);
+    if (!reasonEn || !reasonZh) {
+      await recordNoAction();
+      return;
+    }
     await client.comment(
       target.prNumber,
       [
-        decision.reason_en,
+        reasonEn,
         '',
         '<details>',
         '<summary>中文说明</summary>',
         '',
-        decision.reason_zh,
+        reasonZh,
         '',
         '</details>',
         '',
