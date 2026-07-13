@@ -97,6 +97,38 @@ export function ghApiAll(path: string): unknown[] {
   return Array.isArray(parsed) ? parsed : [];
 }
 
+/**
+ * Paginate an endpoint whose array is nested under a key, e.g.
+ * `check-runs` → `{ total_count, check_runs: [...] }`.
+ *
+ * A plain `ghApiAll` cannot be used here: `--paginate` alone concatenates the
+ * raw per-page objects, so `JSON.parse` sees `}{ ` between pages and throws. On
+ * a commit with more than 30 check runs (a busy CI matrix — one real head had
+ * 508) the un-paginated call silently saw only the first page, which could hide
+ * a failing or skipped run behind the cut and let a review approve past it.
+ *
+ * `--paginate --jq '.<key>[]'` applies the jq to every page and streams each
+ * element as a newline-delimited JSON value (NDJSON), so the result is parsed
+ * line by line rather than as one array. (`gh api` has no `--slurp`.)
+ */
+export function ghApiAllNested(path: string, key: string): unknown[] {
+  return parseNdjson(gh('api', '--paginate', path, '--jq', `.${key}[]`));
+}
+
+/**
+ * Parse the newline-delimited JSON that `gh --paginate --jq '.x[]'` streams:
+ * one JSON value per non-blank line. Split out and exported so the parse is
+ * unit-testable without spawning `gh` (the spawn is covered by the commands'
+ * own runs, per this module's testing note above).
+ */
+export function parseNdjson(out: string): unknown[] {
+  if (!out) return [];
+  return out
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line));
+}
+
 /** Login of the currently authenticated GitHub user. */
 export function currentUser(): string {
   return gh('api', 'user', '--jq', '.login');

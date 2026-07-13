@@ -308,7 +308,15 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       const r = spawnSync(
         'npx',
         ['vitest', 'run', '--reporter=json', ...probes],
-        { cwd: worktree, encoding: 'utf8', timeout: 300_000 },
+        {
+          cwd: worktree,
+          encoding: 'utf8',
+          timeout: 300_000,
+          // Vitest's JSON reporter on a large suite easily exceeds spawnSync's
+          // 1 MiB default stdout buffer, which returns ENOBUFS and turns every
+          // probe `inconclusive`. Match the 64 MiB ceiling the gh wrapper uses.
+          maxBuffer: 64 * 1024 * 1024,
+        },
       );
       // `r.error` is set — and `r.status` is null — when the process never ran
       // (npx missing) or was killed (the timeout above fires SIGTERM). Ignoring

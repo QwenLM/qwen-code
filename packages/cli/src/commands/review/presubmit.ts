@@ -17,6 +17,7 @@ import {
   gh,
   ghApi,
   ghApiAll,
+  ghApiAllNested,
   currentUser,
   ensureAuthenticated,
   setGhHost,
@@ -62,9 +63,22 @@ const FAIL_CONCLUSIONS = new Set([
   'cancelled',
   'timed_out',
   'action_required',
+  // GitHub reports a workflow that could not start as `startup_failure`. It is
+  // a failure, and leaving it out let it count as an execution that added no
+  // failed name — an all_pass on a commit whose CI never ran.
+  'startup_failure',
 ]);
 const FAIL_STATUS_STATES = new Set(['failure', 'error']);
-const PENDING_STATES = new Set(['queued', 'in_progress', 'pending']);
+// GitHub check-run statuses that mean "still going". `waiting` and `requested`
+// are real active states — omitting them mislabels a commit whose only check is
+// waiting as `no_checks` with a spurious "every check was skipped" reason.
+const PENDING_STATES = new Set([
+  'queued',
+  'in_progress',
+  'pending',
+  'waiting',
+  'requested',
+]);
 
 /**
  * Conclusions that mean the job did not execute. GitHub reports these with
@@ -241,10 +255,13 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   const isSelfPr = author.toLowerCase() === me.toLowerCase();
 
   // --- CI status ---------------------------------------------------------
-  const checkRunsResp = ghApi(
+  // Paginate: a busy CI matrix produces more than 30 check runs on one commit,
+  // and the first-page-only call could hide a failing or skipped job behind the
+  // cut, letting the review approve past it.
+  const checkRuns = ghApiAllNested(
     `repos/${owner}/${repo}/commits/${commitSha}/check-runs`,
-  ) as { check_runs?: CheckRun[] } | null;
-  const checkRuns = checkRunsResp?.check_runs ?? [];
+    'check_runs',
+  ) as CheckRun[];
   const statusResp = ghApi(
     `repos/${owner}/${repo}/commits/${commitSha}/status`,
   ) as { statuses?: CommitStatus[] } | null;

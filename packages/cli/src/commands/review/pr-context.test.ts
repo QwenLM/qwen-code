@@ -554,13 +554,25 @@ describe('extractCodeRefs', () => {
     ]);
   });
 
-  it('keeps a scoped or relative path prefix intact', () => {
+  it('drops paths that escape the worktree — the read list is a trusted directive', () => {
+    // The body is untrusted and this list is rendered as "read each at the
+    // reviewed commit". A traversal or absolute token must not enter it.
+    expect(
+      extractCodeRefs('read `../../../../etc/passwd.sh` and `src/ok.ts:5`'),
+    ).toEqual(['src/ok.ts:5']);
+    expect(extractCodeRefs('see `/root/.ssh/id_rsa.key`')).toEqual([]);
+    expect(extractCodeRefs('see `~/secrets.json`')).toEqual([]);
+  });
+
+  it('keeps a scoped in-repo path prefix intact', () => {
     // `\b` fires on the first word-character transition, so `@scope/…` came back
-    // as `scope/…` and `../lib/b.ts` as `lib/b.ts` — not the path that was cited.
+    // as `scope/…` — not the path that was cited. A scoped package path stays in
+    // the repo, so it is kept; a `../` path escapes it and is dropped by the
+    // traversal filter above.
     expect(extractCodeRefs('see @scope/pkg/index.ts:10')).toEqual([
       '@scope/pkg/index.ts:10',
     ]);
-    expect(extractCodeRefs('see ../lib/b.ts')).toEqual(['../lib/b.ts']);
+    expect(extractCodeRefs('see ../lib/b.ts')).toEqual([]);
   });
 
   it('returns nothing for a body that names no code', () => {

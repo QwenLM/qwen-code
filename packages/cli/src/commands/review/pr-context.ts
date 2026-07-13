@@ -199,7 +199,21 @@ const MAX_CODE_REFS = 12;
 export function extractCodeRefs(body: string | undefined): string[] {
   const all = [
     ...new Set([...(body ?? '').matchAll(CODE_REF_RE)].map((m) => m[0])),
-  ];
+  ]
+    // The body is untrusted, and this list is rendered as a trusted "read each
+    // at the reviewed commit" directive. A path that escapes the worktree —
+    // absolute, or containing a `..` segment — must never enter it: a blocker
+    // citing `../../../../etc/passwd.sh` or `/root/.ssh/id_rsa.key` would
+    // otherwise land on the read list. Drop them; a real in-repo reference is
+    // repository-relative.
+    .filter((r) => {
+      const path = r.split(':')[0];
+      return (
+        !path.startsWith('/') &&
+        !path.startsWith('~') &&
+        !path.split('/').includes('..')
+      );
+    });
   // A report routinely names the same location twice — once bare and once by
   // full path (`text-buffer.ts:2663` and `packages/.../text-buffer.ts:2663`).
   // Keep the fuller path: it is the one the reader can open.

@@ -115,6 +115,18 @@ describe('classifyCi — a skipped check is not a passing check', () => {
     expect(got.class).toBe('no_checks');
   });
 
+  it('treats startup_failure as a failure, not a silent pass', () => {
+    // A workflow that could not start is `completed` with `startup_failure`. It
+    // used to count as an execution that added no failed name — an all_pass on
+    // a commit whose CI never ran.
+    const got = classifyCi(
+      [run('Test', 'success'), run('E2E', 'startup_failure')],
+      [],
+    );
+    expect(got.class).toBe('any_failure');
+    expect(got.failedCheckNames).toContain('E2E');
+  });
+
   it('a repo with no CI at all is still no_checks, with nothing to disclose', () => {
     const got = classifyCi([], []);
     expect(got.class).toBe('no_checks');
@@ -127,6 +139,7 @@ const {
   ghMock,
   ghApiMock,
   ghApiAllMock,
+  ghApiAllNestedMock,
   currentUserMock,
   ensureAuthenticatedMock,
   setGhHostMock,
@@ -137,6 +150,7 @@ const {
   ghMock: vi.fn(),
   ghApiMock: vi.fn(),
   ghApiAllMock: vi.fn(),
+  ghApiAllNestedMock: vi.fn(),
   currentUserMock: vi.fn(),
   ensureAuthenticatedMock: vi.fn(),
   setGhHostMock: vi.fn(),
@@ -149,6 +163,7 @@ vi.mock('./lib/gh.js', () => ({
   gh: ghMock,
   ghApi: ghApiMock,
   ghApiAll: ghApiAllMock,
+  ghApiAllNested: ghApiAllNestedMock,
   currentUser: currentUserMock,
   ensureAuthenticated: ensureAuthenticatedMock,
   setGhHost: setGhHostMock,
@@ -186,6 +201,7 @@ describe('presubmitCommand', () => {
     currentUserMock.mockReturnValue('qwen-code-ci-bot');
     ghMock.mockReturnValue('contributor');
     ghApiAllMock.mockReturnValue([]);
+    ghApiAllNestedMock.mockReturnValue([]);
     readFileSyncMock.mockReturnValue('[]');
     process.env['GITHUB_RUN_ID'] = '28788268483';
   });
@@ -204,15 +220,11 @@ describe('presubmitCommand', () => {
     // — the boolean compose-review actually acts on — did not. The disclosure was
     // written and the downgrade never fired. A reason nobody reads is not a gate,
     // so the assertion is on the boolean, through the real command.
+    ghApiAllNestedMock.mockReturnValue([
+      { name: 'Test', status: 'completed', conclusion: 'skipped' },
+      { name: 'Lint', status: 'completed', conclusion: 'skipped' },
+    ]);
     ghApiMock.mockImplementation((path: string) => {
-      if (path.endsWith('/check-runs')) {
-        return {
-          check_runs: [
-            { name: 'Test', status: 'completed', conclusion: 'skipped' },
-            { name: 'Lint', status: 'completed', conclusion: 'skipped' },
-          ],
-        };
-      }
       if (path.endsWith('/status')) return { statuses: [] };
       return null;
     });
@@ -232,25 +244,21 @@ describe('presubmitCommand', () => {
   });
 
   it('ignores the running Qwen PR review check when deciding whether CI is still pending', async () => {
+    ghApiAllNestedMock.mockReturnValue([
+      {
+        name: 'Test (ubuntu-latest, Node 22.x)',
+        status: 'completed',
+        conclusion: 'success',
+      },
+      {
+        name: 'review-pr',
+        status: 'in_progress',
+        conclusion: null,
+        details_url:
+          'https://github.com/QwenLM/qwen-code/actions/runs/28788268483/job/85362025778',
+      },
+    ]);
     ghApiMock.mockImplementation((path: string) => {
-      if (path.endsWith('/check-runs')) {
-        return {
-          check_runs: [
-            {
-              name: 'Test (ubuntu-latest, Node 22.x)',
-              status: 'completed',
-              conclusion: 'success',
-            },
-            {
-              name: 'review-pr',
-              status: 'in_progress',
-              conclusion: null,
-              details_url:
-                'https://github.com/QwenLM/qwen-code/actions/runs/28788268483/job/85362025778',
-            },
-          ],
-        };
-      }
       if (path.endsWith('/status')) {
         return { statuses: [] };
       }
@@ -275,6 +283,7 @@ describe('presubmitCommand', () => {
   it('threads --host to the gh layer before any call (GitHub Enterprise routing is code, not prose)', async () => {
     ghApiMock.mockReturnValue(null);
     ghApiAllMock.mockReturnValue([]);
+    ghApiAllNestedMock.mockReturnValue([]);
     currentUserMock.mockReturnValue('someone');
     ghMock.mockReturnValue('{}');
 
