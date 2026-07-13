@@ -28,6 +28,7 @@ export function mapSkillConfigToStatus(
     description: skill.description,
     level: skill.level,
     modelInvocable,
+    installedPath: skill.filePath,
     ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
     ...(skill.model ? { model: skill.model } : {}),
     ...(skill.extensionName ? { extensionName: skill.extensionName } : {}),

@@ -819,14 +819,20 @@ Recommended poll cadence: aligned with whatever already polls `/workspace/mcp`; 
       "description": "Review code",
       "level": "project",
       "modelInvocable": true,
+      "installedPath": "/home/alice/project/.qwen/skills/review/SKILL.md",
       "argumentHint": "[path]"
     }
   ]
 }
 ```
 
-`level` is one of `project`, `user`, `extension`, or `bundled`. `errors` is
-omitted when discovery succeeds.
+`level` is one of `project`, `user`, `extension`, or `bundled`.
+`installedPath` is the existing absolute path to the skill's `SKILL.md`; the
+daemon returns it as stored without separately resolving symlinks or
+canonicalizing it. Current daemons emit it for every skill, while clients must
+tolerate its absence from older v1 daemons. Skill bodies, hooks, `skillRoot`,
+and other skill configuration remain excluded. `errors` is omitted when
+discovery succeeds.
 
 ### `GET /workspace/providers`
 

@@ -1073,6 +1073,7 @@ export interface DaemonWorkspaceSkillStatus extends DaemonStatusCell {
   description: string;
   level: DaemonSkillLevel;
   modelInvocable: boolean;
+  installedPath?: string;
   argumentHint?: string;
   model?: string;
   extensionName?: string;
