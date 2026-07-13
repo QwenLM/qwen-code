@@ -1796,6 +1796,7 @@ const EN: Messages = {
   'thinking.expand': 'Expand thinking',
   'thinking.collapse': 'Collapse thinking',
   'thinking.running': (v) => `Thinking${v?.duration ? ` ${v.duration}` : ''}`,
+  'thinking.doneBriefly': 'Thought briefly',
   'thinking.done': (v) =>
     v?.duration ? `Thought for ${v.duration}` : 'Done thinking',
   'sessionsOverview.count': (v) => `${v?.count ?? 0} sessions`,
@@ -3618,6 +3619,7 @@ const ZH: Messages = {
   'thinking.expand': '展开思考',
   'thinking.collapse': '收起思考',
   'thinking.running': (v) => `正在思考${v?.duration ? ` ${v.duration}` : ''}`,
+  'thinking.doneBriefly': '思考片刻',
   'thinking.done': (v) => (v?.duration ? `已思考 ${v.duration}` : '思考完成'),
   'welcome.changeModel': '(/model 切换)',
   'welcome.defaultModel': '未知模型',
