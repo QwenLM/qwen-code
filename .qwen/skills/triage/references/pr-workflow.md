@@ -45,11 +45,21 @@ EXISTING=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" \
 if [ "$EXISTING" -eq 0 ]; then gh pr review ... ; fi
 ```
 
-**Signature:** every comment ends with:
+**Signature & footer:** capture the reviewed commit's short SHA once, up front (before Stage 1 posts anything):
+
+```bash
+HEAD_SHA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid[0:7]')
+```
+
+Every staged comment (Stage 1 gate-pass, Stage 2, Stage 3) ends with the signature line, then a footer recording the commit this pass reflects. Because comments are updated in place on re-run, the SHA lets a maintainer tell at a glance whether new commits landed since the last review:
 
 ```
 — *Qwen Code · qwen3.7-max*
+
+<sub>Reviewed at `<HEAD_SHA>` · re-run with `@qwen-code /triage`</sub>
 ```
+
+Terminal-gate reviews (Stage 1a/1b/1c, submitted via `gh pr review --request-changes`) use the signature only — no footer; they reject before a real review pass.
 
 **Approval:** the `gh pr review --approve` command is a separate step that runs **after** Stage 3 comment is posted. Comment first, then approve only when genuinely confident.
 
@@ -214,6 +224,8 @@ Approach: <state your honest assessment — the scope feels right / feels like i
 </details>
 
 — _Qwen Code · qwen3.7-max_
+
+<sub>Reviewed at `<HEAD_SHA>` · re-run with `@qwen-code /triage`</sub>
 ```
 
 Save this comment's ID. Terminal exits — stop here if any applies:
@@ -265,6 +277,55 @@ gh pr diff "$PR_NUMBER" --repo "$REPO"
 
 When posting findings, summarize in a few sentences like a human would — "the auth logic is duplicated in two places, worth extracting" not a line-by-line breakdown. Save inline comments for things that genuinely block the merge.
 
+#### 2a-bis. Optional enrichments (only when they add signal)
+
+Selective and conditional — these augment the human-voice comment for complex PRs; they are **not** a template to fill in on every run. Add each only when it genuinely helps the maintainer, and skip silently otherwise. A diagram or files table bolted onto a small, focused PR is exactly the auto-generated noise the gate philosophy warns against — when in doubt, leave it out.
+
+**Sequence diagram** — add when the PR introduces or reshapes a multi-step runtime flow: a new tool/callback lifecycle, a request → response → re-inject path, a state machine, a cross-component handshake. Skip for one-line fixes, pure refactors, and config/doc/test-only changes. Keep it to the key path (≤ ~8 participants), not every branch. Render both a light and a dark variant so it stays legible in either GitHub theme — the `#gh-light-mode-only` / `#gh-dark-mode-only` anchors make GitHub show exactly one:
+
+````markdown
+<a href="#gh-light-mode-only">
+
+```mermaid
+%%{init: {'theme': 'neutral'}}%%
+sequenceDiagram
+    participant User as User
+    participant Tool as new_tool
+    User->>Tool: invoke
+    Tool-->>User: result
+```
+
+</a>
+<a href="#gh-dark-mode-only">
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {"darkMode": true, "background": "#0d1117", "primaryColor": "#21262d", "primaryTextColor": "#e6edf3", "primaryBorderColor": "#8b949e", "lineColor": "#8b949e", "textColor": "#e6edf3", "actorBkg": "#21262d", "actorBorder": "#8b949e", "actorTextColor": "#e6edf3", "signalColor": "#8b949e", "signalTextColor": "#e6edf3", "noteBkgColor": "#373320", "noteBorderColor": "#d4a72c", "noteTextColor": "#f0e6c0", "activationBkgColor": "#30363d"}}}%%
+sequenceDiagram
+    participant User as User
+    participant Tool as new_tool
+    User->>Tool: invoke
+    Tool-->>User: result
+```
+
+</a>
+````
+
+Keep both variants structurally identical — only the `init` theme block differs. Diagram text (participants, labels) stays English in the main comment; the `<details>` Chinese translation can summarize it in prose rather than duplicating the diagram. The dual-theme anchor trick is copied from a production review bot, but it depends on GitHub's theme-specific rendering — if a real run ever shows both variants stacked instead of one per theme, drop to a single `theme: 'neutral'` diagram, which stays legible in both light and dark.
+
+**Changed-files overview** — add only when the PR touches many source files (~5+) and a per-file map genuinely helps a reviewer navigate. Pull the file list from `gh pr view "$PR_NUMBER" --repo "$REPO" --json files`. Fold the table in a `<details>` so it doesn't dominate the comment, and write one honest line per file in your own words — not a mechanical restatement of the diff. Skip for small, focused PRs.
+
+```markdown
+<details>
+<summary>Files changed</summary>
+
+| File                            | What changed      |
+| ------------------------------- | ----------------- |
+| `packages/core/src/foo.ts`      | <one honest line> |
+| `packages/core/src/foo.test.ts` | <one honest line> |
+
+</details>
+```
+
 #### 2b. Real-Scenario Testing
 
 **Runs in the main working tree, not the worktree** — tmux needs the local build environment.
@@ -298,7 +359,7 @@ tmux kill-session -t "$S"
 - Cannot run after exhausting workarounds → FAIL, not skip.
 - Fork code: sandbox (strip write tokens/secrets).
 
-Post a single Stage 2 comment (must include `<!-- qwen-triage stage=2 -->` at the top): code review findings + testing result.
+Post a single Stage 2 comment (must include `<!-- qwen-triage stage=2 -->` at the top), in this order: code review findings → optional sequence diagram (2a-bis) → optional changed-files overview (2a-bis) → real-scenario testing result (below). Include the two enrichments only when 2a-bis says they earn their place; a small, focused PR is just findings + testing.
 
 **⛔ BEFORE POSTING: verify your comment contains the tmux output.** Read back through your draft — does it have a fenced code block with the actual terminal capture? If not, add it now. The maintainer cannot approve without seeing what actually happened.
 
@@ -312,7 +373,7 @@ Post a single Stage 2 comment (must include `<!-- qwen-triage stage=2 -->` at th
 <!-- paste capture-pane output here inside ``` -->
 ````
 
-Sign with `— *Qwen Code · qwen3.7-max*` and save this comment's ID.
+Sign with `— *Qwen Code · qwen3.7-max*`, add the reviewed-commit footer, and save this comment's ID.
 
 ### Stage 3: Reflect
 
@@ -333,7 +394,21 @@ Step back and look at the whole picture — the motivation, the implementation, 
 
 If your independent proposal was materially simpler — say so. Not as a blocker, but as an honest question the contributor should think about.
 
-**Step 1: Post the reflection comment** (must include `<!-- qwen-triage stage=3 -->` at the top). Write what you're actually thinking. "Looks good, ships the feature cleanly, the before/after shows it works" — not a five-bullet summary of the stages. If you have reservations, say them plainly. If you're approving with mild concerns, name them. Sign with `— *Qwen Code · qwen3.7-max*` and save this comment's ID.
+**Step 1: Post the reflection comment** (must include `<!-- qwen-triage stage=3 -->` at the top).
+
+Open it with a one-line confidence score — `**Confidence: N/5** — <one honest line>` — as the human-readable summary of everything above. It is your read, not a rubric dump, and it must stay consistent with the verdict you're about to act on in Step 2:
+
+| Score | Meaning                                                         | Verdict          |
+| ----- | --------------------------------------------------------------- | ---------------- |
+| 5/5   | Clean across every stage; would merge without hesitation        | approve          |
+| 4/5   | Solid; only non-blocking nits (name them)                       | approve          |
+| 3/5   | Works, but real reservations or something a human should second | defer / escalate |
+| 2/5   | Significant concerns; leaning against as-is                     | request changes  |
+| 1/5   | Should not merge in its current form                            | request changes  |
+
+A fork `refactor` that hits the approval guardrail below caps at 3/5 and escalates no matter how clean every stage looked — the guardrail drives the action, not the score. Never post a 4–5/5 alongside a `--request-changes`, or a 1–2/5 alongside an `--approve`: the score and the verdict tell the same story.
+
+Then write what you're actually thinking. "Looks good, ships the feature cleanly, the before/after shows it works" — not a five-bullet summary of the stages. If you have reservations, say them plainly. If you're approving with mild concerns, name them. Sign with `— *Qwen Code · qwen3.7-max*`, add the reviewed-commit footer, and save this comment's ID.
 
 **Step 2: Act on the verdict.**
 
