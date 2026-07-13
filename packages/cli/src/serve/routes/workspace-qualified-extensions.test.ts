@@ -528,7 +528,7 @@ describe('extension management v2 REST', () => {
     }
   });
 
-  it('does not overlap generation reconciliation after a runtime refresh times out', async () => {
+  it('keeps generation polling serialized while a runtime refresh is in flight', async () => {
     vi.useFakeTimers();
     const h = await makeHarness();
     mockExtensionManager();
@@ -557,18 +557,13 @@ describe('extension management v2 REST', () => {
       expect(
         h.primary.bridge.refreshExtensionsForAllSessions,
       ).toHaveBeenCalledOnce();
-      expect(process.stderr.write).toHaveBeenCalledWith(
-        expect.stringContaining(
-          `extension generation reconciliation failed for workspace ${h.secondary.workspaceId}`,
-        ),
-      );
 
       releaseRefresh();
       await vi.advanceTimersByTimeAsync(30_000);
 
       expect(
         h.secondary.bridge.refreshExtensionsForAllSessions,
-      ).toHaveBeenCalledTimes(2);
+      ).toHaveBeenCalledOnce();
     } finally {
       releaseRefresh();
       vi.useRealTimers();
@@ -688,7 +683,7 @@ describe('extension management v2 REST', () => {
     }
   });
 
-  it('does not let a late lower-generation reconcile move applied state backwards', async () => {
+  it('serializes runtime reconciliation in generation order', async () => {
     const h = await makeHarness();
     mockExtensionManager();
     const snapshot = (generation: number): ExtensionStoreSnapshot => ({
@@ -703,23 +698,29 @@ describe('extension management v2 REST', () => {
         },
       },
     });
+    let releaseFirstCommit: (() => void) | undefined;
     vi.mocked(ExtensionManager.prototype.setExtensionWorkspaceActivation)
-      .mockResolvedValueOnce(snapshot(8))
-      .mockResolvedValueOnce(snapshot(9));
+      .mockImplementationOnce(
+        async (_id, _workspace, _activation, committed) => {
+          committed?.(8);
+          await new Promise<void>((resolve) => {
+            releaseFirstCommit = resolve;
+          });
+          return snapshot(8);
+        },
+      )
+      .mockImplementationOnce(
+        async (_id, _workspace, _activation, committed) => {
+          committed?.(9);
+          return snapshot(9);
+        },
+      );
     vi.mocked(
       ExtensionManager.prototype.getExtensionStoreSnapshot,
     ).mockResolvedValue(snapshot(9));
-    let releaseFirst: (() => void) | undefined;
-    vi.mocked(h.secondary.bridge.refreshExtensionsForAllSessions)
-      .mockImplementationOnce(
-        async () =>
-          await new Promise<{ refreshed: number; failed: number }>(
-            (resolve) => {
-              releaseFirst = () => resolve({ refreshed: 1, failed: 0 });
-            },
-          ),
-      )
-      .mockResolvedValue({ refreshed: 1, failed: 0 });
+    vi.mocked(
+      h.secondary.bridge.refreshExtensionsForAllSessions,
+    ).mockResolvedValue({ refreshed: 1, failed: 0 });
     try {
       const first = await auth(
         request(h.app)
@@ -728,11 +729,7 @@ describe('extension management v2 REST', () => {
           )
           .send({ state: 'enabled' }),
       );
-      await vi.waitFor(() =>
-        expect(
-          h.secondary.bridge.refreshExtensionsForAllSessions,
-        ).toHaveBeenCalledOnce(),
-      );
+      await vi.waitFor(() => expect(releaseFirstCommit).toBeDefined());
 
       const second = await auth(
         request(h.app)
@@ -741,14 +738,31 @@ describe('extension management v2 REST', () => {
           )
           .send({ state: 'disabled' }),
       );
+      await vi.waitFor(async () => {
+        const operation = await auth(
+          request(h.app).get(
+            `/extensions/operations/${second.body.operationId}`,
+          ),
+        );
+        expect(operation.body).toMatchObject({
+          status: 'running',
+          phase: 'reconciling',
+        });
+      });
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+
+      releaseFirstCommit?.();
       await expect(
         pollOperation(h.app, second.body.operationId),
       ).resolves.toMatchObject({ status: 'succeeded' });
-
-      releaseFirst?.();
       await expect(
         pollOperation(h.app, first.body.operationId),
       ).resolves.toMatchObject({ status: 'succeeded' });
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledTimes(2);
       const projection = await auth(
         request(h.app).get(
           `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions`,
@@ -756,7 +770,7 @@ describe('extension management v2 REST', () => {
       );
       expect(projection.body.appliedGeneration).toBe(9);
     } finally {
-      releaseFirst?.();
+      releaseFirstCommit?.();
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
   });

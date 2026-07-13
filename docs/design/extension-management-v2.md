@@ -134,11 +134,12 @@ does not change the store, cache, or runtime. Prepared mutations enter a
 separate single-concurrency FIFO commit queue in the order preparation
 finishes. Activation and uninstall enter only the commit queue; check-updates
 enters only the preparation queue. Manual refresh is serialized through the
-commit queue. The commit lane is released after the store commit and settings
-commit; extension reload, manager runtime refresh, prepared-file cleanup, and
-daemon runtime reconciliation run outside it. These post-commit steps do not
-occupy either slot, so later commits may proceed while an earlier generation is
-being applied or cleaned up.
+commit queue, and an HTTP timeout does not release that lane until the
+underlying refresh settles. The commit lane is released after the store commit
+and settings commit; extension reload, manager runtime refresh, prepared-file
+cleanup, and daemon runtime reconciliation run outside it. These post-commit
+steps do not occupy either slot, so later commits may proceed while an earlier
+generation is being applied or cleaned up.
 
 The preparation deadline starts when an operation first acquires a preparation
 slot, not while it waits. Abort is propagated to network operations and active
@@ -160,9 +161,15 @@ workspace override reconciles only its target. Runtime reconciliation refreshes
 extension and skill caches, extension tools, hierarchical memory, active chat
 system instructions, and available commands. A failed component does not skip
 the remaining refresh components; the session RPC reports the combined failure
-after all components have been attempted. Per-workspace generation
-coalescing means applying generation N also satisfies waiters for older
-generations; a late lower-generation refresh therefore cannot move the applied
+after all components have been attempted. Runtime generation reconciliation
+uses a daemon-wide FIFO shared by mutations and the generation poller. A
+mutation reserves its position at the durable commit callback, so later
+generations cannot refresh a runtime first even when earlier post-commit work
+finishes later.
+The ACP bridge bounds each session refresh at 30 seconds; the route layer does
+not abandon an uncancelled refresh or release its FIFO slot on a separate
+watchdog. Applying generation N also satisfies waiters for older generations,
+and a late lower-generation refresh therefore cannot move the applied
 generation backwards. Partial refresh failure or post-commit reload/cleanup
 failure produces `succeeded_with_warnings` with workspace-specific or commit
 diagnostics, without rolling back the artifact.

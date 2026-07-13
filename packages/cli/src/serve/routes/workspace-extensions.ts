@@ -15,6 +15,7 @@ import {
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import { createFifoTaskQueue } from '../extension-operation-scheduler.js';
 import { isBlockedAuthProviderHost } from '../server/auth-provider-helpers.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import type { safeBody as safeBodyType } from '../server/request-helpers.js';
@@ -31,13 +32,13 @@ import {
   createExtensionsController,
   type ExtensionOperationContext,
   type ExtensionsController,
+  type RuntimeReconciliationReservation,
 } from './workspace-extensions-controller.js';
 
 type SafeBody = typeof safeBodyType;
 
 const EXTENSION_PREPARE_DEADLINE_MS = 10 * 60_000;
 const EXTENSION_UPDATE_CHECK_DEADLINE_MS = 2 * 60_000;
-const EXTENSION_GENERATION_RECONCILE_TIMEOUT_MS = 60_000;
 
 const parseExtensionScope = (
   body: Record<string, unknown>,
@@ -201,6 +202,33 @@ export function registerWorkspaceExtensionRoutes(
   const primaryController = createExtensionsController(
     controllerDeps(boundWorkspace, bridge, workspace),
   );
+  const runtimeReconciliationQueue = createFifoTaskQueue(1);
+  const reserveRuntimeReconciliation = (): RuntimeReconciliationReservation => {
+    let provideTask!: (task?: () => Promise<unknown>) => void;
+    const task = new Promise<(() => Promise<unknown>) | undefined>(
+      (resolve) => {
+        provideTask = resolve;
+      },
+    );
+    const queued = runtimeReconciliationQueue.run(async () => {
+      const run = await task;
+      return run ? await run() : undefined;
+    });
+    let used = false;
+    return {
+      run: async <T>(run: () => Promise<T>): Promise<T> => {
+        if (used) throw new Error('Runtime reconciliation already released');
+        used = true;
+        provideTask(run);
+        return (await queued) as T;
+      },
+      release: () => {
+        if (used) return;
+        used = true;
+        provideTask(undefined);
+      },
+    };
+  };
   const appliedGenerationByWorkspaceId = new Map<string, number>();
   const onRuntimeReconciled = (
     runtime: WorkspaceRuntime,
@@ -218,6 +246,7 @@ export function registerWorkspaceExtensionRoutes(
     workspaceRegistry
       ? {
           refreshRuntimes: () => workspaceRegistry.list(),
+          reserveRuntimeReconciliation,
           onRuntimeReconciled,
         }
       : {};
@@ -225,6 +254,7 @@ export function registerWorkspaceExtensionRoutes(
     workspaceRegistry
       ? {
           refreshRuntimes: [workspaceRegistry.primary],
+          reserveRuntimeReconciliation,
           onRuntimeReconciled,
         }
       : {};
@@ -241,10 +271,6 @@ export function registerWorkspaceExtensionRoutes(
   if (workspaceRegistry) {
     let observedGeneration: number | undefined;
     let reconciling = false;
-    const reconciliationInFlightByWorkspaceId = new Map<
-      string,
-      Promise<void>
-    >();
     const reconcileExternalGeneration = async (): Promise<void> => {
       if (reconciling) return;
       reconciling = true;
@@ -264,53 +290,22 @@ export function registerWorkspaceExtensionRoutes(
           );
         if (generation === observedGeneration && pendingRuntimes.length === 0)
           return;
-        const runtimes = pendingRuntimes.filter(
-          (runtime) =>
-            !reconciliationInFlightByWorkspaceId.has(runtime.workspaceId),
-        );
+        const runtimes = pendingRuntimes;
         if (runtimes.length === 0) return;
-        const results = await Promise.allSettled(
-          runtimes.map(async (runtime) => {
-            const refresh = (async () => {
-              runtime.workspaceService.invalidateWorkspaceSkillsStatus();
-              const result =
-                await runtime.bridge.refreshExtensionsForAllSessions();
-              if (result.failed > 0) {
-                throw new Error(
-                  `${result.failed} extension session refresh(es) failed`,
-                );
-              }
-            })();
-            reconciliationInFlightByWorkspaceId.set(
-              runtime.workspaceId,
-              refresh,
-            );
-            const clearInFlight = () => {
-              if (
-                reconciliationInFlightByWorkspaceId.get(runtime.workspaceId) ===
-                refresh
-              ) {
-                reconciliationInFlightByWorkspaceId.delete(runtime.workspaceId);
-              }
-            };
-            void refresh.then(clearInFlight, clearInFlight);
-            let timer: ReturnType<typeof setTimeout> | undefined;
-            await Promise.race([
-              refresh,
-              new Promise<never>((_resolve, reject) => {
-                timer = setTimeout(() => {
-                  reject(
-                    new Error(
-                      `Extension generation reconciliation timed out after ${EXTENSION_GENERATION_RECONCILE_TIMEOUT_MS}ms.`,
-                    ),
+        const results = await runtimeReconciliationQueue.run(
+          async () =>
+            await Promise.allSettled(
+              runtimes.map(async (runtime) => {
+                runtime.workspaceService.invalidateWorkspaceSkillsStatus();
+                const result =
+                  await runtime.bridge.refreshExtensionsForAllSessions();
+                if (result.failed > 0) {
+                  throw new Error(
+                    `${result.failed} extension session refresh(es) failed`,
                   );
-                }, EXTENSION_GENERATION_RECONCILE_TIMEOUT_MS);
-                timer.unref();
+                }
               }),
-            ]).finally(() => {
-              if (timer) clearTimeout(timer);
-            });
-          }),
+            ),
         );
         results.forEach((result, index) => {
           if (result.status === 'fulfilled') {
@@ -953,6 +948,7 @@ export function registerWorkspaceExtensionRoutes(
         manager,
         operationBasePath: '/extensions/operations',
         onRuntimeReconciled,
+        reserveRuntimeReconciliation,
         ...options,
       },
     );

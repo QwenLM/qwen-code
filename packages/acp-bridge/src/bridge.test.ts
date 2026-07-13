@@ -1237,6 +1237,32 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('bounds a hung session extension refresh', async () => {
+    vi.useFakeTimers();
+    const refreshGate = deferred<Record<string, unknown>>();
+    const bridge = makeBridge({
+      channelFactory: async () =>
+        makeChannel({
+          extMethodImpl: async (method) =>
+            method === SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh
+              ? await refreshGate.promise
+              : {},
+        }).channel,
+    });
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const refresh = bridge.refreshExtensionsForAllSessions();
+
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      await expect(refresh).resolves.toEqual({ refreshed: 0, failed: 1 });
+    } finally {
+      refreshGate.resolve({});
+      vi.useRealTimers();
+      await bridge.shutdown();
+    }
+  });
+
   it('does not refresh or broadcast extensions when no sessions are live', async () => {
     const bridge = makeBridge();
 

@@ -104,6 +104,14 @@ export interface ExtensionOperationContext {
   ): Promise<T>;
 }
 
+export interface RuntimeReconciliationReservation {
+  run<T>(task: () => Promise<T>): Promise<T>;
+  release(): void;
+}
+
+export type ReserveRuntimeReconciliation =
+  () => RuntimeReconciliationReservation;
+
 export interface CreateExtensionsControllerDeps {
   boundWorkspace: string;
   bridge: AcpSessionBridge;
@@ -149,6 +157,7 @@ export interface ExtensionsController {
       refreshRuntimes?:
         | readonly WorkspaceRuntime[]
         | (() => readonly WorkspaceRuntime[]);
+      reserveRuntimeReconciliation?: ReserveRuntimeReconciliation;
       operationBasePath?: string;
       skipRefresh?: boolean;
       deadlineMs?: number;
@@ -297,29 +306,30 @@ export function createExtensionsController(
   const refreshExtensionsForAllSessions = async (): Promise<{
     refreshed: number;
     failed: number;
-  }> =>
-    await commitQueue.run(async () => {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        extensionsStatusCache = undefined;
-        const result = await Promise.race([
-          workspace.refreshExtensionsForAllSessions(),
-          new Promise<never>((_resolve, reject) => {
-            timer = setTimeout(() => {
-              reject(
-                new Error(
-                  `extension refresh timed out after ${EXTENSION_REFRESH_TIMEOUT_MS}ms`,
-                ),
-              );
-            }, EXTENSION_REFRESH_TIMEOUT_MS);
-            timer.unref?.();
-          }),
-        ]);
-        return result;
-      } finally {
-        if (timer) clearTimeout(timer);
-      }
+  }> => {
+    const refresh = commitQueue.run(async () => {
+      extensionsStatusCache = undefined;
+      return await workspace.refreshExtensionsForAllSessions();
     });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        refresh,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            reject(
+              new Error(
+                `extension refresh timed out after ${EXTENSION_REFRESH_TIMEOUT_MS}ms`,
+              ),
+            );
+          }, EXTENSION_REFRESH_TIMEOUT_MS);
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
 
   const runQueuedExtensionMutation = (
     operation: string,
@@ -335,6 +345,7 @@ export function createExtensionsController(
       refreshRuntimes?:
         | readonly WorkspaceRuntime[]
         | (() => readonly WorkspaceRuntime[]);
+      reserveRuntimeReconciliation?: ReserveRuntimeReconciliation;
       operationBasePath?: string;
       skipRefresh?: boolean;
       deadlineMs?: number;
@@ -376,9 +387,19 @@ export function createExtensionsController(
     void (async () => {
       let deadline: ReturnType<typeof setTimeout> | undefined;
       let committedGeneration: number | undefined;
+      let reconciliationReservation:
+        | RuntimeReconciliationReservation
+        | undefined;
       let mutationEvent: ExtensionMutationEvent | undefined;
       const commitWarnings: NonNullable<ExtensionOperationStatus['warnings']> =
         [];
+      const runReconciliation = async <T>(
+        task: () => Promise<T>,
+      ): Promise<T> => {
+        const reservation = reconciliationReservation;
+        reconciliationReservation = undefined;
+        return reservation ? await reservation.run(task) : await task();
+      };
       try {
         updateExtensionOperation(operationId, {
           status: 'running',
@@ -443,11 +464,17 @@ export function createExtensionsController(
             const result = await commitQueue.runUntilReleased(
               async (release) =>
                 await task((generation) => {
+                  reconciliationReservation ??=
+                    options.reserveRuntimeReconciliation?.();
                   committedGeneration = generation;
                   release();
                 }),
             );
-            committedGeneration ??= result.generation;
+            if (committedGeneration === undefined) {
+              reconciliationReservation ??=
+                options.reserveRuntimeReconciliation?.();
+              committedGeneration = result.generation;
+            }
             for (const warning of result.warnings ?? []) {
               commitWarnings.push({
                 workspaceCwd: boundWorkspace,
@@ -468,6 +495,8 @@ export function createExtensionsController(
         if (deadline) clearTimeout(deadline);
         extensionsStatusCache = undefined;
         if (options.skipRefresh || event.updated === false) {
+          reconciliationReservation?.release();
+          reconciliationReservation = undefined;
           updateExtensionOperation(operationId, {
             status:
               commitWarnings.length > 0
@@ -478,9 +507,13 @@ export function createExtensionsController(
           });
           return;
         }
-        committedGeneration ??= (
-          await extensionManager.getExtensionStoreSnapshot()
-        ).generation;
+        if (committedGeneration === undefined) {
+          committedGeneration = (
+            await extensionManager.getExtensionStoreSnapshot()
+          ).generation;
+          reconciliationReservation ??=
+            options.reserveRuntimeReconciliation?.();
+        }
         updateExtensionOperation(operationId, {
           status: 'running',
           phase: 'reconciling',
@@ -490,26 +523,30 @@ export function createExtensionsController(
             ? options.refreshRuntimes()
             : options.refreshRuntimes;
         if (refreshTargets) {
-          const results = await Promise.all(
-            refreshTargets.map(async (runtime) => {
-              const startedAt = Date.now();
-              try {
-                runtime.workspaceService.invalidateWorkspaceSkillsStatus();
-                return {
-                  status: 'fulfilled' as const,
-                  result: await runtime.bridge.refreshExtensionsForAllSessions(
-                    bridgeMutationEvent(event),
-                  ),
-                  elapsedMs: Date.now() - startedAt,
-                };
-              } catch (reason) {
-                return {
-                  status: 'rejected' as const,
-                  reason,
-                  elapsedMs: Date.now() - startedAt,
-                };
-              }
-            }),
+          const results = await runReconciliation(
+            async () =>
+              await Promise.all(
+                refreshTargets.map(async (runtime) => {
+                  const startedAt = Date.now();
+                  try {
+                    runtime.workspaceService.invalidateWorkspaceSkillsStatus();
+                    return {
+                      status: 'fulfilled' as const,
+                      result:
+                        await runtime.bridge.refreshExtensionsForAllSessions(
+                          bridgeMutationEvent(event),
+                        ),
+                      elapsedMs: Date.now() - startedAt,
+                    };
+                  } catch (reason) {
+                    return {
+                      status: 'rejected' as const,
+                      reason,
+                      elapsedMs: Date.now() - startedAt,
+                    };
+                  }
+                }),
+              ),
           );
           let refreshed = 0;
           let failed = 0;
@@ -577,12 +614,14 @@ export function createExtensionsController(
           });
         } else {
           try {
-            workspace.invalidateWorkspaceSkillsStatus();
-            const startedAt = Date.now();
-            const result = await bridge.refreshExtensionsForAllSessions(
-              bridgeMutationEvent(event),
-            );
-            const elapsedMs = Date.now() - startedAt;
+            const { result, elapsedMs } = await runReconciliation(async () => {
+              workspace.invalidateWorkspaceSkillsStatus();
+              const startedAt = Date.now();
+              const result = await bridge.refreshExtensionsForAllSessions(
+                bridgeMutationEvent(event),
+              );
+              return { result, elapsedMs: Date.now() - startedAt };
+            });
             const warnings: NonNullable<ExtensionOperationStatus['warnings']> =
               [...commitWarnings];
             if (result.failed > 0) {
@@ -763,6 +802,7 @@ export function createExtensionsController(
         }
       } finally {
         if (deadline) clearTimeout(deadline);
+        reconciliationReservation?.release();
         releaseOperationSlot();
       }
     })();
