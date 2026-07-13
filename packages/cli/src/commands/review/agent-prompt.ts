@@ -40,7 +40,7 @@
 import type { CommandModule } from 'yargs';
 import { readFileSync } from 'node:fs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import type { DiffChunk } from './lib/diff-plan.js';
+import { READ_FILE_CHAR_CAP, type DiffChunk } from './lib/diff-plan.js';
 
 interface AgentPromptArgs {
   plan: string;
@@ -143,7 +143,7 @@ export function buildChunkAgentPrompt(
   // The uncoverable case: a single line longer than one read returns. Paging
   // starts every page at a line boundary, so the tail of that line is
   // unreachable by any offset. Such a chunk must not be receipted as covered.
-  const unreachable = chunk.maxLineChars > 25_000;
+  const unreachable = chunk.maxLineChars > READ_FILE_CHAR_CAP;
 
   const parts = [
     `You are reviewing chunk ${chunk.id} of ${total} of a code diff.`,
@@ -225,15 +225,31 @@ export function buildChunkAgentPrompt(
       'and cases you walked, in your own words. Do not recite a stock sentence: a return that ' +
       'names nothing you read is indistinguishable from never having read anything, and will ' +
       'be treated as such.',
-    '',
-    `Then, on its own final line: \`Covered: chunk ${chunk.id} lines ${chunk.startLine}-${chunk.endLine}\``,
   );
+
+  // The receipt, but NOT for an unreachable chunk: that one has already been told
+  // to return `Uncoverable`, and asking for both hands the agent two instructions
+  // that contradict each other. Downstream, a chunk that reports itself both
+  // uncoverable and covered is neither, and the honest one loses.
+  if (!unreachable) {
+    parts.push(
+      '',
+      `Then, on its own final line: \`Covered: chunk ${chunk.id} lines ${chunk.startLine}-${chunk.endLine}\``,
+    );
+  }
 
   return parts.join('\n');
 }
 
 function runAgentPrompt(args: AgentPromptArgs): void {
-  const report = JSON.parse(readFileSync(args.plan, 'utf8')) as PlanReport;
+  let report: PlanReport;
+  try {
+    report = JSON.parse(readFileSync(args.plan, 'utf8')) as PlanReport;
+  } catch (err) {
+    throw new Error(
+      `agent-prompt: cannot read the plan ${args.plan}: ${(err as Error).message}`,
+    );
+  }
   writeStdoutLine(buildChunkAgentPrompt(report, args.chunk));
 }
 
