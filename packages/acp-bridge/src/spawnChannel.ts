@@ -110,7 +110,13 @@ export interface SpawnChannelFactoryOptions {
   onDiagnosticLine?: (line: string, level?: 'info' | 'warn' | 'error') => void;
   extraArgs?: string[];
   pipeHooks?: NdJsonStreamHooks;
-  sourceEnv?: Readonly<NodeJS.ProcessEnv>;
+  /**
+   * Source environment for the spawned ACP child. Can be a static object
+   * (snapshot at factory creation time) or a function invoked at each
+   * spawn (so credential store / runtime env mutations reach new children).
+   * Defaults to `process.env`.
+   */
+  sourceEnv?: Readonly<NodeJS.ProcessEnv> | (() => Readonly<NodeJS.ProcessEnv>);
 }
 
 /**
@@ -126,7 +132,10 @@ export function createSpawnChannelFactory(
   options: SpawnChannelFactoryOptions = {},
 ): ChannelFactory {
   return async (workspaceCwd, childEnvOverrides) => {
-    const sourceEnv = options.sourceEnv ?? process.env;
+    const sourceEnv =
+      typeof options.sourceEnv === 'function'
+        ? options.sourceEnv()
+        : (options.sourceEnv ?? process.env);
     const cliEntry = sourceEnv['QWEN_CLI_ENTRY'] || process.argv[1];
     if (!cliEntry) {
       throw new MissingCliEntryError();

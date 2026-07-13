@@ -4,12 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import process from 'node:process';
-
 import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
+import {
+  defaultCredentialProvider,
+  type CredentialProvider,
+} from './credential-provider.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { RUNTIME_SNAPSHOT_PREFIX } from '../utils/runtimeModelPrefix.js';
@@ -63,6 +65,12 @@ export interface ModelsConfigOptions {
   generationConfigSources?: ContentGeneratorConfigSources;
   /** Callback when model changes require refresh */
   onModelChange?: OnModelChangeCallback;
+  /**
+   * Credential provider for API key resolution. Defaults to
+   * `process.env`-backed reader. The daemon passes a store-backed
+   * provider so `QWEN_CUSTOM_API_KEY_*` stays OS-invisible.
+   */
+  credentialProvider?: CredentialProvider;
 }
 
 /**
@@ -104,6 +112,9 @@ export class ModelsConfig {
 
   // Callback for notifying Config of model changes
   private onModelChange?: OnModelChangeCallback;
+
+  // Credential provider for API key resolution (per-instance, not global)
+  readonly credentialProvider: CredentialProvider;
 
   // Flag indicating whether authType was explicitly provided (not defaulted)
   private readonly authTypeWasExplicitlyProvided: boolean;
@@ -155,6 +166,8 @@ export class ModelsConfig {
       options.providerProtocolConfig,
     );
     this.onModelChange = options.onModelChange;
+    this.credentialProvider =
+      options.credentialProvider ?? defaultCredentialProvider;
 
     // Initialize generation config
     // Note: generationConfig.model should already be fully resolved by ModelConfigResolver
@@ -834,9 +847,13 @@ export class ModelsConfig {
       this._generationConfig.apiKeyEnvKey = undefined;
     }
 
-    // Read API key from environment variable if envKey is specified
+    // Read API key from the instance's credential provider if envKey is
+    // specified. In the daemon, the provider reads from an in-process
+    // store (not process.env) so custom-provider credentials stay
+    // OS-invisible. In CLI/ACP contexts, the default provider reads
+    // from process.env — same behavior as before.
     if (model.envKey !== undefined) {
-      const apiKey = process.env[model.envKey];
+      const apiKey = this.credentialProvider.get(model.envKey);
       if (apiKey) {
         this._generationConfig.apiKey = apiKey;
         this.generationConfigSources['apiKey'] = {

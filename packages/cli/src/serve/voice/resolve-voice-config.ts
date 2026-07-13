@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ModelsConfig } from '@qwen-code/qwen-code-core';
+import {
+  ModelsConfig,
+  type CredentialProvider,
+  type CredentialStore,
+} from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import {
@@ -49,6 +53,7 @@ function readVoiceModel(settings: LoadedSettings): string | undefined {
 function buildModelsConfig(
   settings: LoadedSettings,
   env: Readonly<Record<string, string | undefined>>,
+  credentialProvider?: CredentialProvider,
 ): ModelsConfig {
   const merged = settings.merged;
   const selectedAuthType =
@@ -62,9 +67,24 @@ function buildModelsConfig(
   return new ModelsConfig({
     initialAuthType: selectedAuthType,
     modelProvidersConfig: merged.modelProviders,
+    credentialProvider,
     generationConfig: resolvedCliConfig.generationConfig,
     generationConfigSources: resolvedCliConfig.sources,
   });
+}
+
+/**
+ * Merge credential store snapshot into an env object. The daemon scrubs
+ * QWEN_CUSTOM_API_KEY_* from process.env; this restores them for the voice
+ * transcription resolver (which reads credentials from the env arg, not
+ * ModelsConfig.credentialProvider). Store keys take precedence.
+ */
+function mergeCredentialStore(
+  env: Readonly<Record<string, string | undefined>>,
+  store?: CredentialStore,
+): Record<string, string | undefined> {
+  if (!store) return { ...env };
+  return { ...env, ...store.snapshot() };
 }
 
 /**
@@ -74,7 +94,10 @@ function buildModelsConfig(
  */
 export function loadDaemonVoiceContext(
   workspaceCwd: string,
-  options: { env?: Readonly<Record<string, string | undefined>> } = {},
+  options: {
+    env?: Readonly<Record<string, string | undefined>>;
+    credentialStore?: CredentialStore;
+  } = {},
 ): DaemonVoiceContext {
   const settings = loadSettings(
     workspaceCwd,
@@ -84,21 +107,25 @@ export function loadDaemonVoiceContext(
   if (!voiceModel) {
     throw new Error('No voice model is configured for this workspace.');
   }
-  const models = buildModelsConfig(
-    settings,
-    options.env ?? snapshotProcessEnv(),
-  );
+  // Merge credential store so the voice resolver can find custom-provider
+  // keys that were scrubbed from process.env.
+  const baseEnv = options.env ?? snapshotProcessEnv();
+  const mergedEnv = mergeCredentialStore(baseEnv, options.credentialStore);
+  const models = buildModelsConfig(settings, baseEnv);
   // Validates transcribable + baseUrl + apiKey presence (throws otherwise).
+  // Uses mergedEnv so custom-provider envKeys resolve to store credentials.
   resolveVoiceTranscriptionConfig({
     config: models,
     settings,
     voiceModel,
-    env: options.env,
+    env: mergedEnv,
   });
   return {
     settings,
     models,
-    ...(options.env ? { env: options.env } : {}),
+    // Downstream transcribers read credentials from this env; use mergedEnv
+    // so custom-provider keys (from the store) are available.
+    env: mergedEnv,
     voiceModel,
     streaming: isStreamingVoiceModel(voiceModel),
   };

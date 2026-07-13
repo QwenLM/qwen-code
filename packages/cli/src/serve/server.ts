@@ -7,7 +7,10 @@
 import express from 'express';
 import type { Application } from 'express';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
-import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core';
+import {
+  hashDaemonWorkspace,
+  type CredentialStore,
+} from '@qwen-code/qwen-code-core';
 import type { DaemonLogger } from './daemon-logger.js';
 import type {
   DaemonMetricsBucket,
@@ -280,6 +283,19 @@ function getRuntimeEffectiveEnv(
   return metadata?.effectiveEnv;
 }
 
+/**
+ * Merge credential store snapshot into an env object. The daemon scrubs
+ * QWEN_CUSTOM_API_KEY_* from process.env; this restores them for paths that
+ * resolve credentials from an env object (voice transcription). Store wins.
+ */
+function mergeCredentialStore(
+  env: Readonly<Record<string, string | undefined>> | undefined,
+  store?: CredentialStore,
+): Record<string, string | undefined> | undefined {
+  if (!store) return env;
+  return { ...(env ?? {}), ...store.snapshot() };
+}
+
 export interface ChannelWebhookConfigSource {
   workspaceCwd: string;
   channelNames?: readonly string[];
@@ -425,6 +441,14 @@ export interface ServeAppDeps {
   primaryWorkspaceTrusted?: boolean;
   primaryRuntimeEnv?: WorkspaceRuntimeEnvMetadata;
   voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
+  /**
+   * Daemon-private credential store. Used to inject QWEN_CUSTOM_API_KEY_*
+   * into the voice transcription path (which resolves credentials from an
+   * env object, not ModelsConfig.credentialProvider). When omitted, voice
+   * falls back to the effective runtime env (which may lack custom keys
+   * after daemon scrub).
+   */
+  credentialStore?: CredentialStore;
 }
 
 /**
@@ -1173,6 +1197,10 @@ export function createServeApp(
     broadcastSettingsChanged,
     parseAndValidateClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+    env: mergeCredentialStore(
+      getRuntimeEffectiveEnv(primaryRuntime.env),
+      deps.credentialStore,
+    ),
   });
 
   // A2UI action inbound (the upstream half of A2UI-over-MCP): user
@@ -1430,6 +1458,7 @@ export function createServeApp(
         path: '/voice/stream',
         onConnection: createVoiceWsConnectionHandler(primaryBoundWorkspace, {
           env: getRuntimeEffectiveEnv(primaryRuntime.env),
+          credentialStore: deps.credentialStore,
         }),
       },
     ],

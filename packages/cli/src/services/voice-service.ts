@@ -57,6 +57,11 @@ export interface WorkspaceVoiceTranscriptionInput extends RecordedVoiceAudio {
   settings: LoadedSettings;
   workspaceCwd: string;
   abortSignal?: AbortSignal;
+  /**
+   * Env for credential resolution. The daemon passes a store-merged env so
+   * QWEN_CUSTOM_API_KEY_* (scrubbed from process.env) reach the transcriber.
+   */
+  env?: Readonly<Record<string, string | undefined>>;
 }
 
 export interface WorkspaceVoiceTranscriptionResult {
@@ -333,6 +338,7 @@ export async function transcribeWorkspaceVoiceAudio(
       settings: input.settings,
       voiceModel: input.voiceModel,
       abortSignal: input.abortSignal,
+      env: input.env,
     },
   );
   return {

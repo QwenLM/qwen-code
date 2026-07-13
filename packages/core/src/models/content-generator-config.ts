@@ -23,6 +23,10 @@ import {
   AUTH_ENV_MAPPINGS,
   MODEL_GENERATION_CONFIG_FIELDS,
 } from './constants.js';
+import {
+  resolveCredential,
+  type CredentialProvider,
+} from './credential-provider.js';
 import type { ResolvedModelConfig } from './types.js';
 
 export interface AuthOverrides {
@@ -49,6 +53,7 @@ export function buildAgentContentGeneratorConfig(
   const parentConfig = base.getContentGeneratorConfig();
   const sameProvider = authOverrides.authType === parentConfig.authType;
   const modelsConfig = base.getModelsConfig();
+  const credentialProvider = modelsConfig?.credentialProvider;
   const resolvedModel = modelId
     ? modelsConfig.getResolvedModel(
         authOverrides.authType as AuthType,
@@ -78,6 +83,7 @@ export function buildAgentContentGeneratorConfig(
       resolvedModel,
       parentConfig,
       authOverrides,
+      credentialProvider,
     );
     return nextConfig;
   }
@@ -87,6 +93,7 @@ export function buildAgentContentGeneratorConfig(
     sameProvider ? parentConfig.apiKey : undefined,
     authOverrides.authType,
     'apiKey',
+    credentialProvider,
   );
   nextConfig.baseUrl =
     authOverrides.baseUrl ??
@@ -95,6 +102,7 @@ export function buildAgentContentGeneratorConfig(
       sameProvider ? parentConfig.baseUrl : undefined,
       authOverrides.authType,
       'baseUrl',
+      credentialProvider,
     );
   nextConfig.apiKeyEnvKey = sameProvider
     ? parentConfig.apiKeyEnvKey
@@ -136,6 +144,7 @@ function applyResolvedModelConfig(
   resolvedModel: ResolvedModelConfig,
   parentConfig: ContentGeneratorConfig,
   authOverrides: AuthOverrides,
+  credentialProvider?: CredentialProvider,
 ): void {
   const sameProvider = authOverrides.authType === parentConfig.authType;
   targetConfig.model = resolvedModel.id;
@@ -148,7 +157,7 @@ function applyResolvedModelConfig(
   if (resolvedModel.envKey) {
     targetConfig.apiKey =
       authOverrides.apiKey ??
-      process.env[resolvedModel.envKey] ??
+      resolveCredential(credentialProvider, resolvedModel.envKey) ??
       (sameProvider ? parentConfig.apiKey : undefined);
     targetConfig.apiKeyEnvKey = resolvedModel.envKey;
   } else {
@@ -157,6 +166,7 @@ function applyResolvedModelConfig(
       sameProvider ? parentConfig.apiKey : undefined,
       authOverrides.authType,
       'apiKey',
+      credentialProvider,
     );
     targetConfig.apiKeyEnvKey = sameProvider
       ? parentConfig.apiKeyEnvKey
@@ -184,6 +194,7 @@ export function resolveCredentialField(
   inheritedValue: string | undefined,
   authType: string,
   field: 'apiKey' | 'baseUrl',
+  credentialProvider?: CredentialProvider,
 ): string | undefined {
   if (explicitValue) return explicitValue;
   if (inheritedValue) return inheritedValue;
@@ -193,7 +204,7 @@ export function resolveCredentialField(
   if (!envMapping) return undefined;
 
   for (const envKey of envMapping[field]) {
-    const value = process.env[envKey];
+    const value = resolveCredential(credentialProvider, envKey);
     if (value) return value;
   }
   return undefined;

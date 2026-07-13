@@ -77,6 +77,11 @@ export interface WorkspaceVoiceRouteDeps {
     res: Response,
   ) => string | undefined | null;
   transcribe?: WorkspaceVoiceTranscriber;
+  /**
+   * Env for voice credential resolution. The daemon passes a store-merged env
+   * so QWEN_CUSTOM_API_KEY_* (scrubbed from process.env) reach the transcriber.
+   */
+  env?: Readonly<Record<string, string | undefined>>;
 }
 
 function sendVoiceError(res: Response, err: unknown): boolean {
@@ -442,6 +447,7 @@ export function registerWorkspaceVoiceRoutes(
           settings,
           workspaceCwd: deps.boundWorkspace,
           abortSignal: requestAbortSignal(req, res),
+          env: deps.env,
         });
         res.status(200).json({ v: 1, ...result });
       } catch (err) {

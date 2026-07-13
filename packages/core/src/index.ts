@@ -46,6 +46,16 @@ export {
   resolveModelConfig,
   type ResolvedModelConfig,
   validateModelConfig,
+  type CredentialProvider,
+  type CredentialStore,
+  createCredentialStore,
+  createCredentialProvider,
+  defaultCredentialProvider,
+  resolveCredential,
+  isCustomCredentialKey,
+  readEnvKey,
+  writeEnvKey,
+  deleteEnvKey,
 } from './models/index.js';
 
 // Output formatting

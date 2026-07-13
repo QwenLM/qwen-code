@@ -222,6 +222,7 @@ import {
   type ProviderProtocolConfig,
   type AvailableModel,
   type RuntimeModelSnapshot,
+  type CredentialProvider,
 } from '../models/index.js';
 import { resolveModelId } from '../utils/modelId.js';
 import type { ClaudeMarketplaceConfig } from '../extension/claude-converter.js';
@@ -1112,6 +1113,12 @@ export interface ConfigParameters {
   modelProvidersConfig?: ModelProvidersConfig;
   /** Maps custom provider ids to their SDK protocol (AuthType) */
   providerProtocolConfig?: ProviderProtocolConfig;
+  /**
+   * Credential provider for API key resolution. The daemon passes a
+   * store-backed provider so `QWEN_CUSTOM_API_KEY_*` stays OS-invisible.
+   * Defaults to `process.env`-backed reader (CLI / ACP child behavior).
+   */
+  credentialProvider?: CredentialProvider;
   /** Multi-agent collaboration settings (Arena, Team, Swarm) */
   agents?: AgentsCollabSettings;
   /** General-purpose worktree settings (Phase D-2). */
@@ -2058,6 +2065,7 @@ export class Config {
       initialAuthType: params.authType ?? params.generationConfig?.authType,
       modelProvidersConfig: this.modelProvidersConfig,
       providerProtocolConfig: this.providerProtocolConfig,
+      credentialProvider: params.credentialProvider,
       generationConfig: {
         model: params.model,
         ...(params.generationConfig || {}),

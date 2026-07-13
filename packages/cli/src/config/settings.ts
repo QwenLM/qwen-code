@@ -18,6 +18,7 @@ import {
 import type {
   MCPServerConfig,
   McpServerScope,
+  CredentialStore,
 } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
 import { isWorkspaceTrusted } from './trustedFolders.js';
@@ -661,6 +662,12 @@ export const CORRUPTED_SUFFIX = '.corrupted';
 export interface LoadSettingsOptions {
   consumeCorruptionEnvVars?: boolean;
   skipLoadEnvironment?: boolean;
+  /**
+   * Credential store for `QWEN_CUSTOM_API_KEY_*` redirection. The daemon
+   * passes its store so env loading routes custom keys to the store
+   * instead of `process.env`, keeping them OS-invisible after scrub.
+   */
+  credentialStore?: CredentialStore;
 }
 
 export function loadSettings(
@@ -991,7 +998,7 @@ export function loadSettings(
   // loadEnviroment depends on settings so we have to create a temp version of
   // the settings to avoid a cycle
   if (!opts.skipLoadEnvironment) {
-    loadEnvironment(tempMergedSettings, workspaceDir);
+    loadEnvironment(tempMergedSettings, workspaceDir, opts.credentialStore);
   }
 
   // Create LoadedSettings first

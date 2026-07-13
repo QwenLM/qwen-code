@@ -19,6 +19,7 @@ import type { ContentGenerator } from './contentGenerator.js';
 import { AuthType, createContentGenerator } from './contentGenerator.js';
 import type { ResolvedModelConfig } from '../models/types.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
+import { resolveCredential } from '../models/credential-provider.js';
 import {
   buildModelIdContext,
   resolveModelId,
@@ -662,13 +663,16 @@ export class BaseLlmClient {
     const generatorPromise = (async () => {
       try {
         const targetModel = resolvedModel.id ?? selector?.modelId ?? model;
+        const credentialProvider =
+          this.config.getModelsConfig().credentialProvider;
         const targetConfig = buildAgentContentGeneratorConfig(
           this.config,
           targetModel,
           {
             authType: resolvedModel.authType,
             apiKey: resolvedModel.envKey
-              ? (process.env[resolvedModel.envKey] ?? undefined)
+              ? (resolveCredential(credentialProvider, resolvedModel.envKey) ??
+                undefined)
               : undefined,
             baseUrl: resolvedModel.baseUrl,
           },

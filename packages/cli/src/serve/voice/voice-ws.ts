@@ -6,7 +6,10 @@
 
 import type { IncomingMessage } from 'node:http';
 import type { RawData, WebSocket } from 'ws';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  type CredentialStore,
+} from '@qwen-code/qwen-code-core';
 import {
   loadDaemonVoiceContext,
   type DaemonVoiceContext,
@@ -69,6 +72,12 @@ function encodeWav(pcm: Uint8Array): Uint8Array {
 export interface VoiceWsDeps {
   loadContext?: (workspaceCwd: string) => DaemonVoiceContext;
   env?: Readonly<Record<string, string | undefined>>;
+  /**
+   * Daemon credential store. When provided, QWEN_CUSTOM_API_KEY_* from the
+   * store are merged into the env passed to voice transcription (the daemon
+   * scrubs these from process.env, so the effective env alone lacks them).
+   */
+  credentialStore?: CredentialStore;
   openStream?: (
     ctx: DaemonVoiceContext,
     callbacks: VoiceStreamCallbacks,
@@ -178,10 +187,16 @@ export function createVoiceWsConnectionHandler(
   boundWorkspace: string,
   deps: VoiceWsDeps = {},
 ): (ws: WebSocket, req: IncomingMessage) => void {
+  // Merge credential store snapshot into the voice env so custom-provider
+  // keys (scrubbed from process.env) reach the transcription resolver. The
+  // store is mutable (reload/install update it), so snapshot at load time.
   const loadContext =
     deps.loadContext ??
     ((workspaceCwd: string) =>
-      loadDaemonVoiceContext(workspaceCwd, { env: deps.env }));
+      loadDaemonVoiceContext(workspaceCwd, {
+        env: deps.env,
+        credentialStore: deps.credentialStore,
+      }));
   const openStream = deps.openStream ?? defaultOpenStream;
   const transcribe = deps.transcribe ?? defaultTranscribe;
   // Shared across all connections from this daemon (factory closure).
