@@ -12,9 +12,15 @@ export class TemplateRenderer {
   async renderInsightHTML(insights: InsightData): Promise<string> {
     // Escape `<` so a `</script>` (or `<script`, `<!--`) inside the report data
     // — chat summaries, file/tool names, LLM output — cannot terminate the
-    // inline <script> that carries it. The `<` escape is valid JSON and
-    // parses back to `<`, so the data reaching the page is unchanged.
-    const insightJson = JSON.stringify(insights).replace(/</g, '\\u003c');
+    // inline <script> that carries it. Also escape U+2028/U+2029, which
+    // JSON.stringify emits raw but which are line terminators to pre-ES2019
+    // engines (embedded WebViews, older Electron) and would throw SyntaxError.
+    // All three are valid JSON escapes and parse back to the original
+    // characters, so the data reaching the page is unchanged.
+    const insightJson = JSON.stringify(insights)
+      .replace(/</g, '\\u003c')
+      .replace(/\u2028/g, '\\u2028')
+      .replace(/\u2029/g, '\\u2029');
     const html = `<!doctype html>
 <html lang="en">
   <head>

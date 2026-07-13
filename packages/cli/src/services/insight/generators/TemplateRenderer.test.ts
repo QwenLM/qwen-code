@@ -41,6 +41,29 @@ describe('TemplateRenderer', () => {
     expect(html).toContain('\\u003c/script>');
   });
 
+  it('escapes U+2028/U+2029 so pre-ES2019 engines can still parse the script', async () => {
+    const renderer = new TemplateRenderer();
+    // U+2028 (line separator) and U+2029 (paragraph separator) are passed
+    // through raw by JSON.stringify but are line terminators to older engines.
+    const payload = 'line1\u2028line2\u2029line3';
+    const html = await renderer.renderInsightHTML(
+      makeInsights({ latestActiveTime: payload }),
+    );
+
+    // The raw separators must not survive into the inline script; the escaped
+    // forms must appear instead.
+    expect(html).not.toContain('\u2028');
+    expect(html).not.toContain('\u2029');
+    expect(html).toContain('\\u2028');
+    expect(html).toContain('\\u2029');
+
+    // And the escape must round-trip back to the original characters.
+    const match = html.match(/window\.INSIGHT_DATA = (.*);/);
+    expect(match).not.toBeNull();
+    const parsed = JSON.parse(match![1]) as InsightData;
+    expect(parsed.latestActiveTime).toBe(payload);
+  });
+
   it('preserves the original data after JSON.parse (escape round-trips)', async () => {
     const renderer = new TemplateRenderer();
     const payload = '</script><b>hi</b>';
