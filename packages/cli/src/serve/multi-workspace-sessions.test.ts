@@ -35,6 +35,10 @@ import {
   type WorkspaceRuntime,
 } from './workspace-registry.js';
 import { createSessionOrganizationService } from './session-organization-helpers.js';
+import {
+  serializeWorkspaceTranscriptResponseForTesting,
+  workspaceTranscriptCursorExceedsLimitForTesting,
+} from './routes/session.js';
 
 const PRIMARY_CWD = path.resolve(path.sep, 'work', 'primary');
 const SECONDARY_CWD = path.resolve(path.sep, 'work', 'secondary');
@@ -1599,6 +1603,137 @@ describe('multi-workspace session dispatch', () => {
       expect(expired.status).toBe(400);
       expect(expired.body.code).toBe('invalid_transcript_cursor');
       expect(expired.body.sessionId).toBe(sessionId);
+    });
+  });
+
+  it('rejects an oversized untrusted transcript record without starting the bridge', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440276';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'x'.repeat(4 * 1024 * 1024),
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const { app, secondaryBridge } = makeHarness({
+        secondaryTrusted: false,
+      });
+
+      const response = await request(app)
+        .get(`/workspaces/secondary-id/session/${sessionId}/transcript`)
+        .set('Host', host());
+
+      expect(response.status).toBe(413);
+      expect(response.body).toMatchObject({
+        code: 'transcript_page_too_large',
+        sessionId,
+        maxBytes: 4 * 1024 * 1024,
+      });
+      expect(response.body.pageBytes).toBeGreaterThan(
+        response.body.maxBytes as number,
+      );
+      expect(secondaryBridge.spawnCalls).toEqual([]);
+      expect(secondaryBridge.restoreCalls).toEqual([]);
+    });
+  });
+
+  it('enforces the workspace transcript cursor byte boundary', () => {
+    expect(
+      workspaceTranscriptCursorExceedsLimitForTesting(
+        'a'.repeat(64 * 1024 + 1),
+      ),
+    ).toBe(true);
+    expect(
+      workspaceTranscriptCursorExceedsLimitForTesting('a'.repeat(64 * 1024)),
+    ).toBe(false);
+  });
+
+  it('rejects workspace transcript responses over the serialized byte budget', () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440279';
+
+    expect(() =>
+      serializeWorkspaceTranscriptResponseForTesting(
+        { events: ['response too large'] },
+        sessionId,
+        8,
+      ),
+    ).toThrowError(
+      expect.objectContaining({
+        name: 'SessionTranscriptPageTooLargeError',
+        sessionId,
+        maxBytes: 8,
+      }),
+    );
+  });
+
+  it('stops pagination when replay state would produce an oversized cursor', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440278';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'pending tools',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const transcriptPath = path.join(
+        new Storage(SECONDARY_CWD).getProjectDir(),
+        'chats',
+        `${sessionId}.jsonl`,
+      );
+      let parentUuid = `${sessionId}-user-1`;
+      const records: Array<Record<string, unknown>> = [];
+      for (let index = 0; index < 500; index++) {
+        const uuid = `pending-tool-${index}`;
+        records.push({
+          uuid,
+          parentUuid,
+          sessionId,
+          timestamp: new Date(Date.UTC(2026, 6, 8, 0, 0, index)).toISOString(),
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: `pending-call-${index}-${'x'.repeat(96)}`,
+                  name: 'run_shell_command',
+                  args: { command: 'true' },
+                },
+              },
+            ],
+          },
+          cwd: SECONDARY_CWD,
+        });
+        parentUuid = uuid;
+      }
+      await fsp.appendFile(
+        transcriptPath,
+        `${records.map((record) => JSON.stringify(record)).join('\n')}\n`,
+        'utf8',
+      );
+      const { app, secondaryBridge } = makeHarness({
+        secondaryTrusted: false,
+      });
+
+      const response = await request(app)
+        .get(
+          `/workspaces/secondary-id/session/${sessionId}/transcript?limit=500`,
+        )
+        .set('Host', host())
+        .expect(200);
+
+      expect(response.body.partial).toBe(true);
+      expect(response.body.replayError).toBe(
+        'Transcript pagination state exceeds the safe limit',
+      );
+      expect(response.body.hasMore).toBe(false);
+      expect(response.body.nextCursor).toBeUndefined();
+      expect(Array.isArray(response.body.events)).toBe(true);
+      expect(response.body.events.length).toBeGreaterThan(0);
+      expect(secondaryBridge.spawnCalls).toEqual([]);
+      expect(secondaryBridge.restoreCalls).toEqual([]);
     });
   });
 
