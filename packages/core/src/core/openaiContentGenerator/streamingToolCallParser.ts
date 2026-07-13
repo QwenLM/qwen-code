@@ -106,20 +106,26 @@ export class StreamingToolCallParser {
 
         // Map this ID to the actual index we're using
         this.idToIndexMap.set(id, actualIndex);
-      }
-      if (actualIndex === index) {
-        this.relocatedIndexByWireIndex.delete(index);
-      } else {
-        this.relocatedIndexByWireIndex.set(index, actualIndex);
+        if (actualIndex === index) {
+          this.relocatedIndexByWireIndex.delete(index);
+        } else {
+          this.relocatedIndexByWireIndex.set(index, actualIndex);
+        }
       }
     } else {
       // No ID provided - this is a continuation chunk
       // Try to find which tool call this belongs to based on the index
       // Look for an existing tool call at this index that's not complete
       const relocatedIndex = this.relocatedIndexByWireIndex.get(index);
-      if (relocatedIndex !== undefined) {
+      if (
+        relocatedIndex !== undefined &&
+        !this.hasCompleteArgumentBuffer(relocatedIndex)
+      ) {
         actualIndex = relocatedIndex;
-      } else if (this.buffers.has(index)) {
+      } else {
+        this.relocatedIndexByWireIndex.delete(index);
+      }
+      if (actualIndex === index && this.buffers.has(index)) {
         const existingBuffer = this.buffers.get(index)!;
         const existingDepth = this.depths.get(index)!;
 
@@ -418,6 +424,17 @@ export class StreamingToolCallParser {
       this.nextAvailableIndex++;
     }
     return this.nextAvailableIndex++;
+  }
+
+  private hasCompleteArgumentBuffer(index: number): boolean {
+    const buffer = this.buffers.get(index);
+    if (!buffer?.trim() || (this.depths.get(index) ?? 0) !== 0) return false;
+    try {
+      JSON.parse(buffer);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**

@@ -389,6 +389,39 @@ describe('StreamingToolCallParser', () => {
         index: 1,
       });
     });
+
+    it('keeps the active route when an older original ID replays', () => {
+      parser.addChunk(0, '{"a":1}', 'call_a', 'tool_a');
+      parser.addChunk(2, '{"c":', 'call_c', 'tool_c');
+      parser.addChunk(0, '{"b":', 'call_b', 'tool_b');
+
+      parser.addChunk(0, '', 'call_a', 'tool_a');
+      parser.addChunk(0, '2}');
+
+      expect(parser.getBuffer(1)).toBe('{"b":2}');
+      expect(parser.getBuffer(2)).toBe('{"c":');
+    });
+
+    it('keeps the active route when an older relocated ID replays', () => {
+      parser.addChunk(0, '{"a":1}', 'call_a', 'tool_a');
+      parser.addChunk(0, '{"b":2}', 'call_b', 'tool_b');
+      parser.addChunk(0, '{"c":', 'call_c', 'tool_c');
+
+      parser.addChunk(0, '', 'call_b', 'tool_b');
+      parser.addChunk(0, '3}');
+
+      expect(parser.getBuffer(1)).toBe('{"b":2}');
+      expect(parser.getBuffer(2)).toBe('{"c":3}');
+    });
+
+    it('falls back after the relocated call completes', () => {
+      parser.addChunk(0, '{"a":', 'call_a', 'tool_a');
+      parser.addChunk(0, '{"b":2}', 'call_b', 'tool_b');
+      parser.addChunk(0, '1}');
+
+      expect(parser.getBuffer(0)).toBe('{"a":1}');
+      expect(parser.getBuffer(1)).toBe('{"b":2}');
+    });
   });
 
   describe('Completed tool calls', () => {
