@@ -88,18 +88,37 @@ export function DialogShell({
   if (shellIdRef.current === null) shellIdRef.current = {};
 
   useEffect(() => {
-    const panel = panelRef.current;
     const shellId = shellIdRef.current!;
     shellStack.push(shellId);
-
-    if (panel && !panel.contains(document.activeElement)) {
-      const preferred = getFocusable(panel).find(
-        (element) => !element.hasAttribute('data-dialog-close'),
+    const preserveImeEscape = (event: KeyboardEvent) => {
+      if (
+        event.key !== 'Escape' ||
+        (!event.isComposing && event.keyCode !== 229) ||
+        !isTopDialogShellId(shellId)
+      ) {
+        return;
+      }
+      // Radix handles Escape on document capture and otherwise prevents the
+      // native IME cancellation. Mask it only for Radix, then restore it before
+      // the event continues to the focused input.
+      Object.defineProperty(event, 'key', {
+        configurable: true,
+        value: 'Process',
+      });
+      document.addEventListener(
+        'keydown',
+        (currentEvent) => {
+          if (currentEvent === event) Reflect.deleteProperty(event, 'key');
+        },
+        { capture: true, once: true },
       );
-      (preferred ?? panel).focus();
-    }
+    };
+    window.addEventListener('keydown', preserveImeEscape, { capture: true });
 
     return () => {
+      window.removeEventListener('keydown', preserveImeEscape, {
+        capture: true,
+      });
       const index = shellStack.indexOf(shellId);
       if (index >= 0) shellStack.splice(index, 1);
       if (shellStack.length === 0) {
@@ -166,16 +185,16 @@ export function DialogShell({
           data-keyboard-scope
           data-web-shell-dialog
           data-web-shell-dialog-title={title}
+          onPointerDownOutside={(event) => event.preventDefault()}
           onEscapeKeyDown={(event) => {
             if (event.defaultPrevented) return;
-            event.preventDefault();
-            if (
-              event.isComposing ||
-              event.keyCode === 229 ||
-              !isTopDialogShellId(shellIdRef.current)
-            ) {
+            if (event.isComposing || event.keyCode === 229) {
               return;
             }
+            if (!isTopDialogShellId(shellIdRef.current)) {
+              return;
+            }
+            event.preventDefault();
             onCloseRef.current();
           }}
           onOpenAutoFocus={(event) => {

@@ -400,8 +400,10 @@ export function WebShellSidebar({
   const actions = useActions();
   const workspaceActions = useWorkspaceActions();
   const workspace = useWorkspace();
-  const footerItems = new Set(
-    footer === false ? [] : (footer?.items ?? DEFAULT_FOOTER_ITEMS),
+  const footerItems = useMemo(
+    () =>
+      new Set(footer === false ? [] : (footer?.items ?? DEFAULT_FOOTER_ITEMS)),
+    [footer],
   );
   const shouldRenderBrand =
     branding !== false && !(mobileOpen && (branding?.hideWhenCompact ?? true));
@@ -643,6 +645,7 @@ export function WebShellSidebar({
         const sessions = await workspace.client
           .workspaceByCwd(entry.cwd)
           .listWorkspaceSessions({
+            pageSize: SESSION_LIST_PAGE_SIZE,
             archiveState: 'archived',
             ...(organizationEnabled
               ? { view: 'organized' as const, group: 'all' }
@@ -2236,7 +2239,9 @@ export function WebShellSidebar({
           deleteLabel={t('sidebar.groupDelete')}
           actionsDisabled={groupBusy}
         >
-          {section.sessions.map((session) => renderSessionRow(session))}
+          {section.sessions.map((session) =>
+            renderSessionRow(session, { grouped: true }),
+          )}
         </SessionGroupSection>
       );
     });
@@ -2822,11 +2827,14 @@ export function WebShellSidebar({
                               ws.primary ? setProjectExpanded : undefined
                             }
                             renderSessions={!ws.primary}
-                            renderSession={(session) =>
-                              renderSessionRow({
-                                ...session,
-                                workspaceCwd: ws.cwd,
-                              })
+                            renderSession={(session, options) =>
+                              renderSessionRow(
+                                {
+                                  ...session,
+                                  workspaceCwd: ws.cwd,
+                                },
+                                options,
+                              )
                             }
                             headerActions={(visible) => (
                               <div

@@ -109,6 +109,11 @@ export type {
   SessionChangeEvent,
 } from './App';
 export type { ToastTone } from './components/ToastHost';
+export type {
+  WebShellSidebarBranding,
+  WebShellSidebarFooterItem,
+  WebShellSidebarFooterOptions,
+} from './components/sidebar/WebShellSidebar';
 export type { WebShellLanguage } from './i18n';
 export type { WebShellTheme } from './themeContext';
 export type {

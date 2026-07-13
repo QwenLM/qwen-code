@@ -32,6 +32,8 @@
 }
 
 .headerActive {
+  background: var(--sidebar-accent);
+  font-weight: 600;
 }
 
 .headerDisabled {

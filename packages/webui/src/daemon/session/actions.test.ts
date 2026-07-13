@@ -287,6 +287,20 @@ describe('createDaemonSessionActions', () => {
     expect(setRestoreWorkspaceCwd).toHaveBeenCalledWith('/workspace/secondary');
   });
 
+  it('forwards the workspace when resuming a session', () => {
+    const setRestoreWorkspaceCwd = vi.fn();
+    const { actions } = createActionsHarness({
+      connection: { status: 'connected', workspaceCwd: '/workspace/primary' },
+      setRestoreWorkspaceCwd,
+    });
+
+    void actions
+      .resumeSession('session-b', { workspaceCwd: '/workspace/secondary' })
+      .catch(() => undefined);
+
+    expect(setRestoreWorkspaceCwd).toHaveBeenCalledWith('/workspace/secondary');
+  });
+
   it('clears transcript loading when a session switch fails', async () => {
     vi.useFakeTimers();
     try {

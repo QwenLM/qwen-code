@@ -681,6 +681,7 @@ const EN: Messages = {
   'quickActions.setGoal': 'Set goal',
   'session.missing': 'Current session does not exist',
   'session.new': 'New session',
+  'workspace.loadFailed': 'Failed to load workspace',
   'workspace.notFound': 'Workspace not found',
   'workspace.notFoundDescription':
     'This workspace may have been removed or the link is no longer valid.',
@@ -2529,6 +2530,7 @@ const ZH: Messages = {
   'quickActions.setGoal': '设置目标',
   'session.missing': '当前会话不存在',
   'session.new': '新建会话',
+  'workspace.loadFailed': '工作区加载失败',
   'workspace.notFound': '工作区不存在',
   'workspace.notFoundDescription': '此工作区可能已被移除，或链接已经失效。',
   'workspace.loadFailedDescription':

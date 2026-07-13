@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { WifiOffIcon } from 'lucide-react';
 import {
   DaemonSessionProvider,
@@ -30,12 +30,15 @@ export function WorkspaceSessionProvider({
   const targetWorkspace = workspace.capabilities?.workspaces?.find(
     (entry) => entry.id === effectiveWorkspaceId,
   );
-  const t = getTranslator(normalizeLanguage(webShellProps.language));
+  const t = useMemo(
+    () => getTranslator(normalizeLanguage(webShellProps.language)),
+    [webShellProps.language],
+  );
 
   if (effectiveWorkspaceId && workspace.status === 'error') {
     return (
       <WorkspaceUnavailableState
-        title={t('daemon.loadFailed')}
+        title={t('workspace.loadFailed')}
         description={t('workspace.loadFailedDescription')}
         actionLabel={t('common.retry')}
         theme={webShellProps.theme}

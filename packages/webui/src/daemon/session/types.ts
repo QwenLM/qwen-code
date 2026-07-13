@@ -333,7 +333,10 @@ export interface DaemonSessionActions {
     sessionId: string,
     options?: { workspaceCwd?: string },
   ): Promise<void>;
-  resumeSession(sessionId: string): Promise<void>;
+  resumeSession(
+    sessionId: string,
+    options?: { workspaceCwd?: string },
+  ): Promise<void>;
   /**
    * Create a daemon session and update local session state. Callers that need
    * transcript/event streaming must follow with `attachSession()`.

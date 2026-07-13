@@ -642,6 +642,18 @@
   cursor: pointer;
 }
 
+.groupedSessionRow {
+  min-height: 42px;
+  margin-left: 12px;
+  padding: 8px;
+  color: var(--muted-foreground);
+}
+
+.groupedSessionRow:not(.currentSession):hover,
+.groupedSessionRow:not(.currentSession):focus-visible {
+  color: var(--sidebar-accent-foreground);
+}
+
 .currentSession {
   background: var(--sidebar-accent);
   color: var(--sidebar-accent-foreground);
@@ -828,8 +840,8 @@
   animation: sidebarSpin 0.8s linear infinite;
 }
 
-.sessionRow:hover .sessionTime,
-.sessionRow:hover .sessionLoading,
+.sessionRow:hover:not(.runningSession) .sessionTime,
+.sessionRow:focus-within:not(.runningSession) .sessionTime,
 .sessionMetaSlot:hover .sessionTime,
 .sessionMetaSlot:hover .sessionLoading,
 .sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionTime,
@@ -849,7 +861,8 @@
   opacity: 0;
 }
 
-.sessionRow:hover .sessionActions,
+.sessionRow:hover:not(.runningSession) .sessionActions,
+.sessionRow:focus-within:not(.runningSession) .sessionActions,
 .sessionMetaSlot:hover .sessionActions,
 .sessionActions:has(.sessionActionButton:focus-visible),
 .sessionActions:has([data-state='open']) {

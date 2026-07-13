@@ -11,7 +11,7 @@ Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
 
-function render(showBottom: boolean) {
+function render(showBottom: boolean, onTopClose = vi.fn()) {
   root!.render(
     <I18nProvider language="en">
       <ThemeProvider value="dark">
@@ -20,7 +20,7 @@ function render(showBottom: boolean) {
             <button type="button">bottom</button>
           </DialogShell>
         )}
-        <DialogShell title="Top" onClose={vi.fn()}>
+        <DialogShell title="Top" onClose={onTopClose}>
           <button type="button" data-testid="top-focus">
             top
           </button>
@@ -52,5 +52,69 @@ describe('DialogShell', () => {
     act(() => render(false));
 
     expect(document.activeElement).toBe(topButton);
+  });
+
+  it('leaves an IME Escape event unhandled', () => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const onClose = vi.fn();
+
+    act(() => render(false, onClose));
+    const event = new KeyboardEvent('keydown', {
+      bubbles: true,
+      cancelable: true,
+      isComposing: true,
+      key: 'Escape',
+    });
+    const target = document.querySelector<HTMLElement>(
+      '[data-testid="top-focus"]',
+    )!;
+    act(() => target.dispatchEvent(event));
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(event.key).toBe('Escape');
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('closes once when the backdrop is clicked', () => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const onClose = vi.fn();
+
+    act(() => render(false, onClose));
+    const backdrop = document.querySelector<HTMLElement>(
+      '[data-slot="dialog-overlay"]',
+    )!;
+    act(() => {
+      backdrop.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+      backdrop.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      backdrop.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      backdrop.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays open when a drag starts in the panel and ends on the backdrop', () => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const onClose = vi.fn();
+
+    act(() => render(false, onClose));
+    const backdrop = document.querySelector<HTMLElement>(
+      '[data-slot="dialog-overlay"]',
+    )!;
+    const panel = document.querySelector<HTMLElement>('[role="dialog"]')!;
+    act(() => {
+      panel.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+      panel.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      backdrop.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      backdrop.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(onClose).not.toHaveBeenCalled();
   });
 });

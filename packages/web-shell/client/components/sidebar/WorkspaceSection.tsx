@@ -12,6 +12,7 @@ import type {
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import { FolderClosedIcon, FolderOpenIcon } from 'lucide-react';
+import { SESSION_LIST_PAGE_SIZE } from '../../constants/sessions';
 import { SessionGroupSection } from './SessionGroupSection';
 import styles from './WorkspaceSection.module.css';
 
@@ -66,7 +67,10 @@ interface WorkspaceSectionProps {
    * type scale, hover actions (pin, archive, export, more…), and states —
    * instead of a bespoke, feature-poor row.
    */
-  renderSession: (session: DaemonSessionSummary) => ReactNode;
+  renderSession: (
+    session: DaemonSessionSummary,
+    options?: { grouped?: boolean },
+  ) => ReactNode;
   headerActions?: (visible: boolean) => ReactNode;
   onRenameGroup?: (group: DaemonSessionGroup, workspaceCwd: string) => void;
   onDeleteGroup?: (group: DaemonSessionGroup, workspaceCwd: string) => void;
@@ -133,6 +137,7 @@ export function WorkspaceSection({
       const result = await client
         .workspaceByCwd(workspace.cwd)
         .listWorkspaceSessions({
+          pageSize: SESSION_LIST_PAGE_SIZE,
           archiveState: 'active',
           ...(organizationEnabled
             ? { view: 'organized' as const, group: 'all' }
@@ -309,7 +314,9 @@ export function WorkspaceSection({
                     deleteLabel={deleteGroupLabel}
                     actionsDisabled={groupActionsDisabled}
                   >
-                    {sessions.map(renderSession)}
+                    {sessions.map((session) =>
+                      renderSession(session, { grouped: true }),
+                    )}
                   </SessionGroupSection>
                 ))}
                 {groupedSessions.ungrouped.length > 0 && (
@@ -327,7 +334,9 @@ export function WorkspaceSection({
                       });
                     }}
                   >
-                    {groupedSessions.ungrouped.map(renderSession)}
+                    {groupedSessions.ungrouped.map((session) =>
+                      renderSession(session, { grouped: true }),
+                    )}
                   </SessionGroupSection>
                 )}
               </>

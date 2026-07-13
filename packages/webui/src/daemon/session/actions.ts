@@ -605,8 +605,8 @@ export function createDaemonSessionActions({
       return startSessionSwitch(sessionId, 'load', options?.workspaceCwd);
     },
 
-    async resumeSession(sessionId) {
-      return startSessionSwitch(sessionId, 'resume');
+    async resumeSession(sessionId, options) {
+      return startSessionSwitch(sessionId, 'resume', options?.workspaceCwd);
     },
 
     async createSession(options?: {
