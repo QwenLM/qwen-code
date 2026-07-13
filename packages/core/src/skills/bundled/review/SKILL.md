@@ -535,7 +535,27 @@ This agent runs deterministic build and test commands to verify the code compile
    - **Environment/setup failures** (missing dependencies, tool not installed, virtualenv not activated) → report as informational note, not Critical
 5. Output format: same as other agents, but the **Source** field MUST be `[build]` for build failures or `[test]` for test failures (not `[review]`).
 
-**Note**: Build/test results are deterministic facts. Code-caused failures skip Step 4 verification — the `[build]`/`[test]` source tag is how they are recognized as pre-confirmed. Environment/setup failures are informational only and should not affect the verdict.
+6. **Run the test-efficacy probe** (same-repo PR reviews, high effort — it needs the worktree and the base SHA). A green suite says the tests pass. It does not say the tests would have failed had the change been wrong, and those are different claims:
+
+   ```bash
+   qwen review test-efficacy .qwen/tmp/qwen-review-pr-<n>-fetch.json \
+     --worktree <worktreePath> \
+     --base <mergeBaseSha> \
+     --out .qwen/tmp/qwen-review-pr-<n>-efficacy.json
+   ```
+
+   `<mergeBaseSha>` is the base the fetch report resolved. **If it is null** (merge-base unresolvable — the same state that leaves `diffPath` null), skip this probe entirely and say so: there is no base to revert to, and a probe against the wrong base would report every gating test as inert.
+
+   It reverts the diff's **source** files to base, keeps its **tests**, re-runs them, and reports two things no reading of the code can establish:
+   `findings[]` carries **both** kinds — read it, not the individual arrays:
+   - **`kind: 'unreachable'`** — a test file the project's test command never collects (outside every npm workspace). It did not run here and it does not run in `npm test`. Cross-check it against `ciStatus.skippedCheckNames` from Step 7's presubmit: a test that runs in neither place gates nothing, anywhere.
+   - **`kind: 'inert'`** — the test **still passed with the change reverted**. It is green whether or not the feature exists, so it cannot catch a regression in it.
+
+   Report each entry in `findings` as a **Suggestion** with `Source: [test]` (a test that does not gate is not itself broken code — but say plainly, in the failure scenario, which behaviour ships unprotected). Both were true of PR #6486 at once: the new test lived in `integration-tests/` (collected by nothing), its CI job was skipped, and it drove a kitty CSI-u sequence into a PTY that never negotiated the protocol — so the keypress was discarded and the test could only ever have caught a startup crash. It shipped as coverage for a feature it never touched.
+
+   **`inconclusive` is not a finding and must never be reported as one.** Reverting the source often breaks the test's own compile — it imports a symbol the diff introduced — and the runner then errors out having collected nothing. That is not the test catching a regression; the subcommand refuses to call it `gated` for exactly that reason, and you must not either. Note it in the terminal and move on.
+
+**Note**: Build/test results are deterministic facts. Code-caused failures skip Step 4 verification — the `[build]`/`[test]` source tag is how they are recognized as pre-confirmed. Environment/setup failures are informational only and should not affect the verdict. Test-efficacy findings are deterministic in the same way and are likewise pre-confirmed.
 
 ### Agent 8: Diff-specialized finders (0–2 agents, optional; high effort only)
 

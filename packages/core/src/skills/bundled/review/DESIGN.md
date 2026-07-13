@@ -339,6 +339,24 @@ Three changes, and the ordering one is load-bearing:
 
 The lesson generalizes past this file: **"a false positive is cheap" is a claim about a budget, and it has to be measured against the real distribution, not assumed.** Here it was false until the ordering was fixed.
 
+## Why a test-efficacy probe, when there is already a Test Coverage agent
+
+Agent 5 asks whether a test **exists** and whether its assertions **look like** they check something. Agent 7 runs the suite and reports that it is **green**. Neither can see a test that protects nothing, and there are two ways to ship one:
+
+- **Unreachable** — the project's test command never collects the file.
+- **Inert** — it runs, it passes, and it would still pass with the change reverted.
+
+PR #6486 shipped both, in one file. The new test lived in `integration-tests/`, which is not an npm workspace, so `npm test --workspaces` never collected it; its CI job (`Integration Tests (CLI, No Sandbox)`) was skipped, so CI never ran it either. **The test executed nowhere — not in CI, not in the review — and nothing in the pipeline noticed.** And had it run, it would have passed regardless: it drove a kitty CSI-u sequence into a PTY that never negotiated the kitty protocol, so the keypress was discarded before reaching the handler under test. It could only ever have caught a startup crash. Agent 5 saw a test file with plausible assertions and said coverage was fine.
+
+Both questions are decidable without judgment, which is why they are a subcommand and not a prompt. Unreachability needs no execution at all — it is a path against the root `package.json` workspace globs. Inertness needs one run: revert the diff's **source** files to base, keep its **tests**, re-run them. A test that is still green is green whether or not the feature exists.
+
+**The trap, and the reason the classifier is asymmetric.** Reverting source frequently breaks the test's own compile — it imports a symbol the diff introduced — and the runner exits non-zero having collected nothing. It is tempting to score that as "the test caught the revert". It is not: a compile error says nothing about whether the test would catch a _behavioural_ regression, and scoring it as `gated` would hand back precisely the false assurance this command exists to remove. So `gated` requires a real **assertion** failure; a bare non-zero exit with nothing collected is `inconclusive`, and `inconclusive` is never reported as a finding.
+
+Two other deliberate limits:
+
+- **A test-only diff is never probed.** A new test for old code is _supposed_ to pass with nothing reverted. Probing it would flag every such PR as inert — a false blocker on exactly the PRs we want people to write.
+- **Findings are Suggestions, not Criticals.** A test that does not gate is not itself wrong code; nothing is broken today. What the finding must say concretely is which behaviour is now shipping unprotected.
+
 ## Why "fixed by this diff" is the verdict that needed a bar
 
 The re-check has three verdicts, and until PR #6486 only two of them cost anything:
