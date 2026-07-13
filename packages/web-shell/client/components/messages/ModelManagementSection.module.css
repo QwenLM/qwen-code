@@ -129,18 +129,18 @@
 }
 
 .deleteButton {
-  color: #d64545;
-  border-color: color-mix(in srgb, #d64545 40%, var(--border));
+  color: var(--error-color);
+  border-color: color-mix(in srgb, var(--error-color) 40%, var(--border));
 }
 
 .deleteButton:hover {
-  background: color-mix(in srgb, #d64545 12%, transparent);
+  background: color-mix(in srgb, var(--error-color) 12%, transparent);
 }
 
 .confirmButton {
   color: #fff;
-  background: #d64545;
-  border-color: #d64545;
+  background: var(--error-color);
+  border-color: var(--error-color);
 }
 
 .actionButton:disabled,
