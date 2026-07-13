@@ -1207,7 +1207,10 @@ export class DaemonClient {
           options.signal?.removeEventListener('abort', onAbort);
           resolve();
         };
-        const timer = setTimeout(finish, Math.min(pollIntervalMs, remainingMs));
+        const timer = setTimeout(
+          finish,
+          Math.min(pollIntervalMs, remainingMs, MAX_TIMER_DELAY_MS),
+        );
         const onAbort = () => {
           clearTimeout(timer);
           options.signal?.removeEventListener('abort', onAbort);

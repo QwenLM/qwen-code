@@ -11259,12 +11259,12 @@ describe('sessionLanguage multi-session propagation', () => {
     expect(extensionManager.refreshCache).toHaveBeenCalledOnce();
     expect(skillManager.refreshCache).toHaveBeenCalledOnce();
     expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
-    expect(refreshHierarchicalMemory).toHaveBeenCalledOnce();
+    expect(refreshHierarchicalMemory).not.toHaveBeenCalled();
     expect(refreshSystemInstruction).toHaveBeenCalledOnce();
     expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
-    expect(refreshHierarchicalMemory.mock.invocationCallOrder[0]).toBeLessThan(
-      refreshSystemInstruction.mock.invocationCallOrder[0]!,
-    );
+    expect(
+      extensionManager.refreshTools.mock.invocationCallOrder[0],
+    ).toBeLessThan(refreshSystemInstruction.mock.invocationCallOrder[0]!);
     expect(refreshSystemInstruction.mock.invocationCallOrder[0]).toBeLessThan(
       sendAvailableCommandsUpdate.mock.invocationCallOrder[0]!,
     );

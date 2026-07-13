@@ -243,17 +243,25 @@ export const ExtensionActionsView = ({
             ? { scope: 'user' }
             : { scope: 'workspace', workspacePath: process.cwd() },
         );
-        manager.setExtensionScope(name, newScope);
+        let preferenceWarning: string | undefined;
+        try {
+          manager.setExtensionScope(name, newScope);
+        } catch (error) {
+          preferenceWarning = getErrorMessage(error);
+        }
         setScope(newScope);
         setEnabled(true);
-        const warnings = result.warnings ?? [];
+        const warnings = [
+          ...(result.warnings ?? []).map((warning) => warning.error),
+          ...(preferenceWarning ? [preferenceWarning] : []),
+        ];
         onStatus({
           type: warnings.length > 0 ? 'info' : 'success',
           text:
             warnings.length > 0
               ? t('Set "{{name}}" scope with warnings: {{detail}}', {
                   name,
-                  detail: warnings.map((warning) => warning.error).join('; '),
+                  detail: warnings.join('; '),
                 })
               : t('Set "{{name}}" scope to {{scope}}.', {
                   name,

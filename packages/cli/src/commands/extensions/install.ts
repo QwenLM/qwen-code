@@ -111,7 +111,13 @@ export async function handleInstall(args: InstallArgs) {
         : { scope: 'user' },
     );
     if (args.scope) {
-      extensionManager.setExtensionScope(extension.name, scope);
+      try {
+        extensionManager.setExtensionScope(extension.name, scope);
+      } catch (scopeError) {
+        writeStderrLine(
+          `Warning: Extension installed, but failed to save scope preference: ${getErrorMessage(scopeError)}`,
+        );
+      }
     }
     writeStdoutLine(
       scope === 'project'
@@ -126,7 +132,13 @@ export async function handleInstall(args: InstallArgs) {
   } catch (error) {
     if (isExtensionCommittedWithWarningsError(error)) {
       if (args.scope && extensionManager) {
-        extensionManager.setExtensionScope(error.identity.name, scope);
+        try {
+          extensionManager.setExtensionScope(error.identity.name, scope);
+        } catch (scopeError) {
+          writeStderrLine(
+            `Warning: Extension installed, but failed to save scope preference: ${getErrorMessage(scopeError)}`,
+          );
+        }
       }
       writeStderrLine(`Warning: ${getErrorMessage(error)}`);
       return;

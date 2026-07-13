@@ -186,6 +186,33 @@ describe('extension tests', () => {
       );
     }
 
+    it('installs and uninstalls within an injected extension store root', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'custom-root.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          writeExtractedExtension(destination, 'custom-root');
+        },
+      );
+      const customExtensionsDir = path.join(tempHomeDir, 'custom-extensions');
+      const manager = createExtensionManager({
+        extensionStore: new ExtensionStore({
+          extensionsDir: customExtensionsDir,
+        }),
+      });
+
+      const installed = await manager.installExtension(
+        { type: 'local', source: archivePath },
+        async () => {},
+      );
+
+      expect(installed.path).toBe(
+        path.join(customExtensionsDir, 'custom-root'),
+      );
+      await manager.uninstallExtensionById(installed.id, true);
+      expect(fs.existsSync(installed.path)).toBe(false);
+    });
+
     it('commits workspace initial activation with the installed artifact', async () => {
       const archivePath = path.join(tempWorkspaceDir, 'workspace-ext.zip');
       fs.writeFileSync(archivePath, 'archive');
@@ -420,7 +447,7 @@ describe('extension tests', () => {
       }
     });
 
-    it('reports temp cleanup failure as a post-commit warning', async () => {
+    it('does not report a temp cleanup warning when an immediate retry succeeds', async () => {
       const archivePath = path.join(tempWorkspaceDir, 'cleanup-warning.zip');
       fs.writeFileSync(archivePath, 'archive');
       mockExtractArchiveFile.mockImplementation(
@@ -450,16 +477,12 @@ describe('extension tests', () => {
       const committed = await manager.commitPreparedExtension(prepared);
 
       expect(committed.generation).toBeGreaterThan(0);
-      expect(committed.warnings).toContainEqual({
-        code: 'extension_temp_cleanup_failed',
-        error: 'cleanup denied',
-      });
-      expect(prepared.disposed).toBe(false);
+      expect(committed.warnings).toBeUndefined();
+      expect(prepared.disposed).toBe(true);
       await expect(
         manager.disposePreparedExtension(prepared),
       ).resolves.toBeUndefined();
       expect(cleanupAttempts).toBe(2);
-      expect(prepared.disposed).toBe(true);
       expect(fs.existsSync(cleanupPath)).toBe(false);
     });
 
@@ -487,6 +510,44 @@ describe('extension tests', () => {
       expect(committed.warnings).toContainEqual({
         code: 'extension_settings_commit_failed',
         error: 'keychain unavailable',
+      });
+    });
+
+    it('signals the durable commit before deferred settings finish', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'settings-deferred.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          writeExtractedExtension(destination, 'settings-deferred');
+        },
+      );
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const prepared = await manager.prepareExtensionInstall({
+        installMetadata: { type: 'local', source: archivePath },
+        initialActivation: { scope: 'user' },
+        requestConsent: async () => {},
+      });
+      let finishSettings!: () => void;
+      const settingsBlocked = new Promise<void>((resolve) => {
+        finishSettings = resolve;
+      });
+      const commitSettings = vi.fn(async () => await settingsBlocked);
+      Object.defineProperty(prepared, 'commitSettings', {
+        value: commitSettings,
+      });
+      const onCommitted = vi.fn();
+
+      const committing = manager.commitPreparedExtension(prepared, onCommitted);
+      await vi.waitFor(() => expect(commitSettings).toHaveBeenCalledOnce());
+
+      expect(onCommitted).toHaveBeenCalledOnce();
+      expect(onCommitted.mock.invocationCallOrder[0]).toBeLessThan(
+        commitSettings.mock.invocationCallOrder[0]!,
+      );
+      finishSettings();
+      await expect(committing).resolves.toMatchObject({
+        identity: { name: 'settings-deferred' },
       });
     });
 
@@ -978,9 +1039,46 @@ describe('extension tests', () => {
       expect(snapshot.extensions[identity.id]).toBeUndefined();
       expect(fs.existsSync(destination)).toBe(false);
     });
+
+    it('uninstalls by id using the loaded artifact directory', async () => {
+      const original = createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'manifest-name',
+      });
+      const destination = path.join(userExtensionsDir, 'artifact-directory');
+      fs.renameSync(original, destination);
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extension = manager.getLoadedExtensions()[0]!;
+
+      const snapshot = await manager.uninstallExtensionById(extension.id, true);
+
+      expect(snapshot.extensions[extension.id]).toBeUndefined();
+      expect(fs.existsSync(destination)).toBe(false);
+    });
   });
 
   describe('loadExtension', () => {
+    it('uses the injected extension store root for discovery', async () => {
+      const customExtensionsDir = path.join(tempHomeDir, 'custom-extensions');
+      createExtension({
+        extensionsDir: customExtensionsDir,
+        name: 'custom-root-extension',
+      });
+      const manager = createExtensionManager({
+        extensionStore: new ExtensionStore({
+          extensionsDir: customExtensionsDir,
+        }),
+      });
+
+      await manager.refreshCache();
+
+      expect(manager.getLoadedExtensions()).toHaveLength(1);
+      expect(manager.getLoadedExtensions()[0]?.path).toBe(
+        path.join(customExtensionsDir, 'custom-root-extension'),
+      );
+    });
+
     it('should include extension path in loaded extension', async () => {
       const extensionDir = path.join(userExtensionsDir, 'test-extension');
       fs.mkdirSync(extensionDir, { recursive: true });

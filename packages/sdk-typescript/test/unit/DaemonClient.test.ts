@@ -3768,6 +3768,39 @@ describe('DaemonClient', () => {
       }
     });
 
+    it('caps polling intervals larger than the maximum timer delay', async () => {
+      vi.useFakeTimers();
+      let polls = 0;
+      const { fetch } = recordingFetch(() => {
+        polls += 1;
+        return jsonResponse(200, {
+          v: 1,
+          operationId: 'op-1',
+          operation: 'install',
+          status: polls === 1 ? 'running' : 'succeeded',
+          createdAt: 1,
+          updatedAt: 2,
+        });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const maximumTimerDelayMs = 2_147_483_647;
+      const waiting = client.waitForExtensionOperation(
+        { accepted: true, operationId: 'op-1' },
+        {
+          pollIntervalMs: maximumTimerDelayMs + 100,
+          timeoutMs: Number.POSITIVE_INFINITY,
+        },
+      );
+
+      try {
+        await vi.advanceTimersByTimeAsync(maximumTimerDelayMs);
+        await expect(waiting).resolves.toMatchObject({ status: 'succeeded' });
+        expect(polls).toBe(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('routes global extension methods through /extensions/*', async () => {
       const { fetch, calls } = recordingFetch((req) => {
         if (req.url === 'http://daemon/extensions') {

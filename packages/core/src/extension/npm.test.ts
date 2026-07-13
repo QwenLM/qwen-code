@@ -814,6 +814,30 @@ describe('downloadFromNpmRegistry', () => {
     expect(tar.x).not.toHaveBeenCalled();
   });
 
+  it('bounds rejected tar link collection', async () => {
+    mockNpmDownload('https://registry.example.com/pkg.tgz');
+    vi.mocked(tar.t).mockImplementationOnce(async (options) => {
+      for (let index = 0; index <= 100; index += 1) {
+        options.onReadEntry?.({
+          type: 'SymbolicLink',
+          path: `package/link-${index}`,
+        } as never);
+      }
+    });
+
+    await expect(
+      downloadFromNpmRegistry(
+        {
+          source: '@scope/pkg',
+          type: 'npm',
+          registryUrl: 'https://registry.example.com',
+        },
+        '/tmp/qwen-extension',
+      ),
+    ).rejects.toThrow('more than 100 unsupported link entries');
+    expect(tar.x).not.toHaveBeenCalled();
+  });
+
   it('stops between tar inspection and extraction when cancelled', async () => {
     const controller = new AbortController();
     const reason = new Error('inspection cancelled');

@@ -154,4 +154,25 @@ describe('ExtensionActionsView', () => {
     expect(manager.setExtensionScope).not.toHaveBeenCalled();
     expect(onReload).not.toHaveBeenCalled();
   });
+
+  it('reloads committed scope changes when saving the preference fails', async () => {
+    const manager = createManager();
+    manager.setExtensionActivationScope.mockResolvedValueOnce({});
+    manager.setExtensionScope.mockImplementationOnce(() => {
+      throw new Error('preference denied');
+    });
+    const statuses: Array<StatusMessage | null> = [];
+    const { onReload } = renderView(manager, (status) => statuses.push(status));
+    const select = await openScopeSelect();
+
+    await act(async () => {
+      select.onSelect('project');
+    });
+
+    await waitFor(() => expect(onReload).toHaveBeenCalledOnce());
+    expect(statuses).toContainEqual({
+      type: 'info',
+      text: 'Set "demo" scope with warnings: preference denied',
+    });
+  });
 });

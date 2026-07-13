@@ -415,10 +415,48 @@ describe('convertClaudePluginPackage', () => {
         originSource: 'Claude',
       },
       expect.any(String),
+      undefined,
     );
     expect(cloneFromGit).not.toHaveBeenCalled();
 
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
+  it('does not fall back to cloning when conversion is aborted', async () => {
+    const pluginSourceDir = path.join(testDir, 'plugin-abort');
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify({
+        name: 'test-marketplace',
+        owner: { name: 'Test Owner', email: 'test@example.com' },
+        plugins: [
+          {
+            name: 'remote',
+            version: '1.0.0',
+            source: 'https://github.com/owner/plugin',
+            strict: false,
+          },
+        ],
+      } satisfies ClaudeMarketplaceConfig),
+    );
+    const controller = new AbortController();
+    const reason = new Error('conversion expired');
+    vi.mocked(downloadFromGitHubRelease).mockImplementationOnce(async () => {
+      controller.abort(reason);
+      throw new Error('download failed');
+    });
+
+    await expect(
+      convertClaudePluginPackage(
+        pluginSourceDir,
+        'remote',
+        undefined,
+        controller.signal,
+      ),
+    ).rejects.toBe(reason);
+    expect(cloneFromGit).not.toHaveBeenCalled();
   });
 
   it('should use all skills from folder when config does not specify skills', async () => {

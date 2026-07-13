@@ -100,9 +100,9 @@ export interface DaemonCapabilities {
    */
   workspaceCwd?: string;
   /**
-   * Registered workspace runtimes. Present only when the daemon advertises
-   * `multi_workspace_sessions`; `workspaceCwd` remains the primary cwd for
-   * old clients.
+   * Registered workspace runtimes. Newer daemons include the primary runtime
+   * even in single-workspace mode so workspace-qualified features can address
+   * it by ID; `workspaceCwd` remains the primary cwd for old clients.
    */
   workspaces?: DaemonWorkspaceCapability[];
 }

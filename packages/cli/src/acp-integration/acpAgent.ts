@@ -7550,7 +7550,6 @@ class QwenAgent implements Agent {
           skillManager?.refreshCache(),
         ]);
         await extensionManager.refreshTools();
-        await config.refreshHierarchicalMemory();
         await config.getGeminiClient()?.refreshSystemInstruction();
         await session.sendAvailableCommandsUpdate();
         return { ok: true };

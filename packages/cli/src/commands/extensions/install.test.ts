@@ -361,6 +361,26 @@ describe('handleInstall', () => {
     );
   });
 
+  it('keeps a committed install successful when saving scope preference fails', async () => {
+    mockParseInstallSource.mockResolvedValue({
+      type: 'git',
+      url: 'git@some-url',
+    });
+    mockInstallExtension.mockResolvedValue({ name: 'scoped-extension' });
+    mockSetExtensionScope.mockImplementationOnce(() => {
+      throw new Error('preference denied');
+    });
+
+    await handleInstall({ source: 'git@some-url', scope: 'project' });
+
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      'Extension "scoped-extension" installed successfully and enabled for the current workspace.',
+    );
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      'Warning: Extension installed, but failed to save scope preference: preference denied',
+    );
+  });
+
   it('reports a failed project-scope install without a follow-up scope mutation', async () => {
     const processSpy = vi
       .spyOn(process, 'exit')

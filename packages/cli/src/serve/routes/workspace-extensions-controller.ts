@@ -460,6 +460,10 @@ export function createExtensionsController(
           },
         };
         await extensionManager.refreshCache();
+        updateExtensionOperation(operationId, {
+          status: 'queued',
+          phase: undefined,
+        });
         const event = await run(
           extensionManager,
           deadlineController.signal,

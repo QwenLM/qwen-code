@@ -482,6 +482,28 @@ describe('ExtensionStore', () => {
     expect(JSON.parse(await fsp.readFile(enablementPath, 'utf8'))).toEqual({});
   });
 
+  it('merges newly discovered extensions while repairing an older V1 projection', async () => {
+    const store = makeStore();
+    const first = { id: 'e8'.repeat(32), name: 'first' };
+    const second = { id: 'e9'.repeat(32), name: 'second' };
+    const initialized = await store.ensureInitialized([first]);
+    await fsp.writeFile(
+      enablementPath,
+      JSON.stringify({ stale: { overrides: ['!/workspace/*'] } }),
+    );
+    await fsp.utimes(enablementPath, new Date(0), new Date(0));
+
+    const repaired = await store.ensureInitialized([first, second]);
+
+    expect(repaired.generation).toBe(initialized.generation + 1);
+    expect(repaired.extensions[second.id]).toMatchObject({
+      name: second.name,
+      defaultActivation: 'enabled',
+      workspaceOverrides: {},
+    });
+    expect(repaired.extensions[second.id]?.legacyPathRules).toBeUndefined();
+  });
+
   it('preserves artifact generation across a sequential downgrade write', async () => {
     const store = makeStore();
     const identity = { id: 'e3'.repeat(32), name: 'demo' };
@@ -690,6 +712,37 @@ describe('ExtensionStore', () => {
     await expect(store.readSnapshot()).resolves.toMatchObject({
       extensions: {},
     });
+  });
+
+  it('rejects installing a renamed extension with an existing id', async () => {
+    const store = makeStore();
+    const id = '98'.repeat(32);
+    const original = { id, name: 'original' };
+    const install = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(install, 'version'), 'one');
+    await store.commitArtifact({
+      operation: 'install',
+      identity: original,
+      stagingDirectory: install,
+      destinationDirectory: path.join(extensionsDir, original.name),
+      initialActivation: { scope: 'user' },
+    });
+    const renamed = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(renamed, 'version'), 'two');
+
+    await expect(
+      store.commitArtifact({
+        operation: 'install',
+        identity: { id, name: 'renamed' },
+        stagingDirectory: renamed,
+        destinationDirectory: path.join(extensionsDir, 'renamed'),
+        initialActivation: { scope: 'user' },
+      }),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
+    await expect(
+      fsp.readFile(path.join(extensionsDir, original.name, 'version'), 'utf8'),
+    ).resolves.toBe('one');
+    expect(fs.existsSync(path.join(extensionsDir, 'renamed'))).toBe(false);
   });
 
   it('rejects a stale prepared update without replacing the artifact', async () => {
@@ -1262,7 +1315,7 @@ describe('ExtensionStore', () => {
     expect(fs.existsSync(journal)).toBe(false);
   });
 
-  it('quarantines a corrupt journal without blocking store operations', async () => {
+  it('fails closed when an active transaction journal is corrupt', async () => {
     const store = makeStore();
     const identity = { id: 'd4'.repeat(32), name: 'demo' };
     await store.ensureInitialized([identity]);
@@ -1270,23 +1323,17 @@ describe('ExtensionStore', () => {
     const journal = path.join(transactionsDir, 'corrupt.json');
     await fsp.writeFile(journal, '{not-json');
 
-    await expect(store.readSnapshot()).resolves.toMatchObject({
-      generation: 0,
-    });
+    await expect(store.readSnapshot()).rejects.toBeInstanceOf(
+      ExtensionStoreCorruptError,
+    );
     await expect(
       store.setDefaultActivation(identity, 'disabled'),
-    ).resolves.toMatchObject({ generation: 1 });
-
-    expect(fs.existsSync(journal)).toBe(false);
-    expect(
-      (await fsp.readdir(transactionsDir)).some(
-        (name) => name.startsWith('corrupt.json.') && name.endsWith('.corrupt'),
-      ),
-    ).toBe(true);
+    ).rejects.toBeInstanceOf(ExtensionStoreCorruptError);
+    expect(fs.existsSync(journal)).toBe(true);
   });
 
   it.each(['destination', 'backup', 'staging', 'transaction-id'] as const)(
-    'quarantines a journal with a hostile %s path',
+    'fails closed for a journal with a hostile %s path',
     async (kind) => {
       const store = makeStore();
       const identity = { id: 'd5'.repeat(32), name: 'demo' };
@@ -1329,18 +1376,11 @@ describe('ExtensionStore', () => {
         }),
       );
 
-      await expect(store.readSnapshot()).resolves.toMatchObject({
-        generation: 0,
-      });
+      await expect(store.readSnapshot()).rejects.toBeInstanceOf(
+        ExtensionStoreCorruptError,
+      );
       expect(await fsp.readFile(sentinel, 'utf8')).toBe('preserve');
-      expect(fs.existsSync(journal)).toBe(false);
-      expect(
-        (await fsp.readdir(path.dirname(journal))).some(
-          (name) =>
-            name.startsWith(`${path.basename(journal)}.`) &&
-            name.endsWith('.corrupt'),
-        ),
-      ).toBe(true);
+      expect(fs.existsSync(journal)).toBe(true);
     },
   );
 
@@ -1399,6 +1439,55 @@ describe('ExtensionStore', () => {
     },
   );
 
+  it('rolls back an artifact-swapped transaction when current state is corrupt', async () => {
+    const store = makeStore();
+    const identity = { id: 'f4'.repeat(32), name: 'demo' };
+    await store.ensureInitialized([identity]);
+    const targetSnapshot = await store.setDefaultActivation(
+      identity,
+      'disabled',
+    );
+    const transactionId = 'recover-corrupt-artifact-swap';
+    const destination = path.join(extensionsDir, identity.name);
+    const backup = path.join(storeDir, 'rollback', transactionId);
+    const journal = path.join(
+      storeDir,
+      'transactions',
+      `${transactionId}.json`,
+    );
+    await fsp.mkdir(destination);
+    await fsp.writeFile(path.join(destination, 'version'), 'new');
+    await fsp.mkdir(backup);
+    await fsp.writeFile(path.join(backup, 'version'), 'old');
+    await fsp.writeFile(
+      journal,
+      JSON.stringify({
+        version: 1,
+        transactionId,
+        operation: 'update',
+        phase: 'artifact_swapped',
+        destinationDirectory: destination,
+        stagingDirectory: path.join(storeDir, 'staging', transactionId),
+        backupDirectory: backup,
+        previousGeneration: 0,
+        targetGeneration: 1,
+        targetSnapshot,
+      }),
+    );
+    await fsp.writeFile(path.join(storeDir, 'state.json'), '{broken');
+
+    const recovered = await store.readSnapshot();
+
+    expect(recovered.generation).toBe(0);
+    expect(recovered.extensions[identity.id]?.defaultActivation).toBe(
+      'enabled',
+    );
+    await expect(
+      fsp.readFile(path.join(destination, 'version'), 'utf8'),
+    ).resolves.toBe('old');
+    expect(fs.existsSync(journal)).toBe(false);
+  });
+
   it.each(['corrupt', 'missing'] as const)(
     'recovers state and projection from state.previous.json when state.json is %s',
     async (stateCondition) => {
@@ -1418,7 +1507,7 @@ describe('ExtensionStore', () => {
 
       const recovered = await store.ensureInitialized([identity]);
 
-      expect(recovered.generation).toBe(1);
+      expect(recovered.generation).toBe(0);
       expect(recovered.extensions[identity.id]?.defaultActivation).toBe(
         'enabled',
       );

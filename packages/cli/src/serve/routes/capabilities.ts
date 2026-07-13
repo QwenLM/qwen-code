@@ -74,16 +74,12 @@ export function registerCapabilitiesRoutes(
             }
           : {}),
       },
-      ...(multiWorkspace
-        ? {
-            workspaces: runtimes.map((runtime) => ({
-              id: runtime.workspaceId,
-              cwd: runtime.workspaceCwd,
-              primary: runtime.primary,
-              trusted: runtime.trusted,
-            })),
-          }
-        : {}),
+      workspaces: runtimes.map((runtime) => ({
+        id: runtime.workspaceId,
+        cwd: runtime.workspaceCwd,
+        primary: runtime.primary,
+        trusted: runtime.trusted,
+      })),
       supportedLanguages: deps.languageCodes,
     };
     res.status(200).json(envelope);

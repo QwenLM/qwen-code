@@ -452,7 +452,9 @@ export async function convertClaudePluginPackage(
   extensionDir: string,
   pluginName: string,
   networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
+  signal?: AbortSignal,
 ): Promise<{ config: ExtensionConfig; convertedDir: string }> {
+  signal?.throwIfAborted();
   // Step 1: Load marketplace.json
   const marketplaceJsonPath = path.join(
     extensionDir,
@@ -496,6 +498,7 @@ export async function convertClaudePluginPackage(
     extensionDir,
     pluginDir,
     networkPolicy,
+    signal,
   );
 
   if (!fs.existsSync(pluginSource)) {
@@ -1018,7 +1021,9 @@ async function resolvePluginSource(
   marketplaceDir: string,
   pluginDir: string,
   networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
+  signal?: AbortSignal,
 ): Promise<string> {
+  signal?.throwIfAborted();
   const source = pluginConfig.source;
 
   // Handle string source (relative path or URL)
@@ -1037,9 +1042,10 @@ async function resolvePluginSource(
         networkPolicy,
       };
       try {
-        await downloadFromGitHubRelease(installMetadata, pluginDir);
+        await downloadFromGitHubRelease(installMetadata, pluginDir, signal);
       } catch {
-        await cloneFromGit(installMetadata, pluginDir);
+        signal?.throwIfAborted();
+        await cloneFromGit(installMetadata, pluginDir, signal);
       }
       return pluginDir;
     }
@@ -1092,9 +1098,10 @@ async function resolvePluginSource(
       networkPolicy,
     };
     try {
-      await downloadFromGitHubRelease(installMetadata, pluginDir);
+      await downloadFromGitHubRelease(installMetadata, pluginDir, signal);
     } catch {
-      await cloneFromGit(installMetadata, pluginDir);
+      signal?.throwIfAborted();
+      await cloneFromGit(installMetadata, pluginDir, signal);
     }
     return pluginDir;
   }
@@ -1106,9 +1113,10 @@ async function resolvePluginSource(
       networkPolicy,
     };
     try {
-      await downloadFromGitHubRelease(installMetadata, pluginDir);
+      await downloadFromGitHubRelease(installMetadata, pluginDir, signal);
     } catch {
-      await cloneFromGit(installMetadata, pluginDir);
+      signal?.throwIfAborted();
+      await cloneFromGit(installMetadata, pluginDir, signal);
     }
     return pluginDir;
   }
@@ -1124,7 +1132,7 @@ async function resolvePluginSource(
       originSource: 'Claude',
       networkPolicy,
     };
-    await cloneFromGit(installMetadata, pluginDir);
+    await cloneFromGit(installMetadata, pluginDir, signal);
     // `source.path` comes from an untrusted manifest. Confine it to the cloned
     // repo so a value like "../../.ssh" (or an absolute path) cannot escape.
     if (!source.path || source.path === '.' || path.isAbsolute(source.path)) {

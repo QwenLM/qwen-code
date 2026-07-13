@@ -108,7 +108,10 @@ function makeRuntime(
   };
 }
 
-async function makeHarness(opts?: { secondaryTrusted?: boolean }) {
+async function makeHarness(opts?: {
+  secondaryTrusted?: boolean;
+  singleWorkspace?: boolean;
+}) {
   const scratch = await fsp.mkdtemp(
     path.join(os.tmpdir(), 'qwen-extension-management-v2-'),
   );
@@ -128,7 +131,9 @@ async function makeHarness(opts?: { secondaryTrusted?: boolean }) {
     trusted: opts?.secondaryTrusted ?? true,
     workspaceId: hashDaemonWorkspace(canonicalSecondary),
   });
-  const registry = createWorkspaceRegistry([primary, secondary]);
+  const registry = createWorkspaceRegistry(
+    opts?.singleWorkspace ? [primary] : [primary, secondary],
+  );
   const app = createServeApp(
     { ...baseOpts, workspace: canonicalPrimary, token: 'secret' },
     undefined,
@@ -262,7 +267,7 @@ describe('extension management v2 REST', () => {
   });
 
   it('advertises extension_management_v2 but not the abandoned capability', async () => {
-    const h = await makeHarness();
+    const h = await makeHarness({ singleWorkspace: true });
     try {
       const response = await auth(request(h.app).get('/capabilities'));
       expect(response.status).toBe(200);
@@ -270,6 +275,13 @@ describe('extension management v2 REST', () => {
       expect(response.body.features).not.toContain(
         'workspace_qualified_extensions',
       );
+      expect(response.body.workspaces).toEqual([
+        expect.objectContaining({
+          id: h.primary.workspaceId,
+          cwd: h.primary.workspaceCwd,
+          primary: true,
+        }),
+      ]);
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
@@ -1220,7 +1232,9 @@ describe('extension management v2 REST', () => {
 
       expect(response.status).toBe(400);
       expect(response.body).toMatchObject({ code: 'invalid_client_id' });
-      expect(ExtensionManager.prototype.refreshCache).not.toHaveBeenCalled();
+      expect(
+        ExtensionManager.prototype.getExtensionStoreSnapshot,
+      ).not.toHaveBeenCalled();
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }

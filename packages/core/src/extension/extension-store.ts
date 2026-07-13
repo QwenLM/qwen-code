@@ -280,52 +280,62 @@ export class ExtensionStore {
           } catch {
             // state.json remains authoritative; a later access retries repair.
           }
-          return existing;
-        }
-        const identities = new Map(
-          Object.entries(existing.extensions).map(([id, policy]) => [
-            id,
-            { id, name: policy.name },
-          ]),
-        );
-        for (const identity of extensions)
-          identities.set(identity.id, identity);
-        for (const identity of identities.values()) {
-          assertIdentity(identity);
-          const existingPolicy = existing.extensions[identity.id];
-          const rules = this.importedLegacyRules(
-            legacy[identity.name]?.overrides ?? [],
-            existingPolicy,
-          );
-          if (existingPolicy) {
-            const previousRules = existingPolicy.legacyPathRules ?? [];
-            const policyChanged =
-              existingPolicy.name !== identity.name ||
-              previousRules.length !== rules.length ||
-              previousRules.some((rule, index) => rule !== rules[index]);
-            if (!policyChanged) continue;
-            existingPolicy.name = identity.name;
-            if (rules.length > 0) {
-              existingPolicy.legacyPathRules = [...rules];
-            } else {
-              delete existingPolicy.legacyPathRules;
-            }
-            changed = true;
-          } else {
+          for (const identity of extensions) {
+            assertIdentity(identity);
+            if (existing.extensions[identity.id]) continue;
             existing.extensions[identity.id] = {
               name: identity.name,
               defaultActivation: 'enabled',
               workspaceOverrides: {},
-              ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
             };
             changed = true;
           }
-        }
-        if (!changed) {
-          try {
-            await this.writeLegacyProjectionUnlocked(existing);
-          } catch {
-            // state.json remains authoritative; a later access retries repair.
+        } else {
+          const identities = new Map(
+            Object.entries(existing.extensions).map(([id, policy]) => [
+              id,
+              { id, name: policy.name },
+            ]),
+          );
+          for (const identity of extensions)
+            identities.set(identity.id, identity);
+          for (const identity of identities.values()) {
+            assertIdentity(identity);
+            const existingPolicy = existing.extensions[identity.id];
+            const rules = this.importedLegacyRules(
+              legacy[identity.name]?.overrides ?? [],
+              existingPolicy,
+            );
+            if (existingPolicy) {
+              const previousRules = existingPolicy.legacyPathRules ?? [];
+              const policyChanged =
+                existingPolicy.name !== identity.name ||
+                previousRules.length !== rules.length ||
+                previousRules.some((rule, index) => rule !== rules[index]);
+              if (!policyChanged) continue;
+              existingPolicy.name = identity.name;
+              if (rules.length > 0) {
+                existingPolicy.legacyPathRules = [...rules];
+              } else {
+                delete existingPolicy.legacyPathRules;
+              }
+              changed = true;
+            } else {
+              existing.extensions[identity.id] = {
+                name: identity.name,
+                defaultActivation: 'enabled',
+                workspaceOverrides: {},
+                ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
+              };
+              changed = true;
+            }
+          }
+          if (!changed) {
+            try {
+              await this.writeLegacyProjectionUnlocked(existing);
+            } catch {
+              // state.json remains authoritative; a later access retries repair.
+            }
           }
         }
       } else {
@@ -422,6 +432,11 @@ export class ExtensionStore {
       }
 
       const currentPolicy = snapshot.extensions[input.identity.id];
+      if (currentPolicy && currentPolicy.name !== input.identity.name) {
+        throw new ExtensionConflictError(
+          `Extension id belongs to "${currentPolicy.name}", not "${input.identity.name}".`,
+        );
+      }
       if (input.operation === 'uninstall' && !currentPolicy) {
         if (!destinationExists) return snapshot;
         throw new ExtensionConflictError(
@@ -1049,7 +1064,7 @@ export class ExtensionStore {
       );
       candidates.push({
         snapshot: previous,
-        recoveryGeneration: previous.generation + 1,
+        recoveryGeneration: previous.generation,
       });
     } catch (error) {
       backupError = error;
@@ -1123,20 +1138,7 @@ export class ExtensionStore {
   private async readRecoverableJournalUnlocked(
     journalPath: string,
   ): Promise<ExtensionTransactionJournal | undefined> {
-    try {
-      return await this.readJournalUnlocked(journalPath);
-    } catch (error) {
-      if (!(error instanceof ExtensionStoreCorruptError)) {
-        throw error;
-      }
-      const quarantinePath = `${journalPath}.${crypto.randomUUID()}.corrupt`;
-      await renameWithRetry(journalPath, quarantinePath, 3, 50);
-      debugLogger.warn(
-        `Quarantined corrupt extension transaction journal at ${quarantinePath}:`,
-        error,
-      );
-      return undefined;
-    }
+    return await this.readJournalUnlocked(journalPath);
   }
 
   private assertRecoveredJournalPaths(

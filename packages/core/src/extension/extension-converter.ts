@@ -31,7 +31,9 @@ export async function convertGeminiOrClaudeExtension(
   extensionDir: string,
   pluginName?: string,
   networkPolicy?: ExtensionNetworkPolicy,
+  signal?: AbortSignal,
 ): Promise<{ extensionDir: string; originSource: ExtensionOriginSource }> {
+  signal?.throwIfAborted();
   let newExtensionDir = extensionDir;
   let originSource: ExtensionOriginSource = 'QwenCode';
   const configFilePath = path.join(
@@ -46,7 +48,12 @@ export async function convertGeminiOrClaudeExtension(
     originSource = 'Gemini';
   } else if (pluginName) {
     newExtensionDir = (
-      await convertClaudePluginPackage(extensionDir, pluginName, networkPolicy)
+      await convertClaudePluginPackage(
+        extensionDir,
+        pluginName,
+        networkPolicy,
+        signal,
+      )
     ).convertedDir;
     originSource = 'Claude';
   } else if (
@@ -56,5 +63,6 @@ export async function convertGeminiOrClaudeExtension(
       .convertedDir;
     originSource = 'Claude';
   }
+  signal?.throwIfAborted();
   return { extensionDir: newExtensionDir, originSource };
 }

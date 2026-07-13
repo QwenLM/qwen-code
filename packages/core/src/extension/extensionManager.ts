@@ -453,7 +453,8 @@ export class ExtensionManager {
     this.enabledExtensionNamesOverride =
       options.enabledExtensionOverrides?.map((name) => name.toLowerCase()) ??
       [];
-    this.configDir = ExtensionStorage.getUserExtensionsDir();
+    this.extensionStore = options.extensionStore ?? new ExtensionStore();
+    this.configDir = this.extensionStore.extensionsDir;
     this.configFilePath = path.join(
       this.configDir,
       'extension-enablement.json',
@@ -466,7 +467,6 @@ export class ExtensionManager {
       // compatibility with sources added before the source/* rename.
       path.join(this.configDir, 'marketplaces.json'),
     );
-    this.extensionStore = options.extensionStore ?? new ExtensionStore();
     this.networkPolicy = options.networkPolicy;
     this.requestSetting = options.requestSetting;
     this.requestChoicePlugin =
@@ -1089,7 +1089,7 @@ export class ExtensionManager {
         } else {
           // Default: load all extensions from QWEN_HOME-aware user extensions dir.
           loaded = await this.loadExtensionsFromExtensionsDir(
-            ExtensionStorage.getUserExtensionsDir(),
+            this.configDir,
             this.workspaceDir,
           );
         }
@@ -1129,7 +1129,7 @@ export class ExtensionManager {
     workspaceDir?: string,
   ): Promise<Extension | null> {
     const cwd = workspaceDir ?? this.workspaceDir;
-    const userExtensionsDir = ExtensionStorage.getUserExtensionsDir();
+    const userExtensionsDir = this.configDir;
     if (!fs.existsSync(userExtensionsDir)) {
       return null;
     }
@@ -1578,7 +1578,7 @@ export class ExtensionManager {
         );
       }
 
-      const extensionsDir = ExtensionStorage.getUserExtensionsDir();
+      const extensionsDir = this.configDir;
       await fs.promises.mkdir(extensionsDir, { recursive: true });
 
       if (
@@ -1674,6 +1674,7 @@ export class ExtensionManager {
             sourceBeforeConversion,
             installMetadata.pluginName,
             installMetadata.networkPolicy,
+            signal,
           );
         signal?.throwIfAborted();
 
@@ -1761,8 +1762,7 @@ export class ExtensionManager {
           });
         }
 
-        const extensionStorage = new ExtensionStorage(newExtensionName);
-        const destinationPath = extensionStorage.getExtensionDir();
+        const destinationPath = path.join(this.configDir, newExtensionName);
         const extensionId = getExtensionId(newExtensionConfig, installMetadata);
         if (isUpdate && previous?.id !== extensionId) {
           throw new Error(
@@ -2138,6 +2138,7 @@ export class ExtensionManager {
         throw error;
       }
       const warnings: NonNullable<CommittedExtensionMutation['warnings']> = [];
+      onCommitted?.(snapshot.generation);
       try {
         await prepared.commitSettings?.();
       } catch (error) {
@@ -2146,7 +2147,6 @@ export class ExtensionManager {
           error: getErrorMessage(error),
         });
       }
-      onCommitted?.(snapshot.generation);
       let extension: Extension | undefined;
       try {
         extension =
@@ -2238,18 +2238,22 @@ export class ExtensionManager {
     prepared: PreparedExtensionMutation,
   ): Promise<unknown[]> {
     if (prepared.disposed) return [];
-    const results = await Promise.allSettled([
-      fs.promises.rm(prepared.stagingDirectory, {
-        recursive: true,
-        force: true,
-      }),
-      ...prepared.cleanupPaths.map((cleanupPath) =>
-        fs.promises.rm(cleanupPath, { recursive: true, force: true }),
-      ),
-    ]);
-    const errors = results.flatMap((result) =>
-      result.status === 'rejected' ? [result.reason] : [],
-    );
+    const paths = [prepared.stagingDirectory, ...prepared.cleanupPaths];
+    let failedPaths = paths;
+    let errors: unknown[] = [];
+    for (let attempt = 0; attempt < 2 && failedPaths.length > 0; attempt++) {
+      const results = await Promise.allSettled(
+        failedPaths.map(async (target) =>
+          fs.promises.rm(target, { recursive: true, force: true }),
+        ),
+      );
+      errors = results.flatMap((result) =>
+        result.status === 'rejected' ? [result.reason] : [],
+      );
+      failedPaths = failedPaths.filter(
+        (_target, index) => results[index]?.status === 'rejected',
+      );
+    }
     prepared.disposed = errors.length === 0;
     return errors;
   }
@@ -2283,11 +2287,9 @@ export class ExtensionManager {
       }
       return await this.uninstallExtensionPolicy(
         { id: extension.id, name: extension.name },
-        new ExtensionStorage(
-          extension.installMetadata?.type === 'link'
-            ? extension.name
-            : path.basename(extension.path),
-        ).getExtensionDir(),
+        extension.installMetadata?.type === 'link'
+          ? path.join(this.configDir, extension.name)
+          : extension.path,
         isUpdate,
         telemetryConfig,
         onCommitted,
@@ -2308,9 +2310,14 @@ export class ExtensionManager {
       const snapshot = await this.extensionStore.readSnapshot();
       const policy = snapshot.extensions[extensionId];
       if (!policy) return snapshot;
+      const extension = this.getLoadedExtensions().find(
+        (candidate) => candidate.id === extensionId,
+      );
       return await this.uninstallExtensionPolicy(
         { id: extensionId, name: policy.name },
-        new ExtensionStorage(policy.name).getExtensionDir(),
+        extension && extension.installMetadata?.type !== 'link'
+          ? extension.path
+          : path.join(this.configDir, policy.name),
         isUpdate,
         getTelemetryConfig(cwd ?? this.workspaceDir, this.telemetrySettings),
         onCommitted,

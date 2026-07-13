@@ -105,4 +105,49 @@ describe('DiscoverTab', () => {
     expect(manager.setExtensionScope).toHaveBeenCalledWith('demo', 'project');
     expect(onInstalled).toHaveBeenCalledOnce();
   });
+
+  it('surfaces a warning when saving scope preference fails after install', async () => {
+    const plugin = {
+      name: 'demo',
+      marketplaceName: 'market',
+      installSource: 'owner/demo',
+      installed: false,
+    } as DiscoveredPlugin;
+    const manager = {
+      discoverPlugins: vi.fn().mockResolvedValue([plugin]),
+      installExtension: vi.fn().mockResolvedValue({ name: 'demo' }),
+      setExtensionScope: vi.fn(() => {
+        throw new Error('preference denied');
+      }),
+    };
+    const onStatus = vi.fn();
+    render(
+      <DiscoverTab
+        config={{ getExtensionManager: () => manager } as unknown as Config}
+        isActive
+        onLockChange={vi.fn()}
+        onStatus={onStatus}
+        onInstalled={vi.fn()}
+        reloadSignal={0}
+      />,
+    );
+    await waitFor(() => expect(manager.discoverPlugins).toHaveBeenCalled());
+    await act(async () => {
+      activeKeypress()({ name: 'return' } as Key);
+    });
+    const detailSelect = mockRadioButtonSelect.mock.calls.at(-1)?.[0] as
+      | SelectProps<'project'>
+      | undefined;
+
+    await act(async () => {
+      detailSelect?.onSelect('project');
+    });
+
+    await waitFor(() =>
+      expect(onStatus).toHaveBeenCalledWith({
+        type: 'info',
+        text: 'Installed 1 extension(s) with warnings: demo: preference denied',
+      }),
+    );
+  });
 });

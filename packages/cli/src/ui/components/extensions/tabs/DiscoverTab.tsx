@@ -239,6 +239,9 @@ export const DiscoverTab = ({
             try {
               extensionManager.setExtensionScope(error.identity.name, scope);
             } catch (scopeError) {
+              warnings.push(
+                `${plugin.name}: ${redactUrlCredentials(getErrorMessage(scopeError))}`,
+              );
               debugLogger.error(
                 'Installed extension but failed to apply scope preference:',
                 scopeError,
@@ -258,6 +261,9 @@ export const DiscoverTab = ({
         try {
           extensionManager.setExtensionScope(ext.name, scope);
         } catch (scopeError) {
+          warnings.push(
+            `${plugin.name}: ${redactUrlCredentials(getErrorMessage(scopeError))}`,
+          );
           debugLogger.error(
             'Installed extension but failed to apply scope preference:',
             scopeError,
