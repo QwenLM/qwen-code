@@ -216,7 +216,7 @@ export async function maybePromptForSettings(
 
   if (!settings || settings.length === 0) {
     if (fsSync.existsSync(envFilePath)) {
-      await atomicWriteFile(envFilePath, '');
+      await atomicWriteFile(envFilePath, '', { noFollow: true });
     }
     await fs.rm(selectorPath, { force: true });
     keychainMutations.push(async () => await clearKeychainSettings(keychain));
@@ -272,7 +272,7 @@ export async function maybePromptForSettings(
 
   const envContent = formatEnvContent(nonSensitiveSettings);
 
-  await atomicWriteFile(envFilePath, envContent);
+  await atomicWriteFile(envFilePath, envContent, { noFollow: true });
   if (Object.keys(sensitiveSettings).length > 0) {
     const bundleKey = `${SETTINGS_BUNDLE_PREFIX}${randomUUID()}`;
     await keychain.setSecret(bundleKey, JSON.stringify(sensitiveSettings));
@@ -528,7 +528,7 @@ export async function updateSetting(
   }
 
   const newEnvContent = formatEnvContent(nonSensitiveSettings);
-  await atomicWriteFile(envFilePath, newEnvContent);
+  await atomicWriteFile(envFilePath, newEnvContent, { noFollow: true });
 }
 
 interface settingsChanges {

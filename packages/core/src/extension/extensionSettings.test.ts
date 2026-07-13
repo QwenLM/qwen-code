@@ -519,6 +519,10 @@ describe('extensionSettings', () => {
         ],
       };
       const previousSettings = { VAR1: 'previous-VAR1' };
+      const expectedEnvPath = path.join(extensionDir, '.env');
+      const symlinkTarget = path.join(tempHomeDir, 'prompt-target.env');
+      await fsPromises.writeFile(symlinkTarget, 'ORIGINAL');
+      await fsPromises.symlink(symlinkTarget, expectedEnvPath);
 
       await maybePromptForSettings(
         newConfig,
@@ -531,10 +535,13 @@ describe('extensionSettings', () => {
       expect(mockRequestSetting).toHaveBeenCalledTimes(1);
       expect(mockRequestSetting).toHaveBeenCalledWith(newConfig.settings![1]);
 
-      const expectedEnvPath = path.join(extensionDir, '.env');
       const actualContent = await fsPromises.readFile(expectedEnvPath, 'utf-8');
       const expectedContent = 'VAR1=previous-VAR1\nVAR2=mock-VAR2\n';
       expect(actualContent).toBe(expectedContent);
+      expect(fs.lstatSync(expectedEnvPath).isSymbolicLink()).toBe(false);
+      expect(await fsPromises.readFile(symlinkTarget, 'utf-8')).toBe(
+        'ORIGINAL',
+      );
     });
 
     it('should clear settings if new config has no settings', async () => {
@@ -565,7 +572,9 @@ describe('extensionSettings', () => {
       );
       await userKeychain.setSecret('SENSITIVE_VAR', 'secret');
       const envPath = path.join(extensionDir, '.env');
-      await fsPromises.writeFile(envPath, 'VAR1=previous-VAR1');
+      const symlinkTarget = path.join(tempHomeDir, 'clear-target.env');
+      await fsPromises.writeFile(symlinkTarget, 'VAR1=previous-VAR1');
+      await fsPromises.symlink(symlinkTarget, envPath);
 
       await maybePromptForSettings(
         newConfig,
@@ -578,6 +587,10 @@ describe('extensionSettings', () => {
       expect(mockRequestSetting).not.toHaveBeenCalled();
       const actualContent = await fsPromises.readFile(envPath, 'utf-8');
       expect(actualContent).toBe('');
+      expect(fs.lstatSync(envPath).isSymbolicLink()).toBe(false);
+      expect(await fsPromises.readFile(symlinkTarget, 'utf-8')).toBe(
+        'VAR1=previous-VAR1',
+      );
       expect(await userKeychain.getSecret('SENSITIVE_VAR')).toBeNull();
     });
 
@@ -974,6 +987,11 @@ describe('extensionSettings', () => {
 
     it('should update a non-sensitive setting in USER scope', async () => {
       mockRequestSetting.mockResolvedValue('new-value1');
+      const expectedEnvPath = path.join(extensionDir, '.env');
+      const symlinkTarget = path.join(tempHomeDir, 'update-target.env');
+      await fsPromises.rm(expectedEnvPath);
+      await fsPromises.writeFile(symlinkTarget, 'VAR1=value1\n');
+      await fsPromises.symlink(symlinkTarget, expectedEnvPath);
 
       await updateSetting(
         config,
@@ -983,9 +1001,12 @@ describe('extensionSettings', () => {
         ExtensionSettingScope.USER,
       );
 
-      const expectedEnvPath = path.join(extensionDir, '.env');
       const actualContent = await fsPromises.readFile(expectedEnvPath, 'utf-8');
       expect(actualContent).toContain('VAR1=new-value1');
+      expect(fs.lstatSync(expectedEnvPath).isSymbolicLink()).toBe(false);
+      expect(await fsPromises.readFile(symlinkTarget, 'utf-8')).toBe(
+        'VAR1=value1\n',
+      );
     });
 
     it('should update a non-sensitive setting in WORKSPACE scope', async () => {

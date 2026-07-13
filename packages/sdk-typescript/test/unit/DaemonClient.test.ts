@@ -4258,6 +4258,7 @@ describe('DaemonClient', () => {
         v: 1,
         workspaceId: 'ws-a',
         workspaceCwd: '/work/a',
+        trusted: true,
         desiredGeneration: 1,
         appliedGeneration: 1,
         extensions: [],
