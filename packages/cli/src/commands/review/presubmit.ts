@@ -181,7 +181,9 @@ export function classifyCi(checkRuns: CheckRun[], statuses: CommitStatus[]) {
 
   return {
     class: cls,
-    failedCheckNames,
+    // Dedupe: a matrix job failing on N platforms pushes its name N times,
+    // and `skippedCheckNames` already dedupes — keep the message consistent.
+    failedCheckNames: [...new Set(failedCheckNames)],
     /**
      * Checks that never executed at this commit. NOT a downgrade on its own —
      * most are routing jobs, and a docs-only PR legitimately skips the test

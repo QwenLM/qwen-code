@@ -57,6 +57,14 @@ describe('parseNdjson (the paginated check-runs decode)', () => {
     ]);
   });
 
+  it('skips a non-JSON line instead of losing the whole page', () => {
+    // gh can print an update/deprecation notice to stdout. One stray line must
+    // not throw away every record already parsed.
+    expect(
+      parseNdjson('{"name":"a"}\ngh version 2.x available\n{"name":"b"}'),
+    ).toEqual([{ name: 'a' }, { name: 'b' }]);
+  });
+
   it('returns [] for an empty response and ignores blank lines', () => {
     expect(parseNdjson('')).toEqual([]);
     expect(parseNdjson('{"name":"a"}\n\n')).toEqual([{ name: 'a' }]);

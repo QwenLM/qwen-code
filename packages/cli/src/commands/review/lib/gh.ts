@@ -123,10 +123,19 @@ export function ghApiAllNested(path: string, key: string): unknown[] {
  */
 export function parseNdjson(out: string): unknown[] {
   if (!out) return [];
-  return out
-    .split('\n')
-    .filter((line) => line.trim().length > 0)
-    .map((line) => JSON.parse(line));
+  const values: unknown[] = [];
+  for (const line of out.split('\n')) {
+    if (line.trim().length === 0) continue;
+    // Skip a line that is not JSON rather than throwing away every value
+    // already parsed — `gh` occasionally prints an update/deprecation notice
+    // to stdout, and one stray line should not lose the whole page.
+    try {
+      values.push(JSON.parse(line));
+    } catch {
+      // not a JSON record; ignore
+    }
+  }
+  return values;
 }
 
 /** Login of the currently authenticated GitHub user. */

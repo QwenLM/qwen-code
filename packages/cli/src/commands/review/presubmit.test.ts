@@ -138,6 +138,18 @@ describe('classifyCi — a skipped check is not a passing check', () => {
         .class,
     ).toBe('all_pending');
   });
+
+  it('dedupes a matrix job that fails on several platforms', () => {
+    // Three legs of one failing matrix job pushed the name three times, so the
+    // downgrade message read "Test, Test, Test".
+    const got = classifyCi(
+      [run('Test', 'failure'), run('Test', 'failure'), run('Test', 'failure')],
+      [],
+    );
+    expect(got.failedCheckNames).toEqual(['Test']);
+    expect(got.class).toBe('any_failure');
+  });
+
   it('a repo with no CI at all is still no_checks, with nothing to disclose', () => {
     const got = classifyCi([], []);
     expect(got.class).toBe('no_checks');
