@@ -26,6 +26,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       bot_login: '${{ steps.identity.outputs.bot_login }}'
+      trusted_sha: '${{ steps.identity.outputs.trusted_sha }}'
     permissions: {}
     steps:
       - name: 'Resolve CI bot login'
@@ -36,6 +37,9 @@ jobs:
           bot_login="$(gh api user --jq .login)"
           test -n "${bot_login}"
           echo "bot_login=${bot_login}" >> "${GITHUB_OUTPUT}"
+          trusted_sha="$(gh api "repos/${{ github.repository }}/commits/${{ github.event.repository.default_branch }}" --jq .sha)"
+          test -n "${trusted_sha}"
+          echo "trusted_sha=${trusted_sha}" >> "${GITHUB_OUTPUT}"
 
   classify:
     name: 'Classify stale PR CI failure'
@@ -55,7 +59,7 @@ jobs:
       - name: 'Checkout trusted main'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          ref: '${{ github.event.repository.default_branch }}'
+          ref: '${{ needs.identity.outputs.trusted_sha }}'
           persist-credentials: false
 
       - name: 'Set up Node.js'
@@ -142,7 +146,7 @@ jobs:
       - name: 'Checkout trusted main'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          ref: '${{ github.event.repository.default_branch }}'
+          ref: '${{ needs.identity.outputs.trusted_sha }}'
           persist-credentials: false
 
       - name: 'Set up Node.js'

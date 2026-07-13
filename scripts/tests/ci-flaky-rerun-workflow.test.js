@@ -6,12 +6,14 @@
 
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 const workflow = readFileSync(
   '.github/workflows/qwen-ci-flaky-rerun.yml',
   'utf8',
 );
 const skill = readFileSync('.qwen/skills/ci-flaky-patrol/SKILL.md', 'utf8');
+const workflowYaml = parse(workflow);
 
 describe('ci flaky rerun workflow', () => {
   it('runs every ten minutes and limits write permissions to a separate action job', () => {
@@ -32,6 +34,32 @@ describe('ci flaky rerun workflow', () => {
     expect(workflow).not.toContain('update-branch');
     expect(workflow).toContain('persist-credentials: false');
     expect(workflow).toContain('set -o pipefail');
+  });
+
+  it('checks out one captured trusted main commit in classify and act', () => {
+    expect(workflow).toContain('trusted_sha:');
+    expect(workflow).toContain('trusted_sha="$(gh api');
+    expect(workflow).toContain(
+      "ref: '${{ needs.identity.outputs.trusted_sha }}'",
+    );
+  });
+
+  it('keeps PAT and write permissions out of the classifier job', () => {
+    expect(workflowYaml.jobs.classify.permissions).toEqual({
+      actions: 'read',
+      contents: 'read',
+      'pull-requests': 'read',
+    });
+    expect(workflowYaml.jobs.act.permissions).toEqual({
+      actions: 'write',
+      contents: 'read',
+      'pull-requests': 'write',
+    });
+    expect(JSON.stringify(workflowYaml.jobs.classify)).not.toContain(
+      'CI_BOT_PAT',
+    );
+    expect(JSON.stringify(workflowYaml.jobs.act)).toContain('CI_BOT_PAT');
+    expect(JSON.stringify(workflowYaml.jobs.identity)).toContain('CI_BOT_PAT');
   });
 
   it('resolves the patrol identity from CI_BOT_PAT rather than a hardcoded login', () => {

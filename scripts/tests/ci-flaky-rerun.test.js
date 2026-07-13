@@ -649,6 +649,38 @@ if (args[0] === 'pr' && args[1] === 'list') {
     expect(client.calls[0][2]).toContain(`head=${target.headSha}`);
   });
 
+  it('does not reset counts for older or different successful checks', async () => {
+    for (const statusCheckRollup of [
+      [
+        run({
+          conclusion: 'SUCCESS',
+          completedAt: '2026-07-12T07:10:00.000Z',
+        }),
+      ],
+      [
+        run({
+          name: 'Other Tests',
+          conclusion: 'SUCCESS',
+          completedAt: '2026-07-12T07:30:00.000Z',
+        }),
+      ],
+    ]) {
+      const client = runner();
+      client.trustedMarkerLogin = 'trusted-patrol-bot';
+      client.comments = async () => [
+        {
+          body: '<!-- qwen-ci-flaky-rerun v=2 pr=42 head=abc123 run=120 attempt=1 action=rerun key=runner-network-timeout check=E2E%20Tests count=2 -->',
+          createdAt: '2026-07-12T07:20:00.000Z',
+          author: { login: 'trusted-patrol-bot' },
+        },
+      ];
+
+      await resetSuccessfulFailures(client, [pr({ statusCheckRollup })]);
+
+      expect(client.calls).toEqual([]);
+    }
+  });
+
   it('derives the trusted marker identity from the active gh token', () => {
     expect(script).toContain('async viewerLogin()');
     expect(script).toContain("['api', 'user', '--jq', '.login']");
@@ -804,6 +836,24 @@ if (args[0] === 'pr' && args[1] === 'list') {
     ).toEqual([['rerunFailedJobs', 123]]);
   });
 
+  it('does not trust a decision with a mismatched failure key', async () => {
+    const client = runner();
+    const target = {
+      ...selectTarget([pr()], { now: NOW }),
+      failureKey: 'check-real-failure',
+    };
+
+    await actOnDecision(client, target, {
+      action: 'rerun',
+      confidence: 'high',
+      failureKey: 'check-other-failure',
+      reason_en: 'runner timeout',
+      reason_zh: 'runner 超时。',
+    });
+
+    expect(client.calls).toEqual([]);
+  });
+
   it('does not act when the failed run is no longer current', async () => {
     const client = runner();
     client.isCurrentFailure = async () => false;
@@ -884,6 +934,38 @@ if (args[0] === 'pr' && args[1] === 'list') {
     });
 
     expect(client.calls).toEqual([]);
+  });
+
+  it('does not update a branch when a branch-writing guard fails', async () => {
+    const completeTarget = {
+      ...selectTarget([pr()], { now: NOW }),
+      mainHeadSha: 'main-head',
+      mainRunId: 456,
+      mainWorkflow: 'ci.yml',
+    };
+    const cases = [
+      { mutate: (client) => (client.behindBy = async () => 0) },
+      {
+        decision: { mainRunId: 999 },
+      },
+      { mutate: (client) => (client.mainRunSucceeded = async () => false) },
+    ];
+
+    for (const testCase of cases) {
+      const client = runner();
+      testCase.mutate?.(client);
+
+      await actOnDecision(client, completeTarget, {
+        action: 'update_branch',
+        confidence: 'high',
+        mainRunId: 456,
+        reason_en: 'main contains the needed CI fix',
+        reason_zh: 'main 包含所需的 CI 修复。',
+        ...testCase.decision,
+      });
+
+      expect(client.calls).toEqual([]);
+    }
   });
 
   it('does not update a branch without a verified successful main run', async () => {
