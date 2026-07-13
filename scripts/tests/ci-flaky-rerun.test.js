@@ -171,7 +171,8 @@ describe('ci flaky rerun patrol', () => {
   });
 
   it('skips fresh, draft, non-main, and already handled PRs', () => {
-    const marker = '<!-- qwen-ci-flaky-rerun v=1 pr=42 head=abc123 run=123 -->';
+    const marker =
+      '<!-- qwen-ci-flaky-rerun v=2 pr=42 head=abc123 run=123 attempt=1 job=1 action=rerun key=old workflow=E2E%20Tests check=E2E%20Tests count=1 -->';
 
     expect(
       selectTarget(
@@ -185,6 +186,16 @@ describe('ci flaky rerun patrol', () => {
         { now: NOW, staleMinutes: 30 },
       ),
     ).toBeNull();
+    expect(
+      selectTarget(
+        [
+          pr({
+            statusCheckRollup: [run({ conclusion: 'TIMED_OUT' })],
+          }),
+        ],
+        { now: NOW, staleMinutes: 30 },
+      ),
+    ).toMatchObject({ prNumber: 42, runId: 123 });
     expect(selectTarget([pr({ isDraft: true })], { now: NOW })).toBeNull();
     expect(
       selectTarget([pr({ baseRefName: 'release' })], { now: NOW }),
@@ -195,8 +206,34 @@ describe('ci flaky rerun patrol', () => {
   });
 
   it('accepts either a regular or non-breaking space after handled markers', () => {
-    expect(script).toContain('(?:\\\\x20|\\\\u00a0)');
+    const marker =
+      '<!-- qwen-ci-flaky-rerun v=2 pr=42 head=abc123 run=123 attempt=1 job=1 action=rerun key=runner-network-timeout workflow=E2E%20Tests check=E2E%20Tests count=1 -->';
+
+    expect(
+      selectTarget(
+        [
+          pr({
+            comments: [
+              {
+                body: `${marker}\u00A0`,
+              },
+            ],
+          }),
+        ],
+        { now: NOW },
+      ),
+    ).toBeNull();
     expect(script).not.toContain('(?: | )');
+  });
+
+  it('does not hide a sibling failed check in the same workflow run', () => {
+    const prior = {
+      body: '<!-- qwen-ci-flaky-rerun v=2 pr=42 head=abc123 run=123 attempt=1 job=2 action=no_action key=lint workflow=Qwen%20Code%20CI check=Lint count=1 -->',
+    };
+
+    expect(
+      selectTarget([pr({ comments: [prior] })], { now: NOW }),
+    ).toMatchObject({ checkName: 'E2E Tests', jobId: 1 });
   });
 
   it('does not trust a hidden marker posted by an unrecognized account', () => {
@@ -470,7 +507,7 @@ if (args[0] === 'pr' && args[1] === 'list') {
     }
   }, 15_000);
 
-  it('skips a candidate when the workflow run attempt changed after scanning', () => {
+  it('uses the live workflow run attempt when the rollup attempt is stale', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ci-flaky-scan-'));
     try {
       const fakeGh = join(dir, 'gh');
@@ -497,6 +534,16 @@ if (args[0] === 'pr' && args[1] === 'list') {
   }]));
 } else if (args[0] === 'api' && args[1].includes('/actions/runs/123')) {
   process.stdout.write('2\\n');
+} else if (args[0] === 'api' && args[1] === '--paginate' && args[2].includes('/issues/')) {
+  process.stdout.write('');
+} else if (args[0] === 'api' && args[1].includes('/actions/jobs/1/logs')) {
+  process.stdout.write('Error: runner network timeout\\n');
+} else if (args[0] === 'api' && args[1].includes('/actions/workflows/ci.yml/runs')) {
+  process.stdout.write(JSON.stringify({ workflow_runs: [{ id: 456, head_sha: 'main-head', event: 'push', conclusion: 'success' }] }));
+} else if (args[0] === 'api' && args[1].includes('/commits/main')) {
+  process.stdout.write('main-head\\n');
+} else if (args[0] === 'api' && args[1].includes('/compare/')) {
+  process.stdout.write('1\\n');
 } else {
   process.stdout.write(args[0] === 'api' && args[1] === '--paginate' ? '' : '[]');
 }
@@ -524,9 +571,9 @@ if (args[0] === 'pr' && args[1] === 'list') {
         },
       );
 
-      expect(output).toContain('target_found=false');
+      expect(output).toContain('target_found=true');
       const input = JSON.parse(readFileSync(join(dir, 'ci-flaky-input.json')));
-      expect(input.candidates).toEqual([]);
+      expect(input.candidates).toMatchObject([{ runId: 123, runAttempt: 2 }]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -590,7 +637,8 @@ if (args[0] === 'pr' && args[1] === 'list') {
       ],
       ['rerunFailedJobs', 123],
     ]);
-    expect(client.calls[0][2]).toContain('action=rerun key=unknown');
+    expect(client.calls[0][2]).toContain('action=rerun');
+    expect(client.calls[0][2]).toContain('key=unknown');
     expect(client.calls[0][2]).toContain('count=1');
   });
 
@@ -682,14 +730,9 @@ if (args[0] === 'pr' && args[1] === 'list') {
     await resetSuccessfulFailures(client, [resetPr]);
 
     expect(client.calls).toEqual([
-      [
-        'comment',
-        42,
-        expect.stringContaining(
-          'key=runner-network-timeout check=E2E%20Tests count=0',
-        ),
-      ],
+      ['comment', 42, expect.stringContaining('key=runner-network-timeout')],
     ]);
+    expect(client.calls[0][2]).toContain('check=E2E%20Tests count=0');
     expect(client.calls[0][2]).toContain(`head=${target.headSha}`);
   });
 
@@ -755,6 +798,32 @@ if (args[0] === 'pr' && args[1] === 'list') {
 
       expect(client.calls).toEqual([]);
     }
+  });
+
+  it('does not reset counts from a different workflow with the same check name', async () => {
+    const client = runner();
+    client.trustedMarkerLogin = 'trusted-patrol-bot';
+    client.comments = async () => [
+      {
+        body: '<!-- qwen-ci-flaky-rerun v=2 pr=42 head=abc123 run=120 attempt=1 job=1 action=rerun key=runner-network-timeout workflow=Qwen%20Code%20CI check=E2E%20Tests count=2 -->',
+        createdAt: '2026-07-12T07:20:00.000Z',
+        author: { login: 'trusted-patrol-bot' },
+      },
+    ];
+
+    await resetSuccessfulFailures(client, [
+      pr({
+        statusCheckRollup: [
+          run({
+            workflowName: 'Other Workflow',
+            conclusion: 'SUCCESS',
+            completedAt: '2026-07-12T07:30:00.000Z',
+          }),
+        ],
+      }),
+    ]);
+
+    expect(client.calls).toEqual([]);
   });
 
   it('derives the trusted marker identity from the active gh token', () => {
@@ -1134,6 +1203,56 @@ if (args[0] === 'pr' && args[1] === 'list') {
       ['rerunFailedJobs', 123],
       ['comment', 43, expect.stringContaining('action=rerun')],
       ['rerunFailedJobs', 124],
+    ]);
+  });
+
+  it('handles independent failed jobs from the same workflow run', async () => {
+    const client = runner();
+    const target = {
+      ...selectTarget([pr()], { now: NOW }),
+      failureKey: 'first-failure',
+    };
+    const sibling = {
+      ...target,
+      jobId: 2,
+      checkName: 'Lint',
+      failureKey: 'second-failure',
+    };
+
+    await actOnDecisions(
+      client,
+      [target, sibling],
+      [
+        {
+          prNumber: 42,
+          headSha: 'abc123',
+          runId: 123,
+          jobId: 1,
+          action: 'rerun',
+          confidence: 'high',
+          failureKey: 'first-failure',
+          reason_en: 'runner timeout',
+          reason_zh: 'runner 超时。',
+        },
+        {
+          prNumber: 42,
+          headSha: 'abc123',
+          runId: 123,
+          jobId: 2,
+          action: 'rerun',
+          confidence: 'high',
+          failureKey: 'second-failure',
+          reason_en: 'lint timeout',
+          reason_zh: 'lint 超时。',
+        },
+      ],
+    );
+
+    expect(
+      client.calls.filter((call) => call[0] === 'rerunFailedJobs'),
+    ).toEqual([
+      ['rerunFailedJobs', 123],
+      ['rerunFailedJobs', 123],
     ]);
   });
 
@@ -1593,8 +1712,9 @@ if (args[0] === 'pr' && args[1] === 'list') {
     expect(client.calls).toHaveLength(1);
     expect(client.calls[0].slice(0, 2)).toEqual(['comment', 42]);
     expect(client.calls[0][2]).toContain(
-      'action=no_action key=deterministic-test-failure check=E2E%20Tests count=1',
+      'action=no_action key=deterministic-test-failure',
     );
+    expect(client.calls[0][2]).toContain('check=E2E%20Tests count=1');
     expect(client.calls[0][2]).toMatch(/^<!-- qwen-ci-flaky-rerun v=2 .* -->$/);
   });
 
