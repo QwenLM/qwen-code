@@ -1,11 +1,5 @@
 #!/usr/bin/env node
 
-/**
- * @license
- * Copyright 2026 Qwen Team
- * SPDX-License-Identifier: Apache-2.0
- */
-
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { execFile as execFileCallback } from 'node:child_process';
@@ -17,13 +11,8 @@ const DEFAULT_STALE_MINUTES = 30;
 const DEFAULT_ACTIVE_DAYS = 7;
 const DEFAULT_MAX_CANDIDATES_PER_RUN = 5;
 const MAX_ACTIONS_PER_HEAD = 3;
-const MAX_REASON_CHARS = 4000;
 const MAIN_CI_WORKFLOW = 'ci.yml';
 const MARKER = 'qwen-ci-flaky-rerun';
-
-function escapeRegex(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
 
 function timeMs(value) {
   const ms = Date.parse(value ?? '');
@@ -41,10 +30,8 @@ function jobIdFromUrl(url) {
 }
 
 function markerFor(target, action, failureKey, count) {
-  const check = encodeURIComponent(target.checkName ?? target.workflowName);
-  const workflow = encodeURIComponent(target.workflowName);
-  const job = encodeURIComponent(String(target.jobId ?? 'none'));
-  return `<!-- ${MARKER} v=2 pr=${target.prNumber} head=${target.headSha} run=${target.runId} attempt=${target.runAttempt ?? 1} job=${job} action=${action} key=${failureKey} workflow=${workflow} check=${check} count=${count} -->`;
+  const check = encodeURIComponent(target.workflowName);
+  return `<!-- ${MARKER} v=2 pr=${target.prNumber} head=${target.headSha} run=${target.runId} attempt=${target.runAttempt ?? 1} action=${action} key=${failureKey} check=${check} count=${count} -->`;
 }
 
 function markerComments(pr, options = {}) {
@@ -56,23 +43,11 @@ function markerComments(pr, options = {}) {
 }
 
 function alreadyHandled(pr, target, options) {
-  const prefix = `<!-- ${MARKER} v=2 pr=${target.prNumber} head=${target.headSha} run=${target.runId} attempt=${target.runAttempt ?? 1}`;
-  const job = encodeURIComponent(String(target.jobId ?? 'none'));
-  const check = encodeURIComponent(target.checkName ?? target.workflowName);
-  const jobPattern = new RegExp(
-    `${escapeRegex(prefix)} job=${escapeRegex(job)}(?:\\x20|\\u00a0)`,
+  const pattern = new RegExp(
+    `<!-- ${MARKER} v=(?:1|2) pr=${target.prNumber} head=${target.headSha} run=${target.runId}${target.runAttempt ? ` attempt=${target.runAttempt}` : ''}(?:\\x20|\\u00a0)`,
   );
-  const checkPattern = new RegExp(
-    `${escapeRegex(prefix)} .* check=${escapeRegex(check)}(?:\\x20|\\u00a0)`,
-  );
-  const legacyPattern = new RegExp(
-    `<!-- ${MARKER} v=1 pr=${target.prNumber} head=${target.headSha} run=${target.runId}(?:\\x20|\\u00a0)`,
-  );
-  return markerComments(pr, options).some(
-    (comment) =>
-      jobPattern.test(String(comment.body ?? '')) ||
-      checkPattern.test(String(comment.body ?? '')) ||
-      legacyPattern.test(String(comment.body ?? '')),
+  return markerComments(pr, options).some((comment) =>
+    pattern.test(String(comment.body ?? '')),
   );
 }
 
@@ -80,13 +55,25 @@ function isRecentlyActive(pr, now, activeDays) {
   return timeMs(now) - timeMs(pr.updatedAt) <= activeDays * 24 * 60 * 60_000;
 }
 
-function canAct(pr, target, options) {
-  return !alreadyHandled(pr, target, options);
+function isStaleFailure(run, now, staleMinutes) {
+  if (run.status !== 'COMPLETED') return false;
+  if (run.conclusion !== 'FAILURE') return false;
+  return timeMs(now) - timeMs(run.completedAt) >= staleMinutes * 60_000;
 }
 
-function failureKey(target, decision) {
-  if (!target.failureKey) return 'unknown';
-  return decision?.failureKey === target.failureKey ? target.failureKey : null;
+function toTarget(pr, run) {
+  const runId = runIdFromUrl(run.detailsUrl);
+  if (runId === null) return null;
+  return {
+    prNumber: pr.number,
+    headSha: pr.headRefOid,
+    runId,
+    runAttempt: run.runAttempt ?? 1,
+    jobId: jobIdFromUrl(run.detailsUrl),
+    workflowName: run.name,
+    detailsUrl: run.detailsUrl,
+    completedAt: run.completedAt,
+  };
 }
 
 export function fingerprint(target, log) {
@@ -100,7 +87,7 @@ export function fingerprint(target, log) {
 
 function stateMarkers(comments, prNumber, trustedMarkerLogin) {
   const marker = new RegExp(
-    `<!-- ${MARKER} v=2 pr=${prNumber} head=(\\S+) run=(\\d+) attempt=(\\d+)(?: job=(\\S+))? action=(\\S+) key=([a-z0-9._-]+)(?: workflow=(\\S+))? check=(\\S+) count=(\\d+) -->`,
+    `<!-- ${MARKER} v=2 pr=${prNumber} head=(\\S+) run=(\\d+) attempt=(\\d+) action=(\\S+) key=([a-z0-9._-]+) check=(\\S+) count=(\\d+) -->`,
     'g',
   );
   return comments
@@ -115,12 +102,10 @@ function stateMarkers(comments, prNumber, trustedMarkerLogin) {
         headSha: match[1],
         runId: Number(match[2]),
         runAttempt: Number(match[3]),
-        jobId: match[4] ? decodeURIComponent(match[4]) : null,
-        action: match[5],
-        key: match[6],
-        workflow: match[7] ? decodeURIComponent(match[7]) : null,
-        check: decodeURIComponent(match[8]),
-        count: Number(match[9]),
+        action: match[4],
+        key: match[5],
+        check: decodeURIComponent(match[6]),
+        count: Number(match[7]),
         createdAt: comment.createdAt,
       };
     })
@@ -147,14 +132,6 @@ function redactLogLine(line) {
     .replace(/\bnpm_[A-Za-z0-9]{20,}/g, '[redacted]');
 }
 
-function boundedReason(value) {
-  const text = String(value ?? '').trim();
-  if (!text) return '';
-  return text.length > MAX_REASON_CHARS
-    ? `${text.slice(0, MAX_REASON_CHARS)}…`
-    : text;
-}
-
 function skillLog(log) {
   const lines = log.split('\n');
   const selected = new Set();
@@ -175,28 +152,6 @@ function skillLog(log) {
     .slice(-200)
     .map(redactLogLine)
     .join('\n');
-}
-
-function isStaleFailure(run, now, staleMinutes) {
-  if (run.status !== 'COMPLETED') return false;
-  if (!['FAILURE', 'TIMED_OUT'].includes(run.conclusion)) return false;
-  return timeMs(now) - timeMs(run.completedAt) >= staleMinutes * 60_000;
-}
-
-function toTarget(pr, run) {
-  const runId = runIdFromUrl(run.detailsUrl);
-  if (runId === null) return null;
-  return {
-    prNumber: pr.number,
-    headSha: pr.headRefOid,
-    runId,
-    runAttempt: run.runAttempt ?? 1,
-    jobId: jobIdFromUrl(run.detailsUrl),
-    workflowName: run.workflowName ?? run.name,
-    checkName: run.name,
-    detailsUrl: run.detailsUrl,
-    completedAt: run.completedAt,
-  };
 }
 
 export function selectCandidateTargets(prs, options = {}) {
@@ -228,7 +183,7 @@ export function selectCandidateTargets(prs, options = {}) {
   return targets.sort((a, b) => {
     const newestA = newestFailureByPr.get(a.prNumber);
     const newestB = newestFailureByPr.get(b.prNumber);
-    const prOrder = timeMs(newestA.completedAt) - timeMs(newestB.completedAt);
+    const prOrder = timeMs(newestB.completedAt) - timeMs(newestA.completedAt);
     if (prOrder !== 0) return prOrder;
     return timeMs(b.completedAt) - timeMs(a.completedAt);
   });
@@ -238,7 +193,7 @@ export function selectTarget(prs, options = {}) {
   return (
     selectCandidateTargets(prs, options).find((target) => {
       const pr = prs.find((candidate) => candidate.number === target.prNumber);
-      return canAct(pr, target, options);
+      return !alreadyHandled(pr, target, options);
     }) ?? null
   );
 }
@@ -257,128 +212,68 @@ export async function actOnDecision(client, target, decision) {
   if (!target) return;
   if (!(await isActionablePr(client, target))) return;
   if (!(await client.isCurrentFailure(target))) return;
-  const key = failureKey(target, decision);
-  if (!key) return;
-  const actionCount = await client.failureActionCount(
+  if (decision.failureKey !== target.failureKey) return;
+  const count = await client.failureActionCount(
     target.prNumber,
     target.headSha,
-    key,
+    target.failureKey,
   );
-  if (actionCount >= MAX_ACTIONS_PER_HEAD) return;
-  const nextTarget = { ...target, actionCount };
-  const recordNoAction = () =>
-    client.comment(
-      target.prNumber,
-      markerFor(nextTarget, 'no_action', key, actionCount + 1),
-    );
-
-  if (decision?.action === 'no_action') {
-    await recordNoAction();
-    return;
-  }
-  if (decision?.confidence !== 'high') {
-    await recordNoAction();
-    return;
-  }
-  if (!['rerun', 'update_branch', 'comment'].includes(decision.action)) {
-    await recordNoAction();
-    return;
-  }
+  if (count >= MAX_ACTIONS_PER_HEAD) return;
+  const next = { ...target, actionCount: count };
+  const marker = markerFor(
+    next,
+    decision.action,
+    target.failureKey,
+    count + 1,
+  );
 
   if (decision.action === 'rerun') {
-    const reasonEn = boundedReason(decision.reason_en);
-    if (!reasonEn) {
-      await recordNoAction();
-      return;
-    }
     await client.comment(
       target.prNumber,
-      [
-        `Rerunning failed jobs because this failure looks flaky: ${reasonEn}`,
-        '',
-        markerFor(nextTarget, 'rerun', key, actionCount + 1),
-      ].join('\n'),
+      `Rerunning failed jobs: ${decision.reason_en || ''}\n\n${marker}`,
     );
     await client.rerunFailedJobs(target.runId);
     return;
   }
-
   if (decision.action === 'update_branch') {
-    if ((await client.behindBy(target.headSha)) <= 0) {
-      await recordNoAction();
-      return;
-    }
-    if (!Number.isSafeInteger(decision.mainRunId)) {
-      await recordNoAction();
-      return;
-    }
-    if (!target.mainHeadSha) {
-      await recordNoAction();
-      return;
-    }
-    if (
-      decision.mainRunId !== target.mainRunId ||
-      (await client.mainHeadSha()) !== target.mainHeadSha
-    ) {
-      await recordNoAction();
-      return;
-    }
-    if (
-      !(await client.mainRunSucceeded(decision.mainRunId, target.mainWorkflow))
-    ) {
-      await recordNoAction();
-      return;
-    }
     await client.comment(
       target.prNumber,
-      [
-        'Requesting an update from main because this failure needs current main.',
-        '',
-        markerFor(nextTarget, 'update_branch', key, actionCount + 1),
-      ].join('\n'),
+      `Updating branch from main: ${decision.reason_en || ''}\n\n${marker}`,
     );
     await client.updateBranch(target.prNumber, target.headSha);
     return;
   }
-
   if (decision.action === 'comment') {
-    const reasonEn = boundedReason(decision.reason_en);
-    const reasonZh = boundedReason(decision.reason_zh);
-    if (!reasonEn || !reasonZh) {
-      await recordNoAction();
-      return;
-    }
     await client.comment(
       target.prNumber,
       [
-        reasonEn,
+        decision.reason_en || '',
         '',
         '<details>',
         '<summary>中文说明</summary>',
         '',
-        reasonZh,
+        decision.reason_zh || '',
         '',
         '</details>',
         '',
-        markerFor(nextTarget, 'comment', key, actionCount + 1),
+        marker,
       ].join('\n'),
     );
+    return;
   }
+  await client.comment(target.prNumber, marker);
 }
 
 export async function actOnDecisions(client, targets, decisions) {
-  const legacyIdFor = (value) =>
-    `${value.prNumber}:${value.headSha}:${value.runId}`;
-  const idFor = (value) => `${legacyIdFor(value)}:${value.jobId ?? 'none'}`;
-  const targetsById = new Map();
-  for (const target of targets) {
-    targetsById.set(idFor(target), target);
-    if (!targetsById.has(legacyIdFor(target)))
-      targetsById.set(legacyIdFor(target), target);
-  }
+  const targetsById = new Map(
+    targets.map((target) => [
+      `${target.prNumber}:${target.headSha}:${target.runId}`,
+      target,
+    ]),
+  );
   const processed = new Set();
   for (const decision of decisions ?? []) {
-    const id = decision.jobId == null ? legacyIdFor(decision) : idFor(decision);
+    const id = `${decision.prNumber}:${decision.headSha}:${decision.runId}`;
     if (processed.has(id)) continue;
     const target = targetsById.get(id);
     if (!target) continue;
@@ -408,7 +303,6 @@ export async function resetSuccessfulFailures(client, prs) {
         const run = (pr.statusCheckRollup ?? []).find(
           (check) =>
             check.name === state.check &&
-            (!state.workflow || check.workflowName === state.workflow) &&
             check.conclusion === 'SUCCESS' &&
             timeMs(check.completedAt) > timeMs(state.createdAt),
         );
@@ -425,35 +319,6 @@ export async function resetSuccessfulFailures(client, prs) {
       );
     }
   }
-}
-
-export async function writeSkillInputs(
-  client,
-  targets,
-  workdir,
-  maxCandidates = Infinity,
-) {
-  const candidates = [];
-  for (const target of targets) {
-    try {
-      candidates.push({
-        ...target,
-        log:
-          target.jobId === null
-            ? ''
-            : skillLog(await client.jobLog(target.jobId)),
-      });
-      candidates.at(-1).failureKey = fingerprint(target, candidates.at(-1).log);
-      if (candidates.length >= maxCandidates) break;
-    } catch (error) {
-      process.stderr.write(
-        `writeSkillInputs: skipping job ${target.jobId} (PR ${target.prNumber}): ${error.message}\n`,
-      );
-      // Expired Actions logs cannot be classified safely; try the next PR.
-    }
-  }
-  writeJson(workdir, 'ci-flaky-input.json', { candidates });
-  return candidates;
 }
 
 class GhClient {
@@ -575,7 +440,7 @@ class GhClient {
     );
     return (
       run.status === 'completed' &&
-      ['failure', 'timed_out'].includes(run.conclusion) &&
+      run.conclusion === 'failure' &&
       run.head_sha === target.headSha &&
       run.run_attempt === target.runAttempt
     );
@@ -591,19 +456,6 @@ class GhClient {
           '.run_attempt',
         ])
       ).trim(),
-    );
-  }
-
-  async mainRunSucceeded(runId, workflow) {
-    const run = JSON.parse(
-      await this.gh(['api', `repos/${this.repo}/actions/runs/${runId}`]),
-    );
-    return (
-      run.event === 'push' &&
-      run.head_branch === 'main' &&
-      run.path === `.github/workflows/${workflow}` &&
-      run.status === 'completed' &&
-      run.conclusion === 'success'
     );
   }
 
@@ -710,42 +562,19 @@ async function trustedMarkerLogin(args, client) {
   return login;
 }
 
-async function skillCandidate(client, target) {
-  const log =
-    target.jobId === null ? '' : skillLog(await client.jobLog(target.jobId));
-  return {
-    ...target,
-    log,
-    failureKey: fingerprint(target, log),
-  };
-}
-
 async function scan(args) {
   const repo = requiredArg(args, 'repo');
   const workdir = requiredArg(args, 'workdir');
   const client = new GhClient(repo);
   const trustedLogin = await trustedMarkerLogin(args, client);
-  const parsedActiveDays = Number(args.get('active-days'));
-  const activeDays =
-    Number.isFinite(parsedActiveDays) && parsedActiveDays > 0
-      ? parsedActiveDays
-      : DEFAULT_ACTIVE_DAYS;
-  const parsedStaleMinutes = Number(args.get('stale-minutes'));
+  const activeDays = Number(args.get('active-days')) || DEFAULT_ACTIVE_DAYS;
   const staleMinutes =
-    Number.isFinite(parsedStaleMinutes) && parsedStaleMinutes > 0
-      ? parsedStaleMinutes
-      : DEFAULT_STALE_MINUTES;
+    Number(args.get('stale-minutes')) || DEFAULT_STALE_MINUTES;
   const prs = await client.prs(activeDays);
-  const candidates = selectCandidateTargets(prs, {
-    staleMinutes,
-    activeDays,
-  });
+  const candidates = selectCandidateTargets(prs, { staleMinutes, activeDays });
   const options = { trustedMarkerLogins: [trustedLogin] };
-  const requestedMax = Number(args.get('max-candidates'));
   const maxCandidates =
-    Number.isSafeInteger(requestedMax) && requestedMax > 0
-      ? requestedMax
-      : DEFAULT_MAX_CANDIDATES_PER_RUN;
+    Number(args.get('max-candidates')) || DEFAULT_MAX_CANDIDATES_PER_RUN;
   const inputs = [];
   const selectedPrs = new Set();
   let mainEvidence;
@@ -754,26 +583,23 @@ async function scan(args) {
     if (selectedPrs.has(candidate.prNumber)) continue;
     try {
       const pr = prs.find((item) => item.number === candidate.prNumber);
-      const liveAttempt = await client.runAttempt(candidate.runId);
-      const target = {
-        ...candidate,
-        runAttempt: liveAttempt,
-      };
-      const comments = await client.comments(candidate.prNumber);
-      if (!canAct({ ...pr, comments }, target, options)) continue;
-      const input = await skillCandidate(client, target);
       if (
-        (await client.failureActionCount(
-          input.prNumber,
-          input.headSha,
-          input.failureKey,
-        )) >= MAX_ACTIONS_PER_HEAD
+        (await client.runAttempt(candidate.runId)) !== candidate.runAttempt
       )
         continue;
+      const comments = await client.comments(candidate.prNumber);
+      if (alreadyHandled({ ...pr, comments }, candidate, options)) continue;
+      const log =
+        candidate.jobId === null
+          ? ''
+          : skillLog(await client.jobLog(candidate.jobId));
+      const failureKey = fingerprint(candidate, log);
       mainEvidence ??= await client.mainEvidence();
       inputs.push({
-        ...input,
-        behindBy: await client.behindBy(input.headSha),
+        ...candidate,
+        log,
+        failureKey,
+        behindBy: await client.behindBy(candidate.headSha),
         ...mainEvidence,
       });
       selectedPrs.add(candidate.prNumber);
