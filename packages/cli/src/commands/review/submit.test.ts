@@ -96,6 +96,7 @@ describe('the posting gate', () => {
     runSubmit(args({ skillArgs: file('skill-args.txt', '--comment') }));
 
     expect(ghMock).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(3);
   });
 
   it('does not open on a hand-written verdict — the gate reads the user, not the caller', () => {
@@ -135,6 +136,7 @@ describe('the posting gate', () => {
     // `--comment` on a local review is not authorisation to post anywhere.
     runSubmit(args({ skillArgs: file('skill-args.txt', '--comment') }));
     expect(ghMock).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(3);
   });
 
   it('posts when the user typed `--comment`', () => {
@@ -156,15 +158,32 @@ describe('the posting gate', () => {
 
   it('refuses a malformed --repo before building an API path from it', () => {
     // It goes straight into the URL. A bad value does not fail safely — it fails
-    // as a confusing 404 from a path nobody meant to build.
-    expect(() =>
-      runSubmit(args({ userAuthorized: true, repo: 'not-a-repo' })),
-    ).toThrow(/<owner>\/<repo>/);
+    // as a confusing 404 from a path nobody meant to build. `.` and `..` are made
+    // of legal characters and mean something else entirely once they get there,
+    // so a character class alone is not the check it looks like.
+    for (const repo of [
+      'not-a-repo',
+      'a/b/../../etc',
+      '../repo',
+      'owner/..',
+      './repo',
+      'owner/.',
+      '',
+    ]) {
+      expect(() => runSubmit(args({ userAuthorized: true, repo }))).toThrow(
+        /<owner>\/<repo>/,
+      );
+    }
     expect(ghMock).not.toHaveBeenCalled();
+  });
 
-    expect(() =>
-      runSubmit(args({ userAuthorized: true, repo: 'a/b/../../etc' })),
-    ).toThrow(/<owner>\/<repo>/);
+  it('refuses a --pr that is not a pull request number', () => {
+    // yargs' `type: 'number'` hands through every one of these.
+    for (const pr of [0, -1, 3.5, NaN, Infinity]) {
+      expect(() => runSubmit(args({ userAuthorized: true, pr }))).toThrow(
+        /not a pull request number/,
+      );
+    }
     expect(ghMock).not.toHaveBeenCalled();
   });
 

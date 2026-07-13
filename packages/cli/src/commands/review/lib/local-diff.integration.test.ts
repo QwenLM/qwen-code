@@ -222,6 +222,36 @@ describe('captureLocalDiff — untracked files', () => {
     expect(res.text).not.toContain('hidden');
   });
 
+  it('records a file git could not diff, and keeps the others', () => {
+    // The per-file recovery had no caller-level test: the helper's test proves an
+    // empty git failure throws, and the command's test starts from a mocked skip
+    // list. Neither showed that the capture survives one bad file, keeps the
+    // good ones, and records the bad one as unreviewed rather than as reviewed.
+    //
+    // A symlink to a directory reaches git (it is a symlink, so the type gate
+    // lets it by) and git then fails on it — the recovery path, driven for real.
+    mkdirSync(join(repo, 'adir'));
+    write('adir/inner.ts', 'export const i = 1;\n');
+    symlinkSync(join(repo, 'adir'), join(repo, 'dirlink'));
+    write('before.ts', 'export const b = 1;\n');
+    write('zafter.ts', 'export const z = 1;\n');
+
+    const res = capture();
+
+    // Both good files survive — the failure did not take the capture down, and
+    // did not swallow the file after it.
+    // (`adir/inner.ts` is untracked too — git lists files inside a plain dir.)
+    expect(res.untracked.sort()).toEqual([
+      'adir/inner.ts',
+      'before.ts',
+      'zafter.ts',
+    ]);
+    expect(res.skipped.map((x) => x.path)).toEqual(['dirlink']);
+    // And every path claimed as reviewed really is in the diff.
+    for (const p of res.untracked) expect(res.text).toContain(`+++ b/${p}`);
+    expect(res.text).not.toContain('dirlink');
+  });
+
   it('reviews a dangling symlink instead of skipping it', () => {
     // Git renders a symlink as its **link text** at mode 120000, and the link
     // text does not depend on the target existing. A symlink pointing nowhere is

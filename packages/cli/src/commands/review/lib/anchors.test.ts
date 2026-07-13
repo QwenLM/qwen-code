@@ -261,6 +261,34 @@ describe('resolveAnchor', () => {
     });
   });
 
+  it('prefers the candidate that touches the change, not the one made only of it', () => {
+    // `run.every(added)` asked "is this run ENTIRELY new code?" — and a two-line
+    // anchor spanning a context line and the added line under it is not, so it
+    // was classed as "context", indistinguishable from a wholly-unchanged
+    // duplicate elsewhere in the file. The added-preference then could not tell
+    // them apart and gave up. What matters is which candidate *touches* the diff.
+    const diff = [
+      'diff --git a/m.ts b/m.ts',
+      '--- a/m.ts',
+      '+++ b/m.ts',
+      '@@ -10,4 +10,5 @@',
+      ' guard();', // 10  ┐ construct A — wholly unchanged
+      ' run();', //     11  ┘
+      ' other();', // 12
+      ' guard();', // 13  ┐ construct B — contains the changed line
+      '+run();', //     14  ┘
+      '',
+    ].join('\n');
+
+    const r = resolveAnchor(lines(diff, 'm.ts'), 'guard();\nrun();');
+    expect(r).toMatchObject({
+      status: 'resolved',
+      startLine: 13,
+      line: 14,
+      matchCount: 2,
+    });
+  });
+
   it('prefers an exact added match over an exact context match', () => {
     // The same text on both a context line (earlier) and an added line. An
     // anchor is meant to quote added code, so the added hit must win even

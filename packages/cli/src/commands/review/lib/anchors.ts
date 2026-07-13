@@ -189,14 +189,21 @@ function anchorVariants(anchor: string): string[][] {
   // than fuzzy. Requiring one `+` keeps it away from ordinary indented code,
   // every line of which begins with a space and would otherwise have its first
   // character eaten.
-  const nonBlank = lines.filter((l) => l !== '');
+  // Git's `\ No newline at end of file` is metadata, not a line of the file, and
+  // a region copied verbatim from the end of a diff brings it along. It carries
+  // no marker column, so it used to disqualify the whole region from the
+  // hunk-region reading and an otherwise unique anchor came back unmatched.
+  const NO_NEWLINE = /^\\ No newline at end of file$/;
+  const marked = lines.filter((l) => l !== '' && !NO_NEWLINE.test(l));
   if (
-    nonBlank.length > 0 &&
-    nonBlank.every((l) => /^[+\- ]/.test(l)) &&
-    nonBlank.some((l) => l.startsWith('+'))
+    marked.length > 0 &&
+    marked.every((l) => /^[+\- ]/.test(l)) &&
+    marked.some((l) => l.startsWith('+'))
   ) {
     variants.push(
-      lines.filter((l) => !l.startsWith('-')).map((l) => l.slice(1)),
+      lines
+        .filter((l) => !l.startsWith('-') && !NO_NEWLINE.test(l))
+        .map((l) => l.slice(1)),
     );
   }
   return variants;
@@ -240,7 +247,16 @@ function matchRuns(
 interface Candidate {
   startLine: number;
   line: number;
-  /** True when every line of the run is a `+` line. */
+  /**
+   * True when the run **contains** a `+` line.
+   *
+   * Not "every line is added". A two-line anchor spanning a context line and the
+   * added line under it is exactly what a finding about a changed line looks
+   * like, and `every` called that run "context" — indistinguishable from a
+   * wholly-unchanged duplicate elsewhere in the file. The added-preference then
+   * could not tell them apart and gave up. What matters is which candidate
+   * touches the diff.
+   */
   added: boolean;
 }
 
@@ -264,7 +280,7 @@ function candidatesFor(
     return {
       startLine: run[0].newLine,
       line: run[run.length - 1].newLine,
-      added: run.every((l) => l.added),
+      added: run.some((l) => l.added),
     };
   });
 }

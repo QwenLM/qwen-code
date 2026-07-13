@@ -44,6 +44,14 @@ describe('validateRequests', () => {
     );
   });
 
+  it('names the offending index for a null element instead of crashing', () => {
+    // `typeof null === 'object'`, so indexing it threw a bare TypeError that said
+    // nothing about which entry was wrong — while every other malformed input got
+    // a message naming the index and the field.
+    expect(() => validateRequests([ok, null])).toThrow(/index 1 is null/);
+    expect(() => validateRequests([['a']])).toThrow(/not an object/);
+  });
+
   it('rejects input that is not an array', () => {
     expect(() => validateRequests({ id: 'f1' })).toThrow(/JSON array/);
   });

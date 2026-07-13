@@ -37,6 +37,15 @@ export function validateRequests(raw: unknown): AnchorRequest[] {
     throw new Error('Input must be a JSON array of findings.');
   }
   const requests = raw.map((r, i) => {
+    // `null` is an object to `typeof`, and indexing it throws a TypeError that
+    // says nothing about which entry was wrong. Every other malformed input gets
+    // a message naming the index and the field; this one deserves the same.
+    if (r === null || typeof r !== 'object' || Array.isArray(r)) {
+      throw new Error(
+        `Finding at index ${i} is ${JSON.stringify(r)}, not an object. ` +
+          `Each entry needs {id, path, anchor} and may carry {line}.`,
+      );
+    }
     const o = r as Record<string, unknown>;
     for (const key of ['id', 'path', 'anchor'] as const) {
       if (typeof o[key] !== 'string' || o[key] === '') {

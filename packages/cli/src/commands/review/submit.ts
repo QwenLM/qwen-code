@@ -30,12 +30,17 @@ import { readFileSync } from 'node:fs';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { gh, setGhHost } from './lib/gh.js';
 import { parseReviewArgs } from './parse-args.js';
+import { skillArgsPath } from '../../services/skill-args-file.js';
 
 /**
  * Where the CLI records a skill's invocation arguments, verbatim, before the
- * skill's prompt reaches the model. Kept in step with `skill-args-file.ts`.
+ * skill's prompt reaches the model.
+ *
+ * Derived, not duplicated. A literal here would say "kept in step with
+ * `skill-args-file.ts`" and nothing would keep it: rename the file there and the
+ * gate silently stops finding the authorisation and refuses every post.
  */
-const DEFAULT_SKILL_ARGS_PATH = '.qwen/tmp/qwen-skill-args-review.txt';
+const DEFAULT_SKILL_ARGS_PATH = skillArgsPath('review');
 
 /** The only events GitHub's Create Review API accepts. */
 const EVENTS = new Set(['APPROVE', 'REQUEST_CHANGES', 'COMMENT']);
@@ -280,17 +285,37 @@ function inconsistencies(payload: ReviewPayload): string[] {
   return problems;
 }
 
-/** `owner/repo`, and nothing that could be a path segment of its own. */
-const REPO_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+/**
+ * `owner/repo` — and neither half may be a dot segment.
+ *
+ * The character class alone admits `../repo`, `owner/..` and `./repo`: `.` and
+ * `..` are made of legal characters and mean something else entirely once they
+ * reach a URL path.
+ */
+const REPO_SEGMENT = /^[A-Za-z0-9._-]+$/;
+function isRepo(repo: string): boolean {
+  const parts = repo.split('/');
+  return (
+    parts.length === 2 &&
+    parts.every((p) => REPO_SEGMENT.test(p) && p !== '.' && p !== '..')
+  );
+}
 
 export function runSubmit(args: SubmitArgs): void {
   setGhHost(args.host);
 
   // The repo goes straight into the API path. A malformed value does not fail
   // safely — it fails as a confusing 404 from a URL nobody meant to build.
-  if (!REPO_RE.test(args.repo)) {
+  if (!isRepo(args.repo)) {
     throw new Error(
       `--repo ${JSON.stringify(args.repo)} is not <owner>/<repo>.`,
+    );
+  }
+  // yargs' `type: 'number'` hands through NaN, 0, -1, 3.5 and Infinity, each of
+  // which builds a URL nobody meant and comes back as a puzzling 404.
+  if (!isDiffLine(args.pr)) {
+    throw new Error(
+      `--pr ${JSON.stringify(args.pr)} is not a pull request number.`,
     );
   }
 
