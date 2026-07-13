@@ -278,6 +278,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Singular session shell routes resolve the owning live workspace runtime.
   multi_workspace_session_shell: { since: 'v1' },
   persistent_workspace_registration: { since: 'v1' },
+  workspace_runtime_removal: { since: 'v1' },
   // Workspace-qualified core REST routes under `/workspaces/:workspace/...`.
   // Covers core file/status/permissions/trust/lifecycle/MCP/tool, memory,
   // workspace agent CRUD, and persisted session organization surfaces.
@@ -373,6 +374,7 @@ export interface AdvertiseFeatureToggles {
   voiceWsAvailable?: boolean;
   multiWorkspaceSessionsEnabled?: boolean;
   persistentWorkspaceRegistrationAvailable?: boolean;
+  workspaceRuntimeRemovalAvailable?: boolean;
   /**
    * Whether the HTTP ACP surface is enabled (default on; opts out via
    * QWEN_SERVE_ACP_HTTP=0). Workspace-qualified ACP is only advertised when on.
@@ -467,6 +469,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'persistent_workspace_registration',
     (toggles) => toggles.persistentWorkspaceRegistrationAvailable === true,
+  ],
+  [
+    'workspace_runtime_removal',
+    (toggles) => toggles.workspaceRuntimeRemovalAvailable === true,
   ],
   [
     'workspace_qualified_acp',
