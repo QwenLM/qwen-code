@@ -85,8 +85,10 @@ export function refExists(ref: string): boolean {
 }
 
 /**
- * Free a review worktree's path **and** its branch. Returns whether a live
- * worktree was there to remove.
+ * Free a review worktree's path **and** its branch. Returns whether anything
+ * was there at the path to remove — a registered worktree OR an untracked
+ * leftover directory (see the `rmSync` below); either way a `true` return means
+ * the path is now gone.
  *
  * `git worktree remove` needs the directory. A user reclaiming disk with
  * `rm -rf .qwen/tmp` leaves the worktree *registered but missing*, and from then

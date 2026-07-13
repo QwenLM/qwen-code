@@ -42,6 +42,7 @@ import {
   readFileSync,
   rmSync,
   lstatSync,
+  existsSync,
 } from 'node:fs';
 import { dirname, join, isAbsolute, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -415,6 +416,11 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       // stderr is kept to explain a subsequent `add` failure. `rmSync` on the
       // path unlinks a symlink rather than following it, so even a tampered
       // leftover cannot redirect the delete outside `probeTree`.
+      //
+      // This is `releaseWorktree`'s two-step, kept inline rather than shared: the
+      // probe must target THIS repo via `cwd: worktree` (`releaseWorktree` runs
+      // git from the process cwd, which need not be this worktree's repo), and it
+      // keeps the sweep's stderr for the diagnostic in the catch below.
       sweep = spawnSync('git', ['worktree', 'remove', '--force', probeTree], {
         cwd: worktree,
         encoding: 'utf8',
@@ -500,14 +506,23 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         );
       } finally {
         // Discard the whole probe tree. There is no in-place restore to fail:
-        // the shared worktree was never mutated. A failed removal only leaves a
-        // stale dir (swept at the start of the next run, and by cleanup.ts) — a
-        // warning, not the "every later step reads the wrong source" alarm the
-        // old in-place restore had to raise.
+        // the shared worktree was never mutated. Mirror the pre-sweep's two steps
+        // so an unregistered or non-empty leftover cannot survive a failed
+        // `worktree remove` — unregister (best-effort), then remove whatever dir
+        // remains. Only a path that still exists after both is a real cleanup
+        // failure, and even then it corrupts nothing: the next run's pre-sweep
+        // and cleanup.ts both sweep it. So this is a warning, not the "every
+        // later step reads the wrong source" alarm the old in-place restore had.
         try {
-          git(worktree, 'worktree', 'remove', '--force', probeTree);
-        } catch (e) {
-          cleanupFailure = `could not remove probe worktree ${probeTree}: ${e instanceof Error ? e.message : String(e)}`;
+          spawnSync('git', ['worktree', 'remove', '--force', probeTree], {
+            cwd: worktree,
+          });
+          rmSync(probeTree, { recursive: true, force: true });
+        } catch {
+          // Fall through to the existence check — that is the real signal.
+        }
+        if (existsSync(probeTree)) {
+          cleanupFailure = `could not remove probe worktree ${probeTree}`;
         }
       }
     }
