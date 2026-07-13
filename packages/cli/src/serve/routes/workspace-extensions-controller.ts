@@ -393,12 +393,12 @@ export function createExtensionsController(
         const deadlineController = new AbortController();
         let deadlineStarted = false;
         const startDeadline = () => {
-          if (deadlineStarted) return;
-          deadlineStarted = true;
           updateExtensionOperation(operationId, {
             status: 'running',
             phase: 'preparing',
           });
+          if (deadlineStarted) return;
+          deadlineStarted = true;
           if (options.deadlineMs) {
             deadline = setTimeout(() => {
               const error = new Error(
@@ -414,6 +414,10 @@ export function createExtensionsController(
           prepare: async <T>(
             task: (signal: AbortSignal) => Promise<T>,
           ): Promise<T> => {
+            updateExtensionOperation(operationId, {
+              status: 'queued',
+              phase: undefined,
+            });
             try {
               return await preparationQueue.run(
                 async () => await task(deadlineController.signal),
@@ -460,10 +464,6 @@ export function createExtensionsController(
           },
         };
         await extensionManager.refreshCache();
-        updateExtensionOperation(operationId, {
-          status: 'queued',
-          phase: undefined,
-        });
         const event = await run(
           extensionManager,
           deadlineController.signal,
