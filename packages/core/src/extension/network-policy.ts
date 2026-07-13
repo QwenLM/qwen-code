@@ -47,6 +47,33 @@ export interface ResolvedNetworkTarget {
   curlResolve?: string;
 }
 
+async function waitForAbortable<T>(
+  promise: Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (!signal) return await promise;
+  signal.throwIfAborted();
+  return await new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      callback();
+    };
+    const onAbort = () => finish(() => reject(signal.reason));
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    promise.then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
+}
+
 function stripIpv6Brackets(hostname: string): string {
   return hostname.startsWith('[') && hostname.endsWith(']')
     ? hostname.slice(1, -1)
@@ -81,7 +108,9 @@ function isBlockedAddress(address: string, family: number): boolean {
 export async function resolveNetworkTarget(
   value: string | URL,
   policy?: ExtensionNetworkPolicy,
+  signal?: AbortSignal,
 ): Promise<ResolvedNetworkTarget> {
+  signal?.throwIfAborted();
   const url = value instanceof URL ? value : new URL(value);
   if (policy !== 'public') return { url };
   if (url.protocol !== 'https:') {
@@ -97,7 +126,10 @@ export async function resolveNetworkTarget(
   const literalFamily = isIP(hostname);
   const addresses = literalFamily
     ? [{ address: hostname, family: literalFamily }]
-    : await dns.lookup(hostname, { all: true, verbatim: true });
+    : await waitForAbortable(
+        dns.lookup(hostname, { all: true, verbatim: true }),
+        signal,
+      );
   if (addresses.length === 0) {
     throw new Error(`Extension network host did not resolve: ${hostname}`);
   }

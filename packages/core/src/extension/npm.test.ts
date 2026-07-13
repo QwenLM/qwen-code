@@ -690,8 +690,8 @@ describe('downloadFromNpmRegistry', () => {
     await vi.waitFor(() => expect(requestCount).toBe(3));
     expect(
       (vi.mocked(https.get).mock.calls[2]?.[1] as { signal?: AbortSignal })
-        .signal,
-    ).toBe(controller.signal);
+        .signal?.aborted,
+    ).toBe(false);
 
     controller.abort(reason);
     finalRequestError?.(new Error('request aborted'));
@@ -935,6 +935,50 @@ describe('downloadFromNpmRegistry', () => {
       message: 'npm tarball download timed out after 120000ms',
     });
     expect(destroy).toHaveBeenCalledOnce();
+  });
+
+  it('does not start a tarball request when DNS outlives the deadline', async () => {
+    vi.useFakeTimers();
+    let resolveTarballDns: ((value: unknown) => void) | undefined;
+    const lookup = vi
+      .spyOn(dns, 'lookup')
+      .mockResolvedValueOnce([{ address: '8.8.8.8', family: 4 }] as never)
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveTarballDns = resolve;
+          }) as never,
+      );
+    vi.mocked(https.get).mockImplementation(
+      (_url: unknown, _options: unknown, callback: unknown) => {
+        if (typeof callback === 'function') {
+          callback(
+            npmMetadataResponse('https://cdn.example.com/pkg.tgz') as never,
+          );
+        }
+        return { on: vi.fn().mockReturnThis(), destroy: vi.fn() } as never;
+      },
+    );
+
+    const outcome = downloadFromNpmRegistry(
+      {
+        source: '@scope/pkg',
+        type: 'npm',
+        registryUrl: 'https://registry.example.com',
+        networkPolicy: 'public',
+      },
+      '/tmp/qwen-extension',
+    ).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(lookup).toHaveBeenCalledTimes(2));
+    await vi.advanceTimersByTimeAsync(120_000);
+
+    await expect(outcome).resolves.toMatchObject({
+      message: 'npm tarball download timed out after 120000ms',
+    });
+    expect(https.get).toHaveBeenCalledOnce();
+    resolveTarballDns?.([{ address: '8.8.4.4', family: 4 }]);
+    await Promise.resolve();
+    expect(https.get).toHaveBeenCalledOnce();
   });
 
   it('destroys a stalled npm response and file at the download deadline', async () => {

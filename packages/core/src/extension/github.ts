@@ -163,6 +163,7 @@ export async function cloneFromGit(
       const networkTarget = await resolveNetworkTarget(
         installMetadata.source,
         installMetadata.networkPolicy,
+        signal,
       );
       networkConfig = networkTarget.curlResolve
         ? createPinnedGitConfig(networkTarget.curlResolve)
@@ -426,11 +427,13 @@ export async function checkForExtensionUpdate(
         const remoteTarget = await resolveNetworkTarget(
           parsedRemote,
           installMetadata.networkPolicy,
+          signal,
         );
         networkConfig = remoteTarget.curlResolve
           ? createPinnedGitConfig(remoteTarget.curlResolve)
           : [];
       }
+      signal?.throwIfAborted();
       const git = restrictGitEnvironment(
         simpleGit(extension.path, {
           ...(signal ? { abort: signal } : {}),
@@ -685,8 +688,9 @@ async function fetchJson<T>(
     headers.Authorization = `token ${token}`;
   }
   const target = networkPolicy
-    ? await resolveNetworkTarget(url, networkPolicy)
+    ? await resolveNetworkTarget(url, networkPolicy, signal)
     : { url: new URL(url) };
+  signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
     const rejectRequest = (error: unknown) => {
       reject(signal?.aborted ? signal.reason : error);
@@ -736,6 +740,16 @@ async function downloadFile(
   if (redirectCount > 10) {
     throw new Error('Too many redirects while downloading extension archive');
   }
+  const timeoutError = new Error('Timed out downloading extension archive');
+  const timeoutController = new AbortController();
+  const hardDeadline = setTimeout(
+    () => timeoutController.abort(timeoutError),
+    ARCHIVE_DOWNLOAD_TIMEOUT_MS,
+  );
+  hardDeadline.unref();
+  const requestSignal = signal
+    ? AbortSignal.any([signal, timeoutController.signal])
+    : timeoutController.signal;
   const headers: { 'User-agent': string; Authorization?: string } = {
     'User-agent': 'gemini-cli',
   };
@@ -743,21 +757,26 @@ async function downloadFile(
   if (options.includeGitHubToken === true && token) {
     headers.Authorization = `token ${token}`;
   }
-  const target = options.networkPolicy
-    ? await resolveNetworkTarget(url, options.networkPolicy)
-    : { url: new URL(url) };
+  let target;
+  try {
+    target = options.networkPolicy
+      ? await resolveNetworkTarget(url, options.networkPolicy, requestSignal)
+      : { url: new URL(url) };
+    requestSignal.throwIfAborted();
+  } catch (error) {
+    clearTimeout(hardDeadline);
+    throw requestSignal.aborted ? requestSignal.reason : error;
+  }
   const parsedUrl = target.url;
   if (parsedUrl.protocol !== 'https:') {
+    clearTimeout(hardDeadline);
     throw new Error(`Unsupported download URL protocol: ${parsedUrl.protocol}`);
   }
   return new Promise((resolve, reject) => {
     let settled = false;
-    let hardDeadline: NodeJS.Timeout | undefined;
     const cleanup = () => {
-      if (hardDeadline) {
-        clearTimeout(hardDeadline);
-        hardDeadline = undefined;
-      }
+      clearTimeout(hardDeadline);
+      requestSignal.removeEventListener('abort', onAbort);
     };
     const finish = () => {
       if (settled) {
@@ -767,20 +786,24 @@ async function downloadFile(
       cleanup();
       resolve();
     };
-    const fail = (error: Error) => {
+    const fail = (error: unknown) => {
       if (settled) {
         return;
       }
       settled = true;
       cleanup();
-      reject(error);
+      reject(requestSignal.aborted ? requestSignal.reason : error);
+    };
+    const onAbort = () => {
+      req.destroy();
+      fail(requestSignal.reason);
     };
     const req = https
       .get(
         url,
         {
           headers,
-          signal,
+          signal: requestSignal,
           lookup: target.lookup,
           ...(target.lookup ? { agent: false } : {}),
         },
@@ -857,14 +880,15 @@ async function downloadFile(
       )
       .on('error', fail);
     if (!settled) {
-      hardDeadline = setTimeout(() => {
-        req.destroy();
-        fail(new Error('Timed out downloading extension archive'));
-      }, ARCHIVE_DOWNLOAD_TIMEOUT_MS);
-      req.setTimeout(ARCHIVE_DOWNLOAD_TIMEOUT_MS, () => {
-        req.destroy();
-        fail(new Error('Timed out downloading extension archive'));
-      });
+      requestSignal.addEventListener('abort', onAbort, { once: true });
+      if (requestSignal.aborted) {
+        onAbort();
+      } else {
+        req.setTimeout(ARCHIVE_DOWNLOAD_TIMEOUT_MS, () => {
+          req.destroy();
+          fail(timeoutError);
+        });
+      }
     }
   });
 }

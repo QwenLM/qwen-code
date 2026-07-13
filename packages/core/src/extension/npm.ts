@@ -214,9 +214,10 @@ function fetchNpmJson<T>(
     headers['Authorization'] = `Bearer ${authToken}`;
   }
 
-  return resolveNetworkTarget(url, networkPolicy).then(
+  return resolveNetworkTarget(url, networkPolicy, signal).then(
     (target) =>
       new Promise((resolve, reject) => {
+        signal?.throwIfAborted();
         const client = clientForUrl(target.url.toString());
         client
           .get(
@@ -321,9 +322,10 @@ function downloadNpmFileRedirect(
     headers['Authorization'] = `Bearer ${authToken}`;
   }
 
-  return resolveNetworkTarget(url, networkPolicy).then(
+  return resolveNetworkTarget(url, networkPolicy, signal).then(
     (target) =>
       new Promise((resolve, reject) => {
+        signal?.throwIfAborted();
         const client = clientForUrl(target.url.toString());
         let settled = false;
         const finish = () => {
@@ -446,6 +448,10 @@ function downloadNpmFile(
     requestGeneration: 0,
     timedOut: false,
   };
+  const timeoutController = new AbortController();
+  const requestSignal = signal
+    ? AbortSignal.any([signal, timeoutController.signal])
+    : timeoutController.signal;
   return new Promise((resolve, reject) => {
     let settled = false;
     const finish = () => {
@@ -465,6 +471,7 @@ function downloadNpmFile(
       const error = new Error(
         `npm tarball download timed out after ${NPM_ARCHIVE_DOWNLOAD_TIMEOUT_MS}ms`,
       );
+      timeoutController.abort(error);
       fail(error);
       context.activeRequest?.destroy();
       context.activeResponse?.destroy();
@@ -476,7 +483,7 @@ function downloadNpmFile(
       dest,
       context,
       authToken,
-      signal,
+      requestSignal,
       0,
       networkPolicy,
     )

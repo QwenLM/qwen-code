@@ -147,10 +147,31 @@ async function fetchUrl(
   headers: Record<string, string>,
   networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
 ): Promise<string | null> {
+  const deadlineController = new AbortController();
+  let req: ClientRequest | undefined;
+  let finish: ((value: string | null) => void) | undefined;
+  // `req.setTimeout` only fires on socket inactivity and resets on every
+  // chunk, so the absolute deadline must start before DNS resolution.
+  const hardDeadline = setTimeout(() => {
+    deadlineController.abort(
+      new Error(
+        `Marketplace request timed out after ${MARKETPLACE_FETCH_TIMEOUT_MS}ms`,
+      ),
+    );
+    req?.destroy();
+    finish?.(null);
+  }, MARKETPLACE_FETCH_TIMEOUT_MS);
+  hardDeadline.unref();
   let target;
   try {
-    target = await resolveNetworkTarget(url, networkPolicy);
+    target = await resolveNetworkTarget(
+      url,
+      networkPolicy,
+      deadlineController.signal,
+    );
+    deadlineController.signal.throwIfAborted();
   } catch (error) {
+    clearTimeout(hardDeadline);
     debugLogger.debug(
       `Failed to resolve marketplace network target: ${redactUrlCredentials(getErrorMessage(error))}`,
     );
@@ -161,25 +182,19 @@ async function fetchUrl(
     try {
       client = clientForUrl(target.url.toString());
     } catch {
+      clearTimeout(hardDeadline);
       resolve(null);
       return;
     }
 
     let settled = false;
-    let req: ClientRequest | undefined;
     const done = (value: string | null) => {
       if (settled) return;
       settled = true;
       clearTimeout(hardDeadline);
       resolve(value);
     };
-    // `req.setTimeout` only fires on socket inactivity and resets on every
-    // chunk, so a server trickling bytes can keep the request alive forever.
-    // Pair it with an absolute wall-clock deadline.
-    const hardDeadline = setTimeout(() => {
-      req?.destroy();
-      done(null);
-    }, MARKETPLACE_FETCH_TIMEOUT_MS);
+    finish = done;
 
     const onResponse = (res: IncomingMessage) => {
       if (res.statusCode !== 200) {
@@ -207,6 +222,7 @@ async function fetchUrl(
         url,
         {
           headers,
+          signal: deadlineController.signal,
           ...(target.lookup
             ? { lookup: target.lookup, agent: false as const }
             : {}),

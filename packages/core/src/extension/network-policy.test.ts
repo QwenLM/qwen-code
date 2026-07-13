@@ -71,6 +71,23 @@ describe('resolveNetworkTarget', () => {
     expect(target.curlResolve).toBe('packages.example:8443:8.8.8.8');
   });
 
+  it('stops waiting for DNS when the caller aborts', async () => {
+    vi.spyOn(dns, 'lookup').mockImplementation(
+      () => new Promise(() => undefined),
+    );
+    const controller = new AbortController();
+    const reason = new Error('resolution cancelled');
+
+    const target = resolveNetworkTarget(
+      'https://packages.example/archive',
+      'public',
+      controller.signal,
+    );
+    controller.abort(reason);
+
+    await expect(target).rejects.toBe(reason);
+  });
+
   it('allows public IPv6 targets', async () => {
     const target = await resolveNetworkTarget(
       'https://[2606:4700:4700::1111]/archive',

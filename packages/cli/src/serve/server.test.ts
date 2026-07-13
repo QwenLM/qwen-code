@@ -2706,7 +2706,14 @@ describe('createServeApp', () => {
         'persistent_workspace_registration',
       );
       expect(before.body.features).not.toContain('multi_workspace_sessions');
-      expect(before.body.workspaces).toBeUndefined();
+      expect(before.body.workspaces).toEqual([
+        {
+          id: 'primary-id',
+          cwd: WS_BOUND,
+          primary: true,
+          trusted: true,
+        },
+      ]);
 
       registry.add(
         makeWorkspaceRuntimeForTest({

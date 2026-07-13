@@ -1269,6 +1269,33 @@ describe('git extension helpers', () => {
       expect(request.destroy).toHaveBeenCalled();
     });
 
+    it('does not start an archive request when DNS outlives the deadline', async () => {
+      vi.useFakeTimers();
+      vi.spyOn(dns, 'lookup').mockImplementation(
+        () => new Promise(() => undefined),
+      );
+
+      try {
+        const outcome = downloadFromArchiveUrl(
+          {
+            source: 'https://packages.example/extension.zip',
+            type: 'archive-url',
+            networkPolicy: 'public',
+          },
+          tempDir,
+        ).catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(120_000);
+
+        await expect(outcome).resolves.toMatchObject({
+          message:
+            'Failed to download archive from https://packages.example/extension.zip: Timed out downloading extension archive',
+        });
+        expect(mockHttpsGet).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('preserves the caller abort reason for archive URL downloads', async () => {
       let errorHandler: ((error: Error) => void) | undefined;
       const request = {
