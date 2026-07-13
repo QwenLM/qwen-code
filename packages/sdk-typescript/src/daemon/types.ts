@@ -3003,7 +3003,6 @@ export interface ExtensionSettingInteraction {
   setting: {
     name: string;
     description: string;
-    envVar: string;
     sensitive: boolean;
   };
 }

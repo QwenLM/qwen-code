@@ -167,7 +167,7 @@ afterEach(() => {
   container = null;
   connection.clientId = 'client-1';
   signals.extensionsVersion = 0;
-  vi.clearAllMocks();
+  vi.resetAllMocks();
 });
 
 describe('ExtensionsManagerPage', () => {
@@ -200,6 +200,59 @@ describe('ExtensionsManagerPage', () => {
 
     expect(actions.extensionOperationStatus).toHaveBeenCalledWith('op-active');
     expect(document.body.textContent).toContain('installed');
+  });
+
+  it('recovers and completes an active extension mutation', async () => {
+    vi.useFakeTimers();
+    actions.extensionOperationStatus
+      .mockResolvedValueOnce({
+        v: 1,
+        operationId: 'op-update',
+        operation: 'update',
+        status: 'running',
+        createdAt: 1,
+        updatedAt: 2,
+        name: 'demo',
+      })
+      .mockResolvedValueOnce({
+        v: 1,
+        operationId: 'op-update',
+        operation: 'update',
+        status: 'succeeded',
+        createdAt: 1,
+        updatedAt: 3,
+        name: 'demo',
+        result: { status: 'updated', name: 'demo' },
+      });
+
+    try {
+      await mount(
+        [extension()],
+        [
+          {
+            v: 1,
+            operationId: 'op-update',
+            operation: 'update',
+            status: 'running',
+            createdAt: 1,
+            updatedAt: 1,
+            name: 'demo',
+          },
+        ],
+      );
+      expect(buttonIncluding('Add Extension')?.disabled).toBe(true);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      await flush();
+
+      expect(actions.extensionOperationStatus).toHaveBeenCalledTimes(2);
+      expect(buttonIncluding('Add Extension')?.disabled).toBe(false);
+      expect(actions.loadExtensionsStatus).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('reloads the extension list without refreshing daemon sessions', async () => {
@@ -253,7 +306,6 @@ describe('ExtensionsManagerPage', () => {
           setting: {
             name: 'API key',
             description: 'Enter an API key',
-            envVar: 'API_KEY',
             sensitive: true,
           },
         },
@@ -271,7 +323,6 @@ describe('ExtensionsManagerPage', () => {
           setting: {
             name: 'Second API key',
             description: 'Enter another API key',
-            envVar: 'SECOND_API_KEY',
             sensitive: true,
           },
         },
@@ -326,7 +377,6 @@ describe('ExtensionsManagerPage', () => {
           setting: {
             name: 'API key',
             description: 'Enter an API key',
-            envVar: 'API_KEY',
             sensitive: true,
           },
         },
@@ -449,7 +499,6 @@ describe('ExtensionsManagerPage', () => {
           setting: {
             name: 'Optional setting',
             description: 'May be left empty',
-            envVar: 'OPTIONAL_SETTING',
             sensitive: false,
           },
         },
@@ -511,18 +560,25 @@ describe('ExtensionsManagerPage', () => {
   });
 
   it('clears stale update states when the extensions signal changes', async () => {
-    actions.checkExtensionUpdates.mockResolvedValue({
-      states: { demo: 'update available' },
-    });
+    actions.checkExtensionUpdates
+      .mockResolvedValueOnce({ states: { demo: 'update available' } })
+      .mockResolvedValueOnce({ states: { demo: 'up to date' } });
     await mount([extension('up to date')]);
     expect(document.body.textContent).toContain('update available');
 
+    actions.loadExtensionsStatus.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/workspace',
+      initialized: true,
+      extensions: [{ ...extension('up to date') }],
+    });
     signals.extensionsVersion = 1;
     await act(async () => {
       renderPage();
     });
     await flush();
 
+    expect(actions.checkExtensionUpdates).toHaveBeenCalledTimes(2);
     expect(document.body.textContent).not.toContain('update available');
   });
 });

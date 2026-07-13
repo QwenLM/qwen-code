@@ -400,7 +400,7 @@ export function ExtensionsManagerPage({
   const [busyName, setBusyName] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [actionsOpen, setActionsOpen] = useState(false);
-  const [uninstallOpen, setUninstallOpen] = useState(false);
+  const [uninstallName, setUninstallName] = useState<string | null>(null);
   const [installOpen, setInstallOpen] = useState(false);
   const [installSource, setInstallSource] = useState('');
   const [installing, setInstalling] = useState(false);
@@ -414,13 +414,22 @@ export function ExtensionsManagerPage({
   const [interactionValue, setInteractionValue] = useState('');
   const [selectedPlugin, setSelectedPlugin] = useState('');
   const [submittingInteraction, setSubmittingInteraction] = useState(false);
+  const [operationsRecovered, setOperationsRecovered] = useState(false);
+  const mutationInFlightRef = useRef(false);
+  const interactionOperationIdRef = useRef<string | null>(null);
+  const cardRefs = useRef(new Map<string, HTMLDivElement>());
+  const returnFocusNameRef = useRef<string | null>(null);
   const [pendingMutation, setPendingMutation] = useState<{
     operationId: string;
     name: string;
     suppressMessage?: boolean;
   } | null>(null);
 
-  const clearInteraction = useCallback(() => {
+  const clearInteraction = useCallback((operationId?: string) => {
+    if (operationId && interactionOperationIdRef.current !== operationId) {
+      return;
+    }
+    interactionOperationIdRef.current = null;
     interactionIdRef.current = null;
     setPendingInteraction(null);
     setInteractionValue('');
@@ -438,6 +447,7 @@ export function ExtensionsManagerPage({
         setSelectedPlugin('');
         interactionIdRef.current = interaction.id;
       }
+      interactionOperationIdRef.current = operationId;
       setPendingInteraction({ operationId, interaction, owner });
     },
     [],
@@ -504,6 +514,7 @@ export function ExtensionsManagerPage({
           (operation) => operation.operation !== 'install',
         );
         if (activeMutation) {
+          mutationInFlightRef.current = true;
           setPendingMutation(
             (current) =>
               current ?? {
@@ -513,6 +524,7 @@ export function ExtensionsManagerPage({
           );
           setBusyName((current) => current ?? activeMutation.name ?? null);
         }
+        setOperationsRecovered(true);
       } catch {
         if (!cancelled) {
           timer = setTimeout(() => void recover(), retryDelay);
@@ -527,8 +539,11 @@ export function ExtensionsManagerPage({
     };
   }, [actions]);
 
+  const extensionsVersionRef = useRef(signals?.extensionsVersion ?? 0);
   useEffect(() => {
-    if ((signals?.extensionsVersion ?? 0) > 0) {
+    const version = signals?.extensionsVersion ?? 0;
+    if (version !== extensionsVersionRef.current) {
+      extensionsVersionRef.current = version;
       setUpdateStates({});
       void load(true);
     }
@@ -562,7 +577,7 @@ export function ExtensionsManagerPage({
             timer = setTimeout(() => void poll(), 5000);
           } else {
             setMessage(t('extensions.manage.operationFailed'));
-            clearInteraction();
+            clearInteraction(pendingInstall.operationId);
             setPendingInstall(null);
           }
           return;
@@ -574,7 +589,7 @@ export function ExtensionsManagerPage({
               error: operation.error ?? '',
             }),
           );
-          clearInteraction();
+          clearInteraction(pendingInstall.operationId);
           setPendingInstall(null);
           return;
         }
@@ -591,7 +606,7 @@ export function ExtensionsManagerPage({
                   name: operation.result?.name ?? pendingInstall.source,
                 }),
           );
-          clearInteraction();
+          clearInteraction(pendingInstall.operationId);
           setPendingInstall(null);
           void load(true);
           return;
@@ -606,7 +621,7 @@ export function ExtensionsManagerPage({
         if (cancelled) return;
         setMessage(error instanceof Error ? error.message : String(error));
         if (error instanceof DaemonHttpError && error.status === 404) {
-          clearInteraction();
+          clearInteraction(pendingInstall.operationId);
           setPendingInstall(null);
           return;
         }
@@ -642,12 +657,12 @@ export function ExtensionsManagerPage({
           connection.clientId,
         )
         .then(() => {
-          clearInteraction();
+          clearInteraction(pendingInteraction.operationId);
           restartPolling();
         })
         .catch((error: unknown) => {
           setMessage(error instanceof Error ? error.message : String(error));
-          clearInteraction();
+          clearInteraction(pendingInteraction.operationId);
           restartPolling();
         })
         .finally(() => setSubmittingInteraction(false));
@@ -678,17 +693,19 @@ export function ExtensionsManagerPage({
             timer = setTimeout(() => void poll(), 5000);
           } else {
             setMessage(t('extensions.manage.operationFailed'));
-            clearInteraction();
+            clearInteraction(pendingMutation.operationId);
             setPendingMutation(null);
             setBusyName(null);
+            mutationInFlightRef.current = false;
           }
           return;
         }
         if (operation.status === 'failed') {
           setMessage(operation.error ?? t('extensions.manage.operationFailed'));
-          clearInteraction();
+          clearInteraction(pendingMutation.operationId);
           setPendingMutation(null);
           setBusyName(null);
+          mutationInFlightRef.current = false;
           return;
         }
         if (
@@ -710,9 +727,10 @@ export function ExtensionsManagerPage({
               ),
             );
           }
-          clearInteraction();
+          clearInteraction(pendingMutation.operationId);
           setPendingMutation(null);
           setBusyName(null);
+          mutationInFlightRef.current = false;
           if (operation.operation === 'uninstall') {
             setSelectedName(null);
           }
@@ -736,9 +754,10 @@ export function ExtensionsManagerPage({
         if (cancelled) return;
         setMessage(error instanceof Error ? error.message : String(error));
         if (error instanceof DaemonHttpError && error.status === 404) {
-          clearInteraction();
+          clearInteraction(pendingMutation.operationId);
           setPendingMutation(null);
           setBusyName(null);
+          mutationInFlightRef.current = false;
           return;
         }
         timer = setTimeout(() => void poll(), retryDelay);
@@ -784,7 +803,14 @@ export function ExtensionsManagerPage({
   const installExtension = useCallback(() => {
     const source = installSource.trim();
     const clientId = connection.clientId;
-    if (!source || pendingInstall || pendingMutation) return;
+    if (
+      !source ||
+      !operationsRecovered ||
+      pendingInstall ||
+      pendingMutation ||
+      mutationInFlightRef.current
+    )
+      return;
     setInstalling(true);
     setMessage(null);
     actions
@@ -802,6 +828,7 @@ export function ExtensionsManagerPage({
     actions,
     connection.clientId,
     installSource,
+    operationsRecovered,
     pendingInstall,
     pendingMutation,
   ]);
@@ -810,17 +837,18 @@ export function ExtensionsManagerPage({
     (
       name: string,
       run: (clientId?: string) => Promise<unknown>,
-      options: {
-        allowWithoutClientId?: boolean;
-        suppressMessage?: boolean;
-      } = {},
+      options: { suppressMessage?: boolean } = {},
     ) => {
       const clientId = connection.clientId;
-      if (pendingInstall || pendingMutation) return;
-      if (!clientId && !options.allowWithoutClientId) {
-        setMessage(t('extensions.install.waitForSession'));
+      if (
+        !operationsRecovered ||
+        pendingInstall ||
+        pendingMutation ||
+        mutationInFlightRef.current
+      ) {
         return;
       }
+      mutationInFlightRef.current = true;
       setBusyName(name);
       setMessage(null);
       let startedPolling = false;
@@ -851,12 +879,20 @@ export function ExtensionsManagerPage({
         })
         .finally(() => {
           if (!startedPolling) {
+            mutationInFlightRef.current = false;
             setBusyName(null);
             void load(true);
           }
         });
     },
-    [connection.clientId, load, pendingInstall, pendingMutation, t],
+    [
+      connection.clientId,
+      load,
+      operationsRecovered,
+      pendingInstall,
+      pendingMutation,
+      t,
+    ],
   );
 
   const selectedExtension = useMemo(
@@ -868,6 +904,17 @@ export function ExtensionsManagerPage({
     () => filterExtensions(extensions, query),
     [extensions, query],
   );
+
+  const returnToList = useCallback(() => {
+    returnFocusNameRef.current = selectedName;
+    setSelectedName(null);
+  }, [selectedName]);
+
+  useEffect(() => {
+    if (selectedName || !returnFocusNameRef.current) return;
+    cardRefs.current.get(returnFocusNameRef.current)?.focus();
+    returnFocusNameRef.current = null;
+  }, [selectedName]);
 
   const standaloneNavigation = (
     <Breadcrumb className="sticky -top-4 z-10 -mx-5 -mt-4 border-b bg-background px-5 py-3">
@@ -886,7 +933,7 @@ export function ExtensionsManagerPage({
         <BreadcrumbItem>
           {selectedExtension ? (
             <BreadcrumbLink asChild>
-              <button type="button" onClick={() => setSelectedName(null)}>
+              <button type="button" onClick={returnToList}>
                 {t('extensions.manage.title')}
               </button>
             </BreadcrumbLink>
@@ -910,7 +957,10 @@ export function ExtensionsManagerPage({
     const updateState =
       updateStates[selectedExtension.name] ?? selectedExtension.updateState;
     const busy =
-      busyName === selectedExtension.name || pendingMutation !== null;
+      !operationsRecovered ||
+      pendingInstall !== null ||
+      busyName !== null ||
+      pendingMutation !== null;
     const checking = checkingName === selectedExtension.name;
     const mutation: Mutation = selectedExtension.isActive
       ? 'disable'
@@ -930,7 +980,7 @@ export function ExtensionsManagerPage({
                 { scope },
                 clientId,
               ),
-        { allowWithoutClientId: true, suppressMessage: true },
+        { suppressMessage: true },
       );
     const commands = details?.commands ?? [];
     const skills = details?.skills ?? [];
@@ -1004,14 +1054,11 @@ export function ExtensionsManagerPage({
                       busy || checking || updateState !== UPDATE_AVAILABLE
                     }
                     onSelect={() =>
-                      runMutation(
-                        selectedExtension.name,
-                        (clientId) =>
-                          actions.updateExtension(
-                            selectedExtension.name,
-                            clientId,
-                          ),
-                        { allowWithoutClientId: true },
+                      runMutation(selectedExtension.name, (clientId) =>
+                        actions.updateExtension(
+                          selectedExtension.name,
+                          clientId,
+                        ),
                       )
                     }
                   >
@@ -1044,7 +1091,7 @@ export function ExtensionsManagerPage({
                     onSelect={(event) => {
                       event.preventDefault();
                       setActionsOpen(false);
-                      setUninstallOpen(true);
+                      setUninstallName(selectedExtension.name);
                     }}
                   >
                     {t('extensions.manage.uninstallAction')}
@@ -1175,7 +1222,12 @@ export function ExtensionsManagerPage({
           </Tabs>
         </div>
 
-        <AlertDialog open={uninstallOpen} onOpenChange={setUninstallOpen}>
+        <AlertDialog
+          open={uninstallName === selectedExtension.name}
+          onOpenChange={(open) => {
+            if (!open) setUninstallName(null);
+          }}
+        >
           <AlertDialogContent>
             <AlertDialogHeader className="place-items-start text-left">
               <AlertDialogTitle>
@@ -1192,16 +1244,11 @@ export function ExtensionsManagerPage({
               <AlertDialogAction
                 variant="destructive"
                 onClick={() => {
-                  runMutation(
-                    selectedExtension.name,
-                    (clientId) =>
-                      actions.uninstallExtension(
-                        selectedExtension.name,
-                        clientId,
-                      ),
-                    { allowWithoutClientId: true },
+                  if (!uninstallName) return;
+                  runMutation(uninstallName, (clientId) =>
+                    actions.uninstallExtension(uninstallName, clientId),
                   );
-                  setUninstallOpen(false);
+                  setUninstallName(null);
                 }}
               >
                 {t('extensions.manage.uninstallAction')}
@@ -1246,7 +1293,10 @@ export function ExtensionsManagerPage({
               {t('common.refresh')}
             </Button>
             <Button
-              disabled={Boolean(pendingInstall || pendingMutation)}
+              disabled={
+                !operationsRecovered ||
+                Boolean(pendingInstall || pendingMutation || busyName)
+              }
               onClick={() => setInstallOpen(true)}
             >
               <PlusIcon data-icon="inline-start" />
@@ -1289,6 +1339,10 @@ export function ExtensionsManagerPage({
               return (
                 <Card
                   key={extension.id || extension.name}
+                  ref={(node) => {
+                    if (node) cardRefs.current.set(extension.name, node);
+                    else cardRefs.current.delete(extension.name);
+                  }}
                   size="sm"
                   role="button"
                   tabIndex={0}
@@ -1334,22 +1388,37 @@ export function ExtensionsManagerPage({
                   <CardFooter className="mt-auto flex flex-wrap justify-end gap-4 border-0 bg-transparent pt-0 text-xs text-muted-foreground tabular-nums">
                     <span className="inline-flex items-center gap-1">
                       <CommandIcon className="size-4" />
+                      <span className="sr-only">
+                        {t('extensions.manage.commands')}
+                      </span>
                       {capabilities.commandCount}
                     </span>
                     <span className="inline-flex items-center gap-1">
                       <SparklesIcon className="size-4" />
+                      <span className="sr-only">
+                        {t('extensions.manage.skills')}
+                      </span>
                       {capabilities.skillCount}
                     </span>
                     <span className="inline-flex items-center gap-1">
                       <BotIcon className="size-4" />
+                      <span className="sr-only">
+                        {t('extensions.manage.agents')}
+                      </span>
                       {capabilities.agentCount}
                     </span>
                     <span className="inline-flex items-center gap-1">
                       <ServerIcon className="size-4" />
+                      <span className="sr-only">
+                        {t('extensions.manage.mcpServers')}
+                      </span>
                       {capabilities.mcpServerCount}
                     </span>
                     <span className="inline-flex items-center gap-1">
                       <FileTextIcon className="size-4" />
+                      <span className="sr-only">
+                        {t('extensions.manage.contextFiles')}
+                      </span>
                       {capabilities.contextFileCount}
                     </span>
                     {capabilities.hasSettings ? (
@@ -1409,7 +1478,12 @@ export function ExtensionsManagerPage({
               {t('common.cancel')}
             </AlertDialogCancel>
             <AlertDialogAction
-              disabled={installing || !installSource.trim()}
+              disabled={
+                installing ||
+                !operationsRecovered ||
+                Boolean(pendingInstall || pendingMutation || busyName) ||
+                !installSource.trim()
+              }
               onClick={installExtension}
             >
               {installing ? <Spinner /> : null}

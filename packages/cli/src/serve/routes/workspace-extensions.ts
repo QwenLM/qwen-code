@@ -286,7 +286,6 @@ export function registerWorkspaceExtensionRoutes(
         setting: {
           name: string;
           description: string;
-          envVar: string;
           sensitive: boolean;
         };
       };
@@ -320,6 +319,7 @@ export function registerWorkspaceExtensionRoutes(
     error?: string;
   };
   const extensionOperations = new Map<string, ExtensionOperationStatus>();
+  const supersededInstallOperations = new Set<string>();
   const pendingExtensionInteractions = new Map<
     string,
     {
@@ -335,11 +335,27 @@ export function registerWorkspaceExtensionRoutes(
     operation.status !== 'queued' &&
     operation.status !== 'running' &&
     operation.status !== 'waiting_for_input';
+  const redactExtensionDisplaySource = (source: string): string => {
+    const redacted = redactUrlCredentials(source);
+    if (/^[A-Za-z]:[\\/]/.test(redacted)) {
+      return redacted;
+    }
+    try {
+      const url = new URL(redacted);
+      url.search = '';
+      url.hash = '';
+      return url.toString();
+    } catch {
+      return redacted;
+    }
+  };
   const redactExtensionOperationResult = (
     event: ExtensionMutationEvent,
   ): ExtensionMutationEvent => ({
     ...event,
-    ...(event.source ? { source: redactUrlCredentials(event.source) } : {}),
+    ...(event.source
+      ? { source: redactExtensionDisplaySource(event.source) }
+      : {}),
   });
   const rememberExtensionOperation = (
     operation: ExtensionOperationStatus,
@@ -378,12 +394,16 @@ export function registerWorkspaceExtensionRoutes(
     pendingExtensionInteractions.delete(operationId);
     pending.reject(new Error(reason));
   };
-  const cancelPendingInstallInteractions = (reason: string) => {
-    for (const operationId of pendingExtensionInteractions.keys()) {
-      if (extensionOperations.get(operationId)?.operation !== 'install') {
+  const supersedeActiveInstallOperations = (reason: string) => {
+    for (const operation of extensionOperations.values()) {
+      if (
+        operation.operation !== 'install' ||
+        isTerminalExtensionOperation(operation)
+      ) {
         continue;
       }
-      cancelPendingExtensionInteraction(operationId, reason);
+      supersededInstallOperations.add(operation.operationId);
+      cancelPendingExtensionInteraction(operation.operationId, reason);
     }
   };
   const waitForExtensionInteraction = (
@@ -391,6 +411,11 @@ export function registerWorkspaceExtensionRoutes(
     interaction: ExtensionInteractionRequest,
     operationDeadline: number,
   ): Promise<string> => {
+    if (supersededInstallOperations.delete(operationId)) {
+      return Promise.reject(
+        new Error('Extension installation superseded by a new install request'),
+      );
+    }
     const timeoutMs = Math.min(
       EXTENSION_INTERACTION_TIMEOUT_MS,
       operationDeadline - Date.now(),
@@ -435,7 +460,6 @@ export function registerWorkspaceExtensionRoutes(
           setting: {
             name: setting.name,
             description: setting.description,
-            envVar: setting.envVar,
             sensitive: setting.sensitive === true,
           },
         },
@@ -455,7 +479,7 @@ export function registerWorkspaceExtensionRoutes(
           plugins: marketplace.plugins.map((plugin) => ({
             name: plugin.name,
             ...(plugin.description ? { description: plugin.description } : {}),
-            source: redactUrlCredentials(
+            source: redactExtensionDisplaySource(
               typeof plugin.source === 'string'
                 ? plugin.source
                 : plugin.source.source === 'github'
@@ -494,7 +518,7 @@ export function registerWorkspaceExtensionRoutes(
       createdAt: now,
       updatedAt: now,
       ...(failureContext.source
-        ? { source: redactUrlCredentials(failureContext.source) }
+        ? { source: redactExtensionDisplaySource(failureContext.source) }
         : {}),
       ...(failureContext.name ? { name: failureContext.name } : {}),
     });
@@ -583,7 +607,7 @@ export function registerWorkspaceExtensionRoutes(
           bridge.broadcastExtensionsChanged({
             status: 'failed',
             ...(failureContext.source
-              ? { source: redactUrlCredentials(failureContext.source) }
+              ? { source: redactExtensionDisplaySource(failureContext.source) }
               : {}),
             ...(failureContext.name ? { name: failureContext.name } : {}),
             refreshed: 0,
@@ -606,8 +630,11 @@ export function registerWorkspaceExtensionRoutes(
         } catch {
           // Keep queued background work from surfacing as unhandledRejection.
         }
+      } finally {
+        supersededInstallOperations.delete(operationId);
       }
     }).catch((err) => {
+      supersededInstallOperations.delete(operationId);
       cancelPendingExtensionInteraction(
         operationId,
         'Extension operation ended',
@@ -672,7 +699,11 @@ export function registerWorkspaceExtensionRoutes(
             isActive: ext.isActive,
             path: ext.path,
             ...(ext.installMetadata?.source
-              ? { source: redactUrlCredentials(ext.installMetadata.source) }
+              ? {
+                  source: redactExtensionDisplaySource(
+                    ext.installMetadata.source,
+                  ),
+                }
               : {}),
             ...(ext.installMetadata?.type
               ? { installType: ext.installMetadata.type }
@@ -799,7 +830,7 @@ export function registerWorkspaceExtensionRoutes(
             status: 'running',
             interaction: undefined,
           });
-          pending.reject(new Error('Extension installation cancelled'));
+          pending.reject(new Error('Extension operation cancelled'));
           res.status(200).json({ accepted: true });
           return;
         }
@@ -918,13 +949,53 @@ export function registerWorkspaceExtensionRoutes(
         if (!validateExtensionSourceHost(sourceValue, res)) {
           return;
         }
-
         if (extensionInstallQueueDepth >= MAX_EXTENSION_INSTALL_QUEUE_DEPTH) {
           sendExtensionQueueFull(res);
           return;
         }
 
-        cancelPendingInstallInteractions(
+        let installMetadata:
+          | Awaited<ReturnType<typeof parseInstallSource>>
+          | undefined;
+        try {
+          installMetadata = await parseInstallSource(sourceValue);
+        } catch {
+          installMetadata = undefined;
+        }
+        if (installMetadata) {
+          if (
+            installMetadata.type !== 'git' &&
+            installMetadata.type !== 'github-release' &&
+            installMetadata.type !== 'npm'
+          ) {
+            res.status(400).json({
+              error:
+                'Only GitHub, Git, and npm extension installs are supported over the daemon endpoint.',
+            });
+            return;
+          }
+          if (installMetadata.type === 'npm' && refValue) {
+            res
+              .status(400)
+              .json({ error: '--ref is not applicable for npm extensions.' });
+            return;
+          }
+          if (installMetadata.type !== 'npm' && registryValue) {
+            res.status(400).json({
+              error: '--registry is only applicable for npm extensions.',
+            });
+            return;
+          }
+          if (!validateExtensionSourceMetadata(installMetadata)) {
+            res.status(400).json({ error: '`source` host is not allowed' });
+            return;
+          }
+          if (installMetadata.type === 'npm' && registryUrl) {
+            installMetadata.registryUrl = registryUrl;
+          }
+        }
+
+        supersedeActiveInstallOperations(
           'Extension installation cancelled by a new install request',
         );
 
@@ -933,34 +1004,11 @@ export function registerWorkspaceExtensionRoutes(
           { source: sourceValue },
           res,
           async (extensionManager) => {
-            const installMetadata = await parseInstallSource(sourceValue);
-
-            if (
-              installMetadata.type !== 'git' &&
-              installMetadata.type !== 'github-release' &&
-              installMetadata.type !== 'npm'
-            ) {
-              throw new Error(
-                'Only GitHub, Git, and npm extension installs are supported over the daemon endpoint.',
-              );
-            }
-            if (installMetadata.type === 'npm' && refValue) {
-              throw new Error('--ref is not applicable for npm extensions.');
-            }
-            if (installMetadata.type !== 'npm' && registryValue) {
-              throw new Error(
-                '--registry is only applicable for npm extensions.',
-              );
-            }
-            if (!validateExtensionSourceMetadata(installMetadata)) {
-              throw new Error('`source` host is not allowed');
-            }
-            if (installMetadata.type === 'npm' && registryUrl) {
-              installMetadata.registryUrl = registryUrl;
-            }
+            const resolvedInstallMetadata =
+              installMetadata ?? (await parseInstallSource(sourceValue));
             const extension = await extensionManager.installExtension(
               {
-                ...installMetadata,
+                ...resolvedInstallMetadata,
                 ref: refValue,
                 autoUpdate: autoUpdateValue,
                 allowPreRelease: allowPreReleaseValue,

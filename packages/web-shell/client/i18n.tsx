@@ -1231,7 +1231,6 @@ const EN: Messages = {
   'extensions.manage.installSelectPluginDescription': (v) =>
     `Choose a plugin from "${v?.marketplace ?? 'this marketplace'}".`,
   'extensions.manage.installType': 'Install type:',
-  'extensions.manage.loading': 'Loading extensions...',
   'extensions.manage.mcpServers': 'MCP servers:',
   'extensions.manage.marketplaceRoot': 'Marketplace root',
   'extensions.manage.name': 'Name:',
@@ -1244,8 +1243,6 @@ const EN: Messages = {
   'extensions.manage.path': 'Path:',
   'extensions.manage.queued': (v) =>
     `Extension action queued for "${v?.name ?? 'extension'}".`,
-  'extensions.manage.refreshed': (v) =>
-    `Extensions refreshed in ${v?.refreshed ?? 0} session(s), ${v?.failed ?? 0} failed.`,
   'extensions.manage.refreshFailed': (v) =>
     `Extension action succeeded, but session refresh failed${
       v?.error ? `: ${v.error}` : '.'
@@ -3108,7 +3105,6 @@ const ZH: Messages = {
   'extensions.manage.installSelectPluginDescription': (v) =>
     `从「${v?.marketplace ?? '此市场'}」中选择插件。`,
   'extensions.manage.installType': '安装类型：',
-  'extensions.manage.loading': '正在加载扩展...',
   'extensions.manage.mcpServers': 'MCP servers：',
   'extensions.manage.marketplaceRoot': '此市场根目录',
   'extensions.manage.name': '名称：',
@@ -3121,8 +3117,6 @@ const ZH: Messages = {
   'extensions.manage.path': '路径：',
   'extensions.manage.queued': (v) =>
     `扩展 "${v?.name ?? '扩展'}" 的操作已提交。`,
-  'extensions.manage.refreshed': (v) =>
-    `已刷新 ${v?.refreshed ?? 0} 个 session，${v?.failed ?? 0} 个失败。`,
   'extensions.manage.refreshFailed': (v) =>
     `扩展操作已成功，但 session 刷新失败${v?.error ? `：${v.error}` : '。'}`,
   'extensions.manage.restartRequired': '已更新，需要重启',

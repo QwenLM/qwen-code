@@ -3882,7 +3882,6 @@ describe('createServeApp', () => {
               kind: 'setting',
               setting: {
                 name: 'API key',
-                envVar: 'API_KEY',
                 sensitive: true,
               },
             },
@@ -3986,7 +3985,8 @@ describe('createServeApp', () => {
             plugins: [
               {
                 name: 'example-plugin',
-                source: 'https://user:token@example.com/plugin',
+                source:
+                  'https://user:token@example.com/plugin?token=secret#private',
                 category: 'tools',
                 tags: ['example'],
               },
@@ -4315,7 +4315,89 @@ describe('createServeApp', () => {
           expect(poll.body.status).toBe('waiting_for_input');
         });
 
+        const invalid = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send({ source: '@scope/ext', ref: 'v1', consent: true });
+        expect(invalid.status).toBe(400);
+
+        const stillWaiting = await request(app)
+          .get(`/workspace/extensions/operations/${first.body.operationId}`)
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(stillWaiting.body.status).toBe('waiting_for_input');
+
         const second = await install('https://example.com/second');
+        await vi.waitFor(async () => {
+          const firstPoll = await request(app)
+            .get(`/workspace/extensions/operations/${first.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          const secondPoll = await request(app)
+            .get(`/workspace/extensions/operations/${second.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(firstPoll.body.status).toBe('failed');
+          expect(secondPoll.body.status).toBe('succeeded');
+        });
+      } finally {
+        restore();
+      }
+    });
+
+    it('rejects a superseded install that requests input after replacement', async () => {
+      let releaseFirst: (() => void) | undefined;
+      const firstBlocked = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      let installCount = 0;
+      const restore = mockExtensionManagerMethods({
+        async installExtension() {
+          installCount += 1;
+          if (installCount === 1) {
+            await firstBlocked;
+            const manager = this as unknown as {
+              requestSetting?: (setting: {
+                name: string;
+                description: string;
+                envVar: string;
+              }) => Promise<string>;
+            };
+            await manager.requestSetting?.({
+              name: 'API key',
+              description: 'API key used by this extension',
+              envVar: 'API_KEY',
+            });
+          }
+          return testExtension(`installed-${installCount}`);
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge() },
+        );
+        const install = (source: string) =>
+          request(app)
+            .post('/workspace/extensions/install')
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret')
+            .send({ source, consent: true });
+
+        const first = await install('https://example.com/first');
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(`/workspace/extensions/operations/${first.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body.status).toBe('running');
+        });
+        const second = await install('https://example.com/second');
+        releaseFirst?.();
+
         await vi.waitFor(async () => {
           const firstPoll = await request(app)
             .get(`/workspace/extensions/operations/${first.body.operationId}`)
@@ -4934,7 +5016,7 @@ describe('createServeApp', () => {
       expect(res.body.error).toBe('`ref` must be a string');
     });
 
-    it('broadcasts failed local extension installs over the daemon endpoint', async () => {
+    it('rejects unsupported local extension installs before queuing', async () => {
       const localExtensionDir = await fsp.mkdtemp(
         path.join(os.tmpdir(), 'qwen-local-extension-'),
       );
@@ -4953,15 +5035,11 @@ describe('createServeApp', () => {
         .set('X-Qwen-Client-Id', 'client-1')
         .send({ source: localExtensionDir, consent: true });
 
-      expect(res.status).toBe(202);
-      await vi.waitFor(() => {
-        expect(bridge.extensionEvents.at(-1)).toMatchObject({
-          status: 'failed',
-          source: localExtensionDir,
-          error:
-            'Only GitHub, Git, and npm extension installs are supported over the daemon endpoint.',
-        });
-      });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe(
+        'Only GitHub, Git, and npm extension installs are supported over the daemon endpoint.',
+      );
+      expect(bridge.extensionEvents).toEqual([]);
     });
 
     it('treats Windows drive paths as local extension sources', async () => {
@@ -5150,7 +5228,7 @@ describe('createServeApp', () => {
       expect(res.body.error).toBe('`source` must not include credentials');
     });
 
-    it('broadcasts failed npm extension install with ref', async () => {
+    it('rejects an npm extension install with ref before queuing', async () => {
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
       const bridge = fakeBridge({ knownClientIds: ['client-1'] });
       const app = createServeApp(
@@ -5166,17 +5244,14 @@ describe('createServeApp', () => {
         .set('X-Qwen-Client-Id', 'client-1')
         .send({ source: '@scope/ext', ref: 'v1', consent: true });
 
-      expect(res.status).toBe(202);
-      await vi.waitFor(() => {
-        expect(bridge.extensionEvents.at(-1)).toMatchObject({
-          status: 'failed',
-          source: '@scope/ext',
-          error: '--ref is not applicable for npm extensions.',
-        });
-      });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe(
+        '--ref is not applicable for npm extensions.',
+      );
+      expect(bridge.extensionEvents).toEqual([]);
     });
 
-    it('broadcasts failed registry use for non-npm extension installs', async () => {
+    it('rejects registry use for non-npm extension installs before queuing', async () => {
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
       const bridge = fakeBridge({ knownClientIds: ['client-1'] });
       const app = createServeApp(
@@ -5196,14 +5271,11 @@ describe('createServeApp', () => {
           consent: true,
         });
 
-      expect(res.status).toBe(202);
-      await vi.waitFor(() => {
-        expect(bridge.extensionEvents.at(-1)).toMatchObject({
-          status: 'failed',
-          source: 'https://example.com/repo',
-          error: '--registry is only applicable for npm extensions.',
-        });
-      });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe(
+        '--registry is only applicable for npm extensions.',
+      );
+      expect(bridge.extensionEvents).toEqual([]);
     });
 
     it('rejects non-https npm registries', async () => {
