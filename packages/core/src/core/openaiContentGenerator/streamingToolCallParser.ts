@@ -156,6 +156,11 @@ export class StreamingToolCallParser {
       if (currentBuffer.trim()) {
         try {
           JSON.parse(currentBuffer);
+          const existingMeta = this.toolCallMeta.get(actualIndex)!;
+          if (name && !existingMeta.name && !chunk.trim()) {
+            existingMeta.name = name;
+            this.namelessToolCallIndices.delete(actualIndex);
+          }
           debugLogger.debug(
             `Ignoring replay chunk for completed toolCall id=${id}`,
           );

@@ -748,6 +748,16 @@ describe('StreamingToolCallParser', () => {
       expect(parser.getBuffer(0)).toBe('{"param1": "value1"}');
     });
 
+    it('accepts a function name after its arguments complete', () => {
+      parser.addChunk(0, '{"path":"a.ts"}', 'call_1');
+      parser.addChunk(0, '', 'call_1', 'read_file');
+
+      expect(parser.hasNamelessToolCall()).toBe(false);
+      expect(parser.getCompletedToolCalls()).toEqual([
+        { id: 'call_1', name: 'read_file', args: { path: 'a.ts' }, index: 0 },
+      ]);
+    });
+
     it('should ignore replayed openers for a completed no-argument tool call', () => {
       parser.addChunk(0, '', 'call_1', 'list_sessions');
       // Provider replays the same ID's opener with a different name; the

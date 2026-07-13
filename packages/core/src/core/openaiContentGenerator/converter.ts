@@ -1432,18 +1432,17 @@ export function convertOpenAIChunkToGemini(
           normalizedReasoningText,
           thoughtThinkingTagState,
         );
+        requestContext.hasStructuredReasoningContent = true;
       }
       if (
         normalizedReasoningText &&
         !requestContext.responseParsingOptions?.taggedThinkingTags
       ) {
-        requestContext.hasStructuredReasoningContent = true;
         parts.push(createOpenAIReasoningThoughtPart(normalizedReasoningText));
       } else if (
         normalizedReasoningText &&
         !requestContext.hasTaggedThinkingThought
       ) {
-        requestContext.hasStructuredReasoningContent = true;
         requestContext.pendingReasoningText =
           (requestContext.pendingReasoningText ?? '') + normalizedReasoningText;
         debugLogger.debug(
