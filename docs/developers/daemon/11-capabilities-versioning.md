@@ -81,6 +81,16 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     (t) => t.voiceTranscriptionAvailable === true,
   ],
   ['session_shell_command', (t) => t.sessionShellCommandEnabled === true],
+  [
+    'multi_workspace_session_rewind',
+    (t) => t.multiWorkspaceSessionsEnabled === true,
+  ],
+  [
+    'multi_workspace_session_shell',
+    (t) =>
+      t.multiWorkspaceSessionsEnabled === true &&
+      t.sessionShellCommandEnabled === true,
+  ],
   ['rate_limit', (t) => t.rateLimit === true],
   ['workspace_reload', (t) => t.reloadAvailable === true],
   ['voice_transcribe', (t) => t.voiceWsAvailable !== false],
@@ -94,7 +104,7 @@ The `Map` stores membership and predicate together. Adding a new conditional tag
 
 Baseline tags are not present in the `Map` and are advertised unconditionally. This is intentionally represented by absence rather than by a separate Set.
 
-### v1 tags, grouped by domain
+### v1 tags grouped by domain
 
 Foundation: `health`, `daemon_status`, `capabilities`.
 
@@ -121,6 +131,15 @@ Auth: `auth_provider_install`, `auth_device_flow`, **`require_auth`** (condition
 Voice: **`workspace_voice`** (conditional), **`workspace_voice_transcription`** (conditional, `modes: ['batch']`), **`voice_transcribe`** (conditional, `modes: ['streaming', 'batch']`).
 
 Rate limiting: **`rate_limit`** (conditional).
+
+Multi-workspace session routing: **`multi_workspace_sessions`** (conditional),
+**`multi_workspace_session_rewind`** (conditional), and
+**`multi_workspace_session_shell`** (conditional). A client may use rewind for
+a primary session with `session_rewind`; a secondary live session additionally
+requires `multi_workspace_session_rewind`. Shell uses the equivalent
+`session_shell_command` plus `multi_workspace_session_shell` pairing for a
+secondary session. ACP-native clients continue to use the `_qwen.methods`
+returned by initialize; no ACP rewind vendor method is advertised.
 
 Bold tags have `modes` or are conditional.
 
@@ -169,23 +188,26 @@ sequenceDiagram
 ## Dependencies
 
 - Read by `packages/cli/src/serve/server.ts` when building `/capabilities` responses.
-- Toggle input comes from `runQwenServe` / `createServeApp`: `{ requireAuth, mcpPoolActive, allowOriginActive, promptDeadlineMs, writerIdleTimeoutMs, persistSettingAvailable, sessionShellCommandEnabled, rateLimit, reloadAvailable }`.
+- Toggle input comes from `runQwenServe` / `createServeApp`, including
+  authentication, MCP, origin, prompt, settings, shell, rate-limit, reload, and
+  live workspace-runtime-count state.
 - The active `permission` policy in the envelope comes from `BridgeOptions.permissionPolicy`, which itself reads `settings.json` `policy.permissionStrategy`.
 
 ## Configuration
 
-| Source                     | Knob                                                            | Effect on capabilities                                                                                                        |
-| -------------------------- | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| CLI flag                   | `--require-auth`                                                | Advertises `require_auth`.                                                                                                    |
-| Env                        | `QWEN_SERVE_NO_MCP_POOL=1`                                      | Stops advertising `mcp_workspace_pool` and `mcp_pool_restart`; MCP events no longer stamp `scope: 'workspace'`.               |
-| CLI flag                   | `--mcp-client-budget=N`, `--mcp-budget-mode={off,warn,enforce}` | Does not change the tag set (`mcp_guardrails` is always advertised), but changes per-server reservation and refusal behavior. |
-| CLI flag / env             | `--rate-limit` / `QWEN_SERVE_RATE_LIMIT=1`                      | Advertises `rate_limit`.                                                                                                      |
-| Embedded option            | `persistSettingAvailable`                                       | Advertises `workspace_settings` and `workspace_voice`.                                                                        |
-| Embedded option            | `voiceTranscriptionAvailable`                                   | Advertises `workspace_voice_transcription`.                                                                                   |
-| CLI flag / embedded option | `--enable-session-shell` / `sessionShellCommandEnabled`         | Advertises `session_shell_command`.                                                                                           |
-| Embedded option            | `reloadAvailable`                                               | Advertises `workspace_reload`.                                                                                                |
-| Embedded option            | `voiceWsAvailable`                                              | Advertises `voice_transcribe`.                                                                                                |
-| `settings.json`            | `policy.permissionStrategy`                                     | Sets envelope `policy.permission`.                                                                                            |
+| Source                     | Knob                                                            | Effect on capabilities                                                                                                                                                 |
+| -------------------------- | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CLI flag                   | `--require-auth`                                                | Advertises `require_auth`.                                                                                                                                             |
+| Env                        | `QWEN_SERVE_NO_MCP_POOL=1`                                      | Stops advertising `mcp_workspace_pool` and `mcp_pool_restart`; MCP events no longer stamp `scope: 'workspace'`.                                                        |
+| CLI flag                   | `--mcp-client-budget=N`, `--mcp-budget-mode={off,warn,enforce}` | Does not change the tag set (`mcp_guardrails` is always advertised), but changes per-server reservation and refusal behavior.                                          |
+| CLI flag / env             | `--rate-limit` / `QWEN_SERVE_RATE_LIMIT=1`                      | Advertises `rate_limit`.                                                                                                                                               |
+| Embedded option            | `persistSettingAvailable`                                       | Advertises `workspace_settings` and `workspace_voice`.                                                                                                                 |
+| Embedded option            | `voiceTranscriptionAvailable`                                   | Advertises `workspace_voice_transcription`.                                                                                                                            |
+| CLI flag / embedded option | `--enable-session-shell` / `sessionShellCommandEnabled`         | Advertises `session_shell_command`.                                                                                                                                    |
+| Runtime state              | More than one registered workspace runtime                      | Advertises `multi_workspace_sessions` and `multi_workspace_session_rewind`; also advertises `multi_workspace_session_shell` when session shell is effectively enabled. |
+| Embedded option            | `reloadAvailable`                                               | Advertises `workspace_reload`.                                                                                                                                         |
+| Embedded option            | `voiceWsAvailable`                                              | Advertises `voice_transcribe`.                                                                                                                                         |
+| `settings.json`            | `policy.permissionStrategy`                                     | Sets envelope `policy.permission`.                                                                                                                                     |
 
 ## Caveats and known limits
 

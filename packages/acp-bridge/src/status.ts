@@ -416,6 +416,7 @@ export interface ServeWorkspaceSkillStatus extends ServeStatusCell {
   description: string;
   level: ServeSkillLevel;
   modelInvocable: boolean;
+  installedPath?: string;
   argumentHint?: string;
   model?: string;
   extensionName?: string;

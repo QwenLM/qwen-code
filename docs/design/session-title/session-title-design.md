@@ -26,10 +26,10 @@ The goal is to make session names _useful by default_:
 
 ## Triggers
 
-| Trigger    | Conditions                                                                                                                                                          | Implementation                                                 |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| **Auto**   | After `recordAssistantTurn` fires. Skipped if an existing title is set, another attempt is in-flight, cap reached, non-interactive, env disabled, or no fast model. | `ChatRecordingService.maybeTriggerAutoTitle` — fire-and-forget |
-| **Manual** | User runs `/rename --auto`                                                                                                                                          | `renameCommand.ts` via `tryGenerateSessionTitle`               |
+| Trigger    | Conditions                                                                                                                                                                                                    | Implementation                                                 |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| **Auto**   | After `recordAssistantTurn` fires. Skipped if an existing or pending explicit title is set, recording has failed, another attempt is in-flight, cap reached, non-interactive, env disabled, or no fast model. | `ChatRecordingService.maybeTriggerAutoTitle` — fire-and-forget |
+| **Manual** | User runs `/rename --auto`                                                                                                                                                                                    | `renameCommand.ts` via `tryGenerateSessionTitle`               |
 
 Both paths funnel into a single function — `tryGenerateSessionTitle(config,
 signal)` — to guarantee identical prompt, schema, model selection, and
@@ -49,7 +49,7 @@ reason-specific error on failure.
 │  │  recordAssistantTurn()   │                                           │
 │  │     │                    │                                           │
 │  │     ↓                    │                                           │
-│  │  maybeTriggerAutoTitle() │── 6 guards ──→ IIFE(autoTitleController)  │
+│  │  maybeTriggerAutoTitle() │── guards ────→ IIFE(autoTitleController)  │
 │  │     │                    │                       │                   │
 │  │     └── resume hydrate   │                       ↓                   │
 │  │         via              │          tryGenerateSessionTitle          │
@@ -63,7 +63,7 @@ reason-specific error on failure.
 │  │ sessionService.ts        │         sanitizeTitle + sanity checks     │
 │  │                          │                         │                 │
 │  │  getSessionTitleInfo()   │◀── cross-process        ↓                 │
-│  │      uses                │    re-read             recordCustomTitle  │
+│  │      uses                │    re-read          persistCustomTitle    │
 │  │  readLastJsonString-     │    before write        (…, 'auto')        │
 │  │  FieldsSync              │                                           │
 │  │  (sessionStorageUtils)   │                                           │
@@ -203,6 +203,29 @@ surrogate after the max-length trim on the output path too.
 
 ## Persistence
 
+### Durable result contract
+
+`ChatRecordingService.recordCustomTitle()` returns `Promise<boolean>`.
+`true` means the `custom_title` record has completed the recorder's ordered
+JSONL write, the in-memory title and source have been updated, and the title
+observer has been notified. It does not mean merely accepted into the write
+queue. A file-creation failure, an existing recorder failure, an earlier
+queued write failure, or the title write's own rejection returns `false` and
+leaves the prior title and observer state unchanged. The recorder's canonical
+`flush()` still reports the sticky writer failure.
+
+The observer runs only after persistence. Observer exceptions are isolated
+because an already written title cannot be retroactively classified as a
+failed rename. The callback also receives the session ID captured in the
+persisted record; consumers must not read the mutable Config session at callback
+time. This prevents a delayed write from an outgoing recorder from renaming the
+new prompt bar after `/clear`, resume, or branch switches sessions.
+
+Background auto-title uses the same private persistence path but remains
+best-effort. Public calls are explicit title requests, including
+`recordCustomTitle(title, 'auto')` from `/rename --auto` and remote control
+surfaces.
+
 ### Record shape
 
 `CustomTitleRecordPayload` grows an optional `titleSource: 'auto' |
@@ -260,17 +283,21 @@ metadata read to an unrelated file.
 
 ### Trigger guard order
 
-`maybeTriggerAutoTitle` checks six conditions in this exact order — each
+`maybeTriggerAutoTitle` checks these conditions in this exact order — each
 short-circuits the rest so the cheap ones run first:
 
 1. `currentCustomTitle` set → skip. Never overwrite manual / prior auto.
-2. `autoTitleController !== undefined` → skip. One attempt at a time.
-3. `autoTitleAttempts >= 3` → skip. Cap bounds total waste.
-4. `!config.isInteractive()` → skip. Headless `qwen -p` / CI never spends
-   fast-model tokens on a one-shot session.
-5. `autoTitleDisabledByEnv()` → skip. `QWEN_DISABLE_AUTO_TITLE=1`
+2. Writer degraded → skip. A fail-stop recorder cannot persist a title, so
+   do not spend more fast-model tokens.
+3. Explicit title write pending → skip. User and remote intent wins even
+   before its JSONL write settles.
+4. `autoTitleController !== undefined` → skip. One attempt at a time.
+5. `autoTitleAttempts >= 3` → skip. Cap bounds total waste.
+6. `autoTitleDisabledByEnv()` → skip. `QWEN_DISABLE_AUTO_TITLE=1`
    explicit opt-out.
-6. `!config.getFastModel()` → skip. No fast-model → no-op.
+7. `!config.isInteractive()` → skip. Headless `qwen -p` / CI never spends
+   fast-model tokens on a one-shot session.
+8. `!config.getFastModel()` → skip. No fast-model → no-op.
 
 ### Why the cap is 3, not 1
 
@@ -305,12 +332,51 @@ fast-model call. The IIFE's `finally` block clears
 `autoTitleController` only if it's still the active one, so a finalize
 mid-flight doesn't race a concurrent `recordAssistantTurn`.
 
-### Manual `/rename` lands mid-flight
+### Explicit rename lands mid-flight
 
-Between the IIFE's `await` completing and the `recordCustomTitle('auto')`
-call, the user could `/rename foo`. The IIFE re-checks
-`this.currentTitleSource === 'manual'` and bails. The in-process check
-AND the cross-process re-read both run; manual wins at both layers.
+Every public `recordCustomTitle()` call increments a pending-explicit counter
+and aborts the active background controller before it waits for JSONL. This
+includes `/rename --auto`, so a model-generated explicit rename has the same
+priority as a literal user title. The background task checks the counter,
+abort signal, current title, and writer state both after generation and just
+before persistence. Concurrent explicit renames are serialized by the writer;
+their in-memory results commit in that same order. If an explicit title arrives
+after a background title is already queued, normal writer ordering makes the
+explicit title the final record.
+
+While an explicit title write is pending, `finalize()` does not re-anchor the
+previous cached title. Otherwise that stale record could be queued behind the
+rename and become the JSONL tail after the new title successfully lands.
+Title-anchor accounting follows logical writer queue order. Descendant records
+queued behind any unresolved title write are counted, but threshold re-anchor
+is deferred until the final cached title is known, so neither shutdown nor the
+32KB anchor path can append a stale title behind a successful rename.
+
+The cross-process re-read still protects manual titles written by another CLI
+process. It is not a compare-and-swap; an external rename in the final check-to-
+write window remains an accepted race.
+
+### Branch title ordering
+
+`/branch` finalizes and flushes the source recorder before copying it. It then
+loads the provisional fork, computes a unique branch title, persists that title
+through `SessionService`, and reloads the fork so its final tail and title cache
+include the appended record. Only after those steps succeed does it switch the
+core recorder and UI. A source flush failure, title failure, or final reload
+failure deletes the incomplete fork and leaves the original session active.
+`forkSession()` also removes its exclusive-created target if writing or closing
+the new JSONL fails before the call can report success, so the caller cannot
+leak a partial file during the window before it marks the fork as created.
+
+### Daemon boundary
+
+Live ACP title operations await `recordCustomTitle()` and therefore report a
+truthful `persisted` or `success` result without a second `flush()` that could
+attribute a later unrelated write failure to the rename. The daemon metadata
+PATCH remains intentionally optimistic: it updates live state and publishes
+its event immediately, while child persistence is best-effort and a false
+result is debug-logged. Strongly consistent HTTP metadata updates are outside
+this design.
 
 ## Configuration
 

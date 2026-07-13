@@ -52,7 +52,11 @@ import {
   type CommandDisplayCategoryOrder,
 } from '../utils/commandDisplay';
 import { useInputHistory } from '../hooks/useInputHistory';
-import { useAtMentionMenu, type AtMentionMenuState } from './useAtMentionMenu';
+import {
+  useAtMentionMenu,
+  type AtMentionMenuState,
+  type AtMentionWorkspaceActions,
+} from './useAtMentionMenu';
 import { useI18n } from '../i18n';
 import {
   inputHighlight,
@@ -1052,6 +1056,7 @@ export interface UseComposerCoreOptions {
   composerInputVersion?: number;
   builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
   atProviders?: readonly WebShellAtProvider[];
+  atWorkspaceCwd?: string;
   composerTagIcons?: WebShellComposerTagIconMap;
   renderComposerTag?: ComposerTagRenderer;
   renderComposerTagTooltip?: ComposerTagRenderer;
@@ -1199,6 +1204,7 @@ export function useComposerCore(
     composerInputVersion,
     builtinAtProviders,
     atProviders,
+    atWorkspaceCwd,
     composerTagIcons,
     renderComposerTag,
     renderComposerTagTooltip,
@@ -1240,8 +1246,52 @@ export function useComposerCore(
   onFocusFooterRef.current = onFocusFooter;
   const languageRef = useRef(language);
   languageRef.current = language;
-  const workspaceActionsRef = useRef(workspace?.actions);
-  workspaceActionsRef.current = workspace?.actions;
+  const workspaceActionsRef = useRef<AtMentionWorkspaceActions | undefined>(
+    undefined,
+  );
+  if (workspace && atWorkspaceCwd) {
+    const client = workspace.client.workspaceByCwd(atWorkspaceCwd);
+    workspaceActionsRef.current = {
+      ...workspace.actions,
+      async globWorkspace(pattern, options) {
+        if (options?.signal?.aborted) return { matches: [] };
+        const result = (await client.glob(pattern)) as { matches?: unknown[] };
+        if (options?.signal?.aborted) return { matches: [] };
+        const matches = Array.isArray(result.matches)
+          ? result.matches.filter(
+              (match): match is string => typeof match === 'string',
+            )
+          : [];
+        return {
+          matches:
+            options?.maxResults === undefined
+              ? matches
+              : matches.slice(0, options.maxResults),
+        };
+      },
+      async listDirectory(dirPath, options) {
+        if (options?.signal?.aborted) {
+          return { kind: 'list', path: dirPath, entries: [], truncated: false };
+        }
+        const result = (await client.dirList(dirPath)) as {
+          kind: 'list';
+          path: string;
+          entries: Array<{
+            name: string;
+            kind: 'file' | 'directory' | 'symlink' | 'other';
+            ignored: boolean;
+          }>;
+          truncated: boolean;
+        };
+        if (options?.signal?.aborted) {
+          return { kind: 'list', path: dirPath, entries: [], truncated: false };
+        }
+        return result;
+      },
+    };
+  } else {
+    workspaceActionsRef.current = workspace?.actions;
+  }
   const composerTagIconsRef = useRef(composerTagIcons);
   composerTagIconsRef.current = composerTagIcons;
   const renderComposerTagRef = useRef(renderComposerTag);
@@ -1293,6 +1343,7 @@ export function useComposerCore(
     disabledRef,
     shellModeRef,
     workspaceActionsRef,
+    workspaceKey: atWorkspaceCwd,
     builtinProviders: builtinAtProviders,
     providers: atProviders,
     createInlineTagEffect: (range) =>

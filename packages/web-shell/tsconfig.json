@@ -4,6 +4,10 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./client/*"]
+    },
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,

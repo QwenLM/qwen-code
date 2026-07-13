@@ -2467,9 +2467,10 @@ export class CoreToolScheduler {
                 `Tool blocked by plan mode: "${reqInfo.name}" is not a read-only tool. ` +
                   `Only read-only tools (read_file, grep_search, glob, list_directory, ` +
                   `web_fetch, etc.) are allowed in plan mode.` +
+                  ` Do NOT retry this tool. ` +
                   (isPlanRequiredTeammate
-                    ? ` Call exit_plan_mode to exit plan mode and execute this tool.`
-                    : ` Present your plan directly to the caller instead of executing this tool.`),
+                    ? `Pivot to read-only alternatives to gather the information you need, then call exit_plan_mode with a plan that covers this tool's purpose.`
+                    : `Pivot to read-only alternatives to gather equivalent information, then present your plan directly to the caller.`),
               );
               this.setStatusInternal(reqInfo.callId, 'error', {
                 ...createErrorResponse(
