@@ -1943,8 +1943,8 @@ describe('startInteractiveUI', () => {
         configurable: true,
       });
     }
-    restoreCiEnv();
     vi.unstubAllEnvs();
+    restoreCiEnv();
     const currentExitListeners = process.listeners(
       'exit',
     ) as NodeJS.ExitListener[];
@@ -2051,6 +2051,30 @@ describe('startInteractiveUI', () => {
 
   it('should not use alternate screen when TERM is dumb', async () => {
     vi.stubEnv('TERM', 'dumb');
+    const { render } = await import('ink');
+    const renderSpy = vi.mocked(render);
+
+    const mockInitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
+    await startInteractiveUI(
+      mockConfig,
+      mockSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      mockInitializationResult,
+    );
+
+    const [, options] = renderSpy.mock.calls[0];
+    expect(options).toMatchObject({ alternateScreen: false });
+  });
+
+  it('should not use alternate screen in CI with a TTY stdout', async () => {
+    vi.stubEnv('CI', 'true');
     const { render } = await import('ink');
     const renderSpy = vi.mocked(render);
 

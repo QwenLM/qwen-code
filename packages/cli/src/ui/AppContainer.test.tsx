@@ -435,8 +435,8 @@ describe('AppContainer State Management', () => {
         configurable: true,
       });
     }
-    restoreCiEnv();
     vi.unstubAllEnvs();
+    restoreCiEnv();
     cleanup();
   });
 
@@ -806,6 +806,35 @@ describe('AppContainer State Management', () => {
       );
 
       expect(capturedUIState.useTerminalBuffer).toBe(true);
+    });
+
+    it('keeps non-TTY output on the Static path', () => {
+      Object.defineProperty(process.stdout, 'isTTY', {
+        value: false,
+        configurable: true,
+      });
+      const defaultSettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={defaultSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(capturedUIState.useTerminalBuffer).toBe(false);
     });
 
     it('uses the startup VP decision when provided', () => {
