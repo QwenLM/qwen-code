@@ -31,6 +31,7 @@ describe('ci flaky rerun workflow', () => {
     expect(workflow).not.toContain('scan-main');
     expect(workflow).not.toContain('update-branch');
     expect(workflow).toContain('persist-credentials: false');
+    expect(workflow).toContain('set -o pipefail');
   });
 
   it('resolves the patrol identity from CI_BOT_PAT rather than a hardcoded login', () => {
@@ -65,6 +66,11 @@ describe('ci flaky rerun workflow', () => {
     expect(workflow).toContain('actions/download-artifact@');
     expect(workflow).toContain("GITHUB_TOKEN: ''");
     expect(workflow).toContain('settings: |-');
+    expect(workflow).toContain('"core": [');
+    expect(workflow).toContain('"read_file"');
+    expect(workflow).toContain('"write_file"');
+    expect(workflow).not.toContain('"shell"');
+    expect(workflow).not.toContain('"web"');
     expect(workflow).toContain('--max-candidates "${MAX_CANDIDATES_PER_RUN}"');
     expect(workflow).not.toContain('settings_json');
   });

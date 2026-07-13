@@ -64,8 +64,13 @@ function runner() {
     async comment(prNumber, body) {
       calls.push(['comment', prNumber, body]);
     },
-    async currentHeadSha() {
-      return 'abc123';
+    async currentPr(prNumber) {
+      return {
+        state: 'OPEN',
+        isDraft: false,
+        baseRefName: 'main',
+        headRefOid: prNumber === 43 ? 'def456' : 'abc123',
+      };
     },
     async isCurrentFailure() {
       return true;
@@ -73,7 +78,8 @@ function runner() {
     async behindBy() {
       return 1;
     },
-    async mainRunSucceeded() {
+    async mainRunSucceeded(_runId, workflow) {
+      if (workflow !== 'ci.yml') return false;
       return true;
     },
     async mainHeadSha() {
@@ -284,8 +290,8 @@ if (args[0] === 'pr' && args[1] === 'list') {
   process.stdout.write(JSON.stringify([pr(42, 'old-head', 123, 1), pr(43, 'new-head', 124, 2)]));
 } else if (args[0] === 'api' && args[1] === '--paginate' && args[2].includes('/issues/')) {
   process.stdout.write('');
-} else if (args[0] === 'run' && args[1] === 'list') {
-  process.stdout.write(JSON.stringify([{ databaseId: 456, headSha: 'main-head', conclusion: 'success' }]));
+} else if (args[0] === 'api' && args[1].includes('/actions/workflows/ci.yml/runs')) {
+  process.stdout.write(JSON.stringify({ workflow_runs: [{ id: 456, head_sha: 'main-head', event: 'push', conclusion: 'success' }] }));
 } else if (args[0] === 'api' && args[1].includes('/commits/main')) {
   process.stdout.write('main-head\\n');
 } else if (args[0] === 'api' && args[1].includes('/compare/')) {
@@ -340,6 +346,154 @@ if (args[0] === 'pr' && args[1] === 'list') {
     }
   }, 15_000);
 
+  it('continues to an older unhandled run when the newest run was handled', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ci-flaky-scan-'));
+    try {
+      const fakeGh = join(dir, 'gh');
+      writeFileSync(
+        fakeGh,
+        `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === 'pr' && args[1] === 'list') {
+  process.stdout.write(JSON.stringify([{
+    number: 42,
+    isDraft: false,
+    baseRefName: 'main',
+    headRefOid: 'abc123',
+    updatedAt: '2026-07-12T07:30:00.000Z',
+    statusCheckRollup: [
+      {
+        databaseId: 1,
+        name: 'E2E Tests',
+        status: 'COMPLETED',
+        conclusion: 'FAILURE',
+        completedAt: '2026-07-12T07:10:00.000Z',
+        detailsUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/123/jobs/1',
+      },
+      {
+        databaseId: 2,
+        name: 'E2E Tests',
+        status: 'COMPLETED',
+        conclusion: 'FAILURE',
+        completedAt: '2026-07-12T07:20:00.000Z',
+        detailsUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/124/jobs/2',
+      },
+    ],
+  }]));
+} else if (args[0] === 'api' && args[1] === '--paginate' && args[2].includes('/issues/')) {
+  process.stdout.write(JSON.stringify({
+    body: '<!-- qwen-ci-flaky-rerun v=2 pr=42 head=abc123 run=124 attempt=1 action=rerun key=old check=E2E%20Tests count=1 -->',
+    createdAt: '2026-07-12T07:25:00Z',
+    author: { login: 'trusted-patrol-bot' },
+  }) + '\\n');
+} else if (args[0] === 'api' && args[1].includes('/actions/workflows/ci.yml/runs')) {
+  process.stdout.write(JSON.stringify({ workflow_runs: [{ id: 456, head_sha: 'main-head', event: 'push', conclusion: 'success' }] }));
+} else if (args[0] === 'api' && args[1].includes('/commits/main')) {
+  process.stdout.write('main-head\\n');
+} else if (args[0] === 'api' && args[1].includes('/compare/')) {
+  process.stdout.write('1\\n');
+} else if (args[0] === 'api' && args[1].includes('/actions/runs/')) {
+  process.stdout.write('1\\n');
+} else if (args[0] === 'api' && args[1].includes('/actions/jobs/1/logs')) {
+  process.stdout.write('Error: runner network timeout\\n');
+} else {
+  process.stderr.write('unexpected gh call: ' + args.join(' ') + '\\n');
+  process.exit(1);
+}
+`,
+      );
+      chmodSync(fakeGh, 0o755);
+
+      const output = execFileSync(
+        'node',
+        [
+          '.github/scripts/ci-flaky-rerun.mjs',
+          'scan',
+          '--repo',
+          'QwenLM/qwen-code',
+          '--workdir',
+          dir,
+          '--max-candidates',
+          '1',
+          '--trusted-marker-login',
+          'trusted-patrol-bot',
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
+        },
+      );
+
+      expect(output).toContain('target_found=true');
+      const input = JSON.parse(readFileSync(join(dir, 'ci-flaky-input.json')));
+      expect(input.candidates).toMatchObject([{ prNumber: 42, runId: 123 }]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it('skips a candidate when the workflow run attempt changed after scanning', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ci-flaky-scan-'));
+    try {
+      const fakeGh = join(dir, 'gh');
+      writeFileSync(
+        fakeGh,
+        `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === 'pr' && args[1] === 'list') {
+  process.stdout.write(JSON.stringify([{
+    number: 42,
+    isDraft: false,
+    baseRefName: 'main',
+    headRefOid: 'abc123',
+    updatedAt: '2026-07-12T07:30:00.000Z',
+    statusCheckRollup: [{
+      databaseId: 1,
+      name: 'E2E Tests',
+      status: 'COMPLETED',
+      conclusion: 'FAILURE',
+      completedAt: '2026-07-12T07:20:00.000Z',
+      detailsUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/123/jobs/1',
+      runAttempt: 1,
+    }],
+  }]));
+} else if (args[0] === 'api' && args[1].includes('/actions/runs/123')) {
+  process.stdout.write('2\\n');
+} else {
+  process.stdout.write(args[0] === 'api' && args[1] === '--paginate' ? '' : '[]');
+}
+`,
+      );
+      chmodSync(fakeGh, 0o755);
+
+      const output = execFileSync(
+        'node',
+        [
+          '.github/scripts/ci-flaky-rerun.mjs',
+          'scan',
+          '--repo',
+          'QwenLM/qwen-code',
+          '--workdir',
+          dir,
+          '--max-candidates',
+          '1',
+          '--trusted-marker-login',
+          'trusted-patrol-bot',
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
+        },
+      );
+
+      expect(output).toContain('target_found=false');
+      const input = JSON.parse(readFileSync(join(dir, 'ci-flaky-input.json')));
+      expect(input.candidates).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
   it('can rank candidates before fetching comments', () => {
     expect(selectCandidateTargets([pr()], { now: NOW })).toMatchObject([
       {
@@ -349,7 +503,7 @@ if (args[0] === 'pr' && args[1] === 'list') {
     ]);
   });
 
-  it('keeps one newest failed run per PR while retaining every failed PR', () => {
+  it('orders each PR by newest failure without letting newer PRs starve older PRs', () => {
     expect(
       selectCandidateTargets([
         pr({
@@ -372,6 +526,7 @@ if (args[0] === 'pr' && args[1] === 'list') {
       ]).map((target) => [target.prNumber, target.runId]),
     ).toEqual([
       [41, 122],
+      [41, 121],
       [42, 123],
     ]);
   });
@@ -403,7 +558,11 @@ if (args[0] === 'pr' && args[1] === 'list') {
 
   it('counts matching failures across PR head changes', async () => {
     const client = runner();
-    client.failureActionCount = async () => 2;
+    const countCalls = [];
+    client.failureActionCount = async (...args) => {
+      countCalls.push(args);
+      return 2;
+    };
     const target = {
       ...selectTarget([pr()], { now: NOW }),
       failureKey: 'runner-network-timeout',
@@ -419,6 +578,24 @@ if (args[0] === 'pr' && args[1] === 'list') {
 
     expect(client.calls[1][2]).toContain('key=runner-network-timeout');
     expect(client.calls[1][2]).toContain('count=3');
+    expect(countCalls).toEqual([[42, 'abc123', 'runner-network-timeout']]);
+  });
+
+  it('uses the PR head when reading prior action counts', () => {
+    expect(script).toContain(
+      'async failureActionCount(prNumber, headSha, key)',
+    );
+    expect(script).toContain(
+      '.filter((state) => state.headSha === headSha && state.key === key)',
+    );
+  });
+
+  it('uses push runs from the trusted main CI workflow as update-branch evidence', () => {
+    expect(script).toContain(
+      '`repos/${this.repo}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=30`',
+    );
+    expect(script).toContain("run.event === 'push'");
+    expect(script).not.toContain("'run',\n        'list',");
   });
 
   it('stops after three actions for the same PR failure key', async () => {
@@ -568,9 +745,6 @@ if (args[0] === 'pr' && args[1] === 'list') {
         { now: NOW },
       ),
     ];
-    client.currentHeadSha = async (prNumber) =>
-      prNumber === 42 ? 'abc123' : 'def456';
-
     await actOnDecisions(client, targets, [
       {
         prNumber: 42,
@@ -594,6 +768,40 @@ if (args[0] === 'pr' && args[1] === 'list') {
 
     expect(client.calls).toHaveLength(2);
     expect(client.calls[0]).toEqual(['rerunFailedJobs', 123]);
+  });
+
+  it('ignores duplicate decisions for the same scanned target', async () => {
+    const client = runner();
+    const target = selectTarget([pr()], { now: NOW });
+
+    await actOnDecisions(
+      client,
+      [target],
+      [
+        {
+          prNumber: 42,
+          headSha: 'abc123',
+          runId: 123,
+          action: 'rerun',
+          confidence: 'high',
+          reason_en: 'runner timeout',
+          reason_zh: 'runner 超时。',
+        },
+        {
+          prNumber: 42,
+          headSha: 'abc123',
+          runId: 123,
+          action: 'rerun',
+          confidence: 'high',
+          reason_en: 'runner timeout',
+          reason_zh: 'runner 超时。',
+        },
+      ],
+    );
+
+    expect(
+      client.calls.filter((call) => call[0] === 'rerunFailedJobs'),
+    ).toEqual([['rerunFailedJobs', 123]]);
   });
 
   it('does not act when the failed run is no longer current', async () => {
@@ -635,6 +843,7 @@ if (args[0] === 'pr' && args[1] === 'list') {
       ...selectTarget([pr()], { now: NOW }),
       mainHeadSha: 'main-head',
       mainRunId: 456,
+      mainWorkflow: 'ci.yml',
     };
 
     await actOnDecision(client, target, {
@@ -657,6 +866,26 @@ if (args[0] === 'pr' && args[1] === 'list') {
     ]);
   });
 
+  it('does not update a branch without a matching main workflow identity', async () => {
+    const client = runner();
+    const target = {
+      ...selectTarget([pr()], { now: NOW }),
+      mainHeadSha: 'main-head',
+      mainRunId: 456,
+      mainWorkflow: 'other.yml',
+    };
+
+    await actOnDecision(client, target, {
+      action: 'update_branch',
+      confidence: 'high',
+      mainRunId: 456,
+      reason_en: 'main contains the needed CI fix',
+      reason_zh: 'main 包含所需的 CI 修复。',
+    });
+
+    expect(client.calls).toEqual([]);
+  });
+
   it('does not update a branch without a verified successful main run', async () => {
     const client = runner();
 
@@ -676,9 +905,6 @@ if (args[0] === 'pr' && args[1] === 'list') {
       client.calls.push(['rerunFailedJobs', runId]);
       if (runId === 123) throw new Error('temporary gh failure');
     };
-    client.currentHeadSha = async (prNumber) =>
-      prNumber === 42 ? 'abc123' : 'def456';
-
     await actOnDecisions(
       client,
       [
@@ -726,6 +952,7 @@ if (args[0] === 'pr' && args[1] === 'list') {
       ...selectTarget([pr()], { now: NOW }),
       mainHeadSha: 'main-head',
       mainRunId: 456,
+      mainWorkflow: 'ci.yml',
     };
 
     await actOnDecision(client, target, {
@@ -776,7 +1003,12 @@ if (args[0] === 'pr' && args[1] === 'list') {
 
   it('does not update a branch after a new push changes its head', async () => {
     const client = runner();
-    client.currentHeadSha = async () => 'new-head';
+    client.currentPr = async () => ({
+      state: 'OPEN',
+      isDraft: false,
+      baseRefName: 'main',
+      headRefOid: 'new-head',
+    });
     const target = selectTarget([pr()], { now: NOW });
 
     await actOnDecision(client, target, {
@@ -789,9 +1021,49 @@ if (args[0] === 'pr' && args[1] === 'list') {
     expect(client.calls).toEqual([]);
   });
 
+  it('does not act when the PR is closed, draft, or retargeted away from main', async () => {
+    for (const currentPr of [
+      {
+        state: 'CLOSED',
+        isDraft: false,
+        baseRefName: 'main',
+        headRefOid: 'abc123',
+      },
+      {
+        state: 'OPEN',
+        isDraft: true,
+        baseRefName: 'main',
+        headRefOid: 'abc123',
+      },
+      {
+        state: 'OPEN',
+        isDraft: false,
+        baseRefName: 'release',
+        headRefOid: 'abc123',
+      },
+    ]) {
+      const client = runner();
+      client.currentPr = async () => currentPr;
+
+      await actOnDecision(client, selectTarget([pr()], { now: NOW }), {
+        action: 'rerun',
+        confidence: 'high',
+        reason_en: 'The log shows a runner network timeout.',
+        reason_zh: '日志显示 runner 网络超时。',
+      });
+
+      expect(client.calls).toEqual([]);
+    }
+  });
+
   it('does not rerun or comment after a new push changes the head', async () => {
     const client = runner();
-    client.currentHeadSha = async () => 'new-head';
+    client.currentPr = async () => ({
+      state: 'OPEN',
+      isDraft: false,
+      baseRefName: 'main',
+      headRefOid: 'new-head',
+    });
     const target = selectTarget([pr()], { now: NOW });
 
     await actOnDecision(client, target, {
@@ -965,6 +1237,7 @@ if (args[0] === 'pr' && args[1] === 'list') {
               'API_TOKEN=secret-value',
               'Errors:',
               'Cookie: session=another-session-secret',
+              'Error: Set-Cookie: session=prefixed-session-secret',
               'Extra key in zh.js (not in en.js): "toolDisplayName.DeferredToolCall"',
               'Error: NODE_AUTH_TOKEN: another-secret',
               'Error: Authorization: Basic c2VjcmV0LWNyZWRlbnRpYWw=',
@@ -988,6 +1261,7 @@ if (args[0] === 'pr' && args[1] === 'list') {
       expect(log).toContain('Extra key in zh.js');
       expect(log).not.toContain('secret-value');
       expect(log).not.toContain('another-session-secret');
+      expect(log).not.toContain('prefixed-session-secret');
       expect(log).not.toContain('another-secret');
       expect(log).not.toContain('c2VjcmV0LWNyZWRlbnRpYWw=');
       expect(log).not.toContain('AKIAIOSFODNN7EXAMPLE');

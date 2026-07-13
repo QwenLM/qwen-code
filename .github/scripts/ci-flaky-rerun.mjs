@@ -111,7 +111,7 @@ function stateMarkers(comments, prNumber, trustedMarkerLogin) {
 
 function redactLogLine(line) {
   return line
-    .replace(/^(?:Set-)?Cookie:\s*.*/i, 'Cookie: [redacted]')
+    .replace(/((?:Set-)?Cookie:\s*)[^\r\n]*/gi, '$1[redacted]')
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, '$1[redacted]')
     .replace(/(Authorization:\s*)\S+(?:\s+\S+)?/gi, '$1[redacted]')
     .replace(
@@ -188,15 +188,21 @@ export function selectCandidateTargets(prs, options = {}) {
     }
   }
 
-  const seenPrs = new Set();
-  return targets
-    .sort((a, b) => timeMs(b.completedAt) - timeMs(a.completedAt))
-    .filter((target) => {
-      if (seenPrs.has(target.prNumber)) return false;
-      seenPrs.add(target.prNumber);
-      return true;
-    })
-    .sort((a, b) => timeMs(a.completedAt) - timeMs(b.completedAt));
+  const newestFailureByPr = new Map();
+  for (const target of targets) {
+    const current = newestFailureByPr.get(target.prNumber);
+    if (!current || timeMs(target.completedAt) > timeMs(current.completedAt)) {
+      newestFailureByPr.set(target.prNumber, target);
+    }
+  }
+
+  return targets.sort((a, b) => {
+    const newestA = newestFailureByPr.get(a.prNumber);
+    const newestB = newestFailureByPr.get(b.prNumber);
+    const prOrder = timeMs(newestA.completedAt) - timeMs(newestB.completedAt);
+    if (prOrder !== 0) return prOrder;
+    return timeMs(b.completedAt) - timeMs(a.completedAt);
+  });
 }
 
 export function selectTarget(prs, options = {}) {
@@ -208,15 +214,28 @@ export function selectTarget(prs, options = {}) {
   );
 }
 
+async function isActionablePr(client, target) {
+  const pr = await client.currentPr(target.prNumber);
+  return (
+    pr.state === 'OPEN' &&
+    pr.isDraft === false &&
+    pr.baseRefName === 'main' &&
+    pr.headRefOid === target.headSha
+  );
+}
+
 export async function actOnDecision(client, target, decision) {
   if (!target) return;
   if (decision?.action === 'no_action') {
-    if ((await client.currentHeadSha(target.prNumber)) !== target.headSha)
-      return;
+    if (!(await isActionablePr(client, target))) return;
     if (!(await client.isCurrentFailure(target))) return;
     const key = failureKey(target, decision);
     if (!key) return;
-    const actionCount = await client.failureActionCount(target.prNumber, key);
+    const actionCount = await client.failureActionCount(
+      target.prNumber,
+      target.headSha,
+      key,
+    );
     if (actionCount >= MAX_ACTIONS_PER_HEAD) return;
     await client.comment(
       target.prNumber,
@@ -226,11 +245,15 @@ export async function actOnDecision(client, target, decision) {
   }
   if (decision?.confidence !== 'high') return;
   if (!['rerun', 'update_branch', 'comment'].includes(decision.action)) return;
-  if ((await client.currentHeadSha(target.prNumber)) !== target.headSha) return;
+  if (!(await isActionablePr(client, target))) return;
   if (!(await client.isCurrentFailure(target))) return;
   const key = failureKey(target, decision);
   if (!key) return;
-  const actionCount = await client.failureActionCount(target.prNumber, key);
+  const actionCount = await client.failureActionCount(
+    target.prNumber,
+    target.headSha,
+    key,
+  );
   if (actionCount >= MAX_ACTIONS_PER_HEAD) return;
   const nextTarget = { ...target, actionCount };
 
@@ -256,7 +279,10 @@ export async function actOnDecision(client, target, decision) {
       (await client.mainHeadSha()) !== target.mainHeadSha
     )
       return;
-    if (!(await client.mainRunSucceeded(decision.mainRunId))) return;
+    if (
+      !(await client.mainRunSucceeded(decision.mainRunId, target.mainWorkflow))
+    )
+      return;
     await client.updateBranch(target.prNumber, target.headSha);
     await client.comment(
       target.prNumber,
@@ -296,11 +322,13 @@ export async function actOnDecisions(client, targets, decisions) {
       target,
     ]),
   );
+  const processed = new Set();
   for (const decision of decisions ?? []) {
-    const target = targetsById.get(
-      `${decision.prNumber}:${decision.headSha}:${decision.runId}`,
-    );
+    const id = `${decision.prNumber}:${decision.headSha}:${decision.runId}`;
+    if (processed.has(id)) continue;
+    const target = targetsById.get(id);
     if (!target) continue;
+    processed.add(id);
     try {
       await actOnDecision(client, target, decision);
     } catch (error) {
@@ -430,14 +458,14 @@ class GhClient {
     return (await this.gh(['api', 'user', '--jq', '.login'])).trim();
   }
 
-  async failureActionCount(prNumber, key) {
+  async failureActionCount(prNumber, headSha, key) {
     return (
       stateMarkers(
         await this.comments(prNumber),
         prNumber,
         this.trustedMarkerLogin,
       )
-        .filter((state) => state.key === key)
+        .filter((state) => state.headSha === headSha && state.key === key)
         .at(-1)?.count ?? 0
     );
   }
@@ -470,8 +498,8 @@ class GhClient {
     ]);
   }
 
-  async currentHeadSha(prNumber) {
-    return (
+  async currentPr(prNumber) {
+    return JSON.parse(
       await this.gh([
         'pr',
         'view',
@@ -479,11 +507,9 @@ class GhClient {
         '--repo',
         this.repo,
         '--json',
-        'headRefOid',
-        '--jq',
-        '.headRefOid',
-      ])
-    ).trim();
+        'headRefOid,state,isDraft,baseRefName',
+      ]),
+    );
   }
 
   async isCurrentFailure(target) {
@@ -511,12 +537,14 @@ class GhClient {
     );
   }
 
-  async mainRunSucceeded(runId) {
+  async mainRunSucceeded(runId, workflow) {
     const run = JSON.parse(
       await this.gh(['api', `repos/${this.repo}/actions/runs/${runId}`]),
     );
     return (
+      run.event === 'push' &&
       run.head_branch === 'main' &&
+      run.path === `.github/workflows/${workflow}` &&
       run.status === 'completed' &&
       run.conclusion === 'success'
     );
@@ -530,27 +558,25 @@ class GhClient {
 
   async mainEvidence() {
     const headSha = await this.mainHeadSha();
-    const runs = JSON.parse(
+    const response = JSON.parse(
       await this.gh([
-        'run',
-        'list',
-        '--repo',
-        this.repo,
-        '--branch',
-        'main',
-        '--status',
-        'success',
-        '--limit',
-        '30',
-        '--json',
-        'databaseId,headSha,conclusion',
+        'api',
+        `repos/${this.repo}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=30`,
       ]),
     );
-    const run = runs.find(
+    const run = response.workflow_runs.find(
       (candidate) =>
-        candidate.headSha === headSha && candidate.conclusion === 'success',
+        candidate.head_sha === headSha &&
+        candidate.event === 'push' &&
+        candidate.conclusion === 'success',
     );
-    return run ? { mainHeadSha: headSha, mainRunId: run.databaseId } : {};
+    return run
+      ? {
+          mainHeadSha: headSha,
+          mainRunId: run.id,
+          mainWorkflow: 'ci.yml',
+        }
+      : {};
   }
 
   async behindBy(headSha) {
@@ -560,7 +586,7 @@ class GhClient {
           'api',
           `repos/${this.repo}/compare/${headSha}...main`,
           '--jq',
-          '.behind_by',
+          '.ahead_by',
         ])
       ).trim(),
     );
@@ -656,14 +682,17 @@ async function scan(args) {
       ? requestedMax
       : DEFAULT_MAX_CANDIDATES_PER_RUN;
   const inputs = [];
+  const selectedPrs = new Set();
   let mainEvidence;
   for (const candidate of candidates) {
     if (inputs.length >= maxCandidates) break;
+    if (selectedPrs.has(candidate.prNumber)) continue;
     try {
       const pr = prs.find((item) => item.number === candidate.prNumber);
+      const liveAttempt = await client.runAttempt(candidate.runId);
+      if (liveAttempt !== candidate.runAttempt) continue;
       const target = {
         ...candidate,
-        runAttempt: await client.runAttempt(candidate.runId),
       };
       const comments = await client.comments(candidate.prNumber);
       if (!canAct({ ...pr, comments }, target, options)) continue;
@@ -674,6 +703,7 @@ async function scan(args) {
         behindBy: await client.behindBy(input.headSha),
         ...mainEvidence,
       });
+      selectedPrs.add(candidate.prNumber);
     } catch (error) {
       process.stderr.write(
         `scan: skipping PR ${candidate.prNumber}: ${error.message}\n`,

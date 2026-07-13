@@ -68,6 +68,7 @@ jobs:
         env:
           GH_TOKEN: '${{ github.token }}'
         run: |-
+          set -o pipefail
           mkdir -p "${WORKDIR}"
           node .github/scripts/ci-flaky-rerun.mjs scan \
             --repo "${{ github.repository }}" \
@@ -96,7 +97,11 @@ jobs:
           settings: |-
             {
               "tools": {
-                "sandbox": true
+                "sandbox": true,
+                "core": [
+                  "read_file",
+                  "write_file"
+                ]
               }
             }
           prompt: |-
