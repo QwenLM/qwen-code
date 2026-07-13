@@ -17,6 +17,7 @@ const DEFAULT_STALE_MINUTES = 30;
 const DEFAULT_ACTIVE_DAYS = 7;
 const DEFAULT_MAX_CANDIDATES_PER_RUN = 5;
 const MAX_ACTIONS_PER_HEAD = 3;
+const MAIN_CI_WORKFLOW = 'ci.yml';
 const MARKER = 'qwen-ci-flaky-rerun';
 
 function timeMs(value) {
@@ -392,7 +393,10 @@ export async function writeSkillInputs(
       });
       candidates.at(-1).failureKey = fingerprint(target, candidates.at(-1).log);
       if (candidates.length >= maxCandidates) break;
-    } catch {
+    } catch (error) {
+      process.stderr.write(
+        `writeSkillInputs: skipping job ${target.jobId} (PR ${target.prNumber}): ${error.message}\n`,
+      );
       // Expired Actions logs cannot be classified safely; try the next PR.
     }
   }
@@ -562,7 +566,7 @@ class GhClient {
     const response = JSON.parse(
       await this.gh([
         'api',
-        `repos/${this.repo}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=30`,
+        `repos/${this.repo}/actions/workflows/${MAIN_CI_WORKFLOW}/runs?branch=main&event=push&status=success&per_page=30`,
       ]),
     );
     const run = response.workflow_runs.find(
@@ -575,7 +579,7 @@ class GhClient {
       ? {
           mainHeadSha: headSha,
           mainRunId: run.id,
-          mainWorkflow: 'ci.yml',
+          mainWorkflow: MAIN_CI_WORKFLOW,
         }
       : {};
   }
@@ -640,6 +644,12 @@ function writeJson(workdir, name, value) {
   writeFileSync(resolve(workdir, name), `${JSON.stringify(value, null, 2)}\n`);
 }
 
+function requiredArg(args, name) {
+  const value = args.get(name);
+  if (!value) throw new Error(`--${name} is required`);
+  return value;
+}
+
 async function trustedMarkerLogin(args, client) {
   const login =
     args.get('trusted-marker-login') ?? (await client.viewerLogin());
@@ -659,7 +669,9 @@ async function skillCandidate(client, target) {
 }
 
 async function scan(args) {
-  const client = new GhClient(args.get('repo'));
+  const repo = requiredArg(args, 'repo');
+  const workdir = requiredArg(args, 'workdir');
+  const client = new GhClient(repo);
   const trustedLogin = await trustedMarkerLogin(args, client);
   const parsedActiveDays = Number(args.get('active-days'));
   const activeDays =
@@ -711,7 +723,7 @@ async function scan(args) {
       );
     }
   }
-  writeJson(args.get('workdir'), 'ci-flaky-input.json', { candidates: inputs });
+  writeJson(workdir, 'ci-flaky-input.json', { candidates: inputs });
   process.stdout.write(
     `target_found=${inputs.length > 0 ? 'true' : 'false'}\n`,
   );
@@ -719,20 +731,22 @@ async function scan(args) {
 }
 
 async function act(args) {
-  const workdir = args.get('workdir');
+  const repo = requiredArg(args, 'repo');
+  const workdir = requiredArg(args, 'workdir');
   const { candidates } = JSON.parse(
     readFileSync(resolve(workdir, 'ci-flaky-input.json')),
   );
   const { decisions } = JSON.parse(
     readFileSync(resolve(workdir, 'ci-flaky-decisions.json')),
   );
-  const client = new GhClient(args.get('repo'));
+  const client = new GhClient(repo);
   await trustedMarkerLogin(args, client);
   await actOnDecisions(client, candidates, decisions);
 }
 
 async function reset(args) {
-  const client = new GhClient(args.get('repo'));
+  const repo = requiredArg(args, 'repo');
+  const client = new GhClient(repo);
   await trustedMarkerLogin(args, client);
   await resetSuccessfulFailures(client, await client.markerPrs());
 }

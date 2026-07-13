@@ -103,6 +103,38 @@ describe('ci flaky rerun patrol', () => {
     ).toThrow(/command must be scan, act, or reset/);
   });
 
+  it('reports clear required argument errors before invoking gh', () => {
+    expect(() =>
+      execFileSync(
+        'node',
+        [
+          '.github/scripts/ci-flaky-rerun.mjs',
+          'scan',
+          '--workdir',
+          tmpdir(),
+          '--trusted-marker-login',
+          'qwen-code-ci-bot',
+        ],
+        { encoding: 'utf8' },
+      ),
+    ).toThrow(/--repo is required/);
+
+    expect(() =>
+      execFileSync(
+        'node',
+        [
+          '.github/scripts/ci-flaky-rerun.mjs',
+          'act',
+          '--repo',
+          'QwenLM/qwen-code',
+          '--trusted-marker-login',
+          'qwen-code-ci-bot',
+        ],
+        { encoding: 'utf8' },
+      ),
+    ).toThrow(/--workdir is required/);
+  });
+
   it('selects the newest stale failed PR run', () => {
     expect(selectTarget([pr()], { now: NOW, staleMinutes: 30 })).toMatchObject({
       prNumber: 42,
@@ -596,8 +628,9 @@ if (args[0] === 'pr' && args[1] === 'list') {
   });
 
   it('uses push runs from the trusted main CI workflow as update-branch evidence', () => {
+    expect(script).toContain("const MAIN_CI_WORKFLOW = 'ci.yml';");
     expect(script).toContain(
-      '`repos/${this.repo}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=30`',
+      '`repos/${this.repo}/actions/workflows/${MAIN_CI_WORKFLOW}/runs?branch=main&event=push&status=success&per_page=30`',
     );
     expect(script).toContain("run.event === 'push'");
     expect(script).not.toContain("'run',\n        'list',");
@@ -988,13 +1021,18 @@ if (args[0] === 'pr' && args[1] === 'list') {
         decision: { mainRunId: 999 },
       },
       { mutate: (client) => (client.mainRunSucceeded = async () => false) },
+      {
+        target: (({ mainHeadSha: _mainHeadSha, ...target }) => target)(
+          completeTarget,
+        ),
+      },
     ];
 
     for (const testCase of cases) {
       const client = runner();
       testCase.mutate?.(client);
 
-      await actOnDecision(client, completeTarget, {
+      await actOnDecision(client, testCase.target ?? completeTarget, {
         action: 'update_branch',
         confidence: 'high',
         mainRunId: 456,
@@ -1278,6 +1316,34 @@ if (args[0] === 'pr' && args[1] === 'list') {
       );
       expect(input.candidates).toMatchObject([{ prNumber: 43, runId: 124 }]);
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('logs skipped skill input targets with the GitHub error', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ci-flaky-rerun-'));
+    const originalWrite = process.stderr.write;
+    const stderr = [];
+    process.stderr.write = (chunk) => {
+      stderr.push(String(chunk));
+      return true;
+    };
+    try {
+      await writeSkillInputs(
+        {
+          async jobLog() {
+            throw new Error('HTTP 410');
+          },
+        },
+        [selectTarget([pr()], { now: NOW })],
+        dir,
+      );
+
+      expect(stderr.join('')).toContain(
+        'writeSkillInputs: skipping job 1 (PR 42): HTTP 410',
+      );
+    } finally {
+      process.stderr.write = originalWrite;
       rmSync(dir, { recursive: true, force: true });
     }
   });
