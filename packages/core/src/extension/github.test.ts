@@ -1508,6 +1508,20 @@ describe('git extension helpers', () => {
       expect(repo).toBe('repo');
     });
 
+    it('should not strip .git from the middle of a repo name (GitHub Pages)', () => {
+      const source = 'https://github.com/owner/owner.github.io';
+      const { owner, repo } = parseGitHubRepoForReleases(source);
+      expect(owner).toBe('owner');
+      expect(repo).toBe('owner.github.io');
+    });
+
+    it('should only strip a trailing .git, not an embedded one', () => {
+      const { repo } = parseGitHubRepoForReleases(
+        'owner/my.gitignore-tools.git',
+      );
+      expect(repo).toBe('my.gitignore-tools');
+    });
+
     it('should fail on a GitHub SSH URL', () => {
       const source = 'git@github.com:owner/repo.git';
       expect(() => parseGitHubRepoForReleases(source)).toThrow(
