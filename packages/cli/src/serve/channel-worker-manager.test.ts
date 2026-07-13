@@ -160,6 +160,47 @@ describe('createChannelWorkerManager', () => {
     expect(test.onCommittedSelection).toHaveBeenCalledTimes(2);
   });
 
+  it('restores idle and classifies workspace topology reconcile failures', async () => {
+    const test = setup();
+    const selection: ServeChannelSelection = {
+      mode: 'names',
+      names: ['telegram'],
+    };
+    await test.manager.setSelection(selection);
+    vi.mocked(test.group.reconcile).mockRejectedValueOnce(
+      new ChannelWorkerReconcileError('secondary failed', {
+        rolledBack: true,
+      }),
+    );
+
+    await expect(test.manager.refreshWorkspaces()).rejects.toMatchObject({
+      code: 'channel_worker_start_failed',
+      rolledBack: true,
+    });
+    expect(test.manager.state()).toMatchObject({
+      transition: 'idle',
+      selection,
+    });
+  });
+
+  it('restores idle when workspace topology resolution fails', async () => {
+    const test = setup();
+    const selection: ServeChannelSelection = {
+      mode: 'names',
+      names: ['telegram'],
+    };
+    await test.manager.setSelection(selection);
+    test.resolveGroups.mockRejectedValueOnce(new Error('settings invalid'));
+
+    await expect(test.manager.refreshWorkspaces()).rejects.toThrow(
+      'settings invalid',
+    );
+    expect(test.manager.state()).toMatchObject({
+      transition: 'idle',
+      selection,
+    });
+  });
+
   it('starts the initial selection through the boot-time path', async () => {
     const test = setup();
     const selection: ServeChannelSelection = {

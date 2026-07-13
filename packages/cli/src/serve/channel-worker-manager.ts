@@ -480,11 +480,20 @@ export function createChannelWorkerManager(
     refreshWorkspaces() {
       return enqueue(async () => {
         if (!group || !committedSelection) return;
-        const targetGroups = await opts.resolveGroups(
-          committedSelection,
-          'reload',
-        );
-        await group.reconcile(targetGroups);
+        setTransition('reconciling', committedSelection);
+        let targetGroups: readonly ChannelWorkspaceGroup[];
+        try {
+          targetGroups = await opts.resolveGroups(committedSelection, 'reload');
+        } catch (error) {
+          setTransition('idle');
+          throw error;
+        }
+        try {
+          await group.reconcile(targetGroups);
+        } catch (error) {
+          setTransition('idle');
+          throw classifyFailure(error, 'channel_worker_start_failed');
+        }
         commit(committedSelection, targetGroups);
       });
     },
