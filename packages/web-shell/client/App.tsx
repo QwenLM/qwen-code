@@ -20,6 +20,7 @@ import {
   useStreamingState,
   useTranscriptBlocks,
   useTranscriptStore,
+  useWorkspace,
   useWorkspaceActions,
   useWorkspaceEventSignals,
   type DaemonWorkspaceActions,
@@ -130,7 +131,6 @@ import {
 } from './utils/copyCommand';
 import { isEditableTarget } from './utils/dom';
 import { getModelDisplayName } from './utils/modelDisplay';
-import { hasMultipleWorkspaces, workspaceBasename } from './utils/workspace';
 import { isVisibleComposerModel } from './utils/composerModels';
 import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
 import { decideEscapeIntent } from './utils/escapeIntent';
@@ -194,6 +194,7 @@ import {
   THEME_SETTING_KEY,
   LANGUAGE_SETTING_KEY,
   themeSettingToWebShellTheme,
+  webShellThemeToSettingValue,
   type WebShellTheme,
 } from './themeContext';
 import {
@@ -412,7 +413,7 @@ export interface WebShellSidebarOptions {
   defaultCollapsed?: boolean;
   /** Whether to show WebShell's built-in compact drawer toggle. Defaults to true. */
   showCompactToggle?: boolean;
-  /** Hide or replace the leading New Chat brand mark. */
+  /** Hide or replace the complete sidebar branding row. */
   branding?: false | WebShellSidebarBranding;
   /** Hide the footer completely or select the built-in entries it exposes. */
   footer?: false | WebShellSidebarFooterOptions;
@@ -428,8 +429,6 @@ export interface WebShellApi {
   openSplitView: () => void;
   /** Open the Session Overview panel, matching the built-in sidebar button. */
   openSessionOverview: () => void;
-  /** Open the compact session drawer, matching the hamburger control. */
-  openSessionDrawer: () => void;
 }
 
 export type WebShellComposerPlaceholderState = ComposerPlaceholderState;
@@ -440,7 +439,10 @@ export type WebShellComposerPlaceholders = Readonly<
 
 export interface WebShellProps {
   /** Called whenever the attached daemon session id changes. */
-  onSessionIdChange?: (sessionId: string | undefined) => void;
+  onSessionIdChange?: (
+    sessionId: string | undefined,
+    workspaceId?: string,
+  ) => void;
   /** Called after a new session is created. Session setup waits up to 30 seconds. */
   onSessionCreated?: (sessionId: string) => Promise<void> | void;
   /** Visual theme for the embedded shell. */
@@ -584,6 +586,7 @@ export interface WebShellProps {
 type SessionActionsWithCreate = {
   createSession: (options?: {
     workspaceCwd?: string;
+    approvalMode?: string;
   }) => Promise<{ sessionId: string }>;
   attachSession: () => Promise<void>;
   clearSession: () => Promise<void>;
@@ -1014,10 +1017,8 @@ export function App({
     string | null
   >(null);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
-  const [forceMobileDrawer, setForceMobileDrawer] = useState(false);
   const closeMobileDrawer = useCallback(() => {
     setMobileDrawerOpen(false);
-    setForceMobileDrawer(false);
   }, []);
   // The Session Overview panel (mission control for managing many sessions at
   // once) is only offered on large screens; below that there is no room for it
@@ -1032,11 +1033,11 @@ export function App({
   useEffect(() => {
     const mql = window.matchMedia('(max-width: 760px)');
     const handler = (e: MediaQueryListEvent) => {
-      if (!e.matches) closeMobileDrawer();
+      if (!e.matches) setMobileDrawerOpen(false);
     };
     mql.addEventListener('change', handler);
     return () => mql.removeEventListener('change', handler);
-  }, [closeMobileDrawer]);
+  }, []);
 
   useEffect(() => {
     if (!mobileDrawerOpen) return;
@@ -1138,6 +1139,11 @@ export function App({
   const store = useTranscriptStore();
   const blocks = useTranscriptBlocks();
   const connection = useConnection();
+  const workspace = useWorkspace();
+  const workspaces = useMemo(
+    () => workspace.capabilities?.workspaces ?? [],
+    [workspace.capabilities?.workspaces],
+  );
   const sessionActions = useActions();
   const { notices, dismissNotice } = useSessionNotices();
   const workspaceActions = useWorkspaceActions();
@@ -1149,6 +1155,42 @@ export function App({
   >(undefined);
   const selectedWorkspaceCwdRef = useRef(selectedWorkspaceCwd);
   selectedWorkspaceCwdRef.current = selectedWorkspaceCwd;
+  const [selectedWorkspaceGitBranch, setSelectedWorkspaceGitBranch] = useState<
+    string | undefined
+  >(undefined);
+  useEffect(() => {
+    if (connection.sessionId) {
+      setSelectedWorkspaceGitBranch(undefined);
+      return;
+    }
+    const primaryWorkspaceCwd = workspaces.find((entry) => entry.primary)?.cwd;
+    const workspaceCwd = selectedWorkspaceCwd ?? primaryWorkspaceCwd;
+    if (!workspaceCwd) {
+      setSelectedWorkspaceGitBranch(undefined);
+      return;
+    }
+    let cancelled = false;
+    setSelectedWorkspaceGitBranch(undefined);
+    void workspace.client
+      .workspaceByCwd(workspaceCwd)
+      .workspaceGit()
+      .then((git) => {
+        if (!cancelled) {
+          setSelectedWorkspaceGitBranch(git.branch ?? undefined);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setSelectedWorkspaceGitBranch(undefined);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    connection.sessionId,
+    selectedWorkspaceCwd,
+    workspaces,
+    workspace.client,
+  ]);
   const onToastRef = useRef(onToast);
   onToastRef.current = onToast;
   const toastIdRef = useRef(0);
@@ -1187,6 +1229,7 @@ export function App({
   const chatPaneRef = useRef<HTMLDivElement | null>(null);
   const currentSessionIdRef = useRef(connection.sessionId);
   const lastNotifiedSessionIdRef = useRef<string | undefined>(undefined);
+  const lastNotifiedWorkspaceIdRef = useRef<string | undefined>(undefined);
   const lastGoalSessionIdRef = useRef(connection.sessionId);
   const displayMessages = useMemo(() => {
     const localMessages = [recapMessage].filter(
@@ -2056,12 +2099,6 @@ export function App({
     () => ({
       openSplitView: () => requestOpenSplitView(),
       openSessionOverview: () => openPanel('sessions'),
-      openSessionDrawer: () => {
-        setActivePanel(null);
-        setMainView('chat');
-        setForceMobileDrawer(true);
-        setMobileDrawerOpen(true);
-      },
     }),
     [openPanel, requestOpenSplitView],
   );
@@ -2412,12 +2449,15 @@ export function App({
         currentModelRef.current || connectionRef.current.currentModel;
       const modeId =
         currentModeRef.current || connectionRef.current.currentMode;
+      const primaryWorkspaceCwd = workspaces.find(
+        (entry) => entry.primary,
+      )?.cwd;
       await createAndAttachSessionForPrompt({
         sessionActions: sessionActions as typeof sessionActions &
           SessionActionsWithCreate,
         modelId,
         modeId,
-        workspaceCwd: selectedWorkspaceCwdRef.current,
+        workspaceCwd: selectedWorkspaceCwdRef.current ?? primaryWorkspaceCwd,
         onSessionCreated: onSessionCreatedRef.current,
         onSessionAllocated: (sessionId) => {
           preparingSessionIdRef.current = sessionId;
@@ -2438,7 +2478,7 @@ export function App({
     };
     void promise.then(clearPreparation, clearPreparation);
     return promise;
-  }, [sessionActions]);
+  }, [sessionActions, workspaces]);
   const onSubmitBeforeRef = useRef(onSubmitBefore);
   onSubmitBeforeRef.current = onSubmitBefore;
   const [sessionListReloadToken, setSessionListReloadToken] = useState(0);
@@ -3197,12 +3237,34 @@ export function App({
       // Keep the dead-session route visible until the user explicitly starts a
       // new chat; clearing it here would immediately hide the recovery state.
       lastNotifiedSessionIdRef.current = connection.sessionId;
+      lastNotifiedWorkspaceIdRef.current = undefined;
       return;
     }
-    if (lastNotifiedSessionIdRef.current === connection.sessionId) return;
+    const activeWorkspace = workspaces.find(
+      (entry) => entry.cwd === connection.workspaceCwd,
+    );
+    if (connection.sessionId && !workspace.capabilities) return;
+    const workspaceId =
+      activeWorkspace && !activeWorkspace.primary
+        ? activeWorkspace.id
+        : undefined;
+    if (
+      lastNotifiedSessionIdRef.current === connection.sessionId &&
+      lastNotifiedWorkspaceIdRef.current === workspaceId
+    ) {
+      return;
+    }
     lastNotifiedSessionIdRef.current = connection.sessionId;
-    onSessionIdChange?.(connection.sessionId);
-  }, [connection.missingSession, connection.sessionId, onSessionIdChange]);
+    lastNotifiedWorkspaceIdRef.current = workspaceId;
+    onSessionIdChange?.(connection.sessionId, workspaceId);
+  }, [
+    connection.missingSession,
+    connection.sessionId,
+    connection.workspaceCwd,
+    onSessionIdChange,
+    workspace.capabilities,
+    workspaces,
+  ]);
 
   const lastRenameSessionRef = useRef<string | undefined>(undefined);
   const lastRenameNameRef = useRef<string | undefined>(undefined);
@@ -3389,23 +3451,28 @@ export function App({
     branchCurrentSession();
   }, [branchCurrentSession]);
 
-  const createNewSession = useCallback(async () => {
-    // Close the drawer before awaiting so a failed createSession() doesn't leave
-    // it stuck open with the page scroll still locked, matching loadSidebarSession.
-    closeMobileDrawer();
-    // Starting a new chat means the user wants to see it — leave any open
-    // Settings/Status panel so the fresh chat is visible (no-op when closed).
-    closePanel();
-    try {
-      await (
-        sessionActions as typeof sessionActions & SessionActionsWithCreate
-      ).clearSession();
-      return true;
-    } catch (error) {
-      reportError(error, 'Failed to start a new chat');
-      return false;
-    }
-  }, [closeMobileDrawer, closePanel, reportError, sessionActions]);
+  const createNewSession = useCallback(
+    async (workspaceCwd?: string) => {
+      selectedWorkspaceCwdRef.current = workspaceCwd;
+      setSelectedWorkspaceCwd(workspaceCwd);
+      // Close the drawer before awaiting so a failed createSession() doesn't leave
+      // it stuck open with the page scroll still locked, matching loadSidebarSession.
+      closeMobileDrawer();
+      // Starting a new chat means the user wants to see it — leave any open
+      // Settings/Status panel so the fresh chat is visible (no-op when closed).
+      closePanel();
+      try {
+        await (
+          sessionActions as typeof sessionActions & SessionActionsWithCreate
+        ).clearSession();
+        return true;
+      } catch (error) {
+        reportError(error, 'Failed to start a new chat');
+        return false;
+      }
+    },
+    [closeMobileDrawer, closePanel, reportError, sessionActions],
+  );
   const handleMissingSessionNewSession = useCallback(async () => {
     if (creatingMissingSessionRef.current) return;
     creatingMissingSessionRef.current = true;
@@ -3423,7 +3490,7 @@ export function App({
   }, [createNewSession, onSessionIdChange]);
 
   const loadSidebarSession = useCallback(
-    async (sessionId: string) => {
+    async (sessionId: string, workspaceCwd?: string) => {
       setSidebarSwitchingSessionId(sessionId);
       // Close the drawer before awaiting the load; the transcript clears
       // immediately and shows its loading skeleton for the selected session.
@@ -3432,7 +3499,7 @@ export function App({
       // Settings/Status panel (no-op when the panel is closed).
       closePanel();
       try {
-        await sessionActions.loadSession(sessionId);
+        await sessionActions.loadSession(sessionId, { workspaceCwd });
       } catch (error) {
         setSidebarSwitchingSessionId((current) =>
           current === sessionId ? null : current,
@@ -5539,7 +5606,6 @@ export function App({
                 className={[
                   styles.mobileDrawer,
                   mobileDrawerOpen ? styles.mobileDrawerOpen : undefined,
-                  forceMobileDrawer ? styles.mobileDrawerForced : undefined,
                 ]
                   .filter(Boolean)
                   .join(' ')}
@@ -5578,13 +5644,22 @@ export function App({
                     openSplitView();
                   }}
                   canOpenSplitView={isLargeScreen}
-                  onNewSession={() => {
-                    setMainView('chat');
-                    return createNewSession();
+                  theme={selectedTheme}
+                  onThemeChange={(theme) => {
+                    handleThemeChange(theme);
+                    void setWorkspaceSetting(
+                      'workspace',
+                      THEME_SETTING_KEY,
+                      webShellThemeToSettingValue(theme),
+                    );
                   }}
-                  onLoadSession={(sessionId) => {
+                  onNewSession={(workspaceCwd) => {
                     setMainView('chat');
-                    return loadSidebarSession(sessionId);
+                    return createNewSession(workspaceCwd);
+                  }}
+                  onLoadSession={(sessionId, workspaceCwd) => {
+                    setMainView('chat');
+                    return loadSidebarSession(sessionId, workspaceCwd);
                   }}
                   onError={reportError}
                   mobileOpen={mobileDrawerOpen}
@@ -5623,7 +5698,6 @@ export function App({
                       .filter(Boolean)
                       .join(' ')}
                     onClick={() => {
-                      setForceMobileDrawer(false);
                       setMobileDrawerOpen((open) => !open);
                     }}
                     aria-label={t('sidebar.toggleMenu')}
@@ -6136,14 +6210,11 @@ export function App({
                           onClearQueuedMessages={clearQueuedPrompts}
                           currentMode={currentMode}
                           currentModel={currentModel}
-                          gitBranch={connection.gitBranch}
-                          workspaceName={
-                            hasMultipleWorkspaces(connection.capabilities) &&
-                            connection.workspaceCwd
-                              ? workspaceBasename(connection.workspaceCwd)
-                              : undefined
+                          gitBranch={
+                            connection.sessionId
+                              ? connection.gitBranch
+                              : selectedWorkspaceGitBranch
                           }
-                          workspaceTitle={connection.workspaceCwd || undefined}
                           chatWidthMode={chatWidthMode}
                           showChatWidthToggle={!isChatEmptyState}
                           chatWidthToggleMin={chatWidthToggleMin}
@@ -6151,6 +6222,43 @@ export function App({
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
+                          workspaces={
+                            workspaces.length > 1
+                              ? workspaces.map((entry) => ({
+                                    id: entry.id,
+                                    cwd: entry.cwd,
+                                    label:
+                                      entry.cwd
+                                        .split(/[\\/]+/)
+                                        .filter(Boolean)
+                                        .at(-1) ?? entry.cwd,
+                                    primary: entry.primary,
+                                  }))
+                              : undefined
+                          }
+                          selectedWorkspaceCwd={
+                            connection.sessionId
+                              ? workspaces.find(
+                                  (entry) =>
+                                    entry.cwd === connection.workspaceCwd,
+                                )?.primary
+                                ? undefined
+                                : connection.workspaceCwd
+                              : selectedWorkspaceCwd
+                          }
+                          workspaceSelectionDisabled={Boolean(
+                            connection.sessionId,
+                          )}
+                          atWorkspaceCwd={
+                            connection.sessionId
+                              ? connection.workspaceCwd
+                              : (selectedWorkspaceCwd ??
+                                workspaces.find((entry) => entry.primary)?.cwd)
+                          }
+                          onSelectWorkspace={(cwd) => {
+                            selectedWorkspaceCwdRef.current = cwd;
+                            setSelectedWorkspaceCwd(cwd);
+                          }}
                           onChatWidthModeChange={handleChatWidthModeChange}
                           sessionName={sessionDisplayName}
                           dialogOpen={

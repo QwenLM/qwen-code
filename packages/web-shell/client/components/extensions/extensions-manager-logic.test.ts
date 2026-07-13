@@ -43,10 +43,15 @@ describe('extensions manager logic', () => {
     expect(filterExtensions(extensions, 'automation')).toEqual([extensions[1]]);
   });
 
+  it('returns all extensions for an empty query', () => {
+    expect(filterExtensions(extensions, '')).toEqual(extensions);
+  });
+
   it('keeps a selected extension only while it remains installed', () => {
     expect(preserveSelectedExtensionName('gsd-core', extensions)).toBe(
       'gsd-core',
     );
     expect(preserveSelectedExtensionName('removed', extensions)).toBeNull();
+    expect(preserveSelectedExtensionName(null, extensions)).toBeNull();
   });
 });

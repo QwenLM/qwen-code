@@ -378,8 +378,11 @@ export function registerWorkspaceExtensionRoutes(
     pendingExtensionInteractions.delete(operationId);
     pending.reject(new Error(reason));
   };
-  const cancelPendingExtensionInteractions = (reason: string) => {
+  const cancelPendingInstallInteractions = (reason: string) => {
     for (const operationId of pendingExtensionInteractions.keys()) {
+      if (extensionOperations.get(operationId)?.operation !== 'install') {
+        continue;
+      }
       cancelPendingExtensionInteraction(operationId, reason);
     }
   };
@@ -479,7 +482,7 @@ export function registerWorkspaceExtensionRoutes(
         await extensionManager.refreshCache();
         const event = await withExtensionTimeout(
           run(extensionManager),
-          operation === 'install'
+          operation === 'install' || operation === 'update'
             ? EXTENSION_INSTALL_TIMEOUT_MS
             : EXTENSION_MUTATION_TIMEOUT_MS,
           `extension ${operation}`,
@@ -871,7 +874,7 @@ export function registerWorkspaceExtensionRoutes(
           return;
         }
 
-        cancelPendingExtensionInteractions(
+        cancelPendingInstallInteractions(
           'Extension installation cancelled by a new install request',
         );
 

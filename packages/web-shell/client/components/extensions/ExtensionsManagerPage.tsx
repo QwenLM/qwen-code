@@ -290,16 +290,16 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
           pendingInstall.operationId,
         );
         if (cancelled) return;
-        const interaction = (
-          operation as {
-            interaction?: ExtensionPendingInteraction;
+        if (operation.status === 'waiting_for_input') {
+          if (operation.interaction) {
+            setPendingInteraction({
+              operationId: operation.operationId,
+              interaction: operation.interaction,
+            });
+          } else {
+            setMessage(t('extensions.manage.operationFailed'));
+            setPendingInstall(null);
           }
-        ).interaction;
-        if (String(operation.status) === 'waiting_for_input' && interaction) {
-          setPendingInteraction({
-            operationId: operation.operationId,
-            interaction,
-          });
           return;
         }
         if (operation.status === 'failed') {
@@ -309,6 +309,7 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
               error: operation.error ?? '',
             }),
           );
+          setPendingInteraction(null);
           setPendingInstall(null);
           return;
         }
@@ -317,20 +318,23 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
           operation.status === 'succeeded_with_refresh_error'
         ) {
           setMessage(
-            t('extensions.install.installed', {
-              name: operation.result?.name ?? pendingInstall.source,
-            }),
+            operation.status === 'succeeded_with_refresh_error'
+              ? t('extensions.manage.refreshFailed', {
+                  error: operation.result?.error ?? '',
+                })
+              : t('extensions.install.installed', {
+                  name: operation.result?.name ?? pendingInstall.source,
+                }),
           );
+          setPendingInteraction(null);
           setPendingInstall(null);
           void load(true);
           return;
         }
         setMessage(
-          String(operation.status) === 'waiting_for_input'
-            ? t('extensions.manage.installWaitingForInput')
-            : t('extensions.install.started', {
-                source: pendingInstall.source,
-              }),
+          t('extensions.install.started', {
+            source: pendingInstall.source,
+          }),
         );
         timer = setTimeout(() => void poll(), 1000);
       } catch (error) {
@@ -371,6 +375,8 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
         })
         .catch((error: unknown) => {
           setMessage(error instanceof Error ? error.message : String(error));
+          setPendingInteraction(null);
+          setPendingInstall((current) => (current ? { ...current } : current));
         })
         .finally(() => setSubmittingInteraction(false));
     },
@@ -398,11 +404,15 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
           operation.status === 'succeeded_with_refresh_error'
         ) {
           setMessage(
-            mutationSuccessMessage(
-              operation.operation,
-              pendingMutation.name,
-              t,
-            ),
+            operation.status === 'succeeded_with_refresh_error'
+              ? t('extensions.manage.refreshFailed', {
+                  error: operation.result?.error ?? '',
+                })
+              : mutationSuccessMessage(
+                  operation.operation,
+                  pendingMutation.name,
+                  t,
+                ),
           );
           setPendingMutation(null);
           if (operation.operation === 'uninstall') {
@@ -431,8 +441,21 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
 
   const refreshList = useCallback(() => {
     setMessage(null);
-    void load();
-  }, [load]);
+    actions
+      .refreshExtensions(connection.clientId)
+      .then((result) => {
+        setMessage(
+          t('extensions.manage.refreshed', {
+            refreshed: result.refreshed,
+            failed: result.failed,
+          }),
+        );
+        return load(true);
+      })
+      .catch((error: unknown) => {
+        setMessage(error instanceof Error ? error.message : String(error));
+      });
+  }, [actions, connection.clientId, load, t]);
 
   const checkUpdates = useCallback(
     (name: string) => {
@@ -460,7 +483,7 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
   const installExtension = useCallback(() => {
     const source = installSource.trim();
     const clientId = connection.clientId;
-    if (!source) return;
+    if (!source || pendingInstall) return;
     setInstalling(true);
     setMessage(null);
     actions
@@ -474,7 +497,7 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
         setMessage(error instanceof Error ? error.message : String(error));
       })
       .finally(() => setInstalling(false));
-  }, [actions, connection.clientId, installSource]);
+  }, [actions, connection.clientId, installSource, pendingInstall]);
 
   const runMutation = useCallback(
     (
@@ -489,6 +512,7 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
       }
       setBusyName(name);
       setMessage(null);
+      let startedPolling = false;
       run(clientId)
         .then((result) => {
           const operationId =
@@ -499,6 +523,7 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
               ? result.operationId
               : undefined;
           if (operationId) {
+            startedPolling = true;
             setPendingMutation({ operationId, name });
             return;
           }
@@ -509,7 +534,7 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
         })
         .finally(() => {
           setBusyName(null);
-          void load();
+          if (!startedPolling) void load(true);
         });
     },
     [connection.clientId, load, t],
@@ -882,7 +907,10 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
               )}
               {t('common.refresh')}
             </Button>
-            <Button onClick={() => setInstallOpen(true)}>
+            <Button
+              disabled={Boolean(pendingInstall)}
+              onClick={() => setInstallOpen(true)}
+            >
               <PlusIcon data-icon="inline-start" />
               {t('extensions.manage.add')}
             </Button>
@@ -1034,7 +1062,14 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
         </AlertDialogContent>
       </AlertDialog>
 
-      <AlertDialog open={Boolean(pendingInteraction)}>
+      <AlertDialog
+        open={Boolean(pendingInteraction)}
+        onOpenChange={(open) => {
+          if (!open && pendingInteraction && !submittingInteraction) {
+            submitInteraction({ cancelled: true });
+          }
+        }}
+      >
         <AlertDialogContent size="lg">
           <AlertDialogHeader className="place-items-start px-3 text-left">
             <AlertDialogTitle>

@@ -17,7 +17,7 @@ export function filterExtensions(
   if (!normalized) return [...extensions];
   return extensions.filter((extension) =>
     [extension.name, extension.displayName, extension.description]
-      .filter(Boolean)
-      .some((value) => value!.toLowerCase().includes(normalized)),
+      .filter((value): value is string => Boolean(value))
+      .some((value) => value.toLowerCase().includes(normalized)),
   );
 }

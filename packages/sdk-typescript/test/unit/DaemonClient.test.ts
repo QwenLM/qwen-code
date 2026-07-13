@@ -3688,6 +3688,28 @@ describe('DaemonClient', () => {
         status: 'succeeded',
       });
     });
+
+    it('POSTs an extension interaction response with encoded ids', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { accepted: true }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.respondToExtensionInteraction(
+        'op/1',
+        'interaction/1',
+        { cancelled: true },
+        'client-1',
+      );
+
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/extensions/operations/op%2F1/interactions/interaction%2F1',
+      );
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(calls[0]?.body).toBe(JSON.stringify({ cancelled: true }));
+      expect(result).toEqual({ accepted: true });
+    });
   });
 
   describe('error coercion', () => {
