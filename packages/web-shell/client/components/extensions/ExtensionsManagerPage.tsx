@@ -269,15 +269,30 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
     [actions],
   );
 
+  const checkAllUpdates = useCallback(() => {
+    return actions
+      .checkExtensionUpdates(connection.clientId)
+      .then((result) => setUpdateStates(result.states))
+      .catch((error: unknown) => {
+        setMessage(error instanceof Error ? error.message : String(error));
+      });
+  }, [actions, connection.clientId]);
+
   useEffect(() => {
     void load();
   }, [load]);
 
   useEffect(() => {
     if ((signals?.extensionsVersion ?? 0) > 0) {
+      setUpdateStates({});
       void load(true);
     }
   }, [load, signals?.extensionsVersion]);
+
+  useEffect(() => {
+    if (extensions.length === 0) return;
+    void checkAllUpdates();
+  }, [checkAllUpdates, extensions.length]);
 
   useEffect(() => {
     if (!pendingInstall) return;
@@ -418,6 +433,13 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
           if (operation.operation === 'uninstall') {
             setSelectedName(null);
           }
+          if (operation.operation === 'update') {
+            setUpdateStates((current) => {
+              const next = { ...current };
+              delete next[pendingMutation.name];
+              return next;
+            });
+          }
           void load(true);
           return;
         }
@@ -450,12 +472,12 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
             failed: result.failed,
           }),
         );
-        return load(true);
+        return load(true).then(checkAllUpdates);
       })
       .catch((error: unknown) => {
         setMessage(error instanceof Error ? error.message : String(error));
       });
-  }, [actions, connection.clientId, load, t]);
+  }, [actions, checkAllUpdates, connection.clientId, load, t]);
 
   const checkUpdates = useCallback(
     (name: string) => {
@@ -679,11 +701,14 @@ export function ExtensionsManagerPage({ onClose }: ExtensionsManagerPageProps) {
                       busy || checking || updateState !== UPDATE_AVAILABLE
                     }
                     onSelect={() =>
-                      runMutation(selectedExtension.name, (clientId) =>
-                        actions.updateExtension(
-                          selectedExtension.name,
-                          clientId,
-                        ),
+                      runMutation(
+                        selectedExtension.name,
+                        (clientId) =>
+                          actions.updateExtension(
+                            selectedExtension.name,
+                            clientId,
+                          ),
+                        { allowWithoutClientId: true },
                       )
                     }
                   >

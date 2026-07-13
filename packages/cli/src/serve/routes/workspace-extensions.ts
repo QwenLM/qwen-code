@@ -1118,6 +1118,7 @@ export function registerWorkspaceExtensionRoutes(
             req,
             res,
             'POST /workspace/extensions/:name/update',
+            { requireClientId: false },
           )
         ) {
           return;

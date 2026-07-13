@@ -2,11 +2,12 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { DaemonExtensionEntry } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../../i18n';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
-const { actions, connection } = vi.hoisted(() => ({
+const { actions, connection, signals } = vi.hoisted(() => ({
   actions: {
     loadExtensionsStatus: vi.fn(),
     installExtension: vi.fn(),
@@ -20,12 +21,13 @@ const { actions, connection } = vi.hoisted(() => ({
     uninstallExtension: vi.fn(),
   },
   connection: { clientId: 'client-1' as string | undefined },
+  signals: { extensionsVersion: 0 },
 }));
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useConnection: () => connection,
   useWorkspaceActions: () => actions,
-  useWorkspaceEventSignals: () => ({ extensionsVersion: 0 }),
+  useWorkspaceEventSignals: () => signals,
 }));
 
 const { ExtensionsManagerPage } = await import('./ExtensionsManagerPage');
@@ -41,22 +43,54 @@ async function flush() {
   });
 }
 
-async function mount() {
+function extension(
+  updateState?: DaemonExtensionEntry['updateState'],
+): DaemonExtensionEntry {
+  return {
+    kind: 'extension',
+    id: 'demo',
+    name: 'demo',
+    displayName: 'Demo',
+    version: '1.0.0',
+    isActive: true,
+    path: '/tmp/demo',
+    updateState,
+    capabilities: {
+      mcpServerCount: 0,
+      skillCount: 0,
+      agentCount: 0,
+      hookCount: 0,
+      commandCount: 0,
+      contextFileCount: 0,
+      channelCount: 0,
+      hasSettings: false,
+    },
+  };
+}
+
+function renderPage() {
+  root?.render(
+    <I18nProvider language="en">
+      <ExtensionsManagerPage onClose={vi.fn()} />
+    </I18nProvider>,
+  );
+}
+
+async function mount(extensions: DaemonExtensionEntry[] = []) {
+  if (!actions.checkExtensionUpdates.getMockImplementation()) {
+    actions.checkExtensionUpdates.mockResolvedValue({ states: {} });
+  }
   actions.loadExtensionsStatus.mockResolvedValue({
     v: 1,
     workspaceCwd: '/workspace',
     initialized: true,
-    extensions: [],
+    extensions,
   });
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   await act(async () => {
-    root?.render(
-      <I18nProvider language="en">
-        <ExtensionsManagerPage onClose={vi.fn()} />
-      </I18nProvider>,
-    );
+    renderPage();
   });
   await flush();
 }
@@ -67,11 +101,30 @@ function buttonIncluding(text: string): HTMLButtonElement | undefined {
   );
 }
 
+function elementIncluding(selector: string, text: string): Element | undefined {
+  return Array.from(document.querySelectorAll(selector)).find((element) =>
+    element.textContent?.includes(text),
+  );
+}
+
 function click(element: Element | undefined) {
   if (!element) throw new Error('click target not found');
   act(() => {
     element.dispatchEvent(
       new MouseEvent('click', { bubbles: true, cancelable: true }),
+    );
+  });
+}
+
+function pointerDown(element: Element | undefined) {
+  if (!element) throw new Error('pointer target not found');
+  act(() => {
+    element.dispatchEvent(
+      new MouseEvent('pointerdown', {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+      }),
     );
   });
 }
@@ -101,6 +154,7 @@ afterEach(() => {
   root = null;
   container = null;
   connection.clientId = 'client-1';
+  signals.extensionsVersion = 0;
   vi.clearAllMocks();
 });
 
@@ -192,5 +246,58 @@ describe('ExtensionsManagerPage', () => {
     );
     expect(actions.extensionOperationStatus).toHaveBeenCalledTimes(2);
     expect(document.body.textContent).toContain('Interaction expired');
+  });
+
+  it('checks for updates automatically after loading extensions', async () => {
+    actions.checkExtensionUpdates.mockResolvedValue({
+      states: { demo: 'update available' },
+    });
+
+    await mount([extension()]);
+
+    expect(actions.checkExtensionUpdates).toHaveBeenCalledWith('client-1');
+    expect(document.body.textContent).toContain('update available');
+  });
+
+  it('updates an extension without a session client id', async () => {
+    connection.clientId = undefined;
+    actions.checkExtensionUpdates.mockResolvedValue({
+      states: { demo: 'update available' },
+    });
+    actions.updateExtension.mockResolvedValue({});
+    await mount([extension()]);
+
+    click(document.querySelector('[data-slot="card"]') ?? undefined);
+    await flush();
+    pointerDown(
+      document.querySelector('button[aria-label="Extension actions"]') ??
+        undefined,
+    );
+    await flush();
+    click(
+      elementIncluding('[data-slot="dropdown-menu-item"]', 'Update Extension'),
+    );
+    await flush();
+
+    expect(actions.updateExtension).toHaveBeenCalledWith('demo', undefined);
+    expect(document.body.textContent).not.toContain(
+      'Wait for the session to connect',
+    );
+  });
+
+  it('clears stale update states when the extensions signal changes', async () => {
+    actions.checkExtensionUpdates.mockResolvedValue({
+      states: { demo: 'update available' },
+    });
+    await mount([extension('up to date')]);
+    expect(document.body.textContent).toContain('update available');
+
+    signals.extensionsVersion = 1;
+    await act(async () => {
+      renderPage();
+    });
+    await flush();
+
+    expect(document.body.textContent).not.toContain('update available');
   });
 });
