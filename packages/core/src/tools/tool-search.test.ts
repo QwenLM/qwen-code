@@ -12,6 +12,7 @@ import { ToolRegistry } from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { ToolSearchTool, scoreTool, tokenize } from './tool-search.js';
+import { formatFunctionSchemaBlocks } from './function-schema-rendering.js';
 import type { ToolResult } from './tools.js';
 import { CronCreateTool } from './cron-create.js';
 import { CronDeleteTool } from './cron-delete.js';
@@ -203,8 +204,7 @@ describe('ToolSearchTool', () => {
     const result = await invocation.execute(new AbortController().signal);
 
     const content = String(result.llmContent);
-    expect(content).toContain('<functions>');
-    expect(content).toContain('"name":"cron_create"');
+    expect(content).toContain(formatFunctionSchemaBlocks([hidden.schema]));
     expect(content).toContain('deferred_tool_call');
     expect(registry.isDeferredToolRevealed('cron_create')).toBe(false);
     expect(result.deferredToolPresentations).toEqual(['cron_create']);

@@ -7,6 +7,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ApprovalMode, Config } from '../config/config.js';
 import { MockTool } from '../test-utils/mock-tool.js';
+import { ToolErrorType } from '../tools/tool-error.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import type { ToolCallRequestInfo } from './turn.js';
@@ -119,6 +120,7 @@ describe('normalizeDeferredToolCallRequest', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.providerName).toBe(ToolNames.DEFERRED_TOOL_CALL);
+      expect(result.errorType).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
       expect(result.error.message).toContain(message);
     }
   });
@@ -134,6 +136,7 @@ describe('normalizeDeferredToolCallRequest', () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
+      expect(result.errorType).toBe(ToolErrorType.TOOL_NOT_REGISTERED);
       expect(result.error.message).toContain('is not available');
     }
   });
@@ -155,6 +158,7 @@ describe('normalizeDeferredToolCallRequest', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.providerName).toBe(ToolNames.DEFERRED_TOOL_CALL);
+      expect(result.errorType).toBe(ToolErrorType.EXECUTION_FAILED);
       expect(result.error.message).toContain(
         'Failed to load deferred tool "cron_create": factory exploded',
       );
@@ -175,6 +179,7 @@ describe('normalizeDeferredToolCallRequest', () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
+      expect(result.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
       expect(result.error.message).toContain('not eligible');
     }
   });
@@ -195,6 +200,7 @@ describe('normalizeDeferredToolCallRequest', () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
+      expect(result.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
       expect(result.error.message).toContain('has not been fetched');
     }
   });

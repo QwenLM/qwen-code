@@ -41,11 +41,14 @@ export async function normalizeDeferredToolCallRequest(
     return { ok: true, request };
   }
 
-  const fail = (message: string): DeferredToolCallNormalizationResult => ({
+  const fail = (
+    message: string,
+    errorType: ToolErrorType = ToolErrorType.INVALID_TOOL_PARAMS,
+  ): DeferredToolCallNormalizationResult => ({
     ok: false,
     error: new Error(message),
     providerName: ToolNames.DEFERRED_TOOL_CALL,
-    errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+    errorType,
   });
 
   const targetName = request.args['name'];
@@ -80,21 +83,25 @@ export async function normalizeDeferredToolCallRequest(
       `Failed to load deferred tool "${targetName}": ${
         error instanceof Error ? error.message : String(error)
       }`,
+      ToolErrorType.EXECUTION_FAILED,
     );
   }
   if (!targetTool) {
     return fail(
       `Deferred tool "${targetName}" is not available. Use tool_search to find the current deferred tool name and schema.`,
+      ToolErrorType.TOOL_NOT_REGISTERED,
     );
   }
   if (!toolRegistry.isProxyEligibleDeferredTool(canonicalTarget)) {
     return fail(
       `Tool "${canonicalTarget}" is not eligible for deferred_tool_call. Call directly if it is visible, or use tool_search for deferred tools.`,
+      ToolErrorType.EXECUTION_DENIED,
     );
   }
   if (!toolRegistry.hasPresentedProxySchema(canonicalTarget)) {
     return fail(
       `Schema for deferred tool "${canonicalTarget}" has not been fetched in the active context. Use tool_search first, then call deferred_tool_call on a later turn.`,
+      ToolErrorType.EXECUTION_DENIED,
     );
   }
 

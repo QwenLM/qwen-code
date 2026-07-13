@@ -37,6 +37,7 @@ import {
   isLeaderOnlyToolUnavailableInSubagent,
   isPlanLifecycleToolUnavailableInSubagent,
 } from '../agents/runtime/subagent-plan-tool-policy.js';
+import { formatFunctionSchemaBlocks } from './function-schema-rendering.js';
 
 const debugLogger = createDebugLogger('TOOL_SEARCH');
 
@@ -331,19 +332,11 @@ class ToolSearchInvocation extends BaseToolInvocation<
       loaded.push(tool);
     }
 
-    // Escape `<` in the JSON-stringified schema so any `</function>`
-    // (or `</functions>`) substring inside a tool's description / enum
-    // / examples can't prematurely close the pseudo-XML wrapper. The
-    // `<` JSON unicode escape decodes back to `<` when the model
-    // interprets the JSON, but as raw text inside the wrapper it's no
-    // longer the start of a closing tag.
-    const schemaBlocks = loaded.map(
-      (tool) =>
-        `<function>${JSON.stringify(tool.schema).replace(/</g, '\\u003c')}</function>`,
-    );
     let llmContent = '';
-    if (schemaBlocks.length > 0) {
-      llmContent += `<functions>\n${schemaBlocks.join('\n')}\n</functions>`;
+    if (loaded.length > 0) {
+      llmContent += formatFunctionSchemaBlocks(
+        loaded.map((tool) => tool.schema),
+      );
     }
     if (deferredToolPresentations.length > 0) {
       llmContent +=

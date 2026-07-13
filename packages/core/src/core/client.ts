@@ -8,6 +8,7 @@
 import { createUserContent } from '@google/genai';
 import type {
   Content,
+  FunctionDeclaration,
   GenerateContentConfig,
   GenerateContentResponse,
   PartListUnion,
@@ -66,6 +67,7 @@ import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { DEFAULT_AUTO_SKILL_MAX_TURNS } from '../memory/skillReviewAgentPlanner.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
+import { formatFunctionSchemaBlocks } from '../tools/function-schema-rendering.js';
 import { ToolNames } from '../tools/tool-names.js';
 
 // Telemetry
@@ -1227,6 +1229,7 @@ export class GeminiClient {
     // Clear stale cache params on session reset to prevent cross-session leakage
     clearCacheSafeParams();
 
+    let effectiveExtraHistory = extraHistory;
     const profiler = createSessionStartProfiler(sessionStartSource);
     let history: Content[] = [];
     let snapshotEntries: AvailableSkillEntry[] = [];
@@ -1234,7 +1237,7 @@ export class GeminiClient {
     const finishProfile = (ok: boolean) => {
       profiler.finish({
         ok,
-        extraHistoryLength: extraHistory?.length ?? 0,
+        extraHistoryLength: effectiveExtraHistory?.length ?? 0,
         historyLength: history.length,
         snapshotEntryCount: snapshotEntries.length,
         deferredReminderCount,
@@ -1257,14 +1260,14 @@ export class GeminiClient {
       // BEFORE `resolveDeferredToolsForReminder()` runs so the resumed tools
       // are correctly filtered out of the startup reminder built below.
       profiler.timeSync('resume_deferred_tool_reveal', () => {
-        if (extraHistory && extraHistory.length > 0) {
+        if (effectiveExtraHistory && effectiveExtraHistory.length > 0) {
           const deferredNames = new Set(
             toolRegistry.getDeferredToolSummary().map((t) => t.name),
           );
           const successfulDeferredProxyTargets = new Set<string>();
           const pendingProxyTargetsById = new Map<string, string>();
           const pendingProxyTargetsWithoutId: string[] = [];
-          for (const entry of extraHistory) {
+          for (const entry of effectiveExtraHistory) {
             for (const part of entry.parts ?? []) {
               const call = part.functionCall;
               if (call?.name === ToolNames.DEFERRED_TOOL_CALL) {
@@ -1294,7 +1297,8 @@ export class GeminiClient {
             }
           }
           if (deferredNames.size > 0) {
-            for (const entry of extraHistory) {
+            const proxyTargetsToRestore = new Set<string>();
+            for (const entry of effectiveExtraHistory) {
               for (const part of entry.parts ?? []) {
                 const callName = part.functionCall?.name;
                 if (callName && deferredNames.has(callName)) {
@@ -1308,7 +1312,40 @@ export class GeminiClient {
                     deferredNames.has(targetName) &&
                     successfulDeferredProxyTargets.has(targetName)
                   ) {
-                    toolRegistry.markProxySchemaPresented(targetName);
+                    proxyTargetsToRestore.add(targetName);
+                  }
+                }
+              }
+            }
+            if (proxyTargetsToRestore.size > 0) {
+              const restoredSchemas: FunctionDeclaration[] = [];
+              for (const targetName of [...proxyTargetsToRestore].sort()) {
+                const tool = toolRegistry.getTool(targetName);
+                if (
+                  tool &&
+                  toolRegistry.isProxyEligibleDeferredTool(targetName)
+                ) {
+                  restoredSchemas.push(tool.schema);
+                }
+              }
+              if (restoredSchemas.length > 0) {
+                effectiveExtraHistory = [
+                  ...effectiveExtraHistory,
+                  {
+                    role: 'user',
+                    parts: [
+                      {
+                        text:
+                          'Current schemas for deferred tools restored from session history:\n\n' +
+                          formatFunctionSchemaBlocks(restoredSchemas) +
+                          '\n\nTo call a restored deferred tool on a later turn, use `deferred_tool_call` with `name` set to the exact function name above and `arguments` matching that function schema.',
+                      },
+                    ],
+                  },
+                ];
+                for (const schema of restoredSchemas) {
+                  if (schema.name) {
+                    toolRegistry.markProxySchemaPresented(schema.name);
                   }
                 }
               }
@@ -1324,7 +1361,7 @@ export class GeminiClient {
       deferredReminderCount = deferredTools?.length ?? 0;
       [history, snapshotEntries] = await profiler.time(
         'initial_chat_history',
-        () => getInitialChatHistory(this.config, extraHistory),
+        () => getInitialChatHistory(this.config, effectiveExtraHistory),
       );
       profiler.timeSync('skill_reminder_seed', () => {
         this.seedSkillReminderDedupFromSnapshot(snapshotEntries);

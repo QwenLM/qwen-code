@@ -218,26 +218,12 @@ flowchart LR
   C --> D --> E --> F --> G --> H --> I --> J --> K --> L --> M
 ```
 
-The normalized request carries both identities:
-
-```ts
-interface NormalizedToolCallRequest extends ToolCallRequestInfo {
-  // Real target identity used by scheduler policy and execution.
-  name: string;
-  args: Record<string, unknown>;
-
-  // Present only when the provider called a stable proxy.
-  providerName?: string;
-  providerArgs?: Record<string, unknown>;
-}
-```
-
-Normal tool calls do not have `providerName`, so existing behavior is
-unchanged. A proxy call looks like:
+The normalized `ToolCallRequestInfo` carries both identities. Normal tool calls
+do not have `providerName`, so existing behavior is unchanged. A proxy call
+looks like:
 
 ```text
 providerName = deferred_tool_call
-providerArgs = { name: "cron_create", arguments: {...} }
 name         = cron_create
 args         = {...}
 ```
@@ -248,11 +234,11 @@ consumers use `name` and `args`.
 Normalization is shared core routing semantics, not private
 `CoreToolScheduler` behavior. Both the main scheduler and ACP/daemon
 `Session.runTool()` must call the same pure helper before tool lookup,
-permissions, hooks, telemetry, and execution. This keeps the ACP execution path
-from executing the `deferred_tool_call` wrapper fallback or bypassing the
-presentation gate. All provider/model-facing function responses still use
-`providerName ?? name`, so hidden target names are not written back to the
-provider.
+permission checks, hooks, telemetry, and execution.
+This keeps the ACP execution path from executing the `deferred_tool_call`
+wrapper fallback or bypassing the presentation gate. All provider/model-facing
+function responses still use `providerName ?? name`, so hidden target names are
+not written back to the provider.
 
 ## Stable Provider Tool
 
@@ -406,8 +392,7 @@ Before the existing target permission flow:
 2. Reject unless the runtime is a top-level main session.
 3. Validate the envelope:
    - `name` is a non-empty string;
-   - `arguments` is a non-null, non-array plain object;
-   - no unexpected envelope fields exist.
+   - `arguments` is a non-null, non-array plain object.
 4. Canonicalize and resolve the current target from `ToolRegistry`.
 5. Reject self-target recursion, where the proxy envelope names
    `deferred_tool_call` itself as the target tool. This check does not reject
@@ -416,8 +401,8 @@ Before the existing target permission flow:
    and tell the model to call them by their real names.
 7. Compare the current target schema fingerprint with the presentation record.
 8. Construct a normalized request using the real target `name` and `args`, while
-   preserving `providerName`, `providerArgs`, call ID, provider call ID, prompt
-   ID, response ID, and truncation state.
+   preserving `providerName`, call ID, provider call ID, prompt ID, response
+   ID, and truncation state.
 9. Run the unchanged target permission, build, confirmation, hook, scheduling,
    execution, timeout, streaming, truncation, and recording pipeline.
 

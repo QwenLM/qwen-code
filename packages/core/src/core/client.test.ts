@@ -91,6 +91,7 @@ import {
 } from '../utils/environmentContext.js';
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
+import { formatFunctionSchemaBlocks } from '../tools/function-schema-rendering.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
   __resetActiveGoalStoreForTests,
@@ -504,6 +505,7 @@ describe('Gemini Client (client.ts)', () => {
       clearRevealedDeferredTools: vi.fn(),
       revealDeferredTool: vi.fn(),
       markProxySchemaPresented: vi.fn(),
+      isProxyEligibleDeferredTool: vi.fn().mockReturnValue(false),
       isDeferredToolRevealed: vi.fn().mockReturnValue(false),
       getTool: vi.fn().mockReturnValue(null),
       getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
@@ -1180,6 +1182,7 @@ describe('Gemini Client (client.ts)', () => {
       return vi.mocked(mockConfig.getToolRegistry)() as unknown as {
         getDeferredToolSummary: ReturnType<typeof vi.fn>;
         getTool: ReturnType<typeof vi.fn>;
+        isProxyEligibleDeferredTool: ReturnType<typeof vi.fn>;
         isDeferredToolRevealed: ReturnType<typeof vi.fn>;
         revealDeferredTool: ReturnType<typeof vi.fn>;
         markProxySchemaPresented: ReturnType<typeof vi.fn>;
@@ -1221,12 +1224,32 @@ describe('Gemini Client (client.ts)', () => {
 
     it('restores proxy presentations that appear in resumed deferred_tool_call history', async () => {
       const reg = getRegistryMock();
+      const cronCreateSchema = {
+        name: 'cron_create',
+        description: 'schedule',
+        parametersJsonSchema: {
+          type: 'object',
+          properties: {
+            schedule: { type: 'string' },
+          },
+          required: ['schedule'],
+        },
+      };
       reg.getDeferredToolSummary.mockReturnValue([
         { name: 'cron_create', description: 'schedule' },
         { name: 'cron_list', description: 'list' },
       ]);
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search'
+          ? ({} as never)
+          : n === 'cron_create'
+            ? ({
+                schema: cronCreateSchema,
+              } as never)
+            : null,
+      );
+      reg.isProxyEligibleDeferredTool.mockImplementation(
+        (n: string) => n === 'cron_create',
       );
       reg.markProxySchemaPresented.mockClear();
 
@@ -1263,6 +1286,21 @@ describe('Gemini Client (client.ts)', () => {
       expect(reg.markProxySchemaPresented).toHaveBeenCalledWith('cron_create');
       expect(reg.markProxySchemaPresented).not.toHaveBeenCalledWith(
         'cron_list',
+      );
+      const restoredSchemaText = client
+        .getHistory()
+        .flatMap((entry) => entry.parts ?? [])
+        .map((part) => part.text ?? '')
+        .find((text) =>
+          text.includes(
+            'Current schemas for deferred tools restored from session history',
+          ),
+        );
+      expect(restoredSchemaText).toContain(
+        formatFunctionSchemaBlocks([cronCreateSchema]),
+      );
+      expect(restoredSchemaText).toContain(
+        'To call a restored deferred tool on a later turn',
       );
     });
 
