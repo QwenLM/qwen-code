@@ -294,12 +294,44 @@ describe('DELETE /workspace/models', () => {
       .send({ authType: 'openai', modelId: 'gpt-4o' });
 
     expect(res.status).toBe(200);
+    // modelFallbacks requiresRestart, so the response flags it.
+    expect(res.body.requiresRestart).toBe(true);
     expect(readUserSettings()['modelFallbacks']).toBe('deepseek-v4');
     expect(broadcastSettingsChanged).toHaveBeenCalledWith(
       'modelFallbacks',
       'deepseek-v4',
       'user',
       undefined,
+    );
+  });
+
+  it('keeps a fallback when another provider still has the same base id', async () => {
+    writeUserSettings({
+      modelProviders: {
+        openai: [
+          { id: 'gpt-4o', baseUrl: 'https://api.openai.com' },
+          { id: 'gpt-4o', baseUrl: 'https://azure.example' },
+        ],
+      },
+      modelFallbacks: 'gpt-4o,deepseek-v4',
+    });
+    const { app, broadcastSettingsChanged } = makeApp();
+
+    const res = await request(app).delete('/workspace/models').send({
+      authType: 'openai',
+      modelId: 'gpt-4o',
+      baseUrl: 'https://api.openai.com',
+    });
+
+    expect(res.status).toBe(200);
+    // The other gpt-4o variant remains, so the bare-id fallback is kept.
+    expect(readUserSettings()['modelFallbacks']).toBe('gpt-4o,deepseek-v4');
+    expect(res.body.requiresRestart).toBe(false);
+    expect(broadcastSettingsChanged).not.toHaveBeenCalledWith(
+      'modelFallbacks',
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
     );
   });
 });

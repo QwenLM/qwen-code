@@ -4980,7 +4980,14 @@ export function App({
       setModelActionBusy(true);
       workspaceActions
         .deleteModel(target)
-        .then(() => {
+        .then((result) => {
+          // A scrubbed fallback requires a restart — surface it like the
+          // settings panel does.
+          if (result?.requiresRestart) {
+            store.dispatch([
+              { type: 'status', text: t('settings.requiresRestart') },
+            ]);
+          }
           // A transient reload failure shouldn't surface as "delete failed" —
           // the model was already removed. Just log it. Reload settings too so a
           // cleared active model / scrubbed fallback isn't shown stale.
@@ -5002,7 +5009,14 @@ export function App({
         })
         .finally(() => setModelActionBusy(false));
     },
-    [workspaceActions, providersState, reloadWorkspaceSettings, reportError, t],
+    [
+      workspaceActions,
+      providersState,
+      reloadWorkspaceSettings,
+      reportError,
+      store,
+      t,
+    ],
   );
 
   const handleCloseAuthDialog = useCallback(() => {
@@ -5020,7 +5034,14 @@ export function App({
         'modelFallbacks',
         baseIds.join(','),
       )
-        .then(() => {
+        .then((result) => {
+          // modelFallbacks requiresRestart — tell the user, like the settings
+          // panel does for restart-required edits.
+          if (result?.requiresRestart) {
+            store.dispatch([
+              { type: 'status', text: t('settings.requiresRestart') },
+            ]);
+          }
           // A reload failure shouldn't surface as "save failed" — the value
           // was already persisted. Just log it.
           reloadWorkspaceSettings().catch((err: unknown) => {
@@ -5039,6 +5060,7 @@ export function App({
       setWorkspaceSetting,
       reloadWorkspaceSettings,
       reportError,
+      store,
       t,
     ],
   );

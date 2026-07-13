@@ -7,6 +7,7 @@
 import type { Application, Request, Response } from 'express';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import { getModelProvidersOwnerScope } from '../../config/modelProvidersScope.js';
+import { getSettingDefinition } from '../../utils/settingsUtils.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   isActiveModelSelection,
@@ -162,8 +163,20 @@ export function registerWorkspaceModelsRoutes(
 
         // Drop the deleted model from modelFallbacks so it doesn't linger as a
         // dangling fallback reference the runtime/UI would show as unavailable.
+        // Fallbacks store bare model ids, so only scrub when no other provider
+        // still configures a model with the same id (else the fallback may have
+        // been intended for that other provider's variant).
+        const stillConfigured = Object.values(next).some(
+          (models) =>
+            Array.isArray(models) &&
+            models.some((model) => model.id === parsed.modelId),
+        );
         const fallbacks = scopeSettings.modelFallbacks;
-        if (typeof fallbacks === 'string' && fallbacks.length > 0) {
+        if (
+          !stillConfigured &&
+          typeof fallbacks === 'string' &&
+          fallbacks.length > 0
+        ) {
           const original = fallbacks
             .split(',')
             .map((entry) => entry.trim())
@@ -214,7 +227,13 @@ export function registerWorkspaceModelsRoutes(
       for (const write of writes) broadcastWrite(write);
 
       const clearedActiveModel = writes.some((w) => w.key === 'model.name');
-      res.status(200).json({ removed: true, clearedActiveModel });
+      // Surface restart-required so the UI can prompt (e.g. modelFallbacks).
+      const requiresRestart = writes.some(
+        (w) => getSettingDefinition(w.key)?.requiresRestart === true,
+      );
+      res
+        .status(200)
+        .json({ removed: true, clearedActiveModel, requiresRestart });
     },
   );
 }

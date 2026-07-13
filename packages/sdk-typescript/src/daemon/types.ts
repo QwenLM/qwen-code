@@ -2001,6 +2001,8 @@ export interface DaemonModelDeleteRequest {
 export interface DaemonModelDeleteResult {
   removed: boolean;
   clearedActiveModel: boolean;
+  /** True when a committed write targets a restart-required setting. */
+  requiresRestart?: boolean;
 }
 
 export type DaemonVoiceMode = 'hold' | 'tap';
