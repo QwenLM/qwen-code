@@ -55,7 +55,9 @@ commit writes a `prepared` journal, moves the old artifact to rollback, moves
 staging into place, and atomically writes `state.json`. That state rename is the
 commit point. Before it, recovery rolls back; after it, recovery only completes
 projection and cleanup. A committed policy is never rolled back because one
-runtime refresh failed.
+runtime refresh failed. If both a pre-commit operation and its rollback fail,
+the caller receives both errors and the journal remains for fail-closed recovery;
+the store does not continue writing through an ambiguous artifact state.
 
 Store files use owner-only permissions and atomic no-follow writes. Extension
 ids, direct-child artifact paths, transaction paths, and names are validated.
@@ -146,18 +148,28 @@ not cancellable. Prepared updates carry the target artifact generation:
 unrelated extension or activation changes safely rebase, while a stale update
 of the same artifact fails with `extension_conflict`.
 
+Remote npm metadata is streamed with a 10 MiB response cap. npm and GitHub
+archives have separate 100 MiB download caps, request deadlines, redirect
+limits, and archive-entry validation before extraction.
+
 ## Runtime reconciliation
 
 A successful commit invalidates local status and refreshes affected runtimes.
 Global artifact/default changes reconcile all runtimes in this daemon; an exact
 workspace override reconciles only its target. Runtime reconciliation refreshes
 extension and skill caches, extension tools, hierarchical memory, active chat
-system instructions, and available commands. Per-workspace generation
+system instructions, and available commands. A failed component does not skip
+the remaining refresh components; the session RPC reports the combined failure
+after all components have been attempted. Per-workspace generation
 coalescing means applying generation N also satisfies waiters for older
 generations; a late lower-generation refresh therefore cannot move the applied
 generation backwards. Partial refresh failure or post-commit reload/cleanup
 failure produces `succeeded_with_warnings` with workspace-specific or commit
 diagnostics, without rolling back the artifact.
+
+Legacy workspace migration treats a committed artifact as failed only when it
+could not be reloaded. Settings, cleanup, or runtime-refresh warnings do not
+trigger a retry of an artifact that is already durably installed.
 
 The extension file watcher observes only `extension-store/state.json` for
 policy generation and continues to observe installed/linked extension content

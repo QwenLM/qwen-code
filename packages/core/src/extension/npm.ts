@@ -18,6 +18,7 @@ import { resolveNetworkTarget } from './network-policy.js';
 const debugLogger = createDebugLogger('EXT_NPM');
 const NPM_ARCHIVE_DOWNLOAD_TIMEOUT_MS = 120_000;
 const NPM_ARCHIVE_DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024;
+const NPM_METADATA_MAX_BYTES = 10 * 1024 * 1024;
 const NPM_MAX_REDIRECTS = 10;
 
 export interface NpmDownloadResult {
@@ -272,8 +273,26 @@ function fetchNpmJson<T>(
                 );
               }
               const chunks: Buffer[] = [];
-              res.on('data', (chunk) => chunks.push(chunk));
+              let totalBytes = 0;
+              let responseFinished = false;
+              res.on('data', (chunk: Buffer) => {
+                if (responseFinished) return;
+                totalBytes += chunk.length;
+                if (totalBytes > NPM_METADATA_MAX_BYTES) {
+                  responseFinished = true;
+                  res.destroy();
+                  reject(
+                    new Error(
+                      `npm package metadata exceeded maximum size of ${NPM_METADATA_MAX_BYTES} bytes`,
+                    ),
+                  );
+                  return;
+                }
+                chunks.push(chunk);
+              });
               res.on('end', () => {
+                if (responseFinished) return;
+                responseFinished = true;
                 try {
                   resolve(JSON.parse(Buffer.concat(chunks).toString()) as T);
                 } catch (e) {

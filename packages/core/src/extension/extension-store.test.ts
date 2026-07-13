@@ -675,6 +675,45 @@ describe('ExtensionStore', () => {
     expect(fs.existsSync(staging)).toBe(false);
   });
 
+  it('preserves the original error when rollback also fails', async () => {
+    const store = makeStore();
+    const identity = { id: 'fa'.repeat(32), name: 'demo' };
+    await store.ensureInitialized([]);
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    const primaryError = new Error('state write failed');
+    const rollbackError = new Error('rollback failed');
+    const internals = store as unknown as {
+      writeSnapshotUnlocked(snapshot: unknown): Promise<void>;
+      rollbackJournal(journal: unknown): Promise<void>;
+    };
+    vi.spyOn(internals, 'writeSnapshotUnlocked').mockRejectedValueOnce(
+      primaryError,
+    );
+    vi.spyOn(internals, 'rollbackJournal').mockRejectedValueOnce(rollbackError);
+
+    let thrown: unknown;
+    try {
+      await store.commitArtifact({
+        operation: 'install',
+        identity,
+        stagingDirectory: staging,
+        destinationDirectory: path.join(extensionsDir, identity.name),
+        initialActivation: { scope: 'user' },
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(AggregateError);
+    expect((thrown as AggregateError).errors).toEqual([
+      primaryError,
+      rollbackError,
+    ]);
+    const journals = await fsp.readdir(path.join(storeDir, 'transactions'));
+    expect(journals.filter((name) => name.endsWith('.json'))).toHaveLength(1);
+  });
+
   it('changes artifact generation only for artifact commits', async () => {
     const store = makeStore();
     const identity = { id: '91'.repeat(32), name: 'demo' };

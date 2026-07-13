@@ -11274,8 +11274,9 @@ describe('sessionLanguage multi-session propagation', () => {
   });
 
   it('propagates extension cache refresh failures', async () => {
+    const cacheError = new Error('bad extension cache');
     const extensionManager = {
-      refreshCache: vi.fn().mockRejectedValue(new Error('bad extension cache')),
+      refreshCache: vi.fn().mockRejectedValue(cacheError),
       refreshTools: vi.fn().mockResolvedValue(undefined),
     };
     const skillManager = {
@@ -11319,17 +11320,33 @@ describe('sessionLanguage multi-session propagation', () => {
     });
 
     await agent.newSession({ cwd: '/ext', mcpServers: [] });
-    await expect(
-      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh, {
-        sessionId: 's-ext',
+    let thrown: unknown;
+    try {
+      await agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+        {
+          sessionId: 's-ext',
+        },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(AggregateError);
+    expect((thrown as AggregateError).errors).toEqual([cacheError]);
+    expect(thrown).toEqual(
+      expect.objectContaining({
+        message: expect.stringContaining('bad extension cache'),
       }),
-    ).rejects.toThrow('bad extension cache');
+    );
 
     expect(extensionManager.refreshCache).toHaveBeenCalledOnce();
     expect(skillManager.refreshCache).toHaveBeenCalledOnce();
-    expect(extensionManager.refreshTools).not.toHaveBeenCalled();
+    expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
     expect(cfg.refreshHierarchicalMemory).not.toHaveBeenCalled();
-    expect(sendAvailableCommandsUpdate).not.toHaveBeenCalled();
+    expect(
+      cfg.getGeminiClient().refreshSystemInstruction,
+    ).toHaveBeenCalledOnce();
+    expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -11391,7 +11408,10 @@ describe('sessionLanguage multi-session propagation', () => {
     expect(skillManager.refreshCache).toHaveBeenCalledOnce();
     expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
     expect(cfg.refreshHierarchicalMemory).not.toHaveBeenCalled();
-    expect(sendAvailableCommandsUpdate).not.toHaveBeenCalled();
+    expect(
+      cfg.getGeminiClient().refreshSystemInstruction,
+    ).toHaveBeenCalledOnce();
+    expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
     await agentPromise;

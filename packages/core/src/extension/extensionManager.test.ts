@@ -2313,6 +2313,52 @@ describe('extension tests', () => {
     });
   });
 
+  describe('performWorkspaceExtensionMigration', () => {
+    const extension = {
+      path: '/tmp/migration-source',
+      config: { name: 'migration-extension' },
+    } as Extension;
+
+    it('reports a committed extension that could not be reloaded', async () => {
+      const manager = createExtensionManager();
+      vi.spyOn(manager, 'installExtension').mockRejectedValueOnce(
+        Object.assign(new Error('committed with warnings'), {
+          code: 'extension_committed_with_warnings',
+          committed: true,
+          identity: { id: 'migration-id', name: 'migration-extension' },
+          warnings: [
+            { code: 'extension_reload_failed', error: 'invalid manifest' },
+          ],
+        }),
+      );
+
+      await expect(
+        manager.performWorkspaceExtensionMigration([extension], async () => {}),
+      ).resolves.toEqual(['migration-extension']);
+    });
+
+    it('does not retry a committed extension for recoverable warnings', async () => {
+      const manager = createExtensionManager();
+      vi.spyOn(manager, 'installExtension').mockRejectedValueOnce(
+        Object.assign(new Error('committed with warnings'), {
+          code: 'extension_committed_with_warnings',
+          committed: true,
+          identity: { id: 'migration-id', name: 'migration-extension' },
+          warnings: [
+            {
+              code: 'extension_runtime_refresh_failed',
+              error: 'refresh delayed',
+            },
+          ],
+        }),
+      );
+
+      await expect(
+        manager.performWorkspaceExtensionMigration([extension], async () => {}),
+      ).resolves.toEqual([]);
+    });
+  });
+
   describe('validateExtensionOverrides', () => {
     it('should mark all extensions as active if no enabled extensions are provided', async () => {
       createExtension({

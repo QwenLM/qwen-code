@@ -355,6 +355,39 @@ describe('downloadFromNpmRegistry', () => {
     ).rejects.toBe(responseError);
   });
 
+  it('destroys npm metadata responses that exceed the size limit', async () => {
+    const response = {
+      statusCode: 200,
+      headers: {},
+      destroy: vi.fn(),
+      on: vi.fn((event: string, handler: (data?: Buffer) => void) => {
+        if (event === 'data') {
+          handler(Buffer.alloc(6 * 1024 * 1024));
+          handler(Buffer.alloc(6 * 1024 * 1024));
+        }
+        if (event === 'end') handler();
+      }),
+    };
+    vi.mocked(https.get).mockImplementation(
+      (_url: unknown, _options: unknown, callback: unknown) => {
+        if (typeof callback === 'function') callback(response as never);
+        return { on: vi.fn().mockReturnThis() } as never;
+      },
+    );
+
+    await expect(
+      downloadFromNpmRegistry(
+        {
+          source: '@scope/pkg',
+          type: 'npm',
+          registryUrl: 'https://registry.example.com',
+        },
+        '/tmp/qwen-extension',
+      ),
+    ).rejects.toThrow('npm package metadata exceeded maximum size');
+    expect(response.destroy).toHaveBeenCalledOnce();
+  });
+
   it('destroys non-200 npm tarball responses before rejecting', async () => {
     const response = {
       statusCode: 503,

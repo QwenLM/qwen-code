@@ -2392,7 +2392,14 @@ export class ExtensionManager {
           requestSetting,
         );
       } catch (error) {
-        if (isExtensionCommittedWithWarningsError(error)) continue;
+        if (
+          isExtensionCommittedWithWarningsError(error) &&
+          !error.warnings.some(
+            (warning) => warning.code === 'extension_reload_failed',
+          )
+        ) {
+          continue;
+        }
         failedInstallNames.push(extension.config.name);
       }
     }

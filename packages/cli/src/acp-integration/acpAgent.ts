@@ -7545,13 +7545,37 @@ class QwenAgent implements Agent {
         const config = session.getConfig();
         const extensionManager = config.getExtensionManager();
         const skillManager = config.getSkillManager();
+        const errors: unknown[] = [];
+        const runRefresh = async (refresh: () => Promise<unknown>) => {
+          try {
+            await refresh();
+          } catch (error) {
+            errors.push(error);
+          }
+        };
         await Promise.all([
-          extensionManager.refreshCache(),
-          skillManager?.refreshCache(),
+          runRefresh(async () => await extensionManager.refreshCache()),
+          runRefresh(async () => await skillManager?.refreshCache()),
         ]);
-        await extensionManager.refreshTools();
-        await config.getGeminiClient()?.refreshSystemInstruction();
-        await session.sendAvailableCommandsUpdate();
+        await runRefresh(async () => await extensionManager.refreshTools());
+        await runRefresh(
+          async () =>
+            await config.getGeminiClient()?.refreshSystemInstruction(),
+        );
+        await runRefresh(
+          async () => await session.sendAvailableCommandsUpdate(),
+        );
+        if (errors.length > 0) {
+          const details = errors
+            .map((error) =>
+              error instanceof Error ? error.message : String(error),
+            )
+            .join('; ');
+          throw new AggregateError(
+            errors,
+            `Extension runtime refresh failed: ${details}`,
+          );
+        }
         return { ok: true };
       }
       case 'deleteSession': {

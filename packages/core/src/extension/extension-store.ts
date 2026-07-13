@@ -552,8 +552,16 @@ export class ExtensionStore {
         }
       } catch (error) {
         if (!stateCommitted) {
-          await this.rollbackJournal(journal);
-          await fsp.rm(journalPath, { force: true });
+          try {
+            await this.rollbackJournal(journal);
+            await fsp.rm(journalPath, { force: true });
+          } catch (rollbackError) {
+            throw new AggregateError(
+              [error, rollbackError],
+              'Extension transaction failed and rollback recovery did not complete.',
+              { cause: error },
+            );
+          }
         }
         throw error;
       }

@@ -16,10 +16,7 @@ import { loadSettings } from '../../config/settings.js';
 import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
-import {
-  createBuildWorkspaceCtx,
-  parseAndValidateWorkspaceClientId,
-} from '../server/request-helpers.js';
+import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
 import {
   STATUS_SCHEMA_VERSION,
   type ServeExtensionCapabilities,
@@ -118,7 +115,6 @@ export interface CreateExtensionsControllerDeps {
 export interface ExtensionsController {
   readonly boundWorkspace: string;
   readonly workspace: DaemonWorkspaceService;
-  buildWorkspaceCtx: ReturnType<typeof createBuildWorkspaceCtx>;
   createExtensionManager(
     workspaceDir?: string,
     isWorkspaceTrusted?: boolean,
@@ -169,7 +165,6 @@ export function createExtensionsController(
 ): ExtensionsController {
   const { boundWorkspace, bridge, workspace } = deps;
   const maxExtensionOperationHistory = deps.maxExtensionOperationHistory ?? 100;
-  const buildWorkspaceCtx = createBuildWorkspaceCtx(boundWorkspace);
 
   const preparationQueue = createFifoTaskQueue(
     EXTENSION_PREPARATION_CONCURRENCY,
@@ -856,7 +851,6 @@ export function createExtensionsController(
   return {
     boundWorkspace,
     workspace,
-    buildWorkspaceCtx,
     createExtensionManager,
     buildLocalExtensionsStatus,
     refreshExtensionsForAllSessions,
