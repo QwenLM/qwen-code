@@ -48,10 +48,11 @@ if [ "$EXISTING" -eq 0 ]; then gh pr review ... ; fi
 **Signature & footer:** capture the reviewed commit's **full** OID **once, when you begin inspecting the code** — the SHA the worktree/diff actually reflects. Not a 7-char prefix (28 bits; a fork author can force-push a colliding prefix), and **not** a fresh read at post time (that would attest to code you never reviewed). Reuse this `HEAD_SHA` for every stage's footer, and before each post — and again before `--approve` — re-read the head and bail if it moved:
 
 ```bash
-HEAD_SHA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid')   # once, at review start
+HEAD_SHA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid') || exit 1
+[ -n "$HEAD_SHA" ] || { echo 'empty head SHA — fail closed'; exit 1; }   # once, at review start
 # before any post or approval — refuse to attest to code you didn't review:
-NOW=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid')
-[ "$NOW" = "$HEAD_SHA" ] || { echo 'head moved since review — restart or defer'; exit 1; }
+NOW=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid') || exit 1
+[ -n "$NOW" ] && [ "$NOW" = "$HEAD_SHA" ] || { echo 'head moved or unreadable — restart or defer'; exit 1; }
 ```
 
 Every staged comment (Stage 1 gate-pass, Stage 2, Stage 3) ends with the signature line, then a footer recording the commit this pass reflects. Because comments are updated in place on re-run, the SHA lets a maintainer tell at a glance whether new commits landed since the last review:
@@ -311,14 +312,15 @@ Diagram text (participants, labels) stays English in the main comment; the `<det
 sanitize_path() { # single-line, HTML-safe, cell-bounded
   printf '%s' "$1" | tr -d '\r\n' | cut -c1-200 |
     sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' \
-      -e 's/`/\&#96;/g' -e 's/|/\&#124;/g' -e 's/@/\&#64;/g'
+      -e 's/`/\&#96;/g' -e 's/|/\&#124;/g' -e 's/@/\&#64;/g' \
+      -e 's/\[/\&#91;/g' -e 's/\]/\&#93;/g' -e 's/(/\&#40;/g' -e 's/)/\&#41;/g' -e 's/\*/\&#42;/g'
 }
 # render in the table as:  <code>$(sanitize_path "$path")</code>
 ```
 
 Fold the table in a `<details>` so it doesn't dominate the comment, and write one honest line per file in your own words — not a mechanical restatement of the diff. **Budget it:** show at most ~30 rows, cap each cell (the sanitizer already trims to 200 chars), and append a final `…and N more files` row instead of listing every path — the table shares the comment's ~65 KB limit with the findings, tmux output, the bilingual summary, and the footer, and the Stage 2 post is mandatory. Skip the table entirely for small, focused PRs.
 
-Two more escaping notes: `<code>` shows HTML entities literally but GFM **still parses Markdown inside it**, so extend the `sed` above to also encode link/emphasis syntax (`[` `]` `(` `)` `*` → `&#91;` `&#93;` `&#40;` `&#41;` `&#42;`); and the **What changed** column needs the same discipline — keep it plain prose with no `|`, backticks, or `<`/`>` (or run it through the sanitizer too). Cap the tmux capture (~500 lines / ~15 KB) so findings + diagram + table + testing + the bilingual summary stay under the comment limit together.
+Two more escaping notes: `<code>` shows HTML entities literally but GFM **still parses Markdown inside it**, which is why the `sed` above also encodes link/emphasis syntax (`[` `]` `(` `)` `*`); and the **What changed** column needs the same discipline — keep it plain prose with no `|`, backticks, or `<`/`>` (or run it through the sanitizer too). Cap the tmux capture (~500 lines / ~15 KB) so findings + diagram + table + testing + the bilingual summary stay under the comment limit together.
 
 ```markdown
 <details>
