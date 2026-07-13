@@ -1,6 +1,11 @@
 /**
- * Custom error to signal that a stream completed with invalid content,
- * which should trigger a retry.
+ * @license
+ * Copyright 2025 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * Custom error to signal invalid model stream content that should be retried.
  */
 export class InvalidStreamError extends Error {
   readonly type:

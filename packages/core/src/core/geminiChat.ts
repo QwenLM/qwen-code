@@ -331,7 +331,8 @@ interface TryCompressOptions {
 // reason. All are retried with an independent budget (similar to rate-limit
 // retries) so they do not consume each other's retry budgets.
 const INVALID_STREAM_RETRY_CONFIG = {
-  maxRetries: 4,
+  transientMaxRetries: 4,
+  protocolTagLeakMaxRetries: 2,
   initialDelayMs: 2000,
 };
 
@@ -2478,7 +2479,9 @@ export class GeminiChat {
             // is independent from HTTP retries handled by retryWithBackoff.
             const isInvalidStreamError = error instanceof InvalidStreamError;
             const maxInvalidStreamRetries =
-              INVALID_STREAM_RETRY_CONFIG.maxRetries;
+              isInvalidStreamError && error.type === 'PROTOCOL_TAG_LEAK'
+                ? INVALID_STREAM_RETRY_CONFIG.protocolTagLeakMaxRetries
+                : INVALID_STREAM_RETRY_CONFIG.transientMaxRetries;
             const invalidStreamRetryCount =
               isInvalidStreamError && error.type === 'PROTOCOL_TAG_LEAK'
                 ? protocolTagLeakRetryCount
@@ -2598,7 +2601,9 @@ export class GeminiChat {
 
               attemptState.rollback();
               const maxContinuationRetries =
-                INVALID_STREAM_RETRY_CONFIG.maxRetries;
+                error.type === 'PROTOCOL_TAG_LEAK'
+                  ? INVALID_STREAM_RETRY_CONFIG.protocolTagLeakMaxRetries
+                  : INVALID_STREAM_RETRY_CONFIG.transientMaxRetries;
               const continuationRetryCount =
                 error.type === 'PROTOCOL_TAG_LEAK'
                   ? protocolTagLeakRetryCount

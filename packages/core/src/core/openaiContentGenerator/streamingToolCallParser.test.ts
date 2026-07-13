@@ -281,6 +281,33 @@ describe('StreamingToolCallParser', () => {
   });
 
   describe('Tool call metadata handling', () => {
+    it('tracks real nameless calls but ignores phantom chunks', () => {
+      parser.addChunk(0, '');
+      expect(parser.hasNamelessToolCall()).toBe(false);
+
+      parser.addChunk(0, '', 'call_1');
+      expect(parser.hasNamelessToolCall()).toBe(true);
+
+      parser.resetIndex(0);
+      parser.addChunk(0, '{"path":"a.ts"}');
+      expect(parser.hasNamelessToolCall()).toBe(true);
+    });
+
+    it('accepts a function name that arrives after complete arguments', () => {
+      parser.addChunk(0, '{"path":"a.ts"}', 'call_1');
+      parser.addChunk(0, '{"path":"a.ts"}', 'call_1', 'read_file');
+
+      expect(parser.hasNamelessToolCall()).toBe(false);
+      expect(parser.getCompletedToolCalls()).toEqual([
+        {
+          id: 'call_1',
+          name: 'read_file',
+          args: { path: 'a.ts' },
+          index: 0,
+        },
+      ]);
+    });
+
     it('should store and retrieve tool call metadata', () => {
       parser.addChunk(0, '{"param": "value"}', 'call_123', 'my_function');
 
@@ -306,30 +333,6 @@ describe('StreamingToolCallParser', () => {
       parser.addChunk(0, '{"param":', undefined, 'my_function');
       expect(parser.getToolCallMeta(0).id).toBe('call_123');
       expect(parser.getToolCallMeta(0).name).toBe('my_function');
-    });
-
-    it('should track only real nameless tool calls', () => {
-      parser.addChunk(0, '');
-      expect(parser.hasNamelessToolCall()).toBe(false);
-
-      parser.addChunk(1, '', 'call_1');
-      expect(parser.hasNamelessToolCall()).toBe(true);
-
-      parser.addChunk(1, '', undefined, 'my_function');
-      expect(parser.hasNamelessToolCall()).toBe(false);
-
-      parser.addChunk(2, '{"value":1}');
-      expect(parser.hasNamelessToolCall()).toBe(true);
-      parser.resetIndex(2);
-      expect(parser.hasNamelessToolCall()).toBe(false);
-    });
-
-    it('tracks streamed arguments with no id as a real nameless tool call', () => {
-      parser.addChunk(0, '{"path":"/tmp/file"}');
-      expect(parser.hasNamelessToolCall()).toBe(true);
-
-      parser.addChunk(0, '', undefined, 'write_file');
-      expect(parser.hasNamelessToolCall()).toBe(false);
     });
 
     it('should detect new tool call with same index and reassign to new index', () => {
@@ -359,68 +362,6 @@ describe('StreamingToolCallParser', () => {
         id: 'call_2',
         name: 'function2',
       });
-    });
-
-    it('should isolate a new id from an earlier nameless call at the same index', () => {
-      parser.addChunk(0, '{"path":"/from-first"}', 'call_first');
-      parser.addChunk(0, '{"path":"/from-second"}', 'call_second', 'read_file');
-
-      expect(parser.getBuffer(0)).toBe('{"path":"/from-first"}');
-      expect(parser.getToolCallMeta(0)).toEqual({ id: 'call_first' });
-      expect(parser.getCompletedToolCalls()).toContainEqual({
-        id: 'call_second',
-        name: 'read_file',
-        args: { path: '/from-second' },
-        index: 1,
-      });
-    });
-
-    it('routes id-less continuations to a relocated call', () => {
-      parser.addChunk(0, '{"fromFirst":', 'call_first', 'first_tool');
-      parser.addChunk(0, '{"fromSecond":', 'call_second', 'second_tool');
-      parser.addChunk(0, '"second"}');
-
-      expect(parser.getBuffer(0)).toBe('{"fromFirst":');
-      expect(parser.getBuffer(1)).toBe('{"fromSecond":"second"}');
-      expect(parser.getCompletedToolCalls()).toContainEqual({
-        id: 'call_second',
-        name: 'second_tool',
-        args: { fromSecond: 'second' },
-        index: 1,
-      });
-    });
-
-    it('keeps the active route when an older original ID replays', () => {
-      parser.addChunk(0, '{"a":1}', 'call_a', 'tool_a');
-      parser.addChunk(2, '{"c":', 'call_c', 'tool_c');
-      parser.addChunk(0, '{"b":', 'call_b', 'tool_b');
-
-      parser.addChunk(0, '', 'call_a', 'tool_a');
-      parser.addChunk(0, '2}');
-
-      expect(parser.getBuffer(1)).toBe('{"b":2}');
-      expect(parser.getBuffer(2)).toBe('{"c":');
-    });
-
-    it('keeps the active route when an older relocated ID replays', () => {
-      parser.addChunk(0, '{"a":1}', 'call_a', 'tool_a');
-      parser.addChunk(0, '{"b":2}', 'call_b', 'tool_b');
-      parser.addChunk(0, '{"c":', 'call_c', 'tool_c');
-
-      parser.addChunk(0, '', 'call_b', 'tool_b');
-      parser.addChunk(0, '3}');
-
-      expect(parser.getBuffer(1)).toBe('{"b":2}');
-      expect(parser.getBuffer(2)).toBe('{"c":3}');
-    });
-
-    it('falls back after the relocated call completes', () => {
-      parser.addChunk(0, '{"a":', 'call_a', 'tool_a');
-      parser.addChunk(0, '{"b":2}', 'call_b', 'tool_b');
-      parser.addChunk(0, '1}');
-
-      expect(parser.getBuffer(0)).toBe('{"a":1}');
-      expect(parser.getBuffer(1)).toBe('{"b":2}');
     });
   });
 
@@ -596,20 +537,6 @@ describe('StreamingToolCallParser', () => {
         { id: 'call_3', name: 'function3', args: { x: 1 }, index: 2 },
       ]);
     });
-
-    it('ignores blank phantom chunks after a completed occupied index', () => {
-      parser.addChunk(0, '{"path":"a.ts"}', 'call_1', 'read_file');
-
-      for (let i = 0; i < 100; i++) {
-        parser.addChunk(0, '');
-      }
-      parser.addChunk(0, '{"path":"b.ts"}', 'call_2', 'read_file');
-
-      expect(parser.getCompletedToolCalls()).toEqual([
-        { id: 'call_1', name: 'read_file', args: { path: 'a.ts' }, index: 0 },
-        { id: 'call_2', name: 'read_file', args: { path: 'b.ts' }, index: 1 },
-      ]);
-    });
   });
 
   describe('Edge cases', () => {
@@ -781,16 +708,6 @@ describe('StreamingToolCallParser', () => {
       expect(parser.getBuffer(0)).toBe('{"param1": "value1"}');
     });
 
-    it('accepts a function name after its arguments complete', () => {
-      parser.addChunk(0, '{"path":"a.ts"}', 'call_1');
-      parser.addChunk(0, '', 'call_1', 'read_file');
-
-      expect(parser.hasNamelessToolCall()).toBe(false);
-      expect(parser.getCompletedToolCalls()).toEqual([
-        { id: 'call_1', name: 'read_file', args: { path: 'a.ts' }, index: 0 },
-      ]);
-    });
-
     it('should ignore replayed openers for a completed no-argument tool call', () => {
       parser.addChunk(0, '', 'call_1', 'list_sessions');
       // Provider replays the same ID's opener with a different name; the
@@ -939,27 +856,18 @@ describe('StreamingToolCallParser', () => {
       expect(call3?.index).toBe(3);
     });
 
-    it('should preserve an incomplete call when a different id reuses its index', () => {
+    it('should reuse incomplete index when available', () => {
       // Create an incomplete tool call at index 0
       parser.addChunk(0, '{"incomplete":', 'call_1', 'function1');
 
-      const result = parser.addChunk(
-        0,
-        '{"completed":true}',
-        'call_2',
-        'function2',
-      );
+      // New tool call with different ID should reuse the incomplete index
+      const result = parser.addChunk(0, ' "completed"}', 'call_2', 'function2');
       expect(result.complete).toBe(true);
 
+      // Should have updated the metadata for the same index
       expect(parser.getToolCallMeta(0)).toEqual({
-        id: 'call_1',
-        name: 'function1',
-      });
-      expect(parser.getCompletedToolCalls()).toContainEqual({
         id: 'call_2',
         name: 'function2',
-        args: { completed: true },
-        index: 1,
       });
     });
   });

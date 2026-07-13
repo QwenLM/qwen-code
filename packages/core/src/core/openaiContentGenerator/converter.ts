@@ -1087,141 +1087,9 @@ function hasThoughtPart(parts: Part[]): boolean {
   return parts.some((part) => part.thought === true);
 }
 
-const COMPLETE_THINKING_TAG_PATTERN = /^<\/?think(?:ing)?\s*>$/i;
-const SPACED_THINKING_TAG_PREFIX_PATTERN = /^<\/?think(?:ing)?\s+$/;
-const THINKING_TAGS = [
-  '<think>',
-  '<thinking>',
-  '</think>',
-  '</thinking>',
-] as const;
-
-function getVisiblePartText(parts: Part[]): string {
-  return parts
-    .map((part) =>
-      part.thought !== true && typeof part.text === 'string' ? part.text : '',
-    )
-    .join('');
-}
-
-function isPossibleThinkingTagPrefix(value: string): boolean {
-  const lowerValue = value.toLowerCase();
-  return (
-    THINKING_TAGS.some((tag) => tag.startsWith(lowerValue)) ||
-    SPACED_THINKING_TAG_PREFIX_PATTERN.test(lowerValue)
-  );
-}
-
-function scanThoughtThinkingTags(
-  text: string,
-  state: NonNullable<RequestContext['thoughtThinkingTagState']>,
-): void {
-  for (const char of text) {
-    if (!state.pendingTag) {
-      if (char === '<') {
-        state.pendingTag = char;
-      }
-      continue;
-    }
-
-    if (
-      /\s/.test(char) &&
-      SPACED_THINKING_TAG_PREFIX_PATTERN.test(state.pendingTag.toLowerCase())
-    ) {
-      continue;
-    }
-    state.pendingTag += char;
-    if (COMPLETE_THINKING_TAG_PATTERN.test(state.pendingTag)) {
-      state.hasTag = true;
-      state.pendingTag = '';
-    } else if (!isPossibleThinkingTagPrefix(state.pendingTag)) {
-      state.pendingTag = state.pendingTag.endsWith('<') ? '<' : '';
-    }
-  }
-}
-
-function isTerminalThinkingTagLeak(
-  state: NonNullable<RequestContext['visibleThinkingTagState']>,
-  hasMatchingThoughtTag: boolean,
-): boolean {
-  const pendingTag = state.pendingTag.toLowerCase();
-  return (
-    isPossibleThinkingTagPrefix(state.pendingTag) &&
-    (pendingTag.startsWith('</thi')
-      ? state.openTagCount === 0 &&
-        (state.atVisibleStart || hasMatchingThoughtTag)
-      : pendingTag.startsWith('<think') && state.atVisibleStart)
-  );
-}
-
-function scanVisibleThinkingTags(
-  text: string,
-  state: NonNullable<RequestContext['visibleThinkingTagState']>,
-  hasStructuredReasoning: boolean,
-  hasMatchingThoughtTag: boolean,
-): void {
-  const markVisible = (value: string) => {
-    if (state.atVisibleStart && /\S/.test(value)) {
-      state.atVisibleStart = false;
-    }
-  };
-  for (const char of text) {
-    if (!state.pendingTag) {
-      if (char === '<') {
-        state.pendingTag = char;
-      } else {
-        markVisible(char);
-      }
-      continue;
-    }
-
-    if (
-      /\s/.test(char) &&
-      SPACED_THINKING_TAG_PREFIX_PATTERN.test(state.pendingTag.toLowerCase())
-    ) {
-      continue;
-    }
-    state.pendingTag += char;
-    if (COMPLETE_THINKING_TAG_PATTERN.test(state.pendingTag)) {
-      const tagAtVisibleStart = state.atVisibleStart;
-      state.completedTag = true;
-      if (!hasStructuredReasoning) {
-        state.tagBeforeReasoning = true;
-      }
-      if (tagAtVisibleStart) {
-        state.leadingTag = true;
-      }
-      if (state.pendingTag.startsWith('</')) {
-        if (state.openTagCount === 0) {
-          if (
-            hasStructuredReasoning &&
-            (tagAtVisibleStart || hasMatchingThoughtTag)
-          ) {
-            state.leaked = true;
-          }
-        } else {
-          state.openTagCount--;
-        }
-      } else {
-        if (state.atVisibleStart && hasStructuredReasoning) {
-          state.leaked = true;
-        }
-        state.openTagCount++;
-      }
-      state.atVisibleStart = false;
-      state.pendingTag = '';
-    } else if (!isPossibleThinkingTagPrefix(state.pendingTag)) {
-      const invalidTag = state.pendingTag;
-      state.pendingTag = '';
-      if (invalidTag.endsWith('<')) {
-        markVisible(invalidTag.slice(0, -1));
-        state.pendingTag = '<';
-      } else {
-        markVisible(invalidTag);
-      }
-    }
-  }
-}
+const THINKING_TAG_PATTERN = /<\/?think(?:ing)?\s*>/i;
+const CLOSING_THINKING_TAG_PATTERN = /<\/think(?:ing)?\s*>/i;
+const LEADING_THINKING_TAG_PATTERN = /^\s*<\/?think(?:ing)?\s*>/i;
 
 /**
  * Convert OpenAI response to Gemini format.
@@ -1423,16 +1291,10 @@ export function convertOpenAIChunkToGemini(
         }),
       );
       if (normalizedReasoningText) {
-        const thoughtThinkingTagState =
-          (requestContext.thoughtThinkingTagState ??= {
-            pendingTag: '',
-            hasTag: false,
-          });
-        scanThoughtThinkingTags(
-          normalizedReasoningText,
-          thoughtThinkingTagState,
-        );
         requestContext.hasStructuredReasoningContent = true;
+        if (THINKING_TAG_PATTERN.test(normalizedReasoningText)) {
+          requestContext.hasThinkingTagInReasoning = true;
+        }
       }
       if (
         normalizedReasoningText &&
@@ -1515,82 +1377,46 @@ export function convertOpenAIChunkToGemini(
       }
     }
 
-    // The recorded leak starts with a tag in the thought part, so all parts
-    // participate in holding while only visible parts decide rejection.
-    const visibleThinkingTagState = (requestContext.visibleThinkingTagState ??=
-      {
-        pendingTag: '',
-        openTagCount: 0,
-        atVisibleStart: true,
-        leaked: false,
-      });
-    const hasStructuredReasoning =
-      requestContext.hasStructuredReasoningContent === true;
-    const visiblePartText = getVisiblePartText(parts);
-    const hasMatchingThoughtTag =
-      requestContext.thoughtThinkingTagState?.hasTag === true;
-    const pendingThoughtTag =
-      requestContext.thoughtThinkingTagState?.pendingTag;
-    const hasSuspiciousThoughtTag =
-      hasMatchingThoughtTag ||
-      (!visiblePartText && Boolean(pendingThoughtTag)) ||
-      (Boolean(visiblePartText) &&
-        Boolean(pendingThoughtTag) &&
-        pendingThoughtTag !== '<');
-    if (!visibleThinkingTagState.leaked) {
-      scanVisibleThinkingTags(
-        visiblePartText,
-        visibleThinkingTagState,
-        hasStructuredReasoning,
-        hasMatchingThoughtTag,
-      );
-    }
-    const hasUntrustedVisibleTag =
-      visibleThinkingTagState.tagBeforeReasoning === true ||
-      Boolean(visibleThinkingTagState.pendingTag) ||
-      (hasStructuredReasoning &&
-        (visibleThinkingTagState.leaked ||
-          visibleThinkingTagState.completedTag === true));
-    const malformedThinkingTagLeak =
-      Boolean(choice.finish_reason) &&
-      hasStructuredReasoning &&
-      (visibleThinkingTagState.leadingTag === true ||
-        visibleThinkingTagState.leaked ||
-        (visibleThinkingTagState.completedTag === true &&
-          hasMatchingThoughtTag) ||
-        isTerminalThinkingTagLeak(
-          visibleThinkingTagState,
-          hasMatchingThoughtTag,
-        ));
-    const hasUntrustedProtocolText =
-      hasSuspiciousThoughtTag || hasUntrustedVisibleTag;
-    const toolCallWithoutName = toolCallParser.hasNamelessToolCall();
-    const malformedNamelessToolCall =
-      Boolean(choice.finish_reason) && toolCallWithoutName;
-    const completedToolCalls = choice.finish_reason
-      ? toolCallParser.getCompletedToolCalls()
-      : [];
-    const malformedEmptyToolCallFinish =
-      choice.finish_reason === 'tool_calls' && completedToolCalls.length === 0;
-    if (malformedThinkingTagLeak) {
+    const visibleText = parts
+      .map((part) =>
+        part.thought !== true && typeof part.text === 'string' ? part.text : '',
+      )
+      .join('');
+    const leakedThinkingTag =
+      requestContext.hasStructuredReasoningContent === true &&
+      (LEADING_THINKING_TAG_PATTERN.test(visibleText) ||
+        (requestContext.hasThinkingTagInReasoning === true &&
+          CLOSING_THINKING_TAG_PATTERN.test(visibleText)));
+    if (leakedThinkingTag) {
       requestContext.pendingUntrustedResponseParts = undefined;
       throw new InvalidStreamError(
         'Model response leaked thinking tags.',
         'PROTOCOL_TAG_LEAK',
       );
     }
-    if (malformedNamelessToolCall || malformedEmptyToolCallFinish) {
+
+    const toolCallWithoutName = toolCallParser.hasNamelessToolCall();
+    const completedToolCalls = choice.finish_reason
+      ? toolCallParser.getCompletedToolCalls()
+      : [];
+    if (
+      choice.finish_reason &&
+      (toolCallWithoutName ||
+        (choice.finish_reason === 'tool_calls' &&
+          completedToolCalls.length === 0))
+    ) {
       requestContext.pendingUntrustedResponseParts = undefined;
       throw new InvalidStreamError(
         'Model response contained a malformed tool call.',
         'MALFORMED_TOOL_CALL',
       );
     }
-    const shouldHoldUntrustedParts =
-      toolCallWithoutName ||
-      (!choice.finish_reason && hasUntrustedProtocolText);
 
-    if (shouldHoldUntrustedParts) {
+    const shouldHoldParts =
+      !choice.finish_reason &&
+      (toolCallWithoutName ||
+        requestContext.hasThinkingTagInReasoning === true);
+    if (shouldHoldParts) {
       (requestContext.pendingUntrustedResponseParts ??= []).push(...parts);
       parts.length = 0;
     } else if (requestContext.pendingUntrustedResponseParts) {

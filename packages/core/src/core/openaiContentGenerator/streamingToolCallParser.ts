@@ -47,8 +47,6 @@ export class StreamingToolCallParser {
   private namelessToolCallIndices = new Set<number>();
   /** Map from tool call ID to actual index used for storage */
   private idToIndexMap: Map<string, number> = new Map();
-  /** Latest relocated storage index for each provider-supplied wire index. */
-  private relocatedIndexByWireIndex: Map<number, number> = new Map();
   /** Counter for generating new indices when collisions occur */
   private nextAvailableIndex: number = 0;
 
@@ -75,10 +73,9 @@ export class StreamingToolCallParser {
     name?: string,
   ): ToolCallParseResult {
     if (!id && !name && !chunk.trim()) {
-      const routedIndex = this.relocatedIndexByWireIndex.get(index) ?? index;
-      const depth = this.depths.get(routedIndex) ?? 0;
-      const inString = this.inStrings.get(routedIndex) ?? false;
-      if (!this.buffers.has(routedIndex) || (depth === 0 && !inString)) {
+      const depth = this.depths.get(index) ?? 0;
+      const inString = this.inStrings.get(index) ?? false;
+      if (!this.buffers.has(index) || (depth === 0 && !inString)) {
         return { complete: false };
       }
     }
@@ -94,38 +91,46 @@ export class StreamingToolCallParser {
         actualIndex = this.idToIndexMap.get(id)!;
       } else {
         // New tool call ID
-        // A different ID means the provider reused an occupied index. Keep
-        // the existing arguments isolated even if that call never supplied a
-        // name or completed its JSON.
+        // Check if the requested index is already occupied by a different complete tool call
         if (this.buffers.has(index)) {
+          const existingBuffer = this.buffers.get(index)!;
+          const existingDepth = this.depths.get(index)!;
           const existingMeta = this.toolCallMeta.get(index);
-          if (existingMeta?.id && existingMeta.id !== id) {
-            actualIndex = this.findNextUnusedIndex();
+
+          // Check if we have a complete tool call at this index. Occupancy
+          // is signaled by the name metadata, not the buffer: an empty
+          // buffer with a name is a complete no-argument call.
+          if (
+            existingMeta?.name &&
+            existingDepth === 0 &&
+            existingMeta?.id &&
+            existingMeta.id !== id
+          ) {
+            let existingComplete = true;
+            if (existingBuffer.trim()) {
+              try {
+                JSON.parse(existingBuffer);
+              } catch {
+                // Existing buffer is not complete JSON, we can reuse this index
+                existingComplete = false;
+              }
+            }
+            if (existingComplete) {
+              // We have a complete tool call with a different ID at this index
+              // Find a new index for this tool call
+              actualIndex = this.findNextAvailableIndex();
+            }
           }
         }
 
         // Map this ID to the actual index we're using
         this.idToIndexMap.set(id, actualIndex);
-        if (actualIndex === index) {
-          this.relocatedIndexByWireIndex.delete(index);
-        } else {
-          this.relocatedIndexByWireIndex.set(index, actualIndex);
-        }
       }
     } else {
       // No ID provided - this is a continuation chunk
       // Try to find which tool call this belongs to based on the index
       // Look for an existing tool call at this index that's not complete
-      const relocatedIndex = this.relocatedIndexByWireIndex.get(index);
-      if (
-        relocatedIndex !== undefined &&
-        !this.hasCompleteArgumentBuffer(relocatedIndex)
-      ) {
-        actualIndex = relocatedIndex;
-      } else {
-        this.relocatedIndexByWireIndex.delete(index);
-      }
-      if (actualIndex === index && this.buffers.has(index)) {
+      if (this.buffers.has(index)) {
         const existingBuffer = this.buffers.get(index)!;
         const existingDepth = this.depths.get(index)!;
 
@@ -163,7 +168,7 @@ export class StreamingToolCallParser {
         try {
           JSON.parse(currentBuffer);
           const existingMeta = this.toolCallMeta.get(actualIndex)!;
-          if (name && !existingMeta.name && !chunk.trim()) {
+          if (name && !existingMeta.name) {
             existingMeta.name = name;
             this.namelessToolCallIndices.delete(actualIndex);
           }
@@ -203,9 +208,7 @@ export class StreamingToolCallParser {
     // Add chunk to buffer
     const newBuffer = currentBuffer + chunk;
     this.buffers.set(actualIndex, newBuffer);
-    const hasArguments =
-      this.namelessToolCallIndices.has(actualIndex) || /\S/.test(chunk);
-    if (!meta.name && (meta.id || hasArguments)) {
+    if (!meta.name && (meta.id || /\S/.test(newBuffer))) {
       this.namelessToolCallIndices.add(actualIndex);
     } else {
       this.namelessToolCallIndices.delete(actualIndex);
@@ -276,10 +279,6 @@ export class StreamingToolCallParser {
     return this.toolCallMeta.get(index) || {};
   }
 
-  /**
-   * Returns true while a real in-flight tool call has arguments or an ID but no
-   * function name. Phantom empty slots are ignored.
-   */
   hasNamelessToolCall(): boolean {
     return this.namelessToolCallIndices.size > 0;
   }
@@ -419,24 +418,6 @@ export class StreamingToolCallParser {
     return this.nextAvailableIndex++;
   }
 
-  private findNextUnusedIndex(): number {
-    while (this.buffers.has(this.nextAvailableIndex)) {
-      this.nextAvailableIndex++;
-    }
-    return this.nextAvailableIndex++;
-  }
-
-  private hasCompleteArgumentBuffer(index: number): boolean {
-    const buffer = this.buffers.get(index);
-    if (!buffer?.trim() || (this.depths.get(index) ?? 0) !== 0) return false;
-    try {
-      JSON.parse(buffer);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
   /**
    * Finds the most recent incomplete tool call index
    *
@@ -486,11 +467,6 @@ export class StreamingToolCallParser {
     this.escapes.set(index, false);
     this.toolCallMeta.set(index, {});
     this.namelessToolCallIndices.delete(index);
-    for (const [wireIndex, actualIndex] of this.relocatedIndexByWireIndex) {
-      if (wireIndex === index || actualIndex === index) {
-        this.relocatedIndexByWireIndex.delete(wireIndex);
-      }
-    }
   }
 
   /**
@@ -508,7 +484,6 @@ export class StreamingToolCallParser {
     this.toolCallMeta.clear();
     this.namelessToolCallIndices.clear();
     this.idToIndexMap.clear();
-    this.relocatedIndexByWireIndex.clear();
     this.nextAvailableIndex = 0;
   }
 
