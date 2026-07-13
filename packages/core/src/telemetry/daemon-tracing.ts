@@ -315,14 +315,18 @@ export interface DaemonBridgeTelemetryMetrics {
    * bridge's session/update fan-in, from `agent_message_chunk._meta.usage`.
    * Values are per-round increments, not cumulative. `durationMs` is the same
    * frame's `_meta.durationMs` (the LLM API round-trip time), present only when
-   * the emitter stamped it. Optional: only the daemon host wires it (for the
-   * Daemon Status token-burn / LLM-latency charts); embedded/test callers may
-   * omit it.
+   * the emitter stamped it. `apiErrors` / `apiRetries` are the same frame's
+   * per-round model-API-error and automatic-retry increments (0 when none), for
+   * the Daemon Status model-API-health charts. Optional: only the daemon host
+   * wires it (for the token-burn / LLM-latency / API-health charts);
+   * embedded/test callers may omit it.
    */
   tokenUsage?(
     inputTokens: number,
     outputTokens: number,
     durationMs?: number,
+    apiErrors?: number,
+    apiRetries?: number,
   ): void;
 }
 

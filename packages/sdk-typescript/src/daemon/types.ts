@@ -203,8 +203,9 @@ export interface DaemonStatusReportSession {
  * One time-bucketed sample in the Daemon Status metrics series. **Manual mirror
  * of `packages/cli/src/serve/daemon-metrics-ring.ts` → `DaemonMetricsBucket`;
  * keep the two field lists in sync.** Each bucket covers a fixed window: the
- * request/token counters, the `*P50Ms`/`*P95Ms` percentiles, and
- * `promptsCompleted` aggregate what happened *during* the window, while
+ * request/token counters, the `*P50Ms`/`*P95Ms` percentiles, the
+ * `llmApiErrors`/`llmApiRetries` counters, and `promptsCompleted` aggregate
+ * what happened *during* the window, while
  * `activeSessions`/`activePrompts`/`queuedPrompts`/`rssBytes`/`heapUsedBytes`/
  * `eventLoopLagP99Ms` are gauges read at seal time `t`.
  */
@@ -236,6 +237,11 @@ export interface DaemonMetricsSeriesBucket {
   llmApiP50Ms: number;
   /** p95 per-round LLM API round-trip over the window (ms); 0 when none. */
   llmApiP95Ms: number;
+  /** Model API errors in the window (one per failed model API attempt);
+   *  provider-side failures, distinct from the client→daemon HTTP `errors`. */
+  llmApiErrors: number;
+  /** Automatic backoff retries in the window (one per retried attempt). */
+  llmApiRetries: number;
   /** Process CPU utilization over the window, percent of total capacity across
    *  all cores, clamped to [0,100]. */
   cpuPercent: number;

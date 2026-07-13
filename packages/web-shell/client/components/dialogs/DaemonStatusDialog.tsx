@@ -394,6 +394,22 @@ function MetricsCharts({ series }: { series: DaemonMetricsSeriesBucket[] }) {
           color: 'var(--primary)',
         },
       ])}
+      {/* Model API health: provider-side errors vs. the automatic retries that
+          absorb them. `?? 0` guards a report from a daemon predating these
+          fields (older daemon, newer web shell) so the chart reads clean zero
+          rather than gapping. */}
+      {chart('daemon.charts.apiHealth', formatCount, [
+        {
+          label: t('daemon.charts.apiErrors'),
+          values: col((b) => b.llmApiErrors ?? 0),
+          color: 'var(--error-color)',
+        },
+        {
+          label: t('daemon.charts.apiRetries'),
+          values: col((b) => b.llmApiRetries ?? 0),
+          color: 'var(--warning-color)',
+        },
+      ])}
       {chart('daemon.charts.promptLatency', formatDurationMs, [
         {
           label: t('daemon.charts.queueWait'),

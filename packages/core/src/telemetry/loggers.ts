@@ -127,6 +127,7 @@ import type {
 import type { HookCallEvent } from './types.js';
 import type { UiEvent } from './uiTelemetry.js';
 import { uiTelemetryService } from './uiTelemetry.js';
+import { apiActivityTracker } from './api-activity-tracker.js';
 import { recordTokenUsageFromApiResponseBestEffort } from '../services/tokenUsageService.js';
 import { isChatRecordingSuppressed } from '../utils/chat-recording-suppression-context.js';
 
@@ -415,6 +416,9 @@ export function logApiError(config: Config, event: ApiErrorEvent): void {
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent, config.getSessionId());
+  // Feed the daemon-status model-API-health charts: one model API error per
+  // failed attempt, drained per live model round by the ACP MessageEmitter.
+  apiActivityTracker.recordError();
   if (!isInternalPromptId(event.prompt_id)) {
     recordUiTelemetryEventToChat(config, uiEvent);
   }
@@ -794,6 +798,9 @@ export function logContentRetryFailure(
  *   3. `recordApiRetry` Counter increment for per-model retry-rate dashboards.
  */
 export function logApiRetry(config: Config, event: ApiRetryEvent): void {
+  // Feed the daemon-status model-API-health charts: one automatic retry per
+  // backoff, drained per live model round by the ACP MessageEmitter.
+  apiActivityTracker.recordRetry();
   QwenLogger.getInstance(config)?.logApiRetryEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 

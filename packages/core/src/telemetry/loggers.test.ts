@@ -62,6 +62,7 @@ import {
   logApiRetry,
 } from './loggers.js';
 import * as metrics from './metrics.js';
+import { apiActivityTracker } from './api-activity-tracker.js';
 import { QwenLogger } from './qwen-logger/qwen-logger.js';
 import * as sdk from './sdk.js';
 import * as tokenUsageService from '../services/tokenUsageService.js';
@@ -577,6 +578,18 @@ describe('loggers', () => {
       logApiError(configWithRecording, event);
 
       expect(mockRecordUiTelemetryEvent).toHaveBeenCalled();
+    });
+
+    it('increments the api-activity error counter for the daemon health chart', () => {
+      apiActivityTracker.drain(); // isolate from other cases (global singleton)
+      const event = new ApiErrorEvent({
+        model: 'test-model',
+        durationMs: 100,
+        promptId: 'user_query',
+        errorMessage: 'boom',
+      });
+      logApiError(makeFakeConfig({ sessionId: 'test-session-id' }), event);
+      expect(apiActivityTracker.peek()).toEqual({ errors: 1, retries: 0 });
     });
   });
 
@@ -1912,6 +1925,21 @@ describe('loggers', () => {
       expect(mockQwenLogger.logApiRetryEvent).toHaveBeenCalledWith(event);
       expect(mockLogger.emit).not.toHaveBeenCalled();
       expect(metrics.recordApiRetry).not.toHaveBeenCalled();
+    });
+
+    it('increments the api-activity retry counter for the daemon health chart', () => {
+      apiActivityTracker.drain(); // isolate from other cases (global singleton)
+      const mockConfig = makeFakeConfig({ sessionId: 'test-session-id' });
+      logApiRetry(mockConfig, buildEvent());
+      expect(apiActivityTracker.peek()).toEqual({ errors: 0, retries: 1 });
+    });
+
+    it('counts the retry even when the OTel SDK is not initialized', () => {
+      vi.spyOn(sdk, 'isTelemetrySdkInitialized').mockReturnValue(false);
+      apiActivityTracker.drain();
+      logApiRetry(makeFakeConfig({ sessionId: 's' }), buildEvent());
+      // The daemon health chart is independent of OTel export state.
+      expect(apiActivityTracker.peek().retries).toBe(1);
     });
   });
 });

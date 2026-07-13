@@ -2782,12 +2782,21 @@ export async function runQwenServe(
         // `agent_message_chunk._meta` (`usage` + `durationMs`) at the bridge's
         // single session/update fan-in. Increments (not cumulative), so the ring
         // sums tokens per window (token-burn chart) and pools the round-trip times
-        // for the LLM-latency percentiles.
-        tokenUsage(inputTokens, outputTokens, durationMs) {
+        // for the LLM-latency percentiles. `apiErrors` / `apiRetries` ride the
+        // same frame (per-round increments, 0 when none) and window into the
+        // model-API-health chart.
+        tokenUsage(
+          inputTokens,
+          outputTokens,
+          durationMs,
+          apiErrors,
+          apiRetries,
+        ) {
           metricsRing.recordTokens(inputTokens, outputTokens);
           if (typeof durationMs === 'number') {
             metricsRing.recordLlmDuration(durationMs);
           }
+          metricsRing.recordApiActivity(apiErrors ?? 0, apiRetries ?? 0);
         },
       };
       return telemetry;

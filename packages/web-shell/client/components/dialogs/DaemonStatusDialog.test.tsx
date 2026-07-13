@@ -147,6 +147,8 @@ function makeBucket(t: number): DaemonMetricsSeriesBucket {
     promptDurationP95Ms: 0,
     llmApiP50Ms: 0,
     llmApiP95Ms: 0,
+    llmApiErrors: 0,
+    llmApiRetries: 0,
     cpuPercent: 1,
     rssBytes: 200 * 1024 * 1024,
     heapUsedBytes: 50 * 1024 * 1024,
@@ -361,6 +363,7 @@ describe('DaemonStatusDialog', () => {
     // Chart cards render (spot-check i18n'd titles across the set)...
     expect(text).toContain('Concurrency');
     expect(text).toContain('LLM API latency');
+    expect(text).toContain('Model API health');
     expect(text).toContain('Token burn');
     // ...one SvgLineChart per card...
     expect(
@@ -402,6 +405,56 @@ describe('DaemonStatusDialog', () => {
     expect(text).toContain('15k');
     expect(text).toContain('120%');
     expect(text).toContain('5.0 KB');
+  });
+
+  it('charts model API errors and automatic retries on the Metrics tab', () => {
+    const b = makeBucket(1000);
+    b.llmApiErrors = 4;
+    b.llmApiRetries = 7;
+    summaryState = {
+      report: {
+        ...summaryReport,
+        runtime: { ...summaryReport.runtime, metrics: { series: [b] } },
+      },
+      loading: false,
+      error: undefined,
+    };
+    mount();
+    const metricsTab = container!.querySelector('#daemon-tab-metrics')!;
+    act(() => {
+      metricsTab.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const text = container!.textContent ?? '';
+    // The dedicated model-API-health card renders with both series legends and
+    // their peak values (distinct 4 / 7 so neither collides with fixture data).
+    expect(text).toContain('Model API health');
+    expect(text).toContain('API errors');
+    expect(text).toContain('Retries');
+    expect(text).toContain('4');
+    expect(text).toContain('7');
+  });
+
+  it('tolerates a metrics bucket from a daemon predating the API-health fields', () => {
+    // Older daemon: the wire bucket omits llmApiErrors/llmApiRetries. The chart
+    // must fall back to zero rather than throwing or gapping.
+    const legacy = makeBucket(1000) as Partial<DaemonMetricsSeriesBucket>;
+    delete legacy.llmApiErrors;
+    delete legacy.llmApiRetries;
+    summaryState = {
+      report: {
+        ...summaryReport,
+        runtime: { ...summaryReport.runtime, metrics: { series: [legacy] } },
+      },
+      loading: false,
+      error: undefined,
+    };
+    mount();
+    const metricsTab = container!.querySelector('#daemon-tab-metrics')!;
+    act(() => {
+      metricsTab.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    // Renders without a crash; the card is still present.
+    expect(container!.textContent ?? '').toContain('Model API health');
   });
 
   it('moves between tabs with arrow / Home / End keys (roving tabindex)', () => {
