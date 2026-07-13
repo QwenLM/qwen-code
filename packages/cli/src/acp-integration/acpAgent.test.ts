@@ -11402,6 +11402,9 @@ describe('sessionLanguage multi-session propagation', () => {
     );
     expect(refresh1).toHaveBeenCalledOnce();
     expect(refresh2).toHaveBeenCalledOnce();
+    expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+      'Session skill-2 skill refresh failed: Error: client closed',
+    );
 
     mockConnectionState.resolve();
     await agentPromise;

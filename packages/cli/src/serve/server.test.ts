@@ -11879,6 +11879,7 @@ describe('createServeApp', () => {
     });
 
     it('returns 404 for an unknown skill', async () => {
+      const persistDisabledSkills = vi.fn();
       const app = createServeApp(tokenOpts, undefined, {
         bridge: fakeBridge({
           workspaceSkillsImpl: async () => ({
@@ -11888,7 +11889,7 @@ describe('createServeApp', () => {
             skills: [reviewSkill],
           }),
         }),
-        persistDisabledSkills: vi.fn(),
+        persistDisabledSkills,
         primaryWorkspaceTrusted: true,
       });
       const res = await auth(
@@ -11896,6 +11897,7 @@ describe('createServeApp', () => {
       ).send({ enabled: false });
       expect(res.status).toBe(404);
       expect(res.body.code).toBe('skill_not_found');
+      expect(persistDisabledSkills).not.toHaveBeenCalled();
     });
 
     it('rejects an unknown workspace client id before persistence', async () => {

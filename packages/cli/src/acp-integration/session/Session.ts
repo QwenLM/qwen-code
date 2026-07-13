@@ -3822,14 +3822,27 @@ export class Session implements SessionContext {
   async refreshSkillsFromSettings(): Promise<void> {
     this.settings.reloadScopeFromDisk(SettingScope.Workspace);
     const skillManager = this.config.getSkillManager();
+    let updateFailed = false;
+    let updateError: unknown;
     try {
       await this.sendAvailableCommandsUpdateOrThrow();
-    } finally {
-      if (skillManager) {
+    } catch (error) {
+      updateFailed = true;
+      updateError = error;
+    }
+    if (skillManager) {
+      try {
         skillManager.suppressNextSlashReload();
         await skillManager.notifyConfigChanged();
+      } catch (error) {
+        if (!updateFailed) throw error;
+        debugLogger.error(
+          'SkillManager refresh failed after command update failure:',
+          error,
+        );
       }
     }
+    if (updateFailed) throw updateError;
   }
 
   private async sendAvailableCommandsUpdateOrThrow(): Promise<void> {
