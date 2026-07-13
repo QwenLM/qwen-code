@@ -400,6 +400,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'persistent_workspace_registration',
   'workspace_runtime_removal',
   'workspace_qualified_rest_core',
+  'workspace_qualified_voice',
   'workspace_persisted_transcript',
   'workspace_qualified_acp',
   'client_mcp_over_ws',
@@ -2348,6 +2349,22 @@ describe('createServeApp', () => {
             getAdvertisedServeFeatures(undefined, {
               multiWorkspaceSessionsEnabled: true,
               acpHttpEnabled: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'workspace_qualified_voice') {
+          expect(predicate({ multiWorkspaceSessionsEnabled: true })).toBe(true);
+          expect(predicate({ multiWorkspaceSessionsEnabled: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              multiWorkspaceSessionsEnabled: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(

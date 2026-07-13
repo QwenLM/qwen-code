@@ -82,7 +82,7 @@ export function createServeFeatures(
   };
   const getCachedVoiceTranscriptionAvailable = () => {
     cachedVoiceTranscriptionAvailable ??=
-      isWorkspaceVoiceTranscriptionAvailable(boundWorkspace);
+      isWorkspaceVoiceTranscriptionAvailable(boundWorkspace, env);
     return cachedVoiceTranscriptionAvailable;
   };
 
@@ -130,10 +130,12 @@ export function createServeFeatures(
 
 function isWorkspaceVoiceTranscriptionAvailable(
   boundWorkspace: string,
+  env: Readonly<Record<string, string | undefined>>,
 ): boolean {
   try {
     return hasConfiguredBatchVoiceTranscriptionModel(
-      loadSettings(boundWorkspace),
+      loadSettings(boundWorkspace, { skipLoadEnvironment: true }),
+      { env },
     );
   } catch (err) {
     writeStderrLine(

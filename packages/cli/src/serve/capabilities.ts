@@ -287,6 +287,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // persistence. ACP/WebSocket, auth, voice, and extensions stay on their
   // existing primary-workspace routes in this phase.
   workspace_qualified_rest_core: { since: 'v1' },
+  // Workspace-qualified Voice REST and WebSocket routes. Individual Voice
+  // modalities remain gated by their existing Voice capability tags.
+  workspace_qualified_voice: { since: 'v1' },
   // Workspace-qualified, daemon-local persisted transcript paging. The tag is
   // unconditional because the route also serves a trusted single-workspace
   // primary; authorization is evaluated for the selected runtime per request.
@@ -483,6 +486,12 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     (toggles) =>
       toggles.acpHttpEnabled === true &&
       toggles.multiWorkspaceSessionsEnabled === true,
+  ],
+  [
+    'workspace_qualified_voice',
+    // Like qualified ACP, the plural Voice surface is mounted ahead of time
+    // but only becomes useful once the daemon has a secondary runtime.
+    (toggles) => toggles.multiWorkspaceSessionsEnabled === true,
   ],
   ['client_mcp_over_ws', (toggles) => toggles.clientMcpOverWsEnabled === true],
   ['cdp_tunnel_over_ws', (toggles) => toggles.cdpTunnelOverWsEnabled === true],

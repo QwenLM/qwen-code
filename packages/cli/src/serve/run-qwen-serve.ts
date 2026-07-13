@@ -139,6 +139,7 @@ import type {
 } from '../commands/channel/pidfile.js';
 import { sanitizeLogText } from '@qwen-code/channel-base';
 import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
+import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
 
 // Reverse MCP channel; enabled only by explicit option or env opt-in.
 const QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV = 'QWEN_SERVE_CLIENT_MCP_OVER_WS';
@@ -3070,6 +3071,7 @@ export async function runQwenServe(
       statusProvider,
       workspaceProvidersStatusProvider,
       workspaceSkillsStatusProvider,
+      voiceEnv: runtimeEffectiveEnv,
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools: persistDisabledToolsFn,
       persistSetting: persistSettingFn,
@@ -3376,6 +3378,8 @@ export async function runQwenServe(
           }),
         workspaceSkillsStatusProvider:
           runtime.createWorkspaceSkillsStatusProvider(),
+        voiceEnv: secondaryEnv.effectiveEnv,
+        voiceSettingsScope: WORKSPACE_SETTING_SCOPE,
         isChannelLive: () => secondaryBridge.isChannelLive(),
         preheatAcpChild: () => secondaryBridge.preheat(),
         persistDisabledTools: persistDisabledToolsFn,
@@ -3458,6 +3462,7 @@ export async function runQwenServe(
       runtime.createWorkspaceRegistry(workspaceRuntimes, {
         sessionOwnerIndex,
       });
+    const workspaceVoiceCoordinator = new WorkspaceVoiceCoordinator();
 
     core.registerDaemonGaugeCallbacks({
       sessionCount: () =>
@@ -3744,6 +3749,8 @@ export async function runQwenServe(
             }),
           workspaceSkillsStatusProvider:
             runtime.createWorkspaceSkillsStatusProvider(),
+          voiceEnv: wsEnv.effectiveEnv,
+          voiceSettingsScope: WORKSPACE_SETTING_SCOPE,
           isChannelLive: () => wsBridge.isChannelLive(),
           preheatAcpChild: () => wsBridge.preheat(),
           persistDisabledTools: persistDisabledToolsFn,
@@ -3868,15 +3875,18 @@ export async function runQwenServe(
       beginDrain(runtimeToDrain: WorkspaceRuntime): void {
         totalSessionAdmission.beginWorkspaceDrain(runtimeToDrain.workspaceCwd);
         channelWorkerManager?.beginWorkspaceDrain(runtimeToDrain.workspaceCwd);
+        workspaceVoiceCoordinator.beginWorkspaceDrain(runtimeToDrain);
       },
       cancelDrain(runtimeToDrain: WorkspaceRuntime): void {
         channelWorkerManager?.cancelWorkspaceDrain(runtimeToDrain.workspaceCwd);
         totalSessionAdmission.cancelWorkspaceDrain(runtimeToDrain.workspaceCwd);
+        workspaceVoiceCoordinator.cancelWorkspaceDrain(runtimeToDrain);
       },
       completeDrain(runtimeToDrain: WorkspaceRuntime): void {
         totalSessionAdmission.completeWorkspaceDrain(
           runtimeToDrain.workspaceCwd,
         );
+        workspaceVoiceCoordinator.completeWorkspaceDrain(runtimeToDrain);
       },
       getActivity(runtimeToDrain: WorkspaceRuntime) {
         return {
@@ -3887,6 +3897,8 @@ export async function runQwenServe(
             channelWorkerManager?.workspaceActivity(
               runtimeToDrain.workspaceCwd,
             ) ?? 0,
+          voiceSessions:
+            workspaceVoiceCoordinator.getWorkspaceActivity(runtimeToDrain),
         };
       },
       disposeRuntime(
@@ -3896,6 +3908,10 @@ export async function runQwenServe(
         const existing = runtimeCleanupPromises.get(runtimeToDrain);
         if (existing) return existing;
         const cleanup = (async () => {
+          await workspaceVoiceCoordinator.disposeRuntime(
+            runtimeToDrain,
+            reason,
+          );
           const stopSubSessions = subSessionStoppersByWorkspace.get(
             runtimeToDrain.workspaceCwd,
           );
@@ -3980,6 +3996,7 @@ export async function runQwenServe(
       createWorkspaceRuntime: createDynamicWorkspaceRuntime,
       workspaceRegistrationStore,
       workspaceRuntimeRemoval,
+      voiceCoordinator: workspaceVoiceCoordinator,
       bridge,
       webShellDir,
       boundWorkspace,

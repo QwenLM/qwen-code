@@ -42,6 +42,7 @@ export interface DaemonWorkspaceRemovalActivity {
   acpConnections: number;
   memoryTasks: number;
   channelWorkers: number;
+  voiceSessions: number;
 }
 
 export interface DaemonWorkspaceRemovalResult {

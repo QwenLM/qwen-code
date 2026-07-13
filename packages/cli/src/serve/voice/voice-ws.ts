@@ -24,6 +24,10 @@ import type {
   VoiceStreamCallbacks,
   VoiceStreamSession,
 } from '../../ui/voice/voice-stream-session.js';
+import type {
+  VoiceAdmissionLease,
+  VoiceAdmissionResult,
+} from './workspace-voice-coordinator.js';
 
 const debugLogger = createDebugLogger('VOICE_WS');
 
@@ -34,10 +38,6 @@ const MAX_QUEUED_AUDIO_BYTES = MAX_BATCH_AUDIO_BYTES * 2;
 // Hard cap on a single voice connection so a client that opens the socket and
 // never sends `stop` can't pin an upstream ASR session indefinitely.
 const MAX_CONNECTION_MS = 6 * 60_000;
-// Voice WS bypasses the ACP connection registry; cap concurrent sessions so a
-// client can't open unbounded sockets (each opens an upstream ASR connection).
-// Generous for one interactive user across a few tabs.
-const MAX_CONCURRENT_VOICE_SESSIONS = 8;
 const GENERIC_TRANSCRIPTION_ERROR =
   'Voice transcription failed. Please try again.';
 const NO_VOICE_MODEL_ERROR = 'No voice model is configured for this workspace.';
@@ -72,13 +72,20 @@ export interface VoiceWsDeps {
   openStream?: (
     ctx: DaemonVoiceContext,
     callbacks: VoiceStreamCallbacks,
+    abortSignal?: AbortSignal,
   ) => Promise<VoiceStreamSession>;
-  transcribe?: (ctx: DaemonVoiceContext, pcm: Uint8Array) => Promise<string>;
+  transcribe?: (
+    ctx: DaemonVoiceContext,
+    pcm: Uint8Array,
+    abortSignal?: AbortSignal,
+  ) => Promise<string>;
+  acquireVoiceLease?: () => VoiceAdmissionResult;
 }
 
 async function defaultOpenStream(
   ctx: DaemonVoiceContext,
   callbacks: VoiceStreamCallbacks,
+  abortSignal?: AbortSignal,
 ): Promise<VoiceStreamSession> {
   try {
     const cfg = resolveVoiceStreamConfig({
@@ -88,10 +95,12 @@ async function defaultOpenStream(
       env: ctx.env,
     });
     await assertVoiceBaseUrlNetworkAllowed(cfg);
-    return await openVoiceStreamWithRetry(() =>
-      cfg.transport === 'qwen-asr-realtime'
-        ? openQwenAsrRealtimeStream(cfg, callbacks)
-        : openVoiceStream(cfg, callbacks),
+    return await openVoiceStreamWithRetry(
+      () =>
+        cfg.transport === 'qwen-asr-realtime'
+          ? openQwenAsrRealtimeStream(cfg, callbacks, { abortSignal })
+          : openVoiceStream(cfg, callbacks, { abortSignal }),
+      { abortSignal },
     );
   } catch (error) {
     debugLogger.debug(`[voice-ws] stream open error: ${errMessage(error)}`);
@@ -102,6 +111,7 @@ async function defaultOpenStream(
 function defaultTranscribe(
   ctx: DaemonVoiceContext,
   pcm: Uint8Array,
+  abortSignal?: AbortSignal,
 ): Promise<string> {
   return transcribeVoiceAudio(
     { data: encodeWav(pcm), mimeType: 'audio/wav' },
@@ -110,6 +120,7 @@ function defaultTranscribe(
       settings: ctx.settings,
       voiceModel: ctx.voiceModel,
       env: ctx.env,
+      abortSignal,
     },
   ).catch((error: unknown) => {
     debugLogger.debug(
@@ -184,15 +195,36 @@ export function createVoiceWsConnectionHandler(
       loadDaemonVoiceContext(workspaceCwd, { env: deps.env }));
   const openStream = deps.openStream ?? defaultOpenStream;
   const transcribe = deps.transcribe ?? defaultTranscribe;
-  // Shared across all connections from this daemon (factory closure).
+  // Kept only for direct embeds that have not supplied the daemon-wide
+  // coordinator. Production always uses `acquireVoiceLease`.
   let activeSessions = 0;
+  const acquireLocalLease = (): VoiceAdmissionResult => {
+    if (activeSessions >= 8) return { kind: 'rejected', reason: 'capacity' };
+    activeSessions++;
+    const controller = new AbortController();
+    let released = false;
+    const lease: VoiceAdmissionLease = {
+      signal: controller.signal,
+      release: () => {
+        if (released) return;
+        released = true;
+        activeSessions--;
+      },
+    };
+    return { kind: 'admitted', lease };
+  };
 
   return (ws: WebSocket) => {
-    if (activeSessions >= MAX_CONCURRENT_VOICE_SESSIONS) {
+    const admission = (deps.acquireVoiceLease ?? acquireLocalLease)();
+    if (admission.kind === 'rejected') {
       writeStderrLine(
         `qwen serve: voice websocket rejected; activeSessions=${activeSessions}`,
       );
       try {
+        if (admission.reason === 'draining') {
+          ws.close(1012, 'Workspace removed');
+          return;
+        }
         ws.send(
           JSON.stringify({
             type: 'error',
@@ -205,7 +237,7 @@ export function createVoiceWsConnectionHandler(
       }
       return;
     }
-    activeSessions++;
+    const lease = admission.lease;
     writeStderrLine(
       `qwen serve: voice websocket accepted; activeSessions=${activeSessions}`,
     );
@@ -213,7 +245,7 @@ export function createVoiceWsConnectionHandler(
     const releaseSlot = () => {
       if (!released) {
         released = true;
-        activeSessions--;
+        lease.release();
         writeStderrLine(
           `qwen serve: voice websocket slot released; activeSessions=${activeSessions}`,
         );
@@ -272,6 +304,21 @@ export function createVoiceWsConnectionHandler(
       queuedBytes = 0;
     }
 
+    lease.signal.addEventListener(
+      'abort',
+      () => {
+        if (state === 'closed') return;
+        cleanup();
+        try {
+          ws.close(1012, 'Workspace removed');
+        } catch {
+          // ignore
+        }
+        releaseSlotWhenIdle();
+      },
+      { once: true },
+    );
+
     function fail(message: string): void {
       if (state === 'closed') return;
       writeStderrLine(`qwen serve: voice websocket failed: ${message}`);
@@ -311,7 +358,7 @@ export function createVoiceWsConnectionHandler(
             fail(GENERIC_TRANSCRIPTION_ERROR);
           },
         };
-        const opening = openStream(ctx, callbacks);
+        const opening = openStream(ctx, callbacks, lease.signal);
         sessionPromise = opening;
         const opened = await opening;
         if (state === 'closed') {
@@ -345,7 +392,11 @@ export function createVoiceWsConnectionHandler(
           }
         }
       } else if (pcmChunks.length > 0) {
-        transcript = await transcribe(ctx!, Buffer.concat(pcmChunks));
+        transcript = await transcribe(
+          ctx!,
+          Buffer.concat(pcmChunks),
+          lease.signal,
+        );
       }
       sendJson({ type: 'final', text: transcript });
       writeStderrLine('qwen serve: voice websocket finalized successfully');

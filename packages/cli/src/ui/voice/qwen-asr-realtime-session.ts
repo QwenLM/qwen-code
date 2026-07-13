@@ -21,6 +21,7 @@ export interface QwenRealtimeDeps {
     url: string,
     options: { headers: Record<string, string> },
   ) => SocketLike;
+  abortSignal?: AbortSignal;
 }
 
 const CONNECT_TIMEOUT_MS = 8000;
@@ -61,6 +62,10 @@ export function openQwenAsrRealtimeStream(
       }) as unknown as SocketLike);
 
   return new Promise<VoiceStreamSession>((resolve, reject) => {
+    if (deps.abortSignal?.aborted) {
+      reject(new Error('Voice stream opening was aborted.'));
+      return;
+    }
     const ws = createWebSocket(
       deriveQwenRealtimeUrl(config.baseUrl, config.model),
       {
@@ -129,6 +134,12 @@ export function openQwenAsrRealtimeStream(
       terminalError = normalized;
       callbacks.onError?.(normalized);
     };
+
+    deps.abortSignal?.addEventListener(
+      'abort',
+      () => fail(new Error('Voice stream opening was aborted.')),
+      { once: true },
+    );
 
     connectTimer = setTimeout(() => {
       if (!opened) fail(new Error('Qwen ASR realtime connection timed out.'));

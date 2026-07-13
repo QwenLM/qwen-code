@@ -54,6 +54,7 @@ export interface VoiceStreamDeps {
     url: string,
     options: { headers: Record<string, string> },
   ) => SocketLike;
+  abortSignal?: AbortSignal;
 }
 
 const CONNECT_TIMEOUT_MS = 8000;
@@ -96,6 +97,10 @@ export function openVoiceStream(
       }) as unknown as SocketLike);
 
   return new Promise<VoiceStreamSession>((resolve, reject) => {
+    if (deps.abortSignal?.aborted) {
+      reject(new Error('Voice stream opening was aborted.'));
+      return;
+    }
     const streamUrl = deriveStreamUrl(config.baseUrl);
     const ws = createWebSocket(streamUrl, {
       headers: config.apiKey
@@ -154,6 +159,12 @@ export function openVoiceStream(
         }
       }
     };
+
+    deps.abortSignal?.addEventListener(
+      'abort',
+      () => fail(new Error('Voice stream opening was aborted.')),
+      { once: true },
+    );
 
     connectTimer = setTimeout(() => {
       if (!started) fail(new Error('Voice stream connection timed out.'));

@@ -131,6 +131,52 @@ describe('DaemonClient voice helpers', () => {
     expect(calls[0]?.body).toBe(audio);
   });
 
+  it('uses the encoded workspace selector for qualified Voice requests', async () => {
+    const status = {
+      v: 1,
+      workspaceCwd: '/work with space',
+      enabled: true,
+      mode: 'hold',
+      language: '',
+      voiceModel: 'qwen3-asr-flash',
+      availableVoiceModels: [],
+    };
+    const transcription = {
+      v: 1,
+      text: 'hello',
+      model: 'qwen3-asr-flash',
+      transport: 'qwen-asr-chat',
+    };
+    const { fetch, calls } = recordingFetch((request) =>
+      request.url.includes('/transcribe')
+        ? jsonResponse(200, transcription)
+        : jsonResponse(200, status),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const workspace = client.workspaceByCwd('/work with space');
+
+    await expect(workspace.workspaceVoice('client-1')).resolves.toEqual(status);
+    await expect(
+      workspace.setWorkspaceVoice({ enabled: true }, 'client-2'),
+    ).resolves.toEqual(status);
+    await expect(
+      workspace.transcribeWorkspaceVoice(new Uint8Array([1, 2]), {
+        mimeType: 'audio/wav',
+        voiceModel: 'qwen3 asr',
+        clientId: 'client-3',
+      }),
+    ).resolves.toEqual(transcription);
+
+    expect(calls.map((call) => call.url)).toEqual([
+      'http://daemon/workspaces/%2Fwork%20with%20space/voice',
+      'http://daemon/workspaces/%2Fwork%20with%20space/voice',
+      'http://daemon/workspaces/%2Fwork%20with%20space/voice/transcribe?voiceModel=qwen3+asr',
+    ]);
+    expect(calls[1]?.headers['x-qwen-client-id']).toBe('client-2');
+    expect(calls[2]?.headers['content-type']).toBe('audio/wav');
+    expect(calls[2]?.headers['x-qwen-client-id']).toBe('client-3');
+  });
+
   it('uses the REST endpoint for binary voice audio when ACP transport is configured', async () => {
     const response = {
       v: 1,

@@ -195,6 +195,8 @@ export function createDaemonWorkspaceService(
     persistDisabledTools,
     persistSetting,
     persistSettings,
+    voiceEnv,
+    voiceSettingsScope,
     preheatAcpChild: preheatAcpChildOnBridge,
     queryWorkspaceStatus,
     invokeWorkspaceCommand,
@@ -469,7 +471,10 @@ export function createDaemonWorkspaceService(
     async getWorkspaceVoiceStatus(_ctx: WorkspaceRequestContext) {
       return buildWorkspaceVoiceStatus(
         boundWorkspace,
-        loadSettings(boundWorkspace),
+        loadSettings(
+          boundWorkspace,
+          voiceEnv ? { skipLoadEnvironment: true } : true,
+        ),
       );
     },
 
@@ -536,13 +541,17 @@ export function createDaemonWorkspaceService(
         );
       }
 
-      const settings = loadSettings(boundWorkspace);
-      validateWorkspaceVoiceState(settings, request);
+      const settings = loadSettings(
+        boundWorkspace,
+        voiceEnv ? { skipLoadEnvironment: true } : true,
+      );
+      validateWorkspaceVoiceState(settings, request, { env: voiceEnv });
       const workspaceTrusted =
         getWorkspaceTrustStatus(settings.merged, boundWorkspace).effective
           .state === 'trusted';
       const writes = buildWorkspaceVoiceSettingsWrites(settings, request, {
         workspaceTrusted,
+        ...(voiceSettingsScope ? { scopeOverride: voiceSettingsScope } : {}),
       });
 
       const publishWrite = (write: WorkspaceVoiceSettingsWrite) => {
@@ -602,7 +611,10 @@ export function createDaemonWorkspaceService(
 
       return buildWorkspaceVoiceStatus(
         boundWorkspace,
-        loadSettings(boundWorkspace),
+        loadSettings(
+          boundWorkspace,
+          voiceEnv ? { skipLoadEnvironment: true } : true,
+        ),
       );
     },
 
