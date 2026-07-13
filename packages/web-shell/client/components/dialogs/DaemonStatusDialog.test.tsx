@@ -434,6 +434,37 @@ describe('DaemonStatusDialog', () => {
     expect(text).toContain('7');
   });
 
+  it('gives every metrics chart a hover help affordance with self-explaining copy', () => {
+    summaryState = {
+      report: summaryWithSeries(2),
+      loading: false,
+      error: undefined,
+    };
+    mount();
+    const metricsTab = container!.querySelector('#daemon-tab-metrics')!;
+    act(() => {
+      metricsTab.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    // One ⓘ help button per chart card; its aria-label carries the full
+    // explanation to assistive tech (filter to the long help sentences so the
+    // toolbar/tab buttons don't count).
+    const helpButtons = Array.from(
+      container!.querySelectorAll('button[aria-label]'),
+    ).filter((b) => (b.getAttribute('aria-label') ?? '').length > 20);
+    expect(helpButtons.length).toBeGreaterThanOrEqual(12);
+    // The two highest-value disambiguations render in the DOM: the model-health
+    // errors-vs-retries explanation, and that the HTTP "Requests" chart is NOT
+    // model calls (resolving the "two errors charts" confusion).
+    const text = container!.textContent ?? '';
+    expect(text).toContain('Each failed attempt = 1 error');
+    expect(text).toContain('NOT model calls');
+    expect(
+      container!.querySelector(
+        'button[aria-label*="Provider-side LLM failures"]',
+      ),
+    ).not.toBeNull();
+  });
+
   it('tolerates a metrics bucket from a daemon predating the API-health fields', () => {
     // Older daemon: the wire bucket omits llmApiErrors/llmApiRetries. The chart
     // must fall back to zero rather than throwing or gapping.

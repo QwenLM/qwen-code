@@ -141,6 +141,75 @@
   color: var(--muted-foreground);
 }
 
+/* Per-chart help affordance: an ⓘ button whose hover/focus reveals a plain
+   explanation. The card has no `overflow: hidden` and the ⓘ sits at the card's
+   top-left after the title, so the bubble opens downward into the card's own
+   area — never clipped, never pushing horizontal scroll. */
+.infoHint {
+  position: relative;
+  display: inline-flex;
+  vertical-align: middle;
+  margin-left: 6px;
+}
+
+.infoHintButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted-foreground);
+  /* Reset the uppercase heading context so the glyph renders cleanly. */
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 13px;
+  line-height: 1;
+  cursor: help;
+}
+
+.infoHintButton:hover,
+.infoHintButton:focus-visible {
+  color: var(--foreground);
+}
+
+.infoHintTip {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  width: max-content;
+  max-width: 260px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  /* Match the SvgLineChart data tooltip's surface; --popover/--card are absent
+     under the DialogShell body portal, so fall back to --background. */
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  background: var(--popover, var(--card, var(--background)));
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  /* Reset the heading's uppercase/tracking so the sentence reads normally. */
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.45;
+  color: var(--foreground);
+  white-space: normal;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 120ms ease;
+  pointer-events: none;
+}
+
+.infoHint:hover .infoHintTip,
+.infoHint:focus-within .infoHintTip {
+  opacity: 1;
+  visibility: visible;
+}
+
 .row {
   display: flex;
   align-items: baseline;
