@@ -164,6 +164,7 @@ export interface UseAtMentionMenuOptions {
   disabledRef: RefObject<boolean>;
   shellModeRef: RefObject<boolean>;
   workspaceActionsRef: RefObject<AtMentionWorkspaceActions | undefined>;
+  workspaceKey?: string;
   builtinProviders?: WebShellBuiltinAtProvidersConfig;
   providers?: readonly WebShellAtProvider[];
   createInlineTagEffect?: (range: {
@@ -835,6 +836,7 @@ export function useAtMentionMenu({
   disabledRef,
   shellModeRef,
   workspaceActionsRef,
+  workspaceKey,
   builtinProviders,
   providers = EMPTY_PROVIDERS,
   createInlineTagEffect,
@@ -920,6 +922,19 @@ export function useAtMentionMenu({
     },
     [],
   );
+
+  useEffect(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    if (searchTimerRef.current) {
+      clearTimeout(searchTimerRef.current);
+      searchTimerRef.current = null;
+    }
+    fileDirectoryRef.current = '.';
+    builtinCacheRef.current = createBuiltinProviderCache();
+    stateRef.current = null;
+    setState(null);
+  }, [workspaceKey]);
 
   const clearPendingLoad = useCallback(() => {
     abortRef.current?.abort();

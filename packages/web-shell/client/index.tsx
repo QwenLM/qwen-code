@@ -1,11 +1,9 @@
 import { type ReactNode } from 'react';
-import {
-  DaemonSessionProvider,
-  DaemonWorkspaceProvider,
-} from '@qwen-code/webui/daemon-react-sdk';
+import { DaemonWorkspaceProvider } from '@qwen-code/webui/daemon-react-sdk';
 import { App, type WebShellProps } from './App';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { RootErrorFallback } from './components/RootErrorFallback';
+import { WorkspaceSessionProvider } from './components/WorkspaceSessionProvider';
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
 
 export interface WebShellWithProvidersProps extends WebShellProps {
@@ -15,6 +13,8 @@ export interface WebShellWithProvidersProps extends WebShellProps {
   token?: string;
   /** Session id to load. Undefined starts on an empty page. */
   sessionId?: string;
+  /** Registered daemon workspace id for the session. Undefined uses primary. */
+  workspaceId?: string;
   /** Client identity to reuse when attaching to an externally created session. */
   clientId?: string;
 }
@@ -72,7 +72,8 @@ export function WebShell(props: WebShellProps) {
  * are available without extra setup.
  */
 export function WebShellWithProviders(props: WebShellWithProvidersProps) {
-  const { baseUrl, token, sessionId, clientId, ...webShellProps } = props;
+  const { baseUrl, token, sessionId, workspaceId, clientId, ...webShellProps } =
+    props;
   const resolvedBaseUrl = resolveBaseUrl(baseUrl);
 
   return (
@@ -84,13 +85,12 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
       }
     >
       <DaemonWorkspaceProvider baseUrl={resolvedBaseUrl} token={token}>
-        <DaemonSessionProvider
+        <WorkspaceSessionProvider
           sessionId={sessionId}
+          workspaceId={workspaceId}
           clientId={clientId}
-          suppressOwnUserEcho
-        >
-          <App {...webShellProps} />
-        </DaemonSessionProvider>
+          webShellProps={webShellProps}
+        />
       </DaemonWorkspaceProvider>
     </RootBoundary>
   );
@@ -105,9 +105,12 @@ export type {
   WebShellComposerPlaceholderState,
   WebShellProps,
   WebShellSidebarOptions,
+  BugReportInfo,
+  SessionChangeEvent,
 } from './App';
 export type { ToastTone } from './components/ToastHost';
 export type { WebShellLanguage } from './i18n';
+export type { WebShellTheme } from './themeContext';
 export type {
   CommandDisplayCategory,
   CommandDisplayCategoryOrder,
@@ -121,22 +124,52 @@ export type {
   ToolHeaderExtraRenderer,
   ToolHeaderExtraRenderInfo,
   ToolHeaderKind,
+  ComposerTagClickHandler,
+  ComposerTagRenderer,
   AssistantTurnFooterRenderer,
   UserMessageContentRenderer,
   UserMessageContentRenderInfo,
+  UserMessageContentParser,
   ComposerHeaderRenderer,
   ComposerToolbarStartRenderer,
   ComposerToolbarRightRenderer,
+  WebShellAtItemRenderInfo,
+  WebShellAtItemRenderer,
+  WebShellComposerApi,
+  WebShellBuiltinComposerTagKind,
+  WebShellBuiltinAtProviderId,
+  WebShellBuiltinAtProvidersConfig,
+  WebShellComposerInput,
+  WebShellComposerTag,
+  WebShellComposerTagIconMap,
+  WebShellComposerTagKind,
+  WebShellComposerTagOptions,
+  WebShellComposerTagPlacement,
   WebShellComposerToolbarRenderInfo,
   WebShellComposerToolbarStartRenderInfo,
   WebShellComposerToolbarRightRenderInfo,
+  WebShellComposerTextOptions,
   WelcomeFooterRenderer,
   WelcomeHeaderRenderer,
+  WebShellFooterRenderInfo,
+  FooterRenderer,
+  LoadingPhrasesResolver,
+  WebShellAtProviderTab,
+  WebShellAtItem,
+  WebShellAtProvider,
   WebShellBottomStatusItem,
   WebShellCodeBlockRenderInfo,
   WebShellMarkdownCustomization,
   WebShellAssistantMessageInfo,
   WebShellAssistantTurnFooterRenderInfo,
+  WebShellIconSource,
+  WebShellTaskInfo,
+  WebShellUserMessagePart,
+  WebShellAgentTask,
+  WebShellShellTask,
+  WebShellMonitorTask,
+  WebShellModelInfo,
+  WebShellSkillInfo,
 } from './customization';
 export type { WelcomeHeaderProps } from './components/WelcomeHeader';
 export type {
