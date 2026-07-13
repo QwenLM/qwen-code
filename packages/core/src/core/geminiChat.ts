@@ -325,11 +325,10 @@ interface TryCompressOptions {
   customInstructions?: string;
 }
 
-// Some providers occasionally return transient stream anomalies: either an
-// empty stream (usage metadata only, no candidates), a stream that finishes
-// normally but contains no usable text, or a stream cut off without a finish
-// reason. All are retried with an independent budget (similar to rate-limit
-// retries) so they do not consume each other's retry budgets.
+// Model-output validation errors (protocol tag leaks, malformed tool calls)
+// and transient stream anomalies (empty streams, no usable text, missing
+// finish reason) use an independent retry budget so they do not consume each
+// other's or HTTP retries' budgets.
 const INVALID_STREAM_RETRY_CONFIG = {
   transientMaxRetries: 4,
   protocolTagLeakMaxRetries: 2,
