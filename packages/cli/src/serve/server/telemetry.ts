@@ -219,7 +219,7 @@ export function resolveDaemonTelemetryRoute(
         return { route: 'POST /workspace/agents/:agentType' };
       }
       if (
-        /^\/workspace\/mcp\/[^/]+\/(enable|disable|authenticate|clear-auth)$/.test(
+        /^\/workspace\/mcp\/[^/]+\/(approve|enable|disable|authenticate|clear-auth)$/.test(
           suffix,
         )
       ) {

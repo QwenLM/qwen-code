@@ -969,7 +969,11 @@ export interface DaemonWorkspaceMcpServerStatus extends DaemonStatusCell {
   transport: DaemonMcpTransport;
   disabled: boolean;
   hasOAuthTokens?: boolean;
-  source?: 'user' | 'project' | 'extension';
+  approvalState?: 'pending' | 'rejected';
+  authenticationState?: 'pending' | 'succeeded' | 'failed';
+  authenticationError?: string;
+  source?: 'user' | 'workspace' | 'project' | 'extension';
+  removable?: boolean;
   config?: {
     command?: string;
     args?: string[];
@@ -1056,6 +1060,12 @@ export interface DaemonWorkspaceMcpStatus {
    * Older daemons omit the field.
    */
   budgets?: DaemonMcpBudgetStatusCell[];
+}
+
+/** Response of `POST /workspace/mcp/initialize`. */
+export interface DaemonWorkspaceMcpInitializeResult {
+  /** True only when this request started a new background discovery task. */
+  accepted: boolean;
 }
 
 export interface DaemonWorkspaceMcpToolStatus {
@@ -2405,6 +2415,7 @@ export type DaemonMcpRestartResult =
     };
 
 export type DaemonMcpManageAction =
+  | 'approve'
   | 'enable'
   | 'disable'
   | 'authenticate'
@@ -2417,6 +2428,7 @@ export interface DaemonMcpManageResult {
   changed?: boolean;
   messages?: string[];
   authUrl?: string;
+  pending?: boolean;
 }
 
 /**

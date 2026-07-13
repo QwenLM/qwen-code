@@ -29,6 +29,7 @@ import {
   createIdleEnvStatus,
   createIdleAcpPreflightCells,
   mapDomainErrorToErrorKind,
+  type ServeWorkspaceMcpStatus,
   type ServeWorkspacePreflightStatus,
   type ServeWorkspaceSkillsRefreshResult,
   type ServeWorkspaceSkillsStatus,
@@ -220,6 +221,9 @@ export function createDaemonWorkspaceService(
   // skill-backed slash commands (e.g. `/review`) keep autocompleting after
   // the child channel has been reaped. See `getWorkspaceSkillsStatus`.
   let lastWorkspaceSkillsStatus: ServeWorkspaceSkillsStatus | undefined;
+  // MCP discovery runs without a session. Keep the last live snapshot after
+  // its ACP child is reaped so the configured server list does not disappear.
+  let lastWorkspaceMcpStatus: ServeWorkspaceMcpStatus | undefined;
   let inFlightAcpPreheat: Promise<void> | undefined;
 
   const getWorkspaceSkillsStatus =
@@ -271,9 +275,15 @@ export function createDaemonWorkspaceService(
     // -- Status queries (delegate to ACP child via queryWorkspaceStatus) --
 
     async getWorkspaceMcpStatus(_ctx: WorkspaceRequestContext) {
-      return queryWorkspaceStatus(SERVE_STATUS_EXT_METHODS.workspaceMcp, () =>
-        createIdleWorkspaceMcpStatus(boundWorkspace),
+      const status = await queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceMcp,
+        () => createIdleWorkspaceMcpStatus(boundWorkspace),
       );
+      if (status.initialized) {
+        lastWorkspaceMcpStatus = status;
+        return status;
+      }
+      return lastWorkspaceMcpStatus ?? status;
     },
 
     async getWorkspaceSkillsStatus(_ctx: WorkspaceRequestContext) {

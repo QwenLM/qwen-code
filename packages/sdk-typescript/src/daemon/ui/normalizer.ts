@@ -341,6 +341,15 @@ export function normalizeDaemonEvent(
     case 'mcp_server_restart_refused':
       return normalizeMcpServerRestartRefused(event, base);
 
+    case 'mcp_server_added':
+      return normalizeMcpServerChanged(event, base, 'added');
+
+    case 'mcp_server_removed':
+      return normalizeMcpServerChanged(event, base, 'removed');
+
+    case 'mcp_server_changed':
+      return normalizeMcpServerChanged(event, base);
+
     case 'extensions_changed':
       return normalizeExtensionsChanged(event, base);
 
@@ -1595,6 +1604,45 @@ function normalizeMcpServerRestartRefused(
       type: 'workspace.mcp.server_restart_refused',
       serverName,
       reason: reason as 'in_flight' | 'disabled' | 'budget_would_exceed',
+    },
+  ];
+}
+
+function normalizeMcpServerChanged(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+  fixedAction?: 'added' | 'removed',
+): DaemonUiEvent[] {
+  const serverName = getString(event.data, fixedAction ? 'name' : 'serverName');
+  const action = fixedAction ?? getString(event.data, 'action');
+  if (
+    !serverName ||
+    !action ||
+    ![
+      'added',
+      'removed',
+      'approve',
+      'enable',
+      'disable',
+      'authenticate',
+      'clear-auth',
+    ].includes(action)
+  ) {
+    return fallbackDebug(event, base, 'malformed mcp_server_changed payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'workspace.mcp.server_changed',
+      serverName,
+      action: action as
+        | 'added'
+        | 'removed'
+        | 'approve'
+        | 'enable'
+        | 'disable'
+        | 'authenticate'
+        | 'clear-auth',
     },
   ];
 }

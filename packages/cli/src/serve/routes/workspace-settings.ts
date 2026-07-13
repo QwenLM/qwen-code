@@ -6,6 +6,10 @@
 
 import type { Application, Request, Response } from 'express';
 import { loadSettings, SettingScope } from '../../config/settings.js';
+import {
+  redactMcpServersSetting,
+  restoreRedactedMcpServersSetting,
+} from '../../config/mcp-server-secrets.js';
 import type {
   SettingEnumOption,
   SettingsType,
@@ -43,7 +47,11 @@ const TUI_ONLY_SETTINGS = new Set([
 // `voiceModel` is `showInDialog: false` (so not in the dialog allowlist), but
 // the Web Shell `/model --voice` picker needs to read + persist it; the daemon
 // `/voice/stream` then reads it back via `loadSettings`.
-const WEB_SHELL_SETTINGS = new Set(['ui.compactMode', 'voiceModel']);
+const WEB_SHELL_SETTINGS = new Set([
+  'ui.compactMode',
+  'voiceModel',
+  'mcpServers',
+]);
 
 // The primary /workspace/settings route may write the global user scope
 // (~/.qwen/settings.json). The trust-gated workspace-qualified route stays
@@ -114,11 +122,13 @@ function buildSettingsResponse(
       key,
     );
 
+    const publicValue = (value: unknown) =>
+      key === 'mcpServers' ? redactMcpServersSetting(value) : value;
     const values: SettingDescriptor['values'] = {
-      effective: effective !== undefined ? effective : def.default,
+      effective: publicValue(effective !== undefined ? effective : def.default),
     };
-    if (userVal !== undefined) values.user = userVal;
-    if (wsVal !== undefined) values.workspace = wsVal;
+    if (userVal !== undefined) values.user = publicValue(userVal);
+    if (wsVal !== undefined) values.workspace = publicValue(wsVal);
 
     settings.push({
       key,
@@ -149,9 +159,26 @@ function buildSettingsResponse(
 }
 
 const SCOPE_MAP: Record<string, SettingScope> = {
-  workspace: SettingScope.Workspace,
   user: SettingScope.User,
+  workspace: SettingScope.Workspace,
 };
+
+function prepareSettingWrite(
+  workspace: string,
+  scope: SettingScope,
+  key: string,
+  value: unknown,
+): { persistedValue: unknown; publicValue: unknown } {
+  if (key !== 'mcpServers') {
+    return { persistedValue: value, publicValue: value };
+  }
+  const existing = loadSettings(workspace).forScope(scope).settings.mcpServers;
+  const persistedValue = restoreRedactedMcpServersSetting(value, existing);
+  return {
+    persistedValue,
+    publicValue: redactMcpServersSetting(persistedValue),
+  };
+}
 
 export interface WorkspaceSettingsRouteDeps {
   boundWorkspace: string;
@@ -269,16 +296,29 @@ export function registerWorkspaceSettingsRoutes(
       const clientId = parseAndValidateClientId(req, res);
       if (clientId === null) return;
 
+      const settingScope = SCOPE_MAP[scope];
+      if (!settingScope) {
+        res.status(400).json({
+          error: `scope must be one of: ${[...VALID_WRITE_SCOPES].join(', ')}`,
+          code: 'invalid_scope',
+        });
+        return;
+      }
+      let publicValue: unknown = value;
       try {
-        const settingScope = SCOPE_MAP[scope];
-        if (!settingScope) {
-          res.status(400).json({
-            error: `scope must be one of: ${[...VALID_WRITE_SCOPES].join(', ')}`,
-            code: 'invalid_scope',
-          });
-          return;
-        }
-        await persistSetting(boundWorkspace, settingScope, key, value);
+        const prepared = prepareSettingWrite(
+          boundWorkspace,
+          settingScope,
+          key,
+          value,
+        );
+        publicValue = prepared.publicValue;
+        await persistSetting(
+          boundWorkspace,
+          settingScope,
+          key,
+          prepared.persistedValue,
+        );
       } catch (err) {
         writeStderrLine(
           `qwen serve: POST /workspace/settings persist error (key=${key}, scope=${scope}, workspace=${boundWorkspace}): ${
@@ -293,7 +333,7 @@ export function registerWorkspaceSettingsRoutes(
       }
 
       try {
-        broadcastSettingsChanged(key, value, scope, clientId);
+        broadcastSettingsChanged(key, publicValue, scope, clientId);
       } catch (err) {
         writeStderrLine(
           `qwen serve: POST /workspace/settings broadcast error (key=${key}, scope=${scope}): ${
@@ -305,7 +345,7 @@ export function registerWorkspaceSettingsRoutes(
       res.status(200).json({
         key,
         scope,
-        value,
+        value: publicValue,
         requiresRestart: def.requiresRestart,
       });
     },
@@ -425,12 +465,20 @@ export function registerWorkspaceQualifiedSettingsRoutes(
         });
         return;
       }
+      let publicValue: unknown = value;
       try {
-        await deps.persistSetting(
+        const prepared = prepareSettingWrite(
           runtime.workspaceCwd,
           settingScope,
           key,
           value,
+        );
+        publicValue = prepared.publicValue;
+        await deps.persistSetting(
+          runtime.workspaceCwd,
+          settingScope,
+          key,
+          prepared.persistedValue,
         );
       } catch (err) {
         writeStderrLine(
@@ -448,13 +496,13 @@ export function registerWorkspaceQualifiedSettingsRoutes(
       deps.invalidateServeFeaturesCache();
       runtime.bridge.publishWorkspaceEvent({
         type: 'settings_changed',
-        data: { key, value, scope },
+        data: { key, value: publicValue, scope },
         ...(clientId ? { originatorClientId: clientId } : {}),
       });
       res.status(200).json({
         key,
         scope,
-        value,
+        value: publicValue,
         requiresRestart: def.requiresRestart,
       });
     },

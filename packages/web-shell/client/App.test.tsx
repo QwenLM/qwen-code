@@ -45,6 +45,7 @@ const {
   mockSessionActions,
   mockWorkspace,
   mockWorkspaceActions,
+  mockMcp,
   mockStore,
   mockFollowup,
   testState,
@@ -110,6 +111,19 @@ const {
       loadMcpStatus: vi.fn().mockResolvedValue({ servers: [] }),
       loadMcpTools: vi.fn().mockResolvedValue([]),
       loadMcpResources: vi.fn().mockResolvedValue([]),
+    },
+    mockMcp: {
+      initialize: vi.fn().mockResolvedValue({ accepted: true }),
+      reloadConfig: vi.fn().mockResolvedValue({ accepted: true }),
+      reload: vi.fn(),
+      loadTools: vi.fn(),
+      loadResources: vi.fn(),
+      restartServer: vi.fn(),
+      manageServer: vi.fn(),
+      addServer: vi.fn(),
+      removeServer: vi.fn(),
+      loading: false,
+      error: undefined,
     },
     mockStore: {
       dispatch: vi.fn(),
@@ -178,6 +192,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useTranscriptStore: () => mockStore,
   useWorkspace: () => mockWorkspace,
   useWorkspaceActions: () => mockWorkspaceActions,
+  useMcp: () => mockMcp,
   useWorkspaceEventSignals: () => ({
     artifactsVersion: 0,
     extensionsVersion: 0,
@@ -391,6 +406,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
     WebShellSidebar: (props: {
       sessionListReloadToken?: number;
       collapsed?: boolean;
+      onOpenPlugins?: () => void;
       onOpenDaemonStatus?: () => void;
       onOpenSessions?: () => void;
       onOpenSplitView?: () => void;
@@ -423,6 +439,15 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
             onClick: () => props.onLoadSession?.('session-2'),
           },
           'load session',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'open-plugins',
+            type: 'button',
+            onClick: props.onOpenPlugins,
+          },
+          'plugins',
         ),
         React.createElement(
           'button',
@@ -621,6 +646,7 @@ vi.doMock('./components/extensions/ExtensionsManagerPage', async () => {
     ExtensionsManagerPage: (props: {
       onClose: () => void;
       initialFocusRef?: React.Ref<HTMLHeadingElement>;
+      embedded?: unknown;
     }) =>
       React.createElement(
         'div',
@@ -651,7 +677,6 @@ mockComponent(
   'ReleaseSessionDialog',
 );
 mockComponent('./components/dialogs/RewindDialog', 'RewindDialog');
-mockComponent('./components/dialogs/McpDialog', 'McpDialog');
 mockComponent('./components/messages/AgentsMessage', 'AgentsMessage');
 mockComponent('./components/messages/MemoryMessage', 'MemoryMessage');
 mockComponent('./components/messages/AuthMessage', 'AuthMessage');
@@ -826,6 +851,20 @@ beforeEach(() => {
   mockWorkspaceActions.loadMcpStatus.mockResolvedValue({ servers: [] });
   mockWorkspaceActions.loadMcpTools.mockResolvedValue([]);
   mockWorkspaceActions.loadMcpResources.mockResolvedValue([]);
+  mockMcp.initialize.mockClear();
+  mockMcp.initialize.mockResolvedValue({ accepted: true });
+  mockMcp.reloadConfig.mockClear();
+  mockMcp.reloadConfig.mockResolvedValue({ accepted: true });
+  mockMcp.reload.mockReset();
+  mockMcp.loadTools.mockReset();
+  mockMcp.loadResources.mockReset();
+  mockMcp.restartServer.mockReset();
+  mockMcp.restartServer.mockResolvedValue({
+    serverName: 'server',
+    restarted: true,
+    durationMs: 1,
+  });
+  mockMcp.manageServer.mockReset();
   vi.spyOn(console, 'warn').mockImplementation(() => {});
 });
 
@@ -1724,6 +1763,297 @@ describe('App session callbacks', () => {
       container.querySelector('[data-testid="extensions-manager-page"]'),
     ).toBeNull();
     expect(editorFocus).toHaveBeenCalled();
+  });
+
+  it('opens plugin management tabs from the sidebar', async () => {
+    mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
+      initialized: true,
+      discoveryState: 'completed',
+      servers: [],
+    });
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-plugins"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    const panel = container.querySelector('[data-testid="inline-panel"]');
+    const extensionsTab =
+      panel?.querySelector<HTMLButtonElement>('button[role="tab"]');
+    const tabs =
+      panel?.querySelectorAll<HTMLButtonElement>('button[role="tab"]');
+    expect(panel?.getAttribute('aria-label')).toBe('Plugins');
+    expect(Array.from(tabs ?? []).map((tab) => tab.textContent)).toEqual([
+      'Extensions',
+      'MCP',
+    ]);
+    expect(extensionsTab?.getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(extensionsTab);
+  });
+
+  it('only shows server startup progress during MCP discovery', async () => {
+    mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
+      initialized: true,
+      discoveryState: 'starting',
+      servers: [
+        {
+          name: 'filesystem',
+          source: 'workspace',
+          disabled: false,
+          mcpStatus: 'connecting',
+        },
+      ],
+    });
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/mcp';
+    await clickSubmit(container);
+    await flush();
+
+    expect(container.textContent).toContain(
+      'MCP servers are starting up (1 initializing)',
+    );
+    expect(container.textContent).not.toContain('Loading MCP tools...');
+    expect(
+      container.querySelector('[role="button"][aria-label="filesystem"]'),
+    ).toHaveProperty('tabIndex', 0);
+  });
+
+  it('shows server operations without duplicating tools and resources tabs', async () => {
+    mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
+      initialized: true,
+      discoveryState: 'completed',
+      workspaceCwd: '/workspace',
+      servers: [
+        {
+          name: 'filesystem',
+          source: 'workspace',
+          disabled: false,
+          mcpStatus: 'disconnected',
+          resourceCount: 1,
+        },
+      ],
+    });
+    mockMcp.loadTools.mockResolvedValue({
+      serverName: 'filesystem',
+      tools: [{ name: 'read_file', description: 'Read a file' }],
+    });
+    mockMcp.loadResources.mockResolvedValue({
+      serverName: 'filesystem',
+      resources: [{ uri: 'file:///README.md', name: 'README' }],
+    });
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/mcp';
+    await clickSubmit(container);
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="filesystem"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="mcp-server-actions"]')
+        ?.dispatchEvent(
+          new MouseEvent('pointerdown', {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+          }),
+        );
+      await Promise.resolve();
+    });
+
+    expect(document.body.textContent).not.toContain('View tools');
+    expect(document.body.textContent).not.toContain('View resources');
+    expect(document.body.textContent).toContain('Reconnect');
+    expect(document.body.textContent).toContain('Authenticate');
+    expect(document.body.textContent).toContain('Disable');
+    expect(document.body.textContent).toContain('Delete');
+
+    await act(async () => {
+      document
+        .querySelector<HTMLElement>(
+          '[data-testid="mcp-server-action-reconnect"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(mockMcp.restartServer).toHaveBeenCalledWith('filesystem');
+  });
+
+  it('polls workspace MCP status until browser authentication completes', async () => {
+    vi.useFakeTimers();
+    const disconnectedServer = {
+      name: 'yuque',
+      source: 'workspace' as const,
+      disabled: false,
+      mcpStatus: 'disconnected' as const,
+      resourceCount: 0,
+    };
+    mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
+      initialized: true,
+      discoveryState: 'completed',
+      workspaceCwd: '/workspace',
+      servers: [disconnectedServer],
+    });
+    mockMcp.loadTools.mockResolvedValue({ serverName: 'yuque', tools: [] });
+    mockMcp.manageServer.mockResolvedValue({
+      serverName: 'yuque',
+      action: 'authenticate',
+      ok: true,
+      pending: true,
+      messages: ['Open the browser to authenticate.'],
+      authUrl: 'https://example.com/oauth',
+    });
+    mockMcp.reload
+      .mockResolvedValueOnce({
+        initialized: true,
+        discoveryState: 'completed',
+        workspaceCwd: '/workspace',
+        servers: [
+          { ...disconnectedServer, authenticationState: 'pending' as const },
+        ],
+      })
+      .mockResolvedValueOnce({
+        initialized: true,
+        discoveryState: 'completed',
+        workspaceCwd: '/workspace',
+        servers: [
+          {
+            ...disconnectedServer,
+            mcpStatus: 'connected' as const,
+            hasOAuthTokens: true,
+            authenticationState: 'succeeded' as const,
+          },
+        ],
+      });
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/mcp';
+    await clickSubmit(container);
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="yuque"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="mcp-server-actions"]')
+        ?.dispatchEvent(
+          new MouseEvent('pointerdown', {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+          }),
+        );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      document
+        .querySelector<HTMLElement>(
+          '[data-testid="mcp-server-action-authenticate"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain(
+      'Open the browser to authenticate.',
+    );
+    expect(mockMcp.reload).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    expect(mockMcp.reload).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain('Authenticating');
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    await flush();
+    expect(mockMcp.reload).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('Authenticate complete.');
+  });
+
+  it('does not show MCP discovery progress', async () => {
+    mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
+      initialized: true,
+      discoveryState: 'starting',
+      servers: [],
+    });
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/mcp';
+    await clickSubmit(container);
+    await flush();
+
+    expect(container.textContent).not.toContain('Loading MCP tools...');
+  });
+
+  it('does not initialize MCP discovery when it is already complete', async () => {
+    mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
+      initialized: true,
+      discoveryState: 'completed',
+      servers: [],
+    });
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/mcp';
+    await clickSubmit(container);
+    await flush();
+
+    expect(mockMcp.initialize).not.toHaveBeenCalled();
+    expect(mockMcp.reloadConfig).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain('MCP tools are ready.');
+    expect(container.textContent).not.toContain('Loading MCP tools...');
+  });
+
+  it('does not show MCP discovery progress before or after completion', async () => {
+    vi.useFakeTimers();
+    mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
+      initialized: true,
+      discoveryState: 'starting',
+      servers: [],
+    });
+    mockMcp.reload.mockResolvedValue({
+      initialized: true,
+      discoveryState: 'completed',
+      servers: [],
+    });
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/mcp';
+    await clickSubmit(container);
+    await flush();
+    expect(container.textContent).not.toContain('Loading MCP tools...');
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    await flush();
+
+    expect(container.textContent).not.toContain('Loading MCP tools...');
+    expect(container.textContent).not.toContain('MCP tools are ready.');
   });
 
   it('auto-closes an open panel when an AskUserQuestion approval becomes pending', async () => {

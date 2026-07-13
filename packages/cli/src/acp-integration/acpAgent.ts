@@ -53,6 +53,7 @@ import {
   McpBudgetWouldExceedError,
   McpServerSpawnFailedError,
   InvalidMcpConfigError,
+  isGatedMcpScope,
   MCPOAuthProvider,
   MCPOAuthTokenStorage,
   InvalidSessionTranscriptCursorError,
@@ -78,7 +79,7 @@ import {
   startEventLoopLagMonitor,
   refreshMemoryInstruction,
   type AgentParams,
-  type ApprovalMode,
+  ApprovalMode,
   type Config,
   type ConfigInitializeOptions,
   type DeviceAuthorizationData,
@@ -157,6 +158,14 @@ import {
   SettingScope,
 } from '../config/settings.js';
 import { loadSettingsCached } from '../config/settings-cache.js';
+import { loadMcpApprovals } from '../config/mcpApprovals.js';
+import { assembleMcpServers } from '../config/mcpServers.js';
+import { recomputeMcpGating } from '../config/hot-reload.js';
+import {
+  REDACTED_MCP_SECRET,
+  redactMcpServerSecrets,
+  restoreRedactedMcpSecrets,
+} from '../config/mcp-server-secrets.js';
 import {
   buildPermissionSettings,
   normalizePermissionRules,
@@ -2063,65 +2072,6 @@ function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
   return undefined;
 }
 
-// Placeholder substituted for MCP secret values in settings responses. Keys
-// are preserved so the client can show which env vars / headers are configured
-// without ever receiving the plaintext value. Clients must treat this sentinel
-// as "unchanged" and not echo it back through setMcpServer.
-const REDACTED_MCP_SECRET = '__redacted__';
-
-function redactMcpServerSecrets(
-  server: QwenMcpServerConfig,
-): QwenMcpServerConfig {
-  const redactValues = (record?: Record<string, string>) =>
-    record
-      ? Object.fromEntries(
-          Object.keys(record).map((key) => [key, REDACTED_MCP_SECRET]),
-        )
-      : record;
-  return {
-    ...server,
-    env: redactValues(server.env),
-    headers: redactValues(server.headers),
-  };
-}
-
-/**
- * Reverse of redaction on write: when a client echoes back the
- * `__redacted__` sentinel (because it read the masked value via getCore and
- * re-submitted the whole config), restore the previously stored real value
- * instead of persisting the literal sentinel. Keys with no prior value are
- * dropped, since there is no secret to restore.
- */
-function restoreRedactedMcpSecrets(
-  server: QwenMcpServerConfig,
-  existing: Record<string, unknown>,
-): QwenMcpServerConfig {
-  const restore = (
-    incoming: Record<string, string> | undefined,
-    prior: unknown,
-  ): Record<string, string> | undefined => {
-    if (!incoming) return incoming;
-    const priorRecord = toRecord(prior);
-    const result: Record<string, string> = {};
-    for (const [key, value] of Object.entries(incoming)) {
-      if (value !== REDACTED_MCP_SECRET) {
-        result[key] = value;
-        continue;
-      }
-      const priorValue = priorRecord[key];
-      if (typeof priorValue === 'string') {
-        result[key] = priorValue;
-      }
-    }
-    return result;
-  };
-  return {
-    ...server,
-    env: restore(server.env, existing['env']),
-    headers: restore(server.headers, existing['headers']),
-  };
-}
-
 function redactSecretRecord(
   record: Record<string, string> | undefined,
 ): Record<string, string> | undefined {
@@ -2777,8 +2727,26 @@ interface TranscriptReplayConfigCacheEntry {
   pending?: Promise<Config>;
 }
 
+interface PendingMcpAuthentication {
+  started: Promise<{
+    authUrl: string;
+    messages: string[];
+  }>;
+}
+
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
+  private workspaceMcpDiscoveryConfig: Config | undefined;
+  private workspaceMcpDiscoveryPromise: Promise<void> | undefined;
+  private workspaceMcpDiscoveryError: string | undefined;
+  private readonly pendingMcpAuthentications = new Map<
+    string,
+    PendingMcpAuthentication
+  >();
+  private readonly mcpAuthenticationResults = new Map<
+    string,
+    { state: 'succeeded' | 'failed'; error?: string }
+  >();
   private readonly transcriptReplayConfigCache = new Map<
     string,
     TranscriptReplayConfigCacheEntry
@@ -2821,6 +2789,206 @@ class QwenAgent implements Agent {
 
   getActiveSessions(): Session[] {
     return [...this.sessions.values()];
+  }
+
+  private getWorkspaceMcpConfig(serverName?: string): Config {
+    if (
+      serverName &&
+      this.config.getRuntimeMcpServers?.()[serverName] !== undefined
+    ) {
+      return this.config;
+    }
+    return this.workspaceMcpDiscoveryConfig ?? this.config;
+  }
+
+  private getLiveMcpConfigs(serverName: string): Config[] {
+    return [
+      ...new Set([
+        this.getWorkspaceMcpConfig(),
+        this.config,
+        ...this.getActiveSessions().map((session) => session.getConfig()),
+      ]),
+    ].filter((config) => Boolean(config.getMcpServers()?.[serverName]));
+  }
+
+  private async reconcileMcpServerAcrossLiveConfigs(
+    serverName: string,
+    operation: 'discover' | 'disable' | 'disconnect',
+  ): Promise<void> {
+    const errors: unknown[] = [];
+    for (const config of this.getLiveMcpConfigs(serverName)) {
+      try {
+        const registry = config.getToolRegistry();
+        if (operation === 'discover') {
+          await registry?.discoverToolsForServer(serverName);
+          const geminiClient = config.getGeminiClient?.();
+          if (geminiClient?.isInitialized?.()) {
+            await geminiClient.setTools?.();
+          }
+        } else if (operation === 'disable') {
+          await registry?.disableMcpServer(serverName);
+        } else {
+          await registry?.disconnectServer(serverName);
+        }
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length > 0) {
+      const details = errors
+        .map((error) =>
+          error instanceof Error ? error.message : String(error),
+        )
+        .join('; ');
+      throw new AggregateError(
+        errors,
+        `Failed to synchronize MCP server ${JSON.stringify(serverName)}: ${details}`,
+      );
+    }
+  }
+
+  private getMcpServerStatus(config: Config, serverName: string) {
+    const manager = config.getToolRegistry()?.getMcpClientManager() as
+      | { getServerStatus?: (name: string) => MCPServerStatus }
+      | undefined;
+    return (
+      manager?.getServerStatus?.(serverName) ?? getMCPServerStatus(serverName)
+    );
+  }
+
+  private enqueueWorkspaceMcpDiscovery(
+    label: string,
+    run: () => Promise<void>,
+  ): { accepted: boolean } {
+    const previous = this.workspaceMcpDiscoveryPromise ?? Promise.resolve();
+    const tracked = previous
+      .then(async () => {
+        this.workspaceMcpDiscoveryError = undefined;
+        await run();
+      })
+      .catch((err: unknown) => {
+        this.workspaceMcpDiscoveryError =
+          err instanceof Error ? err.message : String(err);
+        debugLogger.error(
+          `Workspace MCP ${label} failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      })
+      .finally(() => {
+        if (this.workspaceMcpDiscoveryPromise === tracked) {
+          this.workspaceMcpDiscoveryPromise = undefined;
+        }
+      });
+    this.workspaceMcpDiscoveryPromise = tracked;
+    return { accepted: true };
+  }
+
+  private async createWorkspaceMcpDiscoveryConfig(
+    settings: LoadedSettings,
+  ): Promise<void> {
+    if (this.workspaceMcpDiscoveryConfig) return;
+    const cwd = this.config.getTargetDir();
+    const config = await loadCliConfig(
+      settings.merged,
+      {
+        ...this.argv,
+        sessionId: 'workspace-mcp-discovery',
+        resume: undefined,
+        continue: false,
+      },
+      cwd,
+      undefined,
+      {
+        userHooks: settings.getUserHooks(),
+        projectHooks: settings.getProjectHooks(),
+      },
+      buildDisabledSkillNamesProvider(settings),
+    );
+    config.setMcpTransportPool(this.mcpPool);
+    try {
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipFileCheckpointing: true,
+        skipHooks: true,
+        skipSkillManager: true,
+        skipMcpDiscovery: true,
+        lenientToolWarmup: true,
+      });
+      const manager = config.getToolRegistry()?.getMcpClientManager();
+      if (!manager) {
+        throw new Error('MCP client manager is unavailable');
+      }
+      await manager.discoverAllMcpToolsIncremental(config);
+      if (manager.getDiscoveryState() === MCPDiscoveryState.NOT_STARTED) {
+        throw new Error(
+          'MCP discovery did not start. The workspace may not be trusted.',
+        );
+      }
+      this.workspaceMcpDiscoveryConfig = config;
+    } catch (error) {
+      try {
+        await config.getToolRegistry()?.stop();
+      } catch {
+        // Preserve the initialization failure that made this config unusable.
+      }
+      throw error;
+    }
+  }
+
+  private initializeWorkspaceMcpDiscovery(): { accepted: boolean } {
+    if (this.workspaceMcpDiscoveryConfig || this.workspaceMcpDiscoveryPromise) {
+      return { accepted: false };
+    }
+    return this.enqueueWorkspaceMcpDiscovery('initialization', async () => {
+      const settings = loadSettings(this.config.getTargetDir());
+      await this.createWorkspaceMcpDiscoveryConfig(settings);
+    });
+  }
+
+  private reloadWorkspaceMcpDiscovery(): { accepted: boolean } {
+    return this.enqueueWorkspaceMcpDiscovery('reload', async () => {
+      const settings = loadSettings(this.config.getTargetDir());
+      const discoveryConfig = this.workspaceMcpDiscoveryConfig;
+      const liveConfigs = new Set([
+        this.config,
+        ...this.getActiveSessions().map((session) => session.getConfig()),
+        ...(discoveryConfig ? [discoveryConfig] : []),
+      ]);
+      const syncErrors: unknown[] = [];
+      for (const config of liveConfigs) {
+        try {
+          const cwd = config.getTargetDir();
+          const mcpServers = assembleMcpServers(
+            settings.merged.mcpServers,
+            cwd,
+            config.getTopTierMcpServers(),
+          );
+          const gating = recomputeMcpGating(
+            settings,
+            mcpServers,
+            cwd,
+            config.getCliAllowedMcpServerNames(),
+            config.getApprovalMode() === ApprovalMode.YOLO,
+          );
+          config.setExcludedMcpServers(gating.excluded ?? []);
+          config.setAllowedMcpServers(gating.allowed);
+          config.setPendingMcpServers(gating.pending);
+          await config.reinitializeMcpServers(mcpServers);
+        } catch (error) {
+          syncErrors.push(error);
+        }
+      }
+      if (!discoveryConfig) {
+        await this.createWorkspaceMcpDiscoveryConfig(settings);
+      }
+      if (syncErrors.length > 0) {
+        throw new AggregateError(
+          syncErrors,
+          'Failed to synchronize MCP settings with live sessions',
+        );
+      }
+    });
   }
 
   /**
@@ -3677,8 +3845,21 @@ class QwenAgent implements Agent {
     }
   }
 
-  private discoveryState(): ServeMcpDiscoveryState {
-    const state = getMCPDiscoveryState();
+  private discoveryState(config?: Config): ServeMcpDiscoveryState {
+    if (
+      this.workspaceMcpDiscoveryPromise &&
+      (config === this.config || config === this.workspaceMcpDiscoveryConfig)
+    ) {
+      return 'in_progress';
+    }
+    let state = getMCPDiscoveryState();
+    try {
+      state =
+        config?.getToolRegistry()?.getMcpClientManager().getDiscoveryState() ??
+        state;
+    } catch {
+      // A discovery Config can still be constructing its tool registry.
+    }
     switch (state) {
       case MCPDiscoveryState.IN_PROGRESS:
         return 'in_progress';
@@ -3695,11 +3876,8 @@ class QwenAgent implements Agent {
   ): Promise<ServeWorkspaceMcpStatus> {
     try {
       const workspaceCwd = this.workspaceCwd(config);
-      const settings = loadSettings(config.getTargetDir());
-      const workspaceSettings = settings.forScope(
-        SettingScope.Workspace,
-      ).settings;
       const servers = config.getMcpServers() ?? {};
+      const approvals = loadMcpApprovals();
 
       // Pool snapshot for per-server `entryCount` + `entrySummary`.
       // Captured once outside the per-server loop. Absent when the
@@ -3770,7 +3948,7 @@ class QwenAgent implements Agent {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd,
         initialized: true,
-        discoveryState: this.discoveryState(),
+        discoveryState: this.discoveryState(config),
         servers: await Promise.all(
           Object.entries(servers).map(async ([name, server]) => {
             const disabled = config.isMcpServerDisabled(name);
@@ -3781,7 +3959,7 @@ class QwenAgent implements Agent {
             } catch {
               // Match CLI: token lookup errors should not break /mcp status.
             }
-            const rawStatus = getMCPServerStatus(name);
+            const rawStatus = this.getMcpServerStatus(config, name);
             const refusedByBudget = refusedSet.has(name);
             // Config-disable takes precedence over budget-refusal.
             const effectivelyRefused = refusedByBudget && !disabled;
@@ -3800,6 +3978,31 @@ class QwenAgent implements Agent {
               disabled,
               hasOAuthTokens,
             };
+            if (isGatedMcpScope(server.scope)) {
+              const approvalState = approvals.getState(
+                config.getWorkingDir(),
+                name,
+                server,
+              );
+              if (approvalState !== 'approved') {
+                out.approvalState = approvalState;
+                if (!disabled) {
+                  out.status = 'warning';
+                  out.mcpStatus = 'disconnected';
+                }
+              }
+            }
+            if (this.pendingMcpAuthentications.has(name)) {
+              out.authenticationState = 'pending';
+            } else {
+              const authentication = this.mcpAuthenticationResults.get(name);
+              if (authentication) {
+                out.authenticationState = authentication.state;
+                if (authentication.error) {
+                  out.authenticationError = authentication.error;
+                }
+              }
+            }
             if (effectivelyRefused) {
               out.errorKind = 'budget_exhausted';
               out.disabledReason = 'budget';
@@ -3822,11 +4025,27 @@ class QwenAgent implements Agent {
             if (typeof extensionName === 'string') {
               out.extensionName = extensionName;
             }
-            out.source = out.extensionName
+            const source = out.extensionName
               ? 'extension'
-              : workspaceSettings.mcpServers?.[name]
-                ? 'project'
-                : 'user';
+              : server.scope === 'workspace'
+                ? 'workspace'
+                : server.scope === 'project'
+                  ? 'project'
+                  : 'user';
+            (
+              out as unknown as {
+                source?: 'user' | 'workspace' | 'project' | 'extension';
+              }
+            ).source = source;
+            const transient =
+              config.getTopTierMcpServers?.()?.[name] !== undefined ||
+              config.getRuntimeMcpServers?.()[name] !== undefined;
+            (
+              out as ServeWorkspaceMcpServerStatus & { removable?: boolean }
+            ).removable =
+              !out.extensionName &&
+              !transient &&
+              (server.scope === undefined || server.scope === 'workspace');
             if (server && typeof server === 'object') {
               const candidate = server as {
                 command?: unknown;
@@ -3908,6 +4127,16 @@ class QwenAgent implements Agent {
               ),
             }
           : {}),
+        ...(this.workspaceMcpDiscoveryError
+          ? {
+              errors: [
+                this.errorCell(
+                  'mcp',
+                  new Error(this.workspaceMcpDiscoveryError),
+                ),
+              ],
+            }
+          : {}),
       };
     } catch (error) {
       return {
@@ -3918,6 +4147,39 @@ class QwenAgent implements Agent {
         errors: [this.errorCell('mcp', error)],
       };
     }
+  }
+
+  private async buildManagedWorkspaceMcpStatus(): Promise<ServeWorkspaceMcpStatus> {
+    const config = this.getWorkspaceMcpConfig();
+    const status = await this.buildWorkspaceMcpStatus(config);
+    if (config === this.config) return status;
+    const runtimeNames = new Set(
+      Object.keys(this.config.getRuntimeMcpServers?.() ?? {}),
+    );
+    if (runtimeNames.size === 0) return status;
+    const runtimeStatus = await this.buildWorkspaceMcpStatus(this.config);
+    const errors = [
+      ...(status.errors ?? []),
+      ...(runtimeStatus.errors ?? []).filter(
+        (candidate) =>
+          !status.errors?.some(
+            (existing) =>
+              existing.kind === candidate.kind &&
+              existing.status === candidate.status &&
+              existing.error === candidate.error,
+          ),
+      ),
+    ];
+    return {
+      ...status,
+      servers: [
+        ...status.servers.filter((server) => !runtimeNames.has(server.name)),
+        ...runtimeStatus.servers.filter((server) =>
+          runtimeNames.has(server.name),
+        ),
+      ],
+      ...(errors.length > 0 ? { errors } : {}),
+    };
   }
 
   private buildWorkspaceMcpToolsStatus(
@@ -4540,7 +4802,7 @@ class QwenAgent implements Agent {
 
   private buildMcpDiscoveryPreflightCell(config: Config): ServePreflightCell {
     try {
-      const discovery = this.discoveryState();
+      const discovery = this.discoveryState(config);
       const servers = config.getMcpServers() ?? {};
       const total = Object.keys(servers).length;
       // Today `MCPServerStatus` is `{CONNECTED, CONNECTING, DISCONNECTED}`,
@@ -5655,9 +5917,10 @@ class QwenAgent implements Agent {
         };
       }
       case SERVE_STATUS_EXT_METHODS.workspaceMcp:
-        return (await this.buildWorkspaceMcpStatus(
-          this.config,
-        )) as unknown as Record<string, unknown>;
+        return (await this.buildManagedWorkspaceMcpStatus()) as unknown as Record<
+          string,
+          unknown
+        >;
       case SERVE_STATUS_EXT_METHODS.workspaceMcpTools: {
         const serverName = params['serverName'];
         if (typeof serverName !== 'string' || serverName.length === 0) {
@@ -5667,7 +5930,7 @@ class QwenAgent implements Agent {
           );
         }
         return this.buildWorkspaceMcpToolsStatus(
-          this.config,
+          this.getWorkspaceMcpConfig(serverName),
           serverName,
         ) as unknown as Record<string, unknown>;
       }
@@ -5680,7 +5943,7 @@ class QwenAgent implements Agent {
           );
         }
         return this.buildWorkspaceMcpResourcesStatus(
-          this.config,
+          this.getWorkspaceMcpConfig(serverName),
           serverName,
         ) as unknown as Record<string, unknown>;
       }
@@ -6276,6 +6539,7 @@ class QwenAgent implements Agent {
             'Invalid or missing serverName',
           );
         }
+        const config = this.getWorkspaceMcpConfig(serverName);
         // Optional `entryIndex` selector for pool-mode targeted restarts.
         let entryIndex: number | undefined;
         const rawEntryIndex = params['entryIndex'];
@@ -6292,7 +6556,7 @@ class QwenAgent implements Agent {
           }
           entryIndex = rawEntryIndex;
         }
-        const servers = this.config.getMcpServers() ?? {};
+        const servers = config.getMcpServers() ?? {};
         if (!Object.prototype.hasOwnProperty.call(servers, serverName)) {
           // Structured payload so the bridge can map to a typed
           // `McpServerNotFoundError` and HTTP 404.
@@ -6302,7 +6566,7 @@ class QwenAgent implements Agent {
             { errorKind: 'mcp_server_not_found', serverName },
           );
         }
-        if (this.config.isMcpServerDisabled(serverName)) {
+        if (config.isMcpServerDisabled(serverName)) {
           return {
             serverName,
             restarted: false,
@@ -6310,7 +6574,7 @@ class QwenAgent implements Agent {
             reason: 'disabled' as const,
           };
         }
-        const manager = this.config.getToolRegistry()?.getMcpClientManager();
+        const manager = config.getToolRegistry()?.getMcpClientManager();
         if (!manager) {
           throw RequestError.internalError(
             undefined,
@@ -6347,7 +6611,7 @@ class QwenAgent implements Agent {
         // toggles applied since this ACP child booted. Reads need the
         // union (User + System + Workspace); writes target Workspace only.
         try {
-          const fresh = loadSettings(this.config.getTargetDir());
+          const fresh = loadSettings(config.getTargetDir());
           const mergedDisabled = fresh.merged.tools?.disabled;
           // Detect and stderr-log malformed `tools.disabled` before
           // clearing so a misconfigured settings file is loud.
@@ -6362,7 +6626,7 @@ class QwenAgent implements Agent {
           // Use the shared `normalizeDisabledToolList` helper so
           // boot and restart paths agree on what counts as "disabled".
           const disabledList = normalizeDisabledToolList(mergedDisabled);
-          this.config.setDisabledTools(new Set(disabledList));
+          config.setDisabledTools(new Set(disabledList));
         } catch (err) {
           // Settings load failures are non-fatal — fall through with
           // the existing in-memory snapshot.
@@ -6384,6 +6648,14 @@ class QwenAgent implements Agent {
           const restartResults = await this.mcpPool.restartByName(serverName, {
             ...(entryIndex !== undefined ? { entryIndex } : {}),
           });
+          await Promise.all(
+            this.getLiveMcpConfigs(serverName).map(async (liveConfig) => {
+              const geminiClient = liveConfig.getGeminiClient?.();
+              if (geminiClient?.isInitialized?.()) {
+                await geminiClient.setTools?.();
+              }
+            }),
+          );
           // When `entryIndex` doesn't match any current pool entry,
           // return an empty `entries` array (soft signal).
           return {
@@ -6405,22 +6677,22 @@ class QwenAgent implements Agent {
           );
         }
         const start = Date.now();
-        const toolRegistry = this.config.getToolRegistry();
-        if (!toolRegistry) {
-          throw RequestError.internalError(
-            undefined,
-            'ToolRegistry unavailable on this Config',
+        await this.reconcileMcpServerAcrossLiveConfigs(serverName, 'discover');
+        const disconnectedRuntime = this.getLiveMcpConfigs(serverName).find(
+          (liveConfig) =>
+            this.getMcpServerStatus(liveConfig, serverName) !==
+            MCPServerStatus.CONNECTED,
+        );
+        if (disconnectedRuntime) {
+          const postStatus = this.getMcpServerStatus(
+            disconnectedRuntime,
+            serverName,
           );
-        }
-        await toolRegistry.discoverToolsForServer(serverName);
-        // Verify the live status after restart; anything other than
-        // CONNECTED means the restart didn't take effect.
-        const postStatus = getMCPServerStatus(serverName);
-        if (postStatus !== MCPServerStatus.CONNECTED) {
           throw new RequestError(
             -32099,
             `MCP server ${JSON.stringify(serverName)} did not reach a ` +
-              `connected state after restart (status: ${postStatus}).`,
+              `connected state in every live runtime after restart ` +
+              `(status: ${postStatus}).`,
             {
               errorKind: 'mcp_restart_failed',
               serverName,
@@ -6434,6 +6706,10 @@ class QwenAgent implements Agent {
           durationMs: Date.now() - start,
         };
       }
+      case SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize:
+        return this.initializeWorkspaceMcpDiscovery();
+      case SERVE_CONTROL_EXT_METHODS.workspaceMcpReload:
+        return this.reloadWorkspaceMcpDiscovery();
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpManage: {
         const serverName = params['serverName'];
         const action = params['action'];
@@ -6444,6 +6720,7 @@ class QwenAgent implements Agent {
           );
         }
         if (
+          action !== 'approve' &&
           action !== 'enable' &&
           action !== 'disable' &&
           action !== 'authenticate' &&
@@ -6454,7 +6731,8 @@ class QwenAgent implements Agent {
             'Invalid or missing MCP manage action',
           );
         }
-        const servers = this.config.getMcpServers() ?? {};
+        const config = this.getWorkspaceMcpConfig(serverName);
+        const servers = config.getMcpServers() ?? {};
         const server = servers[serverName];
         if (!server) {
           throw new RequestError(
@@ -6463,7 +6741,7 @@ class QwenAgent implements Agent {
             { errorKind: 'mcp_server_not_found', serverName },
           );
         }
-        const toolRegistry = this.config.getToolRegistry();
+        const toolRegistry = config.getToolRegistry();
         if (!toolRegistry) {
           throw RequestError.internalError(
             undefined,
@@ -6471,8 +6749,32 @@ class QwenAgent implements Agent {
           );
         }
 
+        if (action === 'approve') {
+          if (!isGatedMcpScope(server.scope)) {
+            throw RequestError.invalidParams(
+              undefined,
+              `MCP server is not approval-gated: ${serverName}`,
+            );
+          }
+          const approvals = loadMcpApprovals();
+          await approvals.setState(
+            config.getWorkingDir(),
+            serverName,
+            server,
+            'approved',
+          );
+          for (const liveConfig of this.getLiveMcpConfigs(serverName)) {
+            liveConfig.approveMcpServerForSession(serverName);
+          }
+          await this.reconcileMcpServerAcrossLiveConfigs(
+            serverName,
+            'discover',
+          );
+          return { serverName, action, ok: true, changed: true };
+        }
+
         if (action === 'enable') {
-          const settings = loadSettings(this.config.getTargetDir());
+          const settings = loadSettings(config.getTargetDir());
           let settingsChanged = false;
           for (const scope of [SettingScope.User, SettingScope.Workspace]) {
             const scopeSettings = settings.forScope(scope).settings;
@@ -6485,16 +6787,21 @@ class QwenAgent implements Agent {
               settingsChanged = true;
             }
           }
-          const currentExcluded = this.config.getExcludedMcpServers() || [];
-          const runtimeFiltered = currentExcluded.filter(
-            (pattern: string) => pattern !== serverName,
-          );
           let runtimeChanged = false;
-          if (runtimeFiltered.length !== currentExcluded.length) {
-            this.config.setExcludedMcpServers(runtimeFiltered);
-            runtimeChanged = true;
+          for (const liveConfig of this.getLiveMcpConfigs(serverName)) {
+            const currentExcluded = liveConfig.getExcludedMcpServers() || [];
+            const runtimeFiltered = currentExcluded.filter(
+              (pattern: string) => pattern !== serverName,
+            );
+            if (runtimeFiltered.length !== currentExcluded.length) {
+              liveConfig.setExcludedMcpServers(runtimeFiltered);
+              runtimeChanged = true;
+            }
           }
-          await toolRegistry.discoverToolsForServer(serverName);
+          await this.reconcileMcpServerAcrossLiveConfigs(
+            serverName,
+            'discover',
+          );
           return {
             serverName,
             action,
@@ -6504,7 +6811,7 @@ class QwenAgent implements Agent {
         }
 
         if (action === 'disable') {
-          const settings = loadSettings(this.config.getTargetDir());
+          const settings = loadSettings(config.getTargetDir());
           const userSettings = settings.forScope(SettingScope.User).settings;
           const workspaceSettings = settings.forScope(
             SettingScope.Workspace,
@@ -6516,7 +6823,11 @@ class QwenAgent implements Agent {
               `Cannot disable extension MCP server: ${serverName}`,
             );
           }
-          if (workspaceSettings.mcpServers?.[serverName]) {
+          if (
+            server.scope === 'project' ||
+            server.scope === 'workspace' ||
+            workspaceSettings.mcpServers?.[serverName]
+          ) {
             targetScope = SettingScope.Workspace;
           } else if (userSettings.mcpServers?.[serverName]) {
             targetScope = SettingScope.User;
@@ -6531,13 +6842,19 @@ class QwenAgent implements Agent {
             ]);
             settingsChanged = true;
           }
-          const runtimeExcluded = this.config.getExcludedMcpServers() || [];
           let runtimeChanged = false;
-          if (!matchesAnyServerPattern(serverName, runtimeExcluded)) {
-            this.config.setExcludedMcpServers([...runtimeExcluded, serverName]);
-            runtimeChanged = true;
+          const liveConfigs = this.getLiveMcpConfigs(serverName);
+          for (const liveConfig of liveConfigs) {
+            const runtimeExcluded = liveConfig.getExcludedMcpServers() || [];
+            if (!matchesAnyServerPattern(serverName, runtimeExcluded)) {
+              liveConfig.setExcludedMcpServers([
+                ...runtimeExcluded,
+                serverName,
+              ]);
+              runtimeChanged = true;
+            }
           }
-          await toolRegistry.disableMcpServer(serverName);
+          await this.reconcileMcpServerAcrossLiveConfigs(serverName, 'disable');
           return {
             serverName,
             action,
@@ -6549,62 +6866,97 @@ class QwenAgent implements Agent {
         if (action === 'clear-auth') {
           const tokenStorage = new MCPOAuthTokenStorage();
           await tokenStorage.deleteCredentials(serverName);
-          await toolRegistry.disconnectServer(serverName);
+          await this.reconcileMcpServerAcrossLiveConfigs(
+            serverName,
+            'disconnect',
+          );
           return { serverName, action, ok: true, changed: true };
         }
 
-        const messages: string[] = [];
-        let authUrl: string | undefined;
-        const displayListener = (message: unknown) => {
-          if (typeof message === 'string') {
-            messages.push(message);
-          } else if (message && typeof message === 'object') {
-            const key = (message as { key?: unknown }).key;
-            if (typeof key === 'string') {
-              messages.push(key);
+        let pending = this.pendingMcpAuthentications.get(serverName);
+        if (!pending) {
+          this.mcpAuthenticationResults.delete(serverName);
+          const messages: string[] = [];
+          let resolveStarted!: (value: {
+            authUrl: string;
+            messages: string[];
+          }) => void;
+          let rejectStarted!: (reason: unknown) => void;
+          const started = new Promise<{
+            authUrl: string;
+            messages: string[];
+          }>((resolve, reject) => {
+            resolveStarted = resolve;
+            rejectStarted = reject;
+          });
+          pending = { started };
+          this.pendingMcpAuthentications.set(serverName, pending);
+
+          const displayListener = (message: unknown) => {
+            if (typeof message === 'string') {
+              messages.push(message);
+            } else if (message && typeof message === 'object') {
+              const key = (message as { key?: unknown }).key;
+              if (typeof key === 'string') messages.push(key);
             }
-          }
-        };
-        const authUrlListener = (url: unknown) => {
-          if (typeof url === 'string') {
-            authUrl = url;
-          }
-        };
-        appEvents.on(AppEvent.OauthDisplayMessage, displayListener);
-        appEvents.on(AppEvent.OauthAuthUrl, authUrlListener);
-        try {
-          const oauthConfig = server.oauth ?? { enabled: false };
-          const mcpServerUrl = server.httpUrl || server.url;
-          const authProvider = new MCPOAuthProvider(new MCPOAuthTokenStorage());
-          await authProvider.authenticate(
-            serverName,
-            oauthConfig,
-            mcpServerUrl,
-            appEvents,
-          );
-          messages.push(
-            `Successfully authenticated and refreshed tools for '${serverName}'.`,
-          );
-          await toolRegistry.discoverToolsForServer(serverName);
-          const geminiClient = this.config.getGeminiClient();
-          if (geminiClient) {
-            await geminiClient.setTools();
-          }
-          return {
-            serverName,
-            action,
-            ok: true,
-            changed: true,
-            messages,
-            ...(authUrl ? { authUrl } : {}),
           };
-        } finally {
-          appEvents.removeListener(
-            AppEvent.OauthDisplayMessage,
-            displayListener,
-          );
-          appEvents.removeListener(AppEvent.OauthAuthUrl, authUrlListener);
+          const authUrlListener = (url: unknown) => {
+            if (typeof url === 'string') {
+              resolveStarted({ authUrl: url, messages: [...messages] });
+            }
+          };
+          appEvents.on(AppEvent.OauthDisplayMessage, displayListener);
+          appEvents.on(AppEvent.OauthAuthUrl, authUrlListener);
+          void (async () => {
+            try {
+              const oauthConfig = server.oauth ?? { enabled: false };
+              const mcpServerUrl = server.httpUrl || server.url;
+              const authProvider = new MCPOAuthProvider(
+                new MCPOAuthTokenStorage(),
+              );
+              await authProvider.authenticate(
+                serverName,
+                oauthConfig,
+                mcpServerUrl,
+                appEvents,
+              );
+              await this.reconcileMcpServerAcrossLiveConfigs(
+                serverName,
+                'discover',
+              );
+              this.mcpAuthenticationResults.set(serverName, {
+                state: 'succeeded',
+              });
+            } catch (error) {
+              this.mcpAuthenticationResults.set(serverName, {
+                state: 'failed',
+                error: error instanceof Error ? error.message : String(error),
+              });
+              rejectStarted(error);
+              debugLogger.warn(
+                `MCP OAuth authentication failed for ${serverName}:`,
+                error,
+              );
+            } finally {
+              appEvents.removeListener(
+                AppEvent.OauthDisplayMessage,
+                displayListener,
+              );
+              appEvents.removeListener(AppEvent.OauthAuthUrl, authUrlListener);
+              this.pendingMcpAuthentications.delete(serverName);
+            }
+          })();
         }
+
+        const { authUrl, messages } = await pending.started;
+        return {
+          serverName,
+          action,
+          ok: true,
+          pending: true,
+          messages,
+          authUrl,
+        };
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceAgentGenerate: {
         const description = params['description'];
@@ -7390,15 +7742,11 @@ class QwenAgent implements Agent {
             'Invalid or missing config',
           );
         }
-        if (
-          typeof originatorClientId !== 'string' ||
-          originatorClientId.length === 0
-        ) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Invalid or missing originatorClientId',
-          );
-        }
+        const runtimeClientId =
+          typeof originatorClientId === 'string' &&
+          originatorClientId.length > 0
+            ? originatorClientId
+            : 'daemon';
         const manager = this.config.getToolRegistry()?.getMcpClientManager();
         if (!manager) {
           throw RequestError.internalError(
@@ -7439,7 +7787,7 @@ class QwenAgent implements Agent {
           const result = await manager.addRuntimeMcpServer(
             name,
             safeConfig as MCPServerConfig,
-            originatorClientId,
+            runtimeClientId,
           );
           // Reverse tool channel (issue #5626, Phase 2). The add above lands
           // the server in the BOOTSTRAP/workspace Config — which is what
@@ -7470,7 +7818,7 @@ class QwenAgent implements Agent {
                 await sessionManager.addRuntimeMcpServer(
                   name,
                   safeConfig as MCPServerConfig,
-                  originatorClientId,
+                  runtimeClientId,
                 );
               } catch (sessionErr) {
                 debugLogger.warn(
@@ -7525,15 +7873,11 @@ class QwenAgent implements Agent {
             'Server name must be ≤256 chars, alphanumeric + underscore/hyphen, and not a reserved JS property name',
           );
         }
-        if (
-          typeof originatorClientId !== 'string' ||
-          originatorClientId.length === 0
-        ) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Invalid or missing originatorClientId',
-          );
-        }
+        const runtimeClientId =
+          typeof originatorClientId === 'string' &&
+          originatorClientId.length > 0
+            ? originatorClientId
+            : 'daemon';
         const manager = this.config.getToolRegistry()?.getMcpClientManager();
         if (!manager) {
           throw RequestError.internalError(
@@ -7543,7 +7887,7 @@ class QwenAgent implements Agent {
         }
         const result = await manager.removeRuntimeMcpServer(
           name,
-          originatorClientId,
+          runtimeClientId,
         );
         // Mirror of the add fan-out (#5626): the runtime server was also
         // registered on each active session's manager, so deregistering it
@@ -7562,7 +7906,7 @@ class QwenAgent implements Agent {
             try {
               await sessionManager.removeRuntimeMcpServer(
                 name,
-                originatorClientId,
+                runtimeClientId,
               );
             } catch (sessionErr) {
               debugLogger.warn(
@@ -7594,6 +7938,17 @@ class QwenAgent implements Agent {
         };
         await runRefresh(async () => await extensionManager.refreshCache());
         await runRefresh(async () => await extensionManager.refreshTools());
+        const discoveryConfig = this.workspaceMcpDiscoveryConfig;
+        if (discoveryConfig && discoveryConfig !== config) {
+          const discoveryExtensionManager =
+            discoveryConfig.getExtensionManager();
+          await runRefresh(
+            async () => await discoveryExtensionManager.refreshCache(),
+          );
+          await runRefresh(
+            async () => await discoveryExtensionManager.refreshTools(),
+          );
+        }
         await runRefresh(
           async () =>
             await config.getGeminiClient()?.refreshSystemInstruction(),

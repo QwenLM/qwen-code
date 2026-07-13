@@ -159,6 +159,22 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async initializeMcp() {
+      const client = requireClient(getClient, 'Initialize MCP failed');
+      return withActionTimeout(
+        client.initializeWorkspaceMcp(),
+        'Initialize MCP timed out',
+      );
+    },
+
+    async reloadMcp() {
+      const client = requireClient(getClient, 'Reload MCP failed');
+      return withActionTimeout(
+        client.reloadWorkspaceMcp(),
+        'Reload MCP timed out',
+      );
+    },
+
     async loadMcpTools(serverName) {
       const client = requireClient(getClient, 'Load MCP tools failed');
       try {
@@ -231,6 +247,24 @@ export function createDaemonWorkspaceActions({
         client.manageMcpServer(serverName, action),
         'Manage MCP server timed out',
         timeoutMs,
+      );
+    },
+
+    async addRuntimeMcpServer(request) {
+      const client = requireClient(getClient, 'Add MCP server failed');
+      return withActionTimeout(
+        client.addRuntimeMcpServer(request),
+        'Add MCP server timed out',
+        5 * 60_000,
+      );
+    },
+
+    async removeRuntimeMcpServer(name) {
+      const client = requireClient(getClient, 'Remove MCP server failed');
+      return withActionTimeout(
+        client.removeRuntimeMcpServer(name),
+        'Remove MCP server timed out',
+        5 * 60_000,
       );
     },
 

@@ -854,6 +854,16 @@ export interface AcpSessionBridge {
   isWorkspaceMemoryRememberAvailable(): Promise<boolean>;
 
   /**
+   * Start workspace-scoped MCP discovery without creating an ACP session.
+   * The result only confirms the background task was accepted; callers read
+   * progress from the normal workspace MCP status endpoint.
+   */
+  initializeWorkspaceMcp(): Promise<{ accepted: boolean }>;
+
+  /** Reload persisted MCP settings into workspace and active session configs. */
+  reloadWorkspaceMcp(): Promise<{ accepted: boolean }>;
+
+  /**
    * Read discovered MCP tools for one server from the live ACP registry.
    * (New in upstream — kept in bridge pending workspace service migration.)
    */
@@ -1120,7 +1130,7 @@ export interface AcpSessionBridge {
   addRuntimeMcpServer(
     name: string,
     config: Record<string, unknown>,
-    originatorClientId: string,
+    originatorClientId?: string,
   ): Promise<
     | {
         name: string;
@@ -1147,7 +1157,7 @@ export interface AcpSessionBridge {
    */
   removeRuntimeMcpServer(
     name: string,
-    originatorClientId: string,
+    originatorClientId?: string,
   ): Promise<
     | {
         name: string;
@@ -1160,15 +1170,16 @@ export interface AcpSessionBridge {
 
   manageMcpServer(
     serverName: string,
-    action: 'enable' | 'disable' | 'authenticate' | 'clear-auth',
+    action: 'approve' | 'enable' | 'disable' | 'authenticate' | 'clear-auth',
     originatorClientId: string | undefined,
   ): Promise<{
     serverName: string;
-    action: 'enable' | 'disable' | 'authenticate' | 'clear-auth';
+    action: 'approve' | 'enable' | 'disable' | 'authenticate' | 'clear-auth';
     ok: true;
     changed?: boolean;
     messages?: string[];
     authUrl?: string;
+    pending?: boolean;
   }>;
 
   generateWorkspaceAgent(

@@ -23,6 +23,7 @@ type McpPanelStep = 'servers' | 'server' | 'oauth' | 'tools' | 'tool';
 type McpServerAction = {
   id:
     | 'view-tools'
+    | 'approve'
     | 'reconnect'
     | 'enable'
     | 'disable'
@@ -81,6 +82,20 @@ function statusDisplay(
       className: styles.error,
     };
   }
+  if (server.approvalState === 'pending') {
+    return {
+      icon: '!',
+      text: t('mcp.status.needsApproval'),
+      className: styles.warning,
+    };
+  }
+  if (server.approvalState === 'rejected') {
+    return {
+      icon: '✗',
+      text: t('mcp.status.rejected'),
+      className: styles.warning,
+    };
+  }
   switch (server.mcpStatus) {
     case 'connected':
       return {
@@ -135,8 +150,14 @@ function sourceLabel(
   server: DaemonWorkspaceMcpServerStatus,
   t: ReturnType<typeof useI18n>['t'],
 ): string {
-  if (server.source === 'project') return t('mcp.source.project');
-  if (server.source === 'extension' || server.extensionName) {
+  const source = (
+    server as unknown as {
+      source?: 'user' | 'workspace' | 'project' | 'extension';
+    }
+  ).source;
+  if (source === 'workspace') return t('mcp.source.workspace');
+  if (source === 'project') return t('mcp.source.project');
+  if (source === 'extension' || server.extensionName) {
     return t('mcp.source.extension');
   }
   return t('mcp.source.user');
@@ -347,14 +368,23 @@ export function McpStatusMessage({
   const serverActions = useMemo<McpServerAction[]>(() => {
     if (!selectedServer) return [];
     const actions: McpServerAction[] = [];
-    if (!selectedServer.disabled && selectedTools.length > 0) {
+    const awaitingApproval = Boolean(selectedServer.approvalState);
+    if (
+      !selectedServer.disabled &&
+      !awaitingApproval &&
+      selectedTools.length > 0
+    ) {
       actions.push({ id: 'view-tools', label: t('mcp.action.tools') });
     }
     if (
       !selectedServer.disabled &&
+      !awaitingApproval &&
       selectedServer.mcpStatus === 'disconnected'
     ) {
       actions.push({ id: 'reconnect', label: t('mcp.action.reconnect') });
+    }
+    if (!selectedServer.disabled && awaitingApproval) {
+      actions.push({ id: 'approve', label: t('mcp.action.approve') });
     }
     actions.push({
       id: selectedServer.disabled ? 'enable' : 'disable',
@@ -362,7 +392,7 @@ export function McpStatusMessage({
         ? t('mcp.action.enable')
         : t('mcp.action.disable'),
     });
-    if (!selectedServer.disabled) {
+    if (!selectedServer.disabled && !awaitingApproval) {
       actions.push({
         id: 'authenticate',
         label: selectedServer.hasOAuthTokens
@@ -388,6 +418,7 @@ export function McpStatusMessage({
           (server) => server.name === selectedServer?.name,
         ) ?? null;
       if (nextServer) {
+        if (nextServer.approvalState) return;
         const nextTools = await mcp.loadTools(nextServer.name);
         setLocalToolsByServer((current) => ({
           ...current,
@@ -418,7 +449,27 @@ export function McpStatusMessage({
       try {
         let nextActionMessage: string | null = null;
         if (action.id === 'reconnect') {
-          await mcp.restartServer(selectedServer.name);
+          const result = await mcp.restartServer(selectedServer.name);
+          if ('restarted' in result && !result.restarted) {
+            throw new Error(
+              t('mcp.reconnect.skipped', { reason: result.reason }),
+            );
+          }
+          if (
+            'entries' in result &&
+            (result.entries.length === 0 ||
+              result.entries.every((entry) => !entry.restarted))
+          ) {
+            throw new Error(
+              t('mcp.reconnect.skipped', {
+                reason:
+                  result.entries
+                    .map((entry) => entry.reason)
+                    .filter(Boolean)
+                    .join(', ') || 'not connected',
+              }),
+            );
+          }
         } else {
           const result = await mcp.manageServer(selectedServer.name, action.id);
           const details = [

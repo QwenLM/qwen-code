@@ -660,6 +660,40 @@ describe('createDaemonWorkspaceService', () => {
       expect(result.servers).toEqual([]);
     });
 
+    it('retains the last live MCP snapshot after the channel is idle', async () => {
+      const liveStatus = {
+        v: 1 as const,
+        workspaceCwd: '/ws',
+        initialized: true,
+        discoveryState: 'completed' as const,
+        servers: [
+          {
+            kind: 'mcp_server' as const,
+            status: 'ok' as const,
+            name: 'docs',
+            mcpStatus: 'connected' as const,
+            transport: 'stdio' as const,
+            disabled: false,
+            hasOAuthTokens: false,
+          },
+        ],
+      };
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockResolvedValueOnce(liveStatus)
+        .mockImplementationOnce((_m: string, idle: () => unknown) =>
+          Promise.resolve(idle()),
+        );
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus, boundWorkspace: '/ws' }),
+      );
+
+      await svc.getWorkspaceMcpStatus(makeCtx());
+      const result = await svc.getWorkspaceMcpStatus(makeCtx());
+
+      expect(result).toEqual(liveStatus);
+    });
+
     it('getWorkspaceSkillsStatus delegates with correct method', async () => {
       const queryWorkspaceStatus = vi
         .fn()

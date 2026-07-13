@@ -58,6 +58,7 @@ export type DaemonUiEventType =
   | 'workspace.mcp.child_refused'
   | 'workspace.mcp.server_restarted'
   | 'workspace.mcp.server_restart_refused'
+  | 'workspace.mcp.server_changed'
   | 'workspace.extensions.changed'
   // Auth flow events (Wave 4 OAuth)
   | 'auth.device_flow.started'
@@ -503,6 +504,19 @@ export interface DaemonUiMcpServerRestartRefusedEvent
   reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
 }
 
+export interface DaemonUiMcpServerChangedEvent extends DaemonUiEventBase {
+  type: 'workspace.mcp.server_changed';
+  serverName: string;
+  action:
+    | 'added'
+    | 'removed'
+    | 'approve'
+    | 'enable'
+    | 'disable'
+    | 'authenticate'
+    | 'clear-auth';
+}
+
 export interface DaemonUiExtensionsChangedEvent extends DaemonUiEventBase {
   type: 'workspace.extensions.changed';
   refreshed: number;
@@ -607,6 +621,7 @@ export type DaemonUiEvent =
   | DaemonUiMcpChildRefusedEvent
   | DaemonUiMcpServerRestartedEvent
   | DaemonUiMcpServerRestartRefusedEvent
+  | DaemonUiMcpServerChangedEvent
   | DaemonUiExtensionsChangedEvent
   // Auth device-flow events
   | DaemonUiAuthDeviceFlowEvent;

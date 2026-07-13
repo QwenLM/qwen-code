@@ -497,6 +497,8 @@ interface FakeBridgeOpts {
   workspaceMcpResourcesImpl?: (
     serverName: string,
   ) => Promise<ServeWorkspaceMcpResourcesStatus>;
+  initializeWorkspaceMcpImpl?: () => Promise<{ accepted: boolean }>;
+  reloadWorkspaceMcpImpl?: () => Promise<{ accepted: boolean }>;
   workspaceSkillsImpl?: () => Promise<ServeWorkspaceSkillsStatus>;
   workspaceToolsImpl?: () => Promise<ServeWorkspaceToolsStatus>;
   workspaceProvidersImpl?: () => Promise<ServeWorkspaceProvidersStatus>;
@@ -731,6 +733,8 @@ interface FakeBridge extends AcpSessionBridge {
   workspaceMcpCalls: number;
   workspaceMcpToolsCalls: string[];
   workspaceMcpResourcesCalls: string[];
+  workspaceMcpInitializeCalls: number;
+  workspaceMcpReloadCalls: number;
   workspaceSkillsCalls: number;
   workspaceToolsCalls: number;
   workspaceProvidersCalls: number;
@@ -888,6 +892,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   let workspaceMcpCalls = 0;
   const workspaceMcpToolsCalls: string[] = [];
   const workspaceMcpResourcesCalls: string[] = [];
+  let workspaceMcpInitializeCalls = 0;
+  let workspaceMcpReloadCalls = 0;
   let workspaceSkillsCalls = 0;
   let workspaceToolsCalls = 0;
   let workspaceProvidersCalls = 0;
@@ -1080,6 +1086,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       acpChannelLive: false,
       resources: [],
     }));
+  const initializeWorkspaceMcpImpl =
+    opts.initializeWorkspaceMcpImpl ?? (async () => ({ accepted: true }));
+  const reloadWorkspaceMcpImpl =
+    opts.reloadWorkspaceMcpImpl ?? (async () => ({ accepted: true }));
   const workspaceProvidersImpl =
     opts.workspaceProvidersImpl ??
     (async () => ({
@@ -1442,6 +1452,12 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     get workspaceMcpCalls() {
       return workspaceMcpCalls;
     },
+    get workspaceMcpInitializeCalls() {
+      return workspaceMcpInitializeCalls;
+    },
+    get workspaceMcpReloadCalls() {
+      return workspaceMcpReloadCalls;
+    },
     get workspaceMemoryDreamCalls() {
       return workspaceMemoryDreamCalls;
     },
@@ -1592,6 +1608,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getWorkspaceMcpResourcesStatus(serverName) {
       workspaceMcpResourcesCalls.push(serverName);
       return workspaceMcpResourcesImpl(serverName);
+    },
+    async initializeWorkspaceMcp() {
+      workspaceMcpInitializeCalls += 1;
+      return initializeWorkspaceMcpImpl();
+    },
+    async reloadWorkspaceMcp() {
+      workspaceMcpReloadCalls += 1;
+      return reloadWorkspaceMcpImpl();
     },
     async getWorkspaceSkillsStatus() {
       workspaceSkillsCalls += 1;
@@ -12700,6 +12724,44 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('POST /workspace/mcp/initialize', () => {
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+
+    it('accepts background discovery without a session client id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/workspace/mcp/initialize')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({});
+
+      expect(res.status).toBe(202);
+      expect(res.body).toEqual({ accepted: true });
+      expect(bridge.workspaceMcpInitializeCalls).toBe(1);
+    });
+  });
+
+  describe('POST /workspace/mcp/reload', () => {
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+
+    it('accepts background reload without a session client id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/workspace/mcp/reload')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({});
+
+      expect(res.status).toBe(202);
+      expect(res.body).toEqual({ accepted: true });
+      expect(bridge.workspaceMcpReloadCalls).toBe(1);
+    });
+  });
+
   describe('POST /workspace/mcp/:server/restart (#4175 Wave 4 PR 17)', () => {
     const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
     const auth = (req: request.Test): request.Test =>
@@ -12917,6 +12979,21 @@ describe('createServeApp', () => {
       });
     });
 
+    it('200 fresh add does not require X-Qwen-Client-Id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/mcp/servers')).send({
+        name: 'echo',
+        config: { command: 'echo' },
+      });
+      expect(res.status).toBe(200);
+      expect(bridge.addRuntimeMcpServerCalls).toHaveLength(1);
+      expect(bridge.addRuntimeMcpServerCalls[0]).toMatchObject({
+        name: 'echo',
+        originatorClientId: undefined,
+      });
+    });
+
     it('200 soft refuse (skipped:true, reason:budget_warning_only)', async () => {
       const bridge = fakeBridge({
         knownClientIds: ['client-1'],
@@ -13116,6 +13193,20 @@ describe('createServeApp', () => {
       expect(bridge.removeRuntimeMcpServerCalls[0]).toMatchObject({
         name: 'echo',
         originatorClientId: 'client-1',
+      });
+    });
+
+    it('200 remove does not require X-Qwen-Client-Id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).delete('/workspace/mcp/servers/echo'),
+      ).send();
+      expect(res.status).toBe(200);
+      expect(bridge.removeRuntimeMcpServerCalls).toHaveLength(1);
+      expect(bridge.removeRuntimeMcpServerCalls[0]).toMatchObject({
+        name: 'echo',
+        originatorClientId: undefined,
       });
     });
 
