@@ -532,6 +532,7 @@ export interface AcpHttpHandle {
     acpConnections: number;
     memoryTasks: number;
   };
+  /** Commit memory teardown while sockets remain open for terminal events. */
   commitWorkspaceRemoval(workspaceId: string): void;
   disposeWorkspace(workspaceId: string): void;
   /** Attach HTTP server post-listen to enable WebSocket upgrade. */
@@ -1552,7 +1553,9 @@ export function mountAcpHttp(
 
       if (activeMount.draining) {
         logReject(`workspace-draining ${activeMount.routeLabel}`);
-        socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n');
+        socket.write(
+          'HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\n\r\n',
+        );
         socket.destroy();
         return;
       }
@@ -1681,6 +1684,7 @@ export function mountAcpHttp(
             parsed !== null &&
             typeof parsed === 'object'
           ) {
+            // Only replies to requests pending on this connection resolve here.
             const result = await clientMcp.handleFrame(
               parsed as Record<string, unknown>,
             );

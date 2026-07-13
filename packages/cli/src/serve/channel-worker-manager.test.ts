@@ -201,6 +201,30 @@ describe('createChannelWorkerManager', () => {
     });
   });
 
+  it('does not reconcile after forced shutdown interrupts workspace refresh', async () => {
+    const test = setup();
+    const selection: ServeChannelSelection = {
+      mode: 'names',
+      names: ['telegram'],
+    };
+    await test.manager.setSelection(selection);
+    let releaseGroups!: () => void;
+    test.resolveGroups.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseGroups = () => resolve(workspaceGroups(selection));
+        }),
+    );
+
+    const refreshing = test.manager.refreshWorkspaces();
+    await vi.waitFor(() => expect(test.resolveGroups).toHaveBeenCalledTimes(2));
+    test.manager.killAllSync();
+    releaseGroups();
+
+    await expect(refreshing).rejects.toMatchObject({ code: 'daemon_draining' });
+    expect(test.group.reconcile).not.toHaveBeenCalled();
+  });
+
   it('starts the initial selection through the boot-time path', async () => {
     const test = setup();
     const selection: ServeChannelSelection = {

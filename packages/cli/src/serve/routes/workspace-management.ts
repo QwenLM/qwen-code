@@ -838,61 +838,66 @@ export function registerWorkspaceManagementRoutes(
         sendSealed(res);
         return;
       }
-      const registrationId = String(req.params['id']);
-      let runtime = workspaceRegistry
-        .listManaged()
-        .find(
-          (candidate) =>
-            workspaceRegistrationId(candidate.workspaceCwd) ===
-              registrationId ||
-            candidate.registrationIds?.includes(registrationId) === true,
-        );
-      let operationCwd = runtime?.workspaceCwd;
-      if (!operationCwd) {
-        let storedCwd: string | undefined;
-        try {
-          const snapshot = await workspaceRegistrationStore.read();
-          storedCwd = snapshot.workspaces.find(
-            (workspace) =>
-              workspaceRegistrationId(workspace) === registrationId,
+      operationStarted();
+      let operationCwd: string | undefined;
+      let ownsInFlight = false;
+      try {
+        const registrationId = String(req.params['id']);
+        let runtime = workspaceRegistry
+          .listManaged()
+          .find(
+            (candidate) =>
+              workspaceRegistrationId(candidate.workspaceCwd) ===
+                registrationId ||
+              candidate.registrationIds?.includes(registrationId) === true,
           );
-        } catch (err) {
-          writeStderrLine(
-            `qwen serve: failed to read workspace registration before forget: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-          res.status(500).json({
-            error: 'Failed to read workspace registration',
-            code: 'workspace_registration_store_error',
+        operationCwd = runtime?.workspaceCwd;
+        if (!operationCwd) {
+          let storedCwd: string | undefined;
+          try {
+            const snapshot = await workspaceRegistrationStore.read();
+            storedCwd = snapshot.workspaces.find(
+              (workspace) =>
+                workspaceRegistrationId(workspace) === registrationId,
+            );
+          } catch (err) {
+            writeStderrLine(
+              `qwen serve: failed to read workspace registration before forget: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+            res.status(500).json({
+              error: 'Failed to read workspace registration',
+              code: 'workspace_registration_store_error',
+            });
+            return;
+          }
+          if (storedCwd) {
+            try {
+              operationCwd = realpathSync.native(resolve(storedCwd));
+            } catch {
+              operationCwd = resolve(storedCwd);
+            }
+          }
+        }
+        const operation = operationCwd ? inFlight.get(operationCwd) : undefined;
+        if (operation) {
+          res.status(409).json({
+            error:
+              operation === 'removal'
+                ? 'Workspace removal is in progress'
+                : 'Workspace registration is in progress',
+            code:
+              operation === 'removal'
+                ? 'workspace_removal_in_progress'
+                : 'workspace_registration_in_progress',
           });
           return;
         }
-        if (storedCwd) {
-          try {
-            operationCwd = realpathSync.native(resolve(storedCwd));
-          } catch {
-            operationCwd = resolve(storedCwd);
-          }
+        if (operationCwd) {
+          inFlight.set(operationCwd, 'forget');
+          ownsInFlight = true;
         }
-      }
-      const operation = operationCwd ? inFlight.get(operationCwd) : undefined;
-      if (operation) {
-        res.status(409).json({
-          error:
-            operation === 'removal'
-              ? 'Workspace removal is in progress'
-              : 'Workspace registration is in progress',
-          code:
-            operation === 'removal'
-              ? 'workspace_removal_in_progress'
-              : 'workspace_registration_in_progress',
-        });
-        return;
-      }
-      if (operationCwd) inFlight.set(operationCwd, 'forget');
-      operationStarted();
-      try {
         runtime =
           (operationCwd
             ? workspaceRegistry.getManagedByWorkspaceCwd(operationCwd)
@@ -935,7 +940,7 @@ export function registerWorkspaceManagementRoutes(
           code: 'workspace_registration_store_error',
         });
       } finally {
-        if (operationCwd) inFlight.delete(operationCwd);
+        if (ownsInFlight && operationCwd) inFlight.delete(operationCwd);
         operationFinished();
       }
     },

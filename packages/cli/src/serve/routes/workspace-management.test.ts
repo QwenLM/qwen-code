@@ -1276,4 +1276,68 @@ describe('persistent workspace registrations', () => {
     await seal;
     expect(sealed).toBe(true);
   });
+
+  it('waits for an inactive forget that is still reading its registration', async () => {
+    let finishRead!: () => void;
+    const reading = new Promise<{ workspaces: string[] }>((resolve) => {
+      finishRead = () => resolve({ workspaces: [] });
+    });
+    const read = vi.fn().mockReturnValue(reading);
+    const removeById = vi.fn().mockResolvedValue(true);
+    const { app, handle } = createApp({
+      workspaceRegistrationStore: {
+        read,
+        removeById,
+      } as unknown as WorkspaceRegistrationStore,
+    });
+    const pendingForget = request(app).delete(
+      '/workspace-registrations/inactive',
+    );
+    const forgetResult = pendingForget.then((res) => res);
+    await vi.waitFor(() => expect(read).toHaveBeenCalledOnce());
+
+    let sealed = false;
+    const seal = handle.sealAndWait().then(() => {
+      sealed = true;
+    });
+    await Promise.resolve();
+    expect(sealed).toBe(false);
+    expect(removeById).not.toHaveBeenCalled();
+
+    finishRead();
+    expect((await forgetResult).status).toBe(200);
+    await seal;
+    expect(sealed).toBe(true);
+    expect(removeById).toHaveBeenCalledOnce();
+  });
+
+  it('finishes a sealed forget operation when registration reading fails', async () => {
+    let failRead!: () => void;
+    const reading = new Promise<never>((_resolve, reject) => {
+      failRead = () => reject(new Error('read failed'));
+    });
+    const read = vi.fn().mockReturnValue(reading);
+    const { app, handle } = createApp({
+      workspaceRegistrationStore: {
+        read,
+      } as unknown as WorkspaceRegistrationStore,
+    });
+    const pendingForget = request(app).delete(
+      '/workspace-registrations/inactive',
+    );
+    const forgetResult = pendingForget.then((res) => res);
+    await vi.waitFor(() => expect(read).toHaveBeenCalledOnce());
+
+    let sealed = false;
+    const seal = handle.sealAndWait().then(() => {
+      sealed = true;
+    });
+    await Promise.resolve();
+    expect(sealed).toBe(false);
+
+    failRead();
+    expect((await forgetResult).status).toBe(500);
+    await seal;
+    expect(sealed).toBe(true);
+  });
 });

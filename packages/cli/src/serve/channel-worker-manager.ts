@@ -488,6 +488,7 @@ export function createChannelWorkerManager(
           setTransition('idle');
           throw error;
         }
+        if (hardKilled) throw drainingError();
         try {
           await group.reconcile(targetGroups);
         } catch (error) {

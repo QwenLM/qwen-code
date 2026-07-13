@@ -900,9 +900,29 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     expect(workspaceRegistry.beginDrain(secondaryRuntime)).toBe(true);
     handle!.beginWorkspaceDrain('secondary-id');
 
-    await expect(initializeWs('/workspaces/secondary-id/acp')).rejects.toThrow(
-      'Unexpected server response: 503',
-    );
+    const response = await new Promise<{
+      status: number | undefined;
+      retryAfter: string | string[] | undefined;
+    }>((resolve, reject) => {
+      const ws = new WebSocket(
+        `ws://127.0.0.1:${port}/workspaces/secondary-id/acp`,
+        { handshakeTimeout: 2000 },
+      );
+      ws.on('unexpected-response', (_req, res) => {
+        resolve({
+          status: res.statusCode,
+          retryAfter: res.headers['retry-after'],
+        });
+        ws.terminate();
+      });
+      ws.on('open', () => {
+        ws.close();
+        reject(new Error('draining workspace WS upgrade should not open'));
+      });
+      ws.on('error', reject);
+    });
+
+    expect(response).toEqual({ status: 503, retryAfter: '5' });
   });
 
   it('rejects unowned and spoofed correlation frames during drain', async () => {
