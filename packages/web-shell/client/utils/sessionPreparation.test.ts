@@ -271,12 +271,13 @@ describe('createAndAttachSessionForPrompt', () => {
     let currentSessionId = 'session-1';
     const callbackFinished = createDeferred<void>();
     const actions = createActions();
+    const warn = vi.fn();
 
     const result = prepareSession({
       sessionActions: actions,
       getCurrentSessionId: () => currentSessionId,
       onSessionCreated: () => callbackFinished.promise,
-      warn: vi.fn(),
+      warn,
     });
     await vi.waitFor(() => {
       expect(actions.createSession).toHaveBeenCalledOnce();
@@ -285,11 +286,14 @@ describe('createAndAttachSessionForPrompt', () => {
     callbackFinished.resolve();
 
     await expect(result).rejects.toThrow(
-      'Session changed while onSessionCreated was pending',
+      'Session changed during onSessionCreated: expected session-1, found session-2',
     );
     expect(actions.attachSession).not.toHaveBeenCalled();
     expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
     expect(actions.clearSession).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] skipping clearSession: expected session-1, found session-2',
+    );
   });
 
   it('does not set the model when the session changes during attach', async () => {
@@ -298,12 +302,13 @@ describe('createAndAttachSessionForPrompt', () => {
     const actions = createActions({
       attachSession: vi.fn(() => attachFinished.promise),
     });
+    const warn = vi.fn();
 
     const result = prepareSession({
       sessionActions: actions,
       modelId: 'qwen3',
       getCurrentSessionId: () => currentSessionId,
-      warn: vi.fn(),
+      warn,
     });
     await vi.waitFor(() => {
       expect(actions.attachSession).toHaveBeenCalledOnce();
@@ -312,11 +317,14 @@ describe('createAndAttachSessionForPrompt', () => {
     attachFinished.resolve();
 
     await expect(result).rejects.toThrow(
-      'Session changed while attaching the new session',
+      'Session changed while attaching: expected session-1, found session-2',
     );
     expect(actions.setModel).not.toHaveBeenCalled();
     expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
     expect(actions.clearSession).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] skipping clearSession: expected session-1, found session-2',
+    );
   });
 
   it('cleans up the created session when onSessionCreated rejects', async () => {

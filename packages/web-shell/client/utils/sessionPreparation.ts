@@ -49,9 +49,10 @@ export async function createAndAttachSessionForPrompt({
     workspaceCwd,
     ...(approvalMode ? { approvalMode } : {}),
   });
-  let preparationStep = 'run onSessionCreated';
+  let preparationStep = 'prepare new session';
   try {
     if (onSessionCreated) {
+      preparationStep = 'run onSessionCreated';
       let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([
@@ -67,13 +68,19 @@ export async function createAndAttachSessionForPrompt({
         clearTimeout(timeout);
       }
     }
-    if (getCurrentSessionId() !== sessionId) {
-      throw new Error('Session changed while onSessionCreated was pending');
+    const sessionIdAfterCallback = getCurrentSessionId();
+    if (sessionIdAfterCallback !== sessionId) {
+      throw new Error(
+        `Session changed during onSessionCreated: expected ${sessionId}, found ${sessionIdAfterCallback}`,
+      );
     }
     preparationStep = 'attach new session';
     await sessionActions.attachSession();
-    if (getCurrentSessionId() !== sessionId) {
-      throw new Error('Session changed while attaching the new session');
+    const sessionIdAfterAttach = getCurrentSessionId();
+    if (sessionIdAfterAttach !== sessionId) {
+      throw new Error(
+        `Session changed while attaching: expected ${sessionId}, found ${sessionIdAfterAttach}`,
+      );
     }
   } catch (error) {
     warn(`[WebShell] failed to ${preparationStep}:`, error);
@@ -82,10 +89,15 @@ export async function createAndAttachSessionForPrompt({
       .catch((releaseError: unknown) => {
         warn('[WebShell] failed to release unattached session:', releaseError);
       });
-    if (getCurrentSessionId() === sessionId) {
+    const currentSessionId = getCurrentSessionId();
+    if (currentSessionId === sessionId) {
       await sessionActions.clearSession().catch((clearError: unknown) => {
         warn('[WebShell] failed to clear unattached session:', clearError);
       });
+    } else {
+      warn(
+        `[WebShell] skipping clearSession: expected ${sessionId}, found ${currentSessionId}`,
+      );
     }
     throw error;
   }
