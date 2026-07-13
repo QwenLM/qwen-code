@@ -69,6 +69,7 @@ describe('createSpawnChannelFactory env policy', () => {
   const originalArgv1 = process.argv[1];
   let originalSimple: string | undefined;
   let originalServerToken: string | undefined;
+  let originalDaemonToken: string | undefined;
   let originalCliEntry: string | undefined;
   let originalRuntimeOnlyForTest: string | undefined;
 
@@ -76,11 +77,13 @@ describe('createSpawnChannelFactory env policy', () => {
     mockSpawn.mockReset();
     originalSimple = process.env['QWEN_CODE_SIMPLE'];
     originalServerToken = process.env['QWEN_SERVER_TOKEN'];
+    originalDaemonToken = process.env['QWEN_DAEMON_TOKEN'];
     originalCliEntry = process.env['QWEN_CLI_ENTRY'];
     originalRuntimeOnlyForTest = process.env['RUNTIME_ONLY_FOR_TEST'];
     process.argv[1] = '/tmp/qwen.js';
     process.env['QWEN_CODE_SIMPLE'] = '1';
     process.env['QWEN_SERVER_TOKEN'] = 'secret';
+    process.env['QWEN_DAEMON_TOKEN'] = 'daemon-secret';
   });
 
   afterEach(() => {
@@ -94,6 +97,11 @@ describe('createSpawnChannelFactory env policy', () => {
       delete process.env['QWEN_SERVER_TOKEN'];
     } else {
       process.env['QWEN_SERVER_TOKEN'] = originalServerToken;
+    }
+    if (originalDaemonToken === undefined) {
+      delete process.env['QWEN_DAEMON_TOKEN'];
+    } else {
+      process.env['QWEN_DAEMON_TOKEN'] = originalDaemonToken;
     }
     if (originalCliEntry === undefined) {
       delete process.env['QWEN_CLI_ENTRY'];
@@ -114,6 +122,7 @@ describe('createSpawnChannelFactory env policy', () => {
     await factory('/tmp/project', {
       QWEN_CODE_SIMPLE: '1',
       QWEN_SERVER_TOKEN: 'override-secret',
+      QWEN_DAEMON_TOKEN: 'override-daemon-secret',
     });
 
     const spawnOptions = mockSpawn.mock.calls[0]?.[2] as
@@ -121,7 +130,28 @@ describe('createSpawnChannelFactory env policy', () => {
       | undefined;
     expect(spawnOptions?.env).not.toHaveProperty('QWEN_CODE_SIMPLE');
     expect(spawnOptions?.env).not.toHaveProperty('QWEN_SERVER_TOKEN');
+    expect(spawnOptions?.env).not.toHaveProperty('QWEN_DAEMON_TOKEN');
     expect(spawnOptions?.env?.['QWEN_CODE_NO_RELAUNCH']).toBe('true');
+  });
+
+  it('scrubs mixed-case daemon tokens on Windows', async () => {
+    const platformSpy = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue('win32');
+    mockSpawn.mockReturnValue(createFakeChildProcess());
+    try {
+      const factory = createSpawnChannelFactory({
+        sourceEnv: { qwen_daemon_token: 'secret' },
+      });
+      await factory('/tmp/project', { Qwen_Daemon_Token: 'override-secret' });
+      const spawnOptions = mockSpawn.mock.calls[0]?.[2] as
+        | { env?: NodeJS.ProcessEnv }
+        | undefined;
+      expect(spawnOptions?.env).not.toHaveProperty('qwen_daemon_token');
+      expect(spawnOptions?.env).not.toHaveProperty('Qwen_Daemon_Token');
+    } finally {
+      platformSpy.mockRestore();
+    }
   });
 
   it('passes optional child args after --acp', async () => {

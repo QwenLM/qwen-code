@@ -8,7 +8,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import { createSanitizedChildEnv } from '../../../session-tools-core/src/runtime/child-env-scrub.ts';
+import { createSanitizedChildEnv } from '@craft-agent/session-tools-core';
 
 /**
  * HTTP transport config for remote MCP servers

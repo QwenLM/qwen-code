@@ -256,6 +256,8 @@ const KILL_HARD_DEADLINE_MS = 10_000;
  * an authenticated client of its own daemon — an escalation the agent
  * doesn't otherwise have.
  *
+ * `QWEN_DAEMON_TOKEN`: the channel worker's bearer token for its daemon.
+ *
  * `QWEN_CODE_SIMPLE`: an invocation-level bare-mode override. Letting a
  * daemon or IDE environment leak it into per-session `qwen --acp`
  * children silently disables skills in those children.
@@ -284,6 +286,7 @@ const KILL_HARD_DEADLINE_MS = 10_000;
  */
 const SCRUBBED_CHILD_ENV_KEYS: ReadonlySet<string> = new Set([
   'QWEN_SERVER_TOKEN',
+  'QWEN_DAEMON_TOKEN',
   'QWEN_CODE_SIMPLE',
 ]);
 

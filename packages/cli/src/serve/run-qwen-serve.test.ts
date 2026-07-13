@@ -10,7 +10,7 @@ import * as fs from 'node:fs';
 import { createServer } from 'node:http';
 import * as https from 'node:https';
 import type { AddressInfo } from 'node:net';
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import express from 'express';
 import {
   createLazyBridgeProxy,
@@ -20,6 +20,7 @@ import {
   createDisabledChannelWorkerSupervisor,
   resolveRuntimeStartupTimeoutMs,
   runQwenServe,
+  scrubDaemonProcessEnv,
   type RunHandle,
   validatePolicyConfig,
   waitForRuntimeStartingForShutdown,
@@ -6324,5 +6325,64 @@ describe('runQwenServe startup observability', () => {
     } finally {
       await handle.close();
     }
+  });
+});
+
+describe('scrubDaemonProcessEnv', () => {
+  const SCRUB_KEYS = [
+    'QWEN_SERVER_TOKEN',
+    'QWEN_DAEMON_TOKEN',
+    'QWEN_CODE_SIMPLE',
+    'QWEN_CUSTOM_API_KEY_FOO',
+    'QWEN_CUSTOM_API_KEY_BAR',
+  ] as const;
+  const saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const key of SCRUB_KEYS) {
+      saved[key] = process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    for (const key of SCRUB_KEYS) {
+      const value = saved[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  it('removes QWEN_SERVER_TOKEN from process.env', () => {
+    process.env['QWEN_SERVER_TOKEN'] = 'test-secret';
+    scrubDaemonProcessEnv();
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+  });
+
+  it('removes QWEN_DAEMON_TOKEN from process.env', () => {
+    process.env['QWEN_DAEMON_TOKEN'] = 'test-secret';
+    scrubDaemonProcessEnv();
+    expect(process.env['QWEN_DAEMON_TOKEN']).toBeUndefined();
+  });
+
+  it('removes QWEN_CODE_SIMPLE from process.env', () => {
+    process.env['QWEN_CODE_SIMPLE'] = '1';
+    scrubDaemonProcessEnv();
+    expect(process.env['QWEN_CODE_SIMPLE']).toBeUndefined();
+  });
+
+  it('removes QWEN_CUSTOM_API_KEY_* keys', () => {
+    process.env['QWEN_CUSTOM_API_KEY_FOO'] = 'secret-foo';
+    process.env['QWEN_CUSTOM_API_KEY_BAR'] = 'secret-bar';
+    scrubDaemonProcessEnv();
+    expect(process.env['QWEN_CUSTOM_API_KEY_FOO']).toBeUndefined();
+    expect(process.env['QWEN_CUSTOM_API_KEY_BAR']).toBeUndefined();
+  });
+
+  it('preserves unrelated keys', () => {
+    process.env['QWEN_SERVER_TOKEN'] = 'test-secret';
+    process.env['QWEN_CODE_SIMPLE'] = '1';
+    const pathBefore = process.env['PATH'];
+    scrubDaemonProcessEnv();
+    expect(process.env['PATH']).toBe(pathBefore);
   });
 });

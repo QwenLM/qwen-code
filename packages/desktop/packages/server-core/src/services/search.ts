@@ -8,6 +8,7 @@
 import { spawn, ChildProcess } from 'child_process';
 import { existsSync } from 'fs';
 import { resolveBackendHostTooling } from '@craft-agent/shared/agent/backend';
+import { createSanitizedChildEnv } from '@craft-agent/session-tools-core';
 import { createScopedLogger, CONSOLE_LOGGER, type PlatformServices, type Logger } from '../runtime/platform';
 
 /**
@@ -253,6 +254,7 @@ export async function searchSessions(
     }
 
     const rg = spawn(rgPath, args, {
+      env: createSanitizedChildEnv(),
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout,
     });

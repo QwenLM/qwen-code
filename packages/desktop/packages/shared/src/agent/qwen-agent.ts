@@ -23,6 +23,10 @@ import {
   type RequestPermissionRequest,
   type RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
+import {
+  collectSensitiveChildEnvKeys,
+  scrubChildEnv,
+} from '@craft-agent/session-tools-core';
 import type {
   AgentEvent,
   AskUserQuestionItem,
@@ -382,11 +386,14 @@ class SharedQwenAcpProcess {
   }
 
   private buildEnv(): NodeJS.ProcessEnv {
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      ...getProxyEnvVars(),
-      ...this.options.envOverrides,
-    };
+    const env = scrubChildEnv(
+      process.env,
+      collectSensitiveChildEnvKeys(process.env),
+      {
+        ...getProxyEnvVars(),
+        ...this.options.envOverrides,
+      },
+    );
     delete env.CRAFT_SESSION_DIR;
     return withElectronRunAsNodeEnv(
       env,

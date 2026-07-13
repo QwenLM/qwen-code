@@ -9,6 +9,10 @@ import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createDebugLogger } from './debugLogger.js';
+import {
+  collectSensitiveShellEnvKeys,
+  scrubChildEnv,
+} from './child-env-scrub.js';
 
 const debugLogger = createDebugLogger('EDITOR');
 
@@ -347,6 +351,10 @@ export async function openDiff(
       const childProcess = spawn(diffCommand.command, diffCommand.args, {
         stdio: 'inherit',
         shell: process.platform === 'win32',
+        env: scrubChildEnv(
+          process.env,
+          collectSensitiveShellEnvKeys(process.env),
+        ),
       });
 
       childProcess.on('close', (code) => {

@@ -5,15 +5,26 @@
 import { mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { ScriptRuntimeLanguage } from './resolve-script-runtime.ts';
-import { createSanitizedChildEnv } from './child-env-scrub.ts';
+import {
+  collectSensitiveChildEnvKeys,
+  DESKTOP_CHILD_CREDENTIAL_ENV_KEYS,
+  scrubChildEnv,
+} from './child-env-scrub.ts';
 
 /**
- * Return a shallow-copied environment with daemon-internal variables removed.
+ * Return a shallow-copied environment with credentials and daemon-internal
+ * variables removed before running untrusted scripts.
  */
 export function createSanitizedEnv(
   baseEnv: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
-  return createSanitizedChildEnv(baseEnv);
+  return scrubChildEnv(
+    baseEnv,
+    new Set([
+      ...DESKTOP_CHILD_CREDENTIAL_ENV_KEYS,
+      ...collectSensitiveChildEnvKeys(baseEnv),
+    ]),
+  );
 }
 
 export interface ScriptRuntimeEnvOptions {

@@ -212,21 +212,31 @@ describe('IdeClient', () => {
 
     it('should connect using stdio when stdio config is provided in file', async () => {
       process.env['QWEN_CODE_IDE_SERVER_PORT'] = '8080';
+      process.env['QWEN_SERVER_TOKEN'] = 'server-token';
+      process.env['OPENAI_API_KEY'] = 'provider-key';
       const config = { stdio: { command: 'test-cmd', args: ['--foo'] } };
       vi.mocked(fs.promises.readFile).mockResolvedValue(JSON.stringify(config));
 
       const ideClient = await IdeClient.getInstance();
       await ideClient.connect();
 
-      expect(StdioClientTransport).toHaveBeenCalledWith({
-        command: 'test-cmd',
-        args: ['--foo'],
-      });
+      expect(StdioClientTransport).toHaveBeenCalledWith(
+        expect.objectContaining({
+          command: 'test-cmd',
+          args: ['--foo'],
+          env: expect.any(Object),
+        }),
+      );
+      const env = vi.mocked(StdioClientTransport).mock.calls[0]?.[0].env;
+      expect(env?.['QWEN_SERVER_TOKEN']).toBeUndefined();
+      expect(env?.['OPENAI_API_KEY']).toBe('provider-key');
       expect(mockClient.connect).toHaveBeenCalledWith(mockStdioTransport);
       expect(ideClient.getConnectionStatus().status).toBe(
         IDEConnectionStatus.Connected,
       );
       delete process.env['QWEN_CODE_IDE_SERVER_PORT'];
+      delete process.env['QWEN_SERVER_TOKEN'];
+      delete process.env['OPENAI_API_KEY'];
     });
 
     it('should prioritize port over stdio when both are in config file', async () => {
@@ -530,10 +540,13 @@ describe('IdeClient', () => {
       const ideClient = await IdeClient.getInstance();
       await ideClient.connect();
 
-      expect(StdioClientTransport).toHaveBeenCalledWith({
-        command: 'env-cmd',
-        args: ['--bar'],
-      });
+      expect(StdioClientTransport).toHaveBeenCalledWith(
+        expect.objectContaining({
+          command: 'env-cmd',
+          args: ['--bar'],
+          env: expect.any(Object),
+        }),
+      );
       expect(mockClient.connect).toHaveBeenCalledWith(mockStdioTransport);
       expect(ideClient.getConnectionStatus().status).toBe(
         IDEConnectionStatus.Connected,

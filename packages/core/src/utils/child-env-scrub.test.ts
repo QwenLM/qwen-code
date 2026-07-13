@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   collectSensitiveShellEnvKeys,
   scrubChildEnv,
@@ -14,6 +14,7 @@ describe('collectSensitiveShellEnvKeys', () => {
   it('collects Qwen daemon/internal keys only', () => {
     const keys = collectSensitiveShellEnvKeys({
       QWEN_SERVER_TOKEN: 'bearer',
+      QWEN_DAEMON_TOKEN: 'daemon-bearer',
       QWEN_CODE_SIMPLE: '1',
       OPENAI_API_KEY: 'sk-1',
       AWS_ACCESS_KEY_ID: 'AKIAEXAMPLE',
@@ -22,7 +23,25 @@ describe('collectSensitiveShellEnvKeys', () => {
       NPM_TOKEN: 'npm',
       DB_PASSWORD: 'pw',
     });
-    expect(keys).toEqual(new Set(['QWEN_SERVER_TOKEN', 'QWEN_CODE_SIMPLE']));
+    expect(keys).toEqual(
+      new Set(['QWEN_SERVER_TOKEN', 'QWEN_DAEMON_TOKEN', 'QWEN_CODE_SIMPLE']),
+    );
+  });
+
+  it('collects mixed-case internal keys on Windows', () => {
+    const platformSpy = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue('win32');
+    try {
+      const keys = collectSensitiveShellEnvKeys({
+        qwen_daemon_token: 'daemon-bearer',
+        Qwen_Server_Token: 'server-bearer',
+        PATH: '/usr/bin',
+      });
+      expect(keys).toEqual(new Set(['qwen_daemon_token', 'Qwen_Server_Token']));
+    } finally {
+      platformSpy.mockRestore();
+    }
   });
 
   it('collects Qwen custom provider keys because they are internal env storage', () => {
@@ -100,6 +119,7 @@ describe('scrubChildEnv (shell-tool env policy)', () => {
       PATH: '/usr/bin',
       HOME: '/home/user',
       QWEN_SERVER_TOKEN: 'daemon-bearer',
+      QWEN_DAEMON_TOKEN: 'channel-daemon-bearer',
       OPENAI_API_KEY: 'sk-leak',
       ANTHROPIC_API_KEY: 'sk-ant-leak',
       AWS_SECRET_ACCESS_KEY: 'aws-secret',
@@ -124,6 +144,7 @@ describe('scrubChildEnv (shell-tool env policy)', () => {
     });
 
     expect(result).not.toHaveProperty('QWEN_SERVER_TOKEN');
+    expect(result).not.toHaveProperty('QWEN_DAEMON_TOKEN');
     expect(result).not.toHaveProperty(
       'QWEN_CUSTOM_API_KEY_API_EXAMPLE_COM_AB12CD34EF56',
     );

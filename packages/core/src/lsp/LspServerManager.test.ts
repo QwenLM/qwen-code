@@ -1081,6 +1081,9 @@ describe('LspServerManager', () => {
 
   it('filters security-sensitive LSP environment overrides', () => {
     const manager = createTrustedManager();
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'server-token');
+    vi.stubEnv('QWEN_DAEMON_TOKEN', 'daemon-token');
+    vi.stubEnv('OPENAI_API_KEY', 'provider-key');
     const env = (
       manager as unknown as {
         buildProcessEnv(env: Record<string, string>): NodeJS.ProcessEnv;
@@ -1094,6 +1097,9 @@ describe('LspServerManager', () => {
     });
 
     expect(env['PATH']).toBe('/tmp/fake-bin');
+    expect(env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(env['QWEN_DAEMON_TOKEN']).toBeUndefined();
+    expect(env['OPENAI_API_KEY']).toBe('provider-key');
     expect(env['NODE_OPTIONS']).toBe(process.env['NODE_OPTIONS']);
     expect(env['node_options']).toBeUndefined();
     expect(env['Ld_PreLoad']).toBeUndefined();
@@ -1102,6 +1108,9 @@ describe('LspServerManager', () => {
 
   it('does not use LSP config PATH when probing command existence', () => {
     const manager = createTrustedManager();
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'server-token');
+    vi.stubEnv('QWEN_DAEMON_TOKEN', 'daemon-token');
+    vi.stubEnv('OPENAI_API_KEY', 'provider-key');
     const env = (
       manager as unknown as {
         buildCommandProbeEnv(env: Record<string, string>): NodeJS.ProcessEnv;
@@ -1116,6 +1125,9 @@ describe('LspServerManager', () => {
 
     expect(env['PATH']).not.toBe('/tmp/fake-bin');
     expect(env['Path']).not.toBe('/tmp/fake-bin-windows');
+    expect(env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(env['QWEN_DAEMON_TOKEN']).toBeUndefined();
+    expect(env['OPENAI_API_KEY']).toBe('provider-key');
     expect(env['JAVA_HOME']).toBe('/opt/java');
     expect(env['NODE_OPTIONS']).toBe(process.env['NODE_OPTIONS']);
     expect(env['SAFE_VALUE']).toBe('1');

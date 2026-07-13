@@ -741,6 +741,36 @@ export interface RunQwenServeDeps {
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
 }
 
+/**
+ * Regex matching env-var keys that must never appear in the daemon's
+ * OS-visible `process.env` after boot. On macOS a same-UID child can
+ * discover the daemon ancestor's PID via `process.ppid` and read its
+ * environment with `ps eww`; this pattern identifies the keys to
+ * strip before that exposure window opens.
+ *
+ * Mirrors the shell-tool denylist in `child-env-scrub.ts` — kept as a
+ * separate constant so the daemon's self-scrub policy is explicit and
+ * independently auditable.
+ */
+const DAEMON_SELF_SCRUB_PATTERN =
+  /^(?:QWEN_SERVER_TOKEN|QWEN_DAEMON_TOKEN|QWEN_CODE_SIMPLE|QWEN_CUSTOM_API_KEY_.+)$/;
+
+/**
+ * Remove secret-bearing keys from the daemon's own `process.env` so
+ * they are not visible via OS process-inspection tools. Must be called
+ * AFTER all values have been read into local variables and BEFORE
+ * `daemonRuntimeBaseEnv` is snapshotted.
+ */
+export function scrubDaemonProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    const normalizedKey =
+      process.platform === 'win32' ? key.toUpperCase() : key;
+    if (DAEMON_SELF_SCRUB_PATTERN.test(normalizedKey)) {
+      delete process.env[key];
+    }
+  }
+}
+
 function shouldPreheatBridge(deps: RunQwenServeDeps): boolean {
   if (deps.preheatBridge !== undefined) return deps.preheatBridge;
   return process.env['VITEST_WORKER_ID'] === undefined;
@@ -1589,10 +1619,12 @@ export async function runQwenServe(
     },
   };
   preResolveServeFastPathHomeEnvOverrides();
-  const daemonRuntimeBaseEnv: Readonly<NodeJS.ProcessEnv> = Object.freeze({
-    ...process.env,
-  });
 
+  // Resolve the bearer token BEFORE scrubbing process.env — once read
+  // into the local variable the daemon uses it exclusively through
+  // closure (bearerAuth, createMutationGate, etc.) and never re-reads
+  // from the environment.
+  //
   // Trim both sources. Common gotcha: `export QWEN_SERVER_TOKEN=$(cat
   // token.txt)` keeps the file's trailing `\n` in the env value, so the
   // hashed-then-compared token never matches what well-behaved clients
@@ -1604,6 +1636,24 @@ export async function runQwenServe(
     typeof rawToken === 'string' && rawToken.trim().length > 0
       ? rawToken.trim()
       : undefined;
+
+  // Remove secret-bearing keys from the daemon's own process.env so
+  // they are not visible via OS process-inspection tools. On macOS a
+  // same-UID child can discover the daemon ancestor's PID and read
+  // its environment with `ps eww`; the child's own env is already
+  // scrubbed by shellExecutionService but the daemon's was not.
+  // Also scrubs QWEN_CODE_SIMPLE (invocation-level override that
+  // would silently suppress skills in children) and QWEN_CUSTOM_API_KEY_*
+  // (user-configured keys that should not leak into workspace sessions).
+  scrubDaemonProcessEnv();
+
+  // Snapshot AFTER scrubbing — daemonRuntimeBaseEnv is clean by
+  // construction, so buildRuntimeEnvironment() never propagates
+  // daemon secrets into workspace session environments.
+  const daemonRuntimeBaseEnv: Readonly<NodeJS.ProcessEnv> = Object.freeze({
+    ...process.env,
+  });
+
   const sessionShellCommandEnabled =
     optsIn.enableSessionShell === true && token !== undefined;
   if (optsIn.enableSessionShell === true && token === undefined) {

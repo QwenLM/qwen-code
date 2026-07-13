@@ -11,7 +11,7 @@ import { debug } from '../utils/debug.ts';
 import { parseError, type AgentError } from '../agent/errors.ts';
 import { normalizeMcpUrl } from '../sources/server-builder.ts';
 import type { McpTransport } from '../sources/types.ts';
-import { createSanitizedChildEnv } from '../../../session-tools-core/src/runtime/child-env-scrub.ts';
+import { createSanitizedChildEnv } from '@craft-agent/session-tools-core';
 
 export interface InvalidProperty {
   toolName: string;
@@ -267,8 +267,11 @@ export async function validateStdioMcpConnection(
 
     // Spawn the process
     const spawnPromise = (async () => {
+      // MCP child processes must not inherit daemon credentials. Reuse this
+      // exact env for both the probe spawn and the production stdio transport.
+      const sanitizedEnv = createSanitizedChildEnv(process.env, env);
       childProcess = spawn(command, args, {
-        env: createSanitizedChildEnv(process.env, env),
+        env: sanitizedEnv,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
 
@@ -299,17 +302,10 @@ export async function validateStdioMcpConnection(
       }
 
       // Create stdio transport
-      // Filter out undefined values from process.env
-      const processEnv: Record<string, string> = {};
-      for (const [key, value] of Object.entries(process.env)) {
-        if (value !== undefined) {
-          processEnv[key] = value;
-        }
-      }
       const transport = new StdioClientTransport({
         command,
         args,
-        env: { ...processEnv, ...env },
+        env: sanitizedEnv as Record<string, string>,
       });
 
       // Create MCP client

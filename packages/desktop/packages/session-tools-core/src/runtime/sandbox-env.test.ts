@@ -13,10 +13,11 @@ describe('sandbox-env', () => {
     }
   });
 
-  it('strips Qwen internal vars and keeps user credentials', () => {
+  it('strips credentials and Qwen internal vars from sandbox subprocesses', () => {
     const base: NodeJS.ProcessEnv = {
       SAFE_VAR: 'ok',
       QWEN_SERVER_TOKEN: 'daemon-bearer',
+      QWEN_DAEMON_TOKEN: 'channel-daemon-bearer',
       LLM_API_KEY: 'llm-key',
       QWEN_API_KEY: 'qwen-key',
       AWS_ACCESS_KEY_ID: 'AKIAEXAMPLE',
@@ -35,34 +36,65 @@ describe('sandbox-env', () => {
 
     expect(sanitized.SAFE_VAR).toBe('ok');
     expect(sanitized.QWEN_SERVER_TOKEN).toBeUndefined();
-    expect(sanitized.LLM_API_KEY).toBe('llm-key');
-    expect(sanitized.QWEN_API_KEY).toBe('qwen-key');
-    expect(sanitized.AWS_ACCESS_KEY_ID).toBe('AKIAEXAMPLE');
-    expect(sanitized.AWS_SECRET_ACCESS_KEY).toBe('aws-secret');
-    expect(sanitized.AWS_SESSION_TOKEN).toBe('aws-session');
-    expect(sanitized.GITHUB_TOKEN).toBe('gh-token');
-    expect(sanitized.GH_TOKEN).toBe('gh-token');
-    expect(sanitized.GOOGLE_API_KEY).toBe('google-key');
-    expect(sanitized.STRIPE_SECRET_KEY).toBe('stripe-key');
-    expect(sanitized.NPM_TOKEN).toBe('npm-token');
+    expect(sanitized.QWEN_DAEMON_TOKEN).toBeUndefined();
+    expect(sanitized.LLM_API_KEY).toBeUndefined();
+    expect(sanitized.QWEN_API_KEY).toBeUndefined();
+    expect(sanitized.AWS_ACCESS_KEY_ID).toBeUndefined();
+    expect(sanitized.AWS_SECRET_ACCESS_KEY).toBeUndefined();
+    expect(sanitized.AWS_SESSION_TOKEN).toBeUndefined();
+    expect(sanitized.GITHUB_TOKEN).toBeUndefined();
+    expect(sanitized.GH_TOKEN).toBeUndefined();
+    expect(sanitized.GOOGLE_API_KEY).toBeUndefined();
+    expect(sanitized.STRIPE_SECRET_KEY).toBeUndefined();
+    expect(sanitized.NPM_TOKEN).toBeUndefined();
     expect(sanitized.DB_PASSWORD).toBe('db-password');
     expect(sanitized.SSH_PRIVATE_KEY).toBe('private-key');
+  });
+
+  it('strips mixed-case internal vars on Windows', () => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(
+      process,
+      'platform',
+    );
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+      const sanitized = createSanitizedEnv({
+        qwen_daemon_token: 'channel-daemon-bearer',
+        Qwen_Server_Token: 'daemon-bearer',
+        aws_secret_access_key: 'aws-secret',
+        Github_Token: 'gh-token',
+        npm_token: 'npm-token',
+        llm_api_key: 'llm-key',
+      });
+
+      expect(sanitized.qwen_daemon_token).toBeUndefined();
+      expect(sanitized.Qwen_Server_Token).toBeUndefined();
+      expect(sanitized.aws_secret_access_key).toBeUndefined();
+      expect(sanitized.Github_Token).toBeUndefined();
+      expect(sanitized.npm_token).toBeUndefined();
+      expect(sanitized.llm_api_key).toBeUndefined();
+    } finally {
+      Object.defineProperty(process, 'platform', originalPlatform!);
+    }
   });
 
   it('sets python/uv cache and temp dirs inside data directory', () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'sandbox-env-python-'));
     createdDirs.push(dataDir);
 
-    const env = createScriptRuntimeEnv({
-      language: 'python3',
-      dataDir,
-    }, {
-      SAFE_VAR: 'ok',
-      QWEN_API_KEY: 'secret',
-    });
+    const env = createScriptRuntimeEnv(
+      {
+        language: 'python3',
+        dataDir,
+      },
+      {
+        SAFE_VAR: 'ok',
+        QWEN_API_KEY: 'secret',
+      },
+    );
 
     expect(env.SAFE_VAR).toBe('ok');
-    expect(env.QWEN_API_KEY).toBe('secret');
+    expect(env.QWEN_API_KEY).toBeUndefined();
 
     expect(env.TMPDIR).toBe(join(dataDir, '.tmp'));
     expect(env.TMP).toBe(join(dataDir, '.tmp'));

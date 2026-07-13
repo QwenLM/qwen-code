@@ -27,6 +27,10 @@ import { EnvHttpProxyAgent, fetch as undiciFetch } from 'undici';
 import { ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { IDE_REQUEST_TIMEOUT_MS } from './constants.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  collectSensitiveShellEnvKeys,
+  scrubChildEnv,
+} from '../utils/child-env-scrub.js';
 
 const debugLogger = createDebugLogger('IDE');
 
@@ -1076,6 +1080,10 @@ export class IdeClient {
       transport = new StdioClientTransport({
         command,
         args,
+        env: scrubChildEnv(
+          process.env,
+          collectSensitiveShellEnvKeys(process.env),
+        ) as Record<string, string>,
       });
       await this.client.connect(transport);
       this.registerClientHandlers();

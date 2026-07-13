@@ -28,6 +28,10 @@ import type { FileExclusions } from '../utils/ignorePatterns.js';
 import { ToolErrorType } from './tool-error.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
 import { recordGrepResultFileReads } from './grepReadTracking.js';
+import {
+  collectSensitiveShellEnvKeys,
+  scrubChildEnv,
+} from '../utils/child-env-scrub.js';
 
 const debugLogger = createDebugLogger('GREP');
 
@@ -453,6 +457,10 @@ class GrepToolInvocation extends BaseToolInvocation<
           const output = await new Promise<string>((resolve, reject) => {
             const child = spawn('git', gitArgs, {
               cwd: absolutePath,
+              env: scrubChildEnv(
+                process.env,
+                collectSensitiveShellEnvKeys(process.env),
+              ),
               windowsHide: true,
             });
             const stdoutChunks: Buffer[] = [];
@@ -522,6 +530,10 @@ class GrepToolInvocation extends BaseToolInvocation<
           const output = await new Promise<string>((resolve, reject) => {
             const child = spawn('grep', grepArgs, {
               cwd: absolutePath,
+              env: scrubChildEnv(
+                process.env,
+                collectSensitiveShellEnvKeys(process.env),
+              ),
               windowsHide: true,
             });
             const stdoutChunks: Buffer[] = [];
