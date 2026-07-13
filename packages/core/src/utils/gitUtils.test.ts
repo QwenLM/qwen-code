@@ -164,6 +164,35 @@ describe('getRecentGitStatus', () => {
     expect(execSyncSpy).toHaveBeenCalledTimes(2);
   });
 
+  it('extracts the branch name from initial commit output', () => {
+    const execSyncSpy = vi
+      .spyOn(childProcess, 'execSync')
+      .mockReturnValueOnce('## Initial commit on new-branch')
+      .mockReturnValueOnce('');
+
+    const result = getRecentGitStatus(process.cwd());
+
+    expect(result).toContain('git: Current branch: new-branch');
+    expect(execSyncSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns null when status output has no branch header', () => {
+    const execSyncSpy = vi
+      .spyOn(childProcess, 'execSync')
+      .mockReturnValueOnce('unexpected line\n M file');
+
+    const result = getRecentGitStatus(process.cwd());
+
+    expect(result).toBeNull();
+    expect(execSyncSpy).toHaveBeenCalledTimes(1);
+    expect(mockWarn).toHaveBeenCalledWith(
+      'Failed to get recent git status for system prompt:',
+      expect.objectContaining({
+        message: 'Unexpected git status --branch output',
+      }),
+    );
+  });
+
   it('falls back to detached HEAD label for a detached worktree', async () => {
     const execSyncSpy = vi
       .spyOn(childProcess, 'execSync')
