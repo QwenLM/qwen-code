@@ -140,6 +140,43 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     );
   });
 
+  it('attributes singular rewind and shell routes to the live session owner', () => {
+    const resolveSessionWorkspaceCwd = vi.fn(() => '/workspace/secondary');
+    const mw = daemonTelemetryMiddleware(
+      () => '/workspace/primary',
+      undefined,
+      resolveSessionWorkspaceCwd,
+    );
+
+    for (const [method, path, route] of [
+      [
+        'GET',
+        '/session/secondary-session/rewind/snapshots',
+        'GET /session/:id/rewind/snapshots',
+      ],
+      ['POST', '/session/secondary-session/rewind', 'POST /session/:id/rewind'],
+      ['POST', '/session/secondary-session/shell', 'POST /session/:id/shell'],
+    ] as const) {
+      const res = mockRes(200);
+      mw(mockReq(method, path), res, vi.fn() as unknown as NextFunction);
+      res.emit('finish');
+      expect(coreMocks.withDaemonRequestSpan).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          method,
+          route,
+          sessionId: 'secondary-session',
+          workspaceHash: 'hash:/workspace/secondary',
+        }),
+        expect.any(Function),
+      );
+    }
+
+    expect(resolveSessionWorkspaceCwd).toHaveBeenCalledTimes(3);
+    expect(resolveSessionWorkspaceCwd).toHaveBeenCalledWith(
+      'secondary-session',
+    );
+  });
+
   it('normalizes plural workspace agent routes to stable route labels', () => {
     const mw = daemonTelemetryMiddleware(() => '/ws');
     for (const [method, path, route] of [

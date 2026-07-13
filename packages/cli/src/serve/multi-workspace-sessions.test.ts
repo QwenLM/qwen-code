@@ -947,6 +947,22 @@ describe('multi-workspace session dispatch', () => {
         context: { clientId: 'client-2' },
       },
     ]);
+    expect(daemonLog.info).toHaveBeenCalledWith('rewind snapshots loaded', {
+      sessionId: 'secondary-session',
+      snapshotCount: 1,
+      workspaceId: 'secondary-id',
+      workspaceCwd: SECONDARY_CWD,
+    });
+    expect(daemonLog.info).toHaveBeenCalledWith('session rewind completed', {
+      sessionId: 'secondary-session',
+      promptId: 'secondary-prompt',
+      rewindFiles: true,
+      rewound: true,
+      filesChangedCount: 1,
+      filesFailedCount: 0,
+      workspaceId: 'secondary-id',
+      workspaceCwd: SECONDARY_CWD,
+    });
     expect(daemonLog.info).toHaveBeenCalledWith('shell command completed', {
       sessionId: 'secondary-session',
       clientId: 'client-2',
@@ -982,6 +998,12 @@ describe('multi-workspace session dispatch', () => {
       const response = await rewind({ promptId: 'invalid', rewindFiles });
       expect(response.status).toBe(400);
       expect(response.body.code).toBe('invalid_rewind_files_flag');
+    }
+
+    for (const body of [{}, { promptId: '' }]) {
+      const response = await rewind(body);
+      expect(response.status).toBe(400);
+      expect(response.body.code).toBe('missing_prompt_id');
     }
 
     expect(primaryBridge.rewindCalls).toEqual([]);

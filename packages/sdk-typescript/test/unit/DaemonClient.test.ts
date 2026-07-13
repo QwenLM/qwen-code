@@ -14,6 +14,7 @@ import {
   normalizePendingPromptLimit,
 } from '../../src/daemon/DaemonClient.js';
 import type { DaemonTransport } from '../../src/daemon/DaemonTransport.js';
+import { negotiateTransport } from '../../src/daemon/negotiateTransport.js';
 import {
   DaemonCapabilityMissingError,
   isDaemonContentHash,
@@ -624,6 +625,9 @@ describe('DaemonClient', () => {
         type: 'acp-http',
         supportsReplay: true,
         connected: true,
+        restFetch: vi.fn(async () => {
+          throw new Error('transport REST fetch must not override opts.fetch');
+        }) as unknown as typeof globalThis.fetch,
         fetch: transportFetch,
         async *subscribeEvents() {},
         dispose() {},
@@ -1095,6 +1099,50 @@ describe('DaemonClient', () => {
   });
 
   describe('session rewind transport', () => {
+    it('reuses the negotiated native fetch for REST-only rewind calls', async () => {
+      const negotiatedFetch = vi.fn(async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.endsWith('/capabilities')) {
+          return jsonResponse(200, { transports: ['acp-http'] });
+        }
+        if (url.endsWith('/rewind/snapshots')) {
+          return jsonResponse(200, { snapshots: [] });
+        }
+        return jsonResponse(200, {
+          rewound: true,
+          targetTurnIndex: 0,
+          filesChanged: [],
+          filesFailed: [],
+        });
+      }) as unknown as typeof globalThis.fetch;
+      const globalFetch = vi
+        .spyOn(globalThis, 'fetch')
+        .mockRejectedValue(new Error('global fetch must not handle rewind'));
+
+      try {
+        const transport = await negotiateTransport('http://daemon', 'secret', {
+          fetchFn: negotiatedFetch,
+        });
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          token: 'secret',
+          transport,
+        });
+
+        await expect(client.getRewindSnapshots('s-1')).resolves.toEqual({
+          snapshots: [],
+        });
+        await expect(
+          client.rewindSession('s-1', 'prompt-1'),
+        ).resolves.toMatchObject({ rewound: true });
+
+        expect(negotiatedFetch).toHaveBeenCalledTimes(3);
+        expect(globalFetch).not.toHaveBeenCalled();
+      } finally {
+        globalFetch.mockRestore();
+      }
+    });
+
     it('forces owner-aware REST with auth, client id, timeout, and boolean body', async () => {
       const { fetch, calls } = recordingFetch((req) => {
         if (req.url.endsWith('/rewind/snapshots')) {

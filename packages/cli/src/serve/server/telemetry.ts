@@ -35,6 +35,13 @@ export function resolveDaemonTelemetryRoute(
   if (req.method === 'GET' && path === '/daemon/status') {
     return { route: 'GET /daemon/status' };
   }
+  const rewindSnapshots = path.match(/^\/session\/([^/]+)\/rewind\/snapshots$/);
+  if (rewindSnapshots?.[1] && req.method === 'GET') {
+    return {
+      route: 'GET /session/:id/rewind/snapshots',
+      sessionId: rewindSnapshots[1],
+    };
+  }
   const sessionAction = path.match(
     /^\/session\/([^/]+)\/(load|resume|prompt|cancel|recap|btw|mid-turn-message|model|shell|detach|rewind|approval-mode|language|a2ui-action)$/,
   );
@@ -295,6 +302,7 @@ export function daemonTelemetryMiddleware(
   // the OTel counter's scope, so the "requests" line reflects daemon API
   // traffic rather than static-asset or unrouted noise.
   recordRequest?: (durationMs: number, statusCode: number) => void,
+  resolveSessionWorkspaceCwd?: (sessionId: string) => string | undefined,
 ): (req: Request, res: Response, next: NextFunction) => void {
   const workspaceHashByCwd = new Map<string, string>();
   const resolveWorkspaceHash = (workspaceCwd: string): string => {
@@ -311,7 +319,15 @@ export function daemonTelemetryMiddleware(
       next();
       return;
     }
-    const workspaceHash = resolveWorkspaceHash(resolveWorkspaceCwd(req));
+    const resolveOwnerWorkspace =
+      route.route === 'GET /session/:id/rewind/snapshots' ||
+      route.route === 'POST /session/:id/rewind' ||
+      route.route === 'POST /session/:id/shell';
+    const workspaceCwd =
+      (resolveOwnerWorkspace && route.sessionId
+        ? resolveSessionWorkspaceCwd?.(route.sessionId)
+        : undefined) ?? resolveWorkspaceCwd(req);
+    const workspaceHash = resolveWorkspaceHash(workspaceCwd);
     const rawClientId = req.get(CLIENT_ID_HEADER);
     const clientId =
       rawClientId !== undefined &&

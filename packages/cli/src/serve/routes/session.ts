@@ -2962,9 +2962,16 @@ export function registerSessionRoutes(
     withOwnerReadSession(
       'GET /session/:id/rewind/snapshots',
       async (_req, res, sessionId, runtime) => {
-        res
-          .status(200)
-          .json(await runtime.bridge.getRewindSnapshots(sessionId));
+        const response = await runtime.bridge.getRewindSnapshots(sessionId);
+        if (daemonLog) {
+          daemonLog.info('rewind snapshots loaded', {
+            sessionId,
+            snapshotCount: response.snapshots.length,
+            workspaceId: runtime.workspaceId,
+            workspaceCwd: runtime.workspaceCwd,
+          });
+        }
+        res.status(200).json(response);
       },
     ),
   );
@@ -2999,6 +3006,18 @@ export function registerSessionRoutes(
           { promptId, rewindFiles: rewindFiles !== false },
           clientId !== undefined ? { clientId } : undefined,
         );
+        if (daemonLog) {
+          daemonLog.info('session rewind completed', {
+            sessionId,
+            promptId,
+            rewindFiles: rewindFiles !== false,
+            rewound: response.rewound,
+            filesChangedCount: response.filesChanged.length,
+            filesFailedCount: response.filesFailed.length,
+            workspaceId: runtime.workspaceId,
+            workspaceCwd: runtime.workspaceCwd,
+          });
+        }
         res.status(200).json(response);
       },
     ),
