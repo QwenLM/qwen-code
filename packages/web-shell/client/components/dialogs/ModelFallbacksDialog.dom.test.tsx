@@ -122,4 +122,13 @@ describe('ModelFallbacksDialog', () => {
     // Deduped to 2 of 3, not 3/3.
     expect(container.textContent).toContain('2/3');
   });
+
+  it('groups the toggle options with an accessible name for screen readers', () => {
+    const { container } = renderDialog();
+    const group = container.querySelector<HTMLDivElement>('[role="group"]');
+    expect(group).toBeTruthy();
+    expect(group?.getAttribute('aria-label')).toBe('Model Fallbacks');
+    // The option buttons live inside the group.
+    expect(group?.querySelectorAll('button[aria-pressed]').length).toBe(4);
+  });
 });

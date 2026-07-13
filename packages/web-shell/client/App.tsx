@@ -1947,6 +1947,9 @@ export function App({
 
   const [modelDialogMode, setModelDialogMode] =
     useState<ModelDialogMode | null>(null);
+  // Mirror of modelDialogMode for reading the latest value inside the async
+  // voice loadProviders callback (see the voiceModel branch in onSubDialog).
+  const modelDialogModeRef = useRef<ModelDialogMode | null>(modelDialogMode);
   // Scope a model sub-dialog opened from the Settings panel persists to. Set
   // when opening from the User/Workspace settings tab; reset to 'workspace'
   // whenever the model dialog closes (any path) so command-launched pickers
@@ -2888,6 +2891,10 @@ export function App({
     autoLoad: true,
   });
   const providersState = useProviders({ autoLoad: true });
+  // useProviders returns a fresh object each render, but its `reload` identity is
+  // stable — pull it out so callbacks can depend on the function alone without
+  // re-creating on every render (and without an exhaustive-deps warning).
+  const reloadProviders = providersState.reload;
   const [modelActionBusy, setModelActionBusy] = useState(false);
   const {
     settings: workspaceSettings,
@@ -3104,6 +3111,10 @@ export function App({
   useEffect(() => {
     streamingStateRef.current = streamingState;
   }, [streamingState]);
+
+  useEffect(() => {
+    modelDialogModeRef.current = modelDialogMode;
+  }, [modelDialogMode]);
 
   useEffect(() => {
     let retryableTurnErrorId: string | null = null;
@@ -5010,7 +5021,7 @@ export function App({
           // A transient reload failure shouldn't surface as "delete failed" —
           // the model was already removed. Just log it. Reload settings too so a
           // cleared active model / scrubbed fallback isn't shown stale.
-          providersState.reload().catch((err: unknown) => {
+          reloadProviders().catch((err: unknown) => {
             console.warn(
               '[web-shell] failed to reload providers after delete',
               err,
@@ -5028,9 +5039,11 @@ export function App({
         })
         .finally(() => setModelActionBusy(false));
     },
+    // Depend on the stable `reload` fn, not the whole providersState object,
+    // which useProviders returns fresh each render (would defeat the memo).
     [
       workspaceActions,
-      providersState,
+      reloadProviders,
       reloadWorkspaceSettings,
       reportError,
       store,
@@ -5042,8 +5055,8 @@ export function App({
     setShowAuthDialog(false);
     // The provider install flow doesn't broadcast a settings change, so refresh
     // the model list on close to surface any newly added models.
-    providersState.reload().catch(() => null);
-  }, [providersState]);
+    reloadProviders().catch(() => null);
+  }, [reloadProviders]);
 
   const handleFallbacksConfirm = useCallback(
     (baseIds: string[]) => {
@@ -5764,24 +5777,26 @@ export function App({
                             setModelSettingScope(scope);
                             setModelDialogMode('vision');
                           } else if (key === 'voiceModel') {
-                            setModelSettingScope(scope);
+                            // The voice picker opens asynchronously (after
+                            // loadProviders), so DON'T record the scope up front:
+                            // if the user opens and closes another picker while
+                            // loading, the reset effect would clobber it and the
+                            // voice model would persist to the wrong scope. Set
+                            // the scope together with the open, from this click's
+                            // captured `scope`, and only when no other surface
+                            // opened meanwhile.
                             workspaceActions
                               .loadProviders()
                               .then((status) => {
                                 setVoiceModels(extractVoiceModels(status));
-                                // Don't clobber a picker the user opened while
-                                // loadProviders was still in flight.
-                                setModelDialogMode((prev) =>
-                                  prev === null ? 'voice' : prev,
-                                );
+                                if (modelDialogModeRef.current === null) {
+                                  setModelSettingScope(scope);
+                                  setModelDialogMode('voice');
+                                }
                               })
-                              .catch((error: unknown) => {
-                                reportError(error, t('model.setVoice'));
-                                // No dialog opened, so the reset effect won't
-                                // run — clear the recorded scope so a later
-                                // command-launched picker defaults to workspace.
-                                setModelSettingScope('workspace');
-                              });
+                              .catch((error: unknown) =>
+                                reportError(error, t('model.setVoice')),
+                              );
                           } else if (key === 'modelFallbacks') {
                             setModelSettingScope(scope);
                             setShowFallbacksDialog(true);

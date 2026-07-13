@@ -64,7 +64,11 @@ export function ModelFallbacksDialog({
       <div className={styles.hint}>
         {t('settings.models.fallbacks.hint', { max })}
       </div>
-      <div className={styles.list}>
+      <div
+        className={styles.list}
+        role="group"
+        aria-label={t('settings.models.fallbacks.title')}
+      >
         {rows.length === 0 && (
           <div className={styles.empty}>
             {t('settings.models.fallbacks.empty')}
