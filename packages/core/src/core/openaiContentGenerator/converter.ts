@@ -1184,6 +1184,7 @@ function scanVisibleThinkingTags(
     state.pendingTag += char;
     if (COMPLETE_THINKING_TAG_PATTERN.test(state.pendingTag)) {
       const tagAtVisibleStart = state.atVisibleStart;
+      state.completedTag = true;
       if (!hasStructuredReasoning) {
         state.tagBeforeReasoning = true;
       }
@@ -1527,14 +1528,16 @@ export function convertOpenAIChunkToGemini(
     const hasStructuredReasoning =
       requestContext.hasStructuredReasoningContent === true;
     const visiblePartText = getVisiblePartText(parts);
-    if (visiblePartText && requestContext.thoughtThinkingTagState?.pendingTag) {
-      requestContext.thoughtThinkingTagState.pendingTag = '';
-    }
     const hasMatchingThoughtTag =
       requestContext.thoughtThinkingTagState?.hasTag === true;
+    const pendingThoughtTag =
+      requestContext.thoughtThinkingTagState?.pendingTag;
     const hasSuspiciousThoughtTag =
       hasMatchingThoughtTag ||
-      Boolean(requestContext.thoughtThinkingTagState?.pendingTag);
+      (!visiblePartText && Boolean(pendingThoughtTag)) ||
+      (Boolean(visiblePartText) &&
+        Boolean(pendingThoughtTag) &&
+        pendingThoughtTag !== '<');
     if (!visibleThinkingTagState.leaked) {
       scanVisibleThinkingTags(
         visiblePartText,
@@ -1552,7 +1555,7 @@ export function convertOpenAIChunkToGemini(
       hasStructuredReasoning &&
       (visibleThinkingTagState.leadingTag === true ||
         visibleThinkingTagState.leaked ||
-        (visibleThinkingTagState.tagBeforeReasoning === true &&
+        (visibleThinkingTagState.completedTag === true &&
           hasMatchingThoughtTag) ||
         isTerminalThinkingTagLeak(
           visibleThinkingTagState,

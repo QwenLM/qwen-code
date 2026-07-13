@@ -104,6 +104,7 @@ export interface RequestContext {
     openTagCount: number;
     atVisibleStart: boolean;
     leaked: boolean;
+    completedTag?: boolean;
     leadingTag?: boolean;
     tagBeforeReasoning?: boolean;
   };

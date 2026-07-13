@@ -671,6 +671,43 @@ describe('OpenAIContentConverter', () => {
       ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
     });
 
+    it('keeps reasoning tag scanning across visible interleaving', () => {
+      const stream = withStreamParser(new StreamingToolCallParser());
+      const reasoningPrefix = converter.convertOpenAIChunkToGemini(
+        streamChunk('interleaved-reasoning-tag-prefix', {
+          reasoning_content: 'hidden <thi',
+        }),
+        stream,
+      );
+      const visible = converter.convertOpenAIChunkToGemini(
+        streamChunk('interleaved-visible-gap', {
+          content: 'visible text',
+        }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('interleaved-reasoning-tag-suffix', {
+          reasoning_content: 'nk>secret',
+        }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('interleaved-visible-closing-tag', {
+          content: 'answer </think>',
+        }),
+        stream,
+      );
+
+      expect(reasoningPrefix.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(visible.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('interleaved-reasoning-tag-finish', {}, 'stop'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
     it('preserves literal thinking tags inside structured reasoning by themselves', () => {
       const stream = withStreamParser(new StreamingToolCallParser());
       converter.convertOpenAIChunkToGemini(
@@ -1043,6 +1080,31 @@ describe('OpenAIContentConverter', () => {
       expect(() =>
         converter.convertOpenAIChunkToGemini(
           streamChunk('matching-late-reasoning-finish', {}, 'stop'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('rejects an inline tag when earlier reasoning contains a matching tag', () => {
+      const stream = withStreamParser(new StreamingToolCallParser());
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('matching-reasoning-before-inline-tag', {
+          reasoning_content: 'hidden <think>reasoning</think>',
+        }),
+        stream,
+      );
+      const visible = converter.convertOpenAIChunkToGemini(
+        streamChunk('inline-tag-after-matching-reasoning', {
+          content: 'Use <think>literal</think> text.',
+        }),
+        stream,
+      );
+
+      expect(visible.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('matching-early-reasoning-finish', {}, 'stop'),
           stream,
         ),
       ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
