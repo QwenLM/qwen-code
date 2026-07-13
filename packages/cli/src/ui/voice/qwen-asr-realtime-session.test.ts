@@ -92,6 +92,35 @@ describe('qwen-asr-realtime-session', () => {
     expect(socket.readyState).toBe(3);
   });
 
+  it('aborts an established upstream connection', async () => {
+    const socket = new FakeSocket();
+    const controller = new AbortController();
+    const sessionPromise = openQwenAsrRealtimeStream(
+      {
+        baseUrl: 'https://dashscope.example/v1',
+        model: 'qwen3-asr-flash-realtime',
+      },
+      {},
+      {
+        createWebSocket: () => socket,
+        abortSignal: controller.signal,
+      },
+    );
+    socket.emit(
+      'message',
+      JSON.stringify({ type: 'session.updated', event_id: 'updated' }),
+      false,
+    );
+    const session = await sessionPromise;
+
+    controller.abort();
+
+    expect(socket.readyState).toBe(3);
+    await expect(session.finish()).rejects.toThrow(
+      'Voice stream opening was aborted.',
+    );
+  });
+
   it('streams PCM chunks as base64 events and resolves the completed transcript', async () => {
     const socket = new FakeSocket();
     const createWebSocket = vi.fn(() => socket);

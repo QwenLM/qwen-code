@@ -540,6 +540,18 @@ describe('createVoiceWsConnectionHandler', () => {
     expect(ws.frames()).toEqual([]);
   });
 
+  it('closes with busy semantics when Voice capacity is exhausted', () => {
+    const ws = new FakeWs();
+    const handler = createVoiceWsConnectionHandler('/ws', {
+      acquireVoiceLease: () => ({ kind: 'rejected', reason: 'capacity' }),
+    });
+
+    handler(ws as never, {} as never);
+
+    expect(ws.closeCode).toBe(1013);
+    expect(ws.frames()).toEqual([expect.objectContaining({ type: 'error' })]);
+  });
+
   it('closes only the disposed runtime session and releases its lease', async () => {
     const coordinator = new WorkspaceVoiceCoordinator();
     const runtime = { workspaceId: 'secondary' } as WorkspaceRuntime;

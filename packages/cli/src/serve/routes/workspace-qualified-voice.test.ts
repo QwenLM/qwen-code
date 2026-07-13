@@ -58,6 +58,7 @@ async function createApp(
   persistSetting: ReturnType<typeof vi.fn>;
   acquireVoiceLease: ReturnType<typeof vi.fn>;
   transcribe: ReturnType<typeof vi.fn>;
+  invalidateServeFeaturesCache: ReturnType<typeof vi.fn>;
 }> {
   const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-voice-home-'));
   homes.push(home);
@@ -72,15 +73,12 @@ async function createApp(
   process.env['QWEN_HOME'] = home;
   resetHomeEnvBootstrapForTesting();
 
+  const primary = runtime('primary-id', primaryCwd, { primary: true });
   const secondary = runtime('secondary-id', secondaryCwd, {
     effectiveEnv: { SECONDARY_VOICE_KEY: 'secondary-secret' },
   });
   const untrusted = runtime('untrusted-id', untrustedCwd, { trusted: false });
-  const registry = createWorkspaceRegistry([
-    runtime('primary-id', primaryCwd, { primary: true }),
-    secondary,
-    untrusted,
-  ]);
+  const registry = createWorkspaceRegistry([primary, secondary, untrusted]);
   const persistSetting = vi.fn(async () => undefined);
   const acquireVoiceLease = vi.fn(
     opts.acquireVoiceLease ??
@@ -96,6 +94,7 @@ async function createApp(
       model: 'secondary-asr',
       transport: 'qwen-asr-chat' as const,
     }));
+  const invalidateServeFeaturesCache = vi.fn();
   const app = express();
   app.use(express.json());
   registerWorkspaceQualifiedVoiceRoutes(app, {
@@ -106,7 +105,7 @@ async function createApp(
     acquireVoiceLease: () => acquireVoiceLease(),
     transcribe,
     parseAndValidateClientId: () => undefined,
-    invalidateServeFeaturesCache: vi.fn(),
+    invalidateServeFeaturesCache,
   });
   return {
     app,
@@ -115,6 +114,7 @@ async function createApp(
     persistSetting,
     acquireVoiceLease,
     transcribe,
+    invalidateServeFeaturesCache,
   };
 }
 
@@ -147,7 +147,8 @@ describe('workspace-qualified Voice routes', () => {
   });
 
   it('selects only the trusted target runtime and writes Voice settings in workspace scope', async () => {
-    const { app, secondary, persistSetting } = await createApp();
+    const { app, secondary, persistSetting, invalidateServeFeaturesCache } =
+      await createApp();
 
     await expect(
       request(app).get('/workspaces/secondary-id/voice'),
@@ -178,6 +179,19 @@ describe('workspace-qualified Voice routes', () => {
     expect(
       secondary.bridge.publishWorkspaceEvent as ReturnType<typeof vi.fn>,
     ).toHaveBeenCalled();
+    expect(invalidateServeFeaturesCache).not.toHaveBeenCalled();
+  });
+
+  it('invalidates the primary-derived feature cache for primary Voice updates', async () => {
+    const { app, invalidateServeFeaturesCache } = await createApp();
+
+    await expect(
+      request(app)
+        .post('/workspaces/primary-id/voice')
+        .send({ enabled: false }),
+    ).resolves.toMatchObject({ status: 200 });
+
+    expect(invalidateServeFeaturesCache).toHaveBeenCalledOnce();
   });
 
   it('rejects an unknown selector before reading settings and untrusted targets without fallback', async () => {

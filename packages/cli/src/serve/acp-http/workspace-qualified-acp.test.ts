@@ -721,7 +721,13 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
           ws.close();
           reject(new Error('rejected Voice WS upgrade should not open'));
         });
-        ws.on('error', () => resolve(selector === 'untrusted-id' ? 403 : 400));
+        ws.on('error', (err) =>
+          reject(
+            new Error(
+              `unexpected Voice WS error for ${selector}: ${err.message}`,
+            ),
+          ),
+        );
       });
 
     await expect(status('missing')).resolves.toBe(400);
@@ -743,9 +749,9 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
         ws.close();
         reject(new Error('untrusted WS upgrade should not open'));
       });
-      // Some ws versions surface a rejected upgrade as an error rather than
-      // `unexpected-response`; treat that as the expected 403.
-      ws.on('error', () => resolve(403));
+      ws.on('error', (err) =>
+        reject(new Error(`unexpected ACP WS error: ${err.message}`)),
+      );
     });
     expect(status).toBe(403);
   });

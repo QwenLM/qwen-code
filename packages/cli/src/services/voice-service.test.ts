@@ -161,6 +161,44 @@ describe('voice service', () => {
     ]);
   });
 
+  it('applies a workspace scope override to every voice setting', () => {
+    const settings = makeSettings({ user: {} });
+
+    expect(
+      buildWorkspaceVoiceSettingsWrites(
+        settings,
+        {
+          voiceModel: 'qwen3-asr-flash',
+          mode: 'tap',
+          language: 'english',
+          enabled: true,
+        },
+        { scopeOverride: SettingScope.Workspace },
+      ),
+    ).toEqual([
+      {
+        scope: SettingScope.Workspace,
+        key: 'voiceModel',
+        value: 'qwen3-asr-flash',
+      },
+      {
+        scope: SettingScope.Workspace,
+        key: 'general.voice.mode',
+        value: 'tap',
+      },
+      {
+        scope: SettingScope.Workspace,
+        key: 'general.voice.language',
+        value: 'english',
+      },
+      {
+        scope: SettingScope.Workspace,
+        key: 'general.voice.enabled',
+        value: true,
+      },
+    ]);
+  });
+
   it('requires an effective voice model before enabling voice', () => {
     const settings = makeSettings({ user: {} });
 
