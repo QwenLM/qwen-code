@@ -1292,7 +1292,7 @@ export function KeypressProvider({
       const content = Buffer.concat(rawPasteChunks);
       rawPasteChunks = [];
       rawPasteAccumulating = false;
-      pasteAlreadyFlushed = true;
+      // pasteAlreadyFlushed is set inside broadcastPasteFromRaw.
       broadcastPasteFromRaw(content);
     };
 
@@ -1305,6 +1305,10 @@ export function KeypressProvider({
     };
 
     const broadcastPasteFromRaw = (content: Buffer) => {
+      // Mark flushed so a stale paste-end marker leaking through to the
+      // keypress-level handler is swallowed instead of broadcasting a
+      // second (duplicate) paste event. Covers all call sites.
+      pasteAlreadyFlushed = true;
       setPasteProgress({ active: false, receivedBytes: 0, totalBytes: null });
       const text = content.toString('utf-8');
       if (text.length > 0) {
