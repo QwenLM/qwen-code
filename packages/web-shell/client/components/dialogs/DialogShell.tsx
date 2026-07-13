@@ -109,10 +109,7 @@ export function DialogShell({
       const scopes = Array.from(
         document.querySelectorAll<HTMLElement>('[data-keyboard-scope]'),
       );
-      const topPanel =
-        scopes[scopes.length - 1]?.querySelector<HTMLElement>(
-          '[role="dialog"]',
-        );
+      const topPanel = scopes[scopes.length - 1];
       const preferred = getFocusable(topPanel).find(
         (element) => !element.hasAttribute('data-dialog-close'),
       );

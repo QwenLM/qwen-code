@@ -1017,10 +1017,8 @@ export function App({
     string | null
   >(null);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
-  const [forceMobileDrawer, setForceMobileDrawer] = useState(false);
   const closeMobileDrawer = useCallback(() => {
     setMobileDrawerOpen(false);
-    setForceMobileDrawer(false);
   }, []);
   // The Session Overview panel (mission control for managing many sessions at
   // once) is only offered on large screens; below that there is no room for it
@@ -5616,7 +5614,6 @@ export function App({
                 className={[
                   styles.mobileDrawer,
                   mobileDrawerOpen ? styles.mobileDrawerOpen : undefined,
-                  forceMobileDrawer ? styles.mobileDrawerForced : undefined,
                 ]
                   .filter(Boolean)
                   .join(' ')}
@@ -5709,7 +5706,6 @@ export function App({
                       .filter(Boolean)
                       .join(' ')}
                     onClick={() => {
-                      setForceMobileDrawer(false);
                       setMobileDrawerOpen((open) => !open);
                     }}
                     aria-label={t('sidebar.toggleMenu')}
