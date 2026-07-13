@@ -8,11 +8,13 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 
 // Use vi.hoisted to define mock functions before vi.mock is hoisted
-const { mockSpawn, mockExecSync, clipboardMockState } = vi.hoisted(() => ({
-  mockSpawn: vi.fn(),
-  mockExecSync: vi.fn(),
-  clipboardMockState: { failLoad: false, loadDelayMs: 0 },
-}));
+const { mockSpawn, mockExecSync, mockExecFileSync, clipboardMockState } =
+  vi.hoisted(() => ({
+    mockSpawn: vi.fn(),
+    mockExecSync: vi.fn(),
+    mockExecFileSync: vi.fn(),
+    clipboardMockState: { failLoad: false, loadDelayMs: 0 },
+  }));
 
 // Mock @teddyzhu/clipboard
 vi.mock('@teddyzhu/clipboard', async () => {
@@ -43,11 +45,13 @@ vi.mock('node:child_process', () => ({
   default: {
     spawn: mockSpawn,
     execSync: mockExecSync,
+    execFileSync: mockExecFileSync,
     exec: vi.fn(),
     execFile: vi.fn(),
   },
   spawn: mockSpawn,
   execSync: mockExecSync,
+  execFileSync: mockExecFileSync,
   exec: vi.fn(),
   execFile: vi.fn(),
 }));
@@ -81,9 +85,8 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   };
 });
 
-// We intentionally do NOT mock node:fs root beyond createWriteStream, to avoid
-// cross-test pollution with other files like startupProfiler.test.ts
-// that use vi.mock('node:fs') (auto-mock).
+// We intentionally do NOT mock node:fs root to avoid breaking indirect
+// dependencies (e.g. debugLogger, symlink) that import from 'node:fs'.
 /**
  * Create a mock child process that emits stdout data and close event.
  */
@@ -153,6 +156,7 @@ describe('clipboardUtils', () => {
   let saveClipboardImage: (dir?: string) => Promise<string | null>;
   let cleanupOldClipboardImages: (dir?: string) => Promise<void>;
   let writeOsc52: (text: string) => boolean;
+  let readTextFromClipboard: () => string;
 
   beforeEach(async () => {
     // Clean up /tmp/test directory from previous runs to ensure
@@ -168,6 +172,14 @@ describe('clipboardUtils', () => {
     clipboardMockState.loadDelayMs = 0;
     vi.resetModules();
     vi.clearAllMocks();
+    // Default: execFileSync throws (no binary found). Tests override as needed.
+    mockExecFileSync.mockImplementation(() => {
+      throw new Error('command not found');
+    });
+    // Default: execSync throws (command -v fails = binary not found).
+    mockExecSync.mockImplementation(() => {
+      throw new Error('command not found');
+    });
 
     // Dynamic import after resetModules gives a fresh module instance.
     // Top-level import would be stale after resetModules.
@@ -176,6 +188,7 @@ describe('clipboardUtils', () => {
     saveClipboardImage = mod.saveClipboardImage;
     cleanupOldClipboardImages = mod.cleanupOldClipboardImages;
     writeOsc52 = mod.writeOsc52;
+    readTextFromClipboard = mod.readTextFromClipboard;
     mod.resetLinuxClipboardTool();
     // Set up Wayland env as default
     vi.stubEnv('WAYLAND_DISPLAY', 'wayland-0');
@@ -266,6 +279,28 @@ describe('clipboardUtils', () => {
         const result = await clipboardHasImage();
         expect(result).toBe(false);
       });
+
+      it('should fall back to xclip when wl-paste is not found in Wayland+DISPLAY env', async () => {
+        // Wayland env with X11 display available (e.g. XWayland)
+        vi.stubEnv('WAYLAND_DISPLAY', 'wayland-0');
+        vi.stubEnv('DISPLAY', ':0');
+        // wl-paste not installed, xclip is
+        mockExecSync.mockImplementation((cmd: string) => {
+          if (typeof cmd === 'string' && cmd.includes('wl-paste'))
+            throw new Error('not found');
+          return Buffer.from('/usr/bin/xclip');
+        });
+        const mockChild = createMockChild('image/png\n', 0);
+        mockSpawn.mockReturnValue(mockChild);
+
+        const result = await clipboardHasImage();
+        expect(result).toBe(true);
+        expect(mockSpawn).toHaveBeenCalledWith(
+          'xclip',
+          ['-selection', 'clipboard', '-t', 'TARGETS', '-o'],
+          { stdio: ['ignore', 'pipe', 'ignore'] },
+        );
+      });
     });
 
     describe('saveClipboardImage', () => {
@@ -283,6 +318,96 @@ describe('clipboardUtils', () => {
       // breaking indirect deps (debugLogger, symlink) that import
       // { promises as fs } from 'node:fs'.  Error paths below verify
       // correct spawn construction; clipboardHasImage tests verify detection.
+    });
+  });
+
+  // ─── WSL2 PowerShell fallback tests ──────────────────────────
+
+  describe('WSL2 PowerShell clipboard fallback', () => {
+    it('should detect image via powershell.exe when no Linux tool is available', async () => {
+      // No Linux clipboard tools installed
+      mockExecSync.mockImplementation(() => {
+        throw new Error('command not found');
+      });
+      // powershell.exe binary exists
+      mockExecFileSync.mockImplementation((bin: string, args: string[]) => {
+        if (
+          bin === 'powershell.exe' &&
+          args.some((a) => typeof a === 'string' && a.includes('ContainsImage'))
+        ) {
+          return 'True';
+        }
+        throw new Error('not found');
+      });
+
+      const result = await clipboardHasImage();
+      expect(result).toBe(true);
+    });
+
+    it('should return false when powershell.exe reports no image', async () => {
+      mockExecSync.mockImplementation(() => {
+        throw new Error('command not found');
+      });
+      mockExecFileSync.mockImplementation((bin: string) => {
+        if (bin === 'powershell.exe') return 'False';
+        throw new Error('not found');
+      });
+
+      const result = await clipboardHasImage();
+      expect(result).toBe(false);
+    });
+
+    it('should save image via powershell.exe and return the path', async () => {
+      mockExecSync.mockImplementation(() => {
+        throw new Error('command not found');
+      });
+      mockExecFileSync.mockImplementation((bin: string, args: string[]) => {
+        if (
+          bin === 'powershell.exe' &&
+          args.some((a) => typeof a === 'string' && a.includes('ContainsImage'))
+        ) {
+          return 'True';
+        }
+        if (
+          bin === 'powershell.exe' &&
+          args.some((a) => typeof a === 'string' && a.includes('GetImage'))
+        ) {
+          return '';
+        }
+        throw new Error('not found');
+      });
+
+      const result = await saveClipboardImage('/tmp/test');
+      expect(result).not.toBe(null);
+      expect(result).toMatch(/clipboard-.*\.png$/);
+    });
+
+    it('should return null when powershell.exe save fails', async () => {
+      mockExecSync.mockImplementation(() => {
+        throw new Error('command not found');
+      });
+      // powershell.exe: ContainsImage returns True, but GetImage throws
+      let getImageCalled = false;
+      mockExecFileSync.mockImplementation((bin: string, args: string[]) => {
+        if (
+          bin === 'powershell.exe' &&
+          args.some((a) => typeof a === 'string' && a.includes('ContainsImage'))
+        ) {
+          return 'True';
+        }
+        if (
+          bin === 'powershell.exe' &&
+          args.some((a) => typeof a === 'string' && a.includes('GetImage'))
+        ) {
+          getImageCalled = true;
+          throw new Error('save failed');
+        }
+        throw new Error('not found');
+      });
+
+      const result = await saveClipboardImage('/tmp/test');
+      expect(result).toBe(null);
+      expect(getImageCalled).toBe(true);
     });
   });
 
@@ -792,6 +917,186 @@ describe('clipboardUtils', () => {
         expectedSequence,
         expect.any(Function),
       );
+    });
+  });
+
+  describe('readTextFromClipboard', () => {
+    it('should read text via pbpaste on macOS', () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+      });
+      mockExecFileSync.mockReturnValue('hello from mac clipboard');
+
+      const result = readTextFromClipboard();
+
+      expect(result).toBe('hello from mac clipboard');
+      expect(mockExecFileSync).toHaveBeenCalledWith('pbpaste', [], {
+        encoding: 'utf-8',
+        timeout: 2000,
+        stdio: ['pipe', 'pipe', 'ignore'],
+      });
+    });
+
+    it('should read text via powershell on Windows', () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'win32',
+        configurable: true,
+      });
+      mockExecFileSync.mockReturnValue('hello from win clipboard');
+
+      const result = readTextFromClipboard();
+
+      expect(result).toBe('hello from win clipboard');
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        'powershell',
+        ['-NoProfile', '-NonInteractive', '-c', 'Get-Clipboard'],
+        { encoding: 'utf-8', timeout: 2000, stdio: ['pipe', 'pipe', 'ignore'] },
+      );
+    });
+
+    it('should read text via xclip on Linux X11', () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'linux',
+        configurable: true,
+      });
+      // command -v xclip succeeds (probe)
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));
+      // actual read via execFileSync
+      mockExecFileSync.mockReturnValue('clipboard text');
+
+      const result = readTextFromClipboard();
+
+      expect(result).toBe('clipboard text');
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        'xclip',
+        ['-selection', 'clipboard', '-o'],
+        { encoding: 'utf-8', timeout: 2000, stdio: ['pipe', 'pipe', 'ignore'] },
+      );
+    });
+
+    it('should fall back to xsel when xclip is not found on Linux', () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'linux',
+        configurable: true,
+      });
+      // command -v xclip fails, command -v xsel succeeds
+      mockExecSync.mockImplementation((cmd: string) => {
+        if (typeof cmd === 'string' && cmd.includes('xclip'))
+          throw new Error('not found');
+        return Buffer.from('/usr/bin/xsel');
+      });
+      mockExecFileSync.mockReturnValue('xsel clipboard text');
+
+      const result = readTextFromClipboard();
+
+      expect(result).toBe('xsel clipboard text');
+    });
+
+    it('should fall back to wl-paste when xclip and xsel are not found on Linux', () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'linux',
+        configurable: true,
+      });
+      mockExecSync.mockImplementation((cmd: string) => {
+        if (
+          typeof cmd === 'string' &&
+          (cmd.includes('xclip') || cmd.includes('xsel'))
+        )
+          throw new Error('not found');
+        return Buffer.from('/usr/bin/wl-paste');
+      });
+      mockExecFileSync.mockReturnValue('wl-paste text');
+
+      const result = readTextFromClipboard();
+
+      expect(result).toBe('wl-paste text');
+    });
+
+    it('should return empty string when no clipboard tool is available on Linux', () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'linux',
+        configurable: true,
+      });
+      // All command -v checks fail, powershell.exe probe also fails
+      mockExecSync.mockImplementation(() => {
+        throw new Error('not found');
+      });
+      mockExecFileSync.mockImplementation(() => {
+        throw new Error('not found');
+      });
+
+      const result = readTextFromClipboard();
+
+      expect(result).toBe('');
+    });
+
+    it('should return empty string on pbpaste failure on macOS', () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+      });
+      mockExecFileSync.mockImplementation(() => {
+        throw new Error('pbpaste failed');
+      });
+
+      const result = readTextFromClipboard();
+
+      expect(result).toBe('');
+    });
+
+    it('should cache the working Linux clipboard tool across calls', () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'linux',
+        configurable: true,
+      });
+      // command -v xclip succeeds (probe)
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));
+      mockExecFileSync.mockReturnValue('clipboard text');
+
+      readTextFromClipboard();
+      const execSyncCountAfterFirst = mockExecSync.mock.calls.length;
+
+      readTextFromClipboard();
+      // Second call should NOT re-probe (cached)
+      expect(mockExecSync.mock.calls.length).toBe(execSyncCountAfterFirst);
+    });
+
+    it('should fall back to powershell.exe on WSL2 when no Linux tool is available', () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'linux',
+        configurable: true,
+      });
+      // All command -v checks fail
+      mockExecSync.mockImplementation(() => {
+        throw new Error('not found');
+      });
+      // powershell.exe probe and read succeed
+      mockExecFileSync.mockImplementation((bin: string) => {
+        if (bin === 'powershell.exe') return 'windows clipboard text';
+        throw new Error('not found');
+      });
+
+      const result = readTextFromClipboard();
+
+      expect(result).toBe('windows clipboard text');
+    });
+
+    it('should return empty string when no tool including powershell is available', () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'linux',
+        configurable: true,
+      });
+      mockExecSync.mockImplementation(() => {
+        throw new Error('not found');
+      });
+      mockExecFileSync.mockImplementation(() => {
+        throw new Error('not found');
+      });
+
+      const result = readTextFromClipboard();
+
+      expect(result).toBe('');
     });
   });
 });

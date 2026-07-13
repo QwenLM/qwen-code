@@ -6,7 +6,7 @@
 
 import * as fs from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
-import { execSync, spawn } from 'node:child_process';
+import { execFileSync, execSync, spawn } from 'node:child_process';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
@@ -91,11 +91,15 @@ async function getClipboardModule(): Promise<any | null> {
 export function resetLinuxClipboardTool(): void {
   linuxClipboardTool = undefined;
   cachedWlPasteImageTypes = null;
+  linuxTextReadCmd = undefined;
 }
 
 /**
  * Detect the Linux clipboard tool.
  * Handles WSL2 where XDG_SESSION_TYPE may be unset but WAYLAND_DISPLAY is set.
+ * When the preferred tool's binary exists but fails at runtime (e.g. wl-paste
+ * cannot connect to the Wayland socket in WSL2), callers should fall back to
+ * the alternate tool.
  */
 function getLinuxClipboardTool(): 'wl-paste' | 'xclip' | null {
   if (linuxClipboardTool !== undefined) return linuxClipboardTool;
@@ -121,6 +125,17 @@ function getLinuxClipboardTool(): 'wl-paste' | 'xclip' | null {
     return toolName;
   } catch {
     debugLogger.warn(`${toolName} not found`);
+    // If the preferred tool is missing, try the other protocol as fallback.
+    // e.g. Wayland env but wl-paste not installed → try xclip for X11.
+    if (toolName === 'wl-paste' && (sessionType === 'x11' || display)) {
+      try {
+        execSync('command -v xclip', { stdio: 'ignore' });
+        linuxClipboardTool = 'xclip';
+        return 'xclip';
+      } catch {
+        debugLogger.warn('xclip not found (fallback)');
+      }
+    }
     linuxClipboardTool = null;
     return null;
   }
@@ -306,6 +321,10 @@ export async function clipboardHasImage(
   cachedWlPasteImageTypes = null; // Fresh check each time
   if (process.platform === 'linux') {
     try {
+      // WSL2 first: check Windows clipboard via powershell.exe.
+      // This does not consume the clipboard content, unlike wl-paste.
+      if (clipboardHasImageViaPowershell()) return true;
+
       const tool = getLinuxClipboardTool();
       if (tool === 'wl-paste') {
         return checkClipboardForImage('wl-paste', ['--list-types']);
@@ -388,6 +407,58 @@ async function getWlPasteImageTypes(): Promise<string[]> {
       resolve([]);
     });
   });
+}
+
+/**
+ * Check if the Windows clipboard (via powershell.exe) contains an image.
+ * Used as a WSL2 fallback when wl-paste/xclip are unavailable or fail.
+ */
+function clipboardHasImageViaPowershell(): boolean {
+  try {
+    const result = execFileSync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-c',
+        'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Clipboard]::ContainsImage()',
+      ],
+      { encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'ignore'] },
+    ).trim();
+    return result === 'True';
+  } catch (e) {
+    debugLogger.debug('PowerShell clipboard image check failed:', e);
+    return false;
+  }
+}
+
+/**
+ * Save the Windows clipboard image to a PNG file via powershell.exe.
+ * Used as a WSL2 fallback when wl-paste/xclip are unavailable or fail.
+ */
+async function saveImageWithPowershell(targetPath: string): Promise<boolean> {
+  const absPath = path.resolve(targetPath);
+  try {
+    execFileSync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-c',
+        `Add-Type -AssemblyName System.Windows.Forms; $img = [System.Windows.Forms.Clipboard]::GetImage(); if ($img) { $img.Save('${absPath}') }`,
+      ],
+      { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] },
+    );
+    try {
+      const stats = await fs.stat(absPath);
+      return stats.size > 0;
+    } catch {
+      return false;
+    }
+  } catch (e) {
+    debugLogger.debug('PowerShell clipboard image save failed:', e);
+    return false;
+  }
 }
 
 /**
@@ -533,6 +604,12 @@ export async function saveClipboardImage(
         tempDir,
         `clipboard-${timestamp}-${randomUUID()}.png`,
       );
+
+      // WSL2 first: try powershell.exe which reads the Windows clipboard
+      // directly without consuming the Wayland/X11 clipboard content.
+      // This must run before wl-paste, which can consume the image on WSL2.
+      if (await saveImageWithPowershell(pngPath)) return pngPath;
+
       const tool = getLinuxClipboardTool();
 
       if (tool === 'wl-paste') {
@@ -547,11 +624,15 @@ export async function saveClipboardImage(
             /* ignore */
           }
         }
-        return null;
+        // Fall through to xclip fallback
       }
       if (tool === 'xclip') {
         if (await saveFileWithXclip(pngPath)) return pngPath;
-        return null;
+      }
+      try {
+        await fs.unlink(pngPath);
+      } catch {
+        /* ignore */
       }
       return null;
     }
@@ -635,5 +716,91 @@ export async function cleanupOldClipboardImages(
     }
   } catch {
     // Ignore errors in cleanup
+  }
+}
+
+// Cache for Linux text clipboard read command
+let linuxTextReadCmd: string[] | null | undefined;
+
+/**
+ * Read text from the system clipboard.
+ * Used as fallback when Ctrl+V is pressed but clipboard has no image.
+ * @returns clipboard text content, or empty string on failure
+ */
+export function readTextFromClipboard(): string {
+  try {
+    const platform = process.platform;
+    if (platform === 'darwin') {
+      return execFileSync('pbpaste', [], {
+        encoding: 'utf-8',
+        timeout: 2000,
+        stdio: ['pipe', 'pipe', 'ignore'],
+      }).toString();
+    }
+    if (platform === 'win32') {
+      return execFileSync(
+        'powershell',
+        ['-NoProfile', '-NonInteractive', '-c', 'Get-Clipboard'],
+        {
+          encoding: 'utf-8',
+          timeout: 2000,
+          stdio: ['pipe', 'pipe', 'ignore'],
+        },
+      ).toString();
+    }
+    // Linux/WSL2: probe once, then use cached tool
+    if (linuxTextReadCmd === undefined) {
+      const candidates: Array<[string, string[]]> = [
+        ['xclip', ['-selection', 'clipboard', '-o']],
+        ['xsel', ['--clipboard', '--output']],
+        ['wl-paste', ['--no-newline']],
+      ];
+      linuxTextReadCmd = null;
+      for (const [bin, args] of candidates) {
+        try {
+          execSync('command -v ' + bin, { stdio: 'ignore' });
+          linuxTextReadCmd = [bin, ...args];
+          break;
+        } catch {
+          /* try next */
+        }
+      }
+      // WSL2 fallback: read Windows clipboard via powershell interop.
+      // Works even when no Linux clipboard tools are installed.
+      if (!linuxTextReadCmd) {
+        try {
+          execFileSync(
+            'powershell.exe',
+            ['-NoProfile', '-NonInteractive', '-c', 'echo 1'],
+            {
+              encoding: 'utf-8',
+              timeout: 500,
+              stdio: ['pipe', 'pipe', 'ignore'],
+            },
+          );
+          linuxTextReadCmd = [
+            'powershell.exe',
+            '-NoProfile',
+            '-NonInteractive',
+            '-c',
+            'Get-Clipboard',
+          ];
+        } catch {
+          /* not WSL2 or powershell unavailable */
+        }
+      }
+    }
+    if (linuxTextReadCmd) {
+      const [bin, ...args] = linuxTextReadCmd;
+      return execFileSync(bin, args, {
+        encoding: 'utf-8',
+        timeout: 2000,
+        stdio: ['pipe', 'pipe', 'ignore'],
+      }).toString();
+    }
+    return '';
+  } catch (e) {
+    debugLogger.warn('readTextFromClipboard failed:', e);
+    return '';
   }
 }

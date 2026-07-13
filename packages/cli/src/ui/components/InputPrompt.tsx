@@ -41,6 +41,7 @@ import {
   clipboardHasImage,
   saveClipboardImage,
   cleanupOldClipboardImages,
+  readTextFromClipboard,
 } from '../utils/clipboardUtils.js';
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
@@ -724,9 +725,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     );
   }, [clipboardUnavailableShownRef, uiState.historyManager]);
 
-  // Handle clipboard image pasting with Ctrl+V
+  // Handle clipboard image pasting with Ctrl+V.
+  // Returns true when an image was found and attached.
   const handleClipboardImage = useCallback(
-    async (validated = false) => {
+    async (validated = false): Promise<boolean> => {
       try {
         const hasImage =
           validated || (await clipboardHasImage(reportClipboardUnavailable));
@@ -748,11 +750,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
               filename,
             };
             setAttachments((prev) => [...prev, newAttachment]);
+            return true;
           }
         }
       } catch (error) {
         debugLogger.error('Error handling clipboard image:', error);
       }
+      return false;
     },
     [reportClipboardUnavailable],
   );
@@ -1661,9 +1665,21 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return true;
       }
 
-      // Ctrl+V for clipboard image paste
+      // Ctrl+V / Cmd+V: image paste with text fallback.
+      // On Linux/WSL2 the terminal does not intercept Ctrl+V, so the key
+      // event reaches us directly. Previously we consumed it unconditionally
+      // for image-only paste, silently discarding text clipboard content.
+      // Now we fall back to reading text from the system clipboard when no
+      // image is present.
       if (keyMatchers[Command.PASTE_CLIPBOARD_IMAGE](key)) {
-        handleClipboardImage();
+        void handleClipboardImage().then((hadImage) => {
+          if (!hadImage) {
+            const text = readTextFromClipboard();
+            if (text) {
+              buffer.insert(text);
+            }
+          }
+        });
         return true;
       }
 
