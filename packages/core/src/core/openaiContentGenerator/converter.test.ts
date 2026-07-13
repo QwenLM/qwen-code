@@ -420,13 +420,12 @@ describe('OpenAIContentConverter', () => {
         ).candidates?.[0]?.content?.parts,
       ).toEqual([{ text: 'fallback text' }]);
 
-      const result = converter.convertOpenAIChunkToGemini(
-        streamChunk('phantom-only-finish', {}, 'tool_calls'),
-        stream,
-      );
-
-      expect(result.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(result.candidates?.[0]?.finishReason).toBeUndefined();
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('phantom-only-finish', {}, 'tool_calls'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'NAMELESS_TOOL_CALL' }));
     });
 
     it('discards a response whose tool call never provides a function name', () => {
@@ -449,12 +448,12 @@ describe('OpenAIContentConverter', () => {
           stream,
         ).candidates?.[0]?.content?.parts,
       ).toEqual([]);
-      const result = converter.convertOpenAIChunkToGemini(
-        streamChunk('malformed-tool-call-finish', {}, 'stop'),
-        stream,
-      );
-      expect(result.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(result.candidates?.[0]?.finishReason).toBeUndefined();
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('malformed-tool-call-finish', {}, 'stop'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'NAMELESS_TOOL_CALL' }));
     });
 
     it('discards a nameless tool call with arguments but no id', () => {
@@ -475,12 +474,12 @@ describe('OpenAIContentConverter', () => {
         ).candidates?.[0]?.content?.parts,
       ).toEqual([]);
 
-      const result = converter.convertOpenAIChunkToGemini(
-        streamChunk('nameless-arguments-finish', {}, 'tool_calls'),
-        stream,
-      );
-      expect(result.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(result.candidates?.[0]?.finishReason).toBeUndefined();
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('nameless-arguments-finish', {}, 'tool_calls'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'NAMELESS_TOOL_CALL' }));
     });
 
     it('preserves literal thinking tags when no nameless tool call appears', () => {
@@ -632,17 +631,16 @@ describe('OpenAIContentConverter', () => {
         }),
         stream,
       );
-      const result = converter.convertOpenAIChunkToGemini(
-        streamChunk('late-finish', {}, 'stop'),
-        stream,
-      );
-
       expect(visible.candidates?.[0]?.content?.parts).toEqual([
         { text: 'late <think>payload</think>' },
       ]);
       expect(malformed.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(result.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(result.candidates?.[0]?.finishReason).toBeUndefined();
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('late-finish', {}, 'stop'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'NAMELESS_TOOL_CALL' }));
     });
 
     it('rejects raw thinking tags that leak after structured reasoning output', () => {
@@ -1099,6 +1097,37 @@ describe('OpenAIContentConverter', () => {
             'structured-reasoning-leak-with-tool-call',
             {
               content: '</think> leaked visible reasoning',
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call_named',
+                  type: 'function',
+                  function: { name: 'run_shell_command', arguments: '{}' },
+                },
+              ],
+            },
+            'tool_calls',
+          ),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('rejects held thought tags before emitting tool calls at finish', () => {
+      const stream = withStreamParser(new StreamingToolCallParser());
+      const reasoning = converter.convertOpenAIChunkToGemini(
+        streamChunk('thought-tag-before-tool-call', {
+          reasoning_content: 'hidden <think>leaked reasoning</think>',
+        }),
+        stream,
+      );
+
+      expect(reasoning.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk(
+            'thought-tag-tool-call-finish',
+            {
               tool_calls: [
                 {
                   index: 0,

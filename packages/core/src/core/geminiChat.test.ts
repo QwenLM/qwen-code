@@ -8602,7 +8602,7 @@ describe('GeminiChat', async () => {
     }
 
     function invalidStream(
-      type: 'NO_FINISH_REASON' | 'PROTOCOL_TAG_LEAK',
+      type: 'NO_FINISH_REASON' | 'PROTOCOL_TAG_LEAK' | 'NAMELESS_TOOL_CALL',
     ): AsyncGenerator<GenerateContentResponse> {
       return {
         [Symbol.asyncIterator]() {
