@@ -90,6 +90,30 @@ describe('WorkspaceVoiceCoordinator', () => {
     expect(coordinator['states'].has(target)).toBe(false);
   });
 
+  it('cancels an unfinished drain but cannot reactivate a completed drain', () => {
+    const coordinator = new WorkspaceVoiceCoordinator();
+    const target = runtime('target');
+
+    coordinator.beginWorkspaceDrain(target);
+    expect(coordinator.acquire(target)).toEqual({
+      kind: 'rejected',
+      reason: 'draining',
+    });
+
+    coordinator.cancelWorkspaceDrain(target);
+    const admitted = coordinator.acquire(target);
+    if (admitted.kind !== 'admitted') throw new Error('expected lease');
+
+    coordinator.completeWorkspaceDrain(target);
+    coordinator.cancelWorkspaceDrain(target);
+    expect(coordinator['states'].get(target)?.draining).toBe(true);
+    expect(coordinator.acquire(target)).toEqual({
+      kind: 'rejected',
+      reason: 'draining',
+    });
+    admitted.lease.release();
+  });
+
   it('keeps a re-added runtime generation independent from old leases', async () => {
     const coordinator = new WorkspaceVoiceCoordinator();
     const oldRuntime = runtime('same-id');

@@ -235,4 +235,22 @@ describe('workspace-qualified Voice routes', () => {
     expect(acquireVoiceLease).toHaveBeenCalledOnce();
     expect(transcribe).not.toHaveBeenCalled();
   });
+
+  it('reports workspace draining before reading the audio body', async () => {
+    const { app, secondary, transcribe, acquireVoiceLease } = await createApp({
+      acquireVoiceLease: () => ({ kind: 'rejected', reason: 'draining' }),
+    });
+    await enableSecondaryVoice(secondary);
+
+    const response = await request(app)
+      .post('/workspaces/secondary-id/voice/transcribe')
+      .set('Content-Type', 'audio/wav')
+      .send(Buffer.from([1, 2, 3]));
+
+    expect(response.status).toBe(503);
+    expect(response.headers['retry-after']).toBe('5');
+    expect(response.body.code).toBe('workspace_draining');
+    expect(acquireVoiceLease).toHaveBeenCalledOnce();
+    expect(transcribe).not.toHaveBeenCalled();
+  });
 });
