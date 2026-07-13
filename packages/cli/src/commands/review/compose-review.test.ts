@@ -524,6 +524,32 @@ describe('coverage caps the verdict', () => {
     expect(r.event).toBe('APPROVE');
   });
 
+  it('caps on an EMPTY coverage report — {} is not coverage', () => {
+    // `{}` fell between both guards: "provided", so the absent-coverage cap was
+    // skipped, and `Object.keys({}).length > 0` was false, so the failed-coverage
+    // cap was skipped too. Both gates open, and `{}` composed an APPROVE.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      coverage: {},
+      modelId: MODEL,
+    });
+    expect(r.event).not.toBe('APPROVE');
+  });
+
+  it('refuses a chunk id that is not one', () => {
+    // `typeof v === 'number'` admits NaN/Infinity/-1/2.5, each of which would be
+    // rendered into the body as "chunk NaN".
+    for (const bad of [Number.NaN, Infinity, -1, 2.5, 0]) {
+      expect(() =>
+        composeReview({
+          ...base,
+          coverage: { ok: true, missingChunks: [bad] },
+        }),
+      ).toThrow(/positive whole numbers/);
+    }
+  });
+
   it('forbids an Approve on `ok: false` alone', () => {
     // A report that says the coverage check failed is the strongest statement in
     // this input; it must cap without needing an itemised list to be believed.
@@ -600,6 +626,6 @@ describe('coverage caps the verdict', () => {
     );
     expect(() =>
       composeReview({ ...base, coverage: { missingChunks: ['1'] } } as never),
-    ).toThrow(/array of numbers/);
+    ).toThrow(/positive whole numbers/);
   });
 });

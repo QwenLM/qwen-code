@@ -24,7 +24,7 @@
 // diff is a concatenation of per-file sections; the result parses exactly like
 // any other.
 
-import { lstatSync, statSync, type Stats } from 'node:fs';
+import { lstatSync, statSync, type Stats, realpathSync } from 'node:fs';
 import { join, relative, resolve, isAbsolute, sep } from 'node:path';
 import {
   LITERAL_PATHSPECS,
@@ -182,7 +182,21 @@ function describeUndiffable(abs: string, st: Stats): string | null {
  * whole argument back into a plain name.
  */
 function toRepoPathspec(repoRoot: string, file: string): string {
-  const abs = resolve(process.cwd(), file);
+  // `resolve` does not follow symlinks, but `rev-parse --show-toplevel` returns
+  // the canonical root — on macOS `/tmp` is a symlink to `/private/tmp`, so a
+  // `--file` given under `/tmp` relativises against a root that shares no prefix
+  // with it and the containment check below rejects a file that is plainly
+  // inside the repo. Canonicalise both sides before comparing. `realpathSync`
+  // throws on a path that does not exist yet, which a `--file` may legitimately
+  // be (a brand-new untracked file is exactly this feature's subject), so fall
+  // back to the non-canonical form rather than failing the review.
+  let abs = resolve(process.cwd(), file);
+  try {
+    abs = realpathSync(abs);
+  } catch {
+    // Not on disk yet — resolve() is the best we have, and the check below still
+    // holds for it.
+  }
   const rel = relative(repoRoot, abs);
   // `rel.startsWith('..')` is not the containment check it looks like: a file
   // called `..foo.ts` at the repository root relativises to `..foo.ts`, and the

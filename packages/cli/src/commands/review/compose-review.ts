@@ -137,12 +137,21 @@ function toStringList(value: unknown, field: string): string[] {
   return value as string[];
 }
 
-/** A list of chunk ids. Same discipline as `toStringList`: refuse, don't coerce. */
+/**
+ * A list of chunk ids. Same discipline as `toStringList`: refuse, don't coerce.
+ *
+ * `typeof v === 'number'` admits `NaN`, `Infinity`, `-1` and `2.5` — none of
+ * which is a chunk id, and each of which would be rendered into the review body
+ * as "chunk NaN". The sibling `toCount` has always checked this; this did not.
+ */
 function toNumberList(value: unknown, field: string): number[] {
   if (value === undefined || value === null) return [];
-  if (!Array.isArray(value) || value.some((v) => typeof v !== 'number')) {
+  if (
+    !Array.isArray(value) ||
+    value.some((v) => !Number.isSafeInteger(v) || (v as number) < 1)
+  ) {
     throw new TypeError(
-      `compose-review: ${field} must be an array of numbers, got ${JSON.stringify(value)}`,
+      `compose-review: ${field} must be an array of positive whole numbers, got ${JSON.stringify(value)}`,
     );
   }
   return value as number[];
@@ -225,7 +234,13 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     );
   }
   if (covProvided) {
-    if (cov['ok'] !== true && Object.keys(cov).length > 0) {
+    // `ok !== true` caps — and an EMPTY report is the same statement made by
+    // saying nothing. `coverage: {}` used to fall between the two guards: it is
+    // "provided", so the absent-coverage cap above is skipped, and the
+    // `Object.keys(...) > 0` clause here excused it from the failed-coverage cap
+    // as well. Both gates open, and `{}` composed an APPROVE. A report with no
+    // `ok: true` in it has not shown coverage, however few keys it has.
+    if (cov['ok'] !== true) {
       unreviewed.push(
         'coverage — the `check-coverage` report says the diff was not covered',
       );

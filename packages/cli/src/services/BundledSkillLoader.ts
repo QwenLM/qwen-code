@@ -22,6 +22,7 @@ import { t } from '../i18n/index.js';
 import {
   writeSkillArgs,
   clearSkillArgs,
+  staleArgsWarning,
   skillArgsNote,
   skillArgsPath,
 } from './skill-args-file.js';
@@ -141,9 +142,14 @@ export class BundledSkillLoader implements ICommandLoader {
           } else {
             // A bare invocation records no arguments — and must erase any record
             // an earlier argument-bearing run left, or that run's posting
-            // authority is inherited by this one.
-            clearSkillArgs(skill.name);
+            // authority is inherited by this one. If the erase FAILS, the stale
+            // record is still on disk and `submit` will still trust it, so the
+            // skill is told: silence here would let a `/review 6771 --comment`
+            // from earlier in the session authorise this bare run's post.
             content = [{ text: skillPrompt }];
+            if (!clearSkillArgs(skill.name)) {
+              content = appendToLastTextPart(content, staleArgsWarning());
+            }
           }
 
           return {

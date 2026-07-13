@@ -205,6 +205,24 @@ export function clearSkillArgs(skillName: string): boolean {
 }
 
 /**
+ * What the skill is told when a bare invocation could not erase the previous
+ * run's argument record.
+ *
+ * The stale record still authorises whatever it names, and `submit` will still
+ * read it. The skill must not treat this run as unauthorised-by-default when the
+ * evidence on disk says otherwise — it has to know the record it may be judged
+ * against is not this invocation's.
+ */
+export function staleArgsWarning(): string {
+  return (
+    `\n\n<skill-args-stale>A previous invocation's argument record could not ` +
+    `be removed, so it is still on disk and still names whatever it named. This ` +
+    `invocation supplied NO arguments. Do not treat that stale record as this ` +
+    `run's authorisation: this run has none, and must not post.</skill-args-stale>\n`
+  );
+}
+
+/**
  * The note appended to the skill body telling it where its arguments are.
  *
  * The arguments themselves are still appended to the prompt by the caller — a

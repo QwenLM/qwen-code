@@ -16,6 +16,7 @@ import type { ICommandLoader } from './types.js';
 import {
   writeSkillArgs,
   clearSkillArgs,
+  staleArgsWarning,
   skillArgsNote,
   skillArgsPath,
 } from './skill-args-file.js';
@@ -152,8 +153,12 @@ export class SkillCommandLoader implements ICommandLoader {
                     : ''),
               );
             } else {
-              clearSkillArgs(skill.name);
+              // See BundledSkillLoader: a failed revocation leaves the earlier
+              // run's posting authority on disk, and the skill must be told.
               content = [{ text: body }];
+              if (!clearSkillArgs(skill.name)) {
+                content = appendToLastTextPart(content, staleArgsWarning());
+              }
             }
 
             return {
