@@ -50,6 +50,8 @@ import type {
   DaemonWorkspaceToolsStatus,
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
+  DaemonModelDeleteRequest,
+  DaemonModelDeleteResult,
   DaemonSessionGroup,
   DaemonSessionGroupCatalog,
   DaemonSessionGroupInput,
@@ -320,7 +322,7 @@ export interface DaemonWorkspaceActions {
   // Settings
   loadSettingsStatus(): Promise<DaemonWorkspaceSettingsStatus>;
   setWorkspaceSetting(
-    scope: 'workspace',
+    scope: 'workspace' | 'user',
     key: string,
     value: unknown,
   ): Promise<DaemonSettingUpdateResult>;
@@ -441,6 +443,9 @@ export interface DaemonWorkspaceActions {
   installAuthProvider(
     req: DaemonAuthProviderInstallRequest,
   ): Promise<DaemonAuthProviderInstallResult>;
+  deleteModel(
+    target: DaemonModelDeleteRequest,
+  ): Promise<DaemonModelDeleteResult>;
 
   // Workspace management
   addWorkspace(

@@ -138,6 +138,8 @@ import type {
   DaemonWorkspaceSettingsStatus,
   DaemonWorkspacePermissionsStatus,
   DaemonSettingUpdateResult,
+  DaemonModelDeleteRequest,
+  DaemonModelDeleteResult,
   DaemonVoiceAudioInput,
   DaemonWorkspaceVoiceStatus,
   DaemonWorkspaceVoiceTranscribeOptions,
@@ -2321,7 +2323,7 @@ export class DaemonClient {
   }
 
   async setWorkspaceSetting(
-    scope: 'workspace',
+    scope: 'workspace' | 'user',
     key: string,
     value: unknown,
     opts?: { clientId?: string },
@@ -2341,6 +2343,29 @@ export class DaemonClient {
           throw await this.failOnError(res, 'POST /workspace/settings');
         }
         return (await res.json()) as DaemonSettingUpdateResult;
+      },
+    );
+  }
+
+  async deleteModel(
+    target: DaemonModelDeleteRequest,
+    opts?: { clientId?: string },
+  ): Promise<DaemonModelDeleteResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/models`,
+      {
+        method: 'DELETE',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify(target),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'DELETE /workspace/models');
+        }
+        return (await res.json()) as DaemonModelDeleteResult;
       },
     );
   }
@@ -3918,6 +3943,8 @@ export class WorkspaceDaemonClient {
   }
 
   setWorkspaceSetting(
+    // The workspace-qualified settings route is workspace-only (see
+    // QUALIFIED_WRITE_SCOPES); only the primary DaemonClient writes user scope.
     scope: 'workspace',
     key: string,
     value: unknown,

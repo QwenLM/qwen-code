@@ -1,12 +1,21 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { useI18n } from '../../i18n';
-import { dp } from './dialogStyles';
 import { DialogShell } from './DialogShell';
-import styles from './AddWorkspaceDialog.module.css';
+import { Button } from '../ui/button';
+import {
+  Field,
+  FieldContent,
+  FieldDescription,
+  FieldError,
+  FieldGroup,
+  FieldLabel,
+} from '../ui/field';
+import { Input } from '../ui/input';
+import { Switch } from '../ui/switch';
 
 interface AddWorkspaceDialogProps {
   onClose: () => void;
-  onAdd: (cwd: string) => Promise<void>;
+  onAdd: (cwd: string, persist: boolean) => Promise<void>;
 }
 
 const HINT_ID = 'add-workspace-hint';
@@ -20,6 +29,7 @@ export function AddWorkspaceDialog({
   const [path, setPath] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [persist, setPersist] = useState(true);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -38,7 +48,7 @@ export function AddWorkspaceDialog({
       setError(null);
       setSubmitting(true);
       try {
-        await onAdd(trimmed);
+        await onAdd(trimmed, persist);
         onClose();
       } catch (err) {
         setError(
@@ -48,7 +58,7 @@ export function AddWorkspaceDialog({
         setSubmitting(false);
       }
     },
-    [path, onAdd, onClose, t],
+    [path, persist, onAdd, onClose, t],
   );
 
   return (
@@ -57,56 +67,66 @@ export function AddWorkspaceDialog({
       size="md"
       onClose={onClose}
     >
-      <form className={dp('dialog-form')} onSubmit={handleSubmit}>
-        <div className={styles.field}>
-          <label htmlFor="add-workspace-path">
-            {t('sidebar.addWorkspacePath')}
-          </label>
-          <input
-            ref={inputRef}
-            id="add-workspace-path"
-            type="text"
-            placeholder="/absolute/path/to/project"
-            value={path}
-            onChange={(e) => {
-              setPath(e.target.value);
-              if (error) setError(null);
-            }}
-            disabled={submitting}
-            autoCapitalize="off"
-            autoCorrect="off"
-            autoComplete="off"
-            spellCheck={false}
-            aria-describedby={error ? `${ERROR_ID} ${HINT_ID}` : HINT_ID}
-            aria-invalid={error ? true : undefined}
-          />
-          <span className={styles.hint} id={HINT_ID}>
-            {t('sidebar.addWorkspaceHint')}
-          </span>
-          {error && (
-            <span className={styles.error} id={ERROR_ID} role="alert">
-              {error}
-            </span>
-          )}
-        </div>
-        <div className={`${dp('dialog-footer-actions')} ${styles.footer}`}>
-          <button
+      <form className="flex flex-col gap-6" onSubmit={handleSubmit}>
+        <FieldGroup>
+          <Field data-invalid={error ? true : undefined}>
+            <FieldLabel htmlFor="add-workspace-path">
+              {t('sidebar.addWorkspacePath')}
+            </FieldLabel>
+            <Input
+              ref={inputRef}
+              id="add-workspace-path"
+              type="text"
+              placeholder="/absolute/path/to/project"
+              value={path}
+              onChange={(e) => {
+                setPath(e.target.value);
+                if (error) setError(null);
+              }}
+              disabled={submitting}
+              autoCapitalize="off"
+              autoCorrect="off"
+              autoComplete="off"
+              spellCheck={false}
+              aria-describedby={error ? `${ERROR_ID} ${HINT_ID}` : HINT_ID}
+              aria-invalid={error ? true : undefined}
+            />
+            <FieldDescription id={HINT_ID}>
+              {t('sidebar.addWorkspaceHint')}
+            </FieldDescription>
+            {error && <FieldError id={ERROR_ID}>{error}</FieldError>}
+          </Field>
+          <Field orientation="horizontal">
+            <FieldContent>
+              <FieldLabel htmlFor="add-workspace-persist">
+                {t('sidebar.addWorkspacePersist')}
+              </FieldLabel>
+              <FieldDescription>
+                {t('sidebar.addWorkspacePersistHint')}
+              </FieldDescription>
+            </FieldContent>
+            <Switch
+              id="add-workspace-persist"
+              checked={persist}
+              onCheckedChange={setPersist}
+              disabled={submitting}
+            />
+          </Field>
+        </FieldGroup>
+        <div className="flex justify-end gap-2">
+          <Button
             type="button"
-            className={dp('dialog-inline-button')}
+            variant="outline"
             onClick={onClose}
             disabled={submitting}
           >
             {t('sidebar.addWorkspaceCancel')}
-          </button>
-          <button
-            type="submit"
-            className={dp('dialog-primary-button')}
-            disabled={submitting || !path.trim()}
-          >
+          </Button>
+          <Button type="submit" disabled={submitting || !path.trim()}>
             {submitting
               ? t('sidebar.addWorkspaceAdding')
               : t('sidebar.addWorkspaceRegister')}
-          </button>
+          </Button>
         </div>
       </form>
     </DialogShell>

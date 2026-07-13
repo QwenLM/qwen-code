@@ -363,6 +363,8 @@ export type {
   DaemonWorkspacePermissionsStatus,
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
+  DaemonModelDeleteRequest,
+  DaemonModelDeleteResult,
   DaemonVoiceAudioInput,
   DaemonVoiceMode,
   DaemonVoiceModelDescriptor,
