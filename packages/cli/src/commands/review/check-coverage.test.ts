@@ -290,6 +290,52 @@ describe('coverage — from the harness, not from the caller', () => {
     expect(r.coveredChunks).toEqual([1, 2]);
   });
 
+  it('does not call an agent "not blind" for a read_file that never named the diff', () => {
+    // A prompt that points the agent at source files but never at the diff is
+    // exactly as blind as one that names no file at all — and a bare `read_file(`
+    // anywhere in it used to be enough to pass. It would then be reported as a
+    // whiff, sending the reader to relaunch an agent whose *prompt* is the defect.
+    transcript(
+      'a1',
+      'Review chunk 1 of 2. Start with read_file(file_path="/src/pay.ts").',
+      { calls: 0 },
+    );
+    transcript('a2', good(2), { calls: 1 });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.blindAgents).toEqual(['chunk 1']);
+    expect(r.idleAgents).toEqual([]); // not a whiff — it could not have read it
+  });
+
+  it('refuses a plan whose chunk ids are not ids', () => {
+    for (const chunks of [
+      [{ id: 0, startLine: 1, endLine: 10 }],
+      [{ id: 1.5, startLine: 1, endLine: 10 }],
+      [{ id: -2, startLine: 1, endLine: 10 }],
+    ]) {
+      const p = join(dir, 'bad-ids.json');
+      writeFileSync(p, JSON.stringify({ diffPathAbsolute: DIFF, chunks }));
+      expect(() => coverageFromTranscripts(p, ENV)).toThrow(
+        /positive integer id/,
+      );
+    }
+  });
+
+  it('refuses a plan with duplicate chunk ids', () => {
+    const p = join(dir, 'dupe.json');
+    writeFileSync(
+      p,
+      JSON.stringify({
+        diffPathAbsolute: DIFF,
+        chunks: [
+          { id: 1, startLine: 1, endLine: 10 },
+          { id: 1, startLine: 11, endLine: 20 },
+        ],
+      }),
+    );
+    expect(() => coverageFromTranscripts(p, ENV)).toThrow(/duplicate chunk/);
+  });
+
   it('refuses a plan that is not one', () => {
     const p = join(dir, 'bad.json');
     writeFileSync(p, JSON.stringify({}));

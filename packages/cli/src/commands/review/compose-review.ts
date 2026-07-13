@@ -60,23 +60,6 @@ export interface ComposeReviewInput {
    */
   unreviewedDimensions?: string[];
   /**
-   * The `check-coverage` report for this run.
-   *
-   * The cap lists above are numbers the caller supplies, and a caller that
-   * skipped Step 3's receipt check supplies empty ones — which is exactly what a
-   * clean review looks like. Dogfooding, an orchestrator launched 25 agents over
-   * an 18-chunk diff, 22 of them returned in under two seconds having made zero
-   * tool calls, and it passed `uncoverableChunks: []`, `unreviewedDimensions: []`
-   * and filed an **Approve** over 4 925 lines nobody had read.
-   *
-   * So the coverage is not asked for, it is **shown**: pass the report that
-   * `check-coverage` produced from the agents' verbatim returns. Its
-   * `missingChunks` and `whiffedAgents` are folded into the cap lists here, and
-   * they forbid an Approve exactly as a hand-supplied entry would. Omitting it is
-   * itself a cap — a run that cannot show what it covered has not shown that it
-   * covered anything.
-   */
-  /**
    * The plan report from Step 1.
    *
    * Coverage is derived from it plus the harness's transcripts — it is not an
@@ -216,7 +199,12 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     try {
       const cov = coverageFromTranscripts(input.planPath, input.env);
       for (const id of cov.missingChunks) missingReceipts.push(id);
-      for (const id of cov.uncoverableChunks) uncoverable.push(`chunk ${id}`);
+      for (const id of cov.uncoverableChunks) {
+        // The caller may already have named it. Rendered twice, the body reads
+        // "Not reviewed: chunk 5, chunk 5".
+        const entry = `chunk ${id}`;
+        if (!uncoverable.includes(entry)) uncoverable.push(entry);
+      }
       for (const label of cov.idleAgents) {
         unreviewed.push(
           `${label} — the agent made no tool call: it read nothing`,

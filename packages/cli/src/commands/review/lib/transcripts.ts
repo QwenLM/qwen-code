@@ -251,6 +251,11 @@ export function readTranscripts(
 export function wasGivenTheDiff(rec: AgentRecord, diffPath: string): boolean {
   const p = rec.launchPrompt;
   if (!p) return false;
-  // The path itself, or the read call that opens it.
-  return p.includes(diffPath) || /read_file\s*\(/.test(p);
+  // The diff file, by name. Nothing weaker: a bare `read_file(` in the prompt
+  // proves only that *some* file was named, and a prompt that points an agent at
+  // source files while never mentioning the diff is exactly as blind as one that
+  // names no file at all. It would pass a `read_file`-anywhere check, be called
+  // "not blind", and its silence would then be read as a whiff — sending the
+  // reader to relaunch an agent whose prompt is the actual defect.
+  return p.includes(diffPath);
 }
