@@ -5,8 +5,13 @@
  */
 
 import { spawn } from 'node:child_process';
+import {
+  cdpEndpoint,
+  parseSelectedPageUrl,
+  stopChild,
+} from './acceptance-helpers.mjs';
 
-const endpoint = process.env.WS || 'ws://127.0.0.1:4170/cdp';
+const endpoint = cdpEndpoint();
 const fixtureUrl = process.env.FIXTURE_URL || 'http://127.0.0.1:4180';
 const command = process.env.QWEN_CDP_MCP_COMMAND;
 if (!command) {
@@ -95,7 +100,9 @@ const verifyCurrentPage = async (expectedUrl) => {
     }
   });
   const verifierRequest = async (id, method, params = {}) => {
-    verifier.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+    verifier.stdin.write(
+      `${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`,
+    );
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
       const response = verifierResponses.get(id);
@@ -105,7 +112,9 @@ const verifyCurrentPage = async (expectedUrl) => {
       }
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
-    throw new Error(`verification timeout; stderr=${verifierStderr.slice(-500)}`);
+    throw new Error(
+      `verification timeout; stderr=${verifierStderr.slice(-500)}`,
+    );
   };
   try {
     await verifierRequest(1, 'initialize', {
@@ -122,9 +131,9 @@ const verifyCurrentPage = async (expectedUrl) => {
         arguments: {},
       }),
     );
-    return pages.includes(expectedUrl);
+    return parseSelectedPageUrl(pages) === new URL(expectedUrl).href;
   } finally {
-    verifier.kill('SIGTERM');
+    await stopChild(verifier);
   }
 };
 
@@ -143,13 +152,11 @@ try {
   checks.toolCount = tools.tools?.length || 0;
 
   const pages = textOf(await call('list_pages'));
-  const selectedPage =
-    pages.split('\n').find((line) => line.includes('[selected]')) || pages;
-  originalUrl =
-    process.env.RESTORE_URL ||
-    selectedPage.match(/\(([a-z][a-z0-9+.-]*:\/\/[^)]+)\)/i)?.[1] ||
-    selectedPage.match(/\d+:\s+([a-z][a-z0-9+.-]*:\/\/\S+)/i)?.[1];
-  checks.originalUrl = originalUrl;
+  originalUrl = process.env.RESTORE_URL || parseSelectedPageUrl(pages);
+  if (!originalUrl) {
+    throw new Error('Cannot capture a restorable URL for the selected page');
+  }
+  checks.originalUrlCaptured = true;
   await call('navigate_page', { type: 'url', url: fixtureUrl });
 
   const snapshot = textOf(await call('take_snapshot'));
@@ -203,21 +210,17 @@ try {
   if (originalUrl) {
     try {
       await call('navigate_page', { type: 'url', url: originalUrl });
-      checks.restoredOriginalUrl = true;
-    } catch (error) {
-      checks.restoreCommandError = error.message;
-      verifyRestoredPage = true;
+    } catch {
+      checks.restoreCommandFailed = true;
     }
+    verifyRestoredPage = true;
   }
-  child.kill('SIGTERM');
-  if (child.exitCode === null) {
-    await new Promise((resolve) => child.once('exit', resolve));
-  }
+  await stopChild(child);
   if (verifyRestoredPage) {
     try {
       checks.restoredOriginalUrl = await verifyCurrentPage(originalUrl);
-    } catch (verificationError) {
-      checks.restoreVerificationError = verificationError.message;
+    } catch {
+      checks.restoreVerificationFailed = true;
     }
   }
 }
@@ -234,7 +237,7 @@ const passed =
   checks.linkNavigation &&
   checks.restoredOriginalUrl &&
   !checks.error &&
-  !checks.restoreVerificationError;
+  !checks.restoreVerificationFailed;
 
 console.log(JSON.stringify(checks, null, 2));
 console.log(`FULL-CDP-SMOKE: ${passed ? 'PASS' : 'FAIL'}`);

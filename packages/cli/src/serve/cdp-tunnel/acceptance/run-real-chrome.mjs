@@ -10,6 +10,7 @@ import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { stopChild, waitForJson } from './acceptance-helpers.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '../../../../../..');
@@ -57,18 +58,6 @@ const waitForExit = (child) => {
     child.once('exit', (code, signal) => resolveExit({ code, signal }));
   });
 };
-const stop = async (child) => {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return;
-  child.kill('SIGTERM');
-  await Promise.race([
-    waitForExit(child),
-    new Promise((resolveWait) => setTimeout(resolveWait, 3_000)),
-  ]);
-  if (child.exitCode === null && child.signalCode === null) {
-    child.kill('SIGKILL');
-    await waitForExit(child);
-  }
-};
 const assertPortFree = (portToCheck) =>
   new Promise((resolveCheck, reject) => {
     const socket = net.createConnection({
@@ -85,23 +74,6 @@ const assertPortFree = (portToCheck) =>
       resolveCheck();
     });
   });
-const waitForJson = async (url, predicate, timeoutMs = 30_000) => {
-  const deadline = Date.now() + timeoutMs;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(url);
-      if (response.ok) {
-        const value = await response.json();
-        if (predicate(value)) return value;
-      }
-    } catch (error) {
-      lastError = error;
-    }
-    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
-  }
-  throw new Error(`Timed out waiting for ${url}: ${lastError?.message || ''}`);
-};
 const waitFor = async (predicate, timeoutMs = 30_000) => {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -196,14 +168,14 @@ try {
     (value) => value.servers?.length === 0,
   );
   console.log('DEGRADED-MODE: PASS');
-  await stop(daemon);
+  await stopChild(daemon);
 
   daemon = await startDaemon({ withAdapter: true });
   console.log('RUNTIME-MCP: PASS');
-  await stop(daemon);
+  await stopChild(daemon);
   daemon = await startDaemon({ withAdapter: true });
   console.log('RUNTIME-MCP-RECONNECT: PASS');
-  await stop(daemon);
+  await stopChild(daemon);
 
   daemon = await startDaemon({ withAdapter: false, waitForBridge: true });
   const smokeEnv = {
@@ -217,13 +189,13 @@ try {
     throw error;
   });
 
-  await stop(daemon);
+  await stopChild(daemon);
   daemon = await startDaemon({ withAdapter: false, waitForBridge: true });
   await runScript(reconnectSmoke, smokeEnv);
   console.log('REAL-CHROME-E2E: PASS');
 } finally {
-  await stop(daemon);
-  await stop(fixtureServer);
-  for (const child of children) child.kill('SIGTERM');
+  await stopChild(daemon);
+  await stopChild(fixtureServer);
+  for (const child of children) await stopChild(child);
   await rm(qwenHome, { recursive: true, force: true });
 }
