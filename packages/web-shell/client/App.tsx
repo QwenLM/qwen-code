@@ -172,8 +172,10 @@ import {
 } from './utils/sessionPreparation';
 import {
   getComposerPlaceholderKey,
+  getComposerPlaceholderState,
   shouldBlockComposerSubmit,
   shouldDisableComposerInput,
+  type ComposerPlaceholderState,
 } from './utils/composerInputState';
 import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
 import {
@@ -221,6 +223,8 @@ import {
   type WebShellBottomStatusItem,
 } from './customization';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
+import { WebShellPortalRootContext } from './portalRoot';
+import './styles/globals.css';
 import styles from './App.module.css';
 
 export const CompactModeContext = createContext(false);
@@ -428,6 +432,12 @@ export interface WebShellApi {
   openSessionDrawer: () => void;
 }
 
+export type WebShellComposerPlaceholderState = ComposerPlaceholderState;
+
+export type WebShellComposerPlaceholders = Readonly<
+  Partial<Record<WebShellComposerPlaceholderState, string>>
+>;
+
 export interface WebShellProps {
   /** Called whenever the attached daemon session id changes. */
   onSessionIdChange?: (sessionId: string | undefined) => void;
@@ -464,6 +474,11 @@ export interface WebShellProps {
   shellRef?: React.Ref<WebShellApi>;
   /** Built-in composer toolbar actions to show. Defaults to all actions. */
   composerToolbarActions?: readonly ComposerToolbarAction[];
+  /**
+   * Main-composer copy by semantic state. Omitted or blank entries retain the
+   * WebShell localized default; shell-mode and follow-up copy still wins.
+   */
+  composerPlaceholders?: WebShellComposerPlaceholders;
   /** Called when connection status changes (idle/connecting/connected/disconnected/error). */
   onConnectionChange?: (status: string) => void;
   /** Called when prompt status changes (idle/waiting/responding). */
@@ -960,6 +975,7 @@ export function App({
   messageTurnOutputs,
   shellRef,
   composerToolbarActions,
+  composerPlaceholders,
   compactThinking = false,
   collapseCompletedTurns = true,
   markdownTableMode = 'basic',
@@ -1781,6 +1797,9 @@ export function App({
   const showBottomPanels =
     showFloatingTodos || floatingBottomStatusItems.length > 0;
   const footerRef = useRef<HTMLDivElement>(null);
+  const appRootRef = useRef<HTMLDivElement>(null);
+  const [portalRoot, setPortalRoot] = useState<HTMLElement | null>(null);
+  const portalRootVariableNamesRef = useRef<Set<string>>(new Set());
   const bottomPanelsRef = useRef<HTMLDivElement>(null);
   const [bottomPanelInset, setBottomPanelInset] = useState(0);
   const [bottomPanelHeight, setBottomPanelHeight] = useState(0);
@@ -4924,6 +4943,19 @@ export function App({
     pendingApproval: pendingApproval !== null,
     isPreparingPrompt,
   });
+  const composerPlaceholderInputState = {
+    catchingUp: Boolean(connection.catchingUp),
+    isPreparingPrompt,
+    isStreaming: streamingState !== 'idle',
+  };
+  const composerPlaceholderState = getComposerPlaceholderState(
+    composerPlaceholderInputState,
+  );
+  const customComposerPlaceholder =
+    composerPlaceholders?.[composerPlaceholderState];
+  const composerPlaceholderText = customComposerPlaceholder?.trim()
+    ? customComposerPlaceholder
+    : t(getComposerPlaceholderKey(composerPlaceholderInputState));
 
   const handleModelSelect = useCallback(
     (modelId: string) => {
@@ -5112,6 +5144,7 @@ export function App({
     selectedTheme === WebShellThemeId.Light
       ? styles.themeLight
       : styles.themeDark,
+    selectedTheme === WebShellThemeId.Dark ? 'dark' : undefined,
     externalClassName,
   ]
     .filter(Boolean)
@@ -5155,10 +5188,80 @@ export function App({
     previousEmptyStateRef.current = isChatEmptyState;
   }, [isChatEmptyState]);
 
+  useLayoutEffect(() => {
+    const root = document.createElement('div');
+    root.dataset.webShellPortalRoot = '';
+    root.dataset.webShellShadcn = '';
+    document.body.appendChild(root);
+    setPortalRoot(root);
+    return () => {
+      root.remove();
+      setPortalRoot(null);
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    const root = appRootRef.current;
+    if (!root || !portalRoot) return;
+    let frameId: number | null = null;
+    const syncVariables = () => {
+      frameId = null;
+      const computedStyle = getComputedStyle(root);
+      const nextNames = new Set<string>();
+      portalRoot.dataset.webShellShadcn = '';
+      portalRoot.classList.toggle(
+        'dark',
+        selectedTheme === WebShellThemeId.Dark,
+      );
+      portalRoot.lang = selectedLanguage;
+      for (let index = 0; index < computedStyle.length; index += 1) {
+        const name = computedStyle[index];
+        if (!name.startsWith('--')) continue;
+        nextNames.add(name);
+        portalRoot.style.setProperty(
+          name,
+          computedStyle.getPropertyValue(name),
+        );
+      }
+      for (const name of portalRootVariableNamesRef.current) {
+        if (!nextNames.has(name)) portalRoot.style.removeProperty(name);
+      }
+      portalRootVariableNamesRef.current = nextNames;
+    };
+    const scheduleSync = () => {
+      if (frameId === null) frameId = requestAnimationFrame(syncVariables);
+    };
+    syncVariables();
+    const observer = new MutationObserver(scheduleSync);
+    let element: HTMLElement | null = root;
+    while (element) {
+      observer.observe(element, {
+        attributes: true,
+        attributeFilter: ['class', 'style', 'data-theme', 'lang'],
+      });
+      element = element.parentElement;
+    }
+    window.addEventListener('resize', scheduleSync);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', scheduleSync);
+      if (frameId !== null) cancelAnimationFrame(frameId);
+    };
+  }, [appClassName, appStyle, portalRoot, selectedLanguage, selectedTheme]);
+
   return (
     <ThemeProvider value={selectedTheme}>
       <I18nProvider language={selectedLanguage}>
-        <div className={appClassName} style={appStyle} data-web-shell-root>
+        {/* prettier-ignore */}
+        <WebShellPortalRootContext.Provider value={portalRoot}>
+        <div
+          ref={appRootRef}
+          className={appClassName}
+          style={appStyle}
+          data-web-shell-root
+          data-web-shell-shadcn
+          lang={selectedLanguage}
+        >
           {!onToast && <ToastHost toasts={toasts} onDismiss={dismissToast} />}
           {showResumeDialog && (
             <DialogShell
@@ -6041,13 +6144,7 @@ export function App({
                           onDismissFollowup={onDismissFollowup}
                           composerInput={composerInput}
                           composerInputVersion={composerInputVersion}
-                          placeholderText={t(
-                            getComposerPlaceholderKey({
-                              catchingUp: Boolean(connection.catchingUp),
-                              isPreparingPrompt,
-                              isStreaming: streamingState !== 'idle',
-                            }),
-                          )}
+                          placeholderText={composerPlaceholderText}
                         />
                       </div>
                       {CustomFooter ? (
@@ -6176,6 +6273,7 @@ export function App({
             )}
           </div>
         </div>
+        </WebShellPortalRootContext.Provider>
       </I18nProvider>
     </ThemeProvider>
   );

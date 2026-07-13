@@ -1,0 +1,85 @@
+# .github/workflows/main-ci-failure-issue.yml
+
+name: 'Main CI Failure Issue'
+
+on:
+  workflow_run:
+    workflows: ['E2E Tests', 'SDK Python']
+    types: ['completed']
+
+permissions:
+  contents: 'read'
+  issues: 'write'
+
+defaults:
+  run:
+    shell: 'bash'
+
+jobs:
+  create_issue:
+    name: 'Create autofix issue'
+    if: "${{ github.repository == 'QwenLM/qwen-code' && github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.event == 'push' }}"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    steps:
+      - name: 'Create autofix-ready issue'
+        env:
+          GH_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          REPO: '${{ github.repository }}'
+          WORKFLOW_NAME: '${{ github.event.workflow_run.name }}'
+          WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
+          WORKFLOW_RUN_URL: '${{ github.event.workflow_run.html_url }}'
+          HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
+          HEAD_BRANCH: '${{ github.event.workflow_run.head_branch }}'
+          AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
+          BUG_LABEL: 'type/bug'
+          READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
+          AUTOFIX_APPROVED_LABEL: 'autofix/approved'
+        run: |-
+          short_sha="${HEAD_SHA:0:12}"
+          marker="qwen-main-ci-failure:${HEAD_SHA}"
+
+          apply_autofix_route() {
+            gh issue edit "$1" \
+              --repo "${REPO}" \
+              --add-label "${BUG_LABEL},${READY_FOR_AGENT_LABEL},${AUTOFIX_APPROVED_LABEL}" \
+              --add-assignee "${AUTOFIX_BOT}"
+          }
+
+          existing_issue="$(
+            gh issue list \
+              --repo "${REPO}" \
+              --state open \
+              --search "${marker} in:body" \
+              --json number \
+              --jq '.[0].number // ""'
+          )"
+
+          if [[ -n "${existing_issue}" ]]; then
+            echo "Issue #${existing_issue} already tracks CI failure for ${HEAD_SHA}."
+            apply_autofix_route "${existing_issue}"
+            exit 0
+          fi
+
+          body_file="$(mktemp)"
+          {
+            echo "<!-- ${marker} -->"
+            echo
+            echo "A main-branch CI run failed on \`${HEAD_BRANCH}\`."
+            echo
+            echo "- Workflow: ${WORKFLOW_NAME}"
+            echo "- Run: ${WORKFLOW_RUN_URL}"
+            echo "- Run ID: ${WORKFLOW_RUN_ID}"
+            echo "- Commit: ${HEAD_SHA}"
+            echo
+            echo "This issue is labeled for autofix so the existing agent can create a repair PR."
+          } > "${body_file}"
+
+          issue_url="$(
+            gh issue create \
+              --repo "${REPO}" \
+              --title "Main CI failed: ${WORKFLOW_NAME} on ${short_sha}" \
+              --body-file "${body_file}"
+          )"
+
+          apply_autofix_route "${issue_url}"
