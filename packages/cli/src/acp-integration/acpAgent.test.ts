@@ -5615,7 +5615,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       settings: {
         enableManagedAutoMemory: true,
         enableManagedAutoDream: true,
-        enableAutoSkill: true,
+        enableAutoSkill: false,
         autoSkillConfirm: true,
         enableTeamMemory: false,
         enableTeamMemorySync: false,
