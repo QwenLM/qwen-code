@@ -2474,8 +2474,8 @@ export class GeminiChat {
               break;
             }
 
-            // Invalid stream responses use an independent retry budget and do
-            // not consume the content retry budget.
+            // Invalid stream responses use INVALID_STREAM_RETRY_CONFIG, which
+            // is independent from HTTP retries handled by retryWithBackoff.
             const isInvalidStreamError = error instanceof InvalidStreamError;
             const maxInvalidStreamRetries =
               INVALID_STREAM_RETRY_CONFIG.maxRetries;

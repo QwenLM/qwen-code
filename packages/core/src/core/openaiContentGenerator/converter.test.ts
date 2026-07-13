@@ -642,6 +642,60 @@ describe('OpenAIContentConverter', () => {
       ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
     });
 
+    it('rejects raw thinking tags split across structured reasoning deltas', () => {
+      const stream = withStreamParser(new StreamingToolCallParser());
+      const prefix = converter.convertOpenAIChunkToGemini(
+        streamChunk('structured-reasoning-tag-prefix', {
+          reasoning_content: 'hidden <thi',
+        }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('structured-reasoning-tag-suffix', {
+          reasoning_content: 'nk>secret',
+        }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('visible-closing-tag', {
+          content: 'answer </think>',
+        }),
+        stream,
+      );
+
+      expect(prefix.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('split-reasoning-tag-finish', {}, 'stop'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('preserves literal thinking tags inside structured reasoning by themselves', () => {
+      const stream = withStreamParser(new StreamingToolCallParser());
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('structured-reasoning-quoted-tag', {
+          reasoning_content:
+            'The response format may mention <think> and </think> literally.',
+        }),
+        stream,
+      );
+
+      const finish = converter.convertOpenAIChunkToGemini(
+        streamChunk('quoted-tag-finish', {}, 'stop'),
+        stream,
+      );
+
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
+        {
+          thought: true,
+          text: 'The response format may mention <think> and </think> literally.',
+        },
+      ]);
+      expect(finish.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+    });
+
     it.each([
       ['closing tag', '</thi', 'nk> leaked visible reasoning'],
       [
@@ -964,26 +1018,56 @@ describe('OpenAIContentConverter', () => {
       expect(finish.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
     });
 
-    it('rejects an unambiguous leading opening prefix at stream finish', () => {
+    it('rejects a leading complete tag if structured reasoning arrives later', () => {
       const stream = withStreamParser(new StreamingToolCallParser());
+
       converter.convertOpenAIChunkToGemini(
-        streamChunk('reasoning-before-malformed-terminal-prefix', {
-          reasoning_content: 'hidden reasoning',
+        streamChunk('leading-tag-before-reasoning', {
+          content: '<think>leaked</think>final',
         }),
         stream,
       );
       converter.convertOpenAIChunkToGemini(
-        streamChunk('malformed-terminal-prefix', { content: '<think' }),
+        streamChunk('reasoning-after-leading-tag', {
+          reasoning_content: 'late hidden reasoning',
+        }),
         stream,
       );
 
       expect(() =>
         converter.convertOpenAIChunkToGemini(
-          streamChunk('malformed-terminal-prefix-finish', {}, 'stop'),
+          streamChunk('leading-tag-after-reasoning-finish', {}, 'stop'),
           stream,
         ),
       ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
     });
+
+    it.each([
+      ['opening', '<think'],
+      ['closing', '</thi'],
+    ])(
+      'rejects an unambiguous leading %s prefix at stream finish',
+      (_name, prefix) => {
+        const stream = withStreamParser(new StreamingToolCallParser());
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('reasoning-before-malformed-terminal-prefix', {
+            reasoning_content: 'hidden reasoning',
+          }),
+          stream,
+        );
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('malformed-terminal-prefix', { content: prefix }),
+          stream,
+        );
+
+        expect(() =>
+          converter.convertOpenAIChunkToGemini(
+            streamChunk('malformed-terminal-prefix-finish', {}, 'stop'),
+            stream,
+          ),
+        ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+      },
+    );
 
     it('marks a completed structured reasoning tag leak explicitly', () => {
       const stream = withStreamParser(new StreamingToolCallParser());
@@ -1060,7 +1144,7 @@ describe('OpenAIContentConverter', () => {
       ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
     });
 
-    it('rejects thinking tags held in thought parts at stream finish', () => {
+    it('preserves thinking tags held in thought parts without visible protocol text', () => {
       const stream = withStreamParser(new StreamingToolCallParser());
 
       const reasoning = converter.convertOpenAIChunkToGemini(
@@ -1071,25 +1155,34 @@ describe('OpenAIContentConverter', () => {
       );
       expect(reasoning.candidates?.[0]?.content?.parts).toEqual([]);
 
-      expect(() =>
-        converter.convertOpenAIChunkToGemini(
-          streamChunk(
-            'tagged-structured-reasoning-finish',
-            {
-              tool_calls: [
-                {
-                  index: 0,
-                  id: 'call_named',
-                  type: 'function',
-                  function: { name: 'run_shell_command', arguments: '{}' },
-                },
-              ],
-            },
-            'tool_calls',
-          ),
-          stream,
+      const finish = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'tagged-structured-reasoning-finish',
+          {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_named',
+                type: 'function',
+                function: { name: 'run_shell_command', arguments: '{}' },
+              },
+            ],
+          },
+          'tool_calls',
         ),
-      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+        stream,
+      );
+
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'hidden <think>leaked reasoning</think>' },
+        {
+          functionCall: {
+            id: 'call_named',
+            name: 'run_shell_command',
+            args: {},
+          },
+        },
+      ]);
     });
   });
 

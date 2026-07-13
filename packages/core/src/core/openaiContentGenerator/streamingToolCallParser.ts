@@ -72,8 +72,12 @@ export class StreamingToolCallParser {
     id?: string,
     name?: string,
   ): ToolCallParseResult {
-    if (!id && !name && !chunk.trim() && !this.buffers.has(index)) {
-      return { complete: false };
+    if (!id && !name && !chunk.trim()) {
+      const depth = this.depths.get(index) ?? 0;
+      const inString = this.inStrings.get(index) ?? false;
+      if (!this.buffers.has(index) || (depth === 0 && !inString)) {
+        return { complete: false };
+      }
     }
 
     let actualIndex = index;

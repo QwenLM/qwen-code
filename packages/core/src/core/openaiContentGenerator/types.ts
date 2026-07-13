@@ -90,6 +90,14 @@ export interface RequestContext {
    * making a matching visible tag suspicious at stream finish.
    */
   hasUntrustedThoughtTag?: boolean;
+  /**
+   * Request-scoped scanner state for raw thinking tags inside structured
+   * reasoning text. This catches tags split across reasoning deltas.
+   */
+  thoughtThinkingTagState?: {
+    pendingTag: string;
+    hasTag: boolean;
+  };
   /** Tracks whether this stream used structured reasoning deltas. */
   hasStructuredReasoningContent?: boolean;
   /**
@@ -101,6 +109,7 @@ export interface RequestContext {
     openTagCount: number;
     atVisibleStart: boolean;
     leaked: boolean;
+    leadingTag?: boolean;
   };
 }
 

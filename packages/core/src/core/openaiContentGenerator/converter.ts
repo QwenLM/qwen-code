@@ -1113,6 +1113,34 @@ function isPossibleThinkingTagPrefix(value: string): boolean {
   );
 }
 
+function scanThoughtThinkingTags(
+  text: string,
+  state: NonNullable<RequestContext['thoughtThinkingTagState']>,
+): void {
+  for (const char of text) {
+    if (!state.pendingTag) {
+      if (char === '<') {
+        state.pendingTag = char;
+      }
+      continue;
+    }
+
+    if (
+      /\s/.test(char) &&
+      SPACED_THINKING_TAG_PREFIX_PATTERN.test(state.pendingTag.toLowerCase())
+    ) {
+      continue;
+    }
+    state.pendingTag += char;
+    if (COMPLETE_THINKING_TAG_PATTERN.test(state.pendingTag)) {
+      state.hasTag = true;
+      state.pendingTag = '';
+    } else if (!isPossibleThinkingTagPrefix(state.pendingTag)) {
+      state.pendingTag = state.pendingTag.endsWith('<') ? '<' : '';
+    }
+  }
+}
+
 function isTerminalThinkingTagLeak(
   state: NonNullable<RequestContext['visibleThinkingTagState']>,
   hasMatchingThoughtTag: boolean,
@@ -1157,6 +1185,9 @@ function scanVisibleThinkingTags(
     state.pendingTag += char;
     if (COMPLETE_THINKING_TAG_PATTERN.test(state.pendingTag)) {
       const tagAtVisibleStart = state.atVisibleStart;
+      if (tagAtVisibleStart) {
+        state.leadingTag = true;
+      }
       if (state.pendingTag.startsWith('</')) {
         if (state.openTagCount === 0) {
           if (
@@ -1388,6 +1419,20 @@ export function convertOpenAIChunkToGemini(
           cumulativeMode: false,
         }),
       );
+      if (normalizedReasoningText) {
+        const thoughtThinkingTagState =
+          (requestContext.thoughtThinkingTagState ??= {
+            pendingTag: '',
+            hasTag: false,
+          });
+        scanThoughtThinkingTags(
+          normalizedReasoningText,
+          thoughtThinkingTagState,
+        );
+        if (thoughtThinkingTagState.hasTag) {
+          requestContext.hasUntrustedThoughtTag = true;
+        }
+      }
       if (
         normalizedReasoningText &&
         !requestContext.responseParsingOptions?.taggedThinkingTags
@@ -1496,6 +1541,9 @@ export function convertOpenAIChunkToGemini(
     }
     const hasMatchingThoughtTag =
       requestContext.hasUntrustedThoughtTag === true;
+    const hasSuspiciousThoughtTag =
+      hasMatchingThoughtTag ||
+      Boolean(requestContext.thoughtThinkingTagState?.pendingTag);
     if (!visibleThinkingTagState.leaked) {
       scanVisibleThinkingTags(
         getVisiblePartText(parts),
@@ -1511,14 +1559,14 @@ export function convertOpenAIChunkToGemini(
     const malformedThinkingTagLeak =
       Boolean(choice.finish_reason) &&
       hasStructuredReasoning &&
-      (requestContext.hasUntrustedThoughtTag === true ||
+      (visibleThinkingTagState.leadingTag === true ||
         visibleThinkingTagState.leaked ||
         isTerminalThinkingTagLeak(
           visibleThinkingTagState,
           hasMatchingThoughtTag,
         ));
     const hasUntrustedProtocolText =
-      requestContext.hasUntrustedThoughtTag === true || hasUntrustedVisibleTag;
+      hasSuspiciousThoughtTag || hasUntrustedVisibleTag;
     const toolCallWithoutName = toolCallParser.hasNamelessToolCall();
     const malformedNamelessToolCall =
       Boolean(choice.finish_reason) && toolCallWithoutName;

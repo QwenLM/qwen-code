@@ -548,6 +548,20 @@ describe('StreamingToolCallParser', () => {
         { id: 'call_3', name: 'function3', args: { x: 1 }, index: 2 },
       ]);
     });
+
+    it('ignores blank phantom chunks after a completed occupied index', () => {
+      parser.addChunk(0, '{"path":"a.ts"}', 'call_1', 'read_file');
+
+      for (let i = 0; i < 100; i++) {
+        parser.addChunk(0, '');
+      }
+      parser.addChunk(0, '{"path":"b.ts"}', 'call_2', 'read_file');
+
+      expect(parser.getCompletedToolCalls()).toEqual([
+        { id: 'call_1', name: 'read_file', args: { path: 'a.ts' }, index: 0 },
+        { id: 'call_2', name: 'read_file', args: { path: 'b.ts' }, index: 1 },
+      ]);
+    });
   });
 
   describe('Edge cases', () => {
