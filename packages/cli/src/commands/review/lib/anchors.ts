@@ -308,7 +308,13 @@ function pick(cands: Candidate[], claimedLine?: number): Candidate | null {
     // of 11, nothing distinguishes them, and answering 10 with a straight face
     // attaches a blocker to whichever occurrence happened to come first.
     const dist = (c: Candidate) => Math.abs(c.startLine - claimedLine);
-    const best = Math.min(...cands.map(dist));
+    // A loop, not `Math.min(...)`. The spread turns every candidate into a
+    // function argument, and a diff with enough repeated lines — a minified
+    // bundle, a generated table — crosses the engine's argument limit and throws
+    // a RangeError that takes the whole anchor batch down with it. Measured on
+    // Node 22: fine at 125 000 candidates, RangeError at 200 000.
+    let best = Infinity;
+    for (const c of cands) best = Math.min(best, dist(c));
     const nearest = cands.filter((c) => dist(c) === best);
     return nearest.length === 1 ? nearest[0] : null;
   }

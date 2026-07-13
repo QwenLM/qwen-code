@@ -207,7 +207,7 @@ function toRepoPathspec(repoRoot: string, file: string): string {
  * `Binary files /dev/null and b/logo.png differ` — that is the entire body. The
  * section parses, and it contains nothing to review.
  */
-function isBinarySection(section: Buffer): boolean {
+export function isBinarySection(section: Buffer): boolean {
   // Both halves of the old test were wrong, in opposite directions.
   //
   // It read only the first 4096 bytes, on the theory that a binary section is
@@ -426,7 +426,8 @@ export function captureLocalDiff(opts: {
             reason:
               `its diff is ${Math.round(section.length / 1000)} kB, over the ` +
               `${Math.round(MAX_UNTRACKED_BYTES / 1000)} kB untracked-file cap ` +
-              `(the file grew after it was measured)`,
+              `(the rendered diff, not the file — unified-diff framing and a ` +
+              `file that grew after it was measured both land here)`,
           });
           continue;
         }

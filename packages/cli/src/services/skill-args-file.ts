@@ -24,7 +24,7 @@
 // So the CLI writes the arguments down at launch, verbatim, before the model has
 // any say in it. Nothing to copy, nothing to miscopy.
 
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, openSync, writeSync, closeSync, constants } from 'node:fs';
 import { join } from 'node:path';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
@@ -33,16 +33,42 @@ const debugLogger = createDebugLogger('SKILL_ARGS_FILE');
 /** Where a skill finds the arguments it was invoked with. */
 export const SKILL_ARGS_DIR = join('.qwen', 'tmp');
 
+/** A component safe to put in a filename. */
+function safe(s: string): string {
+  return s.replace(/[^A-Za-z0-9._-]/g, '_');
+}
+
 /**
- * Path of the args file for `skillName`.
+ * The current session id, from the environment the CLI exports it to.
  *
- * Per-skill, so two skills invoked in one session cannot read each other's
- * arguments. The name is sanitised because it becomes a filename: a skill named
- * `../../etc/passwd` must not be able to choose where the CLI writes.
+ * `Config` sets `QWEN_CODE_SESSION_ID` for the whole process, and a `qwen review
+ * submit` subprocess spawned by the skill's shell tool inherits it — so both the
+ * loader that writes the args file and the subcommand that reads it derive the
+ * same path from the same id, with no model input in between. Empty string when
+ * unset (a bare `node dist/cli.js`), which simply means one un-scoped file.
  */
-export function skillArgsPath(skillName: string): string {
-  const safe = skillName.replace(/[^A-Za-z0-9._-]/g, '_');
-  return join(SKILL_ARGS_DIR, `qwen-skill-args-${safe}.txt`);
+export function currentSessionId(): string {
+  return process.env['QWEN_CODE_SESSION_ID']?.trim() ?? '';
+}
+
+/**
+ * Path of the args file for `skillName` in this session.
+ *
+ * **Scoped to the session**, not just the skill. A fixed per-skill name was
+ * forgeable and stale-prone: any file at a predictable path authorised a post,
+ * two concurrent reviews in one workspace raced last-writer-wins, and a bare
+ * invocation left a previous run's file behind to speak for this one. Keying on
+ * the session id — which the model cannot choose and cannot see — ties the record
+ * to the run that wrote it. Per-skill within that, so two skills in one session
+ * cannot read each other's arguments. Sanitised because both halves become a
+ * filename.
+ */
+export function skillArgsPath(
+  skillName: string,
+  sessionId: string = currentSessionId(),
+): string {
+  const scope = sessionId ? `${safe(sessionId)}-` : '';
+  return join(SKILL_ARGS_DIR, `qwen-skill-args-${scope}${safe(skillName)}.txt`);
 }
 
 /**
@@ -59,10 +85,27 @@ export function writeSkillArgs(skillName: string, args: string): string | null {
   const path = skillArgsPath(skillName);
   try {
     mkdirSync(SKILL_ARGS_DIR, { recursive: true });
-    // Verbatim. No trailing newline, no trimming, no shell quoting: the file is
-    // the argument string, byte for byte, and a parser reading it gets exactly
-    // what the user typed.
-    writeFileSync(path, args, 'utf8');
+    // `O_NOFOLLOW`, so a symlink planted at this path is an error, not a write
+    // through it — a reproduction overwrote an arbitrary user-writable file that
+    // way. `O_TRUNC` because a bare invocation leaves no file, so a stale one
+    // from a previous run must not survive to authorise this one. Mode 0600:
+    // arguments can carry a token, and the default 0644 makes them world-read.
+    //
+    // Verbatim otherwise. No trailing newline, no trimming, no shell quoting:
+    // the file is the argument string, byte for byte.
+    const fd = openSync(
+      path,
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_TRUNC |
+        constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      writeSync(fd, args, null, 'utf8');
+    } finally {
+      closeSync(fd);
+    }
     return path;
   } catch (err) {
     debugLogger.warn(

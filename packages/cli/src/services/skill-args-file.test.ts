@@ -11,6 +11,9 @@ import {
   readFileSync,
   existsSync,
   mkdirSync,
+  writeFileSync,
+  symlinkSync,
+  statSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, isAbsolute, relative, resolve } from 'node:path';
@@ -68,6 +71,46 @@ describe('writeSkillArgs', () => {
     // own tree — the traversal, had it worked, would have created these.)
     expect(existsSync(join(dir, 'etc'))).toBe(false);
     expect(existsSync(join(dir, '.qwen', 'etc'))).toBe(false);
+  });
+
+  it('scopes the path to the session, and derives the same path both sides', () => {
+    // The record must be tied to the run that wrote it, not to a predictable
+    // per-skill name any file could sit at. The session id — which the model
+    // cannot choose or see — is the key, and it is read from the environment on
+    // both the write and read sides.
+    const prev = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_SESSION_ID'] = 'abc-123';
+    try {
+      const p1 = skillArgsPath('review');
+      expect(p1).toContain('abc-123');
+      expect(p1).toContain('review');
+      // A different session is a different file.
+      process.env['QWEN_CODE_SESSION_ID'] = 'xyz-789';
+      expect(skillArgsPath('review')).not.toBe(p1);
+    } finally {
+      if (prev === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = prev;
+    }
+  });
+
+  it('refuses to write through a symlink planted at its path', () => {
+    // A reproduction overwrote an arbitrary user-writable victim this way.
+    // O_NOFOLLOW turns the planted link into an error, not a write through it.
+    const target = join(dir, 'victim.txt');
+    writeFileSync(target, 'precious');
+    const linkPath = skillArgsPath('review');
+    mkdirSync(join(dir, '.qwen', 'tmp'), { recursive: true });
+    symlinkSync(target, linkPath);
+
+    expect(writeSkillArgs('review', 'attacker')).toBeNull();
+    expect(readFileSync(target, 'utf8')).toBe('precious'); // untouched
+  });
+
+  it('writes the file mode 0600 — arguments can carry a secret', () => {
+    if (process.platform === 'win32') return;
+    writeSkillArgs('review', 'TOKEN=sk-secret');
+    const mode = statSync(skillArgsPath('review')).mode & 0o777;
+    expect(mode).toBe(0o600);
   });
 
   it('gives each skill its own file', () => {

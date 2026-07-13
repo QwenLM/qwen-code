@@ -172,6 +172,105 @@ describe('checkCoverage', () => {
   });
 });
 
+describe('checkCoverage — topology and roster', () => {
+  it('does not demand receipts under the dimension fan-out', () => {
+    // Step 3A has no receipts, and must not. The first cut demanded them anyway,
+    // which would have blocked EVERY small review at Step 4 with chunks it
+    // believed nobody read. Under the dimension topology the only question is
+    // whether each agent did a walk.
+    const r = checkCoverage(
+      [1, 2, 3],
+      splitReturns(
+        returnsFile([
+          [
+            'correctness',
+            'No issues found — walked all three hunks; the guard on line 12 ' +
+              'handles the empty case, and every changed export keeps its ' +
+              'signature.\n',
+          ],
+        ]),
+      ),
+      { topology: 'dimension' },
+    );
+    expect(r.ok).toBe(true);
+    expect(r.missingChunks).toEqual([]);
+  });
+
+  it('still flags a dimension agent that walked nothing', () => {
+    const r = checkCoverage(
+      [1, 2],
+      splitReturns(returnsFile([['security', 'No issues found.\n']])),
+      { topology: 'dimension' },
+    );
+    expect(r.ok).toBe(false);
+    expect(r.whiffedAgents).toEqual(['security']);
+  });
+
+  it('sees an expected agent that never returned at all', () => {
+    // Every chunk receipted, but the Security agent was never launched. A checker
+    // that only sees the returns that turned up cannot miss what is not there.
+    const r = checkCoverage(
+      [1],
+      splitReturns(returnsFile([['chunk 1', real(1)]])),
+      { topology: 'territory', expected: ['chunk 1', 'security'] },
+    );
+    expect(r.ok).toBe(false);
+    expect(r.missingAgents).toEqual(['security']);
+  });
+
+  it('does not credit a receipt for a chunk the agent was not assigned', () => {
+    // A chunk-1 agent whose receipt says `Covered: chunk 2` — a copy-paste, or a
+    // receipt quoted out of the untrusted diff this file sits in. The label
+    // carries the assignment; the receipt has to agree with it.
+    //
+    // Chunk 2 is deliberately NOT among the returns, so the only way it could
+    // appear as covered is by crediting the cross-claim. It must not: chunk 2 is
+    // missing, and chunk 1 — which brought no receipt of its own — is missing
+    // too. (An earlier version of this test kept chunk 2 present, so `[2]` came
+    // from chunk 2's own receipt and the cross-claim went unmeasured — the
+    // assertion matched the buggy behaviour exactly.)
+    const bad = checkCoverage(
+      [1, 2],
+      splitReturns(
+        returnsFile([
+          ['chunk 1', 'Covered: chunk 2 lines 1-9\nthe guard is inverted\n'],
+        ]),
+      ),
+    );
+    expect(bad.coveredChunks).toEqual([]); // the cross-claim credits nothing
+    expect(bad.missingChunks).toEqual([1, 2]);
+  });
+
+  it('flags a receipted chunk whose body still says nothing', () => {
+    // The substantive-return check must run WITH a receipt present, not only
+    // without one. A `Covered: chunk 3` followed by "No issues found." read the
+    // lines it was handed and looked at none of them.
+    const r = checkCoverage(
+      [3],
+      splitReturns(
+        returnsFile([
+          ['chunk 3', 'Covered: chunk 3 lines 1-9\nNo issues found.\n'],
+        ]),
+      ),
+    );
+    expect(r.coveredChunks).toEqual([3]);
+    expect(r.whiffedAgents).toEqual(['chunk 3']);
+    expect(r.ok).toBe(false);
+  });
+
+  it('sanitises a forged, control-laden agent label', () => {
+    const forged = `chunk 1 \u001b[2K\u0007${'x'.repeat(200)}`;
+    const r = checkCoverage(
+      [1],
+      splitReturns(`=== AGENT: ${forged} ===\n${real(1)}`),
+    );
+    // No control byte survives into the report — a diff-induced `=== AGENT:`
+    // line could otherwise fabricate a return and drive the reader's terminal.
+    // eslint-disable-next-line no-control-regex
+    expect(/[\u0000-\u001f]/.test(JSON.stringify(r))).toBe(false);
+  });
+});
+
 describe('check-coverage (command boundary)', () => {
   let dir: string;
   beforeEach(() => {
@@ -196,6 +295,7 @@ describe('check-coverage (command boundary)', () => {
       plan,
       returns,
       out,
+      topology: 'territory',
     });
     return JSON.parse(readFileSync(out, 'utf8'));
   }
@@ -222,6 +322,24 @@ describe('check-coverage (command boundary)', () => {
     );
     expect(report.ok).toBe(true);
     expect(process.exitCode).toBeUndefined();
+  });
+
+  it('refuses a plan that is not a plan', () => {
+    // `{}` parses, and a zero-chunk plan is a review with nothing to cover. Point
+    // the command at the wrong artifact and it would exit 0 over a diff it never
+    // saw.
+    const plan = join(dir, 'plan.json');
+    const returns = join(dir, 'returns.txt');
+    writeFileSync(plan, JSON.stringify({}));
+    writeFileSync(returns, returnsFile([['chunk 1', real(1)]]));
+    expect(() =>
+      (checkCoverageCommand.handler as (a: unknown) => void)({
+        plan,
+        returns,
+        out: join(dir, 'c.json'),
+        topology: 'territory',
+      }),
+    ).toThrow(/no .chunks/);
   });
 
   it('refuses a returns file with no agent blocks at all', () => {

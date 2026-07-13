@@ -99,6 +99,29 @@ describe('the posting gate', () => {
     expect(process.exitCode).toBe(3);
   });
 
+  it('ignores a caller-supplied --skill-args when a session id is present', () => {
+    // `--skill-args` was the last forgeable seam: a model could point the gate at
+    // a file it wrote. In a real run a session id is exported to the environment,
+    // and both the loader (write) and submit (read) derive the path from it — so
+    // a caller-supplied path is honoured only when there is no session (tests),
+    // and ignored otherwise.
+    const forged = file('forged.txt', '6771 --comment'); // says yes
+    const realArgs = join('.qwen', 'tmp', 'qwen-skill-args-sess1-review.txt');
+    const prev = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_SESSION_ID'] = 'sess1';
+    try {
+      // The session-scoped file does not exist, so the gate refuses — it did NOT
+      // read `forged`, which would have authorised the post.
+      runSubmit(args({ skillArgs: forged }));
+      expect(ghMock).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(3);
+      expect(realArgs).toBeTruthy();
+    } finally {
+      if (prev === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = prev;
+    }
+  });
+
   it('does not open on a hand-written verdict — the gate reads the user, not the caller', () => {
     // The obvious design reads `comment.effective` out of the parser's JSON
     // *output*. That is a document the caller wrote: a model that wants to post

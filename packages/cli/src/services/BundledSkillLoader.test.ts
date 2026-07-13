@@ -370,12 +370,25 @@ describe('BundledSkillLoader', () => {
       'qwen3-coder',
     );
 
-    const loader = new BundledSkillLoader(mockConfig);
-    const commands = await loader.loadCommands(signal);
-    const result = (await commands[0].action!(
-      { invocation: { raw: '/review 123', args: '123' } } as never,
-      '123',
-    )) as { type: string; content: Array<{ text: string }> };
+    // An argument-bearing invoke writes the args file; keep it in a throwaway
+    // cwd so the suite does not leave `.qwen/tmp/qwen-skill-args-review.txt` in
+    // the real repository.
+    const argDir = mkdtempSync(join(tmpdir(), 'bundled-model-args-'));
+    const argCwd = process.cwd();
+    process.chdir(argDir);
+
+    let result: { type: string; content: Array<{ text: string }> };
+    try {
+      const loader = new BundledSkillLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      result = (await commands[0].action!(
+        { invocation: { raw: '/review 123', args: '123' } } as never,
+        '123',
+      )) as { type: string; content: Array<{ text: string }> };
+    } finally {
+      process.chdir(argCwd);
+      rmSync(argDir, { recursive: true, force: true });
+    }
 
     expect(result.type).toBe('submit_prompt');
     const text = result.content[0].text;

@@ -511,6 +511,27 @@ describe('resolveAnchor', () => {
   });
 });
 
+it('does not throw on a candidate set past the argument-spread limit', () => {
+  // `Math.min(...cands.map(dist))` turns every candidate into a function
+  // argument; a diff with enough repeated lines crosses the engine limit and
+  // throws a RangeError that takes the whole batch down. 200 000 identical
+  // added lines, one claim: a loop must survive it.
+  const N = 200_000;
+  const body = Array.from({ length: N }, () => '+dup();').join('\n');
+  const diff = [
+    'diff --git a/big.ts b/big.ts',
+    '--- a/big.ts',
+    '+++ b/big.ts',
+    `@@ -1,0 +1,${N} @@`,
+    body,
+    '',
+  ].join('\n');
+  const hay = lines(diff, 'big.ts');
+  // A claim in the middle: many candidates are equidistant, so it resolves to
+  // `unmatched` — but it must get there without a RangeError.
+  expect(() => resolveAnchor(hay, 'dup();', N / 2)).not.toThrow();
+});
+
 describe('resolveAnchors (batch)', () => {
   it('resolves against the right file and reports one that is not in the diff', () => {
     const out = resolveAnchors(PAY_DIFF, [

@@ -490,17 +490,31 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
 describe('coverage caps the verdict', () => {
   const base = { criticalsInline: 0, suggestionsInline: 0, modelId: 'm' };
 
-  it('forbids an Approve over chunks nobody receipted', () => {
-    // The dogfood failure, at the one place that could still have stopped it:
-    // 22 of 25 agents returned nothing, the orchestrator passed empty cap lists
-    // — which is exactly what a clean review looks like — and this composed an
-    // APPROVE over 4 925 lines nobody had read. The coverage is now *shown*, not
-    // asserted, and its gaps are the cap.
+  it('forbids an Approve on `ok: false` alone', () => {
+    // A report that says the coverage check failed is the strongest statement in
+    // this input; it must cap without needing an itemised list to be believed.
+    const r = composeReview({ ...base, coverage: { ok: false } });
+    expect(r.event).not.toBe('APPROVE');
+  });
+
+  it('forbids an Approve on a missing receipt alone', () => {
+    // Independently of `ok`: a chunk nobody receipted caps on its own.
+    const r = composeReview({
+      ...base,
+      coverage: { ok: true, missingChunks: [1, 2, 3] },
+    });
+    expect(r.event).not.toBe('APPROVE');
+    expect(r.body).toContain('chunk 1');
+    // And with its true cause, not the uncoverable renderer's read-limit excuse.
+    expect(r.body).toContain('nobody read them');
+    expect(r.body).not.toContain('exceeds the read limit');
+  });
+
+  it('the dogfood failure: empty findings, unread diff, no Approve', () => {
     const r = composeReview({
       ...base,
       coverage: { missingChunks: [1, 2, 3], whiffedAgents: [], ok: false },
     });
-
     expect(r.event).not.toBe('APPROVE');
     expect(r.body).toContain('chunk 1');
   });

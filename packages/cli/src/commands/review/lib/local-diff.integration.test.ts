@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   captureLocalDiff,
+  isBinarySection,
   MAX_UNTRACKED_BYTES,
   MAX_UNTRACKED_FILES,
   MAX_UNTRACKED_TOTAL_BYTES,
@@ -389,24 +390,30 @@ describe('captureLocalDiff — untracked files', () => {
     expect(res.text).toContain('GIT binary patch is a format git uses.');
   });
 
-  it('still catches a binary file whose header is pushed past 4 kB by its path', () => {
+  it('still catches a binary marker sitting past the first 4 kB', () => {
     // The window the old check read was 4096 bytes, on the theory that a binary
-    // section is short. Its *header* is short; the path in it is not bounded, and
-    // a Linux path can run to 4096 bytes on its own — pushing git's marker out of
-    // the window and certifying unreadable bytes as reviewed.
-    const deep = Array.from({ length: 40 }, (_, i) => `d${i}`.repeat(20)).join(
-      '/',
+    // section is short. Its *header* is short; the path in it is not, and a long
+    // enough path pushes git's marker out of the window, certifying unreadable
+    // bytes as reviewed. The property is about where the marker sits in the
+    // section — exercise it directly, without a 4 kB filesystem path that macOS
+    // (PATH_MAX 1024) rejects with ENAMETOOLONG, reddening the very CI leg the
+    // cross-platform test was added for.
+    const filler = '+' + 'x'.repeat(5000) + '\n';
+    const section = Buffer.from(
+      'diff --git a/logo.png b/logo.png\n' +
+        filler +
+        'Binary files /dev/null and b/logo.png differ\n',
     );
-    mkdirSync(join(repo, deep), { recursive: true });
-    writeFileSync(
-      join(repo, deep, 'logo.png'),
-      Buffer.from([0, 1, 2, 3, 0, 255]),
-    );
+    expect(isBinarySection(section)).toBe(true);
 
-    const res = capture();
-    expect(res.untracked).toEqual([]);
-    expect(res.skipped).toHaveLength(1);
-    expect(res.skipped[0].reason).toContain('binary');
+    // And a text line that merely mentions the marker is still not binary,
+    // wherever it sits.
+    const prose = Buffer.from(
+      'diff --git a/n.md b/n.md\n' +
+        filler +
+        '+GIT binary patch is a phrase that appears in prose.\n',
+    );
+    expect(isBinarySection(prose)).toBe(false);
   });
 
   it('never claims to have reviewed a binary file', () => {

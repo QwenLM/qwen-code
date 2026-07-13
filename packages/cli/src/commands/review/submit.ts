@@ -30,7 +30,10 @@ import { readFileSync } from 'node:fs';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { gh, setGhHost } from './lib/gh.js';
 import { parseReviewArgs } from './parse-args.js';
-import { skillArgsPath } from '../../services/skill-args-file.js';
+import {
+  skillArgsPath,
+  currentSessionId,
+} from '../../services/skill-args-file.js';
 
 /**
  * Where the CLI records a skill's invocation arguments, verbatim, before the
@@ -40,7 +43,12 @@ import { skillArgsPath } from '../../services/skill-args-file.js';
  * `skill-args-file.ts`" and nothing would keep it: rename the file there and the
  * gate silently stops finding the authorisation and refuses every post.
  */
-const DEFAULT_SKILL_ARGS_PATH = skillArgsPath('review');
+// Derived from the session id at call time, not a constant: the args file is
+// named for the session that wrote it, and `submit` (a subprocess of that
+// session) reads the same name from the same inherited `QWEN_CODE_SESSION_ID`.
+function defaultSkillArgsPath(): string {
+  return skillArgsPath('review');
+}
 
 /** The only events GitHub's Create Review API accepts. */
 const EVENTS = new Set(['APPROVE', 'REQUEST_CHANGES', 'COMMENT']);
@@ -109,7 +117,16 @@ function authorization(args: SubmitArgs): { ok: boolean; why: string } {
   // keystrokes and this file has an opinion. So the gate reads *that*, and runs
   // the same tested parser on it. Forging authorisation now means forging the
   // user's own input, which is not something a careless run does by accident.
-  const path = args.skillArgs ?? DEFAULT_SKILL_ARGS_PATH;
+  // The session-scoped path is derived here, from the environment, on both the
+  // write and read sides — the model never names it. `--skill-args` is a test
+  // seam only (there is no session id under vitest); honouring a caller-supplied
+  // path in a real run would hand the gate back the model-writable file the whole
+  // design removed, so it is ignored whenever a session id is present.
+  const sessionScoped = defaultSkillArgsPath();
+  const path =
+    currentSessionId() === '' && args.skillArgs
+      ? args.skillArgs
+      : sessionScoped;
   let raw: string;
   try {
     raw = readFileSync(path, 'utf8');

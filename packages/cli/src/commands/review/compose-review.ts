@@ -183,6 +183,11 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // report's own gaps are added to it — a run cannot approve past a chunk nobody
   // receipted or an agent that returned nothing, and it cannot do so by leaving
   // the lists empty.
+  // Separate from `uncoverable`. The uncoverable renderer explains the gap as
+  // "a line there exceeds the read limit", which is true of an uncoverable chunk
+  // and a fabrication about a chunk nobody receipted. The public body would give
+  // the author a false cause.
+  const missingReceipts: number[] = [];
   const coverageRaw: unknown = input.coverage ?? {};
   if (typeof coverageRaw !== 'object' || Array.isArray(coverageRaw)) {
     throw new TypeError(
@@ -190,17 +195,40 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     );
   }
   const cov = coverageRaw as Record<string, unknown>;
-  for (const id of toNumberList(
-    cov['missingChunks'],
-    'coverage.missingChunks',
-  )) {
-    uncoverable.push(`chunk ${id} — no agent receipted it; nobody read it`);
-  }
-  for (const label of toStringList(
-    cov['whiffedAgents'],
-    'coverage.whiffedAgents',
-  )) {
-    unreviewed.push(`${label} — the agent returned nothing substantive`);
+
+  // A cap that only fires on the caller's say-so is not a cap. The first cut of
+  // this read `missingChunks` and `whiffedAgents` and nothing else — so an
+  // absent `coverage`, a `coverage: {ok: false}`, and a report carrying an
+  // uncoverable chunk **all composed an APPROVE**. The doc comment above
+  // promised "omitting it is itself a cap" and the code did not implement it.
+  //
+  // Every one of these is a cap now, and `ok: false` is a cap on its own: a
+  // report that says the coverage check failed is the strongest statement in
+  // this input, and it must not need an itemised list to be believed.
+  if (input.coverage !== undefined && input.coverage !== null) {
+    if (cov['ok'] !== true && Object.keys(cov).length > 0) {
+      unreviewed.push(
+        'coverage — the `check-coverage` report says the diff was not covered',
+      );
+    }
+    for (const id of toNumberList(
+      cov['missingChunks'],
+      'coverage.missingChunks',
+    )) {
+      missingReceipts.push(id);
+    }
+    for (const id of toNumberList(
+      cov['uncoverableChunks'],
+      'coverage.uncoverableChunks',
+    )) {
+      uncoverable.push(`chunk ${id}`);
+    }
+    for (const label of toStringList(
+      cov['whiffedAgents'],
+      'coverage.whiffedAgents',
+    )) {
+      unreviewed.push(`${label} — the agent returned nothing substantive`);
+    }
   }
   const contextUnavailable = toBool(
     input.contextUnavailable,
@@ -248,6 +276,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // softened by them.
   const cappedBy: string[] = [];
   if (cannotTell.length > 0) cappedBy.push('cannot-tell-existing-critical');
+  if (missingReceipts.length > 0) cappedBy.push('chunk-nobody-read');
   if (uncoverable.length > 0) cappedBy.push('uncoverable-chunk');
   if (unreviewed.length > 0) cappedBy.push('unreviewed-dimension');
   if (contextUnavailable) cappedBy.push('context-unavailable');
@@ -277,6 +306,17 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // Criticals) on REQUEST_CHANGES: the blocker must not squeeze out the
   // disclosure of what was never read.
   const notReviewedParts: string[] = [];
+  if (missingReceipts.length > 0) {
+    // Its own sentence, because its own cause. The clause below explains a gap
+    // as a line too long to read, which is true of an *uncoverable* chunk and a
+    // fabrication about one nobody receipted — the author would be told the diff
+    // defeated the reader, when in fact no reader turned up.
+    notReviewedParts.push(
+      `Not reviewed: ${missingReceipts
+        .map((id) => `chunk ${id}`)
+        .join(', ')} — no agent reported covering these; nobody read them.`,
+    );
+  }
   if (uncoverable.length > 0) {
     notReviewedParts.push(
       `Not reviewed: ${uncoverable.join(', ')} — a line there exceeds the read limit.`,

@@ -40,6 +40,8 @@ interface CheckCoverageArgs {
   plan: string;
   returns: string;
   out: string;
+  topology: 'territory' | 'dimension';
+  expect?: string;
 }
 
 /**
@@ -65,6 +67,25 @@ const WHIFF_CHARS = 40;
 const BARE_RE = /^\s*no issues found[.!]?\s*$/i;
 
 const AGENT_RE = /^===\s*AGENT:\s*(.+?)\s*===\s*$/;
+const OWN_CHUNK_RE = /\bchunk\s+(\d+)\b/i;
+
+/**
+ * The chunk this agent was assigned, from its label — or null for a whole-diff
+ * agent, which owns no territory and may receipt nothing.
+ */
+function ownChunk(label: string): number | null {
+  const m = OWN_CHUNK_RE.exec(label);
+  return m ? Number(m[1]) : null;
+}
+
+/** The receipt lines, removed — what is left is the review, if there was one. */
+function stripReceipts(body: string): string {
+  return body
+    .split('\n')
+    .filter((l) => !/^\s*(Covered|Uncoverable):/i.test(l))
+    .join('\n')
+    .trim();
+}
 const COVERED_RE = /^\s*Covered:\s*chunk\s+(\d+)\b/im;
 const UNCOVERABLE_RE = /^\s*Uncoverable:\s*chunk\s+(\d+)\b/im;
 
@@ -81,13 +102,26 @@ export function splitReturns(text: string): AgentReturn[] {
     const m = AGENT_RE.exec(line);
     if (m) {
       if (cur) out.push(cur);
-      cur = { label: m[1], body: '' };
+      // The label is a filename's cousin: it is copied from a prompt the diff
+      // helped write, and it is printed to a terminal. Bound it and strip the
+      // control characters, or a `=== AGENT: <ESC>[2K ===` line sitting inside
+      // the diff under review — this file is in that diff — forges a return and
+      // drives the reader's terminal.
+      cur = { label: sanitiseLabel(m[1]), body: '' };
       continue;
     }
     if (cur) cur.body += line + '\n';
   }
   if (cur) out.push(cur);
   return out;
+}
+
+/** A label safe to put on a terminal, and short enough to read. */
+function sanitiseLabel(raw: string): string {
+  // eslint-disable-next-line no-control-regex
+  const CONTROL = /[\u0000-\u001f\u007f]/g;
+  const clean = raw.replace(CONTROL, '?').slice(0, 80);
+  return clean.trim() || '(unnamed agent)';
 }
 
 export interface CoverageReport {
@@ -98,6 +132,9 @@ export interface CoverageReport {
   missingChunks: number[];
   /** Agents whose return carries no receipt and says nothing. */
   whiffedAgents: string[];
+  /** Agents the caller said to expect, whose return never arrived at all. */
+  missingAgents: string[];
+  topology: 'territory' | 'dimension';
   agents: number;
   ok: boolean;
 }
@@ -105,27 +142,63 @@ export interface CoverageReport {
 export function checkCoverage(
   plannedChunks: number[],
   returns: AgentReturn[],
+  opts: { topology: 'territory' | 'dimension'; expected?: string[] } = {
+    topology: 'territory',
+  },
 ): CoverageReport {
+  // Receipts are a **territory** idea. In the dimension fan-out every agent
+  // walks the whole chunk plan, so "exactly one receipt per chunk" would demand
+  // either none or one per diff-reading agent — and the prompt says so outright:
+  // "Step 3A has no receipts, and must not."
+  //
+  // The first cut of this command demanded them anyway, which would have blocked
+  // **every small review** at Step 4 with eighteen chunks it believed nobody had
+  // read. Under the dimension fan-out the coverage question is a different one:
+  // did each agent do a walk? That is the substantive-return check, and it is
+  // the only one that applies.
+  const territory = opts.topology === 'territory';
   const covered = new Set<number>();
   const uncoverable = new Set<number>();
   const whiffed: string[] = [];
 
   for (const r of returns) {
-    const c = COVERED_RE.exec(r.body);
-    const u = UNCOVERABLE_RE.exec(r.body);
-    if (c) covered.add(Number(c[1]));
-    if (u) uncoverable.add(Number(u[1]));
-
-    // A return with no receipt has to earn its silence with evidence. The
-    // whole-diff agents owe no receipt, so this is the only check they get.
     const body = r.body.trim();
-    if (!c && !u && (body.length < WHIFF_CHARS || BARE_RE.test(body))) {
-      whiffed.push(r.label);
+
+    // A return with no receipt has to earn its silence with evidence — and so
+    // does one *with* a receipt. The first cut only ran this check when no
+    // receipt was present, so a chunk agent that emitted `Covered: chunk 3` and
+    // then "No issues found." cleared coverage having read nothing. The receipt
+    // says which lines it was given; only the body says whether it looked.
+    const substantive =
+      body.length >= WHIFF_CHARS && !BARE_RE.test(stripReceipts(body));
+
+    // A receipt is a claim about the agent's **own** territory. Parsed loose, a
+    // chunk-1 agent could receipt chunk 2 — or quote a receipt out of the diff it
+    // is reviewing, since the diff is untrusted text and this file is in it. The
+    // label carries the assignment (`chunk 7`), so the receipt has to agree with
+    // it, and a whole-diff agent (no chunk in its label) cannot receipt anything.
+    const own = ownChunk(r.label);
+    const c = COVERED_RE.exec(body);
+    const u = UNCOVERABLE_RE.exec(body);
+    if (own !== null) {
+      if (c && Number(c[1]) === own) covered.add(own);
+      if (u && Number(u[1]) === own) uncoverable.add(own);
     }
+
+    if (!substantive) whiffed.push(r.label);
   }
 
-  const missing = plannedChunks.filter(
-    (id) => !covered.has(id) && !uncoverable.has(id),
+  const missing = territory
+    ? plannedChunks.filter((id) => !covered.has(id) && !uncoverable.has(id))
+    : [];
+
+  // An agent that was never launched leaves no return, and a checker that only
+  // sees the returns that turned up cannot miss what is not there. With every
+  // chunk receipted and the Security agent simply never started, the report was
+  // `ok: true` and the review could approve — the lens nobody ran was invisible.
+  const seen = new Set(returns.map((r) => r.label.toLowerCase().trim()));
+  const missingAgents = (opts.expected ?? []).filter(
+    (label) => !seen.has(label.toLowerCase().trim()),
   );
 
   return {
@@ -134,10 +207,16 @@ export function checkCoverage(
     uncoverableChunks: [...uncoverable].sort((a, b) => a - b),
     missingChunks: missing,
     whiffedAgents: whiffed,
+    missingAgents,
+    topology: opts.topology,
     agents: returns.length,
     // `uncoverable` is a disclosed gap, not a failure — it still forbids an
-    // Approve downstream. Missing chunks and whiffed agents are the failure.
-    ok: missing.length === 0 && whiffed.length === 0,
+    // Approve downstream (compose-review caps on it). A chunk nobody receipted,
+    // an agent that said nothing, and an agent that never ran are failures.
+    ok:
+      missing.length === 0 &&
+      whiffed.length === 0 &&
+      missingAgents.length === 0,
   };
 }
 
@@ -150,7 +229,22 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
       `Cannot read the chunk plan ${args.plan}: ${(err as Error).message}`,
     );
   }
-  const planned = (plan.chunks ?? []).map((c) => c.id);
+  // `{}` parses, and a zero-chunk plan is a review with nothing to cover: point
+  // this at the wrong artifact and the command exits 0 over a diff it never saw.
+  if (!Array.isArray(plan.chunks) || plan.chunks.length === 0) {
+    throw new Error(
+      `${args.plan} carries no \`chunks[]\`. That is not a chunk plan — pass the ` +
+        `report from fetch-pr / capture-local / plan-diff for THIS review. A ` +
+        `plan with no chunks would let the check pass over a diff nobody saw.`,
+    );
+  }
+  const planned = plan.chunks.map((c) => c.id);
+  if (planned.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
+    throw new Error(`${args.plan} has a chunk with no positive integer id.`);
+  }
+  if (new Set(planned).size !== planned.length) {
+    throw new Error(`${args.plan} has duplicate chunk ids.`);
+  }
 
   let text: string;
   try {
@@ -170,7 +264,14 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
     );
   }
 
-  const report = checkCoverage(planned, returns);
+  const expected = (args.expect ?? '')
+    .split(',')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const report = checkCoverage(planned, returns, {
+    topology: args.topology,
+    expected,
+  });
 
   mkdirSync(dirname(resolve(args.out)), { recursive: true });
   writeFileSync(args.out, JSON.stringify(report, null, 2), 'utf8');
@@ -190,6 +291,13 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         `${report.missingChunks.join(', ')}. Nobody read those lines. Relaunch ` +
         `an agent for each before Step 4; do not aggregate findings over a diff ` +
         `that was not read, and do not certify what nobody looked at.`,
+    );
+  }
+  if (report.missingAgents.length > 0) {
+    writeStderrLine(
+      `ERROR: ${report.missingAgents.length} expected agent(s) never ` +
+        `returned — ${report.missingAgents.join(', ')}. A lens nobody ran is ` +
+        `not a lens that found nothing. Launch each before Step 4.`,
     );
   }
   if (report.whiffedAgents.length > 0) {
@@ -231,6 +339,18 @@ export const checkCoverageCommand: CommandModule = {
         type: 'string',
         demandOption: true,
         describe: 'Output JSON path (will be overwritten)',
+      })
+      .option('topology', {
+        type: 'string',
+        choices: ['territory', 'dimension'] as const,
+        default: 'territory' as const,
+        describe:
+          'territory (Step 3B: one receipt per chunk) or dimension (Step 3A: no receipts, every agent walks the whole plan)',
+      })
+      .option('expect', {
+        type: 'string',
+        describe:
+          'Comma-separated labels of every agent launched, so an agent that never returned is caught',
       }),
   handler: (argv) => {
     runCheckCoverage(argv as unknown as CheckCoverageArgs);
