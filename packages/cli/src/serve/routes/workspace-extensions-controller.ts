@@ -317,7 +317,7 @@ export function createExtensionsController(
                 ),
               );
             }, EXTENSION_REFRESH_TIMEOUT_MS);
-            timer.unref();
+            timer.unref?.();
           }),
         ]);
         return result;
@@ -403,7 +403,7 @@ export function createExtensionsController(
               error.code = 'extension_prepare_timeout';
               deadlineController.abort(error);
             }, options.deadlineMs);
-            deadline.unref();
+            deadline.unref?.();
           }
         };
         const context: ExtensionOperationContext = {
