@@ -9,10 +9,14 @@ export interface FifoTaskQueue {
     task: () => Promise<T>,
     options?: { signal?: AbortSignal; onStart?: () => void },
   ): Promise<T>;
+  runUntilReleased<T>(
+    task: (release: () => void) => Promise<T>,
+    options?: { signal?: AbortSignal; onStart?: () => void },
+  ): Promise<T>;
 }
 
 type QueuedTask = {
-  task: () => Promise<unknown>;
+  task: (release: () => void) => Promise<unknown>;
   signal?: AbortSignal;
   onStart?: () => void;
   resolve: (value: unknown) => void;
@@ -52,18 +56,22 @@ export function createFifoTaskQueue(limit: number): FifoTaskQueue {
         item.reject(error);
         continue;
       }
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        active -= 1;
+        pump();
+      };
       Promise.resolve()
-        .then(item.task)
+        .then(() => item.task(release))
         .then(item.resolve, item.reject)
-        .finally(() => {
-          active -= 1;
-          pump();
-        });
+        .finally(release);
     }
   };
 
-  const run = <T>(
-    task: () => Promise<T>,
+  const enqueue = <T>(
+    task: (release: () => void) => Promise<T>,
     options: { signal?: AbortSignal; onStart?: () => void } = {},
   ): Promise<T> =>
     new Promise<T>((resolve, reject) => {
@@ -94,5 +102,10 @@ export function createFifoTaskQueue(limit: number): FifoTaskQueue {
       pump();
     });
 
-  return { run };
+  const run = <T>(
+    task: () => Promise<T>,
+    options?: { signal?: AbortSignal; onStart?: () => void },
+  ): Promise<T> => enqueue(async () => await task(), options);
+
+  return { run, runUntilReleased: enqueue };
 }

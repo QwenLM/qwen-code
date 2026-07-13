@@ -132,9 +132,11 @@ does not change the store, cache, or runtime. Prepared mutations enter a
 separate single-concurrency FIFO commit queue in the order preparation
 finishes. Activation and uninstall enter only the commit queue; check-updates
 enters only the preparation queue. Manual refresh is serialized through the
-commit queue, while post-commit runtime reconciliation enters neither queue.
-Cleanup and runtime reconciliation do not occupy either slot, so later commits
-may proceed while an earlier generation is reconciling.
+commit queue. The commit lane is released after the store commit and settings
+commit; extension reload, manager runtime refresh, prepared-file cleanup, and
+daemon runtime reconciliation run outside it. These post-commit steps do not
+occupy either slot, so later commits may proceed while an earlier generation is
+being applied or cleaned up.
 
 The preparation deadline starts when an operation first acquires a preparation
 slot, not while it waits. Abort is propagated to network operations. A started

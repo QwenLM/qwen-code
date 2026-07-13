@@ -103,7 +103,7 @@ export interface ExtensionOperationContext {
       warnings?: ReadonlyArray<{ code: string; error: string }>;
     },
   >(
-    task: () => Promise<T>,
+    task: (onCommitted: (generation: number) => void) => Promise<T>,
   ): Promise<T>;
 }
 
@@ -431,14 +431,20 @@ export function createExtensionsController(
               warnings?: ReadonlyArray<{ code: string; error: string }>;
             },
           >(
-            task: () => Promise<T>,
+            task: (onCommitted: (generation: number) => void) => Promise<T>,
           ): Promise<T> => {
             updateExtensionOperation(operationId, {
               status: 'running',
               phase: 'committing',
             });
-            const result = await commitQueue.run(task);
-            committedGeneration = result.generation;
+            const result = await commitQueue.runUntilReleased(
+              async (release) =>
+                await task((generation) => {
+                  committedGeneration = generation;
+                  release();
+                }),
+            );
+            committedGeneration ??= result.generation;
             for (const warning of result.warnings ?? []) {
               commitWarnings.push({
                 workspaceCwd: boundWorkspace,

@@ -62,6 +62,79 @@ describe('createExtensionsController', () => {
     releaseRefresh?.({ refreshed: 0, failed: 0 });
   });
 
+  it('releases the commit lane at the durable commit boundary', async () => {
+    let finishPostCommit!: () => void;
+    const postCommit = new Promise<void>((resolve) => {
+      finishPostCommit = resolve;
+    });
+    const controller = createExtensionsController({
+      boundWorkspace: '/work/bound',
+      bridge: {} as AcpSessionBridge,
+      workspace: {} as DaemonWorkspaceService,
+    });
+    const manager = {
+      refreshCache: vi.fn(async () => undefined),
+    } as unknown as ExtensionManager;
+    const response = () =>
+      ({
+        status: vi.fn().mockReturnThis(),
+        location: vi.fn().mockReturnThis(),
+        set: vi.fn().mockReturnThis(),
+        json: vi.fn(),
+      }) as unknown as Response;
+    let firstCommitted!: () => void;
+    const durableCommit = new Promise<void>((resolve) => {
+      firstCommitted = resolve;
+    });
+    let finishFirstOperation!: () => void;
+    const firstOperationFinished = new Promise<void>((resolve) => {
+      finishFirstOperation = resolve;
+    });
+    let finishSecondOperation!: () => void;
+    const secondOperationFinished = new Promise<void>((resolve) => {
+      finishSecondOperation = resolve;
+    });
+    let secondStarted = false;
+
+    controller.runQueuedExtensionMutation(
+      'install',
+      { name: 'first' },
+      response(),
+      async (_extensionManager, _signal, context) => {
+        await context!.commit(async (onCommitted) => {
+          onCommitted(1);
+          firstCommitted();
+          await postCommit;
+          return { generation: 1 };
+        });
+        finishFirstOperation();
+        return { status: 'installed', name: 'first' };
+      },
+      { manager, skipRefresh: true },
+    );
+    await durableCommit;
+
+    controller.runQueuedExtensionMutation(
+      'enable',
+      { name: 'second' },
+      response(),
+      async (_extensionManager, _signal, context) => {
+        await context!.commit(async (onCommitted) => {
+          secondStarted = true;
+          onCommitted(2);
+          return { generation: 2 };
+        });
+        finishSecondOperation();
+        return { status: 'enabled', name: 'second' };
+      },
+      { manager, skipRefresh: true },
+    );
+
+    await vi.waitFor(() => expect(secondStarted).toBe(true));
+    finishPostCommit();
+    await Promise.all([firstOperationFinished, secondOperationFinished]);
+  });
+
   it('starts the status cache lifetime after a slow refresh completes', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);

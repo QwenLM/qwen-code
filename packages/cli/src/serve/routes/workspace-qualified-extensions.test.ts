@@ -395,7 +395,12 @@ describe('extension management v2 REST', () => {
       expect(operation.status).toBe('succeeded');
       expect(
         ExtensionManager.prototype.setExtensionWorkspaceActivation,
-      ).toHaveBeenCalledWith(extensionId, h.secondary.workspaceCwd, 'enabled');
+      ).toHaveBeenCalledWith(
+        extensionId,
+        h.secondary.workspaceCwd,
+        'enabled',
+        expect.any(Function),
+      );
       expect(
         h.secondary.bridge.refreshExtensionsForAllSessions,
       ).toHaveBeenCalledOnce();
@@ -1068,7 +1073,10 @@ describe('extension management v2 REST', () => {
         }),
         signal: expect.any(AbortSignal),
       });
-      expect(commitPrepared).toHaveBeenCalledWith(prepared);
+      expect(commitPrepared).toHaveBeenCalledWith(
+        prepared,
+        expect.any(Function),
+      );
       expect(disposePrepared).toHaveBeenCalledWith(prepared);
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
@@ -1239,7 +1247,12 @@ describe('extension management v2 REST', () => {
       });
       expect(
         ExtensionManager.prototype.uninstallExtensionById,
-      ).toHaveBeenCalledWith(extensionId, false);
+      ).toHaveBeenCalledWith(
+        extensionId,
+        false,
+        undefined,
+        expect.any(Function),
+      );
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }

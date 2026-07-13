@@ -537,8 +537,11 @@ export function registerWorkspaceExtensionRoutes(
             });
             try {
               const committed = await context!.commit(
-                async () =>
-                  await extensionManager.commitPreparedExtension(prepared),
+                async (onCommitted) =>
+                  await extensionManager.commitPreparedExtension(
+                    prepared,
+                    onCommitted,
+                  ),
               );
               return {
                 status: 'installed',
@@ -661,11 +664,12 @@ export function registerWorkspaceExtensionRoutes(
                 throw new Error(`Extension "${name}" not found`);
               }
               await context!.commit(
-                async () =>
+                async (onCommitted) =>
                   await extensionManager.enableExtension(
                     extension.name,
                     scope,
                     ctrl.boundWorkspace,
+                    onCommitted,
                   ),
               );
               return { status: 'enabled', name: extension.name };
@@ -713,11 +717,12 @@ export function registerWorkspaceExtensionRoutes(
                 throw new Error(`Extension "${name}" not found`);
               }
               await context!.commit(
-                async () =>
+                async (onCommitted) =>
                   await extensionManager.disableExtension(
                     extension.name,
                     scope,
                     ctrl.boundWorkspace,
+                    onCommitted,
                   ),
               );
               return { status: 'disabled', name: extension.name };
@@ -790,9 +795,10 @@ export function registerWorkspaceExtensionRoutes(
               }
               try {
                 const committed = await context!.commit(
-                  async () =>
+                  async (onCommitted) =>
                     await extensionManager.commitPreparedExtension(
                       preparedResult.prepared,
+                      onCommitted,
                     ),
                 );
                 return {
@@ -839,11 +845,12 @@ export function registerWorkspaceExtensionRoutes(
               throw new Error(`Extension "${name}" not found`);
             }
             await context!.commit(
-              async () =>
+              async (onCommitted) =>
                 await extensionManager.uninstallExtension(
                   extension.name,
                   false,
                   ctrl.boundWorkspace,
+                  onCommitted,
                 ),
             );
             return { status: 'uninstalled', name: extension.name };
@@ -1026,10 +1033,11 @@ export function registerWorkspaceExtensionRoutes(
           if (!extension)
             throw new Error(`Extension "${extensionId}" not found`);
           await context!.commit(
-            async () =>
+            async (onCommitted) =>
               await extensionManager.setExtensionDefaultActivation(
                 extensionId,
                 state,
+                onCommitted,
               ),
           );
           return {
@@ -1180,8 +1188,11 @@ export function registerWorkspaceExtensionRoutes(
         });
         try {
           const committed = await context!.commit(
-            async () =>
-              await extensionManager.commitPreparedExtension(prepared),
+            async (onCommitted) =>
+              await extensionManager.commitPreparedExtension(
+                prepared,
+                onCommitted,
+              ),
           );
           return {
             status: 'installed',
@@ -1284,9 +1295,10 @@ export function registerWorkspaceExtensionRoutes(
           }
           try {
             const committed = await context!.commit(
-              async () =>
+              async (onCommitted) =>
                 await extensionManager.commitPreparedExtension(
                   preparedResult.prepared,
+                  onCommitted,
                 ),
             );
             return {
@@ -1346,10 +1358,12 @@ export function registerWorkspaceExtensionRoutes(
           { name: policy.name },
           async (extensionManager, _signal, context) => {
             await context!.commit(
-              async () =>
+              async (onCommitted) =>
                 await extensionManager.uninstallExtensionById(
                   extensionId,
                   false,
+                  undefined,
+                  onCommitted,
                 ),
             );
             return { status: 'uninstalled', name: policy.name };
@@ -1438,11 +1452,12 @@ export function registerWorkspaceExtensionRoutes(
               throw new Error(`Extension "${extensionId}" not found`);
             }
             await context!.commit(
-              async () =>
+              async (onCommitted) =>
                 await extensionManager.setExtensionWorkspaceActivation(
                   extensionId,
                   runtime.workspaceCwd,
                   state,
+                  onCommitted,
                 ),
             );
             return {
@@ -1480,10 +1495,11 @@ export function registerWorkspaceExtensionRoutes(
               throw new Error(`Extension "${extensionId}" not found`);
             }
             const snapshot = await context!.commit(
-              async () =>
+              async (onCommitted) =>
                 await extensionManager.clearExtensionWorkspaceActivation(
                   extensionId,
                   runtime.workspaceCwd,
+                  onCommitted,
                 ),
             );
             const activation =

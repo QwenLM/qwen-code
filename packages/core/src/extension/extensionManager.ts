@@ -300,6 +300,8 @@ export interface ExtensionStoreMutationResult extends ExtensionStoreSnapshot {
   warnings?: Array<{ code: string; error: string }>;
 }
 
+export type ExtensionCommitCallback = (generation: number) => void;
+
 export class PreparedExtensionConsumedError extends Error {
   readonly code = 'prepared_extension_consumed';
 
@@ -601,6 +603,7 @@ export class ExtensionManager {
     name: string,
     scope: SettingScope,
     cwd?: string,
+    onCommitted?: ExtensionCommitCallback,
   ): Promise<ExtensionStoreMutationResult> {
     const currentDir = cwd ?? this.workspaceDir;
     if (
@@ -633,6 +636,7 @@ export class ExtensionManager {
           'enabled',
         );
       }
+      onCommitted?.(snapshot.generation);
       const config = getTelemetryConfig(currentDir, this.telemetrySettings);
       logExtensionEnable(config, new ExtensionEnableEvent(name, scope));
       this.applyStoreActivation(snapshot);
@@ -650,6 +654,7 @@ export class ExtensionManager {
     name: string,
     scope: SettingScope,
     cwd?: string,
+    onCommitted?: ExtensionCommitCallback,
   ): Promise<ExtensionStoreMutationResult> {
     const currentDir = cwd ?? this.workspaceDir;
     const config = getTelemetryConfig(currentDir, this.telemetrySettings);
@@ -683,6 +688,7 @@ export class ExtensionManager {
           'disabled',
         );
       }
+      onCommitted?.(snapshot.generation);
       logExtensionDisable(config, new ExtensionDisableEvent(name, scope));
       this.applyStoreActivation(snapshot);
       const warning = await this.refreshToolsAfterActivation(name);
@@ -733,6 +739,7 @@ export class ExtensionManager {
   async setExtensionDefaultActivation(
     extensionId: string,
     activation: ExtensionActivation,
+    onCommitted?: ExtensionCommitCallback,
   ): Promise<ExtensionStoreMutationResult> {
     const extension = this.findExtensionById(extensionId);
     const endMutation = this.beginMutation('setExtensionDefaultActivation');
@@ -741,6 +748,7 @@ export class ExtensionManager {
         { id: extension.id, name: extension.name },
         activation,
       );
+      onCommitted?.(snapshot.generation);
       this.applyStoreActivation(snapshot);
       const warning = await this.refreshToolsAfterActivation(extension.name);
       return warning ? { ...snapshot, warnings: [warning] } : snapshot;
@@ -752,6 +760,7 @@ export class ExtensionManager {
   async setExtensionActivationScope(
     extensionId: string,
     activation: InitialExtensionActivation,
+    onCommitted?: ExtensionCommitCallback,
   ): Promise<ExtensionStoreMutationResult> {
     const extension = this.findExtensionById(extensionId);
     const endMutation = this.beginMutation('setExtensionActivationScope');
@@ -760,6 +769,7 @@ export class ExtensionManager {
         { id: extension.id, name: extension.name },
         activation,
       );
+      onCommitted?.(snapshot.generation);
       this.applyStoreActivation(snapshot);
       const warning = await this.refreshToolsAfterActivation(extension.name);
       return warning ? { ...snapshot, warnings: [warning] } : snapshot;
@@ -772,6 +782,7 @@ export class ExtensionManager {
     extensionId: string,
     workspacePath: string,
     activation: ExtensionActivation,
+    onCommitted?: ExtensionCommitCallback,
   ): Promise<ExtensionStoreMutationResult> {
     const extension = this.findExtensionById(extensionId);
     const endMutation = this.beginMutation('setExtensionWorkspaceActivation');
@@ -781,6 +792,7 @@ export class ExtensionManager {
         workspacePath,
         activation,
       );
+      onCommitted?.(snapshot.generation);
       this.applyStoreActivation(snapshot);
       const warning = await this.refreshToolsAfterActivation(extension.name);
       return warning ? { ...snapshot, warnings: [warning] } : snapshot;
@@ -792,6 +804,7 @@ export class ExtensionManager {
   async clearExtensionWorkspaceActivation(
     extensionId: string,
     workspacePath: string,
+    onCommitted?: ExtensionCommitCallback,
   ): Promise<ExtensionStoreMutationResult> {
     const extension = this.findExtensionById(extensionId);
     const endMutation = this.beginMutation('clearExtensionWorkspaceActivation');
@@ -800,6 +813,7 @@ export class ExtensionManager {
         { id: extension.id, name: extension.name },
         workspacePath,
       );
+      onCommitted?.(snapshot.generation);
       this.applyStoreActivation(snapshot);
       const warning = await this.refreshToolsAfterActivation(extension.name);
       return warning ? { ...snapshot, warnings: [warning] } : snapshot;
@@ -2035,13 +2049,19 @@ export class ExtensionManager {
 
   async commitPreparedExtension(
     prepared: PreparedExtensionMutation,
+    onCommitted?: ExtensionCommitCallback,
   ): Promise<CommittedExtensionMutation> {
-    return await this.commitPreparedExtensionInternal(prepared, true);
+    return await this.commitPreparedExtensionInternal(
+      prepared,
+      true,
+      onCommitted,
+    );
   }
 
   private async commitPreparedExtensionInternal(
     prepared: PreparedExtensionMutation,
     emitMutation: boolean,
+    onCommitted?: ExtensionCommitCallback,
   ): Promise<CommittedExtensionMutation> {
     if (!this.preparedMutations.has(prepared)) {
       throw new InvalidPreparedExtensionError();
@@ -2126,6 +2146,7 @@ export class ExtensionManager {
           error: getErrorMessage(error),
         });
       }
+      onCommitted?.(snapshot.generation);
       let extension: Extension | undefined;
       try {
         extension =
@@ -2240,6 +2261,7 @@ export class ExtensionManager {
     extensionIdentifier: string,
     isUpdate: boolean,
     cwd?: string,
+    onCommitted?: ExtensionCommitCallback,
   ): Promise<ExtensionStoreMutationResult> {
     const endMutation = this.beginMutation('uninstallExtension');
     try {
@@ -2268,6 +2290,7 @@ export class ExtensionManager {
         ).getExtensionDir(),
         isUpdate,
         telemetryConfig,
+        onCommitted,
       );
     } finally {
       endMutation();
@@ -2278,6 +2301,7 @@ export class ExtensionManager {
     extensionId: string,
     isUpdate: boolean,
     cwd?: string,
+    onCommitted?: ExtensionCommitCallback,
   ): Promise<ExtensionStoreMutationResult> {
     const endMutation = this.beginMutation('uninstallExtension');
     try {
@@ -2289,6 +2313,7 @@ export class ExtensionManager {
         new ExtensionStorage(policy.name).getExtensionDir(),
         isUpdate,
         getTelemetryConfig(cwd ?? this.workspaceDir, this.telemetrySettings),
+        onCommitted,
       );
     } finally {
       endMutation();
@@ -2300,12 +2325,14 @@ export class ExtensionManager {
     destinationDirectory: string,
     isUpdate: boolean,
     telemetryConfig: Config,
+    onCommitted?: ExtensionCommitCallback,
   ): Promise<ExtensionStoreMutationResult> {
     const snapshot = await this.extensionStore.commitArtifact({
       operation: 'uninstall',
       identity,
       destinationDirectory,
     });
+    onCommitted?.(snapshot.generation);
     this.extensionCache?.delete(identity.name);
     if (isUpdate) return snapshot;
     const warnings: NonNullable<ExtensionStoreMutationResult['warnings']> = [];

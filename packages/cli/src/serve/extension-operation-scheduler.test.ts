@@ -100,6 +100,39 @@ describe('createFifoTaskQueue', () => {
     expect(secondStarted).toBe(true);
   });
 
+  it('can release a slot before post-commit work settles', async () => {
+    const queue = createFifoTaskQueue(1);
+    const finishPostCommit = deferred<void>();
+    let secondStarted = false;
+    const first = queue.runUntilReleased(async (release) => {
+      release();
+      release();
+      await finishPostCommit.promise;
+    });
+    const second = queue.run(async () => {
+      secondStarted = true;
+    });
+
+    await vi.waitFor(() => expect(secondStarted).toBe(true));
+    finishPostCommit.resolve();
+    await Promise.all([first, second]);
+  });
+
+  it('releases an early-release task when it rejects before release', async () => {
+    const queue = createFifoTaskQueue(1);
+    let secondStarted = false;
+    const first = queue.runUntilReleased(async () => {
+      throw new Error('commit failed');
+    });
+    const second = queue.run(async () => {
+      secondStarted = true;
+    });
+
+    await expect(first).rejects.toThrow('commit failed');
+    await second;
+    expect(secondStarted).toBe(true);
+  });
+
   it('calls onStart only when the task acquires a slot', async () => {
     const queue = createFifoTaskQueue(1);
     const release = deferred<void>();

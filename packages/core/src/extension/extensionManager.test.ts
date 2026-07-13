@@ -251,6 +251,44 @@ describe('extension tests', () => {
       ]);
     });
 
+    it('signals the durable commit before runtime refresh completes', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'commit-boundary.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          writeExtractedExtension(destination, 'commit-boundary');
+        },
+      );
+      const manager = createExtensionManager();
+      let finishRefresh!: () => void;
+      const refreshBlocked = new Promise<void>((resolve) => {
+        finishRefresh = resolve;
+      });
+      vi.spyOn(manager, 'refreshTools').mockImplementation(
+        async () => await refreshBlocked,
+      );
+      const prepared = await manager.prepareExtensionInstall({
+        installMetadata: { type: 'local', source: archivePath },
+        initialActivation: { scope: 'user' },
+        requestConsent: async () => {},
+      });
+      const committedGenerations: number[] = [];
+      let settled = false;
+
+      const committing = manager
+        .commitPreparedExtension(prepared, (generation) => {
+          committedGenerations.push(generation);
+        })
+        .finally(() => {
+          settled = true;
+        });
+
+      await vi.waitFor(() => expect(committedGenerations).toHaveLength(1));
+      expect(settled).toBe(false);
+      finishRefresh();
+      await committing;
+    });
+
     it('fully validates the staged extension before commit', async () => {
       const archivePath = path.join(tempWorkspaceDir, 'invalid-context.zip');
       fs.writeFileSync(archivePath, 'archive');
