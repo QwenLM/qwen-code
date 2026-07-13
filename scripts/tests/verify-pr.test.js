@@ -10,6 +10,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -812,18 +813,33 @@ describe('verification orchestration', () => {
   it('checks only existing regular changed files with Prettier', async () => {
     const worktree = mkdtempSync(path.join(tmpdir(), 'verify-pr-worktree-'));
     tempDirs.push(worktree);
+    const outside = mkdtempSync(path.join(tmpdir(), 'verify-pr-outside-'));
+    tempDirs.push(outside);
     mkdirSync(path.join(worktree, 'docs'));
     mkdirSync(path.join(worktree, 'tracked-directory'));
     writeFileSync(path.join(worktree, 'source.js'), 'export {};\n');
+    writeFileSync(path.join(worktree, 'replacement.js'), 'export {};\n');
     writeFileSync(path.join(worktree, 'docs', 'path with spaces.md'), 'doc\n');
     writeFileSync(path.join(worktree, '-leading-option.md'), 'option\n');
+    writeFileSync(path.join(outside, 'external.js'), 'export {};\n');
+    symlinkSync(
+      path.join(outside, 'external.js'),
+      path.join(worktree, 'link.js'),
+    );
+    symlinkSync(outside, path.join(worktree, 'linked-directory'));
+    symlinkSync('loop.js', path.join(worktree, 'loop.js'));
     const execution = await captureValidation({
       changedFiles: [
         'source.js',
+        'replacement.js/deleted.js',
+        'replacement.js',
         'deleted.js',
         'tracked-directory',
         'docs/path with spaces.md',
         '-leading-option.md',
+        'link.js',
+        'linked-directory/external.js',
+        'loop.js',
       ],
       worktree,
     });
@@ -838,6 +854,7 @@ describe('verification orchestration', () => {
       '--ignore-unknown',
       '--',
       'source.js',
+      'replacement.js',
       'docs/path with spaces.md',
       '-leading-option.md',
     ]);

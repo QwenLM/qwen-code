@@ -7,7 +7,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs';
+import { lstatSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -126,6 +126,21 @@ export function selectProfile({
 
 function step(name, ...command) {
   return { command, name };
+}
+
+function isRegularWorktreeFile(worktree, file) {
+  let currentPath = worktree;
+  let stats;
+  const segments = file.split('/');
+
+  for (const [index, segment] of segments.entries()) {
+    currentPath = join(currentPath, segment);
+    stats = lstatSync(currentPath, { throwIfNoEntry: false });
+    if (!stats || stats.isSymbolicLink()) return false;
+    if (index < segments.length - 1 && !stats.isDirectory()) return false;
+  }
+
+  return stats?.isFile() === true;
 }
 
 export function createValidationSteps({ prettierFiles = [], profile }) {
@@ -583,9 +598,7 @@ export async function verifyPullRequest(
         const prettierFiles =
           profile === 'full'
             ? repository.changedFiles.filter((file) =>
-                statSync(join(worktree, file), {
-                  throwIfNoEntry: false,
-                })?.isFile(),
+                isRegularWorktreeFile(worktree, file),
               )
             : [];
         const steps = createValidationSteps({ prettierFiles, profile });
