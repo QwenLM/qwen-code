@@ -140,6 +140,29 @@ describe('verify-pr CLI', () => {
       /Stage: Run unit tests.*Command: npm run test:ci.*HEAD: a{40}.*Base: origin\/main.*Profile: full.*Rerun failed step: npm run test:ci/s,
     );
   });
+
+  it('relays a child signal after printing failure diagnostics', async () => {
+    const events = [];
+    const exitCode = await runCli([], {
+      error: (message) => events.push(`error:${message}`),
+      log: () => {},
+      relaySignal: (signal) => events.push(`signal:${signal}`),
+      verify: async () => {
+        throw Object.assign(new Error('terminated'), {
+          command: ['npm', 'run', 'test:ci'],
+          detail: 'terminated by signal SIGTERM',
+          signal: 'SIGTERM',
+          stage: 'Run unit tests',
+        });
+      },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(events.at(-1)).toBe('signal:SIGTERM');
+    expect(events.slice(0, -1).join('\n')).toMatch(
+      /error:PR verification failed.*error:Error: terminated by signal SIGTERM/s,
+    );
+  });
 });
 
 describe('caller guards', () => {
@@ -266,8 +289,7 @@ describe('validation profiles', () => {
         command.join(' '),
       ),
     ).toEqual([
-      'npm run clean',
-      'npm ci --prefer-offline --no-audit --progress=false',
+      'npm ci --prefer-offline --no-audit --progress=false --ignore-scripts=false',
       'npm run audit:runtime:critical',
       'npm run check:lockfile',
       'npm run check:desktop-isolation',
@@ -486,27 +508,110 @@ describe('step execution', () => {
   it('uses CI-equivalent npm fetch settings only for npm ci', () => {
     const steps = createValidationSteps({ profile: 'full' });
     const installEnv = createStepEnvironment({
-      baseEnv: {},
+      baseEnv: {
+        HUSKY: 'caller-value',
+        QWEN_SKIP_PREPARE: '1',
+        npm_config_ignore_scripts: 'true',
+      },
       home: '/temporary-home',
-      step: steps[1],
+      step: steps[0],
     });
     expect(installEnv).toMatchObject({
+      HUSKY: '0',
       NPM_CONFIG_FETCH_RETRIES: '5',
       NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT: '120000',
       NPM_CONFIG_FETCH_RETRY_MINTIMEOUT: '20000',
       NPM_CONFIG_FETCH_TIMEOUT: '300000',
+      npm_config_ignore_scripts: 'true',
     });
+    expect(installEnv).not.toHaveProperty('QWEN_SKIP_PREPARE');
     expect(
       createStepEnvironment({
-        baseEnv: {},
+        baseEnv: { HUSKY: 'caller-value', QWEN_SKIP_PREPARE: '1' },
         home: '/temporary-home',
-        step: steps[0],
+        step: steps[1],
       }),
     ).not.toHaveProperty('NPM_CONFIG_FETCH_RETRIES');
+    expect(
+      createStepEnvironment({
+        baseEnv: { HUSKY: 'caller-value', QWEN_SKIP_PREPARE: '1' },
+        home: '/temporary-home',
+        step: steps[1],
+      }),
+    ).toMatchObject({ HUSKY: 'caller-value', QWEN_SKIP_PREPARE: '1' });
   });
 });
 
 describe('temporary worktree isolation', () => {
+  it('runs prepare during the first npm ci despite caller skip settings', async () => {
+    const cwd = createRepository();
+    writeFileSync(
+      path.join(cwd, 'package.json'),
+      JSON.stringify({
+        name: 'verify-pr-install-fixture',
+        private: true,
+        scripts: { prepare: 'node prepare.mjs' },
+        type: 'module',
+        version: '1.0.0',
+      }),
+    );
+    writeFileSync(
+      path.join(cwd, 'prepare.mjs'),
+      `import { writeFileSync } from 'node:fs';
+writeFileSync('prepare-marker.json', JSON.stringify({
+  husky: process.env.HUSKY ?? null,
+  ignoreScripts: process.env.npm_config_ignore_scripts ?? null,
+  skipPrepare: process.env.QWEN_SKIP_PREPARE ?? null,
+}));
+`,
+    );
+    const lockResult = spawnSync(
+      'npm',
+      ['install', '--package-lock-only', '--ignore-scripts'],
+      { cwd, encoding: 'utf8' },
+    );
+    expect(lockResult.status, lockResult.stderr).toBe(0);
+    git(cwd, ['add', 'package.json', 'package-lock.json', 'prepare.mjs']);
+    git(cwd, ['commit', '--quiet', '-m', 'add install fixture']);
+    let marker;
+    let ownedContainer;
+
+    await withTemporaryWorktree({
+      cwd,
+      validate: async (paths) => {
+        ownedContainer = paths.container;
+        await runSteps({
+          allocatePort: async () => 43123,
+          baseEnv: {
+            ...process.env,
+            HUSKY: 'caller-value',
+            QWEN_SKIP_PREPARE: '1',
+            npm_config_ignore_scripts: 'true',
+          },
+          cwd: paths.worktree,
+          home: paths.home,
+          log: () => {},
+          steps: createValidationSteps({ profile: 'full' }).slice(0, 1),
+        });
+        marker = JSON.parse(
+          readFileSync(
+            path.join(paths.worktree, 'prepare-marker.json'),
+            'utf8',
+          ),
+        );
+      },
+    });
+
+    expect(marker).toMatchObject({
+      husky: '0',
+      skipPrepare: null,
+    });
+    expect(marker.ignoreScripts).not.toBe('true');
+    expect(existsSync(path.join(cwd, 'prepare-marker.json'))).toBe(false);
+    expect(git(cwd, ['status', '--porcelain'])).toBe('');
+    expect(existsSync(ownedContainer)).toBe(false);
+  });
+
   it('keeps the caller worktree unchanged and removes owned temporary files', async () => {
     const cwd = createRepository();
     let ownedPaths;
@@ -677,8 +782,10 @@ describe('verification orchestration', () => {
 
     expect(execution.cwd).toBe('/owned/worktree');
     expect(execution.home).toBe('/owned/home');
-    expect(execution.steps).toHaveLength(40);
-    expect(execution.steps[0].command.join(' ')).toBe('npm run clean');
-    expect(execution.steps[18].command).toEqual(['uv', '--version']);
+    expect(execution.steps).toHaveLength(39);
+    expect(execution.steps[0].command.join(' ')).toBe(
+      'npm ci --prefer-offline --no-audit --progress=false --ignore-scripts=false',
+    );
+    expect(execution.steps[17].command).toEqual(['uv', '--version']);
   });
 });

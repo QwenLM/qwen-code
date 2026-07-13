@@ -146,7 +146,6 @@ export function createValidationSteps({ profile }) {
           ],
         ]
       : [
-          ['Clean', 'npm', 'run', 'clean'],
           [
             'Install dependencies',
             'npm',
@@ -154,6 +153,7 @@ export function createValidationSteps({ profile }) {
             '--prefer-offline',
             '--no-audit',
             '--progress=false',
+            '--ignore-scripts=false',
           ],
           [
             'Audit critical runtime dependencies',
@@ -214,9 +214,9 @@ export function createValidationSteps({ profile }) {
         ];
   const steps = commands.map(([name, ...command]) => step(name, ...command));
   if (profile === 'full') {
-    steps[1].npmFetchEnvironment = true;
-    for (const testStep of steps.slice(15)) testStep.testEnvironment = true;
-    steps[17].playwright = true;
+    steps[0].installEnvironment = true;
+    for (const testStep of steps.slice(14)) testStep.testEnvironment = true;
+    steps[16].playwright = true;
   }
   return steps;
 }
@@ -314,13 +314,15 @@ export function createPythonSteps({ platform = process.platform, pythonRoot }) {
 export function createStepEnvironment({ baseEnv, home, playwrightPort, step }) {
   const env = { ...baseEnv };
 
-  if (step.npmFetchEnvironment) {
+  if (step.installEnvironment) {
     Object.assign(env, {
+      HUSKY: '0',
       NPM_CONFIG_FETCH_RETRIES: '5',
       NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT: '120000',
       NPM_CONFIG_FETCH_RETRY_MINTIMEOUT: '20000',
       NPM_CONFIG_FETCH_TIMEOUT: '300000',
     });
+    delete env.QWEN_SKIP_PREPARE;
   }
 
   if (step.testEnvironment) {
@@ -364,11 +366,12 @@ function executeChild({ command, cwd, env }) {
 }
 
 class ValidationFailure extends Error {
-  constructor({ command, detail, exitCode, stage }) {
+  constructor({ command, detail, exitCode, signal, stage }) {
     super(`${stage}: ${detail}`);
     this.command = command;
     this.detail = detail;
     this.exitCode = exitCode;
+    this.signal = signal;
     this.stage = stage;
   }
 }
@@ -381,7 +384,13 @@ function commandFailure(stage, command, result) {
     : result.signal
       ? `terminated by signal ${result.signal}`
       : `exited with status ${exitCode}`;
-  return new ValidationFailure({ command, detail, exitCode, stage });
+  return new ValidationFailure({
+    command,
+    detail,
+    exitCode,
+    signal: result.signal ?? undefined,
+    stage,
+  });
 }
 
 export async function runSteps({
@@ -591,6 +600,7 @@ export async function runCli(
     cwd = process.cwd(),
     error = console.error,
     log = console.log,
+    relaySignal = (signal) => process.kill(process.pid, signal),
     verify = verifyPullRequest,
   } = {},
 ) {
@@ -634,6 +644,10 @@ export async function runCli(
         ? `Rerun failed step: ${command}`
         : `Rerun: npm run verify:pr -- --base ${quoteArgument(options.base)} --profile ${options.profile}`,
     );
+    if (typeof context.signal === 'string') {
+      relaySignal(context.signal);
+      return 1;
+    }
     return Number.isInteger(context.exitCode) && context.exitCode > 0
       ? context.exitCode
       : 1;
