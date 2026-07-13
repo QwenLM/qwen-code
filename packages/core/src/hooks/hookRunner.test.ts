@@ -123,6 +123,42 @@ describe('HookRunner', () => {
       expect(mockSpawn).toHaveBeenCalled();
     });
 
+    it('scrubs daemon secrets from the hook subprocess environment', async () => {
+      const originalServerToken = process.env['QWEN_SERVER_TOKEN'];
+      const originalGhToken = process.env['GH_TOKEN'];
+      process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+      process.env['GH_TOKEN'] = 'user-credential';
+      const mockProcess = createMockProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      try {
+        await hookRunner.executeHook(
+          {
+            type: HookType.Command,
+            command: 'echo hello',
+            source: HooksConfigSource.Project,
+          },
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+
+        const spawnOptions = mockSpawn.mock.calls[0]![2];
+        expect(spawnOptions.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+        expect(spawnOptions.env['GH_TOKEN']).toBe('user-credential');
+      } finally {
+        if (originalServerToken === undefined) {
+          delete process.env['QWEN_SERVER_TOKEN'];
+        } else {
+          process.env['QWEN_SERVER_TOKEN'] = originalServerToken;
+        }
+        if (originalGhToken === undefined) {
+          delete process.env['GH_TOKEN'];
+        } else {
+          process.env['GH_TOKEN'] = originalGhToken;
+        }
+      }
+    });
+
     it('should return failure for non-zero exit code', async () => {
       const mockProcess = createMockProcess(1, '', 'error');
       mockSpawn.mockImplementation(() => mockProcess);
