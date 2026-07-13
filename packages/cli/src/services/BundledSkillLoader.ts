@@ -19,6 +19,11 @@ import type {
 } from '../ui/commands/types.js';
 import { CommandKind } from '../ui/commands/types.js';
 import { t } from '../i18n/index.js';
+import {
+  writeSkillArgs,
+  skillArgsNote,
+  skillArgsPath,
+} from './skill-args-file.js';
 
 const debugLogger = createDebugLogger('BUNDLED_SKILL_LOADER');
 
@@ -114,10 +119,22 @@ export class BundledSkillLoader implements ICommandLoader {
             dirname(skill.filePath),
             body,
           );
-          const content = context.invocation?.args
+
+          // Write the arguments down before the model gets a say in them. A
+          // skill that needs them as data used to ask the model to copy them
+          // into a file, and `/review 6771` was duly copied as `--effort high`
+          // — an example lifted out of the skill's own docs. The parser then did
+          // its job perfectly on the wrong input, reviewed the local working
+          // tree instead of the pull request, found it clean, and reported
+          // "no changes to review".
+          const rawArgs = context.invocation?.args ?? '';
+          const content = rawArgs
             ? appendToLastTextPart(
                 [{ text: skillPrompt }],
-                context.invocation.raw,
+                context.invocation!.raw +
+                  (writeSkillArgs(skill.name, rawArgs)
+                    ? skillArgsNote(skillArgsPath(skill.name), rawArgs)
+                    : ''),
               )
             : [{ text: skillPrompt }];
 

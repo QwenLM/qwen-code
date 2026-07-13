@@ -30,17 +30,23 @@ You are an expert code reviewer. Your job is to review code changes and provide 
 
 Your goal here is to understand the scope of changes so you can dispatch agents effectively in Step 3.
 
-**Do not parse the arguments yourself — run the parser.** The flag grammar (`--comment`, `--effort <level>`, `--effort=<level>`) and the target disambiguation are deterministic, and three separate parsing bugs shipped while they lived here as prose. The tested implementation is a subcommand. Deliver the raw argument string **on stdin from a file — never as a positional shell argument, and never inline in shell syntax**: a raw string that begins with a flag (`/review --effort low`) is eaten by the CLI's own argument parsing before the subcommand runs (`Unknown argument: effort low`); one containing a quote or `$(...)` is mangled by the shell; and a heredoc is not safe either — the delimiter is recognized inside the content, so a raw string carrying that exact line would terminate the heredoc early and hand the rest to the shell as commands. A file crosses the boundary with zero shell parsing of the content:
+**Do not parse the arguments yourself — run the parser. And do not retype them — they are already in a file.** The flag grammar (`--comment`, `--effort <level>`, `--effort=<level>`) and the target disambiguation are deterministic, and three separate parsing bugs shipped while they lived here as prose. The tested implementation is a subcommand, and it reads the argument string **on stdin from a file — never as a positional shell argument, and never inline in shell syntax**: a raw string that begins with a flag (`/review --effort low`) is eaten by the CLI's own argument parsing before the subcommand runs (`Unknown argument: effort low`); one containing a quote or `$(...)` is mangled by the shell; and a heredoc is not safe either — the delimiter is recognized inside the content, so a raw string carrying that exact line would terminate the heredoc early and hand the rest to the shell as commands. A file crosses the boundary with zero shell parsing of the content.
 
-1. `write_file` the raw argument string, **verbatim and unmodified** (empty file for a no-argument `/review`), to `.qwen/tmp/qwen-review-args-input.txt`.
-2. Run:
+**The CLI has already written that file for you.** When `/review` is invoked with arguments, they are saved verbatim to `.qwen/tmp/qwen-skill-args-review.txt` before this prompt reaches you, and the note at the end of your instructions gives you the path. Read from it. Do **not** `write_file` the arguments yourself: that is a transcription, and a transcription is a recall. Dogfooding `/review 6771`, a run wrote `--effort high` into the argument file — not the user's argument, but an **example** lifted out of the paragraph above. The parser then did its job perfectly on the wrong input: it resolved a _local_ review, found the working tree clean, and reported "no changes to review". A request to review a pull request became a no-op, and nothing raised an error.
+
+If the args file is genuinely absent (an older CLI, or a write that failed), fall back to `write_file`-ing the raw argument string **verbatim and unmodified** — copying **the user's argument**, not an example from these instructions — and say in your output that you did, so a wrong target is at least attributable. For a no-argument `/review`, no file is written and none is needed; run the parser with an empty stdin.
+
+Then run:
 
 ```bash
-qwen review parse-args --stdin < .qwen/tmp/qwen-review-args-input.txt \
+# The CLI wrote this file; you did not, and must not.
+qwen review parse-args --stdin < .qwen/tmp/qwen-skill-args-review.txt \
   | tee .qwen/tmp/qwen-review-parse-args.json
+# No arguments at all (`/review` bare) — no args file exists:
+#   : | qwen review parse-args --stdin | tee .qwen/tmp/qwen-review-parse-args.json
 ```
 
-(Step 9 removes both files with the other temp files.)
+(Step 9 removes these files with the other temp files.)
 
 **Keep the verdict file.** It is not a convenience. Its `comment.effective` is the fact that authorises Step 7 to write to the PR, and `qwen review submit` refuses to post without being shown it. Once the target suffix is known, copy it to `.qwen/tmp/qwen-review-{target}-parse-args.json` so Step 9's cleanup sweeps it with the rest.
 
@@ -791,11 +797,10 @@ If the user responds with "post comments" (or similar intent like "yes post them
 qwen review submit \
   --pr <pr_number> --repo <owner>/<repo> \
   --review .qwen/tmp/qwen-review-{target}-review.json \
-  --parse-args .qwen/tmp/qwen-review-{target}-parse-args.json \
   [--user-authorized] [--host <host>]
 ```
 
-Pass the Step 1 `parse-args` verdict (save it to a file when you run it) — its `comment.effective` is the authorisation. Pass `--user-authorized` **only** when the user asked, in a message they typed this session, for this review to be published. The subcommand exits 3 and writes nothing when neither holds, and that is a **complete, correct outcome**, not an error to route around: the findings live in the terminal (Step 6) and the saved report (Step 8), and the follow-up tip invites the user to post if they want.
+**You do not tell it whether you are authorised — it looks.** By default it reads `.qwen/tmp/qwen-skill-args-review.txt`, the CLI's verbatim record of what the user typed, and runs the same parser on it. There is no flag you can pass to say "`--comment` was requested", and that is the point: the earlier design read the parser's JSON _output_, which is a document you write — a run that wanted to post could write `{"comment":{"effective":true}}` and hand it over. Pass `--user-authorized` **only** when the user asked, in a message they typed this session, for this review to be published; that is the one input you control, and it is a claim about the user, not about a file. The subcommand exits 3 and writes nothing when neither holds, and that is a **complete, correct outcome**, not an error to route around: the findings live in the terminal (Step 6) and the saved report (Step 8), and the follow-up tip invites the user to post if they want.
 
 It also refuses a payload that contradicts itself — a body promising inline comments next to an empty `comments` array, a literal `\n` from building the JSON with `-f body=`, a `start_line` without its `side` fields — because GitHub accepts every one of those and the author is the one who finds out.
 
@@ -994,8 +999,7 @@ Then submit it — through `submit`, which checks the authorisation and the payl
 ```bash
 qwen review submit \
   --pr {pr_number} --repo {owner}/{repo} \
-  --review .qwen/tmp/qwen-review-{target}-review.json \
-  --parse-args .qwen/tmp/qwen-review-{target}-parse-args.json
+  --review .qwen/tmp/qwen-review-{target}-review.json
 ```
 
 **If the call fails with HTTP 422**, the review is created all-or-nothing — nothing was posted, including the Critical findings. This should now be unreachable for anchor arithmetic: every `line` you posted came out of `resolve-anchors`, which only ever considers lines it collected from **inside a hunk** of the very diff you are reviewing. So before working the recovery below, check the likelier remaining causes: **the diff you resolved against is not the commit you are posting to** — re-run `gh pr view <n> --json headRefOid` and compare it to the `commit_id` in your review JSON (which is the `fetchedSha` Step 1 captured; `fetchedSha` is a field of the _fetch report_, not of the review JSON). A PR's head can advance mid-review, and every line number you resolved is then against a diff that no longer exists — **re-fetch and re-resolve rather than entering anchor recovery against a stale diff.** The other cause is a `line` hand-edited after the resolver returned it. GitHub's error names the failing field (`pull_request_review_thread.line must be part of the diff`) but **does not tell you which entry is at fault**, so do not try to read the offender out of the error text.
@@ -1010,8 +1014,7 @@ qwen review compose-review --input .qwen/tmp/qwen-review-{target}-compose.json \
 # → {"event": "...", "body": "..."} — copy event/body verbatim into the review JSON, then:
 qwen review submit \
   --pr {pr_number} --repo {owner}/{repo} \
-  --review .qwen/tmp/qwen-review-{target}-review.json \
-  --parse-args .qwen/tmp/qwen-review-{target}-parse-args.json
+  --review .qwen/tmp/qwen-review-{target}-review.json
 ```
 
 A zero-finding run is still a **write**, and it is still gated: an unauthorised `APPROVE` is exactly as public and exactly as unasked-for as an unauthorised `REQUEST_CHANGES`. `submit` refuses it on the same terms.
@@ -1070,7 +1073,7 @@ Run the bundled cleanup subcommand:
 qwen review cleanup <target>
 ```
 
-`<target>` is the same suffix used throughout (`pr-<n>`, `local`, or filename). The command removes the worktree at `.qwen/tmp/review-pr-<n>` (PR targets only), deletes the local branch ref `qwen-review/pr-<n>`, and clears any `.qwen/tmp/qwen-review-<target>-*` side files (review JSON, PR context, presubmit / findings reports). It is idempotent — missing files are silent OK. Also remove `.qwen/tmp/qwen-review-args-input.txt` (written before the target suffix was known, so the pattern above misses it).
+`<target>` is the same suffix used throughout (`pr-<n>`, `local`, or filename). The command removes the worktree at `.qwen/tmp/review-pr-<n>` (PR targets only), deletes the local branch ref `qwen-review/pr-<n>`, and clears any `.qwen/tmp/qwen-review-<target>-*` side files (review JSON, PR context, presubmit / findings reports). It is idempotent — missing files are silent OK. Also remove `.qwen/tmp/qwen-review-parse-args.json` and `.qwen/tmp/qwen-skill-args-review.txt` — both are written before the target suffix is known, so the pattern above misses them. (Leave the args file in place if you had to fall back to writing it yourself and the run failed: it is the only record of what the review was actually asked to do.)
 
 This step runs **after** Step 7 and Step 8 to ensure all review outputs are saved before cleanup.
 

@@ -13,6 +13,11 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { dirname } from 'node:path';
 import type { ICommandLoader } from './types.js';
+import {
+  writeSkillArgs,
+  skillArgsNote,
+  skillArgsPath,
+} from './skill-args-file.js';
 import type {
   SlashCommand,
   SlashCommandActionReturn,
@@ -132,8 +137,17 @@ export class SkillCommandLoader implements ICommandLoader {
               skill.body,
             );
 
-            const content = context.invocation?.args
-              ? appendToLastTextPart([{ text: body }], context.invocation.raw)
+            // See BundledSkillLoader: the arguments are written down for the
+            // skill to read, rather than transcribed by the model.
+            const rawArgs = context.invocation?.args ?? '';
+            const content = rawArgs
+              ? appendToLastTextPart(
+                  [{ text: body }],
+                  context.invocation!.raw +
+                    (writeSkillArgs(skill.name, rawArgs)
+                      ? skillArgsNote(skillArgsPath(skill.name), rawArgs)
+                      : ''),
+                )
               : [{ text: body }];
 
             return {

@@ -29,12 +29,20 @@ import type { CommandModule } from 'yargs';
 import { readFileSync } from 'node:fs';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { gh, setGhHost } from './lib/gh.js';
+import { parseReviewArgs } from './parse-args.js';
+
+/**
+ * Where the CLI records a skill's invocation arguments, verbatim, before the
+ * skill's prompt reaches the model. Kept in step with `skill-args-file.ts`.
+ */
+const DEFAULT_SKILL_ARGS_PATH = '.qwen/tmp/qwen-skill-args-review.txt';
 
 interface SubmitArgs {
   pr: number;
   repo: string;
   review: string;
-  parseArgs?: string;
+  /** The CLI-written record of what the user typed. Overridable for tests. */
+  skillArgs?: string;
   userAuthorized: boolean;
   host?: string;
   dryRun: boolean;
@@ -67,31 +75,45 @@ function authorization(args: SubmitArgs): { ok: boolean; why: string } {
   if (args.userAuthorized) {
     return { ok: true, why: 'the user asked for this review to be published' };
   }
-  if (!args.parseArgs) {
+
+  // Read what the **user typed**, and parse it here.
+  //
+  // The obvious design — take the parser's JSON verdict and read
+  // `comment.effective` out of it — hands the gate a document the caller wrote.
+  // A model that wants to post can write `{"comment":{"effective":true}}` to any
+  // file and point at it, and the gate opens. It is not a hypothetical: this
+  // exact weakness was raised by a review of this very change, and confirmed
+  // against the built CLI in one line.
+  //
+  // The argument string is different in kind. The CLI writes it, verbatim,
+  // before the skill's prompt ever reaches the model — nothing between the user's
+  // keystrokes and this file has an opinion. So the gate reads *that*, and runs
+  // the same tested parser on it. Forging authorisation now means forging the
+  // user's own input, which is not something a careless run does by accident.
+  const path = args.skillArgs ?? DEFAULT_SKILL_ARGS_PATH;
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch {
+    // No args file means no arguments — which means no `--comment`. Fail closed:
+    // a missing authorisation record is not an absent objection.
     return {
       ok: false,
       why:
-        'no --parse-args report was given, so this run cannot show that ' +
-        '`--comment` was requested',
+        `no review arguments were recorded at ${path}, so this run cannot ` +
+        'show that `--comment` was requested',
     };
   }
-  let verdict: { comment?: { effective?: boolean } };
-  try {
-    verdict = JSON.parse(readFileSync(args.parseArgs, 'utf8'));
-  } catch (err) {
-    return {
-      ok: false,
-      why: `--parse-args report ${args.parseArgs} could not be read (${
-        (err as Error).message
-      })`,
-    };
-  }
-  if (verdict.comment?.effective === true) {
+
+  const verdict = parseReviewArgs(raw);
+  if (verdict.comment.effective) {
     return { ok: true, why: '`--comment` was in the review arguments' };
   }
   return {
     ok: false,
-    why: '`--comment` was not in the review arguments (comment.effective is false)',
+    why:
+      '`--comment` was not in the review arguments ' +
+      `(${JSON.stringify(raw.trim())})`,
   };
 }
 
@@ -273,10 +295,10 @@ export const submitCommand: CommandModule = {
         describe:
           'Path to the review JSON (commit_id / event / body / comments), as composed by `compose-review`',
       })
-      .option('parse-args', {
+      .option('skill-args', {
         type: 'string',
         describe:
-          "Path to Step 1's parse-args verdict. Its `comment.effective` is what authorises a post.",
+          "Path to the CLI-written record of the review's invocation arguments (defaults to .qwen/tmp/qwen-skill-args-review.txt). Its `--comment` is what authorises a post. Deliberately NOT the parser's JSON output: that is a document the caller writes, and a caller that wants to post can write anything in it.",
       })
       .option('user-authorized', {
         type: 'boolean',
