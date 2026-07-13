@@ -1184,6 +1184,9 @@ function scanVisibleThinkingTags(
     state.pendingTag += char;
     if (COMPLETE_THINKING_TAG_PATTERN.test(state.pendingTag)) {
       const tagAtVisibleStart = state.atVisibleStart;
+      if (!hasStructuredReasoning) {
+        state.tagBeforeReasoning = true;
+      }
       if (tagAtVisibleStart) {
         state.leadingTag = true;
       }
@@ -1358,7 +1361,7 @@ export function convertOpenAIChunkToGemini(
   }
 
   if (choice) {
-    const parts: Part[] = [];
+    let parts: Part[] = [];
     let contentParts: Part[] = [];
 
     // Handle reasoning content (thoughts).
@@ -1523,6 +1526,10 @@ export function convertOpenAIChunkToGemini(
       });
     const hasStructuredReasoning =
       requestContext.hasStructuredReasoningContent === true;
+    const visiblePartText = getVisiblePartText(parts);
+    if (visiblePartText && requestContext.thoughtThinkingTagState?.pendingTag) {
+      requestContext.thoughtThinkingTagState.pendingTag = '';
+    }
     const hasMatchingThoughtTag =
       requestContext.thoughtThinkingTagState?.hasTag === true;
     const hasSuspiciousThoughtTag =
@@ -1530,21 +1537,23 @@ export function convertOpenAIChunkToGemini(
       Boolean(requestContext.thoughtThinkingTagState?.pendingTag);
     if (!visibleThinkingTagState.leaked) {
       scanVisibleThinkingTags(
-        getVisiblePartText(parts),
+        visiblePartText,
         visibleThinkingTagState,
         hasStructuredReasoning,
         hasMatchingThoughtTag,
       );
     }
     const hasUntrustedVisibleTag =
-      hasStructuredReasoning &&
-      (visibleThinkingTagState.leaked ||
-        Boolean(visibleThinkingTagState.pendingTag));
+      visibleThinkingTagState.tagBeforeReasoning === true ||
+      Boolean(visibleThinkingTagState.pendingTag) ||
+      (hasStructuredReasoning && visibleThinkingTagState.leaked);
     const malformedThinkingTagLeak =
       Boolean(choice.finish_reason) &&
       hasStructuredReasoning &&
       (visibleThinkingTagState.leadingTag === true ||
         visibleThinkingTagState.leaked ||
+        (visibleThinkingTagState.tagBeforeReasoning === true &&
+          hasMatchingThoughtTag) ||
         isTerminalThinkingTagLeak(
           visibleThinkingTagState,
           hasMatchingThoughtTag,
@@ -1581,7 +1590,7 @@ export function convertOpenAIChunkToGemini(
       (requestContext.pendingUntrustedResponseParts ??= []).push(...parts);
       parts.length = 0;
     } else if (requestContext.pendingUntrustedResponseParts) {
-      parts.unshift(...requestContext.pendingUntrustedResponseParts);
+      parts = requestContext.pendingUntrustedResponseParts.concat(parts);
       requestContext.pendingUntrustedResponseParts = undefined;
     }
 

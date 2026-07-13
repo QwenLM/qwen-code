@@ -105,6 +105,7 @@ export interface RequestContext {
     atVisibleStart: boolean;
     leaked: boolean;
     leadingTag?: boolean;
+    tagBeforeReasoning?: boolean;
   };
 }
 
