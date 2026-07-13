@@ -94,6 +94,7 @@ export class ToolCallEmitter extends BaseEmitter {
       rawInput: params.args ?? {},
       _meta: {
         toolName: params.toolName,
+        ...(params.phase ? { phase: params.phase } : {}),
         ...params.subagentMeta,
         provenance: provenance.provenance,
         ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
@@ -104,6 +105,35 @@ export class ToolCallEmitter extends BaseEmitter {
     });
 
     return true;
+  }
+
+  /**
+   * Emits a terminal frame when a prepared tool call is discarded before
+   * execution. TodoWrite remains represented exclusively by plan updates.
+   *
+   * @param callId - ID of the prepared tool call
+   * @param toolName - Name of the prepared tool
+   */
+  async emitPreparationDiscarded(
+    callId: string,
+    toolName: string,
+  ): Promise<void> {
+    if (this.isTodoWriteTool(toolName)) return;
+
+    const provenance = ToolCallEmitter.resolveToolProvenance(toolName);
+    await this.sendUpdate({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: callId,
+      status: 'failed',
+      content: [],
+      _meta: {
+        toolName,
+        phase: 'preparing',
+        preparationDiscarded: true,
+        provenance: provenance.provenance,
+        ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
+      },
+    });
   }
 
   /**

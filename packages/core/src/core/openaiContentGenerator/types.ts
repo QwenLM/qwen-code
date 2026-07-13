@@ -79,6 +79,8 @@ export interface RequestContext {
    * emitted after the reasoning thought if no tagged thought appears.
    */
   pendingContentParts?: Part[];
+  /** Tool IDs whose preparing metadata has already been emitted in this stream. */
+  preparedToolCallIds?: Set<string>;
 }
 
 export interface ErrorHandler {

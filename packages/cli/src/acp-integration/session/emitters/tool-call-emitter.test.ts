@@ -162,6 +162,66 @@ describe('ToolCallEmitter', () => {
     });
   });
 
+  describe('tool preparation lifecycle', () => {
+    it('emits a preparing tool call without partial input', async () => {
+      await emitter.emitStart({
+        callId: 'call-1',
+        toolName: 'read_file',
+        args: {},
+        status: 'pending',
+        phase: 'preparing',
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call',
+          toolCallId: 'call-1',
+          status: 'pending',
+          rawInput: {},
+          _meta: expect.objectContaining({
+            toolName: 'read_file',
+            phase: 'preparing',
+          }),
+        }),
+      );
+    });
+
+    it('emits a protocol-valid discarded preparation terminal update', async () => {
+      await emitter.emitPreparationDiscarded(
+        'call-1',
+        'mcp__filesystem__read_file',
+      );
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-1',
+        status: 'failed',
+        content: [],
+        _meta: {
+          toolName: 'mcp__filesystem__read_file',
+          phase: 'preparing',
+          preparationDiscarded: true,
+          provenance: 'mcp',
+          serverId: 'filesystem',
+        },
+      });
+    });
+
+    it('suppresses preparation lifecycle frames for TodoWrite', async () => {
+      const emitted = await emitter.emitStart({
+        callId: 'call-todo',
+        toolName: ToolNames.TODO_WRITE,
+        args: {},
+        status: 'pending',
+        phase: 'preparing',
+      });
+      await emitter.emitPreparationDiscarded('call-todo', ToolNames.TODO_WRITE);
+
+      expect(emitted).toBe(false);
+      expect(sendUpdateSpy).not.toHaveBeenCalled();
+    });
+  });
+
   describe('emitResult', () => {
     it('should emit tool_call_update with completed status on success', async () => {
       await emitter.emitResult({

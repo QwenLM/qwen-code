@@ -13,6 +13,8 @@ const debugLogger = createDebugLogger('STREAMING_TOOL_CALL_PARSER');
  * Type definition for the result of parsing a JSON chunk in tool calls
  */
 export interface ToolCallParseResult {
+  /** Parser index that received this chunk after collision remapping. */
+  actualIndex?: number;
   /** Whether the JSON parsing is complete */
   complete: boolean;
   /** The parsed JSON value (only present when complete is true) */
@@ -46,6 +48,8 @@ export class StreamingToolCallParser {
   private toolCallMeta: Map<number, { id?: string; name?: string }> = new Map();
   /** Map from tool call ID to actual index used for storage */
   private idToIndexMap: Map<string, number> = new Map();
+  /** Remapped slots awaiting a stable ID from a later chunk. */
+  private pendingIndexRemaps: Map<number, number> = new Map();
   /** Counter for generating new indices when collisions occur */
   private nextAvailableIndex: number = 0;
 
@@ -80,6 +84,11 @@ export class StreamingToolCallParser {
       if (this.idToIndexMap.has(id)) {
         // We've seen this ID before, use the existing mapped index
         actualIndex = this.idToIndexMap.get(id)!;
+      } else if (this.pendingIndexRemaps.has(index)) {
+        // Some providers stream name or arguments before the stable ID.
+        actualIndex = this.pendingIndexRemaps.get(index)!;
+        this.pendingIndexRemaps.delete(index);
+        this.idToIndexMap.set(id, actualIndex);
       } else {
         // New tool call ID
         // Check if the requested index is already occupied by a different complete tool call
@@ -121,7 +130,20 @@ export class StreamingToolCallParser {
       // No ID provided - this is a continuation chunk
       // Try to find which tool call this belongs to based on the index
       // Look for an existing tool call at this index that's not complete
-      if (this.buffers.has(index)) {
+      if (this.pendingIndexRemaps.has(index)) {
+        // Keep later argument chunks on the remapped slot until the ID arrives.
+        actualIndex = this.pendingIndexRemaps.get(index)!;
+        const existingBuffer = this.buffers.get(actualIndex)!;
+        const existingDepth = this.depths.get(actualIndex)!;
+        if (existingDepth === 0 && existingBuffer.trim()) {
+          try {
+            JSON.parse(existingBuffer);
+            actualIndex = this.findMostRecentIncompleteIndex();
+          } catch {
+            // The remapped buffer is still incomplete; append below.
+          }
+        }
+      } else if (this.buffers.has(index)) {
         const existingBuffer = this.buffers.get(index)!;
         const existingDepth = this.depths.get(index)!;
 
@@ -161,7 +183,7 @@ export class StreamingToolCallParser {
           debugLogger.debug(
             `Ignoring replay chunk for completed toolCall id=${id}`,
           );
-          return { complete: false };
+          return { actualIndex, complete: false };
         } catch {
           // Not complete yet; append the incoming chunk below.
         }
@@ -178,7 +200,7 @@ export class StreamingToolCallParser {
         debugLogger.debug(
           `Ignoring replayed opener for no-argument toolCall id=${id}`,
         );
-        return { complete: false };
+        return { actualIndex, complete: false };
       }
     }
 
@@ -186,6 +208,9 @@ export class StreamingToolCallParser {
     const meta = this.toolCallMeta.get(actualIndex)!;
     if (id) meta.id = id;
     if (name) meta.name = name;
+    if (!meta.id && actualIndex !== index) {
+      this.pendingIndexRemaps.set(index, actualIndex);
+    }
 
     // Get current state for the actual index
     const currentInString = this.inStrings.get(actualIndex)!;
@@ -224,13 +249,14 @@ export class StreamingToolCallParser {
       try {
         // Standard JSON parsing attempt
         const parsed = JSON.parse(newBuffer);
-        return { complete: true, value: parsed };
+        return { actualIndex, complete: true, value: parsed };
       } catch (e) {
         // Intelligent repair: try auto-closing unclosed strings
         if (inString) {
           try {
             const repaired = JSON.parse(newBuffer + '"');
             return {
+              actualIndex,
               complete: true,
               value: repaired,
               repaired: true,
@@ -240,6 +266,7 @@ export class StreamingToolCallParser {
           }
         }
         return {
+          actualIndex,
           complete: false,
           error: e instanceof Error ? e : new Error(String(e)),
         };
@@ -247,7 +274,7 @@ export class StreamingToolCallParser {
     }
 
     // JSON structure is incomplete, continue accumulating chunks
-    return { complete: false };
+    return { actualIndex, complete: false };
   }
 
   /**
@@ -443,6 +470,11 @@ export class StreamingToolCallParser {
     this.inStrings.set(index, false);
     this.escapes.set(index, false);
     this.toolCallMeta.set(index, {});
+    for (const [providerIndex, actualIndex] of this.pendingIndexRemaps) {
+      if (providerIndex === index || actualIndex === index) {
+        this.pendingIndexRemaps.delete(providerIndex);
+      }
+    }
   }
 
   /**
@@ -459,6 +491,7 @@ export class StreamingToolCallParser {
     this.escapes.clear();
     this.toolCallMeta.clear();
     this.idToIndexMap.clear();
+    this.pendingIndexRemaps.clear();
     this.nextAvailableIndex = 0;
   }
 

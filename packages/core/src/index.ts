@@ -72,6 +72,7 @@ export * from './core/nonInteractiveToolExecutor.js';
 export * from './core/prompts.js';
 export * from './core/session-recovery.js';
 export * from './core/tokenLimits.js';
+export * from './core/tool-call-preparation.js';
 export * from './core/toolCallIdUtils.js';
 export * from './core/turn.js';
 export * from './core/turn-interruption.js';

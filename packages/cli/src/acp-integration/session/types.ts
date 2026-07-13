@@ -95,6 +95,8 @@ export interface ToolCallStartParams {
   args?: Record<string, unknown>;
   /** Status of the tool call */
   status?: 'pending' | 'in_progress' | 'completed' | 'failed';
+  /** Transient phase recognized by clients that support tool preparation. */
+  phase?: 'preparing';
   /** Optional subagent metadata */
   subagentMeta?: SubagentMeta;
   /** Server-side timestamp (ISO string or ms) for message ordering */
