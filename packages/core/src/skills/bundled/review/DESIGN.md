@@ -293,9 +293,42 @@ The resolution is the same one this document already records for presubmit and c
 
 - **`parse-args`** owns the grammar. Every previously-shipped parsing bug is a named row in its table-driven tests. The raw string travels **on stdin** (`--stdin` with a quoted heredoc), never as a positional: a flag-first raw string (`/review --effort low`) is consumed by the CLI's own strict parser before the handler runs, and a positional also breaks on quotes and shell metacharacters. Pure-function tests could not see that class — the documented invocation failed only when run against the built binary — so the suite includes yargs-level wiring tests alongside the table.
 - **`compose-review`** owns event selection and body composition — the C/S table (counting body Criticals and discarded Suggestions), the event caps (cannot-tell existing Criticals, uncoverable chunks, unreviewed dimensions, context-unavailable), the downgrade carve-outs, and the clause composition. Its truth-table tests pin each shipped bug; writing them immediately caught one more instance of the class (all Suggestions discarded → S=0 → APPROVE). The input is validated at the boundary: the producer is a model writing JSON that omits inapplicable fields, so absent counts default to zero and malformed values throw typed errors — before that, an omitted count meant `undefined + 1 = NaN`, which fails every event comparison and would have returned APPROVE over a body-only blocker. 422 recovery stops being a hand-derived recomposition: it is the same call with updated counts, so the "recompute may never upgrade the verdict" guarantee holds by construction.
-- **`pr-context`** ends the fetch-prose chain at its root: review bodies **and replied-Critical root bodies** render **in full** (a body-only blocker lives only there; a capped body names its review or comment id so the tail stays fetchable one object at a time, and reply snippets name their comment id when cut), and replied Critical threads are quarantined into their own section instead of settling into "Already discussed" — a reply alone never retires a blocker. The `gh` wrapper's `maxBuffer` rises to 64 MiB, closing the ENOBUFS that killed two subcommands mid-review on a comment-heavy PR.
+- **`pr-context`** ends the fetch-prose chain at its root: review bodies **and every blocker-bearing body** render **in full** (a body-only blocker lives only there; a capped body names its review or comment id so the tail stays fetchable one object at a time, and reply snippets name their comment id when cut), and blocker-bearing threads are quarantined into a "Blockers to re-check" section instead of settling into "Already discussed" — a reply alone never retires a blocker. The `gh` wrapper's `maxBuffer` rises to 64 MiB, closing the ENOBUFS that killed two subcommands mid-review on a comment-heavy PR.
 
 What deliberately stays prose: everything judgment-shaped — what counts as a Critical, verification, the posting gate's authorization semantics, the angles. A truth table cannot decide whether a finding is real; it can guarantee that a real finding is never mislabeled, dropped by a downgrade, or approved past.
+
+## Why blocker recognition is semantic, not the `[Critical]` marker
+
+The mandatory re-check section used to be gated on the literal string `[Critical]`. That marker is emitted by exactly one author — `/review` itself. Every human blocker was therefore invisible to the gate, and the fallback was a prose instruction in Step 6 telling the model to also scan "Already discussed" semantically.
+
+Prose does not beat structure. PR #6486 is the proof, and it cost a shipped blocker.
+
+A maintainer built the PR, drove the real CLI through a PTY, and found that `Ctrl+F` **dual-fires** — it toggles the model _and_ moves the input cursor, because `text-buffer.ts:2663` still binds `Ctrl+F → move('right')` and both handlers are independent subscribers of a `KeypressContext.broadcast()` that has no stop-propagation. They filed it as an **issue comment**, headed `🔴 Finding 1 — … (blocker)`. No `[Critical]` marker, because a human wrote it.
+
+Three things then compounded:
+
+1. Issue comments all settle into **"Already discussed — do NOT re-report"**.
+2. They render as **240-character one-line snippets**.
+3. The first 240 characters of a verification report are its **preamble**: _"I built this PR from source and drove the real CLI … to validate the model-toggle hotkey before merge. Sharing the results as a merge reference."_
+
+So the one artifact that proved the PR was broken was presented to the review agents as a **maintainer endorsement**, in the section that says not to re-report it. The blocker itself began 1 143 characters past the cut. Three hours later `/review` reviewed the same commit — the fix did not land until that evening — and submitted **"Reviewed — no blockers"**. This is precisely the "dropped blocker" failure the Step 6 re-check exists to prevent, and the re-check could not prevent it, because the input it was handed said the opposite of the truth.
+
+The fix moves the decision out of prose and into `carriesBlockerSignal`: any body asserting a blocking defect — inline thread or issue comment, `[Critical]` or `(blocker)` or "is a blocker" or "must fix" or "still reproducible" or 阻塞项 — is promoted into **"Blockers to re-check"** and rendered **in full**. A bare `🔴` is deliberately **not** a signal, for the reason the next paragraph measures.
+
+Two properties are deliberate:
+
+- **Fail-safe direction.** A false positive costs one extra ruling by the re-check; a false negative ships the bug. When in doubt, promote.
+- **Precision still matters, in the other direction.** Promotion means full-body rendering, and a context file that outgrows one `read_file` is its own way of losing a blocker (PR #5738, recorded above). The prose scan of "Already discussed" is retained as a floor — `carriesBlockerSignal` recognises the phrasings we have seen, not every phrasing that exists.
+
+**Both of those were nearly undone by the first implementation, and only a live run showed it.** That version scanned the whole body for the words `blocker`, `🔴`, `阻塞`, `[Critical]`. Run against the real #6486 thread it promoted **8 of 15** issue comments; exactly one was a live blocker. The others were the triage bot's own template line **"No critical blockers."** (the word inside its own negation), the author's **"### 🔴 Critical fixes"** (a severity emoji on a list of repairs), and a later comment _quoting_ `[Critical]` while arguing a finding away. Eight full bodies took the context file from 30 KB to 59 KB and pushed the real blocker to character **43 094** — past the 25 000 one `read_file` returns. The section existed, held the right blocker, and no agent could see it: PR #5738's failure, reintroduced one section further down by the fix for it.
+
+Three changes, and the ordering one is load-bearing:
+
+- **The section is written FIRST**, ahead of the description and the review history. Nothing in the file outranks the claims a `C=0` verdict may not be reached without ruling on. On the live thread this moved the heading from char 25 961 to **569**, and the blocker body from 43 094 to **4 421**.
+- **Recognition matches assertion patterns, not word presence** — `[Critical]`, `(blocker)`, `is a blocker`, `blocking issue/defect/bug`, `must fix`, `still reproducible/repro/broken/fails`, `阻塞项` — with a **bilingual** negation guard, so neither "no blockers" nor "没有阻塞项" ever promotes. Live promotions dropped 8 → 3 (the one real blocker plus two harmless mentions), and the file 59 KB → 40 KB.
+- **The section carries a character budget.** Tight patterns keep promotion rare; the budget keeps a pathological thread from blowing the read window anyway. Bodies past it degrade to snippets **naming their exact fetch**, which the re-check already must run before ruling — not to silence.
+
+The lesson generalizes past this file: **"a false positive is cheap" is a claim about a budget, and it has to be measured against the real distribution, not assumed.** Here it was false until the ordering was fixed.
 
 ## What the first dogfood batch changed
 
