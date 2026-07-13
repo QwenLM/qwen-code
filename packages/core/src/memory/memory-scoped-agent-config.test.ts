@@ -350,6 +350,7 @@ describe('createMemoryScopedAgentConfig', () => {
 
 describe('isAllowedMemoryPath with a symlinked project root', () => {
   const originalMemoryLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+  let baseDir: string;
   let projectRoot: string;
 
   beforeEach(async () => {
@@ -361,21 +362,22 @@ describe('isAllowedMemoryPath with a symlinked project root', () => {
     // NOT created, so the allow-check must resolve the nearest existing
     // ancestor (the symlink) rather than assume the root already exists.
     process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
-    const base = await fs.mkdtemp(path.join(os.tmpdir(), 'memory-symlink-'));
-    const realProject = path.join(base, 'realproj');
-    projectRoot = path.join(base, 'linkproj');
+    baseDir = await fs.mkdtemp(path.join(os.tmpdir(), 'memory-symlink-'));
+    const realProject = path.join(baseDir, 'realproj');
+    projectRoot = path.join(baseDir, 'linkproj');
     await fs.mkdir(realProject, { recursive: true });
     await fs.symlink(realProject, projectRoot);
     clearAutoMemoryRootCache();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     if (originalMemoryLocal === undefined) {
       delete process.env['QWEN_CODE_MEMORY_LOCAL'];
     } else {
       process.env['QWEN_CODE_MEMORY_LOCAL'] = originalMemoryLocal;
     }
     clearAutoMemoryRootCache();
+    await fs.rm(baseDir, { recursive: true, force: true });
   });
 
   it('allows a write under a symlinked managed-memory root that does not exist yet', () => {
@@ -386,5 +388,13 @@ describe('isAllowedMemoryPath with a symlinked project root', () => {
     // identically even before the root directory exists.
     const memoryFile = path.join(getAutoMemoryRoot(projectRoot), 'project.md');
     expect(isAllowedMemoryPath(memoryFile, projectRoot)).toBe(true);
+  });
+
+  it('still denies a path outside the symlinked managed-memory root', () => {
+    // The symmetric resolution must not become overly permissive: a normal
+    // project file that is not under `<projectRoot>/.qwen/memory` — reached
+    // through the same symlinked root — is still rejected.
+    const outsideFile = path.join(projectRoot, 'notes.md');
+    expect(isAllowedMemoryPath(outsideFile, projectRoot)).toBe(false);
   });
 });
