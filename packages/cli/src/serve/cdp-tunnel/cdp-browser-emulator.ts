@@ -198,6 +198,13 @@ export class CdpBrowserEmulator {
           const attachedSessionId = params?.['sessionId'];
           if (typeof attachedSessionId === 'string') {
             this.attachedPageSessions.delete(attachedSessionId);
+            this.cb.reply({
+              method: 'Target.detachedFromTarget',
+              params: {
+                sessionId: attachedSessionId,
+                targetId: PAGE_TARGET_ID,
+              },
+            });
           }
           return this.cb.reply({ id, result: {} });
         }

@@ -145,12 +145,17 @@ describe('CdpBrowserEmulator (Plan C #5626)', () => {
       method: 'Target.detachFromTarget',
       params: { sessionId },
     });
+    expect(replies[0]).toEqual({
+      method: 'Target.detachedFromTarget',
+      params: { sessionId, targetId: 'qwen-cdp-page' },
+    });
+    expect(replies[1]).toEqual({ id: 9, result: {} });
     await emu.handleFromClient({
       id: 10,
       method: 'Runtime.evaluate',
       sessionId,
     });
-    expect(replies[1]).toMatchObject({
+    expect(replies[2]).toMatchObject({
       id: 10,
       error: { message: `Unknown CDP session: ${sessionId}` },
     });
