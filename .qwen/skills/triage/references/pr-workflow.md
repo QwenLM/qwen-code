@@ -281,36 +281,19 @@ When posting findings, summarize in a few sentences like a human would — "the 
 
 Selective and conditional — these augment the human-voice comment for complex PRs; they are **not** a template to fill in on every run. Add each only when it genuinely helps the maintainer, and skip silently otherwise. A diagram or files table bolted onto a small, focused PR is exactly the auto-generated noise the gate philosophy warns against — when in doubt, leave it out.
 
-**Sequence diagram** — add when the PR introduces or reshapes a multi-step runtime flow: a new tool/callback lifecycle, a request → response → re-inject path, a state machine, a cross-component handshake. Skip for one-line fixes, pure refactors, and config/doc/test-only changes. Keep it to the key path (≤ ~8 participants), not every branch. Render both a light and a dark variant so it stays legible in either GitHub theme — the `#gh-light-mode-only` / `#gh-dark-mode-only` anchors make GitHub show exactly one:
+**Sequence diagram** — add when the PR introduces or reshapes a multi-step runtime flow: a new tool/callback lifecycle, a request → response → re-inject path, a state machine, a cross-component handshake. Skip for one-line fixes, pure refactors, and config/doc/test-only changes. Keep it to the key path (≤ ~8 participants), not every branch. Use a single plain `mermaid` block with **no** `%%{init: {'theme': …}}%%` directive — GitHub renders unthemed mermaid in the reader's own light/dark mode automatically, so one block stays legible in both:
 
 ````markdown
-<a href="#gh-light-mode-only">
-
 ```mermaid
-%%{init: {'theme': 'neutral'}}%%
 sequenceDiagram
     participant User as User
     participant Tool as new_tool
     User->>Tool: invoke
     Tool-->>User: result
 ```
-
-</a>
-<a href="#gh-dark-mode-only">
-
-```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {"darkMode": true, "background": "#0d1117", "primaryColor": "#21262d", "primaryTextColor": "#e6edf3", "primaryBorderColor": "#8b949e", "lineColor": "#8b949e", "textColor": "#e6edf3", "actorBkg": "#21262d", "actorBorder": "#8b949e", "actorTextColor": "#e6edf3", "signalColor": "#8b949e", "signalTextColor": "#e6edf3", "noteBkgColor": "#373320", "noteBorderColor": "#d4a72c", "noteTextColor": "#f0e6c0", "activationBkgColor": "#30363d"}}}%%
-sequenceDiagram
-    participant User as User
-    participant Tool as new_tool
-    User->>Tool: invoke
-    Tool-->>User: result
-```
-
-</a>
 ````
 
-Keep both variants structurally identical — only the `init` theme block differs. Diagram text (participants, labels) stays English in the main comment; the `<details>` Chinese translation can summarize it in prose rather than duplicating the diagram. The dual-theme anchor trick is copied from a production review bot, but it depends on GitHub's theme-specific rendering — if a real run ever shows both variants stacked instead of one per theme, drop to a single `theme: 'neutral'` diagram, which stays legible in both light and dark.
+Diagram text (participants, labels) stays English in the main comment; the `<details>` Chinese translation can summarize it in prose rather than duplicating the diagram. Do **not** wrap two themed copies in `#gh-light-mode-only` / `#gh-dark-mode-only` anchors: GitHub only theme-scopes that fragment on images, not on anchor-wrapped mermaid, so both copies render stacked (verified empirically on a real comment — the anchors survive as inert links and neither `<pre lang="mermaid">` gets a theme-hiding class).
 
 **Changed-files overview** — add only when the PR touches many source files (~5+) and a per-file map genuinely helps a reviewer navigate. Pull the file list from `gh pr view "$PR_NUMBER" --repo "$REPO" --json files`. Fold the table in a `<details>` so it doesn't dominate the comment, and write one honest line per file in your own words — not a mechanical restatement of the diff. Skip for small, focused PRs.
 
