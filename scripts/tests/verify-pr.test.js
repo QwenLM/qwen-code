@@ -9,6 +9,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -87,6 +88,7 @@ async function captureValidation({ baseEnv, changedFiles, worktree }) {
           container: '/owned/container',
           home: '/owned/home',
           pythonRoot: '/owned/python',
+          temp: '/owned/tmp',
           worktree,
         }),
     },
@@ -846,6 +848,8 @@ writeFileSync('prepare-marker.json', JSON.stringify({
       cwd,
       validate: async (paths) => {
         ownedPaths = paths;
+        expect(paths.container).toBe(realpathSync(paths.container));
+        expect(existsSync(paths.temp)).toBe(true);
         writeFileSync(path.join(paths.worktree, 'source.js'), 'changed\n');
       },
     });
@@ -1066,6 +1070,9 @@ describe('verification orchestration', () => {
     expect(execution.baseEnv).toMatchObject({
       RUNNER_TEMP: '/owned/container',
       SAFE: 'kept',
+      TEMP: '/owned/tmp',
+      TMP: '/owned/tmp',
+      TMPDIR: '/owned/tmp',
     });
     const pythonSteps = execution.steps.filter(
       ({ name, uvRequirement }) => uvRequirement || name.includes('(Python '),

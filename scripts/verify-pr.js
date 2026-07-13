@@ -7,7 +7,13 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
-import { lstatSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+} from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -548,15 +554,17 @@ export async function withTemporaryWorktree({
   reportCleanup = console.error,
   validate,
 }) {
-  const container = makeContainer();
+  const container = realpathSync(makeContainer());
   const paths = {
     container,
     home: join(container, 'home'),
     pythonRoot: join(container, 'python'),
+    temp: join(container, 'tmp'),
     worktree: join(container, 'worktree'),
   };
   mkdirSync(paths.home, { recursive: true });
   mkdirSync(paths.pythonRoot, { recursive: true });
+  mkdirSync(paths.temp, { recursive: true });
   let added = false;
   let cleanupFailure;
   let primaryError;
@@ -657,7 +665,7 @@ export async function verifyPullRequest(
     await temporaryWorktree({
       cwd,
       reportCleanup: error,
-      validate: async ({ container, home, pythonRoot, worktree }) => {
+      validate: async ({ container, home, pythonRoot, temp, worktree }) => {
         const prettierFiles =
           profile === 'full'
             ? repository.changedFiles.filter((file) =>
@@ -670,7 +678,13 @@ export async function verifyPullRequest(
         }
         await runValidationSteps({
           allocatePort,
-          baseEnv: { ...baseEnv, RUNNER_TEMP: container },
+          baseEnv: {
+            ...baseEnv,
+            RUNNER_TEMP: container,
+            TEMP: temp,
+            TMP: temp,
+            TMPDIR: temp,
+          },
           cwd: worktree,
           home,
           log,
