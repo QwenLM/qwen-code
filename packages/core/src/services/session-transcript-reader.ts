@@ -47,6 +47,19 @@ export class SessionTranscriptTooLargeError extends Error {
   }
 }
 
+export class SessionTranscriptPageTooLargeError extends Error {
+  constructor(
+    readonly sessionId: string,
+    readonly pageBytes: number,
+    readonly maxBytes: number,
+  ) {
+    super(
+      `Transcript page for session ${sessionId} exceeds the page budget (${pageBytes} bytes, max ${maxBytes} bytes)`,
+    );
+    this.name = 'SessionTranscriptPageTooLargeError';
+  }
+}
+
 export interface SessionTranscriptCursorState {
   v: typeof SESSION_TRANSCRIPT_CURSOR_VERSION;
   sessionId: string;
@@ -62,6 +75,7 @@ export interface SessionTranscriptCursorState {
 export interface SessionTranscriptReadPageOptions {
   cursor?: string;
   limit?: number;
+  maxBytes?: number;
 }
 
 export interface SessionTranscriptRecordPage {
@@ -240,25 +254,22 @@ function getCursorHmacKey(workspaceCwd: string): Buffer {
   return key;
 }
 
-function signCursorPayload(
+function signCursorPayloadWithKey(
   payload: Record<string, unknown>,
-  workspaceCwd: string,
+  key: Uint8Array,
 ): string {
   return crypto
-    .createHmac('sha256', getCursorHmacKey(workspaceCwd))
+    .createHmac('sha256', key)
     .update(JSON.stringify(payload))
     .digest('base64url');
 }
 
-function hasValidCursorMac(
+function hasValidCursorMacWithKey(
   payload: Record<string, unknown>,
   mac: string,
-  workspaceCwd: string,
+  key: Uint8Array,
 ): boolean {
-  const expected = Buffer.from(
-    signCursorPayload(payload, workspaceCwd),
-    'utf8',
-  );
+  const expected = Buffer.from(signCursorPayloadWithKey(payload, key), 'utf8');
   const actual = Buffer.from(mac, 'utf8');
   return (
     expected.length === actual.length &&
@@ -268,28 +279,21 @@ function hasValidCursorMac(
 
 function encodeCursorState(
   state: SessionTranscriptCursorState,
-  workspaceCwd: string,
+  key: Uint8Array,
 ): string {
   const payload = cursorPayload(state);
   return Buffer.from(
     JSON.stringify({
       ...payload,
-      mac: signCursorPayload(payload, workspaceCwd),
+      mac: signCursorPayloadWithKey(payload, key),
     }),
     'utf8',
   ).toString('base64url');
 }
 
-export function encodeSessionTranscriptCursor(
-  state: SessionTranscriptCursorState,
-  workspaceCwd: string,
-): string {
-  return encodeCursorState(state, workspaceCwd);
-}
-
-export function decodeSessionTranscriptCursor(
+function decodeCursorState(
   cursor: string,
-  workspaceCwd: string,
+  key: Uint8Array,
 ): SessionTranscriptCursorState {
   try {
     const decoded = Buffer.from(cursor, 'base64url').toString('utf8');
@@ -328,7 +332,7 @@ export function decodeSessionTranscriptCursor(
       lastUpdated: parsed['lastUpdated'],
       ...(parsed['replay'] !== undefined ? { replay: parsed['replay'] } : {}),
     };
-    if (!hasValidCursorMac(cursorPayload(state), parsed['mac'], workspaceCwd)) {
+    if (!hasValidCursorMacWithKey(cursorPayload(state), parsed['mac'], key)) {
       debugLogger.debug(
         `cursor decode failed: mac mismatch session=${state.sessionId} ` +
           `position=${state.position} snapshotSize=${state.snapshotSize}`,
@@ -353,6 +357,41 @@ export function decodeSessionTranscriptCursor(
   }
 }
 
+export class SessionTranscriptCursorCodec {
+  private readonly key: Buffer;
+
+  constructor(key: Uint8Array) {
+    if (key.byteLength !== CURSOR_HMAC_KEY_BYTES) {
+      throw new RangeError(
+        `Transcript cursor signing key must be ${CURSOR_HMAC_KEY_BYTES} bytes`,
+      );
+    }
+    this.key = Buffer.from(key);
+  }
+
+  encode(state: SessionTranscriptCursorState): string {
+    return encodeCursorState(state, this.key);
+  }
+
+  decode(cursor: string): SessionTranscriptCursorState {
+    return decodeCursorState(cursor, this.key);
+  }
+}
+
+export function encodeSessionTranscriptCursor(
+  state: SessionTranscriptCursorState,
+  workspaceCwd: string,
+): string {
+  return encodeCursorState(state, getCursorHmacKey(workspaceCwd));
+}
+
+export function decodeSessionTranscriptCursor(
+  cursor: string,
+  workspaceCwd: string,
+): SessionTranscriptCursorState {
+  return decodeCursorState(cursor, getCursorHmacKey(workspaceCwd));
+}
+
 function normalizeLimit(limit: number | undefined): number {
   if (limit === undefined) return SESSION_TRANSCRIPT_DEFAULT_LIMIT;
   if (
@@ -365,6 +404,47 @@ function normalizeLimit(limit: number | undefined): number {
     );
   }
   return limit;
+}
+
+function normalizeMaxBytes(maxBytes: number | undefined): number | undefined {
+  if (maxBytes === undefined) return undefined;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) {
+    throw new RangeError(
+      'Transcript page byte limit must be a positive integer',
+    );
+  }
+  return maxBytes;
+}
+
+function recordSegmentBytes(index: TranscriptIndex, uuid: string): number {
+  const entry = index.byUuid.get(uuid);
+  return (
+    entry?.segments.reduce((total, segment) => total + segment.length, 0) ?? 0
+  );
+}
+
+function selectPageUuids(
+  index: TranscriptIndex,
+  sessionId: string,
+  position: number,
+  limit: number,
+  maxBytes: number | undefined,
+): string[] {
+  const candidates = index.activeUuids.slice(position, position + limit);
+  if (maxBytes === undefined) return candidates;
+
+  const selected: string[] = [];
+  let selectedBytes = 0;
+  for (const uuid of candidates) {
+    const bytes = recordSegmentBytes(index, uuid);
+    if (selected.length === 0 && bytes > maxBytes) {
+      throw new SessionTranscriptPageTooLargeError(sessionId, bytes, maxBytes);
+    }
+    if (selectedBytes + bytes > maxBytes) break;
+    selected.push(uuid);
+    selectedBytes += bytes;
+  }
+  return selected;
 }
 
 function fileIdentityFromStats(stats: fs.Stats): SessionTranscriptFileIdentity {
@@ -834,7 +914,10 @@ async function getCachedIndex(params: {
 export class SessionTranscriptReader {
   private readonly storage: Storage;
 
-  constructor(private readonly workspaceCwd: string) {
+  constructor(
+    private readonly workspaceCwd: string,
+    private readonly cursorCodec?: SessionTranscriptCursorCodec,
+  ) {
     this.storage = new Storage(workspaceCwd);
   }
 
@@ -855,9 +938,11 @@ export class SessionTranscriptReader {
     options: SessionTranscriptReadPageOptions = {},
   ): Promise<SessionTranscriptRecordPage> {
     const limit = normalizeLimit(options.limit);
+    const maxBytes = normalizeMaxBytes(options.maxBytes);
     const cursor =
       options.cursor !== undefined
-        ? decodeSessionTranscriptCursor(options.cursor, this.workspaceCwd)
+        ? (this.cursorCodec?.decode(options.cursor) ??
+          decodeSessionTranscriptCursor(options.cursor, this.workspaceCwd))
         : undefined;
     if (cursor && cursor.sessionId !== sessionId) {
       debugLogger.debug(
@@ -906,8 +991,14 @@ export class SessionTranscriptReader {
       );
       throw new InvalidSessionTranscriptCursorError();
     }
-    const nextPosition = Math.min(position + limit, index.activeUuids.length);
-    const pageUuids = index.activeUuids.slice(position, nextPosition);
+    const pageUuids = selectPageUuids(
+      index,
+      sessionId,
+      position,
+      limit,
+      maxBytes,
+    );
+    const nextPosition = position + pageUuids.length;
     const records = await readAggregatedRecords(index, pageUuids);
     const hasMore = nextPosition < index.activeUuids.length;
     const nextCursorState: SessionTranscriptCursorState | undefined = hasMore

@@ -19,7 +19,10 @@ export const GROUP_COLOR_OPTIONS = [
   'purple',
 ] as const;
 
-export type SessionGroupColor = (typeof GROUP_COLOR_OPTIONS)[number];
+export type SessionGroupPresetColor = (typeof GROUP_COLOR_OPTIONS)[number];
+/** Shape hint only; runtime validation below enforces exactly six Hex digits. */
+export type SessionGroupHexColor = `#${string}`;
+export type SessionGroupColor = SessionGroupPresetColor | SessionGroupHexColor;
 
 export interface SessionGroup {
   id: string;
@@ -37,13 +40,13 @@ export interface SessionOrganization {
    * as mutually exclusive (a color is a lightweight, name-free bucket), but the
    * store only records whatever fields callers provide. Absent/unknown → null.
    */
-  color?: SessionGroupColor | null;
+  color?: SessionGroupPresetColor | null;
   pinnedAt?: string;
   updatedAt: string;
 }
 
 export interface SessionOrganizationView extends SessionOrganization {
-  color: SessionGroupColor | null;
+  color: SessionGroupPresetColor | null;
   isPinned: boolean;
 }
 
@@ -54,7 +57,7 @@ export interface SessionOrganizationSnapshot {
 
 export interface SessionGroupCatalog {
   groups: SessionGroup[];
-  colorOptions: SessionGroupColor[];
+  colorOptions: SessionGroupPresetColor[];
 }
 
 export interface CreateSessionGroupInput {
@@ -71,7 +74,7 @@ export interface UpdateSessionGroupInput {
 export interface UpdateSessionOrganizationInput {
   isPinned?: boolean;
   groupId?: string | null;
-  color?: SessionGroupColor | null;
+  color?: SessionGroupPresetColor | null;
 }
 
 interface SessionOrganizationStoreV1 {
@@ -137,8 +140,25 @@ function normalizeGroupName(name: unknown): string {
   return trimmed;
 }
 
-function assertGroupColor(color: unknown): asserts color is SessionGroupColor {
-  if (typeof color !== 'string' || !isSupportedGroupColor(color)) {
+function normalizeGroupColor(color: unknown): SessionGroupColor {
+  const normalized = typeof color === 'string' ? color.trim() : color;
+  if (typeof normalized === 'string' && isPresetGroupColor(normalized)) {
+    return normalized;
+  }
+  if (typeof normalized === 'string' && /^#[0-9a-f]{6}$/i.test(normalized)) {
+    return normalized.toLowerCase() as SessionGroupHexColor;
+  }
+  throw new SessionOrganizationError(
+    '`color` must be a supported preset or a #RRGGBB hex value',
+    'invalid_group_color',
+    'color',
+  );
+}
+
+function assertSessionColor(
+  color: unknown,
+): asserts color is SessionGroupPresetColor {
+  if (typeof color !== 'string' || !isPresetGroupColor(color)) {
     throw new SessionOrganizationError(
       '`color` must be one of the supported color options',
       'invalid_group_color',
@@ -166,8 +186,8 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function isSupportedGroupColor(color: string): color is SessionGroupColor {
-  return GROUP_COLOR_OPTIONS.includes(color as SessionGroupColor);
+function isPresetGroupColor(color: string): color is SessionGroupPresetColor {
+  return GROUP_COLOR_OPTIONS.includes(color as SessionGroupPresetColor);
 }
 
 function emptyStore(): SessionOrganizationStoreV1 {
@@ -192,7 +212,7 @@ function viewOrganization(
     typeof organization?.groupId === 'string' ? organization.groupId : null;
   const color =
     typeof organization?.color === 'string' &&
-    isSupportedGroupColor(organization.color)
+    isPresetGroupColor(organization.color)
       ? organization.color
       : null;
   const pinnedAt =
@@ -265,7 +285,7 @@ export class SessionOrganizationService {
 
   async createGroup(input: CreateSessionGroupInput): Promise<SessionGroup> {
     const name = normalizeGroupName(input.name);
-    assertGroupColor(input.color);
+    const color = normalizeGroupColor(input.color);
     return this.withStoreLock(async () => {
       const store = await this.readStore();
       this.assertGroupNameAvailable(store.groups, name);
@@ -279,7 +299,7 @@ export class SessionOrganizationService {
       const group: SessionGroup = {
         id: randomUUID(),
         name,
-        color: input.color,
+        color,
         order: Math.min(
           store.groups.reduce(
             (maxOrder, existing) => Math.max(maxOrder, existing.order),
@@ -316,8 +336,7 @@ export class SessionOrganizationService {
         group.name = name;
       }
       if (input.color !== undefined) {
-        assertGroupColor(input.color);
-        group.color = input.color;
+        group.color = normalizeGroupColor(input.color);
       }
       if (input.order !== undefined) {
         group.order = normalizeOrder(input.order);
@@ -365,7 +384,7 @@ export class SessionOrganizationService {
       const now = new Date().toISOString();
       if (input.color !== undefined) {
         if (input.color !== null) {
-          assertGroupColor(input.color);
+          assertSessionColor(input.color);
         }
         current.color = input.color;
       }
@@ -478,7 +497,7 @@ export class SessionOrganizationService {
                 ? organization['groupId']
                 : null,
             ...(typeof organization['color'] === 'string' &&
-            isSupportedGroupColor(organization['color'])
+            isPresetGroupColor(organization['color'])
               ? { color: organization['color'] }
               : {}),
             ...(typeof organization['pinnedAt'] === 'string'
@@ -579,10 +598,14 @@ export class SessionOrganizationService {
       this.warnMalformedGroupEntry(value);
       return undefined;
     }
-    const color = isSupportedGroupColor(value['color'])
-      ? value['color']
-      : FALLBACK_GROUP_COLOR;
-    if (color !== value['color']) {
+    let color: SessionGroupColor = FALLBACK_GROUP_COLOR;
+    let supported = true;
+    try {
+      color = normalizeGroupColor(value['color']);
+    } catch {
+      supported = false;
+    }
+    if (!supported) {
       this.warnOnce(
         `unknown-group-color:${value['id']}\0${value['color']}`,
         `Session group "${value['name']}" (id: ${value['id']}) uses unsupported color "${value['color']}"; using "${FALLBACK_GROUP_COLOR}"`,

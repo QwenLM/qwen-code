@@ -467,8 +467,8 @@
 .floatingTooltip {
   position: fixed;
   z-index: 1000;
-  max-width: 320px;
-  min-width: 220px;
+  max-width: calc(100vw - 16px);
+  min-width: 0;
   padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -492,6 +492,11 @@
   left: -12px;
   width: 12px;
   content: '';
+}
+
+.floatingTooltipLeft::before {
+  right: -12px;
+  left: auto;
 }
 
 .tooltipContent {
@@ -546,7 +551,7 @@
 
 .sessionText {
   flex: 1 1 auto;
-  margin-right: 18px;
+  margin-right: 0;
   color: currentColor;
   font-size: 14px;
   line-height: 22px;
@@ -600,10 +605,11 @@
 
 .sessionMetaSlot {
   position: relative;
-  width: 82px;
+  width: auto;
+  min-width: 0;
   height: 30px;
-  flex: 0 0 82px;
-  margin-left: auto;
+  flex: 0 0 auto;
+  margin-left: 8px;
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -884,6 +890,11 @@
   background: var(--agent-purple-600);
 }
 
+.groupColorCustom {
+  box-shadow: inset 0 0 0 1px
+    color-mix(in srgb, var(--foreground) 28%, transparent);
+}
+
 .iconButton:disabled {
   cursor: not-allowed;
   opacity: 0.38;
@@ -974,6 +985,40 @@
   line-height: 20px;
 }
 
+.groupCustomColorRow {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 8px 10px;
+  align-items: end;
+}
+
+.groupColorPicker {
+  width: 44px;
+  height: 44px;
+  padding: 3px;
+  border: 1px solid var(--sidebar-border);
+  border-radius: 8px;
+  background: var(--background);
+  cursor: pointer;
+}
+
+.groupHexField {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.groupColorError {
+  grid-column: 2;
+  color: var(--destructive, #dc2626);
+  font-size: 11px;
+  line-height: 16px;
+}
+
 .secondaryButton,
 .dangerButton {
   height: 28px;
@@ -1011,8 +1056,19 @@
   border-top: 1px solid var(--sidebar-border);
 }
 
+.footerLeading,
+.footerTrailing {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.footerTrailing {
+  margin-left: auto;
+}
+
 .footerButton {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
 }
@@ -1024,27 +1080,41 @@
   text-overflow: ellipsis;
 }
 
-.footerCompact,
-.footerTight {
+.footerCompact {
   gap: 4px;
 }
 
-.footerCompact .footerButton,
-.footerTight .footerButton {
-  width: 26px;
+.footerCompact .footerLeading,
+.footerCompact .footerTrailing {
+  gap: 4px;
+}
+
+.footerCompact .footerButton {
+  width: auto;
+  min-width: 0;
   height: 28px;
-  flex: 0 0 26px;
+  flex: 0 0 auto;
   justify-content: center;
   padding: 0;
 }
 
-.footerCompact .footerButtonLabel,
-.footerTight .footerButtonLabel {
+.footerCompact .footerButtonLabel {
   display: none;
 }
 
-.footerCompact .collapseButton,
-.footerTight .collapseButton {
+.footerCompact .footerButtonWithLabel {
+  width: auto;
+  height: 28px;
+  flex: 0 1 auto;
+  justify-content: flex-start;
+  padding: 0 8px;
+}
+
+.footerCompact .footerButtonWithLabel .footerButtonLabel {
+  display: block;
+}
+
+.footerCompact .collapseButton {
   width: 26px;
   height: 28px;
 }
@@ -1061,6 +1131,57 @@
   letter-spacing: 0.02em;
   white-space: nowrap;
   user-select: text;
+}
+
+.footerMenu {
+  position: fixed;
+  z-index: 1100;
+  min-width: 168px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow:
+    0 2px 4px -2px rgb(0 0 0 / 10%),
+    0 8px 16px -4px rgb(0 0 0 / 18%);
+}
+
+.footerMenuItem,
+.footerMenuVersion {
+  min-width: 0;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  text-align: left;
+}
+
+.footerMenuItem {
+  width: 100%;
+  cursor: pointer;
+}
+
+.footerMenuItem:hover,
+.footerMenuItem:focus-visible {
+  background: var(--accent);
+  color: var(--accent-foreground);
+  outline: none;
+}
+
+.footerMenuVersion {
+  color: var(--muted-foreground);
 }
 
 .collapsed .newChatButton,
@@ -1083,6 +1204,12 @@
 
 .collapsed .footer {
   flex-direction: column;
+}
+
+.collapsed .footerLeading,
+.collapsed .footerTrailing {
+  flex-direction: column;
+  margin-left: 0;
 }
 
 .resizeHandle {

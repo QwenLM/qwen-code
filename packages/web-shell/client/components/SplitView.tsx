@@ -24,6 +24,13 @@ import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
 } from '../constants/sessions';
+import { useOtherWorkspaceSessions } from '../hooks/useOtherWorkspaceSessions';
+import {
+  hasMultipleWorkspaces,
+  isNonPrimaryWorkspaceSession,
+  mergeSessionsById,
+  workspaceBasename,
+} from '../utils/workspace';
 import styles from './SplitView.module.css';
 
 const MAX_PANES = MAX_SPLIT_PANES;
@@ -88,6 +95,20 @@ export function SplitView({
       ? { view: 'organized' as const, group: 'all' }
       : {}),
   });
+  // Live sessions from the daemon's other workspaces, so the picker can offer —
+  // and a pane can attach to — sessions that aren't in the primary workspace.
+  // Empty (a no-op) on a single-workspace daemon.
+  const { sessions: otherSessions, reload: reloadOther } =
+    useOtherWorkspaceSessions();
+  const allSessions = useMemo(
+    () => mergeSessionsById(sessions, otherSessions),
+    [sessions, otherSessions],
+  );
+  const multiWorkspace = hasMultipleWorkspaces(connection.capabilities);
+  // The primary workspace cwd, for labeling picker items the same way the
+  // Session Overview labels its cards (primary → the localized tag, others →
+  // the workspace basename).
+  const primaryCwd = connection.capabilities?.workspaceCwd;
   const sessionIdsControlled = sessionIds !== undefined;
   const normalizedSessionIds = useMemo(
     () =>
@@ -148,8 +169,11 @@ export function SplitView({
   // mount, so without this the picker would offer whatever was current when the
   // split was first entered, missing sessions created since.
   useEffect(() => {
-    if (pickerOpen) void reload();
-  }, [pickerOpen, reload]);
+    if (pickerOpen) {
+      void reload();
+      void reloadOther();
+    }
+  }, [pickerOpen, reload, reloadOther]);
 
   // Also refresh when the parent signals the list changed elsewhere (a session
   // created / deleted / renamed in the sidebar or another tab), so an open
@@ -171,19 +195,40 @@ export function SplitView({
     ) {
       prevReloadTokenRef.current = sessionListReloadToken;
       void reload();
+      void reloadOther();
     }
-  }, [sessionListReloadToken, reload]);
+  }, [sessionListReloadToken, reload, reloadOther]);
 
   const titleById = useMemo(() => {
     const map = new Map<string, string>();
-    for (const session of sessions) {
+    for (const session of allSessions) {
       map.set(
         session.sessionId,
         session.displayName?.trim() || session.sessionId.slice(0, 8),
       );
     }
     return map;
-  }, [sessions]);
+  }, [allSessions]);
+
+  // The workspace each session lives in, so a pane attaches under its owning
+  // workspace (a non-primary session 409s if loaded with the primary cwd). The
+  // seed pane is the current session, whose workspace the connection already
+  // knows before the lists finish loading — cover it so it attaches correctly
+  // on first paint.
+  const workspaceCwdById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const session of allSessions) {
+      map.set(session.sessionId, session.workspaceCwd);
+    }
+    if (
+      currentSessionId &&
+      connection.workspaceCwd &&
+      !map.has(currentSessionId)
+    ) {
+      map.set(currentSessionId, connection.workspaceCwd);
+    }
+    return map;
+  }, [allSessions, currentSessionId, connection.workspaceCwd]);
 
   const addPane = useCallback(
     (sessionId: string) => {
@@ -240,8 +285,8 @@ export function SplitView({
   );
 
   const available = useMemo(
-    () => sessions.filter((session) => !paneIds.includes(session.sessionId)),
-    [sessions, paneIds],
+    () => allSessions.filter((session) => !paneIds.includes(session.sessionId)),
+    [allSessions, paneIds],
   );
   const canAdd = paneIds.length < MAX_PANES && available.length > 0;
 
@@ -290,8 +335,23 @@ export function SplitView({
                     className={styles.pickerItem}
                     onClick={() => addPane(session.sessionId)}
                   >
-                    {titleById.get(session.sessionId) ??
-                      session.sessionId.slice(0, 8)}
+                    <span className={styles.pickerItemLabel}>
+                      {titleById.get(session.sessionId) ??
+                        session.sessionId.slice(0, 8)}
+                    </span>
+                    {multiWorkspace && (
+                      <span
+                        className={styles.pickerItemWorkspace}
+                        title={session.workspaceCwd}
+                      >
+                        {isNonPrimaryWorkspaceSession(
+                          session.workspaceCwd,
+                          primaryCwd,
+                        )
+                          ? workspaceBasename(session.workspaceCwd)
+                          : t('sidebar.workspacePrimary')}
+                      </span>
+                    )}
                   </button>
                 </li>
               ))}
@@ -304,51 +364,73 @@ export function SplitView({
         {paneIds.length === 0 ? (
           <div className={styles.empty}>{t('splitView.empty')}</div>
         ) : (
-          paneIds.map((sessionId) => (
-            <div className={styles.paneSlot} key={sessionId}>
-              {/* Contain a render crash to its own pane — a malformed block in
-                  one session must not white-screen the whole split. */}
-              <ErrorBoundary
-                label={`split-pane:${sessionId}`}
-                resetKeys={[sessionId]}
-                fallback={(error) => (
-                  <div className={styles.paneError} role="alert">
-                    <div className={styles.paneErrorTitle}>
-                      {titleById.get(sessionId) ?? sessionId.slice(0, 8)}
-                    </div>
-                    <div className={styles.paneErrorMessage}>
-                      {t('splitView.paneError')}: {error.message}
-                    </div>
-                    <button
-                      type="button"
-                      className={styles.paneErrorClose}
-                      onClick={() => removePane(sessionId)}
-                    >
-                      {t('splitView.closePane')}
-                    </button>
-                  </div>
-                )}
+          paneIds.map((sessionId) => {
+            const paneWorkspaceCwd = workspaceCwdById.get(sessionId);
+            return (
+              <div
+                className={styles.paneSlot}
+                // Include the resolved workspace in the key on a multi-workspace
+                // daemon so a pane whose workspace resolves only after mount (e.g.
+                // a `?split=` deep link) remounts under the right workspace rather
+                // than staying attached with the primary cwd.
+                key={
+                  multiWorkspace
+                    ? `${sessionId}:${paneWorkspaceCwd ?? ''}`
+                    : sessionId
+                }
               >
-                <DaemonSessionProvider
-                  sessionId={sessionId}
-                  // Distinct from the main view's client (and from any other
-                  // tab's panes) for the same session, so the attachments don't
-                  // collide on one client identity.
-                  clientId={`split-pane:${instanceId}:${sessionId}`}
-                  suppressOwnUserEcho
+                {/* Contain a render crash to its own pane — a malformed block in
+                  one session must not white-screen the whole split. */}
+                <ErrorBoundary
+                  label={`split-pane:${sessionId}`}
+                  resetKeys={[sessionId]}
+                  fallback={(error) => (
+                    <div className={styles.paneError} role="alert">
+                      <div className={styles.paneErrorTitle}>
+                        {titleById.get(sessionId) ?? sessionId.slice(0, 8)}
+                      </div>
+                      <div className={styles.paneErrorMessage}>
+                        {t('splitView.paneError')}: {error.message}
+                      </div>
+                      <button
+                        type="button"
+                        className={styles.paneErrorClose}
+                        onClick={() => removePane(sessionId)}
+                      >
+                        {t('splitView.closePane')}
+                      </button>
+                    </div>
+                  )}
                 >
-                  <ChatPane
-                    title={titleById.get(sessionId)}
-                    onClose={() => removePane(sessionId)}
-                    onError={onError}
-                    onRightPanelOpen={onRightPanelOpen}
-                    onPaneArtifactsChange={onPaneArtifactsChange}
-                    messageTurnOutputs={messageTurnOutputs}
-                  />
-                </DaemonSessionProvider>
-              </ErrorBoundary>
-            </div>
-          ))
+                  <DaemonSessionProvider
+                    sessionId={sessionId}
+                    // Attach the pane under its session's own workspace. Only on
+                    // a multi-workspace daemon — passing it on a single-workspace
+                    // daemon would flip a deep-linked pane's prop from undefined
+                    // to the primary cwd once the list resolves, needlessly
+                    // re-attaching it. Undefined falls back to the provider's
+                    // primary cwd, i.e. today's behavior.
+                    workspaceCwd={multiWorkspace ? paneWorkspaceCwd : undefined}
+                    // Distinct from the main view's client (and from any other
+                    // tab's panes) for the same session, so the attachments don't
+                    // collide on one client identity.
+                    clientId={`split-pane:${instanceId}:${sessionId}`}
+                    suppressOwnUserEcho
+                  >
+                    <ChatPane
+                      title={titleById.get(sessionId)}
+                      workspaceCwd={paneWorkspaceCwd}
+                      onClose={() => removePane(sessionId)}
+                      onError={onError}
+                      onRightPanelOpen={onRightPanelOpen}
+                      onPaneArtifactsChange={onPaneArtifactsChange}
+                      messageTurnOutputs={messageTurnOutputs}
+                    />
+                  </DaemonSessionProvider>
+                </ErrorBoundary>
+              </div>
+            );
+          })
         )}
       </div>
     </div>

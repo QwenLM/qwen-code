@@ -216,11 +216,15 @@ describe('ScheduledTasksDialog editing', () => {
     click(findButton('Save'));
     await flush();
 
-    expect(actions.updateScheduledTask).toHaveBeenCalledWith('t1', {
-      cron: '30 12 * * 1-5',
-      prompt: 'summarize the day',
-      name: 'Digest',
-    });
+    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+      't1',
+      {
+        cron: '30 12 * * 1-5',
+        prompt: 'summarize the day',
+        name: 'Digest',
+      },
+      undefined,
+    );
     expect(actions.createScheduledTask).not.toHaveBeenCalled();
   });
 
@@ -252,6 +256,7 @@ describe('ScheduledTasksDialog editing', () => {
       expect.objectContaining({
         prompt: promptText,
       }),
+      undefined,
     );
   });
 
@@ -380,6 +385,7 @@ describe('ScheduledTasksDialog editing', () => {
       expect.objectContaining({
         prompt: '@ext:alibabacloud-compute-suite /review @mcp:repo-tools',
       }),
+      undefined,
     );
   });
 
@@ -411,6 +417,7 @@ describe('ScheduledTasksDialog editing', () => {
       expect.objectContaining({
         prompt: '/review\\ task',
       }),
+      undefined,
     );
   });
 
@@ -521,6 +528,7 @@ describe('ScheduledTasksDialog editing', () => {
       expect.objectContaining({
         prompt: 'x'.repeat(100_000),
       }),
+      undefined,
     );
   });
 
@@ -565,6 +573,7 @@ describe('ScheduledTasksDialog editing', () => {
       expect.objectContaining({
         prompt: '@ext:alibabacloud-compute-suite',
       }),
+      undefined,
     );
   });
 
@@ -581,6 +590,7 @@ describe('ScheduledTasksDialog editing', () => {
     expect(actions.updateScheduledTask).toHaveBeenCalledWith(
       't1',
       expect.objectContaining({ cron: '0 9 * * 1,3,5' }),
+      undefined,
     );
   });
 });
@@ -626,7 +636,7 @@ describe('ScheduledTasksDialog run now', () => {
     click(document.querySelector('[aria-label="Run now"]'));
     await flush();
     // Server-side run record (updates last-run) + client run in the bound session.
-    expect(actions.runScheduledTask).toHaveBeenCalledWith('t1');
+    expect(actions.runScheduledTask).toHaveBeenCalledWith('t1', undefined);
     expect(onRunPrompt).toHaveBeenCalledWith('do it', 'sess-9');
   });
 
@@ -734,7 +744,7 @@ describe('ScheduledTasksDialog run now', () => {
     );
     click(document.querySelector('[aria-label="Run now"]'));
     await flush();
-    expect(actions.runScheduledTask).toHaveBeenCalledWith('t1'); // consumed
+    expect(actions.runScheduledTask).toHaveBeenCalledWith('t1', undefined); // consumed
     expect(onRunPrompt).toHaveBeenCalledWith('do it', 'sess-9');
     expect(onError).toHaveBeenCalledWith(
       expect.any(Error),
@@ -865,5 +875,195 @@ describe('ScheduledTasksDialog next-run countdown', () => {
     expect(
       document.querySelector('[data-testid="scheduled-task-next-run"]'),
     ).toBeNull();
+  });
+});
+
+describe('ScheduledTasksDialog multi-workspace', () => {
+  const WORKSPACES = [
+    { id: 'id-main', cwd: '/repo/main', primary: true, trusted: true },
+    { id: 'id-other', cwd: '/repo/other', primary: false, trusted: true },
+    { id: 'id-locked', cwd: '/repo/locked', primary: false, trusted: false },
+  ];
+
+  // Fan-out mount: `listScheduledTasks(wsId)` returns each workspace's own tasks
+  // (the primary is queried with undefined, secondaries with their id). The
+  // dialog tags each task with its workspace and merges them. `ws` overrides the
+  // registered workspaces (e.g. to make the primary untrusted).
+  async function mountMulti(
+    byWorkspace: Record<string, MockTask[]>,
+    ws: typeof WORKSPACES = WORKSPACES,
+  ) {
+    actions.listScheduledTasks.mockImplementation(async (wsId?: string) =>
+      wsId === undefined
+        ? (byWorkspace['primary'] ?? [])
+        : (byWorkspace[wsId] ?? []),
+    );
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+    actions.updateScheduledTask.mockResolvedValue(baseTask({}));
+    actions.deleteScheduledTask.mockResolvedValue(undefined);
+    actions.loadExtensionsStatus.mockResolvedValue({ extensions: [] });
+    actions.loadSkillsStatus.mockResolvedValue({ skills: [] });
+    actions.loadMcpStatus.mockResolvedValue({ servers: [] });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(
+        <I18nProvider language="en">
+          <ScheduledTasksDialog
+            onRunPrompt={vi.fn()}
+            onCreateViaChat={vi.fn()}
+            workspaces={ws}
+            onError={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+  }
+
+  const findWorkspaceSelect = () =>
+    Array.from(document.querySelectorAll('select')).find((s) =>
+      s.querySelector('option[value="id-other"]'),
+    );
+
+  it('aggregates trusted workspaces and badges each card by workspace', async () => {
+    await mountMulti({
+      primary: [baseTask({ id: 'p1', name: 'Primary task', createdAt: 1000 })],
+      'id-other': [
+        baseTask({ id: 's1', name: 'Second task', createdAt: 2000 }),
+      ],
+    });
+
+    // Both workspaces' tasks show up together.
+    expect(document.body.textContent).toContain('Primary task');
+    expect(document.body.textContent).toContain('Second task');
+
+    // The fan-out queried the primary (undefined) and the trusted secondary, but
+    // NOT the untrusted one.
+    expect(actions.listScheduledTasks).toHaveBeenCalledWith(undefined);
+    expect(actions.listScheduledTasks).toHaveBeenCalledWith('id-other');
+    expect(actions.listScheduledTasks).not.toHaveBeenCalledWith('id-locked');
+
+    // Each card carries a workspace badge (title = cwd), the primary marked.
+    const primaryBadge = document.querySelector('[title="/repo/main"]');
+    const secondaryBadge = document.querySelector('[title="/repo/other"]');
+    expect(primaryBadge?.textContent).toContain('main');
+    expect(primaryBadge?.textContent).toContain('(primary)');
+    expect(secondaryBadge?.textContent).toContain('other');
+  });
+
+  it('creates a task in the workspace chosen in the picker', async () => {
+    await mountMulti({ primary: [], 'id-other': [] });
+    click(findButton('New scheduled task'));
+
+    // The picker offers the two trusted workspaces (untrusted excluded).
+    const wsSelect = findWorkspaceSelect();
+    expect(wsSelect).toBeDefined();
+    expect(wsSelect!.querySelectorAll('option')).toHaveLength(2);
+
+    // Choose the secondary workspace.
+    act(() => {
+      wsSelect!.value = 'id-other';
+      wsSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]')!;
+    act(() => {
+      prompt.textContent = 'do secondary work';
+      prompt.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    });
+
+    click(findButton('Create'));
+    await flush();
+
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: 'do secondary work' }),
+      'id-other',
+    );
+  });
+
+  it('defaults a new task to the primary workspace', async () => {
+    await mountMulti({ primary: [], 'id-other': [] });
+    click(findButton('New scheduled task'));
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]')!;
+    act(() => {
+      prompt.textContent = 'primary work';
+      prompt.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    });
+    click(findButton('Create'));
+    await flush();
+    // Primary → undefined workspace id (its trust-free unqualified route).
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: 'primary work' }),
+      undefined,
+    );
+  });
+
+  it('threads the task’s own workspace through toggle and delete', async () => {
+    await mountMulti({
+      primary: [],
+      'id-other': [baseTask({ id: 's1', name: 'Second task', enabled: true })],
+    });
+
+    // The secondary's task is the only card → the only toggle switch.
+    click(document.querySelector('[role="switch"]'));
+    await flush();
+    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+      's1',
+      { enabled: false },
+      'id-other',
+    );
+
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    click(document.querySelector('[aria-label="Delete"]'));
+    await flush();
+    expect(actions.deleteScheduledTask).toHaveBeenCalledWith('s1', 'id-other');
+    confirmSpy.mockRestore();
+  });
+
+  it('pins the workspace picker read-only while editing', async () => {
+    await mountMulti({
+      primary: [],
+      'id-other': [baseTask({ id: 's1', name: 'Second task' })],
+    });
+    click(document.querySelector('[aria-label="Edit"]'));
+    const wsSelect = findWorkspaceSelect();
+    // The picker is shown (so the user sees the workspace) but disabled — a
+    // PATCH can't move a task between per-workspace files.
+    expect(wsSelect?.disabled).toBe(true);
+  });
+
+  it('keeps an untrusted primary in the aggregate and picker (trust-free route)', async () => {
+    // Rare: folder-trust on and the primary folder not trusted. The primary is
+    // still reachable via its trust-free unqualified route, so it must not drop
+    // out of the list, and it must stay the selectable default in the New form
+    // (otherwise the picker shows a secondary while a create still lands on the
+    // primary). Secondaries stay gated on trust.
+    const wsUntrustedPrimary = [
+      { id: 'id-main', cwd: '/repo/main', primary: true, trusted: false },
+      { id: 'id-other', cwd: '/repo/other', primary: false, trusted: true },
+    ];
+    await mountMulti(
+      {
+        primary: [baseTask({ id: 'p1', name: 'Primary task' })],
+        'id-other': [baseTask({ id: 's1', name: 'Second task' })],
+      },
+      wsUntrustedPrimary,
+    );
+
+    // The untrusted primary is queried (via its trust-free route) and shown.
+    expect(actions.listScheduledTasks).toHaveBeenCalledWith(undefined);
+    expect(document.body.textContent).toContain('Primary task');
+
+    // In the New form the primary is a selectable option and stays the default,
+    // so the shown selection matches where a create actually lands.
+    click(findButton('New scheduled task'));
+    const wsSelect = findWorkspaceSelect()!;
+    const values = Array.from(wsSelect.querySelectorAll('option')).map(
+      (o) => o.value,
+    );
+    expect(values).toContain(''); // '' = the primary (its undefined action id)
+    expect(wsSelect.value).toBe(''); // default targets the primary, no desync
   });
 });

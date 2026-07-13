@@ -29,7 +29,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { ensureAuthenticated, gh } from './lib/gh.js';
+import { ensureAuthenticated, gh, setGhHost } from './lib/gh.js';
 import { git, gitOpt, gitRaw, refExists, releaseWorktree } from './lib/git.js';
 import {
   REVIEW_TMP_DIR,
@@ -352,6 +352,11 @@ export const fetchPrCommand: CommandModule = {
         demandOption: true,
         describe: 'Output JSON path (will be overwritten)',
       })
+      .option('host', {
+        type: 'string',
+        describe:
+          'GitHub host for this PR (GitHub Enterprise). Routes every gh call in this command via GH_HOST; omit for github.com.',
+      })
       .option('max-chunk-lines', {
         type: 'number',
         default: DEFAULT_MAX_CHUNK_LINES,
@@ -359,6 +364,7 @@ export const fetchPrCommand: CommandModule = {
           'Target size, in diff lines, of each review chunk. A chunk boundary falls on a hunk boundary; a hunk larger than this is split only at a top-level declaration, never inside a function.',
       }),
   handler: async (argv) => {
+    setGhHost((argv as { host?: string }).host);
     await runFetchPr(argv as unknown as FetchPrArgs);
   },
 };

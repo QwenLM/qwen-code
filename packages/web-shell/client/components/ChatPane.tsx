@@ -12,6 +12,7 @@ import {
   useStreamingState,
   useTranscriptBlocks,
   useTranscriptStore,
+  useWorkspace,
   useWorkspaceActions,
   type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
@@ -23,6 +24,7 @@ import { extractPendingPermission } from '../adapters/transcriptAdapter';
 import type { PromptImage } from '../adapters/promptTypes';
 import type {
   ComposerSubmitCommit,
+  ComposerSubmitMetadata,
   EditorHandle,
 } from '../hooks/useComposerCore';
 import { useQueuedPrompts } from '../hooks/useQueuedPrompts';
@@ -30,6 +32,7 @@ import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
 import { getModelDisplayName } from '../utils/modelDisplay';
+import { hasMultipleWorkspaces, workspaceBasename } from '../utils/workspace';
 import {
   getLocalCommands,
   localizeBuiltinDescriptions,
@@ -67,6 +70,12 @@ const PANE_TOOLBAR_ACTIONS: readonly ComposerToolbarAction[] = [
 export interface ChatPaneProps {
   /** Header label; falls back to the session's own display name / id. */
   title?: string;
+  /**
+   * The workspace this pane's session lives in. Passed explicitly by the split
+   * view (which knows it per session) and shown as a composer-toolbar chip on a
+   * multi-workspace daemon; falls back to the connection's own workspace.
+   */
+  workspaceCwd?: string;
   onClose?: () => void;
   onError?: (error: unknown, fallback: string) => void;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
@@ -87,6 +96,7 @@ export interface ChatPaneProps {
  */
 export function ChatPane({
   title,
+  workspaceCwd,
   onClose,
   onError,
   onRightPanelOpen,
@@ -97,6 +107,7 @@ export function ChatPane({
   const connection = useConnection();
   const actions = useActions();
   const workspaceActions = useWorkspaceActions();
+  const workspace = useWorkspace();
   const messages = useMessages(t);
   const blocks = useTranscriptBlocks();
   const store = useTranscriptStore();
@@ -219,14 +230,17 @@ export function ChatPane({
       text: string,
       images?: PromptImage[],
       commitAccepted?: ComposerSubmitCommit,
+      metadata?: ComposerSubmitMetadata,
     ): boolean => {
       const trimmed = text.trim();
       if (!trimmed) return false;
       if (connection.status !== 'connected') return false;
+      const inputAnnotations = metadata?.inputAnnotations;
       if (streamingStateRef.current === 'idle') {
         actions
           .sendPrompt(trimmed, {
             ...(images && images.length ? { images } : {}),
+            ...(inputAnnotations ? { inputAnnotations } : {}),
             onAdmitted: () => {
               clearFollowup();
               commitAccepted?.();
@@ -237,7 +251,9 @@ export function ChatPane({
           );
         return false;
       }
-      return enqueuePrompt(trimmed, images);
+      return inputAnnotations
+        ? enqueuePrompt(trimmed, images, undefined, inputAnnotations)
+        : enqueuePrompt(trimmed, images);
     },
     [actions, clearFollowup, connection.status, enqueuePrompt, reportError],
   );
@@ -354,6 +370,23 @@ export function ChatPane({
   const headerLabel =
     title || connection.displayName || connection.sessionId?.slice(0, 8) || '';
 
+  // On a multi-workspace daemon, surface this pane's workspace as a composer-
+  // toolbar chip (next to where the git-branch chip sits), so it's clear which
+  // workspace a message goes to. Multi-workspace-ness comes from the shared
+  // workspace provider (the pane's own session connection may not carry it).
+  const paneWorkspaceCwd = workspaceCwd ?? connection.workspaceCwd;
+  const showWorkspaceChip =
+    hasMultipleWorkspaces(workspace.capabilities) && !!paneWorkspaceCwd;
+  // Memoized so the array identity is stable across renders — `ChatEditor` is
+  // `React.memo`, and a fresh `[...]` each render would defeat it.
+  const paneToolbarActions = useMemo(
+    () =>
+      showWorkspaceChip
+        ? [...PANE_TOOLBAR_ACTIONS, 'workspace' as const]
+        : PANE_TOOLBAR_ACTIONS,
+    [showWorkspaceChip],
+  );
+
   return (
     <section
       className={styles.pane}
@@ -459,7 +492,13 @@ export function ChatPane({
           queuedMessages={queuedTexts}
           onPopQueuedMessages={editLastQueuedPrompt}
           onClearQueuedMessages={clearQueuedPrompts}
-          visibleToolbarActions={PANE_TOOLBAR_ACTIONS}
+          visibleToolbarActions={paneToolbarActions}
+          workspaceName={
+            showWorkspaceChip && paneWorkspaceCwd
+              ? workspaceBasename(paneWorkspaceCwd)
+              : undefined
+          }
+          workspaceTitle={paneWorkspaceCwd}
           currentMode={connection.currentMode ?? 'default'}
           currentModel={connection.currentModel ?? ''}
           availableModels={availableModels}

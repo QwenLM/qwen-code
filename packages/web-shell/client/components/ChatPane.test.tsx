@@ -17,7 +17,12 @@ let connectionState: any;
 let streamingStateValue: string;
 let pendingPermission: any;
 let latestOnSubmit:
-  | ((text: string, images?: unknown, commit?: () => void) => boolean)
+  | ((
+      text: string,
+      images?: unknown,
+      commit?: () => void,
+      metadata?: unknown,
+    ) => boolean)
   | undefined;
 let latestChatEditorProps: any;
 let latestFollowupAccept: ((suggestion: string) => void) | undefined;
@@ -68,6 +73,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   }),
   usePromptStatus: () => 'idle',
   useWorkspaceActions: () => ({}),
+  useWorkspace: () => ({ capabilities: connectionState.capabilities }),
   useWorkspaceEventSignals: () => ({ artifactsVersion: 0 }),
 }));
 
@@ -277,6 +283,30 @@ describe('ChatPane', () => {
     expect(container!.textContent).toContain('Refactor core');
   });
 
+  it('adds no workspace toolbar chip on a single-workspace daemon', () => {
+    render({ title: 'Refactor core', workspaceCwd: '/w' });
+    expect(latestChatEditorProps.visibleToolbarActions).not.toContain(
+      'workspace',
+    );
+    expect(latestChatEditorProps.workspaceName).toBeUndefined();
+  });
+
+  it('shows the pane workspace as a toolbar chip on a multi-workspace daemon', () => {
+    connectionState.capabilities = {
+      features: [],
+      workspaceCwd: '/work/web-shell',
+      workspaces: [
+        { id: 'w0', cwd: '/work/web-shell', primary: true, trusted: true },
+        { id: 'w1', cwd: '/work/api', primary: false, trusted: true },
+      ],
+    };
+    // The split view hands each pane its own workspace explicitly.
+    render({ title: 'Add pagination', workspaceCwd: '/work/api' });
+    expect(latestChatEditorProps.visibleToolbarActions).toContain('workspace');
+    expect(latestChatEditorProps.workspaceName).toBe('api');
+    expect(latestChatEditorProps.workspaceTitle).toBe('/work/api');
+  });
+
   it('reports loaded pane artifacts to the outer panel owner', async () => {
     const onPaneArtifactsChange = vi.fn();
     connectionState.capabilities = { features: ['session_artifacts'] };
@@ -351,6 +381,28 @@ describe('ChatPane', () => {
     });
   });
 
+  it('forwards composer annotations with an idle prompt', () => {
+    const inputAnnotations = [
+      {
+        start: 6,
+        end: 14,
+        text: '@.husky/',
+        type: 'file',
+        data: { path: '.husky/' },
+      },
+    ];
+    render();
+    act(() => {
+      latestOnSubmit!('check @.husky/', undefined, undefined, {
+        inputAnnotations,
+      });
+    });
+    expect(sendPrompt).toHaveBeenCalledWith('check @.husky/', {
+      inputAnnotations,
+      onAdmitted: expect.any(Function),
+    });
+  });
+
   it('queues a prompt while the pane is already running', () => {
     streamingStateValue = 'responding';
     render();
@@ -361,6 +413,32 @@ describe('ChatPane', () => {
     });
     expect(returned).toBe(true);
     expect(enqueuePrompt).toHaveBeenCalledWith('queued next', undefined);
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('forwards composer annotations with a queued prompt', () => {
+    streamingStateValue = 'responding';
+    const inputAnnotations = [
+      {
+        start: 6,
+        end: 14,
+        text: '@.husky/',
+        type: 'file',
+        data: { path: '.husky/' },
+      },
+    ];
+    render();
+    act(() => {
+      latestOnSubmit!('queue @.husky/', undefined, undefined, {
+        inputAnnotations,
+      });
+    });
+    expect(enqueuePrompt).toHaveBeenCalledWith(
+      'queue @.husky/',
+      undefined,
+      undefined,
+      inputAnnotations,
+    );
     expect(sendPrompt).not.toHaveBeenCalled();
   });
 

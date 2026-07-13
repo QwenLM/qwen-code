@@ -400,6 +400,8 @@ interface SessionEntry {
   events: EventBus;
   /** Per-session structured artifact registry. */
   artifacts: SessionArtifactStore;
+  /** Sticky in-memory health state for the session's transcript recorder. */
+  recordingDegraded: boolean;
   /**
    * Tail of the per-session prompt queue. Each new prompt chains off the
    * resolved (or rejected) state of this promise so prompts run one at a
@@ -767,6 +769,14 @@ function parseWorkspaceMemoryDreamResult(
   };
 }
 
+function pickUserInputEchoMeta(meta: unknown): Record<string, unknown> {
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return {};
+  const inputAnnotations = (meta as Record<string, unknown>)[
+    'inputAnnotations'
+  ];
+  return Array.isArray(inputAnnotations) ? { inputAnnotations } : {};
+}
+
 /**
  * Echo a user prompt to the session bus so multi-client SSE subscribers
  * see the input alongside the agent response. Iterates content blocks
@@ -830,7 +840,11 @@ function echoPromptToSessionBus(
             // field permitted alongside spec fields, the SDK normalizer
             // reads it from `update._meta`/`data._meta`, and every other
             // agent-emitted session_update carries `_meta` the same way.
-            _meta: { serverTimestamp, source: 'bridge-echo' },
+            _meta: {
+              ...pickUserInputEchoMeta(req._meta),
+              serverTimestamp,
+              source: 'bridge-echo',
+            },
           },
         },
         ...(originatorClientId ? { originatorClientId } : {}),
@@ -3046,6 +3060,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         workspaceCwd,
         persistence: createSessionArtifactPersistence(ci.connection, sessionId),
       }),
+      recordingDegraded: false,
       promptQueue: Promise.resolve(),
       pendingPromptCount: 0,
       pendingPromptList: [],
@@ -4719,6 +4734,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           sessionId: entry.sessionId,
           currentModelId: entry.currentModelId ?? null,
           currentApprovalMode: entry.currentApprovalMode ?? null,
+          recordingDegraded: entry.recordingDegraded,
         },
       });
       async function* withSnapshot(): AsyncIterable<BridgeEvent> {
@@ -5144,7 +5160,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 const r = res as { persisted?: boolean } | undefined;
                 if (r && r.persisted === false) {
                   writeStderrLine(
-                    `qwen serve: displayName for ${sessionId} was not persisted (recording service unavailable)`,
+                    `qwen serve: displayName for ${sessionId} was not persisted`,
                   );
                 }
               })

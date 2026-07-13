@@ -18,8 +18,13 @@ import {
 } from '@qwen-code/qwen-code-core';
 import {
   registerScheduledTasksRoutes,
+  registerWorkspaceQualifiedScheduledTasksRoutes,
   scheduledTaskSessionName,
 } from './scheduled-tasks.js';
+import type {
+  WorkspaceRegistry,
+  WorkspaceRuntime,
+} from '../workspace-registry.js';
 
 function safeBody(req: Request): Record<string, unknown> {
   return req.body && typeof req.body === 'object'
@@ -1142,5 +1147,178 @@ describe('scheduledTaskSessionName', () => {
       .map((c) => String.fromCodePoint(c))
       .join('');
     expect(scheduledTaskSessionName(`m${marks}n`)).toBe('⏰ mn');
+  });
+});
+
+// ── Workspace-qualified routes ──────────────────────────────────────────────
+
+interface QualifiedRuntime {
+  workspaceId: string;
+  workspaceCwd: string;
+  trusted: boolean;
+  bridge: StubBridge;
+}
+
+interface QualifiedHarness {
+  app: express.Application;
+  scratch: string;
+  primary: QualifiedRuntime;
+  secondary: QualifiedRuntime;
+  untrusted: QualifiedRuntime;
+}
+
+/** A registry stub exposing only what the qualified route resolver touches:
+ * lookup by id, lookup by cwd, and list (for the mismatch fallback). */
+function makeStubRegistry(runtimes: QualifiedRuntime[]): WorkspaceRegistry {
+  const asRuntime = (r: QualifiedRuntime) => r as unknown as WorkspaceRuntime;
+  return {
+    list: () => runtimes.map(asRuntime),
+    getByWorkspaceId: (id: string) => {
+      const found = runtimes.find((r) => r.workspaceId === id);
+      return found ? asRuntime(found) : undefined;
+    },
+    getByWorkspaceCwd: (cwd: string) => {
+      const found = runtimes.find((r) => r.workspaceCwd === cwd);
+      return found ? asRuntime(found) : undefined;
+    },
+  } as unknown as WorkspaceRegistry;
+}
+
+async function makeQualifiedHarness(): Promise<QualifiedHarness> {
+  const scratch = await fsp.mkdtemp(path.join(os.tmpdir(), 'sched-wsq-'));
+  Storage.setRuntimeBaseDir(scratch);
+
+  const mkRuntime = async (
+    name: string,
+    trusted: boolean,
+  ): Promise<QualifiedRuntime> => {
+    const workspaceCwd = path.join(scratch, name);
+    await fsp.mkdir(workspaceCwd, { recursive: true });
+    return {
+      workspaceId: `id-${name}`,
+      workspaceCwd,
+      trusted,
+      bridge: makeStubBridge(),
+    };
+  };
+
+  const primary = await mkRuntime('primary', true);
+  const secondary = await mkRuntime('secondary', true);
+  const untrusted = await mkRuntime('untrusted', false);
+  const runtimes = [primary, secondary, untrusted];
+
+  const app = express();
+  app.use(express.json());
+  // Both surfaces share the app, as in the real server: the primary's own
+  // cron file behind `/scheduled-tasks`, every workspace behind the qualified
+  // route. `bridge`-per-runtime comes from the registry.
+  registerScheduledTasksRoutes(app, {
+    boundWorkspace: primary.workspaceCwd,
+    mutate: () => (_req, _res, next) => next(),
+    safeBody,
+    bridge: primary.bridge,
+  });
+  registerWorkspaceQualifiedScheduledTasksRoutes(app, {
+    workspaceRegistry: makeStubRegistry(runtimes),
+    mutate: () => (_req, _res, next) => next(),
+    safeBody,
+    manageScheduledTaskSessions: true,
+  });
+  return { app, scratch, primary, secondary, untrusted };
+}
+
+describe('workspace-qualified scheduled-tasks routes', () => {
+  let h: QualifiedHarness;
+
+  beforeEach(async () => {
+    h = await makeQualifiedHarness();
+  });
+  afterEach(async () => {
+    Storage.setRuntimeBaseDir(null);
+    await fsp.rm(h.scratch, { recursive: true, force: true });
+  });
+
+  const qualified = (id: string) => `/workspaces/${id}/scheduled-tasks`;
+
+  it('creates a task in the targeted workspace, isolated from the primary', async () => {
+    const res = await request(h.app)
+      .post(qualified(h.secondary.workspaceId))
+      .send({ cron: '0 9 * * *', prompt: 'secondary work' });
+    expect(res.status).toBe(201);
+    // The bound session was minted through the SECONDARY workspace's bridge.
+    expect(h.secondary.bridge.spawned).toHaveLength(1);
+    expect(h.primary.bridge.spawned).toHaveLength(0);
+
+    // It lands in the secondary's list, and NOT the primary's.
+    const secList = await request(h.app).get(
+      qualified(h.secondary.workspaceId),
+    );
+    expect(secList.body.tasks).toHaveLength(1);
+    expect(secList.body.tasks[0].prompt).toBe('secondary work');
+    const primaryList = await request(h.app).get('/scheduled-tasks');
+    expect(primaryList.body.tasks).toHaveLength(0);
+  });
+
+  it('writes to the targeted workspace’s own cron file on disk', async () => {
+    await request(h.app)
+      .post(qualified(h.secondary.workspaceId))
+      .send({ cron: '0 9 * * *', prompt: 'p' });
+    const onDisk = JSON.parse(
+      await fsp.readFile(getCronFilePath(h.secondary.workspaceCwd), 'utf-8'),
+    );
+    expect(onDisk).toHaveLength(1);
+    // The primary's file was never created.
+    await expect(
+      fsp.readFile(getCronFilePath(h.primary.workspaceCwd), 'utf-8'),
+    ).rejects.toThrow();
+  });
+
+  it('patches / runs / deletes a task addressed by its workspace', async () => {
+    const created = await request(h.app)
+      .post(qualified(h.secondary.workspaceId))
+      .send({ cron: '0 9 * * *', prompt: 'p', name: 'orig' });
+    const id = created.body.id as string;
+
+    const patched = await request(h.app)
+      .patch(`${qualified(h.secondary.workspaceId)}/${id}`)
+      .send({ name: 'renamed' });
+    expect(patched.status).toBe(200);
+    expect(patched.body.name).toBe('renamed');
+
+    const ran = await request(h.app)
+      .post(`${qualified(h.secondary.workspaceId)}/${id}/run`)
+      .send();
+    expect(ran.status).toBe(200);
+    expect(ran.body.lastFiredAt).toBeGreaterThan(0);
+
+    const del = await request(h.app)
+      .delete(`${qualified(h.secondary.workspaceId)}/${id}`)
+      .send();
+    expect(del.status).toBe(200);
+    const after = await request(h.app).get(qualified(h.secondary.workspaceId));
+    expect(after.body.tasks).toHaveLength(0);
+  });
+
+  it('resolves a workspace by absolute path too', async () => {
+    const res = await request(h.app)
+      .post(qualified(encodeURIComponent(h.secondary.workspaceCwd)))
+      .send({ cron: '0 9 * * *', prompt: 'via path' });
+    expect(res.status).toBe(201);
+    expect(h.secondary.bridge.spawned).toHaveLength(1);
+  });
+
+  it('rejects an unknown workspace with 400 workspace_mismatch', async () => {
+    const res = await request(h.app).get(qualified('id-nope')).send();
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('workspace_mismatch');
+  });
+
+  it('rejects an untrusted workspace with 403, without spawning', async () => {
+    const res = await request(h.app)
+      .post(qualified(h.untrusted.workspaceId))
+      .send({ cron: '0 9 * * *', prompt: 'p' });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('untrusted_workspace');
+    expect(h.untrusted.bridge.spawned).toHaveLength(0);
   });
 });

@@ -15,6 +15,11 @@ import { sanitizeLogText } from '@qwen-code/channel-base';
 import type { ChannelWebhookTask } from '@qwen-code/channel-base';
 import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 import {
+  CHANNEL_WORKER_KILL_GRACE_MS,
+  CHANNEL_WORKER_STARTUP_TIMEOUT_MS,
+  CHANNEL_WORKER_STOP_GRACE_MS,
+} from '@qwen-code/acp-bridge/channelControlTimeouts';
+import {
   CHANNEL_WEBHOOK_TASK_IPC_TIMEOUT_MS,
   ChannelWebhookEnqueueError,
   createChannelWebhookTaskMessage,
@@ -24,9 +29,7 @@ import {
   type ChannelWebhookEnqueueErrorCode,
 } from './channel-webhook-ipc.js';
 
-const DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS = 30_000;
 const DEFAULT_CHANNEL_WORKER_HEARTBEAT_TIMEOUT_MS = 45_000;
-const CHANNEL_WORKER_STOP_GRACE_MS = 10_000;
 const MAX_WORKER_LOG_LINE_LENGTH = 4096;
 const MAX_WORKER_LOG_BUFFER_LENGTH = 64 * 1024;
 const MAX_WORKER_LOG_DISCARDED_REMAINDER_LENGTH = MAX_WORKER_LOG_BUFFER_LENGTH;
@@ -42,6 +45,13 @@ export interface ChannelWorkerRestartPolicy {
   maxRestarts: number;
   windowMs: number;
   delaysMs: number[];
+}
+
+export class ChannelWorkerStopError extends Error {
+  constructor(message = 'Channel worker did not exit after SIGKILL.') {
+    super(message);
+    this.name = 'ChannelWorkerStopError';
+  }
 }
 
 const DEFAULT_RESTART_POLICY: ChannelWorkerRestartPolicy = {
@@ -99,6 +109,10 @@ export interface ChannelWorkerChild {
   kill(signal?: NodeJS.Signals | number): boolean;
   on(event: 'message', listener: (message: unknown) => void): this;
   removeListener(event: 'message', listener: (message: unknown) => void): this;
+  removeListener(
+    event: 'exit',
+    listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+  ): this;
   once(event: 'message', listener: (message: unknown) => void): this;
   once(
     event: 'exit',
@@ -274,15 +288,17 @@ function waitForExit(
 ): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false;
+    const onExit = () => done(true);
     const done = (exited: boolean) => {
       if (settled) return;
       settled = true;
-      if (timer) clearTimeout(timer);
+      clearTimeout(timer);
+      child.removeListener('exit', onExit);
       resolve(exited);
     };
     const timer = setTimeout(() => done(false), timeoutMs);
     timer.unref();
-    child.once('exit', () => done(true));
+    child.once('exit', onExit);
   });
 }
 
@@ -754,18 +770,29 @@ export function createChannelWorkerSupervisor(
         cleanupLaunch();
         if (terminatingBeforeReady) return;
         terminatingBeforeReady = true;
-        const exited = waitForExit(startedChild, 2_000);
+        const exited = waitForExit(startedChild, CHANNEL_WORKER_KILL_GRACE_MS);
         startedChild.kill('SIGTERM');
         void exited.then(async (didExit) => {
           if (!didExit && child === startedChild && !exitObserved) {
-            const killed = waitForExit(startedChild, 2_000);
+            const killed = waitForExit(
+              startedChild,
+              CHANNEL_WORKER_KILL_GRACE_MS,
+            );
             startedChild.kill('SIGKILL');
             if (!(await killed) && child === startedChild && !exitObserved) {
-              child = undefined;
-              if (kind === 'restart' && !stopping) {
-                scheduleRestart();
-                notifyExit(opts.onExit, snapshotCopy());
-              }
+              stopping = true;
+              notifyLog(opts.onLog, {
+                stream: 'stderr',
+                line: 'Channel worker did not exit after SIGKILL; automatic restart is disabled.',
+              });
+              snapshot = {
+                ...snapshot,
+                state: 'failed',
+                error:
+                  snapshot.error ??
+                  'Channel worker did not exit after SIGKILL.',
+              };
+              notifyExit(opts.onExit, snapshotCopy());
             }
           }
         });
@@ -883,7 +910,7 @@ export function createChannelWorkerSupervisor(
       }
       startupTimer = setTimeout(() => {
         const timeoutMs =
-          opts.startupTimeoutMs ?? DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS;
+          opts.startupTimeoutMs ?? CHANNEL_WORKER_STARTUP_TIMEOUT_MS;
         const error = `Channel worker did not become ready within ${timeoutMs}ms.`;
         snapshot = {
           ...snapshot,
@@ -894,7 +921,7 @@ export function createChannelWorkerSupervisor(
         if (child === startedChild) {
           terminateBeforeReady();
         }
-      }, opts.startupTimeoutMs ?? DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS);
+      }, opts.startupTimeoutMs ?? CHANNEL_WORKER_STARTUP_TIMEOUT_MS);
       startupTimer.unref();
       startedChild.on('message', handleMessage);
       startedChild.once('exit', settleExit);
@@ -907,7 +934,15 @@ export function createChannelWorkerSupervisor(
       // `disposed` is latched only by killAllSync() (hard shutdown), so the
       // supported stop()/start() reuse lifecycle is preserved; this guard just
       // prevents a relaunch into a daemon that is being force-torn-down.
-      if (disposed || child) return;
+      if (disposed) return;
+      if (child) {
+        if (stopping) {
+          throw new ChannelWorkerStopError(
+            'Channel worker stop is not yet confirmed.',
+          );
+        }
+        return;
+      }
       stopping = false;
       clearRestartTimer();
       restartAttemptTimes = [];
@@ -930,22 +965,20 @@ export function createChannelWorkerSupervisor(
         snapshot = { ...snapshot, state: 'stopped' };
         return;
       }
-      const exited = waitForExit(child, CHANNEL_WORKER_STOP_GRACE_MS);
+      const stoppingChild = child;
+      const exited = waitForExit(stoppingChild, CHANNEL_WORKER_STOP_GRACE_MS);
       stopping = true;
-      child.kill('SIGTERM');
-      if (!(await exited)) {
-        const killed = waitForExit(child, 2_000);
-        child.kill('SIGKILL');
+      stoppingChild.kill('SIGTERM');
+      if (!(await exited) && child === stoppingChild) {
+        const killed = waitForExit(stoppingChild, CHANNEL_WORKER_KILL_GRACE_MS);
+        stoppingChild.kill('SIGKILL');
         if (!(await killed)) {
-          child = undefined;
-          stopping = false;
           snapshot = {
             ...snapshot,
             state: 'failed',
-            signal: 'SIGKILL',
             error: 'Channel worker did not exit after SIGKILL.',
           };
-          return;
+          throw new ChannelWorkerStopError();
         }
       }
       child = undefined;

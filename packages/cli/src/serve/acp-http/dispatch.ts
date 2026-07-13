@@ -14,6 +14,7 @@ import {
   SessionService,
   SessionOrganizationError,
   type SessionGroupColor,
+  type SessionGroupPresetColor,
   BuiltinAgentRegistry,
   SubagentError,
   WorkspaceMemoryFileTooLargeError,
@@ -2015,7 +2016,7 @@ export class AcpDispatcher {
             params['color'] !== null &&
             (typeof params['color'] !== 'string' ||
               !GROUP_COLOR_OPTIONS.includes(
-                params['color'] as SessionGroupColor,
+                params['color'] as SessionGroupPresetColor,
               ))
           ) {
             throw new AcpParamError(
@@ -2047,7 +2048,7 @@ export class AcpDispatcher {
                 ? { groupId: params['groupId'] as string | null }
                 : {}),
               ...('color' in params
-                ? { color: params['color'] as SessionGroupColor | null }
+                ? { color: params['color'] as SessionGroupPresetColor | null }
                 : {}),
             });
             this.replyConn(conn, id, { sessionId, ...organization });

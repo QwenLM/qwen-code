@@ -5,6 +5,7 @@ import {
   type ReactNode,
 } from 'react';
 import type { Components, Options } from 'react-markdown';
+import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
 import type { ACPToolCall } from './adapters/types';
 import type { WelcomeHeaderProps } from './components/WelcomeHeader';
@@ -93,6 +94,7 @@ export type WelcomeFooterRenderer = (props: WelcomeHeaderProps) => ReactNode;
 export interface UserMessageContentRenderInfo {
   content: string;
   images?: readonly { data: string; mimeType: string }[];
+  inputAnnotations?: readonly DaemonInputAnnotation[];
 }
 
 export type UserMessageContentRenderer = (

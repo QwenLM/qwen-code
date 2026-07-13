@@ -35,6 +35,10 @@ import {
   type WorkspaceRuntime,
 } from './workspace-registry.js';
 import { createSessionOrganizationService } from './session-organization-helpers.js';
+import {
+  serializeWorkspaceTranscriptResponseForTesting,
+  workspaceTranscriptCursorExceedsLimitForTesting,
+} from './routes/session.js';
 
 const PRIMARY_CWD = path.resolve(path.sep, 'work', 'primary');
 const SECONDARY_CWD = path.resolve(path.sep, 'work', 'secondary');
@@ -74,6 +78,17 @@ interface FakeBridge extends AcpSessionBridge {
   }>;
   readonly listCalls: string[];
   readonly summaryCalls: string[];
+  readonly setModelCalls: Array<{
+    sessionId: string;
+    req: { modelId?: unknown; sessionId?: unknown };
+    context?: BridgeClientRequestContext;
+  }>;
+  readonly setApprovalModeCalls: Array<{
+    sessionId: string;
+    mode: string;
+    opts: { persist?: boolean };
+    context?: BridgeClientRequestContext;
+  }>;
 }
 
 function makeSummary(
@@ -187,6 +202,8 @@ function makeBridge(
   const restoreCalls: FakeBridge['restoreCalls'] = [];
   const listCalls: string[] = [];
   const summaryCalls: string[] = [];
+  const setModelCalls: FakeBridge['setModelCalls'] = [];
+  const setApprovalModeCalls: FakeBridge['setApprovalModeCalls'] = [];
   const bridge = {
     permissionPolicy: 'first-responder' as const,
     spawnCalls,
@@ -202,6 +219,8 @@ function makeBridge(
     restoreCalls,
     listCalls,
     summaryCalls,
+    setModelCalls,
+    setApprovalModeCalls,
     get sessionCount() {
       return live.size;
     },
@@ -296,6 +315,33 @@ function makeBridge(
     ) {
       promptCalls.push({ sessionId, ...(context ? { context } : {}) });
       return Promise.resolve({ stopReason: 'end_turn' });
+    },
+    async setSessionModel(
+      sessionId: string,
+      req: { modelId?: unknown; sessionId?: unknown },
+      context?: BridgeClientRequestContext,
+    ) {
+      setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
+      return { sessionId, modelId: req.modelId, _meta: { applied: true } };
+    },
+    async setSessionApprovalMode(
+      sessionId: string,
+      mode: string,
+      opts: { persist?: boolean },
+      context?: BridgeClientRequestContext,
+    ) {
+      setApprovalModeCalls.push({
+        sessionId,
+        mode,
+        opts,
+        ...(context ? { context } : {}),
+      });
+      return {
+        sessionId,
+        mode,
+        previous: 'default',
+        persisted: opts?.persist === true,
+      };
     },
     async cancelSession(sessionId: string) {
       cancelCalls.push(sessionId);
@@ -447,6 +493,7 @@ describe('multi-workspace session dispatch', () => {
     expect(res.status).toBe(200);
     expect(res.body.workspaceCwd).toBe(PRIMARY_CWD);
     expect(res.body.features).toContain('multi_workspace_sessions');
+    expect(res.body.features).toContain('workspace_persisted_transcript');
     expect(res.body.workspaces).toEqual([
       { id: 'primary-id', cwd: PRIMARY_CWD, primary: true, trusted: true },
       {
@@ -519,6 +566,24 @@ describe('multi-workspace session dispatch', () => {
       workspaceCwd: SECONDARY_CWD,
     });
     expect(res.body.workspaceCwd).toBe(SECONDARY_CWD);
+  });
+
+  it('applies a creation-time approvalMode on the owning non-primary runtime', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness();
+    const res = await request(app)
+      .post('/session')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD, approvalMode: 'yolo' });
+
+    expect(res.status).toBe(200);
+    expect(primaryBridge.spawnCalls).toEqual([]);
+    expect(secondaryBridge.spawnCalls).toHaveLength(1);
+    // The approval mode rides along with creation on the non-primary runtime,
+    // so no follow-up primary-only approval-mode round-trip is required.
+    expect(secondaryBridge.spawnCalls[0]).toMatchObject({
+      workspaceCwd: SECONDARY_CWD,
+      approvalMode: 'yolo',
+    });
   });
 
   it('rejects unknown and untrusted workspace session creation before touching a bridge', async () => {
@@ -813,6 +878,75 @@ describe('multi-workspace session dispatch', () => {
     expect(res.body.workspaceCwd).toBe(SECONDARY_CWD);
     expect(primaryBridge.restoreCalls).toEqual([]);
     expect(secondaryBridge.restoreCalls).toEqual([]);
+  });
+
+  it('routes POST /session/:id/model to the owning non-primary workspace bridge', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness();
+
+    const res = await request(app)
+      .post('/session/secondary-session/model')
+      .set('Host', host())
+      .set('X-Qwen-Client-Id', 'client-1')
+      .send({ modelId: 'qwen3-coder' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ _meta: { applied: true } });
+    expect(secondaryBridge.setModelCalls).toHaveLength(1);
+    expect(secondaryBridge.setModelCalls[0]?.sessionId).toBe(
+      'secondary-session',
+    );
+    expect(secondaryBridge.setModelCalls[0]?.req.modelId).toBe('qwen3-coder');
+    expect(secondaryBridge.setModelCalls[0]?.context).toEqual({
+      clientId: 'client-1',
+    });
+    // Owner-scoped: the mutation must land on the secondary bridge only, never
+    // the primary one.
+    expect(primaryBridge.setModelCalls).toEqual([]);
+  });
+
+  it('routes POST /session/:id/approval-mode to the owning non-primary workspace bridge', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness();
+
+    const res = await request(app)
+      .post('/session/secondary-session/approval-mode')
+      .set('Host', host())
+      .send({ mode: 'yolo', persist: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      sessionId: 'secondary-session',
+      mode: 'yolo',
+      persisted: true,
+    });
+    expect(secondaryBridge.setApprovalModeCalls).toHaveLength(1);
+    expect(secondaryBridge.setApprovalModeCalls[0]).toMatchObject({
+      sessionId: 'secondary-session',
+      mode: 'yolo',
+      opts: { persist: true },
+    });
+    expect(primaryBridge.setApprovalModeCalls).toEqual([]);
+  });
+
+  it('still rejects model/approval-mode mutations on an untrusted non-primary session', async () => {
+    // Opening these routes to non-primary owners must not bypass the trust
+    // gate: an untrusted workspace runtime is refused before the bridge runs.
+    const { app, secondaryBridge } = makeHarness({ secondaryTrusted: false });
+
+    const modelRes = await request(app)
+      .post('/session/secondary-session/model')
+      .set('Host', host())
+      .send({ modelId: 'qwen3-coder' });
+    expect(modelRes.status).toBe(403);
+    expect(modelRes.body.code).toBe('untrusted_workspace');
+    expect(secondaryBridge.setModelCalls).toEqual([]);
+
+    const approvalRes = await request(app)
+      .post('/session/secondary-session/approval-mode')
+      .set('Host', host())
+      .send({ mode: 'yolo' });
+    expect(approvalRes.status).toBe(403);
+    expect(approvalRes.body.code).toBe('untrusted_workspace');
+    expect(secondaryBridge.setApprovalModeCalls).toEqual([]);
   });
 
   it('lists active persisted and live non-primary workspace sessions by workspace id', async () => {
@@ -1326,6 +1460,441 @@ describe('multi-workspace session dispatch', () => {
       expect(secondaryBridge.listCalls).toEqual([]);
       expect(await fsp.readdir(chatsDir)).toEqual(beforeEntries);
       expect(await fsp.readFile(storedPath, 'utf8')).toBe(beforeContent);
+    });
+  });
+
+  it('chains untrusted transcript pages without bridge or cursor-key writes', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440270';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'first page',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const transcriptPath = path.join(
+        new Storage(SECONDARY_CWD).getProjectDir(),
+        'chats',
+        `${sessionId}.jsonl`,
+      );
+      await fsp.appendFile(
+        transcriptPath,
+        [
+          {
+            uuid: `${sessionId}-assistant-1`,
+            parentUuid: `${sessionId}-user-1`,
+            sessionId,
+            timestamp: '2026-07-08T00:01:00.000Z',
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: 'first answer' }] },
+            cwd: SECONDARY_CWD,
+          },
+          {
+            uuid: `${sessionId}-user-2`,
+            parentUuid: `${sessionId}-assistant-1`,
+            sessionId,
+            timestamp: '2026-07-08T00:02:00.000Z',
+            type: 'user',
+            message: { role: 'user', parts: [{ text: 'second question' }] },
+            cwd: SECONDARY_CWD,
+          },
+          {
+            uuid: `${sessionId}-assistant-2`,
+            parentUuid: `${sessionId}-user-2`,
+            sessionId,
+            timestamp: '2026-07-08T00:03:00.000Z',
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: 'second answer' }] },
+            cwd: SECONDARY_CWD,
+          },
+        ]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+        'utf8',
+      );
+      await writeStoredSession({
+        sessionId,
+        cwd: PRIMARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'same id in primary',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const chatsDir = path.dirname(transcriptPath);
+      const beforeEntries = await fsp.readdir(chatsDir);
+      const beforeContent = await fsp.readFile(transcriptPath);
+      const beforeMtimeMs = (await fsp.stat(transcriptPath)).mtimeMs;
+      const { app, primaryBridge, secondaryBridge } = makeHarness({
+        secondaryTrusted: false,
+      });
+
+      const first = await request(app)
+        .get(`/workspaces/secondary-id/session/${sessionId}/transcript?limit=2`)
+        .set('Host', host())
+        .expect(200);
+      expect(
+        first.body.events.map(
+          (event: {
+            data: { sessionUpdate: string; content?: { text?: string } };
+          }) => [event.data.sessionUpdate, event.data.content?.text],
+        ),
+      ).toEqual([
+        ['user_message_chunk', 'first page'],
+        ['agent_message_chunk', 'first answer'],
+      ]);
+      expect(first.body.hasMore).toBe(true);
+      expect(first.body.nextCursor).toEqual(expect.any(String));
+
+      const crossWorkspace = await request(app)
+        .get(
+          `/workspaces/primary-id/session/${sessionId}/transcript?cursor=${encodeURIComponent(
+            first.body.nextCursor as string,
+          )}`,
+        )
+        .set('Host', host());
+      expect(crossWorkspace.status).toBe(400);
+      expect(crossWorkspace.body.code).toBe('invalid_transcript_cursor');
+      expect(crossWorkspace.body.sessionId).toBe(sessionId);
+
+      const second = await request(app)
+        .get(
+          `/workspaces/${encodeURIComponent(SECONDARY_CWD)}/session/${sessionId}/transcript?limit=2&cursor=${encodeURIComponent(
+            first.body.nextCursor as string,
+          )}`,
+        )
+        .set('Host', host())
+        .expect(200);
+      expect(
+        second.body.events.map(
+          (event: {
+            data: { sessionUpdate: string; content?: { text?: string } };
+          }) => [event.data.sessionUpdate, event.data.content?.text],
+        ),
+      ).toEqual([
+        ['user_message_chunk', 'second question'],
+        ['agent_message_chunk', 'second answer'],
+      ]);
+      expect(second.body.hasMore).toBe(false);
+      expect(second.body.nextCursor).toBeUndefined();
+      expect(primaryBridge.spawnCalls).toEqual([]);
+      expect(primaryBridge.restoreCalls).toEqual([]);
+      expect(secondaryBridge.spawnCalls).toEqual([]);
+      expect(secondaryBridge.restoreCalls).toEqual([]);
+      await expect(
+        fsp.stat(
+          path.join(
+            new Storage(SECONDARY_CWD).getProjectDir(),
+            'session-transcript-cursor-key',
+          ),
+        ),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await fsp.readdir(chatsDir)).toEqual(beforeEntries);
+      expect(await fsp.readFile(transcriptPath)).toEqual(beforeContent);
+      expect((await fsp.stat(transcriptPath)).mtimeMs).toBe(beforeMtimeMs);
+
+      const restarted = makeHarness({ secondaryTrusted: false });
+      const expired = await request(restarted.app)
+        .get(
+          `/workspaces/secondary-id/session/${sessionId}/transcript?cursor=${encodeURIComponent(
+            first.body.nextCursor as string,
+          )}`,
+        )
+        .set('Host', host());
+      expect(expired.status).toBe(400);
+      expect(expired.body.code).toBe('invalid_transcript_cursor');
+      expect(expired.body.sessionId).toBe(sessionId);
+    });
+  });
+
+  it('rejects an oversized untrusted transcript record without starting the bridge', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440276';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'x'.repeat(4 * 1024 * 1024),
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const { app, secondaryBridge } = makeHarness({
+        secondaryTrusted: false,
+      });
+
+      const response = await request(app)
+        .get(`/workspaces/secondary-id/session/${sessionId}/transcript`)
+        .set('Host', host());
+
+      expect(response.status).toBe(413);
+      expect(response.body).toMatchObject({
+        code: 'transcript_page_too_large',
+        sessionId,
+        maxBytes: 4 * 1024 * 1024,
+      });
+      expect(response.body.pageBytes).toBeGreaterThan(
+        response.body.maxBytes as number,
+      );
+      expect(secondaryBridge.spawnCalls).toEqual([]);
+      expect(secondaryBridge.restoreCalls).toEqual([]);
+    });
+  });
+
+  it('enforces the workspace transcript cursor byte boundary', () => {
+    expect(
+      workspaceTranscriptCursorExceedsLimitForTesting(
+        'a'.repeat(64 * 1024 + 1),
+      ),
+    ).toBe(true);
+    expect(
+      workspaceTranscriptCursorExceedsLimitForTesting('a'.repeat(64 * 1024)),
+    ).toBe(false);
+  });
+
+  it('rejects workspace transcript responses over the serialized byte budget', () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440279';
+
+    expect(() =>
+      serializeWorkspaceTranscriptResponseForTesting(
+        { events: ['response too large'] },
+        sessionId,
+        8,
+      ),
+    ).toThrowError(
+      expect.objectContaining({
+        name: 'SessionTranscriptPageTooLargeError',
+        sessionId,
+        maxBytes: 8,
+      }),
+    );
+  });
+
+  it('stops pagination when replay state would produce an oversized cursor', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440278';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'pending tools',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const transcriptPath = path.join(
+        new Storage(SECONDARY_CWD).getProjectDir(),
+        'chats',
+        `${sessionId}.jsonl`,
+      );
+      let parentUuid = `${sessionId}-user-1`;
+      const records: Array<Record<string, unknown>> = [];
+      for (let index = 0; index < 500; index++) {
+        const uuid = `pending-tool-${index}`;
+        records.push({
+          uuid,
+          parentUuid,
+          sessionId,
+          timestamp: new Date(Date.UTC(2026, 6, 8, 0, 0, index)).toISOString(),
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: `pending-call-${index}-${'x'.repeat(96)}`,
+                  name: 'run_shell_command',
+                  args: { command: 'true' },
+                },
+              },
+            ],
+          },
+          cwd: SECONDARY_CWD,
+        });
+        parentUuid = uuid;
+      }
+      await fsp.appendFile(
+        transcriptPath,
+        `${records.map((record) => JSON.stringify(record)).join('\n')}\n`,
+        'utf8',
+      );
+      const { app, secondaryBridge } = makeHarness({
+        secondaryTrusted: false,
+      });
+
+      const response = await request(app)
+        .get(
+          `/workspaces/secondary-id/session/${sessionId}/transcript?limit=500`,
+        )
+        .set('Host', host())
+        .expect(200);
+
+      expect(response.body.partial).toBe(true);
+      expect(response.body.replayError).toBe(
+        'Transcript pagination state exceeds the safe limit',
+      );
+      expect(response.body.hasMore).toBe(false);
+      expect(response.body.nextCursor).toBeUndefined();
+      expect(Array.isArray(response.body.events)).toBe(true);
+      expect(response.body.events.length).toBeGreaterThan(0);
+      expect(secondaryBridge.spawnCalls).toEqual([]);
+      expect(secondaryBridge.restoreCalls).toEqual([]);
+    });
+  });
+
+  it('fails closed for mismatched persisted transcript records', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440271';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'wrong owner',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const transcriptPath = path.join(
+        new Storage(SECONDARY_CWD).getProjectDir(),
+        'chats',
+        `${sessionId}.jsonl`,
+      );
+      const content = await fsp.readFile(transcriptPath, 'utf8');
+      await fsp.writeFile(
+        transcriptPath,
+        content.replace(
+          `"sessionId":"${sessionId}"`,
+          '"sessionId":"550e8400-e29b-41d4-a716-446655440999"',
+        ),
+        'utf8',
+      );
+      const { app } = makeHarness({ secondaryTrusted: false });
+
+      const res = await request(app)
+        .get(`/workspaces/secondary-id/session/${sessionId}/transcript`)
+        .set('Host', host());
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('transcript_snapshot_unavailable');
+    });
+  });
+
+  it('suppresses file-backed debug logging during untrusted transcript reads', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440274';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'no debug writes',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const previousDebugLogFile = process.env['QWEN_DEBUG_LOG_FILE'];
+      const debugSessionId = '550e8400-e29b-41d4-a716-446655440275';
+      const debugLogPath = Storage.getDebugLogPath(debugSessionId);
+      process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+      resetDebugLoggingState();
+      setDebugLogSession({ getSessionId: () => debugSessionId });
+      try {
+        const { app } = makeHarness({ secondaryTrusted: false });
+        await request(app)
+          .get(`/workspaces/secondary-id/session/${sessionId}/transcript`)
+          .set('Host', host())
+          .expect(200);
+        await expect(fsp.stat(debugLogPath)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+      } finally {
+        setDebugLogSession(null);
+        resetDebugLoggingState();
+        if (previousDebugLogFile === undefined) {
+          delete process.env['QWEN_DEBUG_LOG_FILE'];
+        } else {
+          process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFile;
+        }
+      }
+    });
+  });
+
+  it('keeps archived and untrusted-primary transcript boundaries', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440272';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'archived',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      await archiveStoredSession(SECONDARY_CWD, sessionId);
+      const secondary = makeHarness({ secondaryTrusted: false });
+      const archived = await request(secondary.app)
+        .get(`/workspaces/secondary-id/session/${sessionId}/transcript`)
+        .set('Host', host());
+      expect(archived.status).toBe(409);
+      expect(archived.body.code).toBe('session_archived');
+
+      const primary = makeHarness({ primaryTrusted: false });
+      const forbidden = await request(primary.app)
+        .get(`/workspaces/primary-id/session/${sessionId}/transcript`)
+        .set('Host', host());
+      expect(forbidden.status).toBe(403);
+      expect(forbidden.body.code).toBe('untrusted_workspace');
+    });
+  });
+
+  it('serves trusted runtimes and rejects missing or unknown transcript targets', async () => {
+    await withRuntimeDir(async () => {
+      const primarySessionId = '550e8400-e29b-41d4-a716-446655440276';
+      const secondarySessionId = '550e8400-e29b-41d4-a716-446655440277';
+      for (const [sessionId, cwd] of [
+        [primarySessionId, PRIMARY_CWD],
+        [secondarySessionId, SECONDARY_CWD],
+      ] as const) {
+        await writeStoredSession({
+          sessionId,
+          cwd,
+          timestamp: '2026-07-08T00:00:00.000Z',
+          prompt: `trusted ${sessionId}`,
+          mtime: new Date('2026-07-08T00:00:00.000Z'),
+        });
+      }
+      const { app } = makeHarness();
+
+      await request(app)
+        .get(`/workspaces/primary-id/session/${primarySessionId}/transcript`)
+        .set('Host', host())
+        .expect(200);
+      await request(app)
+        .get(
+          `/workspaces/secondary-id/session/${secondarySessionId}/transcript`,
+        )
+        .set('Host', host())
+        .expect(200);
+
+      const missing = await request(app)
+        .get(
+          '/workspaces/secondary-id/session/550e8400-e29b-41d4-a716-446655440278/transcript',
+        )
+        .set('Host', host());
+      expect(missing.status).toBe(404);
+
+      const unknown = await request(app)
+        .get(
+          `/workspaces/${encodeURIComponent(UNKNOWN_CWD)}/session/${secondarySessionId}/transcript`,
+        )
+        .set('Host', host());
+      expect(unknown.status).toBe(400);
+      expect(unknown.body.code).toBe('workspace_mismatch');
+
+      const unknownWithInvalidLimit = await request(app)
+        .get(
+          `/workspaces/${encodeURIComponent(UNKNOWN_CWD)}/session/${secondarySessionId}/transcript?limit=501`,
+        )
+        .set('Host', host());
+      expect(unknownWithInvalidLimit.status).toBe(400);
+      expect(unknownWithInvalidLimit.body.code).toBe('workspace_mismatch');
+
+      const invalidLimit = await request(app)
+        .get(
+          `/workspaces/secondary-id/session/${secondarySessionId}/transcript?limit=501`,
+        )
+        .set('Host', host());
+      expect(invalidLimit.status).toBe(400);
+      expect(invalidLimit.body.code).toBe('invalid_transcript_limit');
     });
   });
 

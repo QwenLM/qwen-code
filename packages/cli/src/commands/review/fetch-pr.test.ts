@@ -5,6 +5,8 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import type { Argv, CommandModule } from 'yargs';
+import { fetchPrCommand } from './fetch-pr.js';
 import { classifyHeavy } from './lib/heavy.js';
 
 describe('classifyHeavy', () => {
@@ -173,5 +175,20 @@ describe('classifyHeavy', () => {
         kind: 'source',
       }).heavy,
     ).toBe(true);
+  });
+});
+
+describe('fetchPrCommand builder', () => {
+  it('registers --host so Enterprise routing is a flag, not a prose instruction', () => {
+    const opts: string[] = [];
+    const stub = {
+      positional: () => stub,
+      option: (name: string) => {
+        opts.push(name);
+        return stub;
+      },
+    } as unknown as Argv;
+    ((fetchPrCommand as CommandModule).builder as (y: Argv) => Argv)(stub);
+    expect(opts).toContain('host');
   });
 });

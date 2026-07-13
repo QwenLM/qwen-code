@@ -169,6 +169,7 @@ describe('runNonInteractiveStreamJson', () => {
   };
   let mockOutputAdapter: {
     emitResult: ReturnType<typeof vi.fn>;
+    emitMessage: ReturnType<typeof vi.fn>;
     emitUserMessage: ReturnType<typeof vi.fn>;
     emitSystemMessage: ReturnType<typeof vi.fn>;
   };
@@ -202,10 +203,12 @@ describe('runNonInteractiveStreamJson', () => {
     // Setup mocks
     mockOutputAdapter = {
       emitResult: vi.fn(),
+      emitMessage: vi.fn(),
       emitUserMessage: vi.fn(),
       emitSystemMessage: vi.fn(),
     } as {
       emitResult: ReturnType<typeof vi.fn>;
+      emitMessage: ReturnType<typeof vi.fn>;
       emitUserMessage: ReturnType<typeof vi.fn>;
       emitSystemMessage: ReturnType<typeof vi.fn>;
       [key: string]: unknown;
@@ -558,6 +561,65 @@ describe('runNonInteractiveStreamJson', () => {
       expect.objectContaining({
         isError: true,
         errorMessage: 'Continue turn failed: continue failed',
+      }),
+    );
+  });
+
+  it('flushes recording failures before a session-level error result', async () => {
+    const { continueResults } = installContinueDispatch();
+    createInitializedGeminiClient([
+      { role: 'user', parts: [{ text: 'resume me' }] },
+    ]);
+    const order: string[] = [];
+    let failureListener:
+      | ((event: { sessionId: string; error: Error }) => void)
+      | undefined;
+    let flushCount = 0;
+    config = createConfig({
+      getGeminiClient: vi.fn().mockReturnValue(config.getGeminiClient()),
+      onChatRecordingFailure: (
+        listener: (event: { sessionId: string; error: Error }) => void,
+      ) => {
+        failureListener = listener;
+        return vi.fn();
+      },
+      getChatRecordingService: () => ({
+        finalize: () => order.push('finalize'),
+        flush: async () => {
+          order.push('flush');
+          if (flushCount++ === 0) {
+            failureListener?.({
+              sessionId: 'affected-session',
+              error: new Error('disk full'),
+            });
+          }
+        },
+      }),
+    });
+    mockOutputAdapter.emitMessage.mockImplementation(() => {
+      order.push('warning');
+    });
+    mockOutputAdapter.emitResult.mockImplementation(() => {
+      order.push('result');
+    });
+    runNonInteractiveMock.mockRejectedValueOnce(new Error('continue failed'));
+    const initRequest = createControlRequest('initialize');
+    const continueRequest = createContinueRequest();
+    mockInputReader.read = async function* () {
+      yield initRequest;
+      yield continueRequest;
+      await vi.waitFor(() => {
+        expect(continueResults).toHaveLength(1);
+      });
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(order.slice(0, 3)).toEqual(['flush', 'warning', 'result']);
+    expect(mockOutputAdapter.emitMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        subtype: 'session_recording_degraded',
+        session_id: 'affected-session',
       }),
     );
   });
