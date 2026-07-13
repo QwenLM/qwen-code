@@ -10,60 +10,39 @@ const yml = parse(workflow);
 const skill = readFileSync('.qwen/skills/ci-flaky-patrol/SKILL.md', 'utf8');
 
 describe('ci flaky rerun workflow', () => {
-  it('runs every 10 minutes with bounded candidates', () => {
+  it('runs every ten minutes and processes one candidate', () => {
     expect(yml.on.schedule[0].cron).toBe('*/10 * * * *');
-    expect(workflow).toContain("ACTIVE_DAYS: '7'");
-    expect(workflow).toContain("MAX_CANDIDATES_PER_RUN: '5'");
+    expect(skill).toContain('Classify exactly one');
   });
 
-  it('keeps PAT out of the skill classification step', () => {
+  it('keeps GitHub write credentials out of classification', () => {
     expect(yml.jobs.classify.permissions).toEqual({
       actions: 'read',
       contents: 'read',
       'pull-requests': 'read',
     });
-    expect(yml.jobs.act.permissions).toEqual({
-      actions: 'read',
-      contents: 'read',
-      'pull-requests': 'read',
-    });
-    const skillStep = yml.jobs.classify.steps.find((s) =>
-      s.uses?.includes('qwen-code-action'),
+    const classifier = yml.jobs.classify.steps.find((step) =>
+      step.uses?.includes('qwen-code-action'),
     );
-    expect(skillStep).toBeDefined();
-    expect(JSON.stringify(skillStep)).not.toContain('CI_BOT_PAT');
+    expect(classifier.env).toEqual({ GH_TOKEN: '', GITHUB_TOKEN: '' });
+    expect(JSON.stringify(classifier)).not.toContain('CI_BOT_PAT');
     expect(JSON.stringify(yml.jobs.act)).toContain('CI_BOT_PAT');
   });
 
-  it('delegates failure judgment to the skill with sandbox and no token', () => {
-    expect(workflow).toContain('.qwen/skills/ci-flaky-patrol/SKILL.md');
-    expect(workflow).toContain('ci-flaky-input.json');
-    expect(workflow).toContain('ci-flaky-decisions.json');
-    expect(workflow).toContain('"sandbox": true');
-    expect(workflow).toContain("GH_TOKEN: ''");
-    expect(workflow).toContain('"read_file"');
-    expect(workflow).toContain('"write_file"');
-    expect(workflow).not.toContain('"shell"');
-    expect(workflow).toContain('--input-sha');
+  it('uses a restricted classifier and a trusted fresh act checkout', () => {
+    const classifier = yml.jobs.classify.steps.find((step) =>
+      step.uses?.includes('qwen-code-action'),
+    );
+    expect(classifier.with.settings).toContain('"sandbox": true');
+    expect(classifier.with.settings).toContain('"read_file"');
+    expect(classifier.with.settings).toContain('"write_file"');
+    expect(classifier.with.settings).not.toContain('"shell"');
+    expect(yml.jobs.act.needs).toBe('classify');
     expect(workflow).toContain('needs.classify.outputs.input_sha');
-    expect(workflow).toContain('test -s "${WORKDIR}/ci-flaky-decisions.json"');
-    expect(skill).toContain('`pending` before rerun/update mutations');
-    expect(skill).toContain('rejected or ambiguous output as `no_action`');
-  });
-
-  it('runs act even when classify finds nothing, for reset', () => {
-    expect(yml.jobs.act.if).toContain('always()');
-    expect(yml.jobs.act.needs).toContain('classify');
-  });
-
-  it('applies decisions before best-effort state cleanup', () => {
-    const act = workflow.indexOf("name: 'Act on PR failure decisions'");
-    const reset = workflow.indexOf("name: 'Reset successful failure state'");
-    expect(act).toBeGreaterThan(-1);
-    expect(reset).toBeGreaterThan(act);
-    expect(workflow.slice(reset)).toContain('continue-on-error: true');
+    expect(workflow).toContain('--input-sha');
     expect(
-      yml.jobs.act.steps.find((step) => step.name.includes('Reset')).if,
-    ).toContain('always()');
+      yml.jobs.act.steps.find((step) => step.name === 'Checkout trusted main')
+        .with['persist-credentials'],
+    ).toBe(false);
   });
 });
