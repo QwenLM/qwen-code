@@ -3838,9 +3838,11 @@ export async function runQwenServe(
 
     const workspaceRuntimeRemoval = {
       async runtimeAdded(runtimeAdded: WorkspaceRuntime): Promise<void> {
-        if (!channelWorkerGroup) return;
+        if (!channelWorkerManager) return;
         try {
-          await channelWorkerGroup.restoreWorkspace(runtimeAdded.workspaceCwd);
+          await channelWorkerManager.restoreWorkspace(
+            runtimeAdded.workspaceCwd,
+          );
         } catch (err) {
           daemonLog.error(
             'workspace channel worker startup error',
@@ -3852,10 +3854,10 @@ export async function runQwenServe(
       },
       beginDrain(runtimeToDrain: WorkspaceRuntime): void {
         totalSessionAdmission.beginWorkspaceDrain(runtimeToDrain.workspaceCwd);
-        channelWorkerGroup?.beginWorkspaceDrain(runtimeToDrain.workspaceCwd);
+        channelWorkerManager?.beginWorkspaceDrain(runtimeToDrain.workspaceCwd);
       },
       cancelDrain(runtimeToDrain: WorkspaceRuntime): void {
-        channelWorkerGroup?.cancelWorkspaceDrain(runtimeToDrain.workspaceCwd);
+        channelWorkerManager?.cancelWorkspaceDrain(runtimeToDrain.workspaceCwd);
         totalSessionAdmission.cancelWorkspaceDrain(runtimeToDrain.workspaceCwd);
       },
       completeDrain(runtimeToDrain: WorkspaceRuntime): void {
@@ -3869,7 +3871,7 @@ export async function runQwenServe(
             runtimeToDrain.workspaceCwd,
           ).inFlight,
           channelWorkers:
-            channelWorkerGroup?.workspaceActivity(
+            channelWorkerManager?.workspaceActivity(
               runtimeToDrain.workspaceCwd,
             ) ?? 0,
         };
@@ -3889,8 +3891,8 @@ export async function runQwenServe(
           } catch {
             // Continue to bridge teardown.
           }
-          if (reason === 'workspace_removed' && channelWorkerGroup) {
-            await channelWorkerGroup
+          if (reason === 'workspace_removed' && channelWorkerManager) {
+            await channelWorkerManager
               .removeWorkspace(runtimeToDrain.workspaceCwd)
               .catch((err) => {
                 daemonLog.error(
@@ -3900,24 +3902,36 @@ export async function runQwenServe(
               });
             writeChannelWorkerPidfile();
           }
+          let bridgeStopped = false;
           try {
             if (!shutdownBridges.has(runtimeToDrain.bridge)) {
               await runtimeToDrain.bridge.shutdown({ reason });
             }
+            bridgeStopped = true;
           } finally {
-            subSessionStoppersByWorkspace.delete(runtimeToDrain.workspaceCwd);
-            if (stopSubSessions) {
-              removeArrayValue(subSessionStoppers, stopSubSessions);
+            if (bridgeStopped || reason === 'workspace_removed') {
+              subSessionStoppersByWorkspace.delete(runtimeToDrain.workspaceCwd);
+              if (stopSubSessions) {
+                removeArrayValue(subSessionStoppers, stopSubSessions);
+              }
+              removeArrayValue(runtimeBridges, runtimeToDrain.bridge);
+              removeArrayValue(
+                internalRuntimeBridgesForCleanup,
+                runtimeToDrain.bridge,
+              );
+              shutdownBridges.add(runtimeToDrain.bridge);
             }
-            removeArrayValue(runtimeBridges, runtimeToDrain.bridge);
-            removeArrayValue(
-              internalRuntimeBridgesForCleanup,
-              runtimeToDrain.bridge,
-            );
-            shutdownBridges.add(runtimeToDrain.bridge);
           }
         })();
         runtimeCleanupPromises.set(runtimeToDrain, cleanup);
+        void cleanup.catch(() => {
+          if (
+            reason === 'daemon_shutdown' &&
+            runtimeCleanupPromises.get(runtimeToDrain) === cleanup
+          ) {
+            runtimeCleanupPromises.delete(runtimeToDrain);
+          }
+        });
         return cleanup;
       },
     };
@@ -5022,8 +5036,11 @@ export async function runQwenServe(
                 const workspaceRegistry = appForCleanup?.locals?.[
                   'workspaceRegistry'
                 ] as WorkspaceRegistry | undefined;
+                const managedRuntimeBridges = new Set<AcpSessionBridge>();
                 if (runtimeRemoval && workspaceRegistry) {
-                  for (const workspaceRuntime of workspaceRegistry.listManaged()) {
+                  const managedRuntimes = workspaceRegistry.listManaged();
+                  for (const workspaceRuntime of managedRuntimes) {
+                    managedRuntimeBridges.add(workspaceRuntime.bridge);
                     await runtimeRemoval
                       .disposeRuntime(workspaceRuntime, 'daemon_shutdown')
                       .catch((err) => {
@@ -5042,6 +5059,7 @@ export async function runQwenServe(
                   }
                 }
                 for (const bridgeForShutdown of getRuntimeBridgesForCleanup()) {
+                  if (managedRuntimeBridges.has(bridgeForShutdown)) continue;
                   if (shutdownBridges.has(bridgeForShutdown)) continue;
                   shutdownBridges.add(bridgeForShutdown);
                   await bridgeForShutdown.shutdown().catch((err) => {

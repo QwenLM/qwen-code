@@ -377,7 +377,9 @@ export function createChannelWorkerGroup(
       const started: ChannelWorkerGroupEntry[] = [];
       try {
         for (const entry of entries.values()) {
-          if (drainingWorkspaces.has(entry.workspaceCwd)) continue;
+          if (drainingWorkspaces.has(entry.workspaceCwd)) {
+            throw new Error('Workspace drained during channel worker startup.');
+          }
           if (stopping) {
             throw new Error('Channel worker group stopped during startup.');
           }
@@ -385,6 +387,12 @@ export function createChannelWorkerGroup(
           await entry.supervisor.start();
           if (stopping) {
             throw new Error('Channel worker group stopped during startup.');
+          }
+          if (
+            entries.get(entry.workspaceCwd)?.generation !== entry.generation ||
+            drainingWorkspaces.has(entry.workspaceCwd)
+          ) {
+            throw new Error('Workspace drained during channel worker startup.');
           }
         }
         groupStarted = true;
@@ -413,9 +421,7 @@ export function createChannelWorkerGroup(
       reconciling = (async () => {
         const targets = new Map(
           targetGroups
-            .filter(
-              (target) => !drainingWorkspaces.has(target.workspaceCwd),
-            )
+            .filter((target) => !drainingWorkspaces.has(target.workspaceCwd))
             .map((target) => [target.workspaceCwd, target]),
         );
         const unchanged = new Map<string, ChannelWorkerGroupEntry>();
@@ -423,6 +429,11 @@ export function createChannelWorkerGroup(
         const newEntries: ChannelWorkerGroupEntry[] = [];
 
         for (const [workspaceCwd, entry] of entries) {
+          if (drainingWorkspaces.has(workspaceCwd)) {
+            unchanged.set(workspaceCwd, entry);
+            targets.delete(workspaceCwd);
+            continue;
+          }
           const target = targets.get(workspaceCwd);
           const healthy = entry.supervisor.snapshot().state === 'running';
           if (
@@ -465,6 +476,11 @@ export function createChannelWorkerGroup(
         const startedNew: ChannelWorkerGroupEntry[] = [];
         try {
           for (const entry of newEntries) {
+            if (drainingWorkspaces.has(entry.workspaceCwd)) {
+              throw new Error(
+                'Workspace drained during channel worker reconcile.',
+              );
+            }
             if (stopping) {
               throw new Error('Channel worker group stopped during reconcile.');
             }
@@ -472,6 +488,11 @@ export function createChannelWorkerGroup(
             await entry.supervisor.start();
             if (stopping) {
               throw new Error('Channel worker group stopped during reconcile.');
+            }
+            if (drainingWorkspaces.has(entry.workspaceCwd)) {
+              throw new Error(
+                'Workspace drained during channel worker reconcile.',
+              );
             }
           }
         } catch (error) {

@@ -13,6 +13,7 @@ import type {
   CreateChannelWorkerSupervisorOptions,
 } from './channel-worker-supervisor.js';
 import { ChannelWorkerStopError } from './channel-worker-supervisor.js';
+import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -161,11 +162,12 @@ describe('createChannelWorkerGroup', () => {
     const { createSupervisor, recorded } = makeCreateSupervisor(() =>
       snapshot({}),
     );
+    const groups: ChannelWorkspaceGroup[] = [
+      { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+      { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
+    ];
     const group = createChannelWorkerGroup({
-      groups: [
-        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
-        { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
-      ],
+      groups,
       registry,
       createSupervisor,
       shared,
@@ -176,9 +178,10 @@ describe('createChannelWorkerGroup', () => {
     await expect(group.enqueueWebhookTask(webhookTask)).rejects.toMatchObject({
       code: 'channel_worker_unavailable',
     });
-    await group.restart();
-    expect(recorded[0]!.supervisor.restart).toHaveBeenCalledOnce();
-    expect(recorded[1]!.supervisor.restart).not.toHaveBeenCalled();
+    await group.reconcile(groups, { force: true });
+    expect(recorded).toHaveLength(3);
+    expect(recorded[1]!.supervisor.stop).not.toHaveBeenCalled();
+    expect(recorded[1]!.supervisor.start).not.toHaveBeenCalled();
 
     group.cancelWorkspaceDrain(SECONDARY);
     recorded[1]!.supervisor.enqueueWebhookTask.mockResolvedValueOnce({
@@ -195,7 +198,7 @@ describe('createChannelWorkerGroup', () => {
     await firstRemoval;
 
     expect(recorded[1]!.supervisor.stop).toHaveBeenCalledOnce();
-    expect(recorded[0]!.supervisor.stop).not.toHaveBeenCalled();
+    expect(recorded[0]!.supervisor.stop).toHaveBeenCalledOnce();
     expect(group.workspaceActivity(SECONDARY)).toBe(0);
     expect(group.snapshots()).toEqual([
       expect.objectContaining({ workspaceCwd: PRIMARY }),
@@ -207,6 +210,7 @@ describe('createChannelWorkerGroup', () => {
     await group.stop();
     expect(recorded[0]!.supervisor.stop).toHaveBeenCalledOnce();
     expect(recorded[1]!.supervisor.stop).toHaveBeenCalledOnce();
+    expect(recorded[2]!.supervisor.stop).toHaveBeenCalledOnce();
   });
 
   it('falls back to synchronous kill when target worker stop fails', async () => {
@@ -493,6 +497,59 @@ describe('createChannelWorkerGroup', () => {
     await group.restoreWorkspace(SECONDARY);
     expect(recorded).toHaveLength(4);
     expect(recorded[3]!.supervisor.start).toHaveBeenCalledOnce();
+  });
+
+  it('stops a restored worker whose start finishes after the group stops', async () => {
+    const runtimes = [
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ];
+    const registry = fakeRegistry(runtimes);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    let releaseStart!: () => void;
+    const createSupervisorWithPendingRestore = (
+      opts: CreateChannelWorkerSupervisorOptions,
+    ) => {
+      const supervisor = createSupervisor(opts);
+      if (recorded.length === 3) {
+        supervisor.start.mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              releaseStart = resolve;
+            }),
+        );
+      }
+      return supervisor;
+    };
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+        { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
+      ],
+      registry,
+      createSupervisor: createSupervisorWithPendingRestore,
+      shared,
+    });
+    await group.start();
+    await group.removeWorkspace(SECONDARY);
+
+    const restoring = group.restoreWorkspace(SECONDARY);
+    await vi.waitFor(() => {
+      expect(recorded[2]!.supervisor.start).toHaveBeenCalledOnce();
+    });
+    await group.stop();
+    releaseStart();
+    await restoring;
+
+    expect(recorded[2]!.supervisor.stop).toHaveBeenCalledTimes(2);
+    expect(group.workspaceActivity(SECONDARY)).toBe(0);
+    expect(group.snapshots()).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ workspaceCwd: SECONDARY }),
+      ]),
+    );
   });
 
   it('does not start later supervisors when the first start fails', async () => {
@@ -886,6 +943,53 @@ describe('createChannelWorkerGroup', () => {
     expect(test.recorded[1]!.opts.selection).toEqual({
       mode: 'names',
       names: ['c'],
+    });
+  });
+
+  it('does not commit a worker drained while reconcile is starting it', async () => {
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ]);
+    let releaseStart!: () => void;
+    const test = makeCreateSupervisor(() => snapshot({}));
+    const createSupervisor = (opts: CreateChannelWorkerSupervisorOptions) => {
+      const supervisor = test.createSupervisor(opts);
+      if (opts.workspace === SECONDARY) {
+        supervisor.start.mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              releaseStart = resolve;
+            }),
+        );
+      }
+      return supervisor;
+    };
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    await group.start();
+
+    const reconciling = group.reconcile([
+      { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+      { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
+    ]);
+    await vi.waitFor(() => expect(releaseStart).toBeTypeOf('function'));
+    group.beginWorkspaceDrain(SECONDARY);
+    releaseStart();
+    await expect(reconciling).rejects.toThrow(
+      'Workspace drained during channel worker reconcile.',
+    );
+
+    expect(test.recorded[1]!.supervisor.stop).toHaveBeenCalledOnce();
+    expect(group.workspaceActivity(SECONDARY)).toBe(0);
+    await expect(group.enqueueWebhookTask(webhookTask)).rejects.toMatchObject({
+      code: 'channel_worker_unavailable',
     });
   });
 

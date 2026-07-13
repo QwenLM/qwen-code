@@ -96,6 +96,11 @@ export interface ChannelWorkerManager {
   enqueueWebhookTask(
     task: ChannelWebhookTask,
   ): ReturnType<ChannelWorkerGroup['enqueueWebhookTask']>;
+  beginWorkspaceDrain(workspaceCwd: string): void;
+  cancelWorkspaceDrain(workspaceCwd: string): void;
+  workspaceActivity(workspaceCwd: string): number;
+  removeWorkspace(workspaceCwd: string): Promise<void>;
+  restoreWorkspace(workspaceCwd: string): Promise<void>;
   workerChanged(): void;
   shutdown(): Promise<void>;
   killAllSync(): void;
@@ -150,6 +155,7 @@ export function createChannelWorkerManager(
   let draining = false;
   let hardKilled = false;
   let lane: Promise<void> = Promise.resolve();
+  const workspaceDrains = new Set<string>();
 
   const snapshot = (): ChannelWorkerControlState => ({
     enabled:
@@ -292,6 +298,9 @@ export function createChannelWorkerManager(
         );
       }
       group = candidate;
+      for (const workspaceCwd of workspaceDrains) {
+        candidate.beginWorkspaceDrain(workspaceCwd);
+      }
       notify();
       try {
         await candidate.start();
@@ -439,6 +448,33 @@ export function createChannelWorkerManager(
         ) as ReturnType<ChannelWorkerGroup['enqueueWebhookTask']>;
       }
       return group.enqueueWebhookTask(task);
+    },
+    beginWorkspaceDrain(workspaceCwd) {
+      workspaceDrains.add(workspaceCwd);
+      group?.beginWorkspaceDrain(workspaceCwd);
+    },
+    cancelWorkspaceDrain(workspaceCwd) {
+      workspaceDrains.delete(workspaceCwd);
+      group?.cancelWorkspaceDrain(workspaceCwd);
+    },
+    workspaceActivity(workspaceCwd) {
+      return group?.workspaceActivity(workspaceCwd) ?? 0;
+    },
+    removeWorkspace(workspaceCwd) {
+      return enqueue(async () => {
+        try {
+          await group?.removeWorkspace(workspaceCwd);
+          notify();
+        } finally {
+          workspaceDrains.delete(workspaceCwd);
+        }
+      });
+    },
+    restoreWorkspace(workspaceCwd) {
+      return enqueue(async () => {
+        await group?.restoreWorkspace(workspaceCwd);
+        notify();
+      });
     },
     workerChanged: notify,
     shutdown() {

@@ -54,6 +54,11 @@ function fakeGroup(
     killAllSync: vi.fn(),
     snapshots: vi.fn(() => snapshots),
     primarySnapshot: vi.fn(() => snapshots[0]!),
+    beginWorkspaceDrain: vi.fn(),
+    cancelWorkspaceDrain: vi.fn(),
+    workspaceActivity: vi.fn(() => 0),
+    removeWorkspace: vi.fn(async () => {}),
+    restoreWorkspace: vi.fn(async () => {}),
     enqueueWebhookTask: vi.fn(async () => ({ accepted: true as const })),
     ...overrides,
   };
@@ -151,6 +156,21 @@ describe('createChannelWorkerManager', () => {
     expect(test.reserveLease).toHaveBeenCalledWith(selection);
     expect(test.group.start).toHaveBeenCalledTimes(1);
     expect(test.manager.state()).toMatchObject({ enabled: true, selection });
+  });
+
+  it('applies an existing workspace drain before a newly created group starts', async () => {
+    const test = setup();
+
+    test.manager.beginWorkspaceDrain(PRIMARY);
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['telegram'],
+    });
+
+    expect(test.group.beginWorkspaceDrain).toHaveBeenCalledWith(PRIMARY);
+    expect(
+      vi.mocked(test.group.beginWorkspaceDrain).mock.invocationCallOrder[0]!,
+    ).toBeLessThan(vi.mocked(test.group.start).mock.invocationCallOrder[0]!);
   });
 
   it('keeps the boot-time lease reserved when group construction fails', async () => {
