@@ -429,6 +429,17 @@ describe('OpenAIContentConverter', () => {
       ).toThrowError(expect.objectContaining({ type: 'MALFORMED_TOOL_CALL' }));
     });
 
+    it('rejects a tool-call finish with no tool call deltas', () => {
+      const stream = withStreamParser(new StreamingToolCallParser());
+
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('tool-call-finish-without-deltas', {}, 'tool_calls'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'MALFORMED_TOOL_CALL' }));
+    });
+
     it('rejects a response whose tool call never provides a function name', () => {
       const stream = withStreamParser(new StreamingToolCallParser());
 

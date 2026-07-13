@@ -390,6 +390,16 @@ describe('StreamingToolCallParser', () => {
       });
     });
 
+    it('keeps blank continuations for a relocated incomplete call', () => {
+      parser.addChunk(0, '{"fromFirst":', 'call_first', 'first_tool');
+      parser.addChunk(0, '{"fromSecond":', 'call_second', 'second_tool');
+
+      const result = parser.addChunk(0, '');
+
+      expect(result.complete).toBe(false);
+      expect(parser.getBuffer(1)).toBe('{"fromSecond":');
+    });
+
     it('keeps the active route when an older original ID replays', () => {
       parser.addChunk(0, '{"a":1}', 'call_a', 'tool_a');
       parser.addChunk(2, '{"c":', 'call_c', 'tool_c');
