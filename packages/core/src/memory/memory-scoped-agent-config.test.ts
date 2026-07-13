@@ -11,7 +11,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { createMemoryScopedAgentConfig } from './memory-scoped-agent-config.js';
+import {
+  createMemoryScopedAgentConfig,
+  isAllowedMemoryPath,
+} from './memory-scoped-agent-config.js';
 import {
   clearAutoMemoryRootCache,
   getAutoMemoryRoot,
@@ -342,5 +345,47 @@ describe('createMemoryScopedAgentConfig', () => {
         filePath: path.join(getUserAutoMemoryRoot(), 'user', 'a.md'),
       }),
     ).resolves.toBe('deny');
+  });
+});
+
+describe('isAllowedMemoryPath with a symlinked, not-yet-created root', () => {
+  const originalMemoryBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+  let realBase: string;
+  let projectRoot: string;
+
+  beforeEach(async () => {
+    // A real base dir plus a symlink pointing at it, mirroring how macOS
+    // exposes `os.tmpdir()` as `/var/...` -> `/private/var/...`. The managed-
+    // memory root under the symlink is deliberately NOT created, so the
+    // allow-check must resolve the nearest existing ancestor (the symlink)
+    // rather than assume the root already exists.
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'memory-symlink-'));
+    realBase = path.join(tmp, 'real');
+    const linkBase = path.join(tmp, 'link');
+    await fs.mkdir(realBase, { recursive: true });
+    await fs.symlink(realBase, linkBase);
+    projectRoot = path.join(realBase, 'project');
+    await fs.mkdir(projectRoot, { recursive: true });
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(linkBase, 'memory');
+    clearAutoMemoryRootCache();
+  });
+
+  afterEach(() => {
+    if (originalMemoryBase === undefined) {
+      delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    } else {
+      process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBase;
+    }
+    clearAutoMemoryRootCache();
+  });
+
+  it('allows a write under a symlinked managed-memory root that does not exist yet', () => {
+    // Regression: the root was resolved with path.resolve (symlink kept) while
+    // the candidate was realpath'd (symlink resolved). On a symlinked base dir
+    // the two diverged (`/var/...` root vs `/private/var/...` candidate), so a
+    // legitimate managed-memory write was rejected. Both sides must resolve the
+    // symlink identically even before the root directory exists.
+    const memoryFile = path.join(getAutoMemoryRoot(projectRoot), 'project.md');
+    expect(isAllowedMemoryPath(memoryFile, projectRoot)).toBe(true);
   });
 });
