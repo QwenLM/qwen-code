@@ -7,6 +7,7 @@ const workflow = readFileSync(
   'utf8',
 );
 const yml = parse(workflow);
+const skill = readFileSync('.qwen/skills/ci-flaky-patrol/SKILL.md', 'utf8');
 
 describe('ci flaky rerun workflow', () => {
   it('runs every 10 minutes with bounded candidates', () => {
@@ -45,6 +46,9 @@ describe('ci flaky rerun workflow', () => {
     expect(workflow).not.toContain('"shell"');
     expect(workflow).toContain('--input-sha');
     expect(workflow).toContain('needs.classify.outputs.input_sha');
+    expect(workflow).toContain('test -s "${WORKDIR}/ci-flaky-decisions.json"');
+    expect(skill).toContain('`pending` before rerun/update mutations');
+    expect(skill).toContain('rejected or ambiguous output as `no_action`');
   });
 
   it('runs act even when classify finds nothing, for reset', () => {
@@ -58,5 +62,8 @@ describe('ci flaky rerun workflow', () => {
     expect(act).toBeGreaterThan(-1);
     expect(reset).toBeGreaterThan(act);
     expect(workflow.slice(reset)).toContain('continue-on-error: true');
+    expect(
+      yml.jobs.act.steps.find((step) => step.name.includes('Reset')).if,
+    ).toContain('always()');
   });
 });

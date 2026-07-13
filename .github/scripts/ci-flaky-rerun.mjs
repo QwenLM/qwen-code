@@ -14,6 +14,7 @@ const MAX_ACTIONS_PER_HEAD = 3;
 const TARGET_WORKFLOW = 'Qwen Code CI';
 const MAX_REASON_LENGTH = 200;
 const MARKER = 'qwen-ci-flaky-rerun';
+const VALID_ACTIONS = ['rerun', 'update_branch', 'comment', 'no_action'];
 
 function timeMs(value) {
   const ms = Date.parse(value ?? '');
@@ -22,6 +23,25 @@ function timeMs(value) {
 
 function checkTimeMs(run) {
   return Math.max(timeMs(run.completedAt), timeMs(run.startedAt));
+}
+
+function isNewerCheck(run, current) {
+  const runTime = checkTimeMs(run);
+  const currentTime = checkTimeMs(current);
+  if (runTime > 0 && currentTime > 0 && runTime !== currentTime) {
+    return runTime > currentTime;
+  }
+  const runId =
+    Number(run.databaseId) ||
+    jobIdFromUrl(run.detailsUrl) ||
+    runIdFromUrl(run.detailsUrl) ||
+    0;
+  const currentId =
+    Number(current.databaseId) ||
+    jobIdFromUrl(current.detailsUrl) ||
+    runIdFromUrl(current.detailsUrl) ||
+    0;
+  return runId > currentId;
 }
 
 function runIdFromUrl(url) {
@@ -34,9 +54,9 @@ function jobIdFromUrl(url) {
   return match ? Number(match[1]) : null;
 }
 
-function markerFor(target, action, failureKey, count) {
+function markerFor(target, action, failureKey, count, state = 'completed') {
   const check = encodeURIComponent(target.checkName ?? target.workflowName);
-  return `<!-- ${MARKER} v=2 pr=${target.prNumber} head=${target.headSha} run=${target.runId} attempt=${target.runAttempt ?? 1} action=${action} key=${failureKey} check=${check} count=${count} -->`;
+  return `<!-- ${MARKER} v=3 pr=${target.prNumber} head=${target.headSha} run=${target.runId} attempt=${target.runAttempt ?? 1} action=${action} state=${state} key=${failureKey} check=${check} count=${count} main=${target.mainHeadSha ?? '-'} -->`;
 }
 
 function markerComments(pr, options = {}) {
@@ -47,9 +67,9 @@ function markerComments(pr, options = {}) {
   );
 }
 
-function alreadyHandled(pr, target, options) {
+export function alreadyHandled(pr, target, options) {
   const pattern = new RegExp(
-    `<!-- ${MARKER} v=(?:1|2) pr=${target.prNumber} head=${target.headSha} run=${target.runId}${target.runAttempt ? ` attempt=${target.runAttempt}` : ''}(?:\\x20|\\u00a0)`,
+    `<!-- ${MARKER} v=(?:1|2|3) pr=${target.prNumber} head=${target.headSha} run=${target.runId}${target.runAttempt ? ` attempt=${target.runAttempt}` : ''}(?:\\x20|\\u00a0)`,
   );
   return markerComments(pr, options).some((comment) =>
     pattern.test(String(comment.body ?? '')),
@@ -90,7 +110,7 @@ export function fingerprint(target, log) {
 
 function stateMarkers(comments, prNumber, trustedMarkerLogin) {
   const marker = new RegExp(
-    `<!-- ${MARKER} v=2 pr=${prNumber} head=(\\S+) run=(\\d+) attempt=(\\d+) action=(\\S+) key=([a-z0-9._-]+) check=(\\S+) count=(\\d+) -->`,
+    `<!-- ${MARKER} v=(2|3) pr=${prNumber} head=(\\S+) run=(\\d+) attempt=(\\d+) action=(\\S+)(?: state=(\\S+))? key=([a-z0-9._-]+) check=(\\S+) count=(\\d+)(?: main=(\\S+))? -->`,
     'g',
   );
   return comments
@@ -102,10 +122,15 @@ function stateMarkers(comments, prNumber, trustedMarkerLogin) {
       const match = matches.at(-1);
       if (!match) return null;
       return {
-        headSha: match[1],
-        key: match[5],
-        check: decodeURIComponent(match[6]),
-        count: Number(match[7]),
+        headSha: match[2],
+        runId: Number(match[3]),
+        attempt: Number(match[4]),
+        action: match[5],
+        state: match[6] ?? 'completed',
+        key: match[7],
+        check: decodeURIComponent(match[8]),
+        count: Number(match[9]),
+        mainHeadSha: match[10] === '-' ? null : (match[10] ?? null),
         createdAt: comment.createdAt,
       };
     })
@@ -166,7 +191,7 @@ export function selectCandidateTargets(prs, options = {}) {
     for (const run of pr.statusCheckRollup ?? []) {
       const key = `${run.workflowName}/${run.name}`;
       const current = latestByCheck.get(key);
-      if (!current || checkTimeMs(run) > checkTimeMs(current)) {
+      if (!current || isNewerCheck(run, current)) {
         latestByCheck.set(key, run);
       }
     }
@@ -189,19 +214,10 @@ export function selectCandidateTargets(prs, options = {}) {
   return targets.sort((a, b) => {
     const newestA = newestFailureByPr.get(a.prNumber);
     const newestB = newestFailureByPr.get(b.prNumber);
-    const prOrder = timeMs(newestB.completedAt) - timeMs(newestA.completedAt);
+    const prOrder = timeMs(newestA.completedAt) - timeMs(newestB.completedAt);
     if (prOrder !== 0) return prOrder;
     return timeMs(b.completedAt) - timeMs(a.completedAt);
   });
-}
-
-export function selectTarget(prs, options = {}) {
-  return (
-    selectCandidateTargets(prs, options).find((target) => {
-      const pr = prs.find((candidate) => candidate.number === target.prNumber);
-      return !alreadyHandled(pr, target, options);
-    }) ?? null
-  );
 }
 
 function validReason(value) {
@@ -224,62 +240,80 @@ async function isActionablePr(client, target) {
 
 export async function actOnDecision(client, target, decision) {
   if (!target) return;
-  if (
-    !['rerun', 'update_branch', 'comment', 'no_action'].includes(
-      decision.action,
-    )
-  )
-    return;
-  if (decision.action !== 'no_action' && decision.confidence !== 'high') return;
-  if (
-    decision.action !== 'no_action' &&
-    (!validReason(decision.reason_en) || !validReason(decision.reason_zh))
-  )
-    return;
   if (decision.failureKey !== target.failureKey) return;
   if (!(await isActionablePr(client, target))) return;
   if (!(await client.isCurrentFailure(target))) return;
+  const requestedAction = VALID_ACTIONS.includes(decision.action)
+    ? decision.action
+    : 'no_action';
+  const action =
+    requestedAction === 'no_action' ||
+    (decision.confidence === 'high' &&
+      validReason(decision.reason_en) &&
+      validReason(decision.reason_zh))
+      ? requestedAction
+      : 'no_action';
   const count = await client.failureActionCount(
     target.prNumber,
     target.headSha,
   );
   if (count >= MAX_ACTIONS_PER_HEAD) return;
-  const marker = markerFor(
-    target,
-    decision.action,
-    target.failureKey,
-    count + 1,
-  );
+  const terminalMarker = (terminalAction = action, state = 'completed') =>
+    markerFor(target, terminalAction, target.failureKey, count + 1, state);
 
-  if (decision.action === 'rerun') {
+  if (action === 'no_action') {
+    await client.comment(
+      target.prNumber,
+      terminalMarker('no_action', 'no_action'),
+    );
+    return;
+  }
+
+  if (action === 'rerun') {
+    await client.comment(target.prNumber, terminalMarker(action, 'pending'));
     await client.rerunFailedJobs(target.runId);
     await client.comment(
       target.prNumber,
-      `Reran failed jobs: ${decision.reason_en}\n\n${marker}`,
+      `Reran failed jobs: ${decision.reason_en}\n\n${terminalMarker()}`,
     );
     return;
   }
-  if (decision.action === 'update_branch') {
+  if (action === 'update_branch') {
     if (
       target.behindBy <= 0 ||
       !target.mainHeadSha ||
+      !target.mainRunId ||
+      !target.mainWorkflowId ||
       decision.mainHeadSha !== target.mainHeadSha
-    )
+    ) {
+      await client.comment(
+        target.prNumber,
+        terminalMarker('no_action', 'no_action'),
+      );
       return;
+    }
     const currentMain = await client.mainContext(target.headSha);
     if (
       currentMain.behindBy <= 0 ||
-      currentMain.mainHeadSha !== target.mainHeadSha
-    )
+      currentMain.mainHeadSha !== target.mainHeadSha ||
+      currentMain.mainRunId !== target.mainRunId ||
+      currentMain.mainWorkflowId !== target.mainWorkflowId
+    ) {
+      await client.comment(
+        target.prNumber,
+        terminalMarker('no_action', 'no_action'),
+      );
       return;
+    }
+    await client.comment(target.prNumber, terminalMarker(action, 'pending'));
     await client.updateBranch(target.prNumber, target.headSha);
     await client.comment(
       target.prNumber,
-      `Updated the branch from main: ${decision.reason_en}\n\n${marker}`,
+      `Updated the branch from main: ${decision.reason_en}\n\n${terminalMarker()}`,
     );
     return;
   }
-  if (decision.action === 'comment') {
+  if (action === 'comment') {
     await client.comment(
       target.prNumber,
       [
@@ -292,12 +326,11 @@ export async function actOnDecision(client, target, decision) {
         '',
         '</details>',
         '',
-        marker,
+        terminalMarker(),
       ].join('\n'),
     );
     return;
   }
-  await client.comment(target.prNumber, marker);
 }
 
 export async function actOnDecisions(client, targets, decisions) {
@@ -309,16 +342,72 @@ export async function actOnDecisions(client, targets, decisions) {
   );
   const processed = new Set();
   for (const decision of decisions ?? []) {
-    const id = `${decision.prNumber}:${decision.headSha}:${decision.runId}`;
-    if (processed.has(id)) continue;
-    const target = targetsById.get(id);
-    if (!target) continue;
-    processed.add(id);
     try {
+      if (
+        !decision ||
+        typeof decision !== 'object' ||
+        Array.isArray(decision)
+      ) {
+        throw new Error('decision must be an object');
+      }
+      const id = `${decision.prNumber}:${decision.headSha}:${decision.runId}`;
+      if (processed.has(id)) continue;
+      const target = targetsById.get(id);
+      if (!target) continue;
+      processed.add(id);
       await actOnDecision(client, target, decision);
     } catch (error) {
       process.stderr.write(
-        `actOnDecision failed for ${decision.prNumber}: ${error.message}\n`,
+        `actOnDecision failed for ${decision?.prNumber ?? 'unknown'}: ${error.message}\n`,
+      );
+    }
+  }
+}
+
+export async function recoverPendingActions(client, prs) {
+  for (const pr of prs) {
+    try {
+      const latest = new Map();
+      for (const state of stateMarkers(
+        await client.comments(pr.number),
+        pr.number,
+        client.trustedMarkerLogin,
+      ))
+        latest.set(`${state.headSha}:${state.key}`, state);
+      for (const state of latest.values()) {
+        if (state.state !== 'pending') continue;
+        let completed = false;
+        if (state.action === 'rerun') {
+          const run = await client.run(state.runId);
+          completed = Number(run.run_attempt) > state.attempt;
+        } else if (state.action === 'update_branch' && state.mainHeadSha) {
+          completed = await client.wasBranchUpdated(
+            pr.number,
+            state.headSha,
+            state.mainHeadSha,
+          );
+        }
+        if (!completed) continue;
+        await client.comment(
+          pr.number,
+          markerFor(
+            {
+              prNumber: pr.number,
+              headSha: state.headSha,
+              runId: state.runId,
+              runAttempt: state.attempt,
+              checkName: state.check,
+              mainHeadSha: state.mainHeadSha,
+            },
+            state.action,
+            state.key,
+            state.count,
+          ),
+        );
+      }
+    } catch (error) {
+      process.stderr.write(
+        `recoverPendingActions failed for ${pr.number}: ${error.message}\n`,
       );
     }
   }
@@ -333,7 +422,7 @@ export async function resetSuccessfulFailures(client, prs) {
         pr.number,
         client.trustedMarkerLogin,
       ))
-        states.set(state.key, state);
+        if (state.headSha === pr.headRefOid) states.set(state.key, state);
       for (const state of states.values()) {
         if (state.count === 0) continue;
         const run = (pr.statusCheckRollup ?? []).find(
@@ -471,14 +560,18 @@ export class GhClient {
   }
 
   async isCurrentFailure(target) {
-    const run = JSON.parse(
-      await this.gh(['api', `repos/${this.repo}/actions/runs/${target.runId}`]),
-    );
+    const run = await this.run(target.runId);
     return (
       run.status === 'completed' &&
       ['failure', 'timed_out'].includes(run.conclusion) &&
       run.head_sha === target.headSha &&
       run.run_attempt === target.runAttempt
+    );
+  }
+
+  async run(runId) {
+    return JSON.parse(
+      await this.gh(['api', `repos/${this.repo}/actions/runs/${runId}`]),
     );
   }
 
@@ -501,14 +594,41 @@ export class GhClient {
       this.gh(['api', `repos/${this.repo}/commits/main`, '--jq', '.sha']),
     ]);
     const response = JSON.parse(comparison);
+    const mainSha = mainHeadSha.trim();
+    const runs = JSON.parse(
+      await this.gh([
+        'api',
+        `repos/${this.repo}/actions/runs?branch=main&status=completed&per_page=100`,
+      ]),
+    );
+    const latestMainRun = (runs.workflow_runs ?? []).find(
+      (run) => run.name === TARGET_WORKFLOW && run.head_sha === mainSha,
+    );
+    const mainRun =
+      latestMainRun?.conclusion === 'success' ? latestMainRun : null;
     return {
       behindBy: Number(response.ahead_by),
-      mainHeadSha: mainHeadSha.trim(),
+      mainHeadSha: mainSha,
+      mainRunId: mainRun?.id ?? null,
+      mainWorkflowId: mainRun?.workflow_id ?? null,
       mainCommits: response.commits.slice(-20).map((commit) => ({
         sha: commit.sha,
         message: String(commit.commit?.message ?? '').split('\n')[0],
       })),
     };
+  }
+
+  async wasBranchUpdated(prNumber, oldHeadSha, mainHeadSha) {
+    const current = await this.currentPr(prNumber);
+    if (current.headRefOid === oldHeadSha) return false;
+    const commit = JSON.parse(
+      await this.gh([
+        'api',
+        `repos/${this.repo}/commits/${current.headRefOid}`,
+      ]),
+    );
+    const parents = new Set((commit.parents ?? []).map((parent) => parent.sha));
+    return parents.has(oldHeadSha) && parents.has(mainHeadSha);
   }
 
   async updateBranch(prNumber, headSha) {
@@ -568,6 +688,16 @@ function requiredArg(args, name) {
   return value;
 }
 
+function positiveIntegerArg(args, name, fallback) {
+  const value = args.get(name);
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`--${name} must be a positive integer`);
+  }
+  return parsed;
+}
+
 async function trustedMarkerLogin(args, client) {
   const login =
     args.get('trusted-marker-login') ?? (await client.viewerLogin());
@@ -579,16 +709,26 @@ async function trustedMarkerLogin(args, client) {
 async function scan(args) {
   const repo = requiredArg(args, 'repo');
   const workdir = requiredArg(args, 'workdir');
+  const activeDays = positiveIntegerArg(
+    args,
+    'active-days',
+    DEFAULT_ACTIVE_DAYS,
+  );
+  const staleMinutes = positiveIntegerArg(
+    args,
+    'stale-minutes',
+    DEFAULT_STALE_MINUTES,
+  );
+  const maxCandidates = positiveIntegerArg(
+    args,
+    'max-candidates',
+    DEFAULT_MAX_CANDIDATES_PER_RUN,
+  );
   const client = new GhClient(repo);
   const trustedLogin = await trustedMarkerLogin(args, client);
-  const activeDays = Number(args.get('active-days')) || DEFAULT_ACTIVE_DAYS;
-  const staleMinutes =
-    Number(args.get('stale-minutes')) || DEFAULT_STALE_MINUTES;
   const prs = await client.prs();
   const candidates = selectCandidateTargets(prs, { staleMinutes, activeDays });
   const options = { trustedMarkerLogins: [trustedLogin] };
-  const maxCandidates =
-    Number(args.get('max-candidates')) || DEFAULT_MAX_CANDIDATES_PER_RUN;
   const inputs = [];
   const selectedPrs = new Set();
   for (const candidate of candidates) {
@@ -596,16 +736,16 @@ async function scan(args) {
     if (selectedPrs.has(candidate.prNumber)) continue;
     try {
       const pr = prs.find((item) => item.number === candidate.prNumber);
-      const target = {
-        ...candidate,
-        runAttempt: await client.runAttempt(candidate.runId),
-      };
+      const liveAttempt = await client.runAttempt(candidate.runId);
+      if (liveAttempt !== candidate.runAttempt) continue;
+      const target = { ...candidate, runAttempt: liveAttempt };
       const comments = await client.comments(candidate.prNumber);
       if (alreadyHandled({ ...pr, comments }, target, options)) continue;
       const log =
         target.jobId === null
           ? ''
           : skillLog(await client.jobLog(target.jobId));
+      if ((await client.runAttempt(candidate.runId)) !== liveAttempt) continue;
       const failureKey = fingerprint(target, log);
       inputs.push({
         ...target,
@@ -648,7 +788,9 @@ async function reset(args) {
   const repo = requiredArg(args, 'repo');
   const client = new GhClient(repo);
   await trustedMarkerLogin(args, client);
-  await resetSuccessfulFailures(client, await client.markerPrs());
+  const prs = await client.markerPrs();
+  await recoverPendingActions(client, prs);
+  await resetSuccessfulFailures(client, prs);
 }
 
 async function main() {

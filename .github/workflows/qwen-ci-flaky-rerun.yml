@@ -91,6 +91,10 @@ jobs:
             Workdir: ${{ github.workspace }}/.qwen/ci-flaky-rerun
             Read ci-flaky-input.json and write ci-flaky-decisions.json.
 
+      - name: 'Validate patrol decisions'
+        if: "${{ steps.scan.outputs.target_found == 'true' }}"
+        run: 'test -s "${WORKDIR}/ci-flaky-decisions.json"'
+
       - name: 'Upload patrol input and decisions'
         if: "${{ steps.scan.outputs.target_found == 'true' }}"
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'
@@ -143,6 +147,7 @@ jobs:
             --trusted-marker-login "${{ needs.classify.outputs.bot_login }}"
 
       - name: 'Reset successful failure state'
+        if: "${{ always() && github.repository == 'QwenLM/qwen-code' && needs.classify.outputs.bot_login != '' }}"
         continue-on-error: true
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'

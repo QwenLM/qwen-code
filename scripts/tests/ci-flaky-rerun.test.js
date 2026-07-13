@@ -2,16 +2,18 @@ import { describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 import {
   actOnDecision,
   actOnDecisions,
+  alreadyHandled,
   fileSha256,
   fingerprint,
   GhClient,
+  recoverPendingActions,
   resetSuccessfulFailures,
   selectCandidateTargets,
-  selectTarget,
   skillLog,
 } from '../../.github/scripts/ci-flaky-rerun.mjs';
 
@@ -75,6 +77,8 @@ function client(overrides = {}) {
       return {
         behindBy: 2,
         mainHeadSha: 'main123',
+        mainRunId: 1001,
+        mainWorkflowId: 2001,
         mainCommits: [],
       };
     },
@@ -111,14 +115,24 @@ function markerComment(login = 'trusted-patrol-bot') {
   };
 }
 
+function pendingMarkerComment(action = 'rerun', mainHeadSha = '-') {
+  return {
+    body: `<!-- qwen-ci-flaky-rerun v=3 pr=42 head=abc123 run=123 attempt=1 action=${action} state=pending key=test-key check=E2E%20Tests count=1 main=${mainHeadSha} -->`,
+    createdAt: '2026-07-12T07:20:00.000Z',
+    author: { login: 'trusted-patrol-bot' },
+  };
+}
+
 const target = () => {
-  const t = selectTarget([pr()], { now: NOW });
+  const t = selectCandidateTargets([pr()], { now: NOW })[0];
   return t ? { ...t, failureKey: 'test-key' } : null;
 };
 
 describe('ci flaky rerun patrol', () => {
   it('selects stale failed PR runs targeting main', () => {
-    expect(selectTarget([pr()], { now: NOW, staleMinutes: 30 })).toMatchObject({
+    expect(
+      selectCandidateTargets([pr()], { now: NOW, staleMinutes: 30 })[0],
+    ).toMatchObject({
       prNumber: 42,
       runId: 123,
       workflowName: 'Qwen Code CI',
@@ -185,7 +199,7 @@ describe('ci flaky rerun patrol', () => {
 
   it('skips fresh, draft, non-main, and already handled PRs', () => {
     expect(
-      selectTarget(
+      selectCandidateTargets(
         [
           pr({
             statusCheckRollup: [
@@ -195,31 +209,33 @@ describe('ci flaky rerun patrol', () => {
         ],
         { now: NOW, staleMinutes: 30 },
       ),
-    ).toBeNull();
-    expect(selectTarget([pr({ isDraft: true })], { now: NOW })).toBeNull();
+    ).toEqual([]);
     expect(
-      selectTarget([pr({ baseRefName: 'release' })], { now: NOW }),
-    ).toBeNull();
+      selectCandidateTargets([pr({ isDraft: true })], { now: NOW }),
+    ).toEqual([]);
     expect(
-      selectTarget(
-        [
-          pr({
-            comments: [
-              {
-                body: '<!-- qwen-ci-flaky-rerun v=2 pr=42 head=abc123 run=123 attempt=1 action=rerun key=x check=E2E%20Tests count=1 -->',
-                author: { login: 'trusted-patrol-bot' },
-              },
-            ],
-          }),
-        ],
-        { now: NOW, trustedMarkerLogins: ['trusted-patrol-bot'] },
+      selectCandidateTargets([pr({ baseRefName: 'release' })], { now: NOW }),
+    ).toEqual([]);
+    const handledPr = pr({
+      comments: [
+        {
+          body: '<!-- qwen-ci-flaky-rerun v=2 pr=42 head=abc123 run=123 attempt=1 action=rerun key=x check=E2E%20Tests count=1 -->',
+          author: { login: 'trusted-patrol-bot' },
+        },
+      ],
+    });
+    expect(
+      alreadyHandled(
+        handledPr,
+        selectCandidateTargets([handledPr], { now: NOW })[0],
+        { trustedMarkerLogins: ['trusted-patrol-bot'] },
       ),
-    ).toBeNull();
+    ).toBe(true);
   });
 
-  it('prioritizes the newest stale failure', () => {
+  it('prioritizes the oldest PR while keeping its newest failure', () => {
     expect(
-      selectTarget(
+      selectCandidateTargets(
         [
           pr({
             number: 41,
@@ -235,36 +251,61 @@ describe('ci flaky rerun patrol', () => {
           pr(),
         ],
         { now: NOW, staleMinutes: 30 },
+      )[0],
+    ).toMatchObject({ prNumber: 41, runId: 122 });
+  });
+
+  it('does not select an older failure while a newer check is queued', () => {
+    expect(
+      selectCandidateTargets(
+        [
+          pr({
+            statusCheckRollup: [
+              run({ databaseId: undefined }),
+              run({
+                databaseId: undefined,
+                status: 'QUEUED',
+                conclusion: null,
+                startedAt: null,
+                completedAt: null,
+                detailsUrl:
+                  'https://github.com/QwenLM/qwen-code/actions/runs/124/jobs/2',
+              }),
+            ],
+          }),
+        ],
+        { now: NOW },
       ),
-    ).toMatchObject({ prNumber: 42, runId: 123 });
+    ).toEqual([]);
   });
 
   it('does not trust markers from unrecognized accounts', () => {
     expect(
-      selectTarget(
-        [
-          pr({
-            comments: [
-              {
-                body: '<!-- qwen-ci-flaky-rerun v=1 pr=42 head=abc123 run=123 -->',
-                author: { login: 'untrusted-user' },
-              },
-            ],
-          }),
-        ],
-        { now: NOW, trustedMarkerLogins: ['trusted-patrol-bot'] },
+      alreadyHandled(
+        pr({
+          comments: [
+            {
+              body: '<!-- qwen-ci-flaky-rerun v=1 pr=42 head=abc123 run=123 -->',
+              author: { login: 'untrusted-user' },
+            },
+          ],
+        }),
+        target(),
+        { trustedMarkerLogins: ['trusted-patrol-bot'] },
       ),
-    ).toMatchObject({ prNumber: 42, runId: 123 });
+    ).toBe(false);
   });
 
   it('reruns failed jobs and posts a marker for valid decisions', async () => {
     const c = client();
     await actOnDecision(c, target(), decision());
-    expect(c.calls).toHaveLength(2);
-    expect(c.calls[0]).toEqual(['rerunFailedJobs', 123]);
-    expect(c.calls[1][0]).toBe('comment');
-    expect(c.calls[1][2]).toContain('action=rerun');
-    expect(c.calls[1][2]).toContain('runner timeout');
+    expect(c.calls).toHaveLength(3);
+    expect(c.calls[0][0]).toBe('comment');
+    expect(c.calls[0][2]).toContain('state=pending');
+    expect(c.calls[1]).toEqual(['rerunFailedJobs', 123]);
+    expect(c.calls[2][0]).toBe('comment');
+    expect(c.calls[2][2]).toContain('state=completed');
+    expect(c.calls[2][2]).toContain('runner timeout');
   });
 
   it('posts a bilingual comment for deterministic failures', async () => {
@@ -300,7 +341,7 @@ describe('ci flaky rerun patrol', () => {
     expect(c.calls[0][2]).toMatch(/^<!-- .* -->$/);
   });
 
-  it('rejects unsafe decisions before any GitHub write', async () => {
+  it('records unsafe decisions as no_action after freshness checks', async () => {
     for (const unsafe of [
       decision({ action: 'delete_branch' }),
       decision({ confidence: 'low' }),
@@ -308,7 +349,9 @@ describe('ci flaky rerun patrol', () => {
     ]) {
       const c = client();
       await actOnDecision(c, target(), unsafe);
-      expect(c.calls).toEqual([]);
+      expect(c.calls).toHaveLength(1);
+      expect(c.calls[0][0]).toBe('comment');
+      expect(c.calls[0][2]).toContain('state=no_action');
     }
   });
 
@@ -317,6 +360,8 @@ describe('ci flaky rerun patrol', () => {
       ...target(),
       behindBy: 2,
       mainHeadSha: 'main123',
+      mainRunId: 1001,
+      mainWorkflowId: 2001,
     };
     const c = client();
     await actOnDecision(
@@ -324,19 +369,25 @@ describe('ci flaky rerun patrol', () => {
       updateTarget,
       decision({ action: 'update_branch', mainHeadSha: 'main123' }),
     );
-    expect(c.calls[0]).toEqual(['updateBranch', 42, 'abc123']);
-    expect(c.calls[1][0]).toBe('comment');
-    expect(c.calls[1][2]).toContain('action=update_branch');
+    expect(c.calls[0][2]).toContain('state=pending');
+    expect(c.calls[1]).toEqual(['updateBranch', 42, 'abc123']);
+    expect(c.calls[2][2]).toContain('state=completed');
 
     const changedMain = client({
-      mainContext: async () => ({ behindBy: 2, mainHeadSha: 'new-main' }),
+      mainContext: async () => ({
+        behindBy: 2,
+        mainHeadSha: 'new-main',
+        mainRunId: 1002,
+        mainWorkflowId: 2001,
+      }),
     });
     await actOnDecision(
       changedMain,
       updateTarget,
       decision({ action: 'update_branch', mainHeadSha: 'main123' }),
     );
-    expect(changedMain.calls).toEqual([]);
+    expect(changedMain.calls).toHaveLength(1);
+    expect(changedMain.calls[0][2]).toContain('state=no_action');
   });
 
   it('hashes the exact classifier input bytes', () => {
@@ -389,7 +440,75 @@ describe('ci flaky rerun patrol', () => {
     ).toBe(false);
   });
 
-  it('stops after three actions for the same head SHA', async () => {
+  it('reads verified-green main evidence from the production API shape', async () => {
+    const c = new GhClient('QwenLM/qwen-code');
+    c.gh = async (args) => {
+      const path = args[1];
+      if (path.includes('/compare/')) {
+        return JSON.stringify({
+          ahead_by: 2,
+          commits: [{ sha: 'fix1', commit: { message: 'fix test\nbody' } }],
+        });
+      }
+      if (path.includes('/commits/main')) return 'main123\n';
+      return JSON.stringify({
+        workflow_runs: [
+          {
+            id: 1001,
+            workflow_id: 2001,
+            name: 'Qwen Code CI',
+            head_sha: 'main123',
+            conclusion: 'success',
+          },
+        ],
+      });
+    };
+    await expect(c.mainContext('abc123')).resolves.toMatchObject({
+      behindBy: 2,
+      mainHeadSha: 'main123',
+      mainRunId: 1001,
+      mainWorkflowId: 2001,
+      mainCommits: [{ sha: 'fix1', message: 'fix test' }],
+    });
+  });
+
+  it('recovers a rerun only after the live attempt advances', async () => {
+    const c = client({
+      comments: async () => [pendingMarkerComment()],
+      run: async () => ({ run_attempt: 2 }),
+    });
+    await recoverPendingActions(c, [pr()]);
+    expect(c.calls).toHaveLength(1);
+    expect(c.calls[0][2]).toContain('action=rerun state=completed');
+
+    const ambiguous = client({
+      comments: async () => [pendingMarkerComment()],
+      run: async () => ({ run_attempt: 1 }),
+    });
+    await recoverPendingActions(ambiguous, [pr()]);
+    expect(ambiguous.calls).toEqual([]);
+  });
+
+  it('recovers update_branch only from a verified merge commit', async () => {
+    const c = client({
+      comments: async () => [pendingMarkerComment('update_branch', 'main123')],
+      wasBranchUpdated: async (...args) => {
+        expect(args).toEqual([42, 'abc123', 'main123']);
+        return true;
+      },
+    });
+    await recoverPendingActions(c, [pr()]);
+    expect(c.calls).toHaveLength(1);
+    expect(c.calls[0][2]).toContain('action=update_branch state=completed');
+  });
+
+  it('allows the last action before stopping at the head limit', async () => {
+    const allowed = client({ failureActionCount: async () => 2 });
+    await actOnDecision(allowed, target(), decision());
+    expect(allowed.calls.some((call) => call[0] === 'rerunFailedJobs')).toBe(
+      true,
+    );
+
     const c = client({
       failureActionCount: async (...args) => {
         expect(args).toEqual([42, 'abc123']);
@@ -488,8 +607,10 @@ describe('ci flaky rerun patrol', () => {
         reason_zh: '不得执行',
       }),
     ]);
-    expect(c.calls.filter((call) => call[0] === 'rerunFailedJobs')).toEqual([
+    expect(c.calls).toEqual([
+      expect.arrayContaining(['comment', 42]),
       ['rerunFailedJobs', 123],
+      expect.arrayContaining(['comment', 42]),
     ]);
   });
 
@@ -526,7 +647,13 @@ describe('ci flaky rerun patrol', () => {
       ['rerunFailedJobs', 123],
       ['rerunFailedJobs', 124],
     ]);
-    expect(c.calls.filter((call) => call[0] === 'comment')).toHaveLength(1);
+    expect(c.calls.filter((call) => call[0] === 'comment')).toHaveLength(3);
+  });
+
+  it('continues after a malformed decision entry', async () => {
+    const c = client();
+    await actOnDecisions(c, [target()], [null, scannedDecision()]);
+    expect(c.calls.some((call) => call[0] === 'rerunFailedJobs')).toBe(true);
   });
 
   it('resets failure counts after a matching check succeeds', async () => {
@@ -544,6 +671,8 @@ describe('ci flaky rerun patrol', () => {
       }),
     ]);
     expect(c.calls).toHaveLength(1);
+    expect(c.calls[0][0]).toBe('comment');
+    expect(c.calls[0][1]).toBe(42);
     expect(c.calls[0][2]).toContain('action=reset');
     expect(c.calls[0][2]).toContain('count=0');
   });
@@ -574,6 +703,27 @@ describe('ci flaky rerun patrol', () => {
         statusCheckRollup: [
           run({
             workflowName: 'review-pr',
+            conclusion: 'SUCCESS',
+            completedAt: '2026-07-12T07:30:00.000Z',
+          }),
+        ],
+      }),
+    ]);
+    expect(c.calls).toEqual([]);
+  });
+
+  it('does not reset current-head state from an old-head marker', async () => {
+    const c = client();
+    c.comments = async () => [
+      {
+        ...markerComment(),
+        body: markerComment().body.replace('head=abc123', 'head=old-head'),
+      },
+    ];
+    await resetSuccessfulFailures(c, [
+      pr({
+        statusCheckRollup: [
+          run({
             conclusion: 'SUCCESS',
             completedAt: '2026-07-12T07:30:00.000Z',
           }),
@@ -615,11 +765,63 @@ describe('ci flaky rerun patrol', () => {
       fingerprint(t, 'Error: timeout'),
     );
     expect(fingerprint(t, 'Error: timeout')).not.toBe(
-      fingerprint({ ...t, workflowName: 'Lint' }, 'Error: timeout'),
+      fingerprint({ ...t, checkName: 'Lint' }, 'Error: timeout'),
     );
     const sharedPrefix = 'context '.repeat(200);
     expect(fingerprint(t, `${sharedPrefix}first failure`)).not.toBe(
       fingerprint(t, `${sharedPrefix}second failure`),
     );
+  });
+
+  it('rejects invalid numeric controls before GitHub access', () => {
+    const script = join(process.cwd(), '.github/scripts/ci-flaky-rerun.mjs');
+    for (const [flag, value] of [
+      ['--active-days', '-1'],
+      ['--stale-minutes', '1.5'],
+      ['--max-candidates', 'Infinity'],
+    ]) {
+      const result = spawnSync(
+        process.execPath,
+        [
+          script,
+          'scan',
+          '--repo',
+          'QwenLM/qwen-code',
+          '--workdir',
+          tmpdir(),
+          flag,
+          value,
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('must be a positive integer');
+    }
+  });
+
+  it('rejects modified classifier input before GitHub access', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ci-flaky-rerun-act-'));
+    try {
+      writeFileSync(join(dir, 'ci-flaky-input.json'), '{"candidates":[]}\n');
+      writeFileSync(join(dir, 'ci-flaky-decisions.json'), '{"decisions":[]}\n');
+      const result = spawnSync(
+        process.execPath,
+        [
+          join(process.cwd(), '.github/scripts/ci-flaky-rerun.mjs'),
+          'act',
+          '--repo',
+          'QwenLM/qwen-code',
+          '--workdir',
+          dir,
+          '--input-sha',
+          'modified',
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('integrity check failed');
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
   });
 });
