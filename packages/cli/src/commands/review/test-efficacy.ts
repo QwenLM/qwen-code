@@ -75,10 +75,10 @@ export function isWorkspaceMember(
     }
     return norm === g || norm.startsWith(`${g}/`);
   };
-  // npm evaluates the globs IN ORDER, so a positive glob listed after a negation
-  // re-includes what the negation excluded. Two passes (all negations, then all
-  // positives) let a negation win regardless of where it sits, which would file
-  // a false `unreachable` — a finding posted to someone's PR.
+  // npm evaluates the globs IN ORDER — a positive glob listed after a negation
+  // re-includes what the negation excluded. So walk them in order and let the
+  // last match win; a two-pass filter (all negations, then all positives) would
+  // let a negation win wherever it sat and file a false `unreachable`.
   let member = false;
   for (const g of workspaceGlobs) {
     if (!matches(g)) continue;

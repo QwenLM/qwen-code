@@ -674,6 +674,18 @@ describe('carriesBlockerSignal', () => {
     ).toBe(false);
   });
 
+  it('does not let a negation reach across a comma either', () => {
+    // Both Codex and qwen flagged this: the stop-set had `;:—` but not `,`, so
+    // "No other concerns, but auth is a blocker" suppressed the real assertion
+    // across the comma — a false negative, the costly direction. Adding `,，、`
+    // to the stop-set left recall 2/2 and false positives 6/36 on the corpus.
+    expect(
+      carriesBlockerSignal('No other concerns, but auth is a blocker'),
+    ).toBe(true);
+    // A negation whose clause genuinely covers the signal still negates.
+    expect(carriesBlockerSignal('No blockers found, ship it')).toBe(false);
+    expect(carriesBlockerSignal('没有阻塞问题，一切正常')).toBe(false);
+  });
   it('does not let a negation reach across a clause separator', () => {
     // The negation guard scans back 40 characters for a negation word, and its
     // stop-set only had `.!?`. "No blockers; the cache path is a (blocker)"

@@ -306,12 +306,14 @@ const BLOCKER_PATTERNS: RegExp[] = [
  * (The CJK clause takes no `\b`: there are no word boundaries to anchor to.)
  */
 const NEGATION =
-  /(?:\b(?:no|not|zero|without|never)\b|没有|不是|无|未发现|不存在)[^.!?。！？;:；：—\n]{0,40}$/;
+  /(?:\b(?:no|not|zero|without|never)\b|没有|不是|无|未发现|不存在)[^.!?。！？;:；：，,、—\n]{0,40}$/;
 
 export function carriesBlockerSignal(body: string | undefined): boolean {
   const b = (body ?? '').toLowerCase();
   return BLOCKER_PATTERNS.some((re) => {
-    const m = new RegExp(re.source, 'g');
+    // Preserve the pattern's own flags (a future `i`/`u` must not be silently
+    // dropped) and add `g` for the scan; dedupe so `g` is never doubled.
+    const m = new RegExp(re.source, [...new Set(re.flags + 'g')].join(''));
     let hit: RegExpExecArray | null;
     while ((hit = m.exec(b)) !== null) {
       // Negated occurrences do not count, but a body may both mention "no

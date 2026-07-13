@@ -127,6 +127,17 @@ describe('classifyCi — a skipped check is not a passing check', () => {
     expect(got.failedCheckNames).toContain('E2E');
   });
 
+  it('treats waiting and requested as pending, not skipped', () => {
+    // Real active check-run statuses. Omitting them mislabeled a commit whose
+    // only check is waiting as no_checks with a spurious "skipped" reason.
+    expect(
+      classifyCi([run('E2E', null as unknown as string, 'waiting')], []).class,
+    ).toBe('all_pending');
+    expect(
+      classifyCi([run('Lint', null as unknown as string, 'requested')], [])
+        .class,
+    ).toBe('all_pending');
+  });
   it('a repo with no CI at all is still no_checks, with nothing to disclose', () => {
     const got = classifyCi([], []);
     expect(got.class).toBe('no_checks');
