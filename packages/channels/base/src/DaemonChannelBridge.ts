@@ -321,14 +321,21 @@ export class DaemonChannelBridge
     controllers.add(controller);
 
     const chunks: string[] = [];
+    let slashCommandOutput = '';
     const onChunk = (sid: string, chunk: string) => {
       if (sid === sessionId) {
         chunks.push(chunk);
       }
     };
+    const onSlashCommandOutput = (sid: string, chunk: string) => {
+      if (sid === sessionId) {
+        slashCommandOutput = chunk;
+      }
+    };
     const clearChunks = (sid: string) => {
       if (sid === sessionId) {
         chunks.length = 0;
+        slashCommandOutput = '';
       }
     };
     const onSessionDied = (info: { sessionId: string }) => {
@@ -337,6 +344,7 @@ export class DaemonChannelBridge
       }
     };
     this.on('textChunk', onChunk);
+    this.on('slashCommandOutput', onSlashCommandOutput);
     this.on('responseBoundary', clearChunks);
     this.on('sessionDied', onSessionDied);
     const turnBarrier = this.createTurnBarrier(sessionId);
@@ -360,7 +368,7 @@ export class DaemonChannelBridge
         turnBarrier,
         new Promise<void>((resolve) => setTimeout(resolve, 0)),
       ]);
-      const textResult = chunks.join('');
+      const textResult = chunks.join('') || slashCommandOutput;
       this.emit('promptComplete', {
         sessionId,
         text: textResult,
@@ -370,6 +378,7 @@ export class DaemonChannelBridge
     } finally {
       this.clearTurnBarrier(sessionId);
       this.off('textChunk', onChunk);
+      this.off('slashCommandOutput', onSlashCommandOutput);
       this.off('responseBoundary', clearChunks);
       this.off('sessionDied', onSessionDied);
       this.activePrompts.delete(sessionId);
@@ -634,7 +643,13 @@ export class DaemonChannelBridge
         }
         const text = getTextContent(update['content']);
         if (text) {
-          this.emit('textChunk', sessionId, text);
+          this.emit(
+            meta?.['source'] === 'slash_command'
+              ? 'slashCommandOutput'
+              : 'textChunk',
+            sessionId,
+            text,
+          );
         }
         break;
       }
