@@ -400,6 +400,44 @@ describe('StreamingToolCallParser', () => {
       expect(parser.getBuffer(1)).toBe('{"fromSecond":');
     });
 
+    it('routes ID-less continuations after a known ID resumes', () => {
+      parser.addChunk(0, '{"a":', 'call_a', 'tool_a');
+      parser.addChunk(0, '{"b":', 'call_b', 'tool_b');
+
+      parser.addChunk(0, '"a"', 'call_a', 'tool_a');
+      parser.addChunk(0, '}');
+
+      expect(parser.getBuffer(0)).toBe('{"a":"a"}');
+      expect(parser.getBuffer(1)).toBe('{"b":');
+    });
+
+    it('keeps a relocated completed call routed for late name metadata', () => {
+      parser.addChunk(0, '{"a":', 'call_a', 'tool_a');
+      parser.addChunk(0, '{"b":1}', 'call_b');
+
+      parser.addChunk(0, '', undefined, 'tool_b');
+
+      expect(parser.getCompletedToolCalls()).toContainEqual({
+        id: 'call_b',
+        name: 'tool_b',
+        args: { b: 1 },
+        index: 1,
+      });
+    });
+
+    it('records a late name when a known ID replays arguments', () => {
+      parser.addChunk(0, '{"a":1}', 'call_a');
+
+      parser.addChunk(0, '{"a":1}', 'call_a', 'tool_a');
+
+      expect(parser.getCompletedToolCalls()).toContainEqual({
+        id: 'call_a',
+        name: 'tool_a',
+        args: { a: 1 },
+        index: 0,
+      });
+    });
+
     it('keeps the active route when an older original ID replays', () => {
       parser.addChunk(0, '{"a":1}', 'call_a', 'tool_a');
       parser.addChunk(2, '{"c":', 'call_c', 'tool_c');

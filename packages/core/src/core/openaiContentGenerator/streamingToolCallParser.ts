@@ -117,9 +117,14 @@ export class StreamingToolCallParser {
       // Try to find which tool call this belongs to based on the index
       // Look for an existing tool call at this index that's not complete
       const relocatedIndex = this.relocatedIndexByWireIndex.get(index);
+      const relocatedMeta =
+        relocatedIndex === undefined
+          ? undefined
+          : this.toolCallMeta.get(relocatedIndex);
       if (
         relocatedIndex !== undefined &&
-        !this.hasCompleteArgumentBuffer(relocatedIndex)
+        (!this.hasCompleteArgumentBuffer(relocatedIndex) ||
+          (Boolean(name) && !relocatedMeta?.name))
       ) {
         actualIndex = relocatedIndex;
       } else {
@@ -163,7 +168,7 @@ export class StreamingToolCallParser {
         try {
           JSON.parse(currentBuffer);
           const existingMeta = this.toolCallMeta.get(actualIndex)!;
-          if (name && !existingMeta.name && !chunk.trim()) {
+          if (name && !existingMeta.name) {
             existingMeta.name = name;
             this.namelessToolCallIndices.delete(actualIndex);
           }
@@ -188,6 +193,14 @@ export class StreamingToolCallParser {
           `Ignoring replayed opener for no-argument toolCall id=${id}`,
         );
         return { complete: false };
+      }
+    }
+
+    if (id) {
+      if (actualIndex === index) {
+        this.relocatedIndexByWireIndex.delete(index);
+      } else {
+        this.relocatedIndexByWireIndex.set(index, actualIndex);
       }
     }
 
@@ -428,7 +441,7 @@ export class StreamingToolCallParser {
 
   private hasCompleteArgumentBuffer(index: number): boolean {
     const buffer = this.buffers.get(index);
-    if (!buffer?.trim() || (this.depths.get(index) ?? 0) !== 0) return false;
+    if ((this.depths.get(index) ?? 0) !== 0 || !buffer?.trim()) return false;
     try {
       JSON.parse(buffer);
       return true;
