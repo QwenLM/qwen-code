@@ -850,6 +850,42 @@ if (args[0] === 'pr' && args[1] === 'list') {
     }
   });
 
+  it('keeps failure summaries that appear before post-job cleanup output', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ci-flaky-rerun-'));
+    const target = selectTarget([pr()], { now: NOW });
+    try {
+      await writeSkillInputs(
+        {
+          async jobLog() {
+            return [
+              'setup output',
+              ' ❯ src/core/coreToolScheduler.test.ts (65 tests | 3 failed)',
+              '   × CoreToolScheduler validation retry loop detection > should inject RETRY LOOP DETECTED directive',
+              '     → this.toolRegistry.ensureTool is not a function',
+              ' Failed Tests 3 ',
+              ' FAIL  src/core/coreToolScheduler.test.ts > CoreToolScheduler validation retry loop detection > should inject RETRY LOOP DETECTED directive',
+              'TypeError: this.toolRegistry.ensureTool is not a function',
+              ...Array.from(
+                { length: 3000 },
+                (_, index) => `post-job artifact upload output ${index}`,
+              ),
+            ].join('\n');
+          },
+        },
+        [target],
+        dir,
+      );
+
+      const log = JSON.parse(
+        readFileSync(join(dir, 'ci-flaky-input.json'), 'utf8'),
+      ).candidates[0].log;
+      expect(log).toContain('coreToolScheduler.test.ts');
+      expect(log).toContain('ensureTool is not a function');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('allows a bounded large job log before extracting the failure excerpt', () => {
     expect(script).toContain('maxBuffer: 16 * 1024 * 1024');
   });

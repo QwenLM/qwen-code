@@ -128,11 +128,11 @@ function redactLogLine(line) {
 }
 
 function skillLog(log) {
-  const lines = log.slice(-20_000).split('\n');
+  const lines = log.split('\n');
   const selected = new Set();
   for (const [index, line] of lines.entries()) {
     if (
-      /(error|failed|failure|exception|timeout|timed out|network|download|assertion|lint|typecheck)/i.test(
+      /(\bfail\b|×|error|failed|failure|exception|timeout|timed out|network|download|assertion|lint|typecheck)/i.test(
         line,
       )
     ) {
