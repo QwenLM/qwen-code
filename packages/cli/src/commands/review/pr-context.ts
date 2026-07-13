@@ -156,6 +156,212 @@ export function fullCommentBody(
   );
 }
 
+/** Cap a full issue-comment body; the cut names the issue-comment id. */
+export function fullIssueCommentBody(
+  s: string | undefined,
+  id?: number,
+  ctx?: RefContext,
+): string {
+  return capBody(
+    s,
+    id !== undefined ? issueCommentRef(id, ctx) : 'the issue comments API',
+  );
+}
+
+/**
+ * Code locations a blocker's body points at, in the order they appear.
+ *
+ * The Step 6 re-check rules "fixed by this diff" by reading the code. The trap
+ * is *which* code: a fix's new lines are in the diff, but whether they actually
+ * work often turns on a file the diff never touches, and an agent reading only
+ * the diff sees a plausible-looking fix and rules it good.
+ *
+ * PR #6486 again. The author's first fix added a guard to the toggle handler —
+ * visible in the diff, and it looks like a fix. It changed nothing: `Ctrl+F`
+ * still dual-fired, because the second handler is `text-buffer.ts:2663`, an
+ * untouched file, subscribed independently to the same broadcast. The blocker's
+ * body *names that line*. So the evidence the re-check needs is right there in
+ * the text — it just has to be pulled out and handed over as a read list, not
+ * left for an agent to notice inside 6 000 characters of prose.
+ *
+ * Deliberately loose: a path-shaped token with a known-ish extension, optional
+ * `:line` (or `:line-line`). Over-matching costs one file read; under-matching
+ * costs the ruling. `MAX_CODE_REFS` bounds the render, since a long report can
+ * name a lot of files.
+ */
+// The leading boundary is a lookbehind, not `\b`: `\b` fires on the first
+// word-character transition, so `@scope/pkg/index.ts` extracted as
+// `scope/pkg/index.ts` and `../lib/b.ts` as `lib/b.ts` — a path whose meaning
+// is not the path that was cited.
+// The path body is `[\w./@-]{0,200}[\w-]` — a bounded run ending in a name
+// char — NOT `[\w./@-]*[\w-]+`. The two overlapping greedy quantifiers in the
+// old form backtracked catastrophically when the trailing `\.ext` failed: a
+// long extensionless token (`"(blocker)\n" + "a".repeat(n)`) was O(n²), ~7 s at
+// 80k chars, a real ReDoS on an untrusted comment body. The single bounded
+// class cannot split, and {0,200} caps a real code path well above any genuine
+// one while making the scan linear.
+const CODE_REF_RE =
+  /(?<![\w./@-])[\w./@-]{0,200}[\w-]\.(?:tsx?|jsx?|mjs|cjs|vue|svelte|py|go|rs|java|kt|rb|c|cc|cpp|h|hpp|cs|php|swift|scala|sh|sql|graphql|gql|proto|gradle|ya?ml|json|toml|md)(?::\d+(?:-\d+)?)?\b/g;
+const MAX_CODE_REFS = 12;
+export function extractCodeRefs(body: string | undefined): string[] {
+  const all = [
+    ...new Set([...(body ?? '').matchAll(CODE_REF_RE)].map((m) => m[0])),
+  ]
+    // The body is untrusted, and this list is rendered as a trusted "read each
+    // at the reviewed commit" directive. A path that escapes the worktree —
+    // absolute, or containing a `..` segment — must never enter it: a blocker
+    // citing `../../../../etc/passwd.sh` or `/root/.ssh/id_rsa.key` would
+    // otherwise land on the read list. Drop them; a real in-repo reference is
+    // repository-relative.
+    .filter((r) => {
+      const path = r.split(':')[0];
+      return (
+        !path.startsWith('/') &&
+        !path.startsWith('~') &&
+        !path.split('/').includes('..')
+      );
+    });
+  // A report routinely names the same location twice — once bare and once by
+  // full path (`text-buffer.ts:2663` and `packages/.../text-buffer.ts:2663`).
+  // Keep the fuller path: it is the one the reader can open.
+  const refs = all.filter(
+    (r) => !all.some((other) => other !== r && other.endsWith(`/${r}`)),
+  );
+  return refs.slice(0, MAX_CODE_REFS);
+}
+
+/**
+ * Does this body assert a blocking defect?
+ *
+ * The re-check section used to be gated on the literal `[Critical]` marker,
+ * which only /review itself emits. A human blocker phrased any other way fell
+ * through to "Already discussed — do NOT re-report", where it is rendered as a
+ * 240-character snippet.
+ *
+ * On PR #6486 a maintainer built the PR, drove the real CLI, and filed
+ * "🔴 Finding 1 — Ctrl+F dual-fires ... (blocker)" as an issue comment. The
+ * marker never appeared. The first 240 characters were the report's preamble —
+ * "I built this PR from source and drove the real CLI ... to validate the
+ * model-toggle hotkey before merge" — which reads as an ENDORSEMENT, filed
+ * under a heading that says not to re-report it. The blocker began 1 143
+ * characters past the cut. /review reviewed that same commit three hours later
+ * and submitted "no blockers"; the defect was real and was fixed that evening.
+ *
+ * So recognition is semantic. It matches **assertion patterns, not word
+ * presence**, and that distinction was learned the hard way: the first cut of
+ * this scanned the whole body for the words `blocker`, `🔴`, `阻塞` and
+ * `[Critical]`, and on the live #6486 thread it promoted **8 of 15** issue
+ * comments. Exactly one was a live blocker. The others:
+ *
+ *   - "**No** critical blockers." — the triage bot's own template line, i.e. the
+ *     word appearing inside its own negation. Hence `NEGATION`.
+ *   - "### 🔴 Critical **fixes**" — the author listing what he had *repaired*.
+ *     A severity emoji says nothing about who is asserting what.
+ *   - a later comment *quoting* `[Critical]` while arguing a finding away.
+ *
+ * Promotion is still deliberately fail-safe — a false positive costs one extra
+ * ruling, a false negative ships the bug — but "cheap" was measured, not
+ * assumed, and it was wrong: promotion means **full-body** rendering, and those
+ * 8 bodies took the context file from 30 KB to 59 KB and pushed the real
+ * blocker to character 43 094, past what one `read_file` returns. A blocker
+ * rendered where nobody reads it is not better than one rendered as a snippet.
+ * That is why the section is written FIRST and carries a size budget.
+ *
+ * **Tight is not the same as narrow, and the first cut of these patterns was
+ * narrow.** They named the nouns — `blocking issue|defect|bug`, `阻塞项` — and a
+ * second real blocker walked straight past them: a maintainer's E2E report on
+ * PR #6638 (a committed extension policy that never reaches a running agent's
+ * system prompt, while the API reports full convergence) is headed
+ * "**86/90 checks pass, 1 blocking gap**" and "🔴 **Blocking:**", and in Chinese
+ * "**阻塞问题**". Not one pattern matched. It would have settled into "Already
+ * discussed" behind a 240-character snippet whose visible text is
+ * _"86/90 checks pass … The store, the REST surface and the secur…"_ — an
+ * endorsement, again, exactly as in #6486.
+ *
+ * So the patterns match the word people actually write (`blocking`, with a
+ * lookbehind for `non-blocking` — our own reports file their nits under
+ * "🟡 Non-blocking observations"), and the CJK forms they actually use. Measured
+ * over 38 real comments from three threads: recall 1/2 → **2/2**, false
+ * positives **unchanged at 6**. Widening `before merge` / `合并前` would also
+ * have caught it and cost 2 and 1 more false positives respectively, so those
+ * are left out. The list is calibrated against real threads, not imagined ones,
+ * and it stays a **floor**: SKILL.md still scans "Already discussed" in prose.
+ */
+const BLOCKER_PATTERNS: RegExp[] = [
+  /\[critical\]/, // the marker /review itself emits
+  /\(blocker\)/, // "🔴 Finding 1 — … (blocker)"
+  /\bis a blocker\b/,
+  // `blocking` on its own, because that is how people actually write it: a
+  // "blocking gap", a "🔴 Blocking:" heading. Naming the nouns (`blocking
+  // issue|defect|bug`) looked precise and missed a real blocker — see below.
+  // The patterns stay bare (no negation lookbehind): negation is handled
+  // uniformly by the NEGATION window, so `non-blocking` / `非阻塞` are one
+  // mechanism, not per-pattern special cases that each open a new hole.
+  /\bblocking\b/,
+  /\bmust[ -]fix\b/,
+  /\bstill (?:reproducible|repro|broken|fails?)\b/,
+  /阻塞(?:项|问题|点)/,
+];
+/**
+ * Is a blocker signal negated by the text leading up to it?
+ *
+ * Applied to the slice *before* a matched signal. It is deliberately a narrow
+ * heuristic — its job is to kill the triage bot's "No critical blockers" line
+ * and its Chinese twin "没有阻塞项", not to parse natural language. Every attempt
+ * to make it more than that opened a hole in the other direction, so this
+ * version is redesigned around two ideas rather than a growing lookbehind pile:
+ *
+ * 1. A **negation word** within ~40 chars of the signal, in either language.
+ *    English negators sit on word boundaries; the CJK ones do not. `非` is a
+ *    negation EXCEPT in `除非` ("unless"), which introduces a real blocking
+ *    condition — hence `(?<!除)非`. `非-blocking`/`non-blocking` fold in here as
+ *    the glued forms `non[- ]` / (the bare `非` clause), not as pattern
+ *    lookbehinds.
+ * 2. An **adversative** between the negation and the signal RESETS it: in
+ *    "No concerns, but auth is a blocker" the clause after `but` is asserting,
+ *    not negating. This is why a bare comma is NOT a boundary — a comma
+ *    coordinates ("No blocking, must-fix, or critical issues" stays negated)
+ *    while `but`/`但` reverses. The earlier comma-stop-set got this backwards
+ *    and promoted coordinated negated lists.
+ *
+ * Prior regressions this closes, all from real review comments: `除非阻塞`
+ * (unless-blocker, was suppressed), `并非一个阻塞项` (non-adjacent 非, was
+ * promoted), and the coordinated list above (was promoted).
+ */
+const NEG_WORD =
+  '\\b(?:no|not|zero|without|never|non[- ])|没有|不是|无|未发现|不存在|并非|绝非|(?<!除)非';
+// …plus a space-surrounded hyphen run (` - ` / ` -- `), an informal clause
+// separator: "No blockers - auth is still broken" starts a new clause after the
+// dash. Space-surrounded on purpose, so `must-fix` / `non-blocking` (no
+// surrounding spaces) are untouched.
+const ADVERSATIVE =
+  '\\b(?:but|however|although|though)\\b|但是|但|然而|不过|\\s-{1,2}\\s';
+const NEGATION = new RegExp(
+  // negation word, then ≤40 clause chars — none of which start an adversative,
+  // and none of which is a hard clause break (`.!?;:` and CJK equivalents) —
+  // then end-of-slice (i.e. the signal follows immediately). A `;` or `:`
+  // starts a new independent clause ("No blockers; the cache is a blocker" →
+  // promote), so it breaks the window; a bare `,` only coordinates a list
+  // ("No blocking, must-fix, or critical" → stay negated), so it does not.
+  `(?:${NEG_WORD})(?:(?!${ADVERSATIVE})[^.!?。！？;:；：\\n]){0,40}$`,
+);
+
+export function carriesBlockerSignal(body: string | undefined): boolean {
+  const b = (body ?? '').toLowerCase();
+  return BLOCKER_PATTERNS.some((re) => {
+    // Preserve the pattern's own flags (a future `i`/`u` must not be silently
+    // dropped) and add `g` for the scan; dedupe so `g` is never doubled.
+    const m = new RegExp(re.source, [...new Set(re.flags + 'g')].join(''));
+    let hit: RegExpExecArray | null;
+    while ((hit = m.exec(b)) !== null) {
+      // Negated occurrences do not count, but a body may both mention "no
+      // blockers" AND assert one — so a single un-negated occurrence promotes.
+      if (!NEGATION.test(b.slice(0, hit.index))) return true;
+    }
+    return false;
+  });
+}
+
 /**
  * One-line snippet that, when it cuts, names the exact fetch for the rest —
  * a bare `…` marks a cut nobody can act on, and the fail-closed "a body you
@@ -226,7 +432,8 @@ export function isReviewWorthShowing(body: string | undefined): boolean {
 
 export interface InlineThreads {
   openRoots: RawComment[];
-  repliedCriticalRoots: RawComment[];
+  openBlockerRoots: RawComment[];
+  repliedBlockerRoots: RawComment[];
   repliedRoots: RawComment[];
   repliesByRoot: Map<number, RawComment[]>;
 }
@@ -262,24 +469,161 @@ export function classifyInlineThreads(inline: RawComment[]): InlineThreads {
   const roots = inline.filter(
     (c) => c.in_reply_to_id === undefined || c.in_reply_to_id === null,
   );
-  const allRepliedRoots = roots.filter((c) => repliesByRoot.has(c.id));
-  // A reply alone does not retire a blocker — "I disagree" is a reply. Any
-  // replied thread whose root is a Critical finding is pulled out of
-  // "Already discussed" into its own mandatory re-check section. Matching
-  // on the marker is fail-safe in this direction: a third party embedding
-  // it can only ADD their thread to the re-check list, never hide one.
-  // (It is a floor, not a ceiling: a blocker phrased WITHOUT the marker
-  // settles into "Already discussed", which is why Step 6's semantic
-  // re-check scans that section too.)
-  const repliedCriticalRoots = allRepliedRoots.filter((c) =>
-    (c.body ?? '').includes('[Critical]'),
+  // A root asserting a blocking defect is pulled into the mandatory re-check
+  // section, rendered first and in full — WHETHER OR NOT it has a reply. An
+  // earlier cut only promoted *replied* roots, so a fresh un-replied `[Critical]`
+  // went straight into "Open inline comments" as a 240-char snippet: exactly the
+  // "blocker past the read window" failure this whole change exists to close,
+  // left open for the un-replied half. Promotion is fail-safe either way — a
+  // third party can only ADD a thread to the re-check list, never hide one.
+  //
+  // (This used to key on the literal `[Critical]` marker, which only /review
+  // emits — a human blocker phrased any other way settled into "do NOT
+  // re-report". `carriesBlockerSignal` is the semantic test.)
+  const repliedBlockerRoots = roots.filter(
+    (c) => repliesByRoot.has(c.id) && carriesBlockerSignal(c.body),
   );
-  const repliedRoots = allRepliedRoots.filter(
-    (c) => !(c.body ?? '').includes('[Critical]'),
+  const openBlockerRoots = roots.filter(
+    (c) => !repliesByRoot.has(c.id) && carriesBlockerSignal(c.body),
   );
-  const openRoots = roots.filter((c) => !repliesByRoot.has(c.id));
+  const repliedRoots = roots.filter(
+    (c) => repliesByRoot.has(c.id) && !carriesBlockerSignal(c.body),
+  );
+  const openRoots = roots.filter(
+    (c) => !repliesByRoot.has(c.id) && !carriesBlockerSignal(c.body),
+  );
 
-  return { openRoots, repliedCriticalRoots, repliedRoots, repliesByRoot };
+  return {
+    openRoots,
+    openBlockerRoots,
+    repliedBlockerRoots,
+    repliedRoots,
+    repliesByRoot,
+  };
+}
+
+/**
+ * Total characters the blocker section may spend on full bodies.
+ *
+ * Full-body rendering is what makes a blocker rulable, but it is not free: on
+ * the live #6486 thread eight promoted bodies took the context file from 30 KB
+ * to 59 KB. Tight patterns keep promotion rare; this keeps a pathological
+ * thread from pushing the section past one `read_file` even so. Bodies past the
+ * budget degrade to snippets **that name their exact fetch** — which SKILL.md's
+ * re-check already requires be run before ruling — rather than being dropped.
+ */
+const BLOCKER_SECTION_BUDGET = 16000;
+
+function blockerSection(
+  roots: RawComment[],
+  issueBlockers: RawComment[],
+  repliesByRoot: Map<number, RawComment[]>,
+  ctx: RefContext,
+): string[] {
+  if (roots.length === 0 && issueBlockers.length === 0) return [];
+  const out: string[] = [
+    '## Blockers to re-check — a reply alone does NOT retire a blocker; the re-check must rule on each against the code',
+    '',
+    '> Bodies are rendered in full; a body cut at a cap names its comment id to fetch, and a body read in part is `cannot tell`, never "no blocker in it".',
+    '>',
+    '> **Ruling "fixed by this diff" means reading the code the blocker names — including the files this PR never touches.** Each blocker below carries a **Referenced code** list extracted from its own body. A fix whose new lines are in the diff can still be inert because of a file outside it (PR #6486: the added guard looked right; `Ctrl+F` still dual-fired, because the second handler lived in an untouched file). A location you did not read is not evidence of a fix — that ruling is `cannot tell`.',
+    '',
+  ];
+
+  // Everything this section emits counts against the budget, not just the quoted
+  // bodies: the headings, the Referenced-code lists and the reply snippets are
+  // real characters in a file whose whole point is fitting inside one
+  // `read_file`. Charging only the bodies leaves the overhead unbounded, which
+  // is how the section outgrows the window while its own accounting says it has
+  // room.
+  // The heading and the instruction block are ~600 characters of the budget.
+  // Starting `spent` at 0 spends them for free, which is the same unbounded
+  // overhead the `charge()` comment above exists to close.
+  let spent = out.join('\n').length;
+  const charge = (lines: string[]): string[] => {
+    spent += lines.join('\n').length;
+    return lines;
+  };
+  const refsLine = (body: string | undefined): string[] => {
+    const refs = extractCodeRefs(body);
+    return refs.length > 0
+      ? [
+          `**Referenced code — read each at the reviewed commit before ruling:** ${refs.map((r) => `\`${r}\``).join(', ')}`,
+          '',
+        ]
+      : [];
+  };
+
+  const sortedRoots = [...roots].sort((a, b) => {
+    const p = (a.path ?? '').localeCompare(b.path ?? '');
+    if (p !== 0) return p;
+    return (a.line ?? 0) - (b.line ?? 0);
+  });
+
+  for (const root of sortedRoots) {
+    out.push(
+      ...charge([
+        `**\`${root.path ?? '?'}\`:${root.line ?? '?'}** — initiated by @${root.user?.login ?? '?'} (comment ${root.id})`,
+        '',
+      ]),
+    );
+    // Gate on what is actually emitted. `quoteBlock` adds `> ` to every line, so
+    // gating on the raw body undercounts each one by 2 × its line count.
+    const quoted = quoteBlock(fullCommentBody(root.body, root.id, ctx));
+    if (spent + quoted.length <= BLOCKER_SECTION_BUDGET) {
+      out.push(...charge([quoted, '']));
+    } else {
+      out.push(
+        ...charge([
+          `> ${snippetWithRef(root.body, 400, pullCommentRef(root.id, ctx))}`,
+          '',
+          '_(section budget spent — this body is a snippet; fetch it in full before ruling)_',
+          '',
+        ]),
+      );
+    }
+    out.push(...charge(refsLine(root.body)));
+    const replies = repliesByRoot.get(root.id) ?? [];
+    if (replies.length > 0) {
+      out.push(
+        ...charge([
+          'Replies (chronological):',
+          ...replies.map(
+            (r) =>
+              `- **@${r.user?.login ?? '?'}**: ${snippetWithRef(r.body, 500, pullCommentRef(r.id, ctx))}`,
+          ),
+          '',
+        ]),
+      );
+    }
+  }
+
+  // Issue-level blockers carry no path/line — they are whole-PR claims, and an
+  // out-of-band verification report (build it, drive it, file what broke) is
+  // exactly the shape that arrives here.
+  for (const c of issueBlockers) {
+    out.push(
+      ...charge([
+        `**Issue-level comment** — by @${c.user?.login ?? '?'} (comment ${c.id})`,
+        '',
+      ]),
+    );
+    const quoted = quoteBlock(fullIssueCommentBody(c.body, c.id, ctx));
+    if (spent + quoted.length <= BLOCKER_SECTION_BUDGET) {
+      out.push(...charge([quoted, '']));
+    } else {
+      out.push(
+        ...charge([
+          `> ${snippetWithRef(c.body, 400, issueCommentRef(c.id, ctx))}`,
+          '',
+          '_(section budget spent — this body is a snippet; fetch it in full before ruling)_',
+          '',
+        ]),
+      );
+    }
+    out.push(...charge(refsLine(c.body)));
+  }
+  return out;
 }
 
 export function buildMarkdown(
@@ -290,9 +634,26 @@ export function buildMarkdown(
   issue: RawComment[],
   reviews: RawReview[],
 ): string {
-  const { openRoots, repliedCriticalRoots, repliedRoots, repliesByRoot } =
-    classifyInlineThreads(inline);
+  const {
+    openRoots,
+    openBlockerRoots,
+    repliedBlockerRoots,
+    repliedRoots,
+    repliesByRoot,
+  } = classifyInlineThreads(inline);
+  // Both replied and un-replied blocker roots go to the re-check section,
+  // rendered first and in full. Un-replied ones simply have no reply chain.
+  const allBlockerRoots = [...repliedBlockerRoots, ...openBlockerRoots];
   const ctx: RefContext = { ownerRepo, prNumber };
+
+  // Issue-level comments are the channel a maintainer's out-of-band review
+  // arrives on — a build-and-drive report, a "this is still broken" note. They
+  // all used to settle into "Already discussed" as 240-char snippets, so a
+  // blocker filed there was invisible to the re-check (PR #6486). Split them:
+  // the ones asserting a blocking defect join the mandatory re-check section
+  // and are rendered in full; the rest settle as before.
+  const blockerIssue = issue.filter((c) => carriesBlockerSignal(c.body));
+  const settledIssue = issue.filter((c) => !carriesBlockerSignal(c.body));
 
   const parts: string[] = [];
 
@@ -311,6 +672,23 @@ export function buildMarkdown(
   parts.push('');
   parts.push(PREAMBLE);
   parts.push('');
+
+  // Blockers FIRST — ahead of the description, the review history, everything.
+  //
+  // `read_file` returns the first 25 000 characters and pages by line, so
+  // whatever is written last is what a long context file loses. This section
+  // holds the claims a `C=0` verdict is not allowed to be reached without
+  // ruling on; nothing else in this file outranks it, and the PR description
+  // certainly does not.
+  //
+  // Measured, not assumed. Written after "Open inline comments" (its first
+  // position) on the live #6486 thread, the heading landed at character 25 961
+  // and the blocker body at 43 094 — both past what one read returns. The
+  // section existed and nobody could see it, which is the PR #5738 failure this
+  // file already carries a comment about, reintroduced one section further down.
+  parts.push(
+    ...blockerSection(allBlockerRoots, blockerIssue, repliesByRoot, ctx),
+  );
 
   parts.push('## Description');
   parts.push('');
@@ -369,54 +747,12 @@ export function buildMarkdown(
     parts.push('');
   }
 
-  // Replied Criticals — rendered before the settled threads because the
-  // Step 6 re-check must rule on every one of them (still stands / fixed by
-  // this diff / cannot tell); a reply alone never settles a blocker. Root
-  // bodies are rendered in full (same treatment as review summaries): the
-  // re-check rules on the claim's failure scenario and proposed fix, which
-  // is exactly the tail a 1 000-char snippet silently dropped — and a cut
-  // nobody can see also means the fail-closed "a body read in part is
-  // `cannot tell`" rule can never fire.
-  if (repliedCriticalRoots.length > 0) {
-    parts.push(
-      '## Replied Criticals — a reply alone does NOT retire a blocker; the re-check must rule on each against the code',
-    );
-    parts.push('');
-    parts.push(
-      '> Root bodies are rendered in full; a body cut at the cap names its comment id to fetch. Replies are one-line snippets that name their comment id when cut.',
-    );
-    parts.push('');
-    const sortedCrit = [...repliedCriticalRoots].sort((a, b) => {
-      const p = (a.path ?? '').localeCompare(b.path ?? '');
-      if (p !== 0) return p;
-      return (a.line ?? 0) - (b.line ?? 0);
-    });
-    for (const root of sortedCrit) {
-      const replies = repliesByRoot.get(root.id) ?? [];
-      parts.push(
-        `**\`${root.path ?? '?'}\`:${root.line ?? '?'}** — initiated by @${root.user?.login ?? '?'} (comment ${root.id})`,
-      );
-      parts.push('');
-      parts.push(quoteBlock(fullCommentBody(root.body, root.id, ctx)));
-      parts.push('');
-      if (replies.length > 0) {
-        parts.push('Replies (chronological):');
-        for (const r of replies) {
-          parts.push(
-            `- **@${r.user?.login ?? '?'}**: ${snippetWithRef(r.body, 500, pullCommentRef(r.id, ctx))}`,
-          );
-        }
-        parts.push('');
-      }
-    }
-  }
-
   // Already-discussed threads — render the full conversation so review
   // agents can see whether the original concern was addressed (e.g. a
   // "Fixed in abc123" reply closes the topic). The previous version listed
   // only root-comment snippets and forced the LLM driver to manually
   // summarise each reply chain in agent prompts.
-  if (repliedRoots.length > 0 || issue.length > 0) {
+  if (repliedRoots.length > 0 || settledIssue.length > 0) {
     parts.push(
       '## Already discussed — do NOT re-report unless the latest reply itself raises a new concern',
     );
@@ -451,10 +787,10 @@ export function buildMarkdown(
         }
       }
     }
-    if (issue.length > 0) {
+    if (settledIssue.length > 0) {
       parts.push('### Issue-level comments (general PR thread)');
       parts.push('');
-      for (const c of issue) {
+      for (const c of settledIssue) {
         parts.push(
           `- by @${c.user?.login ?? '?'}: ${snippetWithRef(c.body, 240, issueCommentRef(c.id, ctx))}`,
         );
@@ -532,10 +868,13 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   ).length;
   // Same walk buildMarkdown just rendered from — never a re-implementation,
   // so this count cannot silently diverge from the file's contents.
-  const repliedCriticalCount =
-    classifyInlineThreads(inline).repliedCriticalRoots.length;
+  const threads = classifyInlineThreads(inline);
+  const blockerCount =
+    threads.repliedBlockerRoots.length +
+    threads.openBlockerRoots.length +
+    issue.filter((c) => carriesBlockerSignal(c.body)).length;
   writeStdoutLine(
-    `Wrote PR context to ${out} (${inline.length} inline, ${issue.length} issue comments, ${repliedCriticalCount} replied Critical(s), ${meaningfulReviewCount}/${reviews.length} review summaries — review bodies and replied-Critical roots rendered in full)`,
+    `Wrote PR context to ${out} (${inline.length} inline, ${issue.length} issue comments, ${blockerCount} blocker(s) to re-check, ${meaningfulReviewCount}/${reviews.length} review summaries — review bodies and blocker bodies rendered in full)`,
   );
 
   // A reader that stops at the threshold loses the tail in silence: `read_file`
