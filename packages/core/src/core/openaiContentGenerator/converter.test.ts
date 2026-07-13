@@ -1110,6 +1110,37 @@ describe('OpenAIContentConverter', () => {
       ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
     });
 
+    it('rejects a split inline tag after matching reasoning', () => {
+      const stream = withStreamParser(new StreamingToolCallParser());
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('matching-reasoning-before-split-inline-tag', {
+          reasoning_content: 'hidden <think>reasoning</think>',
+        }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('split-inline-tag-prefix', {
+          content: 'Use <thi',
+        }),
+        stream,
+      );
+      const visible = converter.convertOpenAIChunkToGemini(
+        streamChunk('split-inline-tag-suffix', {
+          content: 'nk>literal</think> text.',
+        }),
+        stream,
+      );
+
+      expect(visible.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('matching-reasoning-split-inline-finish', {}, 'stop'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
     it('rejects a leading complete tag if structured reasoning arrives later', () => {
       const stream = withStreamParser(new StreamingToolCallParser());
 
