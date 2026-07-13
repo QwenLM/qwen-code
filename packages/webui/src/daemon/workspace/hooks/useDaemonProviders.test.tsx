@@ -52,9 +52,10 @@ describe('useDaemonProviders', () => {
   });
 
   it('auto-loads and normalizes the provider/current output', async () => {
+    // `current` is a DaemonWorkspaceProviderCurrent object, not a bare id.
     const status = {
       providers: [{ authType: 'openai', models: [{ modelId: 'gpt-4o' }] }],
-      current: 'gpt-4o',
+      current: { authType: 'openai', modelId: 'gpt-4o' },
     };
     loadProviders.mockResolvedValue(status);
     let result: ReturnType<typeof useDaemonProviders> | undefined;
@@ -71,7 +72,7 @@ describe('useDaemonProviders', () => {
     expect(loadProviders).toHaveBeenCalledTimes(1);
     expect(result?.status).toEqual(status);
     expect(result?.providers).toEqual(status.providers);
-    expect(result?.current).toBe('gpt-4o');
+    expect(result?.current).toEqual({ authType: 'openai', modelId: 'gpt-4o' });
   });
 
   it('defaults providers to an empty array before data arrives', async () => {

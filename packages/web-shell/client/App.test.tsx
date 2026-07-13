@@ -309,6 +309,16 @@ vi.mock('./components/messages/SettingsMessage', async () => {
           },
           'fast model',
         ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'open-fast-model-user',
+            type: 'button',
+            // User tab → drives the `--global` flag.
+            onClick: () => props.onSubDialog?.('fastModel', 'user'),
+          },
+          'fast model (user)',
+        ),
       ),
   };
 });
@@ -2408,6 +2418,36 @@ describe('App session callbacks', () => {
     ).toBe(true);
     expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
     expect(settingsReload).toHaveBeenCalled();
+  });
+
+  it('sends /model --fast with --global when the fast-model picker is opened from the User tab', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-fast-model-user"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="model-select"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      mockSessionActions.sendPrompt.mock.calls.some(
+        (c) => c[0] === '/model --fast fast-model-x --global',
+      ),
+    ).toBe(true);
   });
 
   it('marks the chat view aria-hidden while a panel is shown', async () => {

@@ -59,6 +59,23 @@ function subDialogSetting(): DaemonSettingDescriptor {
   };
 }
 
+/** Theme with divergent per-scope values so scope-aware display is observable. */
+function themeSetting(): DaemonSettingDescriptor {
+  return {
+    key: 'ui.theme',
+    type: 'string',
+    label: 'Theme',
+    category: 'UI',
+    requiresRestart: false,
+    default: 'Qwen Dark',
+    values: {
+      effective: 'Qwen Dark',
+      workspace: 'Qwen Dark',
+      user: 'Qwen Light',
+    },
+  };
+}
+
 function makeState(
   settings: DaemonSettingDescriptor[],
   setValue: SettingsMessageSettingsState['setValue'],
@@ -180,5 +197,22 @@ describe('SettingsMessage user-scope editing', () => {
     act(() => modelButton.click());
 
     expect(onSubDialog).toHaveBeenCalledWith('fastModel', 'user');
+  });
+
+  it('displays the theme value for the selected scope, not the effective merge', () => {
+    const setValue = vi.fn(() =>
+      Promise.resolve({} as DaemonSettingUpdateResult),
+    );
+    const container = renderPanel(makeState([themeSetting()], setValue));
+
+    // Workspace tab (default) → workspace value "Qwen Dark" → dark.
+    const select = container.querySelector<HTMLSelectElement>('select');
+    if (!select) throw new Error('theme select not found');
+    expect(select.value).toBe('dark');
+
+    // User tab → user value "Qwen Light" → light (not the effective dark).
+    clickUserTab(container);
+    const userSelect = container.querySelector<HTMLSelectElement>('select');
+    expect(userSelect?.value).toBe('light');
   });
 });

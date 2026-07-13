@@ -5753,11 +5753,18 @@ export function App({
                           onAddModel: () => setShowAuthDialog(true),
                         }}
                         onSubDialog={(key, scope) => {
-                          setModelSettingScope(scope);
-                          if (key === 'fastModel') setModelDialogMode('fast');
-                          else if (key === 'visionModel')
+                          // Record the persist scope only for model settings —
+                          // the reset effect is gated on the dialog/fallback/auth
+                          // flags, so it never runs for the approvalMode dialog
+                          // and would leave a stale scope behind.
+                          if (key === 'fastModel') {
+                            setModelSettingScope(scope);
+                            setModelDialogMode('fast');
+                          } else if (key === 'visionModel') {
+                            setModelSettingScope(scope);
                             setModelDialogMode('vision');
-                          else if (key === 'voiceModel') {
+                          } else if (key === 'voiceModel') {
+                            setModelSettingScope(scope);
                             workspaceActions
                               .loadProviders()
                               .then((status) => {
@@ -5775,10 +5782,13 @@ export function App({
                                 // command-launched picker defaults to workspace.
                                 setModelSettingScope('workspace');
                               });
-                          } else if (key === 'modelFallbacks')
+                          } else if (key === 'modelFallbacks') {
+                            setModelSettingScope(scope);
                             setShowFallbacksDialog(true);
-                          else if (key === 'tools.approvalMode')
+                          } else if (key === 'tools.approvalMode') {
+                            // Not a model setting — leave modelSettingScope alone.
                             setShowApprovalModeDialog(true);
+                          }
                         }}
                       />
                     ) : activePanel === 'status' ? (

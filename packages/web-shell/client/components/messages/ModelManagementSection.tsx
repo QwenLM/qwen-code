@@ -167,6 +167,7 @@ export function ModelManagementSection({
                             type="button"
                             className={styles.actionButton}
                             disabled={busy}
+                            aria-label={`${t('settings.models.cancel')} ${modelLabel}`}
                             onClick={() => setConfirmKey(null)}
                           >
                             {t('settings.models.cancel')}
