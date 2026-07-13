@@ -45,16 +45,16 @@ EXISTING=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" \
 if [ "$EXISTING" -eq 0 ]; then gh pr review ... ; fi
 ```
 
-**Signature & footer:** the Fetch step already returned `headRefOid` — reuse it, don't issue a second `gh pr view`. Pin the **full** OID (a 7-char prefix is only 28 bits — a fork author can force-push a different commit sharing that prefix, leaving the footer identical while the reviewed tree changed), and read it right before posting each stage so a mid-run force-push doesn't bake in a stale SHA:
+**Signature & footer:** capture the reviewed commit's **full** OID — not a 7-char prefix (only 28 bits; a fork author can force-push a different commit sharing that prefix and leave the footer identical). Read it fresh right before you post each stage, so the footer pins the head that stage actually reviewed and a mid-run force-push shows up as a changed SHA (the whole point of the footer). One small `gh` call per post is worth the correct staleness signal:
 
 ```bash
-HEAD_SHA=$(printf '%s' "$PR_JSON" | jq -r '.headRefOid')   # $PR_JSON = the Fetch result; full OID, never a prefix
+HEAD_SHA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid')
 ```
 
 Every staged comment (Stage 1 gate-pass, Stage 2, Stage 3) ends with the signature line, then a footer recording the commit this pass reflects. Because comments are updated in place on re-run, the SHA lets a maintainer tell at a glance whether new commits landed since the last review:
 
 ```
-— *Qwen Code · qwen3.7-max*
+— _Qwen Code · qwen3.7-max_
 
 <sub>Reviewed at `<HEAD_SHA>` · re-run with `@qwen-code /triage`</sub>
 ```
@@ -295,7 +295,16 @@ sequenceDiagram
 
 Diagram text (participants, labels) stays English in the main comment; the `<details>` Chinese translation can summarize it in prose rather than duplicating the diagram. Keep message text to plain words and light punctuation — commas, parentheses, and em dashes all render fine (verified against the repo's bundled Mermaid), but a `;` **inside a message** breaks the parser (it is read as a statement separator) and a `#` clips the rest of the label (verified — `review PR #6789` renders as just `review PR`); drop the `;` and write numbers as plain digits (`PR 6789`, not `#6789`). Do **not** wrap two themed copies in `#gh-light-mode-only` / `#gh-dark-mode-only` anchors: GitHub only theme-scopes that fragment on images, not on anchor-wrapped mermaid, so both copies render stacked (verified empirically on a real comment — the anchors survive as inert links and neither `<pre lang="mermaid">` gets a theme-hiding class).
 
-**Changed-files overview** — add only when the PR touches many source files (~5+) and a per-file map genuinely helps a reviewer navigate. Pull the list with the paginated REST endpoint — `gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename'` — not `gh pr view --json files`, which caps at the first 100 files and silently drops the rest. **A fork PR's paths are attacker-controlled:** a filename can carry `|`, backticks, `<`, `>`, `&`, `@mentions`, or CR/LF that break out of the table cell and render forged bot text (a fake approval or confidence line). Before a path enters the table, collapse it to one line and escape it so it cannot exit the cell — strip CR/LF and escape `` ` ``, `|`, `<`, `>`, `&` (and neutralize `@`); if a path still looks hostile, show a bounded placeholder instead of the raw name. Fold the table in a `<details>` so it doesn't dominate the comment, and write one honest line per file in your own words — not a mechanical restatement of the diff. Skip for small, focused PRs.
+**Changed-files overview** — add only when the PR touches many source files (~5+) and a per-file map genuinely helps a reviewer navigate. Pull the list with the paginated REST endpoint — `gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename'` — not `gh pr view --json files`, which caps at the first 100 files and silently drops the rest. **A fork PR's paths are attacker-controlled:** a filename can carry `|`, backticks, `<`, `>`, `&`, `@mentions`, or CR/LF that break out of the table cell and render forged bot text (a fake approval or confidence line). Before a path enters the table, run it through a deterministic sanitizer — order matters (escape `&` **first**, or later escapes double-encode), and a `` ` `` can't be escaped inside a `` `…` `` span, so render each path inside `<code>…</code>` where HTML entities resolve. If a path still looks hostile, show a bounded placeholder instead of the raw name:
+
+````bash
+sanitize_path() { # single-line, HTML-safe, cell-bounded
+  printf '%s' "$1" | tr -d '\r\n' |
+    sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' \
+      -e 's/`/\&#96;/g' -e 's/|/\&#124;/g' -e 's/@/\&#64;/g'
+}
+# render in the table as:  <code>$(sanitize_path "$path")</code>
+``` Fold the table in a `<details>` so it doesn't dominate the comment, and write one honest line per file in your own words — not a mechanical restatement of the diff. Skip for small, focused PRs.
 
 ```markdown
 <details>
@@ -307,7 +316,7 @@ Diagram text (participants, labels) stays English in the main comment; the `<det
 | `packages/core/src/foo.test.ts` | <one honest line> |
 
 </details>
-```
+````
 
 #### 2b. Real-Scenario Testing
 
@@ -387,17 +396,17 @@ If your independent proposal was materially simpler — say so. Not as a blocker
 
 Open it with a one-line confidence score — `**Confidence: N/5** — <one honest line>` — as the human-readable summary of everything above. It is your read, not a rubric dump, and it must stay consistent with the verdict you're about to act on in Step 2:
 
-| Score | Meaning                                                         | Verdict          |
-| ----- | --------------------------------------------------------------- | ---------------- |
-| 5/5   | Clean across every stage; would merge without hesitation        | approve          |
-| 4/5   | Solid; only non-blocking nits (name them)                       | approve          |
-| 3/5   | Works, but real reservations or something a human should second | defer / escalate |
-| 2/5   | Significant concerns; leaning against as-is                     | request changes  |
-| 1/5   | Should not merge in its current form                            | request changes  |
+| Score | Meaning                                                         | Verdict         |
+| ----- | --------------------------------------------------------------- | --------------- |
+| 5/5   | Clean across every stage; would merge without hesitation        | approve         |
+| 4/5   | Solid; only non-blocking nits (name them)                       | approve         |
+| 3/5   | Works, but real reservations or something a human should second | defer (comment) |
+| 2/5   | Significant concerns; leaning against as-is                     | request changes |
+| 1/5   | Should not merge in its current form                            | request changes |
 
-A fork `refactor` that hits the approval guardrail below, **or a PR that Stage 0 escalated for maintainer awareness**, caps at 3/5 and escalates/defers no matter how clean every stage looked — the guardrail drives the action, not the score. Never post a 4–5/5 alongside a `--request-changes`, or a 1–2/5 alongside an `--approve`: the score and the verdict tell the same story.
+A fork `refactor` that hits the approval guardrail below, **or a PR that Stage 0 escalated for maintainer awareness**, caps at 3/5 no matter how clean every stage looked — the guardrail drives the action, not the score. At 3/5 the action is always **defer via a comment** (never `--request-changes`): if you have nameable concerns, state them in the comment without approving; if it's an unresolvable question, @mention the maintainer. When the cap is pure policy on an otherwise-clean PR, say so in the one-line score so 3/5 doesn't read as real doubt — e.g. `Confidence: 3/5 — clean review, but the fork-refactor guardrail needs a maintainer's sign-off`. Never post a 4–5/5 alongside a `--request-changes`, or a 1–2/5 alongside an `--approve`: the score and the verdict tell the same story.
 
-Then write what you're actually thinking. "Looks good, ships the feature cleanly, the before/after shows it works" — not a five-bullet summary of the stages. If you have reservations, say them plainly. If you're approving with mild concerns, name them. Sign with `— *Qwen Code · qwen3.7-max*`, add the reviewed-commit footer, and save this comment's ID.
+Then write what you're actually thinking. "Looks good, ships the feature cleanly, the before/after shows it works" — not a five-bullet summary of the stages. If you have reservations, say them plainly. If you're approving with mild concerns, name them. Sign with `— _Qwen Code · qwen3.7-max_`, add the reviewed-commit footer, and save this comment's ID.
 
 **Step 2: Act on the verdict.**
 

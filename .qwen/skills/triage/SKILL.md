@@ -26,7 +26,7 @@ Run staged admission via `gh`. Post comment after each stage.
 
 ```bash
 gh issue view "$NUM" --repo "$REPO" --json number,title,body,author,labels,comments,url
-gh pr view "$NUM" --repo "$REPO" --json number,title,body,author,labels,additions,deletions,changedFiles,files,baseRefName,headRefName,headRefOid,isCrossRepository,isDraft,reviewDecision,url
+gh pr view "$NUM" --repo "$REPO" --json number,title,body,author,labels,additions,deletions,changedFiles,baseRefName,headRefName,headRefOid,isCrossRepository,isDraft,reviewDecision,url
 gh label list --repo "$REPO" --limit 200
 ```
 
