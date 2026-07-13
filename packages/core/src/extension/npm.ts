@@ -139,12 +139,18 @@ export function resolveNpmRegistry(
  * Get npm auth token for a registry.
  *
  * Priority:
- * 1. NPM_TOKEN environment variable
+ * 1. NPM_TOKEN environment variable for the configured registry origin
  * 2. Registry-specific _authToken from .npmrc
  */
-function getNpmAuthToken(registryUrl: string): string | undefined {
+function getNpmAuthToken(
+  registryUrl: string,
+  ambientTokenRegistryUrl: string,
+): string | undefined {
   const envToken = process.env['NPM_TOKEN'];
-  if (envToken) {
+  if (
+    envToken &&
+    new URL(registryUrl).origin === new URL(ambientTokenRegistryUrl).origin
+  ) {
     return envToken;
   }
 
@@ -523,13 +529,13 @@ export async function downloadFromNpmRegistry(
     installMetadata.source,
   );
   const scope = name.split('/')[0];
-  const registryUrl =
-    installMetadata.registryUrl || resolveNpmRegistry(scope, undefined);
+  const configuredRegistryUrl = resolveNpmRegistry(scope, undefined);
+  const registryUrl = installMetadata.registryUrl || configuredRegistryUrl;
 
   // Store resolved registry for future update checks
   installMetadata.registryUrl = registryUrl;
 
-  const authToken = getNpmAuthToken(registryUrl);
+  const authToken = getNpmAuthToken(registryUrl, configuredRegistryUrl);
 
   // Fetch package metadata
   const encodedName = name.replaceAll('/', '%2f');
@@ -643,9 +649,9 @@ export async function checkNpmUpdate(
   try {
     const { name } = parseNpmPackageSource(installMetadata.source);
     const scope = name.split('/')[0];
-    const registryUrl =
-      installMetadata.registryUrl || resolveNpmRegistry(scope, undefined);
-    const authToken = getNpmAuthToken(registryUrl);
+    const configuredRegistryUrl = resolveNpmRegistry(scope, undefined);
+    const registryUrl = installMetadata.registryUrl || configuredRegistryUrl;
+    const authToken = getNpmAuthToken(registryUrl, configuredRegistryUrl);
 
     const encodedName = name.replaceAll('/', '%2f');
     const metadataUrl = `${registryUrl}/${encodedName}`;

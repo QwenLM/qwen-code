@@ -305,6 +305,43 @@ describe('downloadFromNpmRegistry', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
+  });
+
+  it('does not send the ambient npm token to an override registry', async () => {
+    vi.stubEnv('NPM_TOKEN', 'ambient-secret');
+    mockNpmDownload('https://registry.example.com/pkg.tgz');
+
+    await downloadFromNpmRegistry(
+      {
+        source: '@scope/pkg',
+        type: 'npm',
+        registryUrl: 'https://registry.example.com',
+      },
+      '/tmp/qwen-extension',
+    );
+
+    expect(vi.mocked(https.get).mock.calls[0]?.[1]).toMatchObject({
+      headers: {},
+    });
+  });
+
+  it('sends the ambient npm token to the configured registry origin', async () => {
+    vi.stubEnv('NPM_TOKEN', 'ambient-secret');
+    mockNpmDownload('https://registry.npmjs.org/pkg.tgz');
+
+    await downloadFromNpmRegistry(
+      {
+        source: '@scope/pkg',
+        type: 'npm',
+        registryUrl: 'https://registry.npmjs.org/custom-path',
+      },
+      '/tmp/qwen-extension',
+    );
+
+    expect(vi.mocked(https.get).mock.calls[0]?.[1]).toMatchObject({
+      headers: { Authorization: 'Bearer ambient-secret' },
+    });
   });
 
   it('redacts credentialed registry URLs in metadata request errors', async () => {

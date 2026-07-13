@@ -37,6 +37,8 @@ describe('resolveNetworkTarget', () => {
     'https://[::ffff:7f00:1]/archive',
     'https://[fec0::1]/archive',
     'https://[2001::1]/archive',
+    'https://[3fff::1]/archive',
+    'https://[3fff:fff:ffff:ffff:ffff:ffff:ffff:ffff]/archive',
     'https://[fc00::1]/archive',
   ])('rejects blocked literal address %s', async (url) => {
     await expect(resolveNetworkTarget(url, 'public')).rejects.toThrow(

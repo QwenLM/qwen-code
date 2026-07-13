@@ -85,6 +85,10 @@ const parsePotentialSourceUrl = (source: string): URL | null => {
   try {
     return new URL(source);
   } catch {
+    const colonIndex = source.indexOf(':');
+    if (colonIndex >= 0 && source.slice(0, colonIndex).includes('/')) {
+      return null;
+    }
     const sshMatch = /^(?:[^@]+@)?(\[[^\]]+\]|[^:]+):/.exec(source);
     if (!sshMatch?.[1]) return null;
     try {
@@ -572,7 +576,7 @@ export function registerWorkspaceExtensionRoutes(
           if (!releaseOperationSlot) return;
           const extensionManager = ctrl.createExtensionManager();
           await extensionManager.refreshCache();
-          const updateStates: Record<string, string> = {};
+          const updateStates: Record<string, string> = Object.create(null);
           const deadline = new AbortController();
           await extensionManager.checkForAllExtensionUpdates(
             (name, state) => {
@@ -1222,7 +1226,7 @@ export function registerWorkspaceExtensionRoutes(
         'check-updates',
         {},
         async (extensionManager, signal, context) => {
-          const states: Record<string, string> = {};
+          const states: Record<string, string> = Object.create(null);
           await extensionManager.checkForAllExtensionUpdates(
             (name, state) => {
               states[name] = state;

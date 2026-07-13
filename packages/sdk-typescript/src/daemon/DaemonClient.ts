@@ -965,6 +965,7 @@ export class DaemonClient {
     return await this.jsonRequest<DaemonWorkspaceExtensionsStatus>(
       '/workspace/extensions',
       'GET /workspace/extensions',
+      { mode: 'rest' },
     );
   }
 
@@ -975,7 +976,7 @@ export class DaemonClient {
     return await this.jsonRequest<ExtensionInstallResponse>(
       '/workspace/extensions/install',
       'POST /workspace/extensions/install',
-      { method: 'POST', body: params, clientId },
+      { method: 'POST', body: params, clientId, mode: 'rest' },
     );
   }
 
@@ -985,6 +986,7 @@ export class DaemonClient {
     return await this.jsonRequest<ExtensionOperationStatus>(
       `/workspace/extensions/operations/${urlEncode(operationId)}`,
       'GET /workspace/extensions/operations/:operationId',
+      { mode: 'rest' },
     );
   }
 
@@ -994,7 +996,7 @@ export class DaemonClient {
     return await this.jsonRequest<ExtensionUpdateCheckResponse>(
       '/workspace/extensions/check-updates',
       'POST /workspace/extensions/check-updates',
-      { method: 'POST', body: {}, clientId },
+      { method: 'POST', body: {}, clientId, mode: 'rest' },
     );
   }
 
@@ -1004,7 +1006,7 @@ export class DaemonClient {
     return await this.jsonRequest<ExtensionRefreshResponse>(
       '/workspace/extensions/refresh',
       'POST /workspace/extensions/refresh',
-      { method: 'POST', body: {}, clientId },
+      { method: 'POST', body: {}, clientId, mode: 'rest' },
     );
   }
 
@@ -1016,7 +1018,7 @@ export class DaemonClient {
     return await this.jsonRequest<ExtensionMutationResponse>(
       `/workspace/extensions/${urlEncode(name)}/enable`,
       'POST /workspace/extensions/:name/enable',
-      { method: 'POST', body: params, clientId },
+      { method: 'POST', body: params, clientId, mode: 'rest' },
     );
   }
 
@@ -1028,7 +1030,7 @@ export class DaemonClient {
     return await this.jsonRequest<ExtensionMutationResponse>(
       `/workspace/extensions/${urlEncode(name)}/disable`,
       'POST /workspace/extensions/:name/disable',
-      { method: 'POST', body: params, clientId },
+      { method: 'POST', body: params, clientId, mode: 'rest' },
     );
   }
 
@@ -1039,7 +1041,7 @@ export class DaemonClient {
     return await this.jsonRequest<ExtensionMutationResponse>(
       `/workspace/extensions/${urlEncode(name)}/update`,
       'POST /workspace/extensions/:name/update',
-      { method: 'POST', body: {}, clientId },
+      { method: 'POST', body: {}, clientId, mode: 'rest' },
     );
   }
 
@@ -1050,7 +1052,7 @@ export class DaemonClient {
     return await this.jsonRequest<ExtensionMutationResponse>(
       `/workspace/extensions/${urlEncode(name)}`,
       'DELETE /workspace/extensions/:name',
-      { method: 'DELETE', clientId },
+      { method: 'DELETE', clientId, mode: 'rest' },
     );
   }
 
@@ -1058,6 +1060,7 @@ export class DaemonClient {
     return await this.jsonRequest<ExtensionCatalog>(
       '/extensions',
       'GET /extensions',
+      { mode: 'rest' },
     );
   }
 
@@ -1068,7 +1071,7 @@ export class DaemonClient {
     return await this.jsonRequest<ExtensionInstallResponse>(
       '/extensions/install',
       'POST /extensions/install',
-      { method: 'POST', body: params, clientId },
+      { method: 'POST', body: params, clientId, mode: 'rest' },
     );
   }
 
@@ -1078,7 +1081,7 @@ export class DaemonClient {
     return await this.jsonRequest<ExtensionInstallResponse>(
       '/extensions/check-updates',
       'POST /extensions/check-updates',
-      { method: 'POST', body: {}, clientId },
+      { method: 'POST', body: {}, clientId, mode: 'rest' },
     );
   }
 
@@ -1089,7 +1092,7 @@ export class DaemonClient {
     return await this.jsonRequest<ExtensionMutationResponse>(
       `/extensions/${urlEncode(extensionId)}/update`,
       'POST /extensions/:extensionId/update',
-      { method: 'POST', body: {}, clientId },
+      { method: 'POST', body: {}, clientId, mode: 'rest' },
     );
   }
 
@@ -1113,6 +1116,8 @@ export class DaemonClient {
         }
         return (await res.json()) as ExtensionMutationResponse;
       },
+      undefined,
+      'rest',
     );
   }
 
@@ -1124,7 +1129,7 @@ export class DaemonClient {
     return await this.jsonRequest<ExtensionMutationResponse>(
       `/extensions/${urlEncode(extensionId)}/activation`,
       'PUT /extensions/:extensionId/activation',
-      { method: 'PUT', body: { state }, clientId },
+      { method: 'PUT', body: { state }, clientId, mode: 'rest' },
     );
   }
 
@@ -1135,7 +1140,7 @@ export class DaemonClient {
     return await this.jsonRequest<ExtensionOperationStatus>(
       `/extensions/operations/${urlEncode(operationId)}`,
       'GET /extensions/operations/:operationId',
-      signal ? { signal } : {},
+      signal ? { signal, mode: 'rest' } : { mode: 'rest' },
     );
   }
 
@@ -4284,7 +4289,12 @@ export class WorkspaceDaemonClient {
   }
 
   workspaceExtensions(): Promise<WorkspaceExtensionProjection> {
-    return this.get('/extensions', 'GET /workspaces/:workspace/extensions');
+    return this.client.workspaceJsonRequest<WorkspaceExtensionProjection>(
+      this.workspaceSelector,
+      '/extensions',
+      'GET /workspaces/:workspace/extensions',
+      { mode: 'rest' },
+    );
   }
 
   setExtensionActivation(
@@ -4296,7 +4306,7 @@ export class WorkspaceDaemonClient {
       this.workspaceSelector,
       `/extensions/${urlEncode(extensionId)}/activation`,
       'PUT /workspaces/:workspace/extensions/:extensionId/activation',
-      { method: 'PUT', body: { state }, clientId },
+      { method: 'PUT', body: { state }, clientId, mode: 'rest' },
     );
   }
 
@@ -4308,18 +4318,18 @@ export class WorkspaceDaemonClient {
       this.workspaceSelector,
       `/extensions/${urlEncode(extensionId)}/activation`,
       'DELETE /workspaces/:workspace/extensions/:extensionId/activation',
-      { method: 'DELETE', clientId },
+      { method: 'DELETE', clientId, mode: 'rest' },
     );
   }
 
   refreshExtensionRuntime(
     clientId?: string,
   ): Promise<ExtensionMutationResponse> {
-    return this.post(
+    return this.client.workspaceJsonRequest<ExtensionMutationResponse>(
+      this.workspaceSelector,
       '/extensions/refresh',
       'POST /workspaces/:workspace/extensions/refresh',
-      {},
-      clientId,
+      { method: 'POST', body: {}, clientId, mode: 'rest' },
     );
   }
 

@@ -11,7 +11,7 @@ import { stripAnsiAndControl } from '../utils/textUtils.js';
 
 const MAX_REPORTED_ENTRY_PATH_LENGTH = 200;
 const MAX_REPORTED_LINK_ENTRIES = 10;
-const MAX_LINK_ENTRIES_BEFORE_ABORT = 100;
+const MAX_LINK_ENTRIES = 100;
 
 function formatEntryPath(entryPath: string): string {
   const sanitized = stripAnsiAndControl(entryPath);
@@ -25,6 +25,7 @@ export async function assertTarArchiveHasNoLinks(
 ): Promise<void> {
   const unsupportedLinkPaths: string[] = [];
   let unsupportedLinkCount = 0;
+  let linkLimitError: Error | undefined;
   const onReadEntry = (entry: tar.ReadEntry) => {
     if (entry.type === 'SymbolicLink' || entry.type === 'Link') {
       unsupportedLinkCount += 1;
@@ -33,9 +34,12 @@ export async function assertTarArchiveHasNoLinks(
       if (unsupportedLinkPaths.length < MAX_REPORTED_LINK_ENTRIES) {
         unsupportedLinkPaths.push(unsupportedLinkPath);
       }
-      if (unsupportedLinkCount > MAX_LINK_ENTRIES_BEFORE_ABORT) {
-        throw new Error(
-          `Tar archive contains more than ${MAX_LINK_ENTRIES_BEFORE_ABORT} unsupported link entries: ${unsupportedLinkPaths.join(', ')}`,
+      if (
+        unsupportedLinkCount > MAX_LINK_ENTRIES &&
+        linkLimitError === undefined
+      ) {
+        linkLimitError = new Error(
+          `Tar archive contains more than ${MAX_LINK_ENTRIES} unsupported link entries: ${unsupportedLinkPaths.join(', ')}`,
         );
       }
     }
@@ -54,6 +58,7 @@ export async function assertTarArchiveHasNoLinks(
   } else {
     await tar.t({ file, onReadEntry });
   }
+  if (linkLimitError) throw linkLimitError;
   if (unsupportedLinkCount > 0) {
     const entryLabel =
       unsupportedLinkCount === 1

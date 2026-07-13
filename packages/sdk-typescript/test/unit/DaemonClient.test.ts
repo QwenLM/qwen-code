@@ -4210,7 +4210,22 @@ describe('DaemonClient', () => {
         }
         return jsonResponse(202, { accepted: true, operationId: 'op-2' });
       });
-      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const transportFetch = vi.fn(async () =>
+        jsonResponse(500, { error: 'transport should not be used' }),
+      );
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
 
       await client.extensionCatalog();
       await client.installUserExtension(
@@ -4240,6 +4255,7 @@ describe('DaemonClient', () => {
         ['PUT', `http://daemon/extensions/${'a'.repeat(64)}/activation`],
         ['GET', 'http://daemon/extensions/operations/op-1'],
       ]);
+      expect(transportFetch).not.toHaveBeenCalled();
     });
 
     it('treats a missing V2 extension uninstall as idempotent success', async () => {
@@ -4267,7 +4283,22 @@ describe('DaemonClient', () => {
         if (req.url.endsWith('/extensions')) return jsonResponse(200, status);
         return jsonResponse(202, { accepted: true, operationId: 'op-2' });
       });
-      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const transportFetch = vi.fn(async () =>
+        jsonResponse(500, { error: 'transport should not be used' }),
+      );
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
       const ws = client.workspaceByCwd('/work/a');
 
       await expect(ws.workspaceExtensions()).resolves.toEqual(status);
@@ -4287,6 +4318,7 @@ describe('DaemonClient', () => {
         ],
         ['POST', 'http://daemon/workspaces/%2Fwork%2Fa/extensions/refresh'],
       ]);
+      expect(transportFetch).not.toHaveBeenCalled();
     });
   });
 

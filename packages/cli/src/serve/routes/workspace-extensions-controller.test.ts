@@ -268,6 +268,58 @@ describe('createExtensionsController', () => {
     await held;
   });
 
+  it('does not commit preparation that settles after its deadline', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    let finishPreparation!: () => void;
+    const preparation = new Promise<void>((resolve) => {
+      finishPreparation = resolve;
+    });
+    const controller = createExtensionsController({
+      boundWorkspace: '/work/bound',
+      bridge: {
+        broadcastExtensionsChanged: vi.fn(),
+      } as unknown as AcpSessionBridge,
+      workspace: {} as DaemonWorkspaceService,
+    });
+    const manager = {
+      refreshCache: vi.fn(async () => undefined),
+    } as unknown as ExtensionManager;
+    const responseBody = vi.fn();
+    const response = {
+      status: vi.fn().mockReturnThis(),
+      location: vi.fn().mockReturnThis(),
+      set: vi.fn().mockReturnThis(),
+      json: responseBody,
+    } as unknown as Response;
+    const commit = vi.fn(async () => ({ generation: 1 }));
+
+    controller.runQueuedExtensionMutation(
+      'install',
+      { name: 'demo' },
+      response,
+      async (_extensionManager, _signal, context) => {
+        await context!.prepare(async () => await preparation);
+        await context!.commit(commit);
+        return { status: 'installed', name: 'demo' };
+      },
+      { manager, deadlineMs: 100 },
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    const operationId = responseBody.mock.calls[0]?.[0].operationId as string;
+
+    await vi.advanceTimersByTimeAsync(100);
+    finishPreparation();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() =>
+      expect(controller.getOperation(operationId)).toMatchObject({
+        status: 'failed',
+        code: 'extension_prepare_timeout',
+      }),
+    );
+    expect(commit).not.toHaveBeenCalled();
+  });
+
   it('releases the operation slot when the acceptance response throws', () => {
     let operationId: string | undefined;
     const throwingResponse = {

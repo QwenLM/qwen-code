@@ -917,10 +917,9 @@ describe('extension management v2 REST', () => {
   it('allows bearer-authenticated global install without a workspace client id', async () => {
     const h = await makeHarness();
     mockExtensionManager();
-    vi.spyOn(
-      ExtensionManager.prototype,
-      'prepareExtensionInstall',
-    ).mockResolvedValue({} as never);
+    const prepareInstall = vi
+      .spyOn(ExtensionManager.prototype, 'prepareExtensionInstall')
+      .mockResolvedValue({} as never);
     vi.spyOn(
       ExtensionManager.prototype,
       'commitPreparedExtension',
@@ -939,7 +938,7 @@ describe('extension management v2 REST', () => {
         .set('Host', host())
         .set('Authorization', 'Bearer secret')
         .send({
-          source: '@scope/demo',
+          source: '@scope/demo:plugin',
           consent: true,
           activation: { scope: 'user' },
         });
@@ -951,6 +950,45 @@ describe('extension management v2 REST', () => {
         status: 'succeeded',
         result: { status: 'installed', name: 'demo' },
       });
+      expect(prepareInstall).toHaveBeenCalledWith(
+        expect.objectContaining({
+          installMetadata: expect.objectContaining({
+            source: '@scope/demo',
+            type: 'npm',
+            pluginName: 'plugin',
+          }),
+        }),
+      );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves prototype-named extension update states', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'checkForAllExtensionUpdates',
+    ).mockImplementation(async (onResult) => {
+      onResult('__proto__', 'update available' as never);
+    });
+    try {
+      const legacy = await auth(
+        request(h.app).post('/workspace/extensions/check-updates'),
+      );
+      expect(legacy.status).toBe(200);
+      expect(Object.hasOwn(legacy.body.states, '__proto__')).toBe(true);
+      expect(legacy.body.states['__proto__']).toBe('update available');
+
+      const started = await auth(
+        request(h.app).post('/extensions/check-updates'),
+      );
+      expect(started.status).toBe(202);
+      const operation = await pollOperation(h.app, started.body.operationId);
+      expect(operation.status).toBe('succeeded');
+      expect(Object.hasOwn(operation.result.states, '__proto__')).toBe(true);
+      expect(operation.result.states['__proto__']).toBe('update available');
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }

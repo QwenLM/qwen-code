@@ -134,11 +134,24 @@ function restrictGitEnvironment(
   networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
 ): SimpleGit {
   if (networkPolicy !== 'public') return git;
-  return git.env({
-    ...process.env,
+  const environment: Record<string, string> = {
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_CONFIG_GLOBAL: os.devNull,
-  });
+  };
+  for (const key of [
+    'PATH',
+    'Path',
+    'SystemRoot',
+    'SYSTEMROOT',
+    'WINDIR',
+    'TEMP',
+    'TMP',
+    'TMPDIR',
+  ]) {
+    const value = process.env[key];
+    if (value !== undefined) environment[key] = value;
+  }
+  return git.env(environment);
 }
 
 /**

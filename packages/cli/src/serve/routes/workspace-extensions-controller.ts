@@ -442,13 +442,15 @@ export function createExtensionsController(
               phase: undefined,
             });
             try {
-              return await preparationQueue.run(
+              const prepared = await preparationQueue.run(
                 async () => await task(deadlineController.signal),
                 {
                   signal: deadlineController.signal,
                   onStart: startDeadline,
                 },
               );
+              deadlineController.signal.throwIfAborted();
+              return prepared;
             } catch (error) {
               if (deadlineController.signal.aborted) {
                 throw deadlineController.signal.reason;

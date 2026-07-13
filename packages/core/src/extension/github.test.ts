@@ -249,6 +249,8 @@ describe('git extension helpers', () => {
     });
 
     it('pins public HTTPS Git traffic and disables redirects and proxies', async () => {
+      const previousGitConfigCount = process.env['GIT_CONFIG_COUNT'];
+      process.env['GIT_CONFIG_COUNT'] = '1';
       vi.spyOn(dns, 'lookup').mockResolvedValue([
         { address: '8.8.8.8', family: 4 },
       ] as never);
@@ -264,7 +266,15 @@ describe('git extension helpers', () => {
         },
       ]);
 
-      await cloneFromGit(installMetadata, '/dest');
+      try {
+        await cloneFromGit(installMetadata, '/dest');
+      } finally {
+        if (previousGitConfigCount === undefined) {
+          delete process.env['GIT_CONFIG_COUNT'];
+        } else {
+          process.env['GIT_CONFIG_COUNT'] = previousGitConfigCount;
+        }
+      }
 
       expect(simpleGit).toHaveBeenLastCalledWith('/dest', {
         config: [
@@ -280,6 +290,9 @@ describe('git extension helpers', () => {
           GIT_CONFIG_NOSYSTEM: '1',
           GIT_CONFIG_GLOBAL: expect.any(String),
         }),
+      );
+      expect(mockGit.env.mock.calls[0]?.[0]).not.toHaveProperty(
+        'GIT_CONFIG_COUNT',
       );
       expect(mockGit.fetch).toHaveBeenCalledWith(
         'https://github.com/owner/repo.git',
@@ -2302,7 +2315,7 @@ describe('git extension helpers', () => {
         await streamFinished;
 
         await expect(extractFile(archivePath, extractionDest)).rejects.toThrow(
-          'Out of bound path',
+          'Refusing to extract through non-directory path',
         );
         await expect(
           fs.lstat(path.join(outsideDir, 'file.txt')),

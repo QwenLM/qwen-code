@@ -9,11 +9,19 @@ import * as path from 'node:path';
 import type { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { open, type Entry, type ZipFile } from 'yauzl';
+import { stripAnsiAndControl } from '../utils/textUtils.js';
 
 const ZIP_FILE_TYPE_MASK = 0xf000;
 const ZIP_DIRECTORY_TYPE = 0x4000;
 const ZIP_SYMBOLIC_LINK_TYPE = 0xa000;
 const ZIP_DOS_DIRECTORY_ATTRIBUTE = 16;
+const MAX_REPORTED_ZIP_PATH_LENGTH = 200;
+
+function formatZipPath(value: string): string {
+  const sanitized = stripAnsiAndControl(value);
+  if (sanitized.length <= MAX_REPORTED_ZIP_PATH_LENGTH) return sanitized;
+  return `${sanitized.slice(0, MAX_REPORTED_ZIP_PATH_LENGTH - 3)}...`;
+}
 
 function isWithinRoot(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
@@ -90,11 +98,57 @@ async function rejectExistingSymbolicLink(destination: string): Promise<void> {
     const stats = await fs.promises.lstat(destination);
     if (stats.isSymbolicLink()) {
       throw new Error(
-        `Refusing to extract through existing symbolic link: ${destination}`,
+        `Refusing to extract through existing symbolic link: ${formatZipPath(destination)}`,
       );
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+}
+
+async function ensureDirectoryWithinRoot(
+  root: string,
+  destination: string,
+  mode?: number,
+): Promise<void> {
+  const relative = path.relative(root, destination);
+  const segments = relative.split(path.sep).filter(Boolean);
+  let current = root;
+  for (const [index, segment] of segments.entries()) {
+    current = path.join(current, segment);
+    try {
+      const stats = await fs.promises.lstat(current);
+      if (stats.isSymbolicLink() || !stats.isDirectory()) {
+        throw new Error(
+          `Refusing to extract through non-directory path: ${formatZipPath(current)}`,
+        );
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      try {
+        await fs.promises.mkdir(current, {
+          ...(index === segments.length - 1 && mode !== undefined
+            ? { mode }
+            : {}),
+        });
+      } catch (mkdirError) {
+        if ((mkdirError as NodeJS.ErrnoException).code !== 'EEXIST') {
+          throw mkdirError;
+        }
+        const stats = await fs.promises.lstat(current);
+        if (stats.isSymbolicLink() || !stats.isDirectory()) {
+          throw new Error(
+            `Refusing to extract through non-directory path: ${formatZipPath(current)}`,
+          );
+        }
+      }
+    }
+  }
+  const canonical = await fs.promises.realpath(destination);
+  if (!isWithinRoot(root, canonical)) {
+    throw new Error(
+      `Out of bound path "${formatZipPath(canonical)}" found while preparing extraction`,
+    );
   }
 }
 
@@ -108,16 +162,17 @@ async function extractEntry(
   if (entry.fileName.startsWith('__MACOSX/')) return;
 
   const mode = getEntryMode(entry);
+  const reportedEntryName = formatZipPath(entry.fileName);
   if (isSymbolicLinkEntry(mode)) {
     throw new Error(
-      `Zip archive contains unsupported symbolic link entry: ${entry.fileName}`,
+      `Zip archive contains unsupported symbolic link entry: ${reportedEntryName}`,
     );
   }
 
   const destination = path.resolve(root, entry.fileName);
   if (!isWithinRoot(root, destination)) {
     throw new Error(
-      `Out of bound path "${destination}" found while processing file ${entry.fileName}`,
+      `Out of bound path "${formatZipPath(destination)}" found while processing file ${reportedEntryName}`,
     );
   }
 
@@ -126,19 +181,12 @@ async function extractEntry(
   const destinationDirectory = isDirectory
     ? destination
     : path.dirname(destination);
-  await fs.promises.mkdir(destinationDirectory, {
-    recursive: true,
-    ...(isDirectory ? { mode: permissions } : {}),
-  });
+  await ensureDirectoryWithinRoot(
+    root,
+    destinationDirectory,
+    isDirectory ? permissions : undefined,
+  );
   signal?.throwIfAborted();
-
-  const canonicalDestinationDirectory =
-    await fs.promises.realpath(destinationDirectory);
-  if (!isWithinRoot(root, canonicalDestinationDirectory)) {
-    throw new Error(
-      `Out of bound path "${canonicalDestinationDirectory}" found while processing file ${entry.fileName}`,
-    );
-  }
   if (isDirectory) return;
 
   await rejectExistingSymbolicLink(destination);
