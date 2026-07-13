@@ -416,10 +416,12 @@ export function createStepEnvironment({ baseEnv, home, playwrightPort, step }) {
       NO_COLOR: 'true',
     });
     for (const key of [
+      'ANTHROPIC_API_KEY',
       'OPENAI_API_KEY',
       'DASHSCOPE_API_KEY',
       'QWEN_API_KEY',
       'GEMINI_API_KEY',
+      'GOOGLE_API_KEY',
       'QWEN_DEFAULT_AUTH_TYPE',
     ]) {
       delete env[key];

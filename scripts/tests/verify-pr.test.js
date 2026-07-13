@@ -421,8 +421,10 @@ describe('step execution', () => {
       ({ testEnvironment }) => testEnvironment,
     );
     const baseEnv = {
+      ANTHROPIC_API_KEY: 'anthropic',
       DASHSCOPE_API_KEY: 'dashscope',
       GEMINI_API_KEY: 'gemini',
+      GOOGLE_API_KEY: 'google',
       HOME: '/caller/home',
       OPENAI_API_KEY: 'openai',
       QWEN_API_KEY: 'qwen',
@@ -450,8 +452,10 @@ describe('step execution', () => {
         step.playwright ? '/caller/profile' : '/tmp/verify-pr-home',
       );
       for (const key of [
+        'ANTHROPIC_API_KEY',
         'DASHSCOPE_API_KEY',
         'GEMINI_API_KEY',
+        'GOOGLE_API_KEY',
         'OPENAI_API_KEY',
         'QWEN_API_KEY',
         'QWEN_DEFAULT_AUTH_TYPE',
