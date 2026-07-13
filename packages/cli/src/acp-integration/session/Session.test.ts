@@ -518,6 +518,7 @@ describe('Session', () => {
       user: { settings: {} },
       workspace: { settings: {} },
       setValue: vi.fn(),
+      reloadScopeFromDisk: vi.fn(),
     } as unknown as LoadedSettings;
 
     getAvailableCommandsSpy = vi.mocked(nonInteractiveCliCommands)
@@ -1938,6 +1939,31 @@ describe('Session', () => {
         session.sendAvailableCommandsUpdate(),
       ).resolves.toBeUndefined();
       expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+    });
+
+    it('refreshes workspace skill settings, commands, and SkillManager consumers', async () => {
+      const suppressNextSlashReload = vi.fn();
+      const notifyConfigChanged = vi.fn().mockResolvedValue(undefined);
+      mockConfig.getSkillManager = vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([]),
+        suppressNextSlashReload,
+        notifyConfigChanged,
+      });
+
+      await session.refreshSkillsFromSettings();
+
+      expect(mockSettings.reloadScopeFromDisk).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+      );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: 'available_commands_update',
+          }),
+        }),
+      );
+      expect(suppressNextSlashReload).toHaveBeenCalledTimes(1);
+      expect(notifyConfigChanged).toHaveBeenCalledTimes(1);
     });
   });
 

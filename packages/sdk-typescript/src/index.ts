@@ -64,6 +64,8 @@ export {
   type DaemonSettingsReloadedData,
   type DaemonSettingsReloadedEvent,
   type DaemonToolToggleResult,
+  type DaemonSkillToggleActivation,
+  type DaemonSkillToggleResult,
   type DaemonToolToggledData,
   type DaemonToolToggledEvent,
   type DaemonTrustChangeRequestedData,

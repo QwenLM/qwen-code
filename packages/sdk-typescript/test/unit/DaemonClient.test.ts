@@ -203,7 +203,7 @@ describe('DaemonClient', () => {
           supported: ['v1'],
         },
         mode: 'http-bridge' as const,
-        features: ['health', 'capabilities'],
+        features: ['health', 'capabilities', 'workspace_skill_toggle'],
         modelServices: [],
         workspaceCwd: '/work/bound',
       };
@@ -211,6 +211,7 @@ describe('DaemonClient', () => {
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       const caps = await client.capabilities();
       expect(caps).toEqual(envelope);
+      expect(caps.features).toContain('workspace_skill_toggle');
       // #3803 §02: clients use `workspaceCwd` to pre-flight check +
       // omit `cwd` from `POST /session` (route falls back).
       expect(caps.workspaceCwd).toBe('/work/bound');
@@ -2916,6 +2917,75 @@ describe('DaemonClient', () => {
       await expect(
         client.setWorkspaceToolEnabled('Bash', false),
       ).rejects.toMatchObject({ status: 401 });
+    });
+  });
+
+  describe('setWorkspaceSkillEnabled', () => {
+    const response = {
+      skillName: 'review/strict',
+      enabled: false,
+      changed: true,
+      activation: 'applied',
+      sessionsRefreshed: 2,
+      sessionsFailed: 0,
+    };
+
+    it('POSTs the flag, client id, and URL-encoded skill name', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, response),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.setWorkspaceSkillEnabled('review/strict', false, {
+          clientId: 'client-1',
+        }),
+      ).resolves.toEqual(response);
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/workspace/skills/review%2Fstrict/enable',
+        method: 'POST',
+        body: JSON.stringify({ enabled: false }),
+      });
+      expect(calls[0]?.headers['content-type']).toBe('application/json');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('supports the workspace-qualified helper', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, response),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client
+        .workspaceByCwd('/tmp/work space')
+        .setWorkspaceSkillEnabled('review/strict', false, {
+          clientId: 'client-2',
+        });
+
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/workspaces/%2Ftmp%2Fwork%20space/skills/review%2Fstrict/enable',
+        method: 'POST',
+        body: JSON.stringify({ enabled: false }),
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-2');
+    });
+
+    it('passes structured daemon errors through', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(409, {
+          error: 'Skill review is locked',
+          code: 'skill_not_toggleable',
+          reason: 'locked',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.setWorkspaceSkillEnabled('review', true),
+      ).rejects.toMatchObject({
+        status: 409,
+        body: expect.objectContaining({ code: 'skill_not_toggleable' }),
+      });
     });
   });
 

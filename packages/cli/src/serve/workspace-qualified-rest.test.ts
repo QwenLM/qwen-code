@@ -121,6 +121,14 @@ function makeWorkspaceService(label: string): DaemonWorkspaceService {
       toolName,
       enabled,
     })),
+    setWorkspaceSkillEnabled: vi.fn(async (_ctx, skillName, enabled) => ({
+      skillName,
+      enabled,
+      changed: true,
+      activation: 'deferred' as const,
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+    })),
     initWorkspace: vi.fn(async (ctx) => ({
       path: `${ctx.workspaceCwd}/QWEN.md`,
       action: 'created' as const,
@@ -864,6 +872,49 @@ describe('workspace-qualified core REST', () => {
       const res = await request(untrusted.app)
         .post(
           `/workspaces/${encodeURIComponent(untrusted.secondaryId)}/tools/Bash/enable`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ enabled: false });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('untrusted_workspace');
+    } finally {
+      await fsp.rm(untrusted.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('routes workspace-qualified skill toggles and trust-gates writes', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const res = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/skills/review/enable`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .set('Host', host())
+        .send({ enabled: false });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        skillName: 'review',
+        enabled: false,
+        changed: true,
+        activation: 'deferred',
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+      });
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+
+    const untrusted = await makeHarness({
+      secondaryTrusted: false,
+      token: 'secret',
+    });
+    try {
+      const res = await request(untrusted.app)
+        .post(
+          `/workspaces/${encodeURIComponent(untrusted.secondaryId)}/skills/review/enable`,
         )
         .set('Authorization', 'Bearer secret')
         .set('Host', host())

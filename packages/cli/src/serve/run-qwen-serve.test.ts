@@ -113,6 +113,98 @@ vi.mock('@qwen-code/acp-bridge/spawnChannel', async (importOriginal) => {
   };
 });
 
+describe('workspace skill settings persistence', () => {
+  let handle: RunHandle | undefined;
+  let workspace = '';
+  let qwenHome = '';
+  let previousQwenHome: string | undefined;
+
+  afterEach(async () => {
+    await handle?.close();
+    if (workspace) fs.rmSync(workspace, { recursive: true, force: true });
+    if (qwenHome) fs.rmSync(qwenHome, { recursive: true, force: true });
+    if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+    else process.env['QWEN_HOME'] = previousQwenHome;
+    settingsRuntime.resetHomeEnvBootstrapForTesting();
+    vi.restoreAllMocks();
+  });
+
+  it('canonicalizes, deduplicates, preserves orphans, serializes updates, and enforces user locks', async () => {
+    workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-skill-settings-')),
+    );
+    qwenHome = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-skill-home-')),
+    );
+    previousQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = qwenHome;
+    settingsRuntime.resetHomeEnvBootstrapForTesting();
+    fs.mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        skills: { disabled: ['orphan', ' ReViEw ', 'review'] },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(qwenHome, 'settings.json'),
+      JSON.stringify({ skills: { disabled: ['locked-skill'] } }),
+    );
+
+    const originalCreateServeApp = serverModule.createServeApp;
+    let persistDisabledSkills:
+      | NonNullable<
+          Parameters<typeof serverModule.createServeApp>[2]
+        >['persistDisabledSkills']
+      | undefined;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      persistDisabledSkills = args[2]?.persistDisabledSkills;
+      return originalCreateServeApp(...args);
+    });
+    handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace,
+        serveWebShell: false,
+      },
+      { bridge: makeRuntimeBridge() },
+    );
+    await handle.runtimeReady;
+    expect(persistDisabledSkills).toBeDefined();
+
+    await expect(
+      persistDisabledSkills!(workspace, 'review', false),
+    ).resolves.toEqual({
+      changed: true,
+      disabled: ['orphan', 'review'],
+    });
+    await expect(
+      persistDisabledSkills!(workspace, 'review', false),
+    ).resolves.toEqual({
+      changed: false,
+      disabled: ['orphan', 'review'],
+    });
+
+    await Promise.all([
+      persistDisabledSkills!(workspace, 'alpha', false),
+      persistDisabledSkills!(workspace, 'beta', false),
+    ]);
+    await expect(
+      persistDisabledSkills!(workspace, 'review', true),
+    ).resolves.toMatchObject({ changed: true });
+
+    const saved = JSON.parse(
+      fs.readFileSync(path.join(workspace, '.qwen', 'settings.json'), 'utf8'),
+    ) as { skills: { disabled: string[] } };
+    expect(saved.skills.disabled).toEqual(['orphan', 'alpha', 'beta']);
+    await expect(
+      persistDisabledSkills!(workspace, 'locked-skill', true),
+    ).rejects.toMatchObject({ reason: 'locked', lockedScope: 'user' });
+  });
+});
+
 /**
  * #4297 fold-in 7 (deepseek S1, addresses #3262690842). Lock the
  * `context.fileName` extraction logic so a regression doesn't

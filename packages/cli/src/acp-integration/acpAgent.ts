@@ -8355,6 +8355,22 @@ class QwenAgent implements Agent {
           sessionsSkipped: skipped,
         };
       }
+      case SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh: {
+        this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+        const results = await Promise.allSettled(
+          this.getActiveSessions().map((session) =>
+            session.refreshSkillsFromSettings(),
+          ),
+        );
+        return {
+          sessionsRefreshed: results.filter(
+            (result) => result.status === 'fulfilled',
+          ).length,
+          sessionsFailed: results.filter(
+            (result) => result.status === 'rejected',
+          ).length,
+        };
+      }
       default:
         throw RequestError.methodNotFound(method);
     }

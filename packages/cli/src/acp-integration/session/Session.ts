@@ -165,7 +165,7 @@ import type {
   SetSessionModelResponse,
   AgentSideConnection,
 } from '@agentclientprotocol/sdk';
-import type { LoadedSettings } from '../../config/settings.js';
+import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import { z } from 'zod';
 import {
   insertAfterFunctionResponses,
@@ -3812,31 +3812,43 @@ export class Session implements SessionContext {
 
   async sendAvailableCommandsUpdate(): Promise<void> {
     try {
-      const { availableCommands, availableSkills, availableSkillDetails } =
-        await buildAvailableCommandsSnapshot(
-          this.config,
-          undefined,
-          this.settings,
-        );
-
-      const update: SessionUpdate = {
-        sessionUpdate: 'available_commands_update',
-        availableCommands,
-        ...(availableSkills !== undefined
-          ? {
-              _meta: {
-                availableSkills,
-                ...(availableSkillDetails ? { availableSkillDetails } : {}),
-              },
-            }
-          : {}),
-      };
-
-      await this.sendUpdate(update);
+      await this.sendAvailableCommandsUpdateOrThrow();
     } catch (error) {
       // Log error but don't fail session creation
       debugLogger.error('Error sending available commands update:', error);
     }
+  }
+
+  async refreshSkillsFromSettings(): Promise<void> {
+    this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+    await this.sendAvailableCommandsUpdateOrThrow();
+    const skillManager = this.config.getSkillManager();
+    if (skillManager) {
+      skillManager.suppressNextSlashReload();
+      await skillManager.notifyConfigChanged();
+    }
+  }
+
+  private async sendAvailableCommandsUpdateOrThrow(): Promise<void> {
+    const { availableCommands, availableSkills, availableSkillDetails } =
+      await buildAvailableCommandsSnapshot(
+        this.config,
+        undefined,
+        this.settings,
+      );
+    const update: SessionUpdate = {
+      sessionUpdate: 'available_commands_update',
+      availableCommands,
+      ...(availableSkills !== undefined
+        ? {
+            _meta: {
+              availableSkills,
+              ...(availableSkillDetails ? { availableSkillDetails } : {}),
+            },
+          }
+        : {}),
+    };
+    await this.sendUpdate(update);
   }
 
   /**
