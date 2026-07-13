@@ -1202,14 +1202,30 @@ describe('multi-workspace session dispatch', () => {
       token: TEST_TOKEN,
     });
 
-    const res = await request(app)
-      .patch('/session/secondary-session/metadata')
-      .set('Host', host())
-      .send({ displayName: 'unauthorized' });
+    const responses = await Promise.all([
+      request(app)
+        .patch('/session/secondary-session/metadata')
+        .set('Host', host())
+        .send({ displayName: 'unauthorized' }),
+      request(app)
+        .post('/session/secondary-session/tasks/task-1/cancel')
+        .set('Host', host())
+        .send({ kind: 'shell' }),
+      request(app)
+        .post('/session/secondary-session/goal/clear')
+        .set('Host', host())
+        .send({}),
+    ]);
 
-    expect(res.status).toBe(401);
+    expect(responses.map((response) => response.status)).toEqual([
+      401, 401, 401,
+    ]);
     expect(primaryBridge.metadataCalls).toEqual([]);
     expect(secondaryBridge.metadataCalls).toEqual([]);
+    expect(primaryBridge.taskCancelCalls).toEqual([]);
+    expect(secondaryBridge.taskCancelCalls).toEqual([]);
+    expect(primaryBridge.goalClearCalls).toEqual([]);
+    expect(secondaryBridge.goalClearCalls).toEqual([]);
   });
 
   it('rejects invalid secondary owner-local inputs before bridge actions', async () => {
