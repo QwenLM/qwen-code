@@ -8152,6 +8152,54 @@ describe('Session', () => {
 
         expect(mockGeminiClient.tryCompressChat).not.toHaveBeenCalled();
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Already compressed.' },
+            _meta: { source: 'slash_command' },
+          },
+        });
+      });
+
+      it('marks streamed slash-command messages with their source', async () => {
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'stream_messages',
+          messages: (async function* () {
+            yield {
+              messageType: 'info' as const,
+              content: 'Compressing context...',
+            };
+            yield {
+              messageType: 'info' as const,
+              content: 'Context compressed.',
+            };
+          })(),
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/compress' }],
+        });
+
+        expect(mockClient.sessionUpdate).toHaveBeenNthCalledWith(1, {
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Compressing context...' },
+            _meta: { source: 'slash_command' },
+          },
+        });
+        expect(mockClient.sessionUpdate).toHaveBeenNthCalledWith(2, {
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Context compressed.' },
+            _meta: { source: 'slash_command' },
+          },
+        });
       });
 
       it('keeps goal terminal observer after ACP /goal set', async () => {

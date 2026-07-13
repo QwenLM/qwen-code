@@ -31,6 +31,26 @@ export interface DaemonWorkspaceCapability {
   cwd: string;
   primary: boolean;
   trusted: boolean;
+  /** Whether this runtime can be removed without restarting the daemon. */
+  removable?: boolean;
+}
+
+export interface DaemonWorkspaceRemovalActivity {
+  sessions: number;
+  activePrompts: number;
+  pendingSessionStarts: number;
+  acpConnections: number;
+  memoryTasks: number;
+  channelWorkers: number;
+}
+
+export interface DaemonWorkspaceRemovalResult {
+  removed: true;
+  workspaceId: string;
+  workspaceCwd: string;
+  forced: boolean;
+  persistedRegistrationRemoved: boolean;
+  activity: DaemonWorkspaceRemovalActivity;
 }
 
 /** Current Git branch metadata returned from a workspace Git status route. */

@@ -1143,6 +1143,14 @@
   line-height: 22px;
 }
 
+.workspaceRemovalActivityList {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted-foreground);
+  font-size: 14px;
+  line-height: 22px;
+}
+
 .confirmActions {
   display: flex;
   justify-content: flex-end;

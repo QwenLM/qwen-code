@@ -301,6 +301,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   });
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
+  useEffect(() => {
+    if (!workspace?.capabilities) return;
+    setConnection((current) =>
+      current.capabilities === workspace.capabilities
+        ? current
+        : { ...current, capabilities: workspace.capabilities },
+    );
+  }, [workspace?.capabilities]);
   const noticeIdRef = useRef(0);
   const [notices, setNotices] = useState<DaemonSessionNotice[]>([]);
   const addNotice = useCallback<AddDaemonSessionNotice>((input) => {

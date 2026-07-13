@@ -5524,6 +5524,58 @@ describe('DaemonClient', () => {
         'http://daemon/workspaces/%2Ftmp%2Fwork%20space/session/session-1/organization',
       );
     });
+
+    it('removes a workspace by id or cwd with an optional force body', async () => {
+      const result = {
+        removed: true as const,
+        workspaceId: 'workspace/id',
+        workspaceCwd: '/tmp/work space',
+        forced: true,
+        persistedRegistrationRemoved: true,
+        activity: {
+          sessions: 1,
+          activePrompts: 0,
+          pendingSessionStarts: 0,
+          acpConnections: 0,
+          memoryTasks: 0,
+          channelWorkers: 0,
+        },
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
+      const transportFetch = vi.fn(async () =>
+        jsonResponse(404, { error: 'transport route not mapped' }),
+      );
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+
+      await expect(
+        client.workspaceById('workspace/id').remove({ force: true }),
+      ).resolves.toEqual(result);
+      await expect(
+        client.workspaceByCwd('/tmp/work space').remove(),
+      ).resolves.toEqual(result);
+
+      expect(calls.map((call) => [call.method, call.url, call.body])).toEqual([
+        [
+          'DELETE',
+          'http://daemon/workspaces/workspace%2Fid',
+          JSON.stringify({ force: true }),
+        ],
+        ['DELETE', 'http://daemon/workspaces/%2Ftmp%2Fwork%20space', null],
+      ]);
+      expect(transportFetch).not.toHaveBeenCalled();
+    });
   });
 
   describe('addRuntimeMcpServer (T2.8 #4514)', () => {

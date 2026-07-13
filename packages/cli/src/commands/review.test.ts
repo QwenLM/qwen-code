@@ -45,6 +45,7 @@ describe('reviewCommand', () => {
       'pr-context',
       'load-rules',
       'presubmit',
+      'test-efficacy',
       'compose-review',
       'cleanup',
     ]);

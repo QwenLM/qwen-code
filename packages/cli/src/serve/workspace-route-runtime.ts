@@ -69,6 +69,39 @@ export function resolveRegisteredWorkspaceRuntimeByPathSelector(
     );
 }
 
+export function resolveManagedWorkspaceRuntimeByPathSelector(
+  registry: WorkspaceRegistry,
+  selector: string,
+): WorkspaceRuntime | undefined {
+  const exact = registry.getManagedByWorkspaceCwd(selector);
+  if (exact) return exact;
+
+  if (path.isAbsolute(selector) && !isUncPath(selector)) {
+    try {
+      const canonicalSelector = canonicalizeWorkspace(selector);
+      const canonicalMatch =
+        registry.getManagedByWorkspaceCwd(canonicalSelector);
+      if (canonicalMatch) return canonicalMatch;
+      for (const runtime of registry.listManaged()) {
+        if (canonicalizeWorkspace(runtime.workspaceCwd) === canonicalSelector) {
+          return runtime;
+        }
+      }
+    } catch {
+      // Fall through to lexical matching for unavailable paths.
+    }
+  }
+
+  const normalizedSelector = normalizePortableAbsolutePath(selector);
+  return registry
+    .listManaged()
+    .find(
+      (runtime) =>
+        normalizePortableAbsolutePath(runtime.workspaceCwd) ===
+        normalizedSelector,
+    );
+}
+
 export function resolveWorkspaceRuntimeFromParam(
   registry: WorkspaceRegistry,
   req: Request,
@@ -93,6 +126,39 @@ export function resolveWorkspaceRuntimeFromParam(
   );
   if (!runtime) {
     sendWorkspaceMismatch(res, registry);
+    return null;
+  }
+  return runtime;
+}
+
+export function resolveManagedWorkspaceRuntimeFromParam(
+  registry: WorkspaceRegistry,
+  req: Request,
+  res: Response,
+  paramName = 'workspace',
+): WorkspaceRuntime | null {
+  const selector = req.params[paramName] ?? '';
+  const byId = registry.getManagedByWorkspaceId(selector);
+  if (byId) return byId;
+
+  if (!isPortableAbsolutePath(selector)) {
+    res.status(400).json({
+      error: `\`:${paramName}\` must decode to a workspace id or absolute path`,
+      code: 'workspace_mismatch',
+    });
+    return null;
+  }
+
+  const runtime = resolveManagedWorkspaceRuntimeByPathSelector(
+    registry,
+    selector,
+  );
+  if (!runtime) {
+    res.status(400).json({
+      error:
+        'Workspace mismatch: the requested workspace is not registered with this daemon.',
+      code: 'workspace_mismatch',
+    });
     return null;
   }
   return runtime;

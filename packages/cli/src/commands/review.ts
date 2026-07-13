@@ -16,6 +16,7 @@ import { planDiffCommand } from './review/plan-diff.js';
 import { prContextCommand } from './review/pr-context.js';
 import { loadRulesCommand } from './review/load-rules.js';
 import { presubmitCommand } from './review/presubmit.js';
+import { testEfficacyCommand } from './review/test-efficacy.js';
 import { cleanupCommand } from './review/cleanup.js';
 
 export const reviewCommand: CommandModule = {
@@ -30,11 +31,12 @@ export const reviewCommand: CommandModule = {
       .command(prContextCommand)
       .command(loadRulesCommand)
       .command(presubmitCommand)
+      .command(testEfficacyCommand)
       .command(composeReviewCommand)
       .command(cleanupCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: parse-args, fetch-pr, plan-diff, pr-context, load-rules, presubmit, compose-review, or cleanup.',
+        'Specify a subcommand: parse-args, fetch-pr, plan-diff, pr-context, load-rules, presubmit, test-efficacy, compose-review, or cleanup.',
       )
       .version(false),
   handler: () => {

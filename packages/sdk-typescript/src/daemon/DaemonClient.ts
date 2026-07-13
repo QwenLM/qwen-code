@@ -86,6 +86,7 @@ import type {
   DaemonWorkspaceMemoryForgetTask,
   DaemonWorkspaceMemoryRememberOptions,
   DaemonWorkspaceMemoryRememberTask,
+  DaemonWorkspaceRemovalResult,
   HeartbeatResult,
   PermissionResponse,
   PromptContentBlock,
@@ -3824,6 +3825,31 @@ export class WorkspaceDaemonClient {
 
   workspaceMemory(): Promise<DaemonWorkspaceMemoryStatus> {
     return this.get('/memory', 'GET /workspaces/:workspace/memory');
+  }
+
+  remove(options?: {
+    force?: boolean;
+    timeoutMs?: number;
+  }): Promise<DaemonWorkspaceRemovalResult> {
+    const body =
+      options?.force === undefined
+        ? undefined
+        : {
+            force: options.force,
+          };
+    return this.client.workspaceJsonRequest<DaemonWorkspaceRemovalResult>(
+      this.workspaceSelector,
+      '',
+      'DELETE /workspaces/:workspace',
+      {
+        method: 'DELETE',
+        ...(body ? { body } : {}),
+        ...(options?.timeoutMs !== undefined
+          ? { timeoutMs: options.timeoutMs }
+          : {}),
+        mode: 'rest',
+      },
+    );
   }
 
   writeWorkspaceMemory(

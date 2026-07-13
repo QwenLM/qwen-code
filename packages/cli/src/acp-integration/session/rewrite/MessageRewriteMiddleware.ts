@@ -88,6 +88,15 @@ export class MessageRewriteMiddleware {
     // Always send original message as-is
     await this.sendUpdate(update);
 
+    if (
+      updateType === 'agent_message_chunk' &&
+      (updateRecord['_meta'] as Record<string, unknown> | undefined)?.[
+        'source'
+      ] === 'slash_command'
+    ) {
+      return;
+    }
+
     // Accumulate for turn-end rewriting
     let didAccumulate = false;
     if (updateType === 'agent_thought_chunk') {
