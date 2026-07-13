@@ -38,6 +38,10 @@ import {
   webShellThemeToSettingValue,
   type WebShellTheme,
 } from '../../themeContext';
+import {
+  ModelManagementSection,
+  type ModelManagementProps,
+} from './ModelManagementSection';
 import { Alert, AlertDescription } from '../ui/alert';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
@@ -74,11 +78,13 @@ type ChatWidthMode = '1000' | 'wide';
 
 interface SettingsMessageProps {
   settingsState: SettingsMessageSettingsState;
-  onLanguageChange: (language: WebShellLanguage) => void;
-  onSubDialog: (settingKey: string) => void;
+  onLanguageChange: (language: WebShellLanguage, scope: Scope) => void;
+  onSubDialog: (settingKey: string, scope: Scope) => void;
   onThemeChange: (theme: WebShellTheme) => void;
   chatWidthMode: ChatWidthMode;
   onChatWidthModeChange: (mode: ChatWidthMode) => void;
+  /** Model list/add/delete/select, rendered inside the Model category. */
+  modelManagement?: ModelManagementProps;
   embedded?: boolean;
 }
 
@@ -89,13 +95,18 @@ export interface SettingsMessageSettingsState {
   error: Error | undefined;
   reload: () => Promise<DaemonWorkspaceSettingsStatus | undefined>;
   setValue: (
-    scope: 'workspace',
+    scope: 'workspace' | 'user',
     key: string,
     value: unknown,
   ) => Promise<DaemonSettingUpdateResult>;
 }
 
-const SUB_DIALOG_KEYS = new Set(['fastModel', 'visionModel']);
+const SUB_DIALOG_KEYS = new Set([
+  'fastModel',
+  'visionModel',
+  'voiceModel',
+  'modelFallbacks',
+]);
 const HIDDEN_SETTING_KEYS = new Set([
   'ui.hideTips',
   'ui.enableUserFeedback',
@@ -394,6 +405,7 @@ export function SettingsMessage({
   onThemeChange,
   chatWidthMode,
   onChatWidthModeChange,
+  modelManagement,
   embedded = false,
 }: SettingsMessageProps) {
   const { language: selectedLanguage, t } = useI18n();
@@ -472,7 +484,7 @@ export function SettingsMessage({
     (key: string, value: unknown) => {
       if (!restartPending) setMessage(null);
       setBusyKey(key);
-      setValue('workspace', key, value)
+      setValue(scope, key, value)
         .then(async (result) => {
           try {
             await reload();
@@ -488,12 +500,18 @@ export function SettingsMessage({
         })
         .finally(() => setBusyKey(null));
     },
-    [reload, restartPending, setValue],
+    [reload, restartPending, scope, setValue],
   );
 
   const activeGroup =
     categories.find((category) => category.id === activeCategory) ??
     categories[0];
+
+  // The model-management block is surfaced inside the "Model" category, detected
+  // by the raw category of its dialog settings (fastModel etc.).
+  const isModelCategory = activeGroup?.items.some(
+    (item) => item.type === 'setting' && item.setting.category === 'Model',
+  );
 
   const renderSelect = (
     value: string,
@@ -525,16 +543,17 @@ export function SettingsMessage({
   const renderSettingControl = (setting: DaemonSettingDescriptor) => {
     const value = resolveValue(setting, scope);
     const isBusy = busyKey === setting.key;
-    const readOnly = scope !== 'workspace';
-    const disabled = isBusy || readOnly;
+    // User-scope settings are editable (this PR enables user-scope writes); the
+    // daemon rejects disallowed keys regardless of scope.
+    const disabled = isBusy;
 
-    // Theme is a daemon-backed workspace setting, so update both the live
-    // shell and the settings API. Language is a Web Shell preference owned by
-    // the host (standalone persists it to localStorage), so it only uses the
-    // language callback and must not be written through the daemon API.
+    // Theme is a daemon-backed setting, so update both the live shell and the
+    // settings API. Language is applied through the language callback (which
+    // forwards the selected scope to the /language command). Both controls
+    // reflect the value for the SELECTED scope, falling back to the live value.
     if (setting.key === THEME_SETTING_KEY) {
       return renderSelect(
-        selectedTheme,
+        themeSettingToWebShellTheme(value) ?? selectedTheme,
         (next) => {
           const theme = next as WebShellTheme;
           onThemeChange(theme);
@@ -551,8 +570,8 @@ export function SettingsMessage({
 
     if (setting.key === LANGUAGE_SETTING_KEY) {
       return renderSelect(
-        selectedLanguage,
-        (next) => onLanguageChange(next as WebShellLanguage),
+        languageSettingToWebShellLanguage(value) ?? selectedLanguage,
+        (next) => onLanguageChange(next as WebShellLanguage, scope),
         WEB_SHELL_LANGUAGES.map((language) => ({
           value: language,
           label: languageLabel(language),
@@ -570,9 +589,9 @@ export function SettingsMessage({
           size="sm"
           disabled={disabled}
           className="max-w-[260px] truncate"
-          onClick={() => onSubDialog(setting.key)}
+          onClick={() => onSubDialog(setting.key, scope)}
         >
-          {formatValue(setting, scope, t) || t('settings.action.edit')}
+          {formatValue(setting, scope, t) || t('settings.action.select')}
         </Button>
       );
     }
@@ -760,7 +779,7 @@ export function SettingsMessage({
                                     },
                                   ],
                                   t('settings.label.ui.chatWidth'),
-                                  scope !== 'workspace',
+                                  false,
                                 )}
                               />
                             </div>
@@ -816,6 +835,11 @@ export function SettingsMessage({
                     </FieldGroup>
                   </CardContent>
                 </Card>
+                {isModelCategory && modelManagement && (
+                  <div className="mt-4">
+                    <ModelManagementSection {...modelManagement} />
+                  </div>
+                )}
               </div>
             )}
           </section>

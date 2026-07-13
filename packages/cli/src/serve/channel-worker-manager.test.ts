@@ -54,6 +54,11 @@ function fakeGroup(
     killAllSync: vi.fn(),
     snapshots: vi.fn(() => snapshots),
     primarySnapshot: vi.fn(() => snapshots[0]!),
+    beginWorkspaceDrain: vi.fn(),
+    cancelWorkspaceDrain: vi.fn(),
+    workspaceActivity: vi.fn(() => 0),
+    removeWorkspace: vi.fn(async () => {}),
+    restoreWorkspace: vi.fn(async () => {}),
     enqueueWebhookTask: vi.fn(async () => ({ accepted: true as const })),
     ...overrides,
   };
@@ -138,6 +143,88 @@ describe('createChannelWorkerManager', () => {
     });
   });
 
+  it('refreshes workspace topology without forcing unchanged workers', async () => {
+    const test = setup();
+    const selection: ServeChannelSelection = {
+      mode: 'names',
+      names: ['telegram'],
+    };
+    await test.manager.setSelection(selection);
+
+    await test.manager.refreshWorkspaces();
+
+    expect(test.resolveGroups).toHaveBeenLastCalledWith(selection, 'reload');
+    expect(test.group.reconcile).toHaveBeenCalledWith(
+      workspaceGroups(selection),
+    );
+    expect(test.onCommittedSelection).toHaveBeenCalledTimes(2);
+  });
+
+  it('restores idle and classifies workspace topology reconcile failures', async () => {
+    const test = setup();
+    const selection: ServeChannelSelection = {
+      mode: 'names',
+      names: ['telegram'],
+    };
+    await test.manager.setSelection(selection);
+    vi.mocked(test.group.reconcile).mockRejectedValueOnce(
+      new ChannelWorkerReconcileError('secondary failed', {
+        rolledBack: true,
+      }),
+    );
+
+    await expect(test.manager.refreshWorkspaces()).rejects.toMatchObject({
+      code: 'channel_worker_start_failed',
+      rolledBack: true,
+    });
+    expect(test.manager.state()).toMatchObject({
+      transition: 'idle',
+      selection,
+    });
+  });
+
+  it('restores idle when workspace topology resolution fails', async () => {
+    const test = setup();
+    const selection: ServeChannelSelection = {
+      mode: 'names',
+      names: ['telegram'],
+    };
+    await test.manager.setSelection(selection);
+    test.resolveGroups.mockRejectedValueOnce(new Error('settings invalid'));
+
+    await expect(test.manager.refreshWorkspaces()).rejects.toThrow(
+      'settings invalid',
+    );
+    expect(test.manager.state()).toMatchObject({
+      transition: 'idle',
+      selection,
+    });
+  });
+
+  it('does not reconcile after forced shutdown interrupts workspace refresh', async () => {
+    const test = setup();
+    const selection: ServeChannelSelection = {
+      mode: 'names',
+      names: ['telegram'],
+    };
+    await test.manager.setSelection(selection);
+    let releaseGroups!: () => void;
+    test.resolveGroups.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseGroups = () => resolve(workspaceGroups(selection));
+        }),
+    );
+
+    const refreshing = test.manager.refreshWorkspaces();
+    await vi.waitFor(() => expect(test.resolveGroups).toHaveBeenCalledTimes(2));
+    test.manager.killAllSync();
+    releaseGroups();
+
+    await expect(refreshing).rejects.toMatchObject({ code: 'daemon_draining' });
+    expect(test.group.reconcile).not.toHaveBeenCalled();
+  });
+
   it('starts the initial selection through the boot-time path', async () => {
     const test = setup();
     const selection: ServeChannelSelection = {
@@ -151,6 +238,21 @@ describe('createChannelWorkerManager', () => {
     expect(test.reserveLease).toHaveBeenCalledWith(selection);
     expect(test.group.start).toHaveBeenCalledTimes(1);
     expect(test.manager.state()).toMatchObject({ enabled: true, selection });
+  });
+
+  it('applies an existing workspace drain before a newly created group starts', async () => {
+    const test = setup();
+
+    test.manager.beginWorkspaceDrain(PRIMARY);
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['telegram'],
+    });
+
+    expect(test.group.beginWorkspaceDrain).toHaveBeenCalledWith(PRIMARY);
+    expect(
+      vi.mocked(test.group.beginWorkspaceDrain).mock.invocationCallOrder[0]!,
+    ).toBeLessThan(vi.mocked(test.group.start).mock.invocationCallOrder[0]!);
   });
 
   it('keeps the boot-time lease reserved when group construction fails', async () => {

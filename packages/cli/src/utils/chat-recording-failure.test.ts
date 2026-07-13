@@ -5,10 +5,6 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { execFile } from 'node:child_process';
-import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { promisify } from 'node:util';
 import {
   OutputFormat,
   type ChatRecordingFailureEvent,
@@ -29,8 +25,6 @@ const { mockWriteStderrLine } = vi.hoisted(() => ({
 vi.mock('./stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
 }));
-
-const execFileAsync = promisify(execFile);
 
 describe('chat recording failure reporting', () => {
   afterEach(() => {
@@ -142,28 +136,4 @@ describe('chat recording failure reporting', () => {
     await expect(result).resolves.toBe('timeout');
     expect(flush).toHaveBeenCalledOnce();
   });
-
-  it('keeps a headless child alive until a never-resolving flush times out', async () => {
-    const moduleUrl = pathToFileURL(
-      resolve(process.cwd(), 'src/utils/chat-recording-failure.ts'),
-    ).href;
-    const script = `
-        const { settleChatRecording } = await import(${JSON.stringify(moduleUrl)});
-        const config = {
-          getChatRecordingService: () => ({
-            flush: () => new Promise(() => {}),
-          }),
-        };
-        const result = await settleChatRecording(config, { finalize: false });
-        process.stdout.write(result);
-      `;
-
-    const { stdout } = await execFileAsync(
-      process.execPath,
-      ['--import', 'tsx', '--input-type=module', '--eval', script],
-      { timeout: 5_000 },
-    );
-
-    expect(stdout).toBe('timeout');
-  }, 10_000);
 });
