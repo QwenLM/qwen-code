@@ -651,6 +651,15 @@ describe('carriesBlockerSignal', () => {
     expect(carriesBlockerSignal('非阻塞观察：建议后续跟进')).toBe(false);
   });
 
+  it('guards the Chinese non-blocking prefix 非/并非', () => {
+    // `非阻塞` is the Chinese "non-blocking" — the CJK twin of the non-blocking
+    // lookbehind. Without the guard, "非阻塞问题" promoted and ate the budget.
+    expect(carriesBlockerSignal('非阻塞问题：建议后续跟进')).toBe(false);
+    expect(carriesBlockerSignal('这是并非阻塞项的小建议')).toBe(false);
+    // The bare blocker still promotes.
+    expect(carriesBlockerSignal('这是阻塞问题，必须修复')).toBe(true);
+  });
+
   it('guards the Chinese signal in Chinese, not only in English', () => {
     // The signal list is bilingual (`阻塞项`); the guard was not. On a repo whose
     // PR discussion is substantially Chinese, every "没有阻塞项" — the Chinese half

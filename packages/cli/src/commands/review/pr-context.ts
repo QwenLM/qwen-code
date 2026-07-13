@@ -292,7 +292,9 @@ const BLOCKER_PATTERNS: RegExp[] = [
   /(?<!non-)(?<!non )\bblocking\b/,
   /\bmust[ -]fix\b/,
   /\bstill (?:reproducible|repro|broken|fails?)\b/,
-  /阻塞(?:项|问题|点)/,
+  // `非阻塞` / `并非阻塞` is the Chinese "non-blocking" — the CJK twin of the
+  // `non-blocking` lookbehind above. Without it, "非阻塞问题" promoted.
+  /(?<![非])(?<!并非)阻塞(?:项|问题|点)/,
 ];
 /**
  * Words shortly before a signal that mean the opposite. "No critical blockers."

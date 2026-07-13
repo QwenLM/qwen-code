@@ -334,7 +334,7 @@ Two properties are deliberate:
 Three changes, and the ordering one is load-bearing:
 
 - **The section is written FIRST**, ahead of the description and the review history. Nothing in the file outranks the claims a `C=0` verdict may not be reached without ruling on. On the live thread this moved the heading from char 25 961 to **569**, and the blocker body from 43 094 to **4 421**.
-- **Recognition matches assertion patterns, not word presence** — `[Critical]`, `(blocker)`, `is a blocker`, `blocking issue/defect/bug`, `must fix`, `still reproducible/repro/broken/fails`, `阻塞项` — with a **bilingual** negation guard, so neither "no blockers" nor "没有阻塞项" ever promotes. Live promotions dropped 8 → 3 (the one real blocker plus two harmless mentions), and the file 59 KB → 40 KB.
+- **Recognition matches assertion patterns, not word presence** — `[Critical]`, `(blocker)`, `is a blocker`, a bare `blocking` (with a `non-blocking` / `非阻塞` lookbehind), `must fix`, `still reproducible/repro/broken/fails`, `阻塞项/问题/点` — with a **bilingual** negation guard, so neither "no blockers" nor "没有阻塞项" ever promotes. Live promotions dropped 8 → 3 (the one real blocker plus two harmless mentions), and the file 59 KB → 40 KB.
 - **The section carries a character budget.** Tight patterns keep promotion rare; the budget keeps a pathological thread from blowing the read window anyway. Bodies past it degrade to snippets **naming their exact fetch**, which the re-check already must run before ruling — not to silence.
 
 The lesson generalizes past this file: **"a false positive is cheap" is a claim about a budget, and it has to be measured against the real distribution, not assumed.** Here it was false until the ordering was fixed.
@@ -375,7 +375,7 @@ PR #6486 is the case. A `Ctrl+F` dual-fire blocker was filed — the hotkey togg
 
 Two changes, split the way this document keeps arriving at — **determinism owns the evidence, judgment owns the ruling**:
 
-- **`pr-context` extracts the evidence** (`extractCodeRefs`). A blocker's body names the code it is about — #6486's named `text-buffer.ts:2663` outright — so every promoted blocker now renders a **Referenced code** list. "Go read the untouched code" stops being a hope the agent might have and becomes a list it is handed.
+- **`pr-context` extracts the evidence** (`extractCodeRefs`). A blocker's body names the code it is about — #6486's named `text-buffer.ts:2663` outright — so a promoted blocker that names a file now renders a **Referenced code** list (a blocker citing no path gets none — the reader traces the mechanism themselves). "Go read the untouched code" stops being a hope the agent might have and becomes a list it is handed.
 - **SKILL.md raises the bar** on the ruling: name the mechanism, name what now stops it, and when the stopping condition lives outside the diff, read it there — or the verdict is `cannot tell`.
 
 No new `compose-review` input was needed: `cannot tell` already caps the event. The change is to make wrong "fixed" rulings land there instead of passing silently.

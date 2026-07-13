@@ -95,6 +95,23 @@ describe('planTestEfficacy', () => {
     ]);
   });
 
+  it('does not revert non-executable source (a .md/.json fixture)', () => {
+    // classifyPath labels a fixture under a src tree `source`. Reverting it is
+    // meaningless (no behaviour) and destructive — this PR ships a .md fixture
+    // that pr-context.test.ts loads; deleting it makes that test fail to load
+    // and the probe inconclusive because of the probe itself.
+    const plan = planTestEfficacy(
+      [
+        { path: 'packages/cli/src/x.ts', kind: 'source' },
+        { path: 'packages/cli/src/__fixtures__/body.md', kind: 'source' },
+        { path: 'packages/cli/src/data.json', kind: 'source' },
+        { path: 'packages/cli/src/x.test.ts', kind: 'test' },
+      ],
+      GLOBS,
+    );
+    expect(plan.revert).toEqual(['packages/cli/src/x.ts']);
+  });
+
   it('probes nothing on a test-only diff', () => {
     // A new test for OLD code is supposed to pass with nothing reverted. Probing
     // it would report every such PR as "inert" — a false blocker on exactly the

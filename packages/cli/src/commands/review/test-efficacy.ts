@@ -97,6 +97,19 @@ export interface EfficacyPlan {
 }
 
 /**
+ * Executable source that can carry a behavioural change worth reverting.
+ * `classifyPath` labels everything under a `src` tree that is not a test,
+ * doc, or generated file `source` — which includes non-executable data a test
+ * imports: JSON fixtures, `.md` fixture bodies (this PR ships one:
+ * `__fixtures__/pr-6486-comment-4942713150.md`), snapshots. Reverting those to
+ * base deletes a file `pr-context.test.ts` then fails to load — an inconclusive
+ * probe caused by the probe itself. Only revert code that actually holds the
+ * behaviour under test.
+ */
+const REVERTABLE_SOURCE_RE =
+  /\.(tsx?|jsx?|mjs|cjs|vue|svelte|py|go|rs|java|kt|rb|c|cc|cpp|h|hpp|cs|php|swift|scala)$/;
+
+/**
  * Split the diff into what to report and what to run.
  *
  * A diff with no source changes has nothing to gate, so it gets no probe: a
@@ -107,7 +120,13 @@ export function planTestEfficacy(
   workspaceGlobs: string[],
 ): EfficacyPlan {
   const tests = files.filter((f) => f.kind === 'test').map((f) => f.path);
-  const revert = files.filter((f) => f.kind === 'source').map((f) => f.path);
+  // `kind === 'source'` is the diff-plan bucket for "not test/doc/generated",
+  // which sweeps in data files a test imports. Reverting a fixture is both
+  // meaningless (it holds no behaviour) and destructive (a test that loads it
+  // then fails), so gate on an executable-source extension too.
+  const revert = files
+    .filter((f) => f.kind === 'source' && REVERTABLE_SOURCE_RE.test(f.path))
+    .map((f) => f.path);
   const unreachable = tests.filter(
     (t) => !isWorkspaceMember(t, workspaceGlobs),
   );
@@ -282,6 +301,28 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     detail: string;
   }> = [];
   let restoreFailure: string | undefined;
+
+  if (probes.length > 0 && revert.length > 0) {
+    // The probe checks out base over the revert set and deletes added files,
+    // then restores HEAD. That is safe on the ephemeral worktree the /review
+    // pipeline builds, but this is a public command that accepts any
+    // `--worktree`: on a tree with uncommitted edits to a revert-set file, the
+    // checkout would discard them with no undo. Refuse a dirty revert set
+    // rather than eat someone's work.
+    const dirty = revert.filter((p) => {
+      const r = spawnSync('git', ['status', '--porcelain', '--', p], {
+        cwd: worktree,
+        encoding: 'utf8',
+      });
+      return (r.stdout ?? '').trim().length > 0;
+    });
+    if (dirty.length > 0) {
+      throw new Error(
+        `refusing to run: the worktree has uncommitted changes to files this probe would revert (${dirty.join(', ')}). ` +
+          `Commit or stash them first — the probe checks out base over these files and could not restore your edits.`,
+      );
+    }
+  }
 
   if (probes.length > 0 && revert.length > 0) {
     // "Revert to base" is two operations, not one. A file the PR MODIFIED is
