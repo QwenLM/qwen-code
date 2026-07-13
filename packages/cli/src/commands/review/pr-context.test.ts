@@ -691,8 +691,12 @@ describe('carriesBlockerSignal', () => {
     expect(
       carriesBlockerSignal('No other concerns, but auth is a blocker'),
     ).toBe(true);
-    // A negation whose clause genuinely covers the signal still negates.
-    expect(carriesBlockerSignal('No blockers found, ship it')).toBe(false);
+    // A negation whose clause genuinely covers the signal still negates — the
+    // negation word is in the SAME clause as the matched pattern, no comma
+    // between them. (`No blockers found` would be a vacuous check here: the
+    // plural `blockers` matches no pattern at all, so it proves nothing about
+    // the negation window.)
+    expect(carriesBlockerSignal('This is not a blocker')).toBe(false);
     expect(carriesBlockerSignal('没有阻塞问题，一切正常')).toBe(false);
   });
   it('does not let a negation reach across a clause separator', () => {

@@ -268,11 +268,25 @@ function git(cwd: string, ...args: string[]): void {
   }
 }
 
-/** Does this path exist at the base commit? */
+/** Run git and return trimmed stdout; throws on spawn failure or non-zero. */
+function gitOut(cwd: string, ...args: string[]): string {
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  if (r.error) throw r.error;
+  if (r.status !== 0) {
+    throw new Error(`git ${args.join(' ')} failed: ${r.stderr ?? ''}`);
+  }
+  return (r.stdout ?? '').trim();
+}
+
+/**
+ * Does this path exist at the given rev? A non-zero exit is a legitimate "no"
+ * (git prints nothing), but a spawn *failure* (`r.error`, e.g. git missing) is
+ * not evidence of absence — surface it rather than reading it as "not present".
+ */
 function existsAtRev(cwd: string, rev: string, path: string): boolean {
-  return (
-    spawnSync('git', ['cat-file', '-e', `${rev}:${path}`], { cwd }).status === 0
-  );
+  const r = spawnSync('git', ['cat-file', '-e', `${rev}:${path}`], { cwd });
+  if (r.error) throw r.error;
+  return r.status === 0;
 }
 const existsAtBase = (cwd: string, base: string, path: string) =>
   existsAtRev(cwd, base, path);
@@ -309,13 +323,13 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     // `--worktree`: on a tree with uncommitted edits to a revert-set file, the
     // checkout would discard them with no undo. Refuse a dirty revert set
     // rather than eat someone's work.
-    const dirty = revert.filter((p) => {
-      const r = spawnSync('git', ['status', '--porcelain', '--', p], {
-        cwd: worktree,
-        encoding: 'utf8',
-      });
-      return (r.stdout ?? '').trim().length > 0;
-    });
+    // `gitOut` throws on spawn failure (via the `git()` guard), so a `git`
+    // that could not run fails the probe rather than silently reading as a
+    // clean tree — the fail-OPEN outcome would defeat the whole guard, which
+    // exists to prevent data loss.
+    const dirty = revert.filter(
+      (p) => gitOut(worktree, 'status', '--porcelain', '--', p).length > 0,
+    );
     if (dirty.length > 0) {
       throw new Error(
         `refusing to run: the worktree has uncommitted changes to files this probe would revert (${dirty.join(', ')}). ` +

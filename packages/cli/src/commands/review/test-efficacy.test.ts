@@ -112,6 +112,17 @@ describe('planTestEfficacy', () => {
     expect(plan.revert).toEqual(['packages/cli/src/x.ts']);
   });
 
+  it('probes nothing on a source-only diff (no tests to run)', () => {
+    // Mirror of the test-only case: source changed but no test file to probe
+    // means nothing to gate. `probes` must be empty even though `revert` is not.
+    const plan = planTestEfficacy(
+      [{ path: 'packages/cli/src/a.ts', kind: 'source' }],
+      GLOBS,
+    );
+    expect(plan.revert).toEqual(['packages/cli/src/a.ts']);
+    expect(plan.probes).toEqual([]);
+  });
+
   it('probes nothing on a test-only diff', () => {
     // A new test for OLD code is supposed to pass with nothing reverted. Probing
     // it would report every such PR as "inert" — a false blocker on exactly the
