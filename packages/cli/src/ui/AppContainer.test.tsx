@@ -219,6 +219,7 @@ describe('AppContainer State Management', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     restoreCiEnv = clearCiEnv();
+    vi.stubEnv('TERM', 'xterm-256color');
     originalStdoutIsTTY = process.stdout.isTTY;
     Object.defineProperty(process.stdout, 'isTTY', {
       value: true,
@@ -435,6 +436,7 @@ describe('AppContainer State Management', () => {
       });
     }
     restoreCiEnv();
+    vi.unstubAllEnvs();
     cleanup();
   });
 
@@ -826,11 +828,38 @@ describe('AppContainer State Management', () => {
           settings={legacySettings}
           version="1.0.0"
           initializationResult={mockInitResult}
-          initialUseTerminalBuffer={true}
+          initialUseVirtualViewport={true}
         />,
       );
 
       expect(capturedUIState.useTerminalBuffer).toBe(true);
+    });
+
+    it('uses a disabled startup VP decision over an enabled setting', () => {
+      const vpSettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+            useTerminalBuffer: true,
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={vpSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+          initialUseVirtualViewport={false}
+        />,
+      );
+
+      expect(capturedUIState.useTerminalBuffer).toBe(false);
     });
 
     it('keeps screen reader mode on the Static path when useTerminalBuffer is unset', () => {
@@ -2446,6 +2475,10 @@ describe('AppContainer State Management', () => {
     };
 
     beforeEach(() => {
+      vi.stubEnv('TMUX', undefined);
+      vi.stubEnv('STY', undefined);
+      vi.stubEnv('ZELLIJ', undefined);
+      vi.stubEnv('DVTM', undefined);
       // Reset mock stdout for each test. The title useEffect now uses
       // process.stdout.write directly (to avoid Ink proxy corruption of
       // OSC escape sequences), so we spy on that.
@@ -3016,7 +3049,7 @@ describe('AppContainer State Management', () => {
       vi.stubEnv('CLI_TITLE', 'Custom Title');
       const staticTitleWithEnv = formatSessionWindowTitle(null, folderName);
       expect(staticTitleWithEnv).toBe('Custom Title');
-      vi.unstubAllEnvs();
+      vi.stubEnv('CLI_TITLE', undefined);
 
       // Verify the escape sequence format for the static title
       const writeSpy = vi.fn();

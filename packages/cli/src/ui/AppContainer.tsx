@@ -18,6 +18,7 @@ import { type DOMElement, measureElement } from 'ink';
 import { App } from './App.js';
 import { AppContext } from './contexts/AppContext.js';
 import { UIStateContext, type UIState } from './contexts/UIStateContext.js';
+import { VirtualViewportContext } from './contexts/VirtualViewportContext.js';
 import {
   UIActionsContext,
   type UIActions,
@@ -433,7 +434,7 @@ interface AppContainerProps {
   startupWarnings?: string[];
   version: string;
   initializationResult: InitializationResult;
-  initialUseTerminalBuffer?: boolean;
+  initialUseVirtualViewport?: boolean;
   extensionRefreshState?: ExtensionRefreshState;
 }
 
@@ -450,7 +451,7 @@ const SHELL_WIDTH_FRACTION = 0.89;
 const SHELL_HEIGHT_PADDING = 10;
 
 export const AppContainer = (props: AppContainerProps) => {
-  const { settings, config, initializationResult, initialUseTerminalBuffer } =
+  const { settings, config, initializationResult, initialUseVirtualViewport } =
     props;
   const extensionRefreshState = useMemo(
     () => props.extensionRefreshState ?? new ExtensionRefreshState(),
@@ -1099,7 +1100,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // change triggered refreshStatic (Ctrl+O, model change, etc.).
   const [useTerminalBuffer] = useState(
     () =>
-      initialUseTerminalBuffer ??
+      initialUseVirtualViewport ??
       shouldUseVirtualViewport(
         settings.merged.ui?.useTerminalBuffer,
         config.getScreenReader(),
@@ -4479,34 +4480,36 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   return (
-    <UIStateContext.Provider value={uiState}>
-      <UIActionsContext.Provider value={uiActions}>
-        <ConfigContext.Provider value={config}>
-          <AppContext.Provider
-            value={{
-              version: props.version,
-              startupWarnings,
-            }}
-          >
-            <ThoughtExpandedProvider value={thoughtExpandedValue}>
-              <RenderModeProvider value={renderModeValue}>
-                <TerminalOutputProvider value={writeRaw}>
-                  <ShellFocusContext.Provider value={isFocused}>
-                    {transcriptFreeze ? (
-                      <TranscriptView
-                        items={transcriptItems}
-                        useAlternateScreen={!useTerminalBuffer}
-                      />
-                    ) : (
-                      <App />
-                    )}
-                  </ShellFocusContext.Provider>
-                </TerminalOutputProvider>
-              </RenderModeProvider>
-            </ThoughtExpandedProvider>
-          </AppContext.Provider>
-        </ConfigContext.Provider>
-      </UIActionsContext.Provider>
-    </UIStateContext.Provider>
+    <VirtualViewportContext.Provider value={useTerminalBuffer}>
+      <UIStateContext.Provider value={uiState}>
+        <UIActionsContext.Provider value={uiActions}>
+          <ConfigContext.Provider value={config}>
+            <AppContext.Provider
+              value={{
+                version: props.version,
+                startupWarnings,
+              }}
+            >
+              <ThoughtExpandedProvider value={thoughtExpandedValue}>
+                <RenderModeProvider value={renderModeValue}>
+                  <TerminalOutputProvider value={writeRaw}>
+                    <ShellFocusContext.Provider value={isFocused}>
+                      {transcriptFreeze ? (
+                        <TranscriptView
+                          items={transcriptItems}
+                          useAlternateScreen={!useTerminalBuffer}
+                        />
+                      ) : (
+                        <App />
+                      )}
+                    </ShellFocusContext.Provider>
+                  </TerminalOutputProvider>
+                </RenderModeProvider>
+              </ThoughtExpandedProvider>
+            </AppContext.Provider>
+          </ConfigContext.Provider>
+        </UIActionsContext.Provider>
+      </UIStateContext.Provider>
+    </VirtualViewportContext.Provider>
   );
 };

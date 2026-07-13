@@ -42,6 +42,11 @@ describe('isInteractiveTerminal', () => {
     expect(isInteractiveTerminal(undefined, {})).toBe(false);
   });
 
+  it('keeps dumb terminals on the append-only path', () => {
+    expect(isInteractiveTerminal(true, { TERM: 'dumb' })).toBe(false);
+    expect(isInteractiveTerminal(true, { TERM: 'DUMB' })).toBe(false);
+  });
+
   it('treats CI sessions as non-interactive unless CI is explicitly disabled', () => {
     expect(isInteractiveTerminal(true, { CI: 'true' })).toBe(false);
     expect(

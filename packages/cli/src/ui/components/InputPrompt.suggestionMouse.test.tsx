@@ -25,7 +25,7 @@ import { useInputHistory } from '../hooks/useInputHistory.js';
 import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.js';
 import { useVoiceInput } from '../hooks/use-voice-input.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
-import { useUIState } from '../contexts/UIStateContext.js';
+import { VirtualViewportContext } from '../contexts/VirtualViewportContext.js';
 
 // Capture the props handed to SuggestionsDisplay so we can drive the mouse
 // hover/select callbacks directly, without simulating raw SGR mouse bytes.
@@ -49,17 +49,9 @@ vi.mock('../hooks/useCommandCompletion.js');
 vi.mock('../hooks/useInputHistory.js');
 vi.mock('../hooks/useReverseSearchCompletion.js');
 vi.mock('../hooks/use-voice-input.js');
-vi.mock('../contexts/UIStateContext.js', async () => {
-  const { createContext } = await import('react');
-  return {
-    UIStateContext: createContext(null),
-    useUIState: vi.fn(() => ({
-      isFeedbackDialogOpen: false,
-      messageQueue: [],
-      useTerminalBuffer: false,
-    })),
-  };
-});
+vi.mock('../contexts/UIStateContext.js', () => ({
+  useUIState: vi.fn(() => ({ isFeedbackDialogOpen: false, messageQueue: [] })),
+}));
 vi.mock('../contexts/UIActionsContext.js', () => ({
   useUIActions: vi.fn(() => ({
     handleRetryLastPrompt: vi.fn(),
@@ -94,13 +86,6 @@ vi.mock('../contexts/BackgroundTaskViewContext.js', () => ({
 }));
 
 const mockSlashCommands: SlashCommand[] = [];
-
-const mockUIState = (useTerminalBuffer = false) =>
-  ({
-    isFeedbackDialogOpen: false,
-    messageQueue: [],
-    useTerminalBuffer,
-  }) as unknown as ReturnType<typeof useUIState>;
 
 describe('InputPrompt suggestion mouse routing', () => {
   let props: InputPromptProps;
@@ -141,7 +126,6 @@ describe('InputPrompt suggestion mouse routing', () => {
   beforeEach(() => {
     captured.props = null;
     vi.clearAllMocks();
-    vi.mocked(useUIState).mockReturnValue(mockUIState());
 
     mockBuffer = makeBuffer('/sk');
     vi.mocked(useShellHistory).mockReturnValue({
@@ -233,10 +217,12 @@ describe('InputPrompt suggestion mouse routing', () => {
     unmount();
   });
 
-  it('uses UIState VP mode for suggestion mouse when the raw setting is unset', () => {
-    vi.mocked(useUIState).mockReturnValue(mockUIState(true));
-
-    const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+  it('uses the startup VP decision for suggestion mouse when the raw setting is unset', () => {
+    const { unmount } = renderWithProviders(
+      <VirtualViewportContext.Provider value={true}>
+        <InputPrompt {...props} />
+      </VirtualViewportContext.Provider>,
+    );
     expect(captured.props).not.toBeNull();
     expect(captured.props!['mouseEnabled']).toBe(true);
     unmount();

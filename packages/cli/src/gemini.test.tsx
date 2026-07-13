@@ -1925,6 +1925,7 @@ describe('startInteractiveUI', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     restoreCiEnv = clearCiEnv();
+    vi.stubEnv('TERM', 'xterm-256color');
     originalStdoutIsTTY = process.stdout.isTTY;
     Object.defineProperty(process.stdout, 'isTTY', {
       value: true,
@@ -1943,6 +1944,7 @@ describe('startInteractiveUI', () => {
       });
     }
     restoreCiEnv();
+    vi.unstubAllEnvs();
     const currentExitListeners = process.listeners(
       'exit',
     ) as NodeJS.ExitListener[];
@@ -2025,6 +2027,30 @@ describe('startInteractiveUI', () => {
       value: false,
       configurable: true,
     });
+    const { render } = await import('ink');
+    const renderSpy = vi.mocked(render);
+
+    const mockInitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
+    await startInteractiveUI(
+      mockConfig,
+      mockSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      mockInitializationResult,
+    );
+
+    const [, options] = renderSpy.mock.calls[0];
+    expect(options).toMatchObject({ alternateScreen: false });
+  });
+
+  it('should not use alternate screen when TERM is dumb', async () => {
+    vi.stubEnv('TERM', 'dumb');
     const { render } = await import('ink');
     const renderSpy = vi.mocked(render);
 

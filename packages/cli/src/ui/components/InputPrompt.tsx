@@ -49,6 +49,7 @@ import { useShellFocusState } from '../contexts/ShellFocusContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
+import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
 import { useKeypressContext } from '../contexts/KeypressContext.js';
 import {
   useAgentViewState,
@@ -246,7 +247,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const settings = useSettings();
   // Mouse interactions (suggestion list + click-to-position cursor) are enabled
   // in alternate-screen mode (see RowMouseController's coordinate assumptions).
-  const mouseInteractionsEnabled = uiState.useTerminalBuffer;
+  const mouseInteractionsEnabled = useVirtualViewport(
+    settings.merged.ui?.useTerminalBuffer,
+  );
   const { pasteWorkaround } = useKeypressContext();
   const { agents, agentTabBarFocused } = useAgentViewState();
   const { setAgentTabBarFocused } = useAgentViewActions();

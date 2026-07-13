@@ -34,7 +34,11 @@ export function isInteractiveTerminal(
   stdoutIsTTY: boolean | undefined = process.stdout.isTTY,
   env: TerminalEnvironment = process.env,
 ): boolean {
-  return Boolean(stdoutIsTTY) && !isCiEnvironment(env);
+  return (
+    Boolean(stdoutIsTTY) &&
+    !isCiEnvironment(env) &&
+    env['TERM']?.toLowerCase() !== 'dumb'
+  );
 }
 
 export function shouldUseVirtualViewport(

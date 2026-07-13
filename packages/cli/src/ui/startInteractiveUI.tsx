@@ -181,7 +181,7 @@ export async function startInteractiveUI(
                         startupWarnings={startupWarnings}
                         version={version}
                         initializationResult={initializationResult}
-                        initialUseTerminalBuffer={useVP}
+                        initialUseVirtualViewport={useVP}
                         extensionRefreshState={options.extensionRefreshState}
                       />
                     </BackgroundTaskViewProvider>

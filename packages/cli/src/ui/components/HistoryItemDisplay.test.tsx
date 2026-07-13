@@ -18,7 +18,7 @@ import { renderWithProviders } from '../../test-utils/render.js';
 import { LoadedSettings } from '../../config/settings.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { ThoughtExpandedProvider } from '../contexts/ThoughtExpandedContext.js';
-import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
+import { VirtualViewportContext } from '../contexts/VirtualViewportContext.js';
 
 // Mock child components
 vi.mock('./messages/ToolGroupMessage.js', () => ({
@@ -577,6 +577,20 @@ describe('<HistoryItemDisplay />', () => {
       durationMs: 1200,
     };
 
+    const settingsWithVp = (enabled: boolean) =>
+      new LoadedSettings(
+        { path: '', settings: {}, originalSettings: {} },
+        { path: '', settings: {}, originalSettings: {} },
+        {
+          path: '',
+          settings: { ui: { useTerminalBuffer: enabled } },
+          originalSettings: {},
+        },
+        { path: '', settings: {}, originalSettings: {} },
+        true,
+        new Set(),
+      );
+
     it('subscribes the click handler without bypassVpGate (stays VP-gated)', () => {
       vi.mocked(useMouseEvents).mockClear();
       renderWithProviders(
@@ -594,20 +608,33 @@ describe('<HistoryItemDisplay />', () => {
       expect(opts?.bypassVpGate ?? false).toBe(false);
     });
 
-    it('shows the click hint when raw settings are unset but UIState is in VP mode', () => {
+    it('shows the click hint when raw settings are unset but startup VP is enabled', () => {
       const { lastFrame } = renderWithProviders(
-        <UIStateContext.Provider
-          value={{ useTerminalBuffer: true } as unknown as UIState}
-        >
+        <VirtualViewportContext.Provider value={true}>
           <HistoryItemDisplay
             item={thoughtItem}
             terminalWidth={100}
             isPending={false}
           />
-        </UIStateContext.Provider>,
+        </VirtualViewportContext.Provider>,
       );
 
       expect(lastFrame()).toContain(`click or ${toggleKeyHint} to expand`);
+    });
+
+    it('hides the click hint when startup VP overrides an enabled setting', () => {
+      const { lastFrame } = renderWithProviders(
+        <VirtualViewportContext.Provider value={false}>
+          <HistoryItemDisplay
+            item={thoughtItem}
+            terminalWidth={100}
+            isPending={false}
+          />
+        </VirtualViewportContext.Provider>,
+        { settings: settingsWithVp(true) },
+      );
+
+      expect(lastFrame()).not.toContain(`click or ${toggleKeyHint} to expand`);
     });
   });
 });
