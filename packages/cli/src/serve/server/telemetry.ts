@@ -18,6 +18,14 @@ import {
   MAX_CLIENT_ID_LENGTH,
 } from './request-helpers.js';
 
+function decodePathSegment(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 // Route handlers are split across `routes/*.ts`; any added or renamed route
 // that needs daemon telemetry must keep these patterns in sync.
 export function resolveDaemonTelemetryRoute(
@@ -323,9 +331,12 @@ export function daemonTelemetryMiddleware(
       route.route === 'GET /session/:id/rewind/snapshots' ||
       route.route === 'POST /session/:id/rewind' ||
       route.route === 'POST /session/:id/shell';
+    const sessionId = route.sessionId
+      ? decodePathSegment(route.sessionId)
+      : undefined;
     const workspaceCwd =
-      (resolveOwnerWorkspace && route.sessionId
-        ? resolveSessionWorkspaceCwd?.(route.sessionId)
+      (resolveOwnerWorkspace && sessionId
+        ? resolveSessionWorkspaceCwd?.(sessionId)
         : undefined) ?? resolveWorkspaceCwd(req);
     const workspaceHash = resolveWorkspaceHash(workspaceCwd);
     const rawClientId = req.get(CLIENT_ID_HEADER);
@@ -342,7 +353,7 @@ export function daemonTelemetryMiddleware(
         method: req.method,
         route: route.route,
         workspaceHash,
-        ...(route.sessionId ? { sessionId: route.sessionId } : {}),
+        ...(sessionId ? { sessionId } : {}),
         ...(route.permissionRequestId
           ? { permissionRequestId: route.permissionRequestId }
           : {}),
