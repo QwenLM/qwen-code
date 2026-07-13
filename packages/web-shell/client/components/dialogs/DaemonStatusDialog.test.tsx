@@ -365,10 +365,11 @@ describe('DaemonStatusDialog', () => {
     expect(text).toContain('LLM API latency');
     expect(text).toContain('Model API health');
     expect(text).toContain('Token burn');
-    // ...one SvgLineChart per card...
+    // ...one SvgLineChart per card (12 charts on the Metrics tab); a floor of
+    // 12 catches a regression that silently drops a chart card.
     expect(
       container!.querySelectorAll('svg[role="img"]').length,
-    ).toBeGreaterThanOrEqual(10);
+    ).toBeGreaterThanOrEqual(12);
     // ...and the panels are mutually exclusive: Overview content is gone.
     expect(text).not.toContain('4242');
   });

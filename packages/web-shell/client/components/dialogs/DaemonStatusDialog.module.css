@@ -184,8 +184,13 @@
   cursor: help;
 }
 
+/* Focus/hover: a filled background (not a color shift alone) so keyboard focus
+   is unmistakable — WCAG 2.4.7. Mirrors the dialog's own header buttons
+   (DialogShell `.close` / `.iconButton`), which use --muted rather than an
+   outline; --muted is in scope under the DialogShell portal. */
 .infoHintButton:hover,
 .infoHintButton:focus-visible {
+  background: var(--muted);
   color: var(--foreground);
 }
 

@@ -789,7 +789,10 @@ export function logContentRetryFailure(
  * at an LLM call site (via the `onRetry` callback opt-in). Distinct from
  * `logContentRetry`, which is fired by `geminiChat`'s content-recovery loop.
  *
- * Three-sink fan-out, matching the `logContentRetry` shape exactly:
+ * Fan-out (sink 0 fires first, before the SDK guard, so retries are counted
+ * even with telemetry off; sinks 1–3 match the `logContentRetry` shape):
+ *   0. `apiActivityTracker` increment — daemon-status model-API-health charts
+ *      (drained per live model round by the ACP MessageEmitter).
  *   1. QwenLogger RUM ingestion (Aliyun internal stats)
  *   2. OTel log signal via `logger.emit()` — picked up by LogToSpanProcessor
  *      and bridged to a span sibling under the caller's active span (typically
@@ -798,9 +801,7 @@ export function logContentRetryFailure(
  *   3. `recordApiRetry` Counter increment for per-model retry-rate dashboards.
  */
 export function logApiRetry(config: Config, event: ApiRetryEvent): void {
-  // Feed the daemon-status model-API-health charts: one automatic retry per
-  // backoff, drained per live model round by the ACP MessageEmitter.
-  apiActivityTracker.recordRetry();
+  apiActivityTracker.recordRetry(); // sink 0 — see fan-out above
   QwenLogger.getInstance(config)?.logApiRetryEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
