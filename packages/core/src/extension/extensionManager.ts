@@ -423,12 +423,12 @@ export class ExtensionManager {
   private readonly preparedMutations = new WeakSet<PreparedExtensionMutation>();
   private discoverCache: DiscoveredPlugin[] | null = null;
 
-  private applyNetworkPolicy(
+  private withNetworkPolicy(
     installMetadata: ExtensionInstallMetadata | undefined,
-  ): void {
-    if (installMetadata && this.networkPolicy) {
-      installMetadata.networkPolicy = this.networkPolicy;
-    }
+  ): ExtensionInstallMetadata | undefined {
+    return installMetadata && this.networkPolicy
+      ? { ...installMetadata, networkPolicy: this.networkPolicy }
+      : installMetadata;
   }
 
   private config?: Config;
@@ -1468,9 +1468,15 @@ export class ExtensionManager {
     | { upToDate: true; extension: Extension }
     | { upToDate: false; prepared: PreparedExtensionMutation }
   > {
-    this.applyNetworkPolicy(options.extension.installMetadata);
+    const installMetadata = this.withNetworkPolicy(
+      options.extension.installMetadata,
+    );
+    const extension =
+      installMetadata === options.extension.installMetadata
+        ? options.extension
+        : { ...options.extension, installMetadata };
     const state = await checkForExtensionUpdate(
-      options.extension,
+      extension,
       this,
       options.signal,
     );
@@ -1506,7 +1512,7 @@ export class ExtensionManager {
     prepareOnly: boolean,
     emitMutation: boolean,
   ): Promise<Extension | PreparedExtensionMutation> {
-    this.applyNetworkPolicy(installMetadata);
+    installMetadata = this.withNetworkPolicy(installMetadata)!;
     const currentDir = cwd ?? this.workspaceDir;
     const telemetryConfig = getTelemetryConfig(
       currentDir,
@@ -2341,11 +2347,16 @@ export class ExtensionManager {
         callback(extension.name, ExtensionUpdateState.NOT_UPDATABLE);
         continue;
       }
-      this.applyNetworkPolicy(extension.installMetadata);
+      const installMetadata = this.withNetworkPolicy(extension.installMetadata);
+      const extensionForUpdate =
+        installMetadata === extension.installMetadata
+          ? extension
+          : { ...extension, installMetadata };
       callback(extension.name, ExtensionUpdateState.CHECKING_FOR_UPDATES);
       promises.push(
         schedule(
-          async () => await checkForExtensionUpdate(extension, this, signal),
+          async () =>
+            await checkForExtensionUpdate(extensionForUpdate, this, signal),
         )
           .then((state) => callback(extension.name, state))
           .catch(() => {

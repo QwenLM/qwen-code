@@ -984,6 +984,42 @@ describe('git extension helpers', () => {
       await fs.rm(tempDir, { recursive: true, force: true });
     });
 
+    it('preserves the abort reason for release metadata response errors', async () => {
+      const responseError = new Error('response interrupted');
+      const controller = new AbortController();
+      const abortReason = new Error('release check cancelled');
+      const response = new Readable({
+        read() {
+          controller.abort(abortReason);
+          this.destroy(responseError);
+        },
+      }) as IncomingMessage;
+      Object.assign(response, { statusCode: 200, headers: {} });
+      mockHttpsGet.mockImplementationOnce(((_url, options, callback) => {
+        callResponseCallback(options, callback, response);
+        return createRequestMock();
+      }) as typeof https.get);
+
+      await expect(
+        downloadFromGitHubRelease(
+          { source: 'owner/repo', type: 'github-release' },
+          tempDir,
+          controller.signal,
+        ),
+      ).rejects.toBe(abortReason);
+    });
+
+    it('rejects invalid release metadata JSON', async () => {
+      mockHttpsResponses('{ invalid json');
+
+      await expect(
+        downloadFromGitHubRelease(
+          { source: 'owner/repo', type: 'github-release' },
+          tempDir,
+        ),
+      ).rejects.toBeInstanceOf(SyntaxError);
+    });
+
     it('should explain when a release archive is missing an extension manifest', async () => {
       const invalidArchive = await createZipBuffer(tempDir, [
         { name: 'README.md', content: 'not an extension' },

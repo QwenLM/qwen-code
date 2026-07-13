@@ -228,6 +228,9 @@ function fetchNpmJson<T>(
               ...(target.lookup ? { agent: false } : {}),
             },
             (res) => {
+              res.on('error', (error) => {
+                reject(signal?.aborted ? signal.reason : error);
+              });
               if (res.statusCode === 301 || res.statusCode === 302) {
                 if (res.headers.location) {
                   let redirectUrl: URL;
@@ -260,6 +263,7 @@ function fetchNpmJson<T>(
                 }
               }
               if (res.statusCode !== 200) {
+                res.resume();
                 return reject(
                   new Error(
                     `npm registry request failed with status ${res.statusCode}: ${redactUrlCredentials(url)}`,
@@ -384,6 +388,8 @@ function downloadNpmFileRedirect(
                 }
               }
               if (res.statusCode !== 200) {
+                res.destroy();
+                context.activeResponse = undefined;
                 fail(
                   new Error(
                     `Failed to download npm tarball: status ${res.statusCode}`,

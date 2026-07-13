@@ -200,19 +200,21 @@ function mockNpmRegistryResponse(data: object) {
 }
 
 function mockNpmRegistryStatus(statusCode: number) {
+  const response = {
+    statusCode,
+    headers: {},
+    on: vi.fn(),
+    resume: vi.fn(),
+  };
   vi.mocked(https.get).mockImplementation(
     (_url: unknown, _options: unknown, callback: unknown) => {
-      const mockRes = {
-        statusCode,
-        headers: {},
-        on: vi.fn(),
-      };
       if (typeof callback === 'function') {
-        callback(mockRes as never);
+        callback(response as never);
       }
       return { on: vi.fn() } as never;
     },
   );
+  return response;
 }
 
 function npmMetadataResponse(tarballUrl: string) {
@@ -306,7 +308,7 @@ describe('downloadFromNpmRegistry', () => {
   });
 
   it('redacts credentialed registry URLs in metadata request errors', async () => {
-    mockNpmRegistryStatus(404);
+    const response = mockNpmRegistryStatus(404);
 
     await expect(
       downloadFromNpmRegistry(
@@ -320,6 +322,76 @@ describe('downloadFromNpmRegistry', () => {
     ).rejects.toThrow(
       'npm registry request failed with status 404: https://***REDACTED***@registry.example.com/@scope%2fpkg',
     );
+    expect(response.resume).toHaveBeenCalled();
+  });
+
+  it('rejects npm metadata response stream errors', async () => {
+    const responseError = new Error('metadata response interrupted');
+    vi.mocked(https.get).mockImplementation(
+      (_url: unknown, _options: unknown, callback: unknown) => {
+        if (typeof callback === 'function') {
+          callback({
+            statusCode: 200,
+            headers: {},
+            on: vi.fn((event: string, handler: (error?: Error) => void) => {
+              if (event === 'error')
+                queueMicrotask(() => handler(responseError));
+            }),
+          } as never);
+        }
+        return { on: vi.fn().mockReturnThis() } as never;
+      },
+    );
+
+    await expect(
+      downloadFromNpmRegistry(
+        {
+          source: '@scope/pkg',
+          type: 'npm',
+          registryUrl: 'https://registry.example.com',
+        },
+        '/tmp/qwen-extension',
+      ),
+    ).rejects.toBe(responseError);
+  });
+
+  it('destroys non-200 npm tarball responses before rejecting', async () => {
+    const response = {
+      statusCode: 503,
+      headers: {},
+      on: vi.fn(),
+      destroy: vi.fn(),
+    };
+    let requestCount = 0;
+    vi.mocked(https.get).mockImplementation(
+      (_url: unknown, _options: unknown, callback: unknown) => {
+        requestCount += 1;
+        if (typeof callback === 'function') {
+          callback(
+            (requestCount === 1
+              ? npmMetadataResponse('https://registry.example.com/pkg.tgz')
+              : response) as never,
+          );
+        }
+        return {
+          on: vi.fn().mockReturnThis(),
+          setTimeout: vi.fn(),
+          destroy: vi.fn(),
+        } as never;
+      },
+    );
+
+    await expect(
+      downloadFromNpmRegistry(
+        {
+          source: '@scope/pkg',
+          type: 'npm',
+          registryUrl: 'https://registry.example.com',
+        },
+        '/tmp/qwen-extension',
+      ),
+    ).rejects.toThrow('Failed to download npm tarball: status 503');
+    expect(response.destroy).toHaveBeenCalled();
   });
 
   it('preserves the original reason for a pre-aborted npm download', async () => {

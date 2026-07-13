@@ -37,6 +37,8 @@ const mockGit = {
   checkout: vi.fn(),
   listRemote: vi.fn(),
   revparse: vi.fn(),
+  version: vi.fn(),
+  env: vi.fn(),
   path: vi.fn(),
 };
 const mockDownloadFromArchiveUrl = vi.hoisted(() => vi.fn());
@@ -1719,23 +1721,24 @@ describe('extension tests', () => {
   });
 
   describe('updateExtension', () => {
-    it('forces the manager network policy onto update checks for existing installs', async () => {
+    it('applies the update network policy without mutating cached metadata', async () => {
       createExtension({
         extensionsDir: userExtensionsDir,
         installMetadata: {
-          type: 'archive-url',
-          source: 'https://example.com/extension.zip',
+          type: 'git',
+          source: 'https://github.com/owner/repo.git',
         },
       });
-      mockDownloadFromArchiveUrl.mockImplementation(
-        async (_metadata: ExtensionInstallMetadata, destination: string) => {
-          fs.mkdirSync(destination, { recursive: true });
-          fs.writeFileSync(
-            path.join(destination, EXTENSIONS_CONFIG_FILENAME),
-            JSON.stringify({ name: 'my-extension', version: '1.0.0' }),
-          );
+      mockGit.version.mockResolvedValue({ major: 2, minor: 52 });
+      mockGit.env.mockReturnValue(mockGit);
+      mockGit.getRemotes.mockResolvedValue([
+        {
+          name: 'origin',
+          refs: { fetch: 'https://github.com/owner/repo.git' },
         },
-      );
+      ]);
+      mockGit.listRemote.mockResolvedValue('same-hash\tHEAD');
+      mockGit.revparse.mockResolvedValue('same-hash');
       const manager = createExtensionManager({ networkPolicy: 'public' });
       await manager.refreshCache();
       const extension = manager.getLoadedExtensions()[0]!;
@@ -1743,7 +1746,13 @@ describe('extension tests', () => {
 
       await manager.checkForAllExtensionUpdates(() => {});
 
-      expect(extension.installMetadata?.networkPolicy).toBe('public');
+      expect(extension.installMetadata?.networkPolicy).toBeUndefined();
+      expect(mockGit.version).toHaveBeenCalled();
+      expect(mockGit.env).toHaveBeenCalled();
+      expect(mockGit.listRemote).toHaveBeenCalledWith([
+        'https://github.com/owner/repo.git',
+        'HEAD',
+      ]);
     });
 
     it('rejects a stale direct update after the artifact changes', async () => {

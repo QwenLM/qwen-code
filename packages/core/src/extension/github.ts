@@ -687,6 +687,9 @@ async function fetchJson<T>(
     ? await resolveNetworkTarget(url, networkPolicy)
     : { url: new URL(url) };
   return new Promise((resolve, reject) => {
+    const rejectRequest = (error: unknown) => {
+      reject(signal?.aborted ? signal.reason : error);
+    };
     https
       .get(
         url,
@@ -697,7 +700,9 @@ async function fetchJson<T>(
           ...(target.lookup ? { agent: false } : {}),
         },
         (res) => {
+          res.on('error', rejectRequest);
           if (res.statusCode !== 200) {
+            res.resume();
             return reject(
               new Error(`Request failed with status code ${res.statusCode}`),
             );
@@ -705,12 +710,15 @@ async function fetchJson<T>(
           const chunks: Buffer[] = [];
           res.on('data', (chunk) => chunks.push(chunk));
           res.on('end', () => {
-            const data = Buffer.concat(chunks).toString();
-            resolve(JSON.parse(data) as T);
+            try {
+              resolve(JSON.parse(Buffer.concat(chunks).toString()) as T);
+            } catch (error) {
+              rejectRequest(error);
+            }
           });
         },
       )
-      .on('error', reject);
+      .on('error', rejectRequest);
   });
 }
 
