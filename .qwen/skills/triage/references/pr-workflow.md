@@ -293,7 +293,7 @@ sequenceDiagram
 ```
 ````
 
-Diagram text (participants, labels) stays English in the main comment; the `<details>` Chinese translation can summarize it in prose rather than duplicating the diagram. Do **not** wrap two themed copies in `#gh-light-mode-only` / `#gh-dark-mode-only` anchors: GitHub only theme-scopes that fragment on images, not on anchor-wrapped mermaid, so both copies render stacked (verified empirically on a real comment — the anchors survive as inert links and neither `<pre lang="mermaid">` gets a theme-hiding class).
+Diagram text (participants, labels) stays English in the main comment; the `<details>` Chinese translation can summarize it in prose rather than duplicating the diagram. Keep message text to plain words and light punctuation — commas and parentheses render fine, but a `;` or an em-dash `—` **inside a message** breaks GitHub's mermaid parser (`;` is read as a statement separator), so keep those out. Do **not** wrap two themed copies in `#gh-light-mode-only` / `#gh-dark-mode-only` anchors: GitHub only theme-scopes that fragment on images, not on anchor-wrapped mermaid, so both copies render stacked (verified empirically on a real comment — the anchors survive as inert links and neither `<pre lang="mermaid">` gets a theme-hiding class).
 
 **Changed-files overview** — add only when the PR touches many source files (~5+) and a per-file map genuinely helps a reviewer navigate. Pull the file list from `gh pr view "$PR_NUMBER" --repo "$REPO" --json files`. Fold the table in a `<details>` so it doesn't dominate the comment, and write one honest line per file in your own words — not a mechanical restatement of the diff. Skip for small, focused PRs.
 
