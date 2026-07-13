@@ -413,7 +413,11 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       c === 0 &&
       cannotTell.length === 0 &&
       uncoverable.length === 0 &&
-      unreviewed.length === 0;
+      unreviewed.length === 0 &&
+      // A missing receipt caps the event but was left out of certification, so a
+      // body could open "Reviewed — no blockers." two lines above "nobody read
+      // them." Nothing nobody read can be certified blocker-free.
+      missingReceipts.length === 0;
     clauses.push(canCertify ? 'Reviewed — no blockers.' : 'Reviewed.');
   }
 

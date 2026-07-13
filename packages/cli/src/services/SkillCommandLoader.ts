@@ -15,6 +15,7 @@ import { dirname } from 'node:path';
 import type { ICommandLoader } from './types.js';
 import {
   writeSkillArgs,
+  clearSkillArgs,
   skillArgsNote,
   skillArgsPath,
 } from './skill-args-file.js';
@@ -138,17 +139,22 @@ export class SkillCommandLoader implements ICommandLoader {
             );
 
             // See BundledSkillLoader: the arguments are written down for the
-            // skill to read, rather than transcribed by the model.
+            // skill to read, rather than transcribed by the model, and a bare
+            // invocation erases any prior record so its authority is not reused.
             const rawArgs = context.invocation?.args ?? '';
-            const content = rawArgs
-              ? appendToLastTextPart(
-                  [{ text: body }],
-                  context.invocation!.raw +
-                    (writeSkillArgs(skill.name, rawArgs)
-                      ? skillArgsNote(skillArgsPath(skill.name), rawArgs)
-                      : ''),
-                )
-              : [{ text: body }];
+            let content;
+            if (rawArgs) {
+              content = appendToLastTextPart(
+                [{ text: body }],
+                context.invocation!.raw +
+                  (writeSkillArgs(skill.name, rawArgs)
+                    ? skillArgsNote(skillArgsPath(skill.name), rawArgs)
+                    : ''),
+              );
+            } else {
+              clearSkillArgs(skill.name);
+              content = [{ text: body }];
+            }
 
             return {
               type: 'submit_prompt',

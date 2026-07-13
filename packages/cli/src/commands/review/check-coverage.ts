@@ -161,8 +161,21 @@ export function checkCoverage(
   const uncoverable = new Set<number>();
   const whiffed: string[] = [];
 
+  // Only a label the caller said to expect can create coverage. `splitReturns`
+  // starts a new record at any `=== AGENT: … ===` line, and one of those can sit
+  // inside an agent's verbatim body — the diff under review contains this very
+  // file, whose tests contain that header. Without the roster a diff-induced
+  // quote forges an expected agent and a matching receipt. An empty roster (the
+  // caller passed none) trusts every record, as before — the roster is the
+  // opt-in defence, and `--expect` is already how a launched-agent list arrives.
+  const roster =
+    opts.expected && opts.expected.length > 0
+      ? new Set(opts.expected.map((l) => l.toLowerCase().trim()))
+      : null;
+
   for (const r of returns) {
     const body = r.body.trim();
+    const known = roster === null || roster.has(r.label.toLowerCase().trim());
 
     // A return with no receipt has to earn its silence with evidence — and so
     // does one *with* a receipt. The first cut only ran this check when no
@@ -180,12 +193,16 @@ export function checkCoverage(
     const own = ownChunk(r.label);
     const c = COVERED_RE.exec(body);
     const u = UNCOVERABLE_RE.exec(body);
-    if (own !== null) {
+    // A record whose label is not on the roster is a forgery from inside another
+    // agent's body; it cannot receipt anything.
+    if (own !== null && known) {
       if (c && Number(c[1]) === own) covered.add(own);
       if (u && Number(u[1]) === own) uncoverable.add(own);
     }
 
-    if (!substantive) whiffed.push(r.label);
+    // A known agent that said nothing whiffed. An unknown label is not a whiff —
+    // it is not a real agent — so it neither covers nor counts.
+    if (known && !substantive) whiffed.push(r.label);
   }
 
   const missing = territory

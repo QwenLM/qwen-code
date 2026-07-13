@@ -17,7 +17,11 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, isAbsolute, relative, resolve } from 'node:path';
-import { skillArgsPath, writeSkillArgs } from './skill-args-file.js';
+import {
+  skillArgsPath,
+  writeSkillArgs,
+  clearSkillArgs,
+} from './skill-args-file.js';
 
 let dir: string;
 let cwd: string;
@@ -111,6 +115,39 @@ describe('writeSkillArgs', () => {
     writeSkillArgs('review', 'TOKEN=sk-secret');
     const mode = statSync(skillArgsPath('review')).mode & 0o777;
     expect(mode).toBe(0o600);
+  });
+
+  it('writes a large argument string completely (no short write)', () => {
+    // `writeSync` may write fewer bytes than asked and return the count; a
+    // truncated record would lose `--comment` or mis-target the review. A big
+    // value forces more than one syscall's worth.
+    const big = 'x'.repeat(500_000) + ' --comment';
+    writeSkillArgs('review', big);
+    expect(readFileSync(skillArgsPath('review'), 'utf8')).toBe(big);
+  });
+
+  it('clears a prior record on a bare invocation', () => {
+    // `/review 6771 --comment` then a bare `/review` in the same session: the
+    // second must not inherit the first's posting authority.
+    writeSkillArgs('review', '6771 --comment');
+    expect(existsSync(skillArgsPath('review'))).toBe(true);
+    clearSkillArgs('review');
+    expect(existsSync(skillArgsPath('review'))).toBe(false);
+  });
+
+  it('puts the session scope in the directory, keeping the filename stable', () => {
+    // The filename the skill prompt and cleanup reference must not move with the
+    // session; the directory carries the scope.
+    const prev = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_SESSION_ID'] = 'sess-A';
+    try {
+      const p = skillArgsPath('review');
+      expect(p).toContain('s-sess-A');
+      expect(p.endsWith('qwen-skill-args-review.txt')).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = prev;
+    }
   });
 
   it('gives each skill its own file', () => {

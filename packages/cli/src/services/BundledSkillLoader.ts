@@ -21,6 +21,7 @@ import { CommandKind } from '../ui/commands/types.js';
 import { t } from '../i18n/index.js';
 import {
   writeSkillArgs,
+  clearSkillArgs,
   skillArgsNote,
   skillArgsPath,
 } from './skill-args-file.js';
@@ -128,15 +129,22 @@ export class BundledSkillLoader implements ICommandLoader {
           // tree instead of the pull request, found it clean, and reported
           // "no changes to review".
           const rawArgs = context.invocation?.args ?? '';
-          const content = rawArgs
-            ? appendToLastTextPart(
-                [{ text: skillPrompt }],
-                context.invocation!.raw +
-                  (writeSkillArgs(skill.name, rawArgs)
-                    ? skillArgsNote(skillArgsPath(skill.name), rawArgs)
-                    : ''),
-              )
-            : [{ text: skillPrompt }];
+          let content;
+          if (rawArgs) {
+            content = appendToLastTextPart(
+              [{ text: skillPrompt }],
+              context.invocation!.raw +
+                (writeSkillArgs(skill.name, rawArgs)
+                  ? skillArgsNote(skillArgsPath(skill.name), rawArgs)
+                  : ''),
+            );
+          } else {
+            // A bare invocation records no arguments — and must erase any record
+            // an earlier argument-bearing run left, or that run's posting
+            // authority is inherited by this one.
+            clearSkillArgs(skill.name);
+            content = [{ text: skillPrompt }];
+          }
 
           return {
             type: 'submit_prompt',

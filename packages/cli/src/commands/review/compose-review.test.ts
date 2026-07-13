@@ -497,6 +497,17 @@ describe('coverage caps the verdict', () => {
     expect(r.event).not.toBe('APPROVE');
   });
 
+  it('never certifies "no blockers" over a chunk nobody read', () => {
+    // The event capped correctly but certification did not, so the body opened
+    // "Reviewed — no blockers." two lines above "nobody read them."
+    const r = composeReview({
+      ...base,
+      coverage: { ok: true, missingChunks: [1] },
+    });
+    expect(r.body).not.toContain('no blockers');
+    expect(r.body).toContain('nobody read them');
+  });
+
   it('forbids an Approve on a missing receipt alone', () => {
     // Independently of `ok`: a chunk nobody receipted caps on its own.
     const r = composeReview({

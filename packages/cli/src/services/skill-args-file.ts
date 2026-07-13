@@ -24,9 +24,16 @@
 // So the CLI writes the arguments down at launch, verbatim, before the model has
 // any say in it. Nothing to copy, nothing to miscopy.
 
-import { mkdirSync, openSync, writeSync, closeSync, constants } from 'node:fs';
+import {
+  mkdirSync,
+  openSync,
+  writeSync,
+  closeSync,
+  rmSync,
+  constants,
+} from 'node:fs';
 import { join } from 'node:path';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { createDebugLogger, sessionIdContext } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('SKILL_ARGS_FILE');
 
@@ -39,36 +46,60 @@ function safe(s: string): string {
 }
 
 /**
- * The current session id, from the environment the CLI exports it to.
+ * The current session id.
  *
- * `Config` sets `QWEN_CODE_SESSION_ID` for the whole process, and a `qwen review
- * submit` subprocess spawned by the skill's shell tool inherits it — so both the
- * loader that writes the args file and the subcommand that reads it derive the
- * same path from the same id, with no model input in between. Empty string when
- * unset (a bare `node dist/cli.js`), which simply means one un-scoped file.
+ * Prefers the async-local `sessionIdContext` over the process-global
+ * `QWEN_CODE_SESSION_ID`, and in that order for a reason: in daemon mode a single
+ * process serves many sessions, the env var holds whichever `Config` booted
+ * first, and each turn binds its own session through `sessionIdContext.run(...)`.
+ * Reading only the env would make a later session write under the first
+ * session's name while `submit` — a subprocess whose shell env the daemon sets
+ * from the async-local value (see `getShellContextEnvVars`) — reads a different
+ * one. Both sides must agree, so both read the same context first.
+ *
+ * Empty string when neither is set (a bare `node dist/cli.js`), which just means
+ * one un-scoped directory.
  */
 export function currentSessionId(): string {
-  return process.env['QWEN_CODE_SESSION_ID']?.trim() ?? '';
+  return (
+    sessionIdContext.getStore()?.trim() ||
+    process.env['QWEN_CODE_SESSION_ID']?.trim() ||
+    ''
+  );
+}
+
+/**
+ * Directory holding this session's skill-args files.
+ *
+ * The session scope lives in the **directory**, not the filename, so the file is
+ * always `qwen-skill-args-<skill>.txt` — a stable name the skill prompt and the
+ * cleanup step can reference without knowing the session id. A concurrent review
+ * in another session writes into a different directory, so the two do not race,
+ * and a stale file from an earlier session sits under that session's directory
+ * where this run never looks.
+ */
+export function skillArgsDir(sessionId: string = currentSessionId()): string {
+  return sessionId
+    ? join(SKILL_ARGS_DIR, `s-${safe(sessionId)}`)
+    : SKILL_ARGS_DIR;
 }
 
 /**
  * Path of the args file for `skillName` in this session.
  *
- * **Scoped to the session**, not just the skill. A fixed per-skill name was
- * forgeable and stale-prone: any file at a predictable path authorised a post,
- * two concurrent reviews in one workspace raced last-writer-wins, and a bare
- * invocation left a previous run's file behind to speak for this one. Keying on
- * the session id — which the model cannot choose and cannot see — ties the record
- * to the run that wrote it. Per-skill within that, so two skills in one session
- * cannot read each other's arguments. Sanitised because both halves become a
- * filename.
+ * Session-scoped by its directory (see `skillArgsDir`). Per-skill within that,
+ * so two skills in one session cannot read each other's arguments. Sanitised
+ * because the skill name becomes a filename: `../../etc/passwd` must not choose
+ * where the CLI writes.
  */
 export function skillArgsPath(
   skillName: string,
   sessionId: string = currentSessionId(),
 ): string {
-  const scope = sessionId ? `${safe(sessionId)}-` : '';
-  return join(SKILL_ARGS_DIR, `qwen-skill-args-${scope}${safe(skillName)}.txt`);
+  return join(
+    skillArgsDir(sessionId),
+    `qwen-skill-args-${safe(skillName)}.txt`,
+  );
 }
 
 /**
@@ -84,7 +115,7 @@ export function skillArgsPath(
 export function writeSkillArgs(skillName: string, args: string): string | null {
   const path = skillArgsPath(skillName);
   try {
-    mkdirSync(SKILL_ARGS_DIR, { recursive: true });
+    mkdirSync(skillArgsDir(), { recursive: true });
     // `O_NOFOLLOW`, so a symlink planted at this path is an error, not a write
     // through it — a reproduction overwrote an arbitrary user-writable file that
     // way. `O_TRUNC` because a bare invocation leaves no file, so a stale one
@@ -102,7 +133,15 @@ export function writeSkillArgs(skillName: string, args: string): string | null {
       0o600,
     );
     try {
-      writeSync(fd, args, null, 'utf8');
+      // `writeSync` can write fewer bytes than it was given and return the count
+      // — a short write leaves a truncated argument record that both loaders then
+      // advertise as authoritative, so a parser could pick the wrong review
+      // target or lose `--comment`. Loop until every byte is on disk.
+      const buf = Buffer.from(args, 'utf8');
+      let off = 0;
+      while (off < buf.length) {
+        off += writeSync(fd, buf, off, buf.length - off);
+      }
     } finally {
       closeSync(fd);
     }
@@ -116,6 +155,29 @@ export function writeSkillArgs(skillName: string, args: string): string | null {
 }
 
 /**
+ * Remove this skill's args file for the session.
+ *
+ * A bare `/review` records no arguments, so it never calls `writeSkillArgs` — and
+ * `O_TRUNC` only truncates a file that is being written. Without this, an
+ * argument-bearing `/review 6771 --comment` followed by a bare `/review` in the
+ * same session leaves the authorised record intact, and the later run reuses the
+ * earlier one's posting authority. The bare path calls this to erase it.
+ *
+ * Never throws — a missing file is the desired state, and any other failure
+ * degrades to the pre-existing (over-permissive) behaviour rather than taking the
+ * invocation down.
+ */
+export function clearSkillArgs(skillName: string): void {
+  try {
+    rmSync(skillArgsPath(skillName), { force: true });
+  } catch (err) {
+    debugLogger.warn(
+      `Could not clear skill args for ${skillName}: ${(err as Error).message}`,
+    );
+  }
+}
+
+/**
  * The note appended to the skill body telling it where its arguments are.
  *
  * The arguments themselves are still appended to the prompt by the caller — a
@@ -124,10 +186,11 @@ export function writeSkillArgs(skillName: string, args: string): string | null {
  */
 export function skillArgsNote(path: string, args: string): string {
   return (
-    `\n\nYour invocation arguments have been written verbatim to \`${path}\`. ` +
-    `Use that file when you need them as data (piping them to a parser, for ` +
-    `instance) — read it or redirect from it rather than retyping the ` +
+    `\n\nYour invocation arguments have been written verbatim to a session-` +
+    `private file. Its exact path is below — use it wherever these instructions ` +
+    `say to read the args file (e.g. \`< '${path}'\`), and do not retype the ` +
     `arguments, which is how they get mistyped.\n` +
+    `<skill-args-file>${path}</skill-args-file>\n` +
     `<skill-args>${args}</skill-args>\n`
   );
 }
