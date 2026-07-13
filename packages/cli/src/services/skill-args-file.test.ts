@@ -126,12 +126,45 @@ describe('writeSkillArgs', () => {
     expect(readFileSync(skillArgsPath('review'), 'utf8')).toBe(big);
   });
 
+  it('refuses to write through a symlinked session directory', () => {
+    // O_NOFOLLOW guards the file, not the parent. `s-<session> -> victim/` would
+    // otherwise truncate victim/qwen-skill-args-review.txt at mode 0644.
+    const prev = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_SESSION_ID'] = 'attacker';
+    try {
+      const victim = join(dir, 'victim');
+      mkdirSync(victim, { recursive: true });
+      writeFileSync(join(victim, 'qwen-skill-args-review.txt'), 'precious');
+      mkdirSync(join(dir, '.qwen', 'tmp'), { recursive: true });
+      symlinkSync(victim, join(dir, '.qwen', 'tmp', 's-attacker'));
+
+      expect(writeSkillArgs('review', '6771 --comment')).toBeNull();
+      expect(
+        readFileSync(join(victim, 'qwen-skill-args-review.txt'), 'utf8'),
+      ).toBe('precious');
+    } finally {
+      if (prev === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = prev;
+    }
+  });
+
+  it('reports failure when the record could not be removed', () => {
+    // A revocation that silently fails leaves posting authority on disk. The
+    // caller must learn it did not happen.
+    writeSkillArgs('review', '6771 --comment');
+    // A directory where the file should be makes rmSync-of-a-file a no-op and
+    // existsSync still true — the record survives.
+    rmSync(skillArgsPath('review'), { force: true });
+    mkdirSync(skillArgsPath('review'), { recursive: true });
+    expect(clearSkillArgs('review')).toBe(false);
+  });
+
   it('clears a prior record on a bare invocation', () => {
     // `/review 6771 --comment` then a bare `/review` in the same session: the
     // second must not inherit the first's posting authority.
     writeSkillArgs('review', '6771 --comment');
     expect(existsSync(skillArgsPath('review'))).toBe(true);
-    clearSkillArgs('review');
+    expect(clearSkillArgs('review')).toBe(true);
     expect(existsSync(skillArgsPath('review'))).toBe(false);
   });
 

@@ -27,10 +27,16 @@ function base(overrides: Partial<ComposeReviewInput>): ComposeReviewInput {
     criticalsInline: 0,
     suggestionsInline: 0,
     // These cases exercise the C/S table, the body clauses and the downgrades —
-    // not coverage. Opting out is the honest annotation: absent coverage caps
-    // now (a run must show what it read), so a table test that means to reach a
-    // clean APPROVE has to say it has no territory to cover.
-    coverageNotApplicable: true,
+    // not coverage. Absent coverage caps now (a run must show what it read), so a
+    // table test meaning to reach a clean APPROVE supplies a real "covered"
+    // report — the same thing the PR path passes — not a model-settable opt-out
+    // (there is none: no model-written field can be its own authorisation).
+    coverage: {
+      ok: true,
+      missingChunks: [],
+      whiffedAgents: [],
+      uncoverableChunks: [],
+    },
     modelId: MODEL,
     ...overrides,
   };
@@ -508,11 +514,11 @@ describe('coverage caps the verdict', () => {
     expect(r.body).toContain('no `check-coverage` report was supplied');
   });
 
-  it('approves a clean run that declares coverage inapplicable', () => {
+  it('approves a clean run that supplies a covered report', () => {
     const r = composeReview({
       criticalsInline: 0,
       suggestionsInline: 0,
-      coverageNotApplicable: true,
+      coverage: { ok: true, missingChunks: [], whiffedAgents: [] },
       modelId: MODEL,
     });
     expect(r.event).toBe('APPROVE');

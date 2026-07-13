@@ -30,6 +30,8 @@ import {
   writeSync,
   closeSync,
   rmSync,
+  lstatSync,
+  existsSync,
   constants,
 } from 'node:fs';
 import { join } from 'node:path';
@@ -115,11 +117,23 @@ export function skillArgsPath(
 export function writeSkillArgs(skillName: string, args: string): string | null {
   const path = skillArgsPath(skillName);
   try {
-    mkdirSync(skillArgsDir(), { recursive: true });
+    const dir = skillArgsDir();
+    mkdirSync(dir, { recursive: true });
+    // `O_NOFOLLOW` protects the final filename, but not the parent: a symlinked
+    // `s-<session>` directory — `s-attacker -> victim/` — redirects the write
+    // into `victim/qwen-skill-args-review.txt`, truncating an arbitrary
+    // user-writable file and leaving its 0644 mode to expose the raw arguments.
+    // Refuse a session directory that is a symlink; `mkdirSync(recursive)` above
+    // is a no-op on an existing one, so this is the only place to catch it.
+    if (lstatSync(dir).isSymbolicLink()) {
+      debugLogger.warn(
+        `Skill args directory ${dir} is a symlink; refusing to write through it.`,
+      );
+      return null;
+    }
     // `O_NOFOLLOW`, so a symlink planted at this path is an error, not a write
-    // through it — a reproduction overwrote an arbitrary user-writable file that
-    // way. `O_TRUNC` because a bare invocation leaves no file, so a stale one
-    // from a previous run must not survive to authorise this one. Mode 0600:
+    // through it. `O_TRUNC` because a bare invocation leaves no file, so a stale
+    // one from a previous run must not survive to authorise this one. Mode 0600:
     // arguments can carry a token, and the default 0644 makes them world-read.
     //
     // Verbatim otherwise. No trailing newline, no trimming, no shell quoting:
@@ -163,18 +177,31 @@ export function writeSkillArgs(skillName: string, args: string): string | null {
  * same session leaves the authorised record intact, and the later run reuses the
  * earlier one's posting authority. The bare path calls this to erase it.
  *
- * Never throws — a missing file is the desired state, and any other failure
- * degrades to the pre-existing (over-permissive) behaviour rather than taking the
- * invocation down.
+ * Returns true when the record is gone, false when it could not be removed —
+ * the caller must treat false as "authority not revoked", not proceed as if it
+ * were. Never throws.
  */
-export function clearSkillArgs(skillName: string): void {
+export function clearSkillArgs(skillName: string): boolean {
+  const path = skillArgsPath(skillName);
   try {
-    rmSync(skillArgsPath(skillName), { force: true });
+    rmSync(path, { force: true });
   } catch (err) {
+    // This is a *revocation* — a bare invocation erasing a prior run's posting
+    // authority. Swallowing a failure here leaves the authorised record on disk
+    // for `submit` to trust, so the caller must know it did not happen: return
+    // false, and the loader surfaces it rather than proceeding as if revoked.
     debugLogger.warn(
       `Could not clear skill args for ${skillName}: ${(err as Error).message}`,
     );
+    return false;
   }
+  // `rmSync(force)` does not report whether anything was there, and a stale file
+  // that survives is the whole risk — confirm it is gone.
+  if (existsSync(path)) {
+    debugLogger.warn(`Skill args for ${skillName} survived removal at ${path}`);
+    return false;
+  }
+  return true;
 }
 
 /**

@@ -84,13 +84,6 @@ export interface ComposeReviewInput {
     uncoverableChunks?: number[];
     ok?: boolean;
   };
-  /**
-   * The caller has no territory to cover, so an absent `coverage` is not a gap.
-   * Set by a Suggestion-only quick pass and non-review callers. Must be stated
-   * explicitly — the failure this guards is a caller that supplied nothing, so
-   * silence cannot be read as "not applicable".
-   */
-  coverageNotApplicable?: boolean;
   /** Step 1's lightweight `pr-context` fetch failed. */
   contextUnavailable?: boolean;
   presubmit?: {
@@ -210,20 +203,22 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   }
   const cov = coverageRaw as Record<string, unknown>;
 
-  // A cap that only fires on the caller's say-so is not a cap. Omitting the
-  // report is itself a cap: a run that cannot show what it covered has not shown
-  // it covered anything, and the whole dogfood failure was an orchestrator that
-  // skipped the coverage step and got a rubber stamp. So an **absent** `coverage`
-  // caps too, unless the caller states, in a field of its own, that coverage does
-  // not apply to this run.
+  // Omitting the report is itself a cap: a run that cannot show what it covered
+  // has not shown it covered anything, and the whole dogfood failure was an
+  // orchestrator that skipped the coverage step and got a rubber stamp. So an
+  // **absent** `coverage` caps, full stop.
   //
-  // `coverageNotApplicable` is the opt-out for the callers that genuinely have no
-  // territory to cover — a Suggestion-only quick pass, a non-review use of this
-  // subcommand. It has to be said out loud, because the failure mode this guards
-  // is precisely a caller that said nothing.
+  // There is no opt-out field, and there was one for exactly one round: a
+  // `coverageNotApplicable` boolean. But that boolean came from the same
+  // model-authored JSON whose omissions this gate exists to distrust — a review
+  // that wanted an approval could set it and walk straight through, which is the
+  // unread-PR failure with one more keystroke. The lesson this whole PR keeps
+  // relearning is that no model-written field can be its own authorisation. A
+  // caller with genuinely no territory (a non-review use of this subcommand)
+  // passes a coverage report that says so — `{ ok: true }` with empty lists —
+  // rather than asserting inapplicability.
   const covProvided = input.coverage !== undefined && input.coverage !== null;
-  const covNA = toBool(input.coverageNotApplicable, 'coverageNotApplicable');
-  if (!covProvided && !covNA) {
+  if (!covProvided) {
     unreviewed.push(
       'coverage — no `check-coverage` report was supplied, so this run cannot ' +
         'show that any of the diff was read',
