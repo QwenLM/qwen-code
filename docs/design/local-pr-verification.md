@@ -41,6 +41,10 @@ caller's tracked checkout. Developers do not need to create a separate worktree
 themselves. A docs-only auto profile finishes after the same caller guards
 without creating the temporary worktree.
 
+On POSIX systems, the owned container is created below the canonical `/tmp`
+path. This avoids both macOS `/var` aliases and excessively long per-user
+temporary paths while keeping every generated file inside the owned container.
+
 Installation forces lifecycle scripts to run so the build and bundle cannot
 be skipped by caller npm settings, while disabling Husky setup to avoid
 changing the linked worktrees' shared hook configuration.
@@ -71,9 +75,11 @@ The full profile runs these categories in fail-fast order:
 - i18n validation, read-only settings-schema freshness plus a check that the
   build left the committed schema unchanged, type checking, and the serve
   fast-path bundle-closure check;
-- all workspace unit tests plus script tests, with an isolated temporary home,
-  CI settings, and the known model credentials and default auth selection
-  removed;
+- all workspace unit tests plus script tests, with workspaces scheduled
+  serially and each Vitest process limited to four workers to avoid multiplying
+  repository-wide concurrency; the test contents and coverage settings stay
+  unchanged, and the tests use an isolated temporary home, CI settings, and
+  have the known model credentials and default auth selection removed;
 - no-AK integration tests and the web-shell Playwright smoke test on a
   dynamically allocated localhost port.
 

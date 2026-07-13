@@ -338,7 +338,8 @@ describe('validation profiles', () => {
       'git diff --exit-code -- packages/vscode-ide-companion/schemas/settings.schema.json',
       'npm run typecheck',
       'npm run check:serve-fast-path-bundle',
-      'npm run test:ci',
+      'npx cross-env NODE_OPTIONS=--max-old-space-size=3072 npm run test:ci --workspaces --if-present -- --minWorkers=1 --maxWorkers=4',
+      'npm run test:scripts -- --minWorkers=1 --maxWorkers=4',
       'npm run test:integration:no-ak:sandbox:none',
       'npm run test:e2e:smoke --workspace=packages/web-shell',
     ]);
@@ -351,7 +352,11 @@ describe('validation profiles', () => {
     expect(
       steps.find(({ name }) => name === 'Install dependencies'),
     ).toMatchObject({ installEnvironment: true });
-    for (const name of ['Run unit tests', 'Run no-AK integration tests']) {
+    for (const name of [
+      'Run unit tests',
+      'Run script tests',
+      'Run no-AK integration tests',
+    ]) {
       expect(steps.find((candidate) => candidate.name === name)).toMatchObject({
         isolatedHome: true,
         testEnvironment: true,
@@ -849,6 +854,9 @@ writeFileSync('prepare-marker.json', JSON.stringify({
       validate: async (paths) => {
         ownedPaths = paths;
         expect(paths.container).toBe(realpathSync(paths.container));
+        expect(path.dirname(paths.container)).toBe(
+          realpathSync(process.platform === 'win32' ? tmpdir() : '/tmp'),
+        );
         expect(existsSync(paths.temp)).toBe(true);
         writeFileSync(path.join(paths.worktree, 'source.js'), 'changed\n');
       },
@@ -862,6 +870,32 @@ writeFileSync('prepare-marker.json', JSON.stringify({
       ownedPaths.worktree,
     );
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'uses short canonical temporary paths instead of a long caller TMPDIR',
+    async () => {
+      const cwd = createRepository();
+      const longTemp = path.join(cwd, 'a'.repeat(120));
+      mkdirSync(longTemp);
+      const previousTemp = process.env.TMPDIR;
+      let container;
+
+      process.env.TMPDIR = longTemp;
+      try {
+        await withTemporaryWorktree({
+          cwd,
+          validate: async (paths) => {
+            container = paths.container;
+          },
+        });
+      } finally {
+        if (previousTemp === undefined) delete process.env.TMPDIR;
+        else process.env.TMPDIR = previousTemp;
+      }
+
+      expect(path.dirname(container)).toBe(realpathSync('/tmp'));
+    },
+  );
 
   it('fails when owned-worktree cleanup fails after validation succeeds', async () => {
     const cwd = createRepository();

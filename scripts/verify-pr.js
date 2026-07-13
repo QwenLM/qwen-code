@@ -243,7 +243,29 @@ export function createValidationSteps({ prettierFiles = [], profile }) {
             'run',
             'check:serve-fast-path-bundle',
           ],
-          ['Run unit tests', 'npm', 'run', 'test:ci'],
+          [
+            'Run unit tests',
+            'npx',
+            'cross-env',
+            'NODE_OPTIONS=--max-old-space-size=3072',
+            'npm',
+            'run',
+            'test:ci',
+            '--workspaces',
+            '--if-present',
+            '--',
+            '--minWorkers=1',
+            '--maxWorkers=4',
+          ],
+          [
+            'Run script tests',
+            'npm',
+            'run',
+            'test:scripts',
+            '--',
+            '--minWorkers=1',
+            '--maxWorkers=4',
+          ],
           [
             'Run no-AK integration tests',
             'npm',
@@ -265,12 +287,17 @@ export function createValidationSteps({ prettierFiles = [], profile }) {
     ).installEnvironment = true;
     for (const name of [
       'Run unit tests',
+      'Run script tests',
       'Run no-AK integration tests',
       'Run web shell smoke tests',
     ]) {
       steps.find((candidate) => candidate.name === name).testEnvironment = true;
     }
-    for (const name of ['Run unit tests', 'Run no-AK integration tests']) {
+    for (const name of [
+      'Run unit tests',
+      'Run script tests',
+      'Run no-AK integration tests',
+    ]) {
       steps.find((candidate) => candidate.name === name).isolatedHome = true;
     }
     steps.find(({ name }) => name === 'Run web shell smoke tests').playwright =
@@ -548,7 +575,13 @@ function runWorktreeGit({ args, cwd }) {
 export async function withTemporaryWorktree({
   cwd,
   gitCommand = runWorktreeGit,
-  makeContainer = () => mkdtempSync(join(tmpdir(), 'qwen-verify-pr-')),
+  makeContainer = () =>
+    mkdtempSync(
+      join(
+        realpathSync(process.platform === 'win32' ? tmpdir() : '/tmp'),
+        'qwen-verify-pr-',
+      ),
+    ),
   removeContainer = (container) =>
     rmSync(container, { recursive: true, force: true }),
   reportCleanup = console.error,
