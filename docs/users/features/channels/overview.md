@@ -381,13 +381,21 @@ qwen serve --channel my-channel
 
 # Start all configured channels
 qwen serve --channel all
+
+# Or enable channels later on a token-protected daemon
+QWEN_SERVER_TOKEN=secret qwen serve
+qwen channel set my-channel --token secret
+
+# Query or stop the daemon-managed selection
+qwen channel status --daemon-url http://127.0.0.1:4170 --token secret
+qwen channel stop --daemon-url http://127.0.0.1:4170 --token secret
 ```
 
-This mode starts one channel worker process owned by `qwen serve`. The worker connects back to the daemon through the SDK and uses the same channel adapters. It is separate from the daemon process, so a channel adapter crash does not crash the daemon.
+This mode starts workspace-grouped channel worker processes owned by `qwen serve`. Workers connect back to the daemon through the SDK and use the same channel adapters. They are separate from the daemon process, so a channel adapter crash does not crash the daemon. A daemon started without `--channel` does not load channel adapters or reserve the channel-service PID lease until the first `qwen channel set`.
 
-`qwen serve --channel` is not the same service as `qwen channel start`. Standalone `qwen channel start` still uses the ACP-backed channel service and can run channel configs with different `cwd` values. Daemon-managed channels require every selected channel's `cwd` to resolve to the daemon workspace.
+`qwen serve --channel` is not the same service as `qwen channel start`. Standalone `qwen channel start` still uses the ACP-backed channel service and can run channel configs with different `cwd` values. Daemon-managed channels require every selected channel's `cwd` to resolve to a workspace registered by the daemon. In multi-workspace mode, a selection replacement keeps workers for workspaces whose ordered channel list did not change; `all` remains primary-workspace-only.
 
-When channels are serve-managed, `qwen channel status` shows the owner as `qwen serve`, and `qwen channel stop` tells you to stop the daemon instead of signaling the worker directly. If a ready worker exits unexpectedly, the daemon continues running and reports a channel-worker warning in `/daemon/status`.
+Without `--daemon-url`, `qwen channel status` and `qwen channel stop` retain standalone pidfile behavior. Their `--daemon-url` variants query or stop the daemon manager. Runtime selections are not written to settings and do not survive daemon restart. If a ready worker exits unexpectedly, the daemon continues running and reports a channel-worker warning in `/daemon/status`.
 
 ## Webhook-triggered tasks
 

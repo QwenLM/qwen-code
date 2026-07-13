@@ -3258,6 +3258,162 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('channel worker runtime control', () => {
+    const state = {
+      enabled: true,
+      selection: { mode: 'names' as const, names: ['telegram'] },
+      transition: 'idle' as const,
+      workers: [
+        {
+          enabled: true,
+          state: 'running',
+          channels: ['telegram'],
+          workspaceId: 'primary',
+          workspaceCwd: '/work',
+          primary: true,
+        },
+      ],
+    };
+
+    it('GETs the current manager state with client identity', async () => {
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, state));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.getChannelWorkerControl({ clientId: 'client-7' }),
+      ).resolves.toEqual(state);
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/workspace/channel',
+        method: 'GET',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
+    });
+
+    it('PUTs the selection and returns replacement metadata', async () => {
+      const result = {
+        changed: true,
+        replaced: true,
+        partial: false,
+        state,
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        token: 'secret',
+        fetch,
+      });
+
+      await expect(
+        client.setChannelWorkerSelection(
+          { mode: 'names', names: ['telegram'] },
+          { clientId: 'client-8' },
+        ),
+      ).resolves.toEqual(result);
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/workspace/channel',
+        method: 'PUT',
+        body: JSON.stringify({
+          selection: { mode: 'names', names: ['telegram'] },
+        }),
+      });
+      expect(calls[0]?.headers).toMatchObject({
+        authorization: 'Bearer secret',
+        'content-type': 'application/json',
+        'x-qwen-client-id': 'client-8',
+      });
+    });
+
+    it('DELETEs idempotently and maps HTTP failures', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          changed: true,
+          state: {
+            enabled: false,
+            selection: null,
+            transition: 'idle',
+            workers: [],
+          },
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.stopChannelWorker()).resolves.toMatchObject({
+        changed: true,
+      });
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/workspace/channel',
+        method: 'DELETE',
+        body: null,
+      });
+
+      const failing = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: recordingFetch(() =>
+          jsonResponse(500, {
+            error: 'stop failed',
+            code: 'channel_worker_stop_failed',
+          }),
+        ).fetch,
+      });
+      await expect(failing.stopChannelWorker()).rejects.toMatchObject({
+        status: 500,
+      });
+    });
+
+    it('allows lifecycle mutations to outlive the generic fetch timeout', async () => {
+      const fetch = vi.fn(
+        (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              reject(
+                init.signal!.reason ??
+                  new DOMException('aborted', 'AbortError'),
+              );
+            });
+            setTimeout(() => {
+              const method = init?.method;
+              resolve(
+                jsonResponse(
+                  200,
+                  method === 'POST'
+                    ? { reloaded: true, worker: state.workers[0] }
+                    : method === 'PUT'
+                      ? {
+                          changed: true,
+                          replaced: false,
+                          partial: false,
+                          state,
+                        }
+                      : {
+                          changed: true,
+                          state: {
+                            enabled: false,
+                            selection: null,
+                            transition: 'idle',
+                            workers: [],
+                          },
+                        },
+                ),
+              );
+            }, 20);
+          }),
+      ) as unknown as typeof globalThis.fetch;
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 1,
+      });
+
+      await expect(
+        Promise.all([
+          client.reloadChannelWorker(),
+          client.setChannelWorkerSelection({ mode: 'all' }),
+          client.stopChannelWorker(),
+        ]),
+      ).resolves.toHaveLength(3);
+    });
+  });
+
   describe('restartMcpServer (#4175 Wave 4 PR 17)', () => {
     it('POSTs an empty body and returns the typed result on success', async () => {
       const { fetch, calls } = recordingFetch(() =>

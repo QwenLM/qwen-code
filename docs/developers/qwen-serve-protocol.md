@@ -436,16 +436,89 @@ includes `channelWorkers[]` — one entry per owning workspace, each a
 `primary`. `channelWorker` stays populated as the primary workspace's snapshot
 for compatibility. Single-workspace daemons omit `channelWorkers[]`.
 
-`POST /workspace/channel/reload` remains an intentionally daemon-wide control
-route even in multi-workspace mode. It restarts every selected channel worker
-group as one fail-closed operation; it is not scoped by the legacy
-`/workspace` prefix. Concurrent calls share one in-flight restart. A failure
-stops the full group and returns an error rather than leaving workspaces on
-different configuration generations. Clients should use
-`runtime.channelWorkers` afterward to inspect each workspace's resulting
-state.
+### Daemon-managed channel control
 
-`qwen channel status` continues to read pidfile metadata. During a restart
+The `channel_control` capability advertises the runtime selection resource.
+The resource is daemon-wide even though its compatibility path uses the
+singular `/workspace` prefix. Runtime selections are not persisted and do not
+modify the daemon's boot-time `--channel` option.
+
+`GET /workspace/channel` returns an immutable manager snapshot:
+
+```json
+{
+  "enabled": true,
+  "selection": { "mode": "names", "names": ["telegram", "feishu"] },
+  "pendingSelection": { "mode": "names", "names": ["telegram"] },
+  "transition": "reconciling",
+  "workers": [
+    {
+      "workspaceId": "primary-id",
+      "workspaceCwd": "/work/primary",
+      "primary": true,
+      "enabled": true,
+      "state": "running",
+      "channels": ["telegram"],
+      "pid": 1234
+    }
+  ]
+}
+```
+
+`selection` is `null` while disabled. `pendingSelection` is present only during
+a mutation. `transition` is one of `idle`, `starting`, `reconciling`,
+`stopping`, or `rolling_back`.
+
+`PUT /workspace/channel` is strict-gated and accepts exactly one selection:
+
+```json
+{ "selection": { "mode": "all" } }
+```
+
+```json
+{ "selection": { "mode": "names", "names": ["telegram", "feishu"] } }
+```
+
+Names are trimmed and deduplicated without sorting; an empty names array is
+invalid. `all` remains primary-workspace-only. A disabled-to-enabled change
+returns `201`; an idempotent PUT or replacement returns `200`. The response is
+`{ changed, replaced, partial, state }`. An equal selection keeps healthy
+workers in place, but recovers an equal selection whose worker is stopped or
+failed.
+
+`DELETE /workspace/channel` is strict-gated and idempotent. It returns
+`{ changed, state }`; a successful state is disabled. `POST
+/workspace/channel/reload` is also strict-gated and re-reads settings,
+re-resolves workspace groups, and force-reconciles the committed selection.
+It returns `409 channel_worker_not_enabled` while disabled. The
+`channel_reload` capability is advertised dynamically only while the manager
+has a committed, reloadable selection.
+
+Every enable, replace, reload, stop, and daemon shutdown enters one FIFO
+lifecycle lane. GET does not wait for that lane. Workspace groups whose ordered
+selection did not change remain online. Replacement failures attempt to stop
+newly started workers and restore the previous committed selection. Clients
+must inspect `rolledBack`, `rollbackError`, and `state` because cleanup or
+restoration can also fail. The daemon keeps the channel-service PID lease
+throughout a transaction and does not release it until every relevant child
+exit is confirmed.
+
+Stable control errors are:
+
+- `400 invalid_channel_selection`, `channel_workspace_mismatch`, or `ambiguous_channel_workspace`
+- `403 untrusted_workspace`
+- `409 channel_service_conflict` or `channel_worker_not_enabled`
+- `500 channel_worker_stop_failed`
+- `502 channel_worker_start_failed`, with `rolledBack` and an optional credential-redacted `rollbackError`
+- `503 daemon_draining`
+
+Strict writes against a daemon without a configured token return `401
+token_required` before control code runs. Once a request begins, disconnecting
+the HTTP client does not cancel the lifecycle transaction; clients may retry
+the same PUT safely.
+
+`qwen channel status` without `--daemon-url` continues to read pidfile metadata;
+with `--daemon-url` it reads `GET /workspace/channel`. During a restart
 window the serve-owned pidfile remains reserved, but `workerPid` is omitted so
 clients do not display a stale worker process. On a multi-workspace daemon the
 pidfile also carries an additive `workers[]` array (per-workspace
