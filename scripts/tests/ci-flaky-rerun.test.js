@@ -219,13 +219,26 @@ describe('ci flaky rerun patrol', () => {
     expect(script).not.toContain(
       "'number,isDraft,baseRefName,headRefOid,updatedAt,statusCheckRollup,comments'",
     );
-    expect(script).toContain("'pr',\n        'view'");
+    expect(script).toContain('issues/${prNumber}/comments');
     expect(script).toContain("'--search',");
     expect(script).toContain("'--limit',\n        '1000'");
   });
 
   it('asks GitHub to prefilter PRs with failed checks', () => {
     expect(script).toContain('`updated:>=${activeSince} status:failure`');
+  });
+
+  it('reads marker comments through the paginated issue comments endpoint', () => {
+    expect(script).toContain("'--paginate'");
+    expect(script).toContain(
+      '`repos/${this.repo}/issues/${prNumber}/comments`',
+    );
+    expect(script).toContain(
+      "'.[] | {body, createdAt: .created_at, author: {login: .user.login}}'",
+    );
+    expect(script).not.toContain(
+      "'comments',\n        '--jq',\n        '.comments'",
+    );
   });
 
   it('bounds each skill batch after scanning all eligible failed PRs', () => {
@@ -269,8 +282,8 @@ function pr(number, head, run, job) {
 }
 if (args[0] === 'pr' && args[1] === 'list') {
   process.stdout.write(JSON.stringify([pr(42, 'old-head', 123, 1), pr(43, 'new-head', 124, 2)]));
-} else if (args[0] === 'pr' && args[1] === 'view') {
-  process.stdout.write('[]');
+} else if (args[0] === 'api' && args[1] === '--paginate' && args[2].includes('/issues/')) {
+  process.stdout.write('');
 } else if (args[0] === 'run' && args[1] === 'list') {
   process.stdout.write(JSON.stringify([{ databaseId: 456, headSha: 'main-head', conclusion: 'success' }]));
 } else if (args[0] === 'api' && args[1].includes('/commits/main')) {

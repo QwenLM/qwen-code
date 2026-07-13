@@ -411,19 +411,19 @@ class GhClient {
   }
 
   async comments(prNumber) {
-    return JSON.parse(
-      await this.gh([
-        'pr',
-        'view',
-        String(prNumber),
-        '--repo',
-        this.repo,
-        '--json',
-        'comments',
-        '--jq',
-        '.comments',
-      ]),
-    );
+    const output = await this.gh([
+      'api',
+      '--paginate',
+      `repos/${this.repo}/issues/${prNumber}/comments`,
+      '--jq',
+      '.[] | {body, createdAt: .created_at, author: {login: .user.login}}',
+    ]);
+    return output.trim()
+      ? output
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line))
+      : [];
   }
 
   async viewerLogin() {
