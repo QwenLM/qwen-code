@@ -3557,6 +3557,7 @@ export function App({
         await (
           sessionActions as typeof sessionActions & SessionActionsWithCreate
         ).clearSession();
+        window.setTimeout(() => editorRef.current?.focus(), 0);
         return true;
       } catch (error) {
         reportError(error, 'Failed to start a new chat');
@@ -3636,8 +3637,12 @@ export function App({
       !connection.catchingUp
     ) {
       setSidebarSwitchingSessionId(null);
+      if (!approvalOverlayActive) {
+        window.setTimeout(() => editorRef.current?.focus(), 0);
+      }
     }
   }, [
+    approvalOverlayActive,
     connection.catchingUp,
     connection.loadingTranscript,
     connection.sessionId,

@@ -390,6 +390,8 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
       onOpenDaemonStatus?: () => void;
       onOpenSessions?: () => void;
       onOpenSplitView?: () => void;
+      onNewSession?: () => Promise<boolean> | boolean;
+      onLoadSession?: (sessionId: string) => Promise<void> | void;
     }) => {
       sidebarTokens.push(props.sessionListReloadToken);
       // Expose the Daemon Status / Session Overview openers so tests can
@@ -400,6 +402,24 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
           'data-testid': 'sidebar',
           'data-collapsed': String(Boolean(props.collapsed)),
         },
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'new-session',
+            type: 'button',
+            onClick: props.onNewSession,
+          },
+          'new session',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'load-session',
+            type: 'button',
+            onClick: () => props.onLoadSession?.('session-2'),
+          },
+          'load session',
+        ),
         React.createElement(
           'button',
           {
@@ -884,6 +904,48 @@ describe('App session callbacks', () => {
       expect(onSessionIdChange).toHaveBeenCalledTimes(1);
     },
   );
+
+  it('focuses the composer after starting a new session', async () => {
+    const { container } = renderApp();
+    await flush();
+    editorFocus.mockClear();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(editorFocus).toHaveBeenCalledOnce();
+  });
+
+  it('focuses the composer after loading an existing session', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+    editorFocus.mockClear();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="load-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-2', {
+      workspaceCwd: undefined,
+    });
+
+    mockConnection.sessionId = 'session-2';
+    rerender();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(editorFocus).toHaveBeenCalledOnce();
+  });
 
   it('does not show missing-session state for non-404/410 errors', async () => {
     mockConnection.status = 'disconnected';
