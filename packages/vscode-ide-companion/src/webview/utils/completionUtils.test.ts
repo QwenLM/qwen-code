@@ -110,5 +110,10 @@ describe('completionUtils', () => {
         query: 'he',
       });
     });
+
+    it('gives @ priority over / when both are at word boundaries', () => {
+      // Both triggers are valid (/ at pos 0, @ after a space); @ wins by design.
+      expect(at('/cmd @user')).toEqual({ char: '@', pos: 5, query: 'user' });
+    });
   });
 });
