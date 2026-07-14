@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -222,6 +223,10 @@ describe('ci flaky rerun patrol', () => {
       alreadyHandled(comments, target({ runAttempt: 3 }), 'patrol-bot'),
     ).toBe(false);
     expect(alreadyHandled(comments, target(), 'someone-else')).toBe(false);
+    const malformed = markerComment({
+      body: markerComment().body.replace(' count=2', ' malformed count=2'),
+    });
+    expect(alreadyHandled([malformed], target(), 'patrol-bot')).toBe(false);
   });
 
   it('counts actions per head and resets after the handled check succeeds', () => {
@@ -346,6 +351,8 @@ describe('ci flaky rerun patrol', () => {
       decision({ runAttempt: 3 }),
       decision({ action: 'update_branch', mainHeadSha: 'stale-main' }),
       decision({ reason_en: 'x'.repeat(201) }),
+      decision({ reason_en: '' }),
+      decision({ reason_zh: ' ' }),
     ]) {
       const c = client();
       await actOnDecision(c, target(), invalid);
@@ -384,16 +391,28 @@ describe('ci flaky rerun patrol', () => {
   });
 
   it('does nothing when the PR or failure is no longer current', async () => {
+    const changedPr = (overrides) =>
+      client({
+        async currentPr() {
+          return { ...pr(), state: 'OPEN', ...overrides };
+        },
+      });
     const cases = [
       client({
         async currentPr() {
           return { ...pr(), state: 'CLOSED' };
         },
       }),
-      client({
-        async currentPr() {
-          return { ...pr(), state: 'OPEN', headRefOid: 'new-head' };
-        },
+      changedPr({ headRefOid: 'new-head' }),
+      changedPr({ isDraft: true }),
+      changedPr({ baseRefName: 'release' }),
+      changedPr({
+        statusCheckRollup: [
+          run({
+            detailsUrl:
+              'https://github.com/QwenLM/qwen-code/actions/runs/123/job/2',
+          }),
+        ],
       }),
       client({
         async run() {
@@ -498,6 +517,9 @@ describe('ci flaky rerun patrol', () => {
     expect(fingerprint(target(), 'Error 123 at deadbeef')).toBe(
       fingerprint(target(), 'error 456 at cafebabe'),
     );
+    expect(fingerprint(target(), 'Error 12345678')).toBe(
+      fingerprint(target(), 'Error 456'),
+    );
     expect(fingerprint(target(), 'timeout')).not.toBe(
       fingerprint(target({ checkName: 'Lint' }), 'timeout'),
     );
@@ -515,6 +537,12 @@ describe('ci flaky rerun patrol', () => {
         'TypeError: ensureTool is not a function',
         ...Array.from({ length: 220 }, (_, index) => `line-${index}`),
         'x'.repeat(600),
+        'AKIAABCDEFGHIJKLMNOP',
+        'npm_abcdefghijklmnopqrst',
+        'sk-abcdefghijklmnopqrst',
+        'Cookie: session=cookie-secret',
+        'https://user:url-secret@example.com/path',
+        'API_SECRET=env-secret',
       ].join('\n'),
     );
     const lines = evidence.split('\n');
@@ -526,7 +554,45 @@ describe('ci flaky rerun patrol', () => {
     expect(evidence).not.toContain('bearer-secret');
     expect(evidence).not.toContain('eyJhbGci');
     expect(evidence).not.toContain('abcdef1234567890');
+    for (const secret of [
+      'ABCDEFGHIJKLMNOP',
+      'abcdefghijklmnopqrst',
+      'cookie-secret',
+      'url-secret',
+      'env-secret',
+    ]) {
+      expect(evidence).not.toContain(secret);
+    }
     expect(evidence).toContain('TypeError: ensureTool is not a function');
+  });
+
+  it('keeps fallback errors', () => {
+    expect(skillLog('Error: connect ECONNREFUSED')).toContain(
+      'Error: connect ECONNREFUSED',
+    );
+  });
+
+  it('rejects tampered classifier input before GitHub access', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ci-flaky-rerun-act-'));
+    try {
+      writeFileSync(join(dir, 'ci-flaky-input.json'), '{"candidates":[]}\n');
+      const result = spawnSync(
+        process.execPath,
+        [
+          join(process.cwd(), '.github/scripts/ci-flaky-rerun.mjs'),
+          'act',
+          '--workdir',
+          dir,
+          '--input-sha',
+          'tampered',
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('integrity check failed');
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
   });
 
   it('keeps the failure summary when later tests log expected errors', () => {

@@ -112,8 +112,10 @@ function parseMarker(comment) {
       /<!--\s*qwen-ci-flaky-rerun\s+v=5\s+([^]*?)\s*-->/,
     );
     if (!match) return null;
+    const tokens = match[1].split(/\s+/);
+    if (tokens.some((field) => field.indexOf('=') <= 0)) return null;
     const fields = Object.fromEntries(
-      match[1].split(/\s+/).map((field) => {
+      tokens.map((field) => {
         const separator = field.indexOf('=');
         return [field.slice(0, separator), field.slice(separator + 1)];
       }),
@@ -251,8 +253,8 @@ export function skillLog(log) {
 export function fingerprint(target, log) {
   const normalized = log
     .toLowerCase()
-    .replace(/\b(?:0x)?[a-f0-9]{7,40}\b/g, '<hex>')
     .replace(/\b\d+\b/g, '<n>')
+    .replace(/\b(?:0x)?[a-f0-9]{7,40}\b/g, '<hex>')
     .replace(/\s+/g, ' ')
     .trim();
   return `check-${createHash('sha256')
