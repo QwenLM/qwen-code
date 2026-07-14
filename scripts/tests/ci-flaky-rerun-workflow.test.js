@@ -55,6 +55,8 @@ describe('ci failure patrol workflow', () => {
     }
     expect(skill).toContain('maximum of 3 actions');
     expect(skill).toContain('main-branch failures');
+    expect(skill).toContain('changedFiles');
+    expect(skill).toContain('not caused by the PR');
     expect(skill).toContain('ci-flaky-decisions.json');
   });
 });

@@ -505,7 +505,7 @@ class GhClient {
         '--repo',
         this.repo,
         '--json',
-        'headRefOid,state,isDraft,baseRefName,statusCheckRollup',
+        'headRefOid,state,isDraft,baseRefName,statusCheckRollup,files',
       ]),
     );
   }
@@ -680,6 +680,7 @@ async function scan(args) {
       candidates.push({
         ...candidate,
         actionCount,
+        changedFiles: (pr.files ?? []).map((file) => file.path).slice(0, 100),
         ...main,
         log,
       });
