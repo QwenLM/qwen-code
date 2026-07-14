@@ -4,10 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+
 import type { WorkspaceRuntime } from '../workspace-registry.js';
 
 export const MAX_CONCURRENT_VOICE_SESSIONS = 8;
 const DISPOSE_WAIT_MS = 5_000;
+const debugLogger = createDebugLogger('WORKSPACE_VOICE_COORDINATOR');
 
 export interface VoiceAdmissionLease {
   readonly signal: AbortSignal;
@@ -113,16 +116,25 @@ export class WorkspaceVoiceCoordinator {
       state.idleWaiters.add(resolve);
     });
     let timeout: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
     try {
       await Promise.race([
         idle,
         new Promise<void>((resolve) => {
-          timeout = setTimeout(resolve, DISPOSE_WAIT_MS);
+          timeout = setTimeout(() => {
+            timedOut = true;
+            resolve();
+          }, DISPOSE_WAIT_MS);
         }),
       ]);
     } finally {
       if (timeout) clearTimeout(timeout);
       if (resolveIdle) state.idleWaiters.delete(resolveIdle);
+    }
+    if (timedOut && state.leases.size > 0) {
+      debugLogger.warn(
+        `Voice runtime disposal timed out with ${state.leases.size} active lease(s).`,
+      );
     }
   }
 

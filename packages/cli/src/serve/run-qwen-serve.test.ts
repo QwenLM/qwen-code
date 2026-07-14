@@ -435,9 +435,19 @@ describe('runQwenServe telemetry validation', () => {
       enabled: false,
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
     });
+    const shutdownResolvers: Array<() => void> = [];
     const createBridge = vi
       .spyOn(acpBridge, 'createAcpSessionBridge')
-      .mockImplementation(() => makeRuntimeBridge());
+      .mockImplementation(() => {
+        const bridge = makeRuntimeBridge();
+        bridge.shutdown = vi.fn(
+          () =>
+            new Promise<void>((resolve) => {
+              shutdownResolvers.push(resolve);
+            }),
+        );
+        return bridge;
+      });
 
     const handle = await runQwenServe(
       {
@@ -453,6 +463,7 @@ describe('runQwenServe telemetry validation', () => {
         daemonLogBaseDir: path.join(tmpDir, 'debug'),
       },
     );
+    let closing: Promise<void> | undefined;
     try {
       const res = await fetch(`${handle.url}/capabilities`);
       expect(res.status).toBe(200);
@@ -482,8 +493,14 @@ describe('runQwenServe telemetry validation', () => {
           removable: false,
         }),
       ]);
+
+      closing = handle.close();
+      await vi.waitFor(() => expect(shutdownResolvers).toHaveLength(2));
     } finally {
-      await handle.close();
+      closing ??= handle.close();
+      await vi.waitFor(() => expect(shutdownResolvers).toHaveLength(2));
+      for (const resolve of shutdownResolvers) resolve();
+      await closing;
     }
     expect(createBridge).toHaveBeenCalledTimes(2);
     for (const result of createBridge.mock.results) {

@@ -735,6 +735,28 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     expect(workspaceVoiceConnection).not.toHaveBeenCalled();
   });
 
+  it('rejects an encoded relative workspace-qualified Voice selector', async () => {
+    const relativeSelector = path.relative(process.cwd(), '/ws-b');
+    const status = await new Promise<number>((resolve, reject) => {
+      const ws = new WebSocket(
+        `ws://127.0.0.1:${port}/workspaces/${encodeURIComponent(relativeSelector)}/voice/stream`,
+        { handshakeTimeout: 2000 },
+      );
+      ws.on('unexpected-response', (_req, response) => {
+        resolve(response.statusCode ?? 0);
+        ws.terminate();
+      });
+      ws.on('open', () => {
+        ws.close();
+        reject(new Error('relative Voice WS selector should not open'));
+      });
+      ws.on('error', reject);
+    });
+
+    expect(status).toBe(400);
+    expect(workspaceVoiceConnection).not.toHaveBeenCalled();
+  });
+
   it('rejects a WS upgrade to an untrusted workspace', async () => {
     const status = await new Promise<number>((resolve, reject) => {
       const ws = new WebSocket(

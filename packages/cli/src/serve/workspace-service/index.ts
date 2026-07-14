@@ -596,6 +596,9 @@ export function createDaemonWorkspaceService(
                 err instanceof Error ? err.message : String(err)
               }`,
             );
+            for (const committedWrite of committed) {
+              publishWrite(committedWrite);
+            }
             throw new WorkspaceSettingsPartialPersistError(
               `Voice settings partial persist failed: committed=${committed.length}/${writes.length}`,
               committed,

@@ -19,7 +19,10 @@ import {
   createWorkspaceRegistry,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
-import type { VoiceAdmissionResult } from '../voice/workspace-voice-coordinator.js';
+import {
+  WorkspaceVoiceCoordinator,
+  type VoiceAdmissionResult,
+} from '../voice/workspace-voice-coordinator.js';
 
 const homes: string[] = [];
 
@@ -29,6 +32,7 @@ function runtime(
   opts: {
     primary?: boolean;
     trusted?: boolean;
+    envMode?: 'parent-process' | 'runtime-overlay';
     effectiveEnv?: Readonly<Record<string, string | undefined>>;
   } = {},
 ): WorkspaceRuntime {
@@ -37,24 +41,29 @@ function runtime(
     workspaceCwd,
     primary: opts.primary === true,
     trusted: opts.trusted !== false,
-    env: {
-      mode: 'runtime-overlay',
-      overlayKeys: [],
-      effectiveEnv: opts.effectiveEnv ?? {},
-    },
+    env:
+      opts.envMode === 'parent-process'
+        ? { mode: 'parent-process', overlayKeys: [] }
+        : {
+            mode: 'runtime-overlay',
+            overlayKeys: [],
+            effectiveEnv: opts.effectiveEnv ?? {},
+          },
     bridge: { publishWorkspaceEvent: vi.fn() },
   } as unknown as WorkspaceRuntime;
 }
 
 async function createApp(
   opts: {
-    acquireVoiceLease?: () => VoiceAdmissionResult;
+    acquireVoiceLease?: (runtime: WorkspaceRuntime) => VoiceAdmissionResult;
     transcribe?: ReturnType<typeof vi.fn>;
+    secondaryEnvMode?: 'parent-process' | 'runtime-overlay';
   } = {},
 ): Promise<{
   app: express.Application;
   secondary: WorkspaceRuntime;
   untrusted: WorkspaceRuntime;
+  registry: ReturnType<typeof createWorkspaceRegistry>;
   persistSetting: ReturnType<typeof vi.fn>;
   acquireVoiceLease: ReturnType<typeof vi.fn>;
   transcribe: ReturnType<typeof vi.fn>;
@@ -75,6 +84,7 @@ async function createApp(
 
   const primary = runtime('primary-id', primaryCwd, { primary: true });
   const secondary = runtime('secondary-id', secondaryCwd, {
+    envMode: opts.secondaryEnvMode,
     effectiveEnv: { SECONDARY_VOICE_KEY: 'secondary-secret' },
   });
   const untrusted = runtime('untrusted-id', untrustedCwd, { trusted: false });
@@ -102,7 +112,7 @@ async function createApp(
     mutate: () => (_req, _res, next) => next(),
     safeBody: (req) => req.body as Record<string, unknown>,
     persistSetting,
-    acquireVoiceLease: () => acquireVoiceLease(),
+    acquireVoiceLease: (target) => acquireVoiceLease(target),
     transcribe,
     parseAndValidateClientId: () => undefined,
     invalidateServeFeaturesCache,
@@ -111,6 +121,7 @@ async function createApp(
     app,
     secondary,
     untrusted,
+    registry,
     persistSetting,
     acquireVoiceLease,
     transcribe,
@@ -232,6 +243,23 @@ describe('workspace-qualified Voice routes', () => {
     );
   });
 
+  it('inherits the parent process environment for parent-process runtimes', async () => {
+    const { app, secondary, transcribe } = await createApp({
+      secondaryEnvMode: 'parent-process',
+    });
+    await enableSecondaryVoice(secondary);
+
+    const response = await request(app)
+      .post('/workspaces/secondary-id/voice/transcribe')
+      .set('Content-Type', 'audio/wav')
+      .send(Buffer.from([1, 2, 3]));
+
+    expect(response.status).toBe(200);
+    expect(transcribe).toHaveBeenCalledWith(
+      expect.objectContaining({ env: undefined }),
+    );
+  });
+
   it('rejects capacity before reading the audio body', async () => {
     const { app, secondary, transcribe, acquireVoiceLease } = await createApp({
       acquireVoiceLease: () => ({ kind: 'rejected', reason: 'capacity' }),
@@ -250,11 +278,15 @@ describe('workspace-qualified Voice routes', () => {
     expect(transcribe).not.toHaveBeenCalled();
   });
 
-  it('reports workspace draining before reading the audio body', async () => {
-    const { app, secondary, transcribe, acquireVoiceLease } = await createApp({
-      acquireVoiceLease: () => ({ kind: 'rejected', reason: 'draining' }),
-    });
+  it('reports workspace draining after the registry drain gate closes', async () => {
+    const coordinator = new WorkspaceVoiceCoordinator();
+    const { app, secondary, registry, transcribe, acquireVoiceLease } =
+      await createApp({
+        acquireVoiceLease: (runtime) => coordinator.acquire(runtime),
+      });
     await enableSecondaryVoice(secondary);
+    expect(registry.beginDrain(secondary)).toBe(true);
+    coordinator.beginWorkspaceDrain(secondary);
 
     const response = await request(app)
       .post('/workspaces/secondary-id/voice/transcribe')

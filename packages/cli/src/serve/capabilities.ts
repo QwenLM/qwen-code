@@ -284,11 +284,13 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // workspace agent CRUD, and persisted session organization surfaces.
   // Workspace-qualified settings also require the existing
   // `workspace_settings` tag because that surface depends on settings
-  // persistence. ACP/WebSocket, auth, voice, and extensions stay on their
-  // existing primary-workspace routes in this phase.
+  // persistence. ACP, auth, and extensions stay outside this core tag;
+  // workspace-qualified Voice REST/WebSocket routes use their separate
+  // `workspace_qualified_voice` capability below.
   workspace_qualified_rest_core: { since: 'v1' },
-  // Workspace-qualified Voice REST and WebSocket routes. Individual Voice
-  // modalities remain gated by their existing Voice capability tags.
+  // Workspace-qualified Voice REST and WebSocket routes. This tag is enough
+  // to discover plural modalities because legacy Voice tags describe only
+  // the primary runtime and may be absent for a secondary-only setup.
   workspace_qualified_voice: { since: 'v1' },
   // Workspace-qualified, daemon-local persisted transcript paging. The tag is
   // unconditional because the route also serves a trusted single-workspace

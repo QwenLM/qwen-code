@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   LoadedSettings,
   SettingScope,
@@ -56,6 +56,16 @@ function expectWorkspaceVoiceError(action: () => unknown, code: string): void {
 }
 
 describe('voice service', () => {
+  const originalDashscopeKey = process.env['DASHSCOPE_API_KEY'];
+
+  afterEach(() => {
+    if (originalDashscopeKey === undefined) {
+      delete process.env['DASHSCOPE_API_KEY'];
+    } else {
+      process.env['DASHSCOPE_API_KEY'] = originalDashscopeKey;
+    }
+  });
+
   it('builds settings writes using voice and model persistence scopes', () => {
     const settings = makeSettings({
       workspace: {
@@ -292,6 +302,44 @@ describe('voice service', () => {
       () => validateWorkspaceVoiceConfig(settings, 'qwen3-asr-flash'),
       'invalid_voice_model',
     );
+  });
+
+  it('uses the supplied runtime environment for validation and transcription', async () => {
+    process.env['DASHSCOPE_API_KEY'] = 'process-secret';
+    const settings = makeSettings({
+      user: {
+        modelProviders: {
+          openai: [
+            {
+              id: 'qwen3-asr-flash',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+        },
+      },
+    });
+    const runtimeEnv = { DASHSCOPE_API_KEY: undefined };
+
+    expectWorkspaceVoiceError(
+      () =>
+        validateWorkspaceVoiceState(
+          settings,
+          { enabled: true, voiceModel: 'qwen3-asr-flash' },
+          { env: runtimeEnv },
+        ),
+      'invalid_voice_model',
+    );
+    await expect(
+      transcribeWorkspaceVoiceAudio({
+        workspaceCwd: '/workspace',
+        settings,
+        voiceModel: 'qwen3-asr-flash',
+        data: new Uint8Array([1, 2, 3]),
+        mimeType: 'audio/wav',
+        env: runtimeEnv,
+      }),
+    ).rejects.toThrow('requires DASHSCOPE_API_KEY');
   });
 
   it('rejects realtime-only models for batch daemon transcription', async () => {

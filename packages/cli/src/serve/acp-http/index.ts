@@ -24,6 +24,7 @@ import type {
   WorkspaceRuntime,
 } from '../workspace-registry.js';
 import {
+  isPortableAbsolutePath,
   resolveManagedWorkspaceRuntimeFromParam,
   resolveManagedWorkspaceRuntimeByPathSelector,
 } from '../workspace-route-runtime.js';
@@ -1534,7 +1535,12 @@ export function mountAcpHttp(
         const wsRegistry = opts.workspaceRegistry;
         const runtime = wsRegistry
           ? (wsRegistry.getManagedByWorkspaceId(selector) ??
-            resolveManagedWorkspaceRuntimeByPathSelector(wsRegistry, selector))
+            (isPortableAbsolutePath(selector)
+              ? resolveManagedWorkspaceRuntimeByPathSelector(
+                  wsRegistry,
+                  selector,
+                )
+              : undefined))
           : undefined;
         if (!runtime) {
           logReject(`workspace-mismatch ${logSafe(selector)}`);
@@ -1579,7 +1585,12 @@ export function mountAcpHttp(
         const wsRegistry = opts.workspaceRegistry;
         const rt = wsRegistry
           ? (wsRegistry.getManagedByWorkspaceId(selector) ??
-            resolveManagedWorkspaceRuntimeByPathSelector(wsRegistry, selector))
+            (isPortableAbsolutePath(selector)
+              ? resolveManagedWorkspaceRuntimeByPathSelector(
+                  wsRegistry,
+                  selector,
+                )
+              : undefined))
           : undefined;
         if (!rt) {
           logReject(`workspace-mismatch ${logSafe(selector)}`);

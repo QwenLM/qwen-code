@@ -19,6 +19,7 @@ class FakeWs {
   readyState = 1;
   readonly sent: Array<string | 'binary'> = [];
   closeCode: number | undefined;
+  closeReason: string | undefined;
   private handlers: Record<string, Array<(...args: unknown[]) => void>> = {};
 
   constructor(private readonly emitCloseOnClose = true) {}
@@ -30,8 +31,9 @@ class FakeWs {
   send(data: string | Uint8Array): void {
     this.sent.push(typeof data === 'string' ? data : 'binary');
   }
-  close(code?: number): void {
+  close(code?: number, reason?: string): void {
     this.closeCode = code;
+    this.closeReason = reason;
     this.readyState = 3;
     if (this.emitCloseOnClose) this.emit('close');
   }
@@ -566,5 +568,20 @@ describe('createVoiceWsConnectionHandler', () => {
 
     expect(ws.closeCode).toBe(1012);
     expect(coordinator.getWorkspaceActivity(runtime)).toBe(0);
+  });
+
+  it('reports daemon shutdown when its runtime lease is aborted on shutdown', async () => {
+    const coordinator = new WorkspaceVoiceCoordinator();
+    const runtime = { workspaceId: 'primary' } as WorkspaceRuntime;
+    const ws = new FakeWs(false);
+    const handler = createVoiceWsConnectionHandler('/ws', {
+      acquireVoiceLease: () => coordinator.acquire(runtime),
+    });
+    handler(ws as never, {} as never);
+
+    await coordinator.disposeRuntime(runtime, 'daemon_shutdown');
+
+    expect(ws.closeCode).toBe(1012);
+    expect(ws.closeReason).toBe('Server shutting down');
   });
 });

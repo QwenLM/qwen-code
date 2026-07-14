@@ -246,6 +246,62 @@ describe('DaemonClient voice helpers', () => {
     expect(calls[0]?.method).toBe('POST');
   });
 
+  it('uses REST for every qualified Voice method when ACP transport is configured', async () => {
+    const status = {
+      v: 1,
+      workspaceCwd: '/secondary',
+      enabled: false,
+      mode: 'hold',
+      language: '',
+      voiceModel: null,
+      availableVoiceModels: [],
+    };
+    const transcription = {
+      v: 1,
+      text: 'hello',
+      model: 'qwen3-asr-flash',
+      transport: 'qwen-asr-chat',
+    };
+    const { fetch, calls } = recordingFetch((request) =>
+      jsonResponse(
+        200,
+        request.url.endsWith('/transcribe') ? transcription : status,
+      ),
+    );
+    const acpTransport: DaemonTransport = {
+      type: 'acp-http',
+      supportsReplay: false,
+      connected: true,
+      fetch: vi.fn(async () => {
+        throw new Error('qualified Voice must not use ACP route mapping');
+      }),
+      subscribeEvents: vi.fn(() => emptyAsyncEvents()),
+      dispose: vi.fn(),
+    };
+    const workspace = new DaemonClient({
+      baseUrl: 'http://daemon',
+      fetch,
+      transport: acpTransport,
+    }).workspaceById('secondary-id');
+
+    await expect(workspace.workspaceVoice()).resolves.toEqual(status);
+    await expect(
+      workspace.setWorkspaceVoice({ enabled: false }),
+    ).resolves.toEqual(status);
+    await expect(
+      workspace.transcribeWorkspaceVoice(new Uint8Array([1]), {
+        mimeType: 'audio/wav',
+      }),
+    ).resolves.toEqual(transcription);
+
+    expect(acpTransport.fetch).not.toHaveBeenCalled();
+    expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+      'GET http://daemon/workspaces/secondary-id/voice',
+      'POST http://daemon/workspaces/secondary-id/voice',
+      'POST http://daemon/workspaces/secondary-id/voice/transcribe',
+    ]);
+  });
+
   it('allows voice transcription to run longer than the client default timeout', async () => {
     const response = {
       v: 1,

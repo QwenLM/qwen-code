@@ -95,7 +95,7 @@ async function defaultOpenStream(
       voiceModel: ctx.voiceModel,
       env: ctx.env,
     });
-    await assertVoiceBaseUrlNetworkAllowed(cfg);
+    await assertVoiceBaseUrlNetworkAllowed(cfg, undefined, abortSignal);
     return await openVoiceStreamWithRetry(
       () =>
         cfg.transport === 'qwen-asr-realtime'
@@ -133,6 +133,13 @@ function defaultTranscribe(
 
 function errMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function voiceLeaseCloseReason(signal: AbortSignal): string {
+  return signal.reason instanceof Error &&
+    signal.reason.message === 'Daemon is shutting down'
+    ? 'Server shutting down'
+    : 'Workspace removed';
 }
 
 function voiceConfigErrorMessage(error: unknown): string {
@@ -311,7 +318,7 @@ export function createVoiceWsConnectionHandler(
         if (state === 'closed') return;
         cleanup();
         try {
-          ws.close(1012, 'Workspace removed');
+          ws.close(1012, voiceLeaseCloseReason(lease.signal));
         } catch {
           // ignore
         }

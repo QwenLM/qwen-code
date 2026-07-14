@@ -275,4 +275,32 @@ describe('WebShellSidebar workspace removal', () => {
     );
     expect(dialogButton('Force remove').disabled).toBe(true);
   });
+
+  it('shows Voice-only activity before offering force removal', async () => {
+    workspaceActions.removeWorkspace.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        {
+          code: 'workspace_busy',
+          activity: {
+            sessions: 0,
+            activePrompts: 0,
+            pendingSessionStarts: 0,
+            acpConnections: 0,
+            memoryTasks: 0,
+            channelWorkers: 0,
+            voiceSessions: 1,
+          },
+        },
+        'busy',
+      ),
+    );
+    renderSidebar();
+    openRemoval('/tmp/other');
+
+    await act(async () => click(dialogButton('Remove workspace')));
+
+    expect(document.body.textContent).toContain('Voice sessions: 1');
+    expect(dialogButton('Force remove').disabled).toBe(false);
+  });
 });

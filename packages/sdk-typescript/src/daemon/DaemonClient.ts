@@ -3629,18 +3629,23 @@ export class WorkspaceDaemonClient {
   }
 
   workspaceVoice(clientId?: string): Promise<DaemonWorkspaceVoiceStatus> {
-    return this.get('/voice', 'GET /workspaces/:workspace/voice', clientId);
+    return this.client.workspaceJsonRequest<DaemonWorkspaceVoiceStatus>(
+      this.workspaceSelector,
+      '/voice',
+      'GET /workspaces/:workspace/voice',
+      { clientId, mode: 'rest' },
+    );
   }
 
   setWorkspaceVoice(
     update: DaemonWorkspaceVoiceUpdate,
     clientId?: string,
   ): Promise<DaemonWorkspaceVoiceStatus> {
-    return this.post(
+    return this.client.workspaceJsonRequest<DaemonWorkspaceVoiceStatus>(
+      this.workspaceSelector,
       '/voice',
       'POST /workspaces/:workspace/voice',
-      update,
-      clientId,
+      { method: 'POST', body: update, clientId, mode: 'rest' },
     );
   }
 

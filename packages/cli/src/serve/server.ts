@@ -310,7 +310,10 @@ function describeRegistryPrimaryForConflict(
 function getRuntimeEffectiveEnv(
   metadata: WorkspaceRuntimeEnvMetadata | undefined,
 ): Readonly<Record<string, string | undefined>> | undefined {
-  return metadata?.effectiveEnv;
+  if (!metadata || metadata.mode === 'parent-process') {
+    return metadata?.effectiveEnv;
+  }
+  return metadata.effectiveEnv ?? {};
 }
 
 export interface ServeAppDeps {
@@ -860,11 +863,13 @@ export function createServeApp(
   (app.locals as { workspaceRegistry?: WorkspaceRegistry }).workspaceRegistry =
     workspaceRegistry;
   const primaryRuntime = workspaceRegistry.primary;
+  if (deps.workspaceRuntimeRemoval && !deps.voiceCoordinator) {
+    throw new Error(
+      'createServeApp: deps.workspaceRuntimeRemoval requires the matching deps.voiceCoordinator.',
+    );
+  }
   const voiceCoordinator =
     deps.voiceCoordinator ?? new WorkspaceVoiceCoordinator();
-  (
-    app.locals as { workspaceVoiceCoordinator?: WorkspaceVoiceCoordinator }
-  ).workspaceVoiceCoordinator = voiceCoordinator;
   const primaryBoundWorkspace = primaryRuntime.workspaceCwd;
   const primaryBridge = primaryRuntime.bridge;
   const primaryWorkspace = primaryRuntime.workspaceService;
@@ -1687,9 +1692,7 @@ export function createServeApp(
     ],
     workspaceVoiceConnection: (runtime, ws, req) =>
       createVoiceWsConnectionHandler(runtime.workspaceCwd, {
-        // Do not let a qualified runtime inherit process.env when an embedded
-        // registry omitted its effective-env snapshot.
-        env: getRuntimeEffectiveEnv(runtime.env) ?? {},
+        env: getRuntimeEffectiveEnv(runtime.env),
         acquireVoiceLease: () => voiceCoordinator.acquire(runtime),
       })(ws, req),
   });

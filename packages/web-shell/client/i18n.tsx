@@ -848,6 +848,8 @@ const EN: Messages = {
     `ACP connections: ${v?.count ?? 0}`,
   'sidebar.removeWorkspaceMemoryTasks': (v) => `Memory tasks: ${v?.count ?? 0}`,
   'sidebar.removeWorkspaceWorkers': (v) => `Channel workers: ${v?.count ?? 0}`,
+  'sidebar.removeWorkspaceVoiceSessions': (v) =>
+    `Voice sessions: ${v?.count ?? 0}`,
   'sidebar.noSessions': 'No sessions.',
   'sidebar.projectFallback': 'Project',
   'sidebar.sessionsOverview': 'Session Overview',
@@ -2727,6 +2729,7 @@ const ZH: Messages = {
   'sidebar.removeWorkspaceConnections': (v) => `ACP 连接：${v?.count ?? 0}`,
   'sidebar.removeWorkspaceMemoryTasks': (v) => `Memory 任务：${v?.count ?? 0}`,
   'sidebar.removeWorkspaceWorkers': (v) => `Channel worker：${v?.count ?? 0}`,
+  'sidebar.removeWorkspaceVoiceSessions': (v) => `语音会话：${v?.count ?? 0}`,
   'sidebar.noSessions': '暂无会话',
   'sidebar.projectFallback': '项目',
   'sidebar.sessionsOverview': '会话总览',

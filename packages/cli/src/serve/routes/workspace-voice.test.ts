@@ -6,6 +6,8 @@
 
 import { randomBytes } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
+import { request as httpRequest, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import express, {
@@ -224,6 +226,21 @@ describe('workspace voice routes', () => {
     expect(serialized).not.toContain('sk-secret');
     expect(serialized).not.toContain('dashscope.example');
     expect(serialized).not.toContain('envKey');
+  });
+
+  it('GET returns a structured error when Voice settings are unreadable', async () => {
+    await fsp.mkdir(path.join(h.home, 'settings.json'));
+
+    const res = await request(h.app)
+      .get('/workspace/voice')
+      .set('Host', hostHeader)
+      .set('Authorization', 'Bearer secret');
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({
+      error: 'Failed to load voice settings',
+      code: 'internal_error',
+    });
   });
 
   it('POST updates voice settings only after validating the resulting state', async () => {
@@ -504,7 +521,7 @@ describe('workspace voice routes', () => {
     );
   });
 
-  it('POST does not broadcast fallback voice writes when a later write fails', async () => {
+  it('POST broadcasts committed fallback voice writes when a later write fails', async () => {
     await writeVoiceModelSettings(h);
     const broadcastSettingsChanged = vi.fn();
     const persistSetting = vi.fn(
@@ -538,12 +555,48 @@ describe('workspace voice routes', () => {
     });
 
     expect(res.status).toBe(500);
-    expect(broadcastSettingsChanged).not.toHaveBeenCalled();
+    expect(broadcastSettingsChanged).toHaveBeenCalledOnce();
+    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+      'voiceModel',
+      'qwen3-asr-flash',
+      'user',
+      'client-1',
+    );
     const error = mockWriteStderrLine.mock.calls[0]?.[0];
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('partial persist error'),
     );
     expect(error).toContain('committed=1/2');
+  });
+
+  it('returns a structured error when persisted settings cannot be reloaded', async () => {
+    const broadcastSettingsChanged = vi.fn();
+    const persistSetting = vi.fn(async () => {
+      await fsp.mkdir(path.join(h.home, 'settings.json'));
+    });
+    const app = express();
+    app.use(express.json({ limit: '10mb' }));
+    registerWorkspaceVoiceRoutes(app, {
+      boundWorkspace: h.workspace,
+      mutate: () => (_req: Request, _res: Response, next: NextFunction) =>
+        next(),
+      safeBody: (req) => req.body as Record<string, unknown>,
+      persistSetting,
+      broadcastSettingsChanged,
+      parseAndValidateClientId: vi.fn(() => 'client-1'),
+      transcribe: h.transcribe,
+    });
+
+    const res = await request(app)
+      .post('/workspace/voice')
+      .send({ enabled: false });
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({
+      error: 'Voice settings persisted but failed to reload',
+      code: 'internal_error',
+    });
+    expect(broadcastSettingsChanged).toHaveBeenCalledOnce();
   });
 
   it('POST rejects enabling voice when no valid voice model is selected', async () => {
@@ -978,6 +1031,165 @@ describe('workspace voice routes', () => {
       body: { code: 'workspace_draining' },
     });
     expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('releases an admitted lease once after successful transcription', async () => {
+    await writeVoiceModelSettings(h);
+    const release = vi.fn();
+    const app = express();
+    registerWorkspaceVoiceRoutes(app, {
+      boundWorkspace: h.workspace,
+      mutate: () => (_req: Request, _res: Response, next: NextFunction) =>
+        next(),
+      safeBody: (req) => req.body as Record<string, unknown>,
+      persistSetting: h.persistSetting,
+      broadcastSettingsChanged: vi.fn(),
+      parseAndValidateClientId: () => undefined,
+      acquireVoiceLease: () => ({
+        kind: 'admitted',
+        lease: { signal: new AbortController().signal, release },
+      }),
+      transcribe: h.transcribe,
+    });
+
+    await expect(
+      request(app)
+        .post('/workspace/voice/transcribe')
+        .set('Content-Type', 'audio/wav')
+        .send(Buffer.from([1])),
+    ).resolves.toMatchObject({ status: 200 });
+
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('aborts a slow upload and releases its lease before transcription starts', async () => {
+    const leaseController = new AbortController();
+    const release = vi.fn();
+    const transcribe = vi.fn();
+    const acquireVoiceLease = vi.fn(() => ({
+      kind: 'admitted' as const,
+      lease: { signal: leaseController.signal, release },
+    }));
+    const app = express();
+    registerWorkspaceVoiceRoutes(app, {
+      boundWorkspace: h.workspace,
+      mutate: () => (_req: Request, _res: Response, next: NextFunction) =>
+        next(),
+      safeBody: (req) => req.body as Record<string, unknown>,
+      persistSetting: h.persistSetting,
+      broadcastSettingsChanged: vi.fn(),
+      parseAndValidateClientId: () => undefined,
+      acquireVoiceLease,
+      transcribe,
+    });
+    const server = await new Promise<Server>((resolve) => {
+      const listening = app.listen(0, '127.0.0.1', () => resolve(listening));
+    });
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const response = new Promise<{ status: number; body: string }>(
+        (resolve, reject) => {
+          const req = httpRequest(
+            {
+              host: '127.0.0.1',
+              port,
+              path: '/workspace/voice/transcribe',
+              method: 'POST',
+              headers: {
+                'Content-Type': 'audio/wav',
+                'Content-Length': '100',
+              },
+            },
+            (res) => {
+              let body = '';
+              res.setEncoding('utf8');
+              res.on('data', (chunk) => {
+                body += chunk;
+              });
+              res.on('end', () =>
+                resolve({ status: res.statusCode ?? 0, body }),
+              );
+            },
+          );
+          req.on('error', reject);
+          req.write(Buffer.from([1]));
+        },
+      );
+
+      await vi.waitFor(() => expect(acquireVoiceLease).toHaveBeenCalledOnce());
+      leaseController.abort(new Error('Workspace runtime was removed'));
+
+      await expect(response).resolves.toMatchObject({
+        status: 503,
+        body: expect.stringContaining('workspace_draining'),
+      });
+      expect(release).toHaveBeenCalledOnce();
+      expect(transcribe).not.toHaveBeenCalled();
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('retains the lease after disconnect until transcription cleanup settles', async () => {
+    await writeVoiceModelSettings(h);
+    const release = vi.fn();
+    let operationSignal: AbortSignal | undefined;
+    let settle:
+      | ((value: Awaited<ReturnType<typeof h.transcribe>>) => void)
+      | undefined;
+    const transcribe = vi.fn(
+      async (input: { abortSignal?: AbortSignal }) =>
+        await new Promise<Awaited<ReturnType<typeof h.transcribe>>>(
+          (resolve) => {
+            operationSignal = input.abortSignal;
+            settle = resolve;
+          },
+        ),
+    );
+    const app = express();
+    registerWorkspaceVoiceRoutes(app, {
+      boundWorkspace: h.workspace,
+      mutate: () => (_req: Request, _res: Response, next: NextFunction) =>
+        next(),
+      safeBody: (req) => req.body as Record<string, unknown>,
+      persistSetting: h.persistSetting,
+      broadcastSettingsChanged: vi.fn(),
+      parseAndValidateClientId: () => undefined,
+      acquireVoiceLease: () => ({
+        kind: 'admitted',
+        lease: { signal: new AbortController().signal, release },
+      }),
+      transcribe,
+    });
+    const server = await new Promise<Server>((resolve) => {
+      const listening = app.listen(0, '127.0.0.1', () => resolve(listening));
+    });
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const req = httpRequest({
+        host: '127.0.0.1',
+        port,
+        path: '/workspace/voice/transcribe',
+        method: 'POST',
+        headers: { 'Content-Type': 'audio/wav', 'Content-Length': '1' },
+      });
+      req.on('error', () => {});
+      req.end(Buffer.from([1]));
+      await vi.waitFor(() => expect(transcribe).toHaveBeenCalledOnce());
+
+      req.destroy();
+      await vi.waitFor(() => expect(operationSignal?.aborted).toBe(true));
+      expect(release).not.toHaveBeenCalled();
+
+      settle?.({
+        text: 'discarded',
+        model: 'qwen3-asr-flash',
+        transport: 'qwen-asr-chat',
+      });
+      await vi.waitFor(() => expect(release).toHaveBeenCalledOnce());
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it('POST /workspace/voice/transcribe rejects unsupported content types', async () => {

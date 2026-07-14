@@ -27,8 +27,10 @@ leases before its bridge is shut down.
 
 Legacy `/workspace/voice`, `/workspace/voice/transcribe`, and `/voice/stream`
 remain bound to the primary workspace. ACP method names and Voice settings
-schema are unchanged. `workspace_qualified_voice` advertises route selection;
-clients combine it with the existing Voice modality capability tags.
+schema are unchanged. `workspace_qualified_voice` advertises all qualified
+Voice modalities. The existing Voice modality capability tags remain
+primary-workspace signals and are not prerequisites for a secondary runtime,
+whose configuration is validated by the selected route.
 
 Unknown workspace selectors return `400 workspace_mismatch`; registered but
 untrusted runtimes return `403 untrusted_workspace` before Voice settings or

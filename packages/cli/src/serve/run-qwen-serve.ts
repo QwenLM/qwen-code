@@ -5112,22 +5112,26 @@ export async function runQwenServe(
                   const managedRuntimes = workspaceRegistry.listManaged();
                   for (const workspaceRuntime of managedRuntimes) {
                     managedRuntimeBridges.add(workspaceRuntime.bridge);
-                    await runtimeRemoval
-                      .disposeRuntime(workspaceRuntime, 'daemon_shutdown')
-                      .catch((err) => {
-                        daemonLog.error(
-                          'workspace runtime shutdown error',
-                          err instanceof Error ? err : null,
-                        );
-                        bridgeShutdownError =
-                          err instanceof Error ? err : new Error(String(err));
-                        try {
-                          workspaceRuntime.bridge.killAllSync();
-                        } catch {
-                          // Continue shutting down the remaining runtimes.
-                        }
-                      });
                   }
+                  await Promise.all(
+                    managedRuntimes.map((workspaceRuntime) =>
+                      runtimeRemoval
+                        .disposeRuntime(workspaceRuntime, 'daemon_shutdown')
+                        .catch((err) => {
+                          daemonLog.error(
+                            'workspace runtime shutdown error',
+                            err instanceof Error ? err : null,
+                          );
+                          bridgeShutdownError =
+                            err instanceof Error ? err : new Error(String(err));
+                          try {
+                            workspaceRuntime.bridge.killAllSync();
+                          } catch {
+                            // Continue shutting down the remaining runtimes.
+                          }
+                        }),
+                    ),
+                  );
                 }
                 for (const bridgeForShutdown of getRuntimeBridgesForCleanup()) {
                   if (managedRuntimeBridges.has(bridgeForShutdown)) continue;

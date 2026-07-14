@@ -53,6 +53,7 @@ import type {
 } from '../workspace-registry.js';
 import {
   requireTrustedWorkspaceRuntime,
+  resolveManagedWorkspaceRuntimeFromParam,
   resolveWorkspaceRuntimeFromParam,
 } from '../workspace-route-runtime.js';
 
@@ -250,6 +251,9 @@ async function persistVoiceUpdate(
             err instanceof Error ? err.message : String(err)
           }`,
         );
+        for (const committedWrite of committed) {
+          broadcastVoiceWrite(deps, committedWrite, clientId);
+        }
         throw new WorkspaceSettingsPartialPersistError(
           `Voice settings partial persist failed: committed=${committed.length}/${writes.length}`,
           committed,
@@ -285,9 +289,19 @@ function loadVoiceSettings(deps: WorkspaceVoiceRouteDeps): LoadedSettings {
   );
 }
 
+interface VoiceAdmissionState {
+  lease: VoiceAdmissionLease;
+  operationStarted: boolean;
+  release: () => void;
+}
+
+function admissionState(req: Request): VoiceAdmissionState | undefined {
+  return (req as { voiceAdmissionState?: VoiceAdmissionState })
+    .voiceAdmissionState;
+}
+
 function admissionLease(req: Request): VoiceAdmissionLease | undefined {
-  return (req as { voiceAdmissionLease?: VoiceAdmissionLease })
-    .voiceAdmissionLease;
+  return admissionState(req)?.lease;
 }
 
 function installAdmissionLease(
@@ -299,10 +313,7 @@ function installAdmissionLease(
   if (!result) return true;
   if (result.kind === 'rejected') {
     if (result.reason === 'draining') {
-      res.set('Retry-After', '5').status(503).json({
-        error: 'Workspace runtime is being removed',
-        code: 'workspace_draining',
-      });
+      sendWorkspaceDraining(res);
     } else {
       res.set('Retry-After', '5').status(503).json({
         error: 'Too many voice sessions in progress; try again shortly.',
@@ -311,17 +322,32 @@ function installAdmissionLease(
     }
     return false;
   }
-  (req as { voiceAdmissionLease?: VoiceAdmissionLease }).voiceAdmissionLease =
-    result.lease;
   let released = false;
   const release = () => {
     if (released) return;
     released = true;
     result.lease.release();
   };
-  res.once('finish', release);
-  res.once('close', release);
+  const state: VoiceAdmissionState = {
+    lease: result.lease,
+    operationStarted: false,
+    release,
+  };
+  (req as { voiceAdmissionState?: VoiceAdmissionState }).voiceAdmissionState =
+    state;
+  const releaseBeforeOperation = () => {
+    if (!state.operationStarted) release();
+  };
+  res.once('finish', releaseBeforeOperation);
+  res.once('close', releaseBeforeOperation);
   return true;
+}
+
+function beginVoiceOperation(req: Request): (() => void) | undefined {
+  const state = admissionState(req);
+  if (!state) return;
+  state.operationStarted = true;
+  return state.release;
 }
 
 function combinedAbortSignal(req: Request, res: Response): AbortSignal {
@@ -442,11 +468,23 @@ async function handleVoiceUpdate(
     });
     return;
   }
-  res
-    .status(200)
-    .json(
-      buildWorkspaceVoiceStatus(deps.boundWorkspace, loadVoiceSettings(deps)),
+  try {
+    res
+      .status(200)
+      .json(
+        buildWorkspaceVoiceStatus(deps.boundWorkspace, loadVoiceSettings(deps)),
+      );
+  } catch (err) {
+    writeStderrLine(
+      `qwen serve: ${route} reload error after persist (workspace=${deps.boundWorkspace}): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
     );
+    res.status(500).json({
+      error: 'Voice settings persisted but failed to reload',
+      code: 'internal_error',
+    });
+  }
 }
 
 async function handleVoiceTranscription(
@@ -511,15 +549,21 @@ async function handleVoiceTranscription(
     return;
   }
   try {
-    const result = await (deps.transcribe ?? transcribeWorkspaceVoiceAudio)({
-      data,
-      mimeType: contentType,
-      voiceModel,
-      settings,
-      workspaceCwd: deps.boundWorkspace,
-      env: deps.env,
-      abortSignal: combinedAbortSignal(req, res),
-    });
+    const releaseOperation = beginVoiceOperation(req);
+    let result: WorkspaceVoiceTranscriptionResult;
+    try {
+      result = await (deps.transcribe ?? transcribeWorkspaceVoiceAudio)({
+        data,
+        mimeType: contentType,
+        voiceModel,
+        settings,
+        workspaceCwd: deps.boundWorkspace,
+        env: deps.env,
+        abortSignal: combinedAbortSignal(req, res),
+      });
+    } finally {
+      releaseOperation?.();
+    }
     if (admissionLease(req)?.signal.aborted) {
       sendWorkspaceDraining(res);
       return;
@@ -557,13 +601,39 @@ function admitVoiceTranscription(
 }
 
 function voiceAudioBodyParser(): import('express').RequestHandler {
-  return express.raw({
+  const parse = express.raw({
     type: (req) =>
       isSupportedAudioContentType(
         req.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase(),
       ),
     limit: '10mb',
   });
+  return (req, res, next) => {
+    const signal = admissionLease(req)?.signal;
+    let aborted = signal?.aborted === true;
+    const onAbort = () => {
+      aborted = true;
+      if (!res.headersSent) sendWorkspaceDraining(res);
+      const destroyRequest = () => {
+        if (!req.destroyed) req.destroy();
+      };
+      if (res.writableFinished) destroyRequest();
+      else res.once('finish', destroyRequest);
+    };
+    if (aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener('abort', onAbort, { once: true });
+    parse(req, res, (err) => {
+      signal?.removeEventListener('abort', onAbort);
+      if (aborted || signal?.aborted) {
+        if (!res.headersSent) sendWorkspaceDraining(res);
+        return;
+      }
+      next(err);
+    });
+  };
 }
 
 export function registerWorkspaceVoiceRoutes(
@@ -602,6 +672,10 @@ function createRuntimeVoiceDeps(
   runtime: WorkspaceRuntime,
   deps: WorkspaceQualifiedVoiceRouteDeps,
 ): WorkspaceVoiceRouteDeps {
+  const env =
+    runtime.env.mode === 'runtime-overlay'
+      ? (runtime.env.effectiveEnv ?? {})
+      : runtime.env.effectiveEnv;
   return {
     boundWorkspace: runtime.workspaceCwd,
     mutate: deps.mutate,
@@ -609,10 +683,7 @@ function createRuntimeVoiceDeps(
     persistSetting: deps.persistSetting,
     persistSettings: deps.persistSettings,
     transcribe: deps.transcribe,
-    // A qualified request must never fall back to process.env. Runtime
-    // creation normally supplies an effective env; an empty snapshot remains
-    // the safe fallback for injected runtimes that do not.
-    env: runtime.env.effectiveEnv ?? {},
+    ...(env ? { env } : {}),
     scopeOverride: SettingScope.Workspace,
     acquireVoiceLease: () => deps.acquireVoiceLease(runtime),
     broadcastSettingsChanged: (key, value, scope, clientId) => {
@@ -636,12 +707,11 @@ function resolveQualifiedVoiceTarget(
   req: Request,
   res: Response,
   deps: WorkspaceQualifiedVoiceRouteDeps,
+  includeDraining = false,
 ): WorkspaceVoiceRouteDeps | undefined {
-  const runtime = resolveWorkspaceRuntimeFromParam(
-    deps.workspaceRegistry,
-    req,
-    res,
-  );
+  const runtime = includeDraining
+    ? resolveManagedWorkspaceRuntimeFromParam(deps.workspaceRegistry, req, res)
+    : resolveWorkspaceRuntimeFromParam(deps.workspaceRegistry, req, res);
   if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
   return createRuntimeVoiceDeps(runtime, deps);
 }
@@ -679,7 +749,7 @@ export function registerWorkspaceQualifiedVoiceRoutes(
       res: Response,
       next: import('express').NextFunction,
     ) => {
-      const target = resolveQualifiedVoiceTarget(req, res, deps);
+      const target = resolveQualifiedVoiceTarget(req, res, deps, true);
       if (!target) return;
       req.voiceRouteDeps = target;
       if (admitVoiceTranscription(req, res, target)) next();
