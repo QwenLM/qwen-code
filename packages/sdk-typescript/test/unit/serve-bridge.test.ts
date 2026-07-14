@@ -871,6 +871,45 @@ describe('serve-bridge', () => {
       ).toBeUndefined();
     });
 
+    it('should preserve a completed response when abort arrives after collection', async () => {
+      const controller = new AbortController();
+      const { state, calls } = makeMockState({
+        defaultSessionId: 'test-session',
+        fetchReply: (req) => {
+          if (req.url.endsWith('/prompt')) {
+            const collector =
+              state.bindings.get('test-session')!.stream.activeCollector!;
+            collector.texts.push('completed response');
+            collector.resolve();
+            controller.abort();
+            return jsonResponse(200, { stopReason: 'end_turn' });
+          }
+          return new Response(null, { status: 204 });
+        },
+      });
+      bindSession(state, 'test-session', 'client-test');
+      const { agentTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/agent.js'
+      );
+      const promptTool = agentTools(state).find(
+        (t: { name: string }) => t.name === 'prompt',
+      );
+
+      const result = await promptTool.handler(
+        { prompt: 'test' },
+        { signal: controller.signal },
+      );
+
+      expect(result.isError).toBeUndefined();
+      expect(JSON.parse(result.content[0].text)).toMatchObject({
+        stop_reason: 'end_turn',
+        response: 'completed response',
+      });
+      expect(calls.filter((call) => call.url.endsWith('/cancel'))).toHaveLength(
+        1,
+      );
+    });
+
     it('should not cancel an unadmitted legacy prompt after abort', async () => {
       const controller = new AbortController();
       const { state, calls } = makeMockState({
@@ -984,9 +1023,6 @@ describe('serve-bridge', () => {
               promptId: 'prompt-accepted',
               lastEventId: 0,
             });
-          }
-          if (req.url.endsWith('/events')) {
-            return pendingSseResponse();
           }
           if (req.url.endsWith('/cancel')) {
             return jsonResponse(400, { code: 'invalid_client_id' });

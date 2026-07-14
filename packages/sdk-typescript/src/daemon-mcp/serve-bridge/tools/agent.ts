@@ -67,8 +67,10 @@ export function agentTools(state: BridgeState): any[] {
             }
           };
           const onAbort = () => {
-            collector.interrupted = true;
-            collector.resolve();
+            if (!collector.resolved) {
+              collector.interrupted = true;
+              collector.resolve();
+            }
             if (promptSettled) {
               void awaitBestEffortCancel();
             }

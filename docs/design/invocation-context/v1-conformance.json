@@ -32,6 +32,34 @@
       "valid": false
     },
     {
+      "name": "missing-session-id",
+      "valid": false,
+      "input": {
+        "version": 1,
+        "ingress": "cli",
+        "promptId": "prompt-missing-session"
+      }
+    },
+    {
+      "name": "missing-prompt-id",
+      "valid": false,
+      "input": {
+        "version": 1,
+        "ingress": "cli",
+        "sessionId": "session-missing-prompt"
+      }
+    },
+    {
+      "name": "string-version",
+      "valid": false,
+      "input": {
+        "version": "1",
+        "ingress": "cli",
+        "sessionId": "session-string-version",
+        "promptId": "prompt-string-version"
+      }
+    },
+    {
       "name": "future-version",
       "valid": false,
       "input": {

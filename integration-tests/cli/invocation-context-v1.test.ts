@@ -288,7 +288,10 @@ describe('Invocation Context v1 runtime propagation', () => {
     }
   }, 60_000);
 
-  it('keeps external_mcp session markings isolated through the daemon', async () => {
+  it('keeps external_mcp session markings isolated through the daemon', async ({
+    skip,
+  }) => {
+    skip(process.platform === 'win32', 'requires the POSIX daemon harness');
     const root = mkdtempSync(path.join(tmpdir(), 'qwen-invocation-daemon-'));
     const workspace = path.join(root, 'workspace');
     const home = path.join(root, 'home');
