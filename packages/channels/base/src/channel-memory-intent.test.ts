@@ -100,12 +100,11 @@ describe('parseChannelMemoryIntent', () => {
     expect(parseChannelMemoryIntent('/forget m-a31f0d82c7e4')).toBeNull();
   });
 
-  it('keeps clear intents ahead of item removal', () => {
-    expect(parseChannelMemoryIntent('忘掉这个聊天的所有记忆')).toEqual({
+  it('keeps clear requests ahead of item updates', () => {
+    expect(
+      parseChannelMemoryIntent('把 m-a31f0d82c7e4 改成默认的记忆清空'),
+    ).toEqual({
       kind: 'clear_request',
-    });
-    expect(parseChannelMemoryIntent('确认清空记忆')).toEqual({
-      kind: 'clear_confirm',
     });
   });
 
