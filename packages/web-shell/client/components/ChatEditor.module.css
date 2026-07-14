@@ -191,10 +191,34 @@
 
 :global([data-web-shell-slash-menu]) {
   width: min(
-    620px,
+    max(
+      240px,
+      calc(
+        var(--slash-command-col) + var(--slash-desc-col) +
+          var(--slash-column-gap) + 20px
+      )
+    ),
     calc(var(--radix-popover-trigger-width) - 32px),
+    var(--radix-popover-content-available-width),
     calc(100vw - 24px)
   );
+  max-height: var(--radix-popover-content-available-height);
+  overflow: hidden;
+}
+
+:global([data-web-shell-slash-detail]) {
+  z-index: calc(var(--web-shell-popover-z-index, 1000) + 1);
+  width: min(
+    320px,
+    var(--radix-popover-content-available-width),
+    calc(100vw - 24px)
+  );
+  max-height: min(200px, var(--radix-popover-content-available-height));
+  overflow: hidden;
+}
+
+:global([data-web-shell-toolbar-popover]) {
+  width: min(18rem, var(--radix-popover-content-available-width));
   max-height: var(--radix-popover-content-available-height);
   overflow: hidden;
 }
@@ -293,6 +317,11 @@
   cursor: pointer;
 }
 
+.slashItem:not([data-has-description]) {
+  grid-template-columns: minmax(0, 1fr);
+  column-gap: 0;
+}
+
 .slashItem:hover,
 .slashItemActive {
   background: var(--accent);
@@ -304,7 +333,11 @@
 }
 
 .slashDetail {
-  max-height: 180px;
+  min-height: 0;
+  max-height: min(
+    180px,
+    max(0px, calc(var(--radix-popover-content-available-height) - 20px))
+  );
   overflow: auto;
   overflow-wrap: anywhere;
 }

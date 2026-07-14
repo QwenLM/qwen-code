@@ -158,6 +158,7 @@ function renderChatEditor(props: {
     ...chatEditorProps
   } = props;
   const container = document.createElement('div');
+  container.dataset.webShellRoot = '';
   const portalRoot = document.createElement('div');
   portalRoot.dataset.webShellPortalRoot = '';
   document.body.appendChild(container);
@@ -542,6 +543,45 @@ describe('ChatEditor toolbar popovers', () => {
 
     expect(onSelectModel).toHaveBeenCalledWith('qwen-max');
   });
+
+  it('switches between sibling toolbar popovers without dismissing the target', async () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['approvalMode', 'model'],
+      currentModel: 'qwen-plus',
+      availableModels: [{ id: 'qwen-plus', label: 'Qwen Plus' }],
+    });
+    const modeButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-mode-button]',
+    );
+    const modelButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-button]',
+    );
+
+    act(() => modeButton?.click());
+    expect(modeButton?.getAttribute('aria-expanded')).toBe('true');
+
+    await act(async () => {
+      modelButton?.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(modelButton?.getAttribute('aria-expanded')).toBe('true');
+    expect(
+      document.querySelector(
+        '[data-web-shell-toolbar-popover] input[type="search"]',
+      ),
+    ).not.toBeNull();
+
+    await act(async () => {
+      modeButton?.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(modeButton?.getAttribute('aria-expanded')).toBe('true');
+    expect(
+      document.querySelector(
+        '[data-web-shell-toolbar-popover] input[type="search"]',
+      ),
+    ).toBeNull();
+  });
 });
 
 describe('ChatEditor slash command popovers', () => {
@@ -560,6 +600,12 @@ describe('ChatEditor slash command popovers', () => {
           detail: 'Show available commands',
           section: 'Commands',
         },
+        {
+          id: 'history-collapse',
+          label: '/history collapse-on-resume',
+          apply: '/history collapse-on-resume',
+          section: 'Commands',
+        },
       ],
     };
 
@@ -567,6 +613,21 @@ describe('ChatEditor slash command popovers', () => {
 
     const panel = document.querySelector('[data-web-shell-slash-menu]');
     expect(panel?.getAttribute('data-slot')).toBe('popover-content');
+    expect(
+      panel
+        ?.querySelectorAll('[role="option"]')[1]
+        ?.hasAttribute('data-has-description'),
+    ).toBe(false);
+
+    const composingEscape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+      isComposing: true,
+    });
+    act(() => document.body.dispatchEvent(composingEscape));
+    expect(composingEscape.defaultPrevented).toBe(false);
+    expect(document.querySelector('[data-web-shell-slash-menu]')).toBe(panel);
 
     const command = panel?.querySelector<HTMLButtonElement>('[role="option"]');
     act(() => {

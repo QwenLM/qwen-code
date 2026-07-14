@@ -9,7 +9,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import type { ReactNode, RefObject } from 'react';
+import type { CSSProperties, ReactNode, RefObject } from 'react';
 import { Tooltip as TooltipPrimitive } from 'radix-ui';
 import { DAEMON_APPROVAL_MODES } from '@qwen-code/webui/daemon-react-sdk';
 import type { CommandInfo } from '../adapters/types';
@@ -647,7 +647,11 @@ function ToolbarPopover({
   noResultsLabel?: (query: string) => string;
 }) {
   const [searchQuery, setSearchQuery] = useState('');
+  const [collisionBoundary, setCollisionBoundary] =
+    useState<HTMLElement | null>(null);
   const selectionRef = useRef(false);
+  const handoffRef = useRef(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const hasRichItems = items.some((item) => item.description || item.icon);
   const visibleItems = searchable
     ? filterToolbarDropdownItems(items, searchQuery)
@@ -665,7 +669,14 @@ function ToolbarPopover({
     <Popover
       open={open}
       onOpenChange={(nextOpen) => {
-        if (nextOpen) selectionRef.current = false;
+        if (nextOpen) {
+          selectionRef.current = false;
+          handoffRef.current = false;
+          setCollisionBoundary(
+            triggerRef.current?.closest<HTMLElement>('[data-web-shell-root]') ??
+              null,
+          );
+        }
         onOpenChange(nextOpen);
       }}
     >
@@ -673,21 +684,47 @@ function ToolbarPopover({
         <TooltipProvider delayDuration={300}>
           <Tooltip>
             <TooltipTrigger asChild>
-              <PopoverTrigger asChild>{trigger}</PopoverTrigger>
+              <PopoverTrigger ref={triggerRef} asChild>
+                {trigger}
+              </PopoverTrigger>
             </TooltipTrigger>
             <TooltipContent side="top">{tooltip}</TooltipContent>
           </Tooltip>
         </TooltipProvider>
       ) : (
-        <PopoverTrigger asChild>{trigger}</PopoverTrigger>
+        <PopoverTrigger ref={triggerRef} asChild>
+          {trigger}
+        </PopoverTrigger>
       )}
       <PopoverContent
         side="top"
         align="start"
         collisionPadding={8}
+        collisionBoundary={collisionBoundary ?? undefined}
         data-web-shell-toolbar-popover
         onClick={(event) => event.stopPropagation()}
+        onPointerDownOutside={(event) => {
+          const target = event.target;
+          if (
+            target instanceof Element &&
+            target.closest('[data-web-shell-toolbar-popover-trigger]')
+          ) {
+            handoffRef.current = true;
+          }
+        }}
         onCloseAutoFocus={(event) => {
+          if (handoffRef.current) {
+            event.preventDefault();
+            handoffRef.current = false;
+            return;
+          }
+          if (
+            document.activeElement instanceof HTMLElement &&
+            document.activeElement.closest('[data-web-shell-toolbar-popover]')
+          ) {
+            event.preventDefault();
+            return;
+          }
           if (!selectionRef.current) return;
           event.preventDefault();
           selectionRef.current = false;
@@ -778,6 +815,8 @@ function SlashCommandPanel({
 }) {
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const hoverAnchorRef = useRef<HTMLButtonElement>(null);
+  const [collisionBoundary, setCollisionBoundary] =
+    useState<HTMLElement | null>(null);
   const [hoverDetail, setHoverDetail] = useState<{
     label: string;
     detail: string;
@@ -793,7 +832,60 @@ function SlashCommandPanel({
     setHoverDetail(null);
   }, [menu.items]);
 
+  useLayoutEffect(() => {
+    setCollisionBoundary(
+      anchorRef.current?.closest<HTMLElement>('[data-web-shell-root]') ?? null,
+    );
+  }, [anchorRef]);
+
+  useEffect(() => {
+    const preserveImeEscape = (event: KeyboardEvent) => {
+      if (
+        event.key !== 'Escape' ||
+        (!event.isComposing && event.keyCode !== 229)
+      ) {
+        return;
+      }
+      Object.defineProperty(event, 'key', {
+        configurable: true,
+        value: 'Process',
+      });
+      window.addEventListener(
+        'keydown',
+        (currentEvent) => {
+          if (currentEvent === event) Reflect.deleteProperty(event, 'key');
+        },
+        { once: true },
+      );
+    };
+    window.addEventListener('keydown', preserveImeEscape, { capture: true });
+    return () => {
+      window.removeEventListener('keydown', preserveImeEscape, {
+        capture: true,
+      });
+    };
+  }, []);
+
   const rowPlans = planSlashSectionRows(menu.items, menu.kind);
+  const maxLabelLength = Math.max(
+    ...menu.items.map((item) => Array.from(item.label).length),
+    0,
+  );
+  const maxDetailLength = Math.max(
+    ...menu.items.map((item) => Array.from(item.detail ?? '').length),
+    0,
+  );
+  const hasDetailColumn = maxDetailLength > 0;
+  const panelStyle = {
+    '--slash-command-col': `${Math.min(
+      Math.max(maxLabelLength + 1, 10),
+      24,
+    )}ch`,
+    '--slash-desc-col': hasDetailColumn
+      ? `${Math.min(Math.max(maxDetailLength + 1, 18), 36)}ch`
+      : '0px',
+    '--slash-column-gap': hasDetailColumn ? '2ch' : '0px',
+  } as CSSProperties;
 
   return (
     <>
@@ -815,8 +907,10 @@ function SlashCommandPanel({
           alignOffset={16}
           sideOffset={8}
           collisionPadding={12}
+          collisionBoundary={collisionBoundary ?? undefined}
           role="listbox"
           data-web-shell-slash-menu
+          style={panelStyle}
           onOpenAutoFocus={(event) => event.preventDefault()}
           onCloseAutoFocus={(event) => event.preventDefault()}
           onInteractOutside={(event) => {
@@ -876,6 +970,7 @@ function SlashCommandPanel({
                         type="button"
                         role="option"
                         aria-selected={index === menu.selectedIndex}
+                        data-has-description={item.detail ? '' : undefined}
                         className={`${styles.slashItem} ${
                           index === menu.selectedIndex
                             ? styles.slashItemActive
@@ -934,6 +1029,7 @@ function SlashCommandPanel({
             align="start"
             sideOffset={8}
             collisionPadding={12}
+            collisionBoundary={collisionBoundary ?? undefined}
             data-web-shell-slash-detail
             onOpenAutoFocus={(event) => event.preventDefault()}
             onCloseAutoFocus={(event) => event.preventDefault()}
@@ -1529,8 +1625,8 @@ export const ChatEditor = memo(
           );
           return Math.max(
             0,
-            (expanded?.getBoundingClientRect().width ?? 0) -
-              (collapsed?.getBoundingClientRect().width ?? 0),
+            Math.ceil(expanded?.getBoundingClientRect().width ?? 0) -
+              Math.ceil(collapsed?.getBoundingClientRect().width ?? 0),
           );
         };
         const items = [
@@ -1586,20 +1682,22 @@ export const ChatEditor = memo(
               : 0),
           0,
         );
-        const currentLeadingWidth = Math.max(
-          toolbarLeading.scrollWidth,
-          toolbarLeading.getBoundingClientRect().width,
+        const currentLeadingWidth = toolbarLeading.scrollWidth;
+        const gap = Math.ceil(
+          Number.parseFloat(getComputedStyle(toolbar).columnGap) || 0,
         );
-        const gap = Number.parseFloat(getComputedStyle(toolbar).columnGap) || 0;
         const availableWidth = getToolbarExpansionBudget({
-          toolbarWidth: toolbar.getBoundingClientRect().width,
+          toolbarWidth: Math.floor(toolbar.getBoundingClientRect().width),
           leadingWidth: currentLeadingWidth,
-          rightWidth: toolbarRight.getBoundingClientRect().width,
+          rightWidth: Math.ceil(toolbarRight.getBoundingClientRect().width),
           currentExpansionWidth,
           gap,
         });
         const itemVisibility = getToolbarItemVisibility({
-          availableWidth,
+          // Individual replica widths and aggregate scrollWidth can differ by
+          // at most one rounded pixel per item. Keep that margin collapsed so
+          // the measured state cannot oscillate at a fractional boundary.
+          availableWidth: Math.max(0, availableWidth - items.length),
           items,
         });
         const next = {
@@ -2022,6 +2120,7 @@ export const ChatEditor = memo(
                               showModeLabel ? '' : styles.toolBtnCompact
                             }`}
                             data-web-shell-mode-button
+                            data-web-shell-toolbar-popover-trigger
                             onClick={(e) => {
                               e.stopPropagation();
                               core.closeSlashMenu();
@@ -2074,6 +2173,7 @@ export const ChatEditor = memo(
                               showModelLabel ? '' : styles.toolBtnCompact
                             }`}
                             data-web-shell-model-button
+                            data-web-shell-toolbar-popover-trigger
                             onClick={(e) => {
                               e.stopPropagation();
                               core.closeSlashMenu();
