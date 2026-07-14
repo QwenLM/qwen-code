@@ -19,10 +19,11 @@ permissions:
   actions: 'read'
 
 # Serialize publishes for the SAME PR (identified by its source repo + branch),
-# since they push to that PR's own `pr-assets/web-shell-visuals-<n>` branch; the
-# push-retry loop below covers any residual same-branch race. Different PRs —
-# including forks that happen to share a branch name like `main` — get distinct
-# groups and publish in parallel. Never cancel an in-flight publish.
+# since they force-push to that PR's own `pr-assets/web-shell-visuals-<n>`
+# branch; serializing means the force-push never has to reconcile a concurrent
+# same-PR snapshot (a bounded retry below covers transient failures). Different
+# PRs — including forks that happen to share a branch name like `main` — get
+# distinct groups and publish in parallel. Never cancel an in-flight publish.
 concurrency:
   group: >-
     web-shell-visuals-publish-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
@@ -155,7 +156,22 @@ jobs:
           git checkout -q --orphan snapshot
           git add imgs
           git commit -q -m "web-shell visuals: PR #${PR} (run ${RUN_ID})"
-          git push -q --force "${AUTH_URL}" "HEAD:${BRANCH}"
+          # Bounded retry for transient push failures (network / brief lock).
+          # Same-PR runs are serialized by concurrency, so this never needs to
+          # reconcile a concurrent snapshot — a plain retry suffices.
+          pushed=0
+          for attempt in 1 2 3; do
+            if git push -q --force "${AUTH_URL}" "HEAD:${BRANCH}"; then
+              pushed=1
+              break
+            fi
+            echo "::notice::force-push attempt ${attempt} failed; retrying."
+            sleep 2
+          done
+          if [ "${pushed}" -ne 1 ]; then
+            echo "::error::Failed to push web-shell visuals to ${BRANCH} after retries."
+            exit 1
+          fi
           ASSET_SHA="$(git rev-parse HEAD)"
           cd "${GITHUB_WORKSPACE}"
           echo "web-shell visuals hosted on ${BRANCH} at ${ASSET_SHA}."
