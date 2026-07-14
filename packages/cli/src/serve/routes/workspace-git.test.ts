@@ -10,9 +10,10 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { sendBridgeError } from '../server/error-response.js';
 import type { WorkspaceGitState } from '../workspace-git-state.js';
-import type {
-  WorkspaceRegistry,
-  WorkspaceRuntime,
+import {
+  createWorkspaceRegistry,
+  type WorkspaceRegistry,
+  type WorkspaceRuntime,
 } from '../workspace-registry.js';
 import {
   registerWorkspaceGitRoutes,
@@ -34,19 +35,7 @@ function runtime(
 }
 
 function registry(runtimes: WorkspaceRuntime[]): WorkspaceRegistry {
-  return {
-    primary: runtimes[0]!,
-    list: () => runtimes,
-    getByWorkspaceCwd: (cwd) =>
-      runtimes.find((item) => item.workspaceCwd === cwd),
-    getByWorkspaceId: (id) => runtimes.find((item) => item.workspaceId === id),
-    resolveWorkspaceCwd: (cwd) =>
-      cwd === undefined
-        ? runtimes[0]
-        : runtimes.find((item) => item.workspaceCwd === cwd),
-    resolveLiveSessionOwner: () => ({ kind: 'not_found' }),
-    add: () => {},
-  };
+  return createWorkspaceRegistry(runtimes);
 }
 
 describe('workspace Git routes', () => {

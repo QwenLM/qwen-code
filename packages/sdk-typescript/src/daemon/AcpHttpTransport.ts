@@ -199,6 +199,7 @@ export class AcpHttpTransport implements DaemonTransport {
 
   readonly type = 'acp-http' as const;
   readonly supportsReplay = true;
+  readonly restFetch: typeof globalThis.fetch;
 
   constructor(
     baseUrl: string,
@@ -208,6 +209,7 @@ export class AcpHttpTransport implements DaemonTransport {
     this.baseUrl = baseUrl;
     this.token = token;
     this._fetch = fetchFn;
+    this.restFetch = fetchFn;
   }
 
   get connected(): boolean {

@@ -418,7 +418,7 @@ describe('createChannelWorkerSupervisor', () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(child.kill).toHaveBeenCalledWith('SIGKILL');
 
-    await vi.advanceTimersByTimeAsync(2_000);
+    child.emit('exit', null, 'SIGKILL');
     await stopped;
   });
 
@@ -779,7 +779,7 @@ describe('createChannelWorkerSupervisor', () => {
     });
   });
 
-  it('continues restarting when a restart worker errors before ready and never exits', async () => {
+  it('does not restart when a pre-ready worker never exits after SIGKILL', async () => {
     vi.useFakeTimers();
     const firstChild = new FakeChild(false);
     const secondChild = new FakeChild(false);
@@ -821,26 +821,20 @@ describe('createChannelWorkerSupervisor', () => {
       expect.objectContaining({
         state: 'failed',
         error: 'ipc setup failed',
-        nextRestartAt: expect.any(String),
       }),
     );
 
     await vi.advanceTimersByTimeAsync(10);
-    thirdChild.emit('message', {
-      type: 'ready',
-      pid: 33333,
-      channels: ['telegram'],
-      requestedChannels: ['telegram'],
-    });
-    await Promise.resolve();
-
-    expect(spawnWorker).toHaveBeenCalledTimes(3);
+    expect(spawnWorker).toHaveBeenCalledTimes(2);
     expect(supervisor.snapshot()).toMatchObject({
       enabled: true,
-      state: 'running',
-      pid: 33333,
-      restartCount: 2,
+      state: 'failed',
+      error: 'ipc setup failed',
     });
+    await expect(supervisor.start()).rejects.toThrow(
+      'Channel worker stop is not yet confirmed.',
+    );
+    expect(spawnWorker).toHaveBeenCalledTimes(2);
   });
 
   it('captures restart spawn failures and schedules the next restart internally', async () => {
@@ -1798,12 +1792,12 @@ describe('createChannelWorkerSupervisor', () => {
     await Promise.resolve();
     await vi.advanceTimersByTimeAsync(10_000);
     expect(child.kill).toHaveBeenCalledWith('SIGKILL');
-    await vi.advanceTimersByTimeAsync(2_000);
+    child.emit('exit', null, 'SIGKILL');
     await stopped;
 
     expect(supervisor.snapshot()).toMatchObject({
       enabled: true,
-      state: 'failed',
+      state: 'stopped',
       signal: 'SIGKILL',
     });
   });
@@ -1944,12 +1938,14 @@ describe('createChannelWorkerSupervisor', () => {
   it('escalates pre-ready termination to SIGKILL when the worker ignores SIGTERM', async () => {
     vi.useFakeTimers();
     const child = new FakeChild(false);
+    const onLog = vi.fn();
     const supervisor = createChannelWorkerSupervisor({
       cliEntryPath: '/repo/dist/index.js',
       daemonUrl: 'http://127.0.0.1:4170',
       workspace: '/workspace',
       selection: { mode: 'names', names: ['telegram'] },
       spawnWorker: vi.fn(() => child),
+      onLog,
     });
 
     const started = supervisor.start();
@@ -1965,9 +1961,13 @@ describe('createChannelWorkerSupervisor', () => {
       state: 'failed',
       error: 'ipc setup failed',
     });
+    expect(onLog).toHaveBeenCalledWith({
+      stream: 'stderr',
+      line: 'Channel worker did not exit after SIGKILL; automatic restart is disabled.',
+    });
   });
 
-  it('does not report stopped when the worker ignores SIGKILL', async () => {
+  it('does not release or restart a worker whose SIGKILL exit is unconfirmed', async () => {
     vi.useFakeTimers();
     const child = new FakeChild(false);
     const secondChild = new FakeChild();
@@ -1992,19 +1992,41 @@ describe('createChannelWorkerSupervisor', () => {
     await started;
 
     const stopped = supervisor.stop();
+    void stopped.catch(() => {});
     await Promise.resolve();
     expect(child.kill).toHaveBeenCalledWith('SIGTERM');
     await vi.advanceTimersByTimeAsync(10_000);
     expect(child.kill).toHaveBeenCalledWith('SIGKILL');
     await vi.advanceTimersByTimeAsync(2_000);
-    await stopped;
+    await expect(stopped).rejects.toThrow(
+      'Channel worker did not exit after SIGKILL.',
+    );
 
     expect(supervisor.snapshot()).toMatchObject({
       enabled: true,
       state: 'failed',
-      signal: 'SIGKILL',
       error: 'Channel worker did not exit after SIGKILL.',
     });
+    expect(supervisor.snapshot()).not.toHaveProperty('signal');
+
+    await expect(supervisor.start()).rejects.toThrow(
+      'Channel worker stop is not yet confirmed.',
+    );
+    expect(spawnWorker).toHaveBeenCalledTimes(1);
+
+    const retriedStop = supervisor.stop();
+    void retriedStop.catch(() => {});
+    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await expect(retriedStop).rejects.toThrow(
+      'Channel worker did not exit after SIGKILL.',
+    );
+    await expect(supervisor.start()).rejects.toThrow(
+      'Channel worker stop is not yet confirmed.',
+    );
+    expect(spawnWorker).toHaveBeenCalledTimes(1);
+
+    child.emit('exit', 0, null);
 
     const restarted = supervisor.start();
     secondChild.emit('message', {
@@ -2023,8 +2045,6 @@ describe('createChannelWorkerSupervisor', () => {
       channels: ['telegram'],
       requestedChannels: ['telegram'],
     });
-
-    child.emit('exit', 0, null);
 
     expect(supervisor.snapshot()).toMatchObject({
       enabled: true,

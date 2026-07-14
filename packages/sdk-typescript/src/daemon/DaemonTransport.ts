@@ -53,6 +53,9 @@ export type DaemonTransportType = 'rest' | 'acp-http' | 'acp-ws';
  * `DaemonClient` needs no control-flow changes.
  */
 export interface DaemonTransport {
+  /** Native HTTP fetch used by REST-only daemon endpoints. */
+  readonly restFetch?: typeof globalThis.fetch;
+
   /**
    * Issue an HTTP-shaped request. REST transports delegate to the
    * underlying `fetch`; ACP transports translate the URL + body into

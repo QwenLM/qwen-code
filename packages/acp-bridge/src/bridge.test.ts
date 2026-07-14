@@ -164,6 +164,51 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('memoizes shutdown and keeps the first workspace-removal reason', async () => {
+    const lifecycle: Array<{ type: string; reason?: string }> = [];
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+      sessionLifecycle: (event) => lifecycle.push(event),
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const iterator = bridge
+      .subscribeEvents(session.sessionId)
+      [Symbol.asyncIterator]();
+    const terminalEvent = iterator.next();
+
+    const first = bridge.shutdown({ reason: 'workspace_removed' });
+    const second = bridge.shutdown({ reason: 'daemon_shutdown' });
+
+    expect(second).toBe(first);
+    await first;
+    await expect(terminalEvent).resolves.toMatchObject({
+      value: {
+        type: 'session_died',
+        data: { reason: 'workspace_removed' },
+      },
+    });
+    expect(lifecycle.at(-1)).toMatchObject({
+      type: 'removed',
+      reason: 'workspace_removed',
+    });
+  });
+
+  it('publishes the shutdown promise before lifecycle callbacks can re-enter', async () => {
+    let reentered: Promise<void> | undefined;
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+      sessionLifecycle: (event) => {
+        if (event.type === 'removed') reentered = bridge.shutdown();
+      },
+    });
+    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    const first = bridge.shutdown({ reason: 'workspace_removed' });
+
+    expect(reentered).toBe(first);
+    await first;
+  });
+
   it('accepts a valid BridgeOptions.eventRingSize at construction time', () => {
     // Smoke: positive finite integers are accepted; the underlying
     // EventBus ring-size threading is exercised end-to-end in
@@ -10794,6 +10839,176 @@ describe('createAcpSessionBridge', () => {
     });
   });
 
+  describe('extNotification — recording degradation', () => {
+    const recordingFactory =
+      (capture: (conn: AgentSideConnection) => void): ChannelFactory =>
+      async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        capture(new AgentSideConnection(() => new FakeAgent(), agentStream));
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+
+    it('publishes the live event and persists it in session snapshots', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const bridge = makeBridge({
+        channelFactory: recordingFactory((c) => (capturedConn = c)),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      void capturedConn!.extNotification(
+        'qwen/notify/session/recording-degraded',
+        {
+          v: 1,
+          sessionId: session.sessionId,
+          reason: 'write_failed',
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+        lastEventId: 0,
+        snapshot: true,
+      });
+      const collected: BridgeEvent[] = [];
+      for await (const event of iter) {
+        collected.push(event);
+        if (event.type === 'session_snapshot') break;
+      }
+
+      expect(collected).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'session_recording_degraded',
+            data: {
+              sessionId: session.sessionId,
+              reason: 'write_failed',
+            },
+          }),
+        ]),
+      );
+      expect(
+        (
+          collected.find((event) => event.type === 'session_snapshot')!
+            .data as { recordingDegraded: boolean }
+        ).recordingDegraded,
+      ).toBe(true);
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('drops malformed recording degradation notifications', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const bridge = makeBridge({
+        channelFactory: recordingFactory((c) => (capturedConn = c)),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      for (const params of [
+        { v: 2, sessionId: session.sessionId, reason: 'write_failed' },
+        { v: 1, sessionId: '', reason: 'write_failed' },
+        { v: 1, sessionId: session.sessionId, reason: 'disk_full' },
+      ]) {
+        void capturedConn!.extNotification(
+          'qwen/notify/session/recording-degraded',
+          params,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+        lastEventId: 0,
+        snapshot: true,
+      });
+      const collected: BridgeEvent[] = [];
+      for await (const event of iter) {
+        collected.push(event);
+        if (event.type === 'session_snapshot') break;
+      }
+      expect(
+        collected.some((event) => event.type === 'session_recording_degraded'),
+      ).toBe(false);
+      const snapshot = collected.find(
+        (event) => event.type === 'session_snapshot',
+      );
+      expect(snapshot?.type).toBe('session_snapshot');
+      expect(
+        (snapshot?.data as { recordingDegraded: boolean }).recordingDegraded,
+      ).toBe(false);
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('drains an early recording event into both replay and snapshot state', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        capturedConn = new AgentSideConnection(
+          () => new FakeAgent({ sessionIdPrefix: 'recording-buffer' }),
+          agentStream,
+        );
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({
+        channelFactory: factory,
+        sessionScope: 'thread',
+      });
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const futureSessionId = `recording-buffer:${WS_A}#2`;
+
+      void capturedConn!.extNotification(
+        'qwen/notify/session/recording-degraded',
+        { v: 1, sessionId: futureSessionId, reason: 'write_failed' },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const target = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(target.sessionId).toBe(futureSessionId);
+
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(target.sessionId, {
+        signal: abort.signal,
+        lastEventId: 0,
+        snapshot: true,
+      });
+      const collected: BridgeEvent[] = [];
+      for await (const event of iter) {
+        collected.push(event);
+        if (event.type === 'session_snapshot') break;
+      }
+      expect(collected[0]).toMatchObject({
+        id: 1,
+        type: 'session_recording_degraded',
+      });
+      expect(
+        (
+          collected.find((event) => event.type === 'session_snapshot')!
+            .data as { recordingDegraded: boolean }
+        ).recordingDegraded,
+      ).toBe(true);
+      abort.abort();
+      await bridge.shutdown();
+    });
+  });
+
   describe('maxSessions cap (chiga0 Rec 3)', () => {
     it('refuses NEW spawns past the cap with SessionLimitExceededError', async () => {
       let n = 0;
@@ -11728,6 +11943,46 @@ describe('createAcpSessionBridge', () => {
       await bridge.closeSession(session.sessionId);
       await drain;
       await bridge.shutdown();
+    });
+
+    it('keeps the optimistic update and logs a generic persistence failure', async () => {
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const bridge = makeBridge({
+          channelFactory: async () =>
+            makeChannel({
+              extMethodImpl: (method) =>
+                method === SERVE_CONTROL_EXT_METHODS.sessionTitle
+                  ? { persisted: false }
+                  : {},
+            }).channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+        bridge.updateSessionMetadata(session.sessionId, {
+          displayName: 'Optimistic Title',
+        });
+
+        expect(bridge.getSessionSummary(session.sessionId)).toMatchObject({
+          displayName: 'Optimistic Title',
+        });
+        await vi.waitFor(() =>
+          expect(stderrSpy).toHaveBeenCalledWith(
+            expect.stringContaining(
+              `displayName for ${session.sessionId} was not persisted`,
+            ),
+          ),
+        );
+        expect(stderrSpy).not.toHaveBeenCalledWith(
+          expect.stringContaining('recording service unavailable'),
+        );
+
+        await bridge.shutdown();
+      } finally {
+        stderrSpy.mockRestore();
+      }
     });
 
     it('rejects displayName values with control characters', async () => {

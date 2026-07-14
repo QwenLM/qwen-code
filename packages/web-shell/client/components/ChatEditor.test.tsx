@@ -107,6 +107,8 @@ afterEach(() => {
 
 function renderChatEditor(props: {
   gitBranch?: string;
+  workspaceName?: string;
+  workspaceTitle?: string;
   visibleToolbarActions?: readonly ComposerToolbarAction[];
 }) {
   const container = document.createElement('div');
@@ -158,5 +160,65 @@ describe('ChatEditor git branch toolbar integration', () => {
         visibleToolbarActions: [],
       }).querySelector('[aria-label^="Current Git branch:"]'),
     ).toBeNull();
+  });
+});
+
+describe('ChatEditor workspace toolbar integration', () => {
+  it('shows the workspace indicator when the workspace action is visible', () => {
+    const container = renderChatEditor({
+      workspaceName: 'api',
+      workspaceTitle: '/work/api',
+      visibleToolbarActions: ['workspace'],
+    });
+    const chip = container.querySelector('[aria-label="Workspace: api"]');
+    expect(chip).not.toBeNull();
+    expect(chip?.getAttribute('title')).toBe('/work/api');
+    expect(
+      container.querySelector('[data-web-shell-workspace]'),
+    ).not.toBeNull();
+  });
+
+  it('falls back to the workspace name for the tooltip when no title is given', () => {
+    const container = renderChatEditor({
+      workspaceName: 'api',
+      visibleToolbarActions: ['workspace'],
+    });
+    // No `workspaceTitle` → the chip's tooltip uses the name itself.
+    expect(
+      container
+        .querySelector('[data-web-shell-workspace]')
+        ?.getAttribute('title'),
+    ).toBe('api');
+  });
+
+  it('hides the workspace indicator without a name or visible action', () => {
+    expect(
+      renderChatEditor({
+        visibleToolbarActions: ['workspace'],
+      }).querySelector('[aria-label^="Workspace:"]'),
+    ).toBeNull();
+    expect(
+      renderChatEditor({
+        workspaceName: 'api',
+        visibleToolbarActions: [],
+      }).querySelector('[aria-label^="Workspace:"]'),
+    ).toBeNull();
+  });
+
+  it('renders the workspace chip before the git branch chip', () => {
+    const container = renderChatEditor({
+      gitBranch: 'main',
+      workspaceName: 'api',
+      workspaceTitle: '/work/api',
+      visibleToolbarActions: ['workspace', 'gitBranch'],
+    });
+    const ws = container.querySelector('[data-web-shell-workspace]');
+    const git = container.querySelector('[data-web-shell-git-branch]');
+    expect(ws).not.toBeNull();
+    expect(git).not.toBeNull();
+    // The workspace chip must precede the git-branch chip in document order.
+    expect(
+      ws!.compareDocumentPosition(git!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 });

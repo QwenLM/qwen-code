@@ -498,6 +498,14 @@ describe('getPlanModeSystemReminder', () => {
     expect(result).toContain('exit_plan_mode tool');
   });
 
+  it('should include guidance when a tool is blocked by plan mode', () => {
+    const result = getPlanModeSystemReminder();
+
+    expect(result).toContain('When a Tool is Blocked by Plan Mode');
+    expect(result).toContain('Do NOT retry');
+    expect(result).toContain('Pivot to read-only');
+  });
+
   it('should be deterministic', () => {
     const result1 = getPlanModeSystemReminder();
     const result2 = getPlanModeSystemReminder();

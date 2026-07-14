@@ -61,7 +61,6 @@ import {
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
   encodeSessionTranscriptCursor,
-  type SessionTranscriptCursorState,
   subagentGenerator,
   redactUrlCredentials,
   computeUniqueBranchTitle,
@@ -80,13 +79,11 @@ import {
   refreshMemoryInstruction,
   type AgentParams,
   type ApprovalMode,
-  type ChatRecord,
   type Config,
   type ConfigInitializeOptions,
   type DeviceAuthorizationData,
   type DiscoveredMCPPrompt,
   type DiscoveredMCPResource,
-  type HistoryGap,
   type HookConfig,
   type McpBudgetEvent,
   type McpBudgetMode,
@@ -169,11 +166,7 @@ import {
   type PermissionRuleSet,
 } from '../config/permission-settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
-import type {
-  ApprovalModeValue,
-  CumulativeUsage,
-  SessionContext,
-} from './session/types.js';
+import type { ApprovalModeValue } from './session/types.js';
 import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
 import {
@@ -195,9 +188,11 @@ import {
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
 import {
-  HistoryReplayer,
-  type PendingReplayToolCall,
-} from './session/HistoryReplayer.js';
+  collectHistoryReplayUpdates,
+  copyCumulativeUsage,
+  createReplayCumulativeUsage,
+  replayTranscriptRecordPage,
+} from './session/history-replay-page.js';
 import {
   formatAcpModelId,
   parseAcpBaseModelId,
@@ -409,190 +404,6 @@ function invalidArtifactPersistPayload(): Error {
 function isBulkLoadReplayRequest(params: LoadSessionRequest): boolean {
   const meta = isObjectRecord(params._meta) ? params._meta : undefined;
   return meta?.[LOAD_REPLAY_MODE_META_KEY] === LOAD_REPLAY_BULK_MODE;
-}
-
-function createReplayCumulativeUsage(): CumulativeUsage {
-  return {
-    promptTokens: 0,
-    cachedTokens: 0,
-    candidateTokens: 0,
-    apiTimeMs: 0,
-  };
-}
-
-function copyCumulativeUsage(
-  target: CumulativeUsage,
-  source: CumulativeUsage,
-): void {
-  target.promptTokens = source.promptTokens;
-  target.cachedTokens = source.cachedTokens;
-  target.candidateTokens = source.candidateTokens;
-  target.apiTimeMs = source.apiTimeMs;
-}
-
-function isCumulativeUsage(value: unknown): value is CumulativeUsage {
-  if (!isObjectRecord(value)) return false;
-  return (
-    typeof value['promptTokens'] === 'number' &&
-    Number.isFinite(value['promptTokens']) &&
-    typeof value['cachedTokens'] === 'number' &&
-    Number.isFinite(value['cachedTokens']) &&
-    typeof value['candidateTokens'] === 'number' &&
-    Number.isFinite(value['candidateTokens']) &&
-    typeof value['apiTimeMs'] === 'number' &&
-    Number.isFinite(value['apiTimeMs'])
-  );
-}
-
-function isPendingReplayToolCall(
-  value: unknown,
-): value is PendingReplayToolCall {
-  if (!isObjectRecord(value)) return false;
-  return (
-    typeof value['callId'] === 'string' &&
-    typeof value['toolName'] === 'string' &&
-    (value['timestamp'] === undefined ||
-      typeof value['timestamp'] === 'string') &&
-    typeof value['recordId'] === 'string'
-  );
-}
-
-function parseTranscriptReplayState(replay: unknown): {
-  pendingToolCalls: PendingReplayToolCall[];
-  cumulativeUsage: CumulativeUsage;
-} {
-  if (!isObjectRecord(replay)) {
-    return {
-      pendingToolCalls: [],
-      cumulativeUsage: createReplayCumulativeUsage(),
-    };
-  }
-  const rawPending = replay['pendingToolCalls'];
-  const pendingToolCalls = Array.isArray(rawPending)
-    ? rawPending.filter(isPendingReplayToolCall)
-    : [];
-  if (
-    Array.isArray(rawPending) &&
-    pendingToolCalls.length !== rawPending.length
-  ) {
-    // A cursor from a newer or corrupted daemon can carry pending tool calls
-    // whose shape no longer matches; drop them defensively but log it so an
-    // operator can tell this apart from a genuine "tool never completed".
-    const dropped = rawPending.length - pendingToolCalls.length;
-    debugLogger.warn(
-      `[transcript] replay state dropped ${dropped} of ${rawPending.length} malformed pending tool calls`,
-    );
-  }
-  const cumulativeUsage = isCumulativeUsage(replay['cumulativeUsage'])
-    ? { ...replay['cumulativeUsage'] }
-    : createReplayCumulativeUsage();
-  return { pendingToolCalls, cumulativeUsage };
-}
-
-async function collectHistoryReplayUpdates({
-  sessionId,
-  config,
-  records,
-  gaps,
-  cumulativeUsage,
-}: {
-  sessionId: string;
-  config: Config;
-  records: ChatRecord[];
-  gaps?: HistoryGap[];
-  cumulativeUsage: CumulativeUsage;
-}): Promise<{ updates: SessionUpdate[]; replayError?: string }> {
-  const updates: SessionUpdate[] = [];
-  const replayContext: SessionContext = {
-    sessionId,
-    config,
-    sendUpdate: async (update) => {
-      updates.push(update);
-    },
-    cumulativeUsage,
-  };
-
-  try {
-    await new HistoryReplayer(replayContext).replay(records, gaps);
-  } catch (error) {
-    const replayError = error instanceof Error ? error.message : String(error);
-    debugLogger.warn(
-      '[historyReplay] History replay failed for session %s (partial updates: %d):',
-      sessionId,
-      updates.length,
-      error,
-    );
-    return { updates, replayError };
-  }
-
-  return { updates };
-}
-
-async function collectHistoryReplayUpdatesPage({
-  sessionId,
-  config,
-  records,
-  gaps,
-  cumulativeUsage,
-  pendingToolCalls,
-  finalizeDangling,
-}: {
-  sessionId: string;
-  config: Config;
-  records: ChatRecord[];
-  gaps?: HistoryGap[];
-  cumulativeUsage: CumulativeUsage;
-  pendingToolCalls: PendingReplayToolCall[];
-  finalizeDangling: boolean;
-}): Promise<{
-  updates: SessionUpdate[];
-  pendingToolCalls: PendingReplayToolCall[];
-  replayError?: string;
-}> {
-  const updates: SessionUpdate[] = [];
-  const replayContext: SessionContext = {
-    sessionId,
-    config,
-    sendUpdate: async (update) => {
-      updates.push(update);
-    },
-    cumulativeUsage,
-  };
-  const replayer = new HistoryReplayer(replayContext);
-
-  try {
-    const state = await replayer.replayPage(records, {
-      pendingToolCalls,
-      finalizeDangling,
-      gaps,
-    });
-    return { updates, pendingToolCalls: state.pendingToolCalls };
-  } catch (error) {
-    debugLogger.warn(
-      '[historyReplay] Paged history replay failed for session %s (partial updates: %d):',
-      sessionId,
-      updates.length,
-      error,
-    );
-    return {
-      updates,
-      pendingToolCalls: replayer.getPendingToolCalls(),
-      replayError: 'Replay conversion failed for this page',
-    };
-  }
-}
-
-function liftSessionUpdateTimestamps(
-  updates: SessionUpdate[],
-): SessionUpdate[] {
-  return updates.map((update) => {
-    const record = update as Record<string, unknown>;
-    const meta = record['_meta'];
-    const timestamp = isObjectRecord(meta) ? meta['timestamp'] : undefined;
-    return typeof timestamp === 'number' || typeof timestamp === 'string'
-      ? ({ ...record, timestamp } as unknown as SessionUpdate)
-      : update;
-  });
 }
 
 function createHiddenWorkspaceMemoryConfig(config: Config): Config {
@@ -3368,8 +3179,9 @@ class QwenAgent implements Agent {
             records,
             gaps: sessionData?.historyGaps,
             cumulativeUsage: replayUsage,
+            logger: debugLogger,
           });
-          replayUpdates = liftSessionUpdateTimestamps(replay.updates);
+          replayUpdates = replay.updates;
           copyCumulativeUsage(session.cumulativeUsage, replayUsage);
           if (replay.replayError !== undefined) {
             replayEnvelope = {
@@ -6027,48 +5839,28 @@ class QwenAgent implements Agent {
               ...(typeof rawLimit === 'number' ? { limit: rawLimit } : {}),
             });
             const config = await this.getTranscriptReplayConfig(cwd, settings);
-            const replayState = parseTranscriptReplayState(page.replay);
-            const replay = await collectHistoryReplayUpdatesPage({
+            const replay = await replayTranscriptRecordPage({
               sessionId,
+              page,
               config,
-              records: page.records,
-              gaps: page.gaps,
-              cumulativeUsage: replayState.cumulativeUsage,
-              pendingToolCalls: replayState.pendingToolCalls,
-              finalizeDangling: !page.hasMore,
+              encodeCursor: (state) =>
+                encodeSessionTranscriptCursor(state, cwd),
+              logger: debugLogger,
             });
-            const updates = liftSessionUpdateTimestamps(replay.updates);
-            let nextCursor: string | undefined;
-            // On a mid-page replay error the page is partial: records after the
-            // failed record are dropped and pendingToolCalls reflect partial
-            // state. Withhold nextCursor so the client cannot paginate forward
-            // past the dropped records with a corrupted cursor — the page is
-            // already flagged partial + replayError below.
-            if (page.nextCursorState && replay.replayError === undefined) {
-              const nextCursorState: SessionTranscriptCursorState = {
-                ...page.nextCursorState,
-                replay: {
-                  pendingToolCalls: replay.pendingToolCalls,
-                  // Preserved for future replay emitters that need cumulative
-                  // usage across page boundaries; current frames expose per-record
-                  // usage metadata only.
-                  cumulativeUsage: replayState.cumulativeUsage,
-                },
-              };
-              nextCursor = encodeSessionTranscriptCursor(nextCursorState, cwd);
-            }
             return {
               v: 1,
               sessionId,
-              events: updates.map((update) => ({
+              events: replay.updates.map((update) => ({
                 v: 1,
                 type: 'session_update',
                 data: update,
               })),
-              ...(nextCursor !== undefined ? { nextCursor } : {}),
-              hasMore: page.hasMore,
-              startTime: page.startTime,
-              lastUpdated: page.lastUpdated,
+              ...(replay.nextCursor !== undefined
+                ? { nextCursor: replay.nextCursor }
+                : {}),
+              hasMore: replay.hasMore,
+              startTime: replay.startTime,
+              lastUpdated: replay.lastUpdated,
               ...(replay.replayError !== undefined
                 ? { partial: true, replayError: replay.replayError }
                 : {}),
@@ -6900,8 +6692,7 @@ class QwenAgent implements Agent {
         const recording = session.getConfig().getChatRecordingService();
         let ok = false;
         if (recording) {
-          ok = recording.recordCustomTitle(displayName, source);
-          await recording.flush();
+          ok = await recording.recordCustomTitle(displayName, source);
         }
         return { sessionId, displayName, titleSource: source, persisted: ok };
       }
@@ -7832,8 +7623,7 @@ class QwenAgent implements Agent {
           ?.getConfig()
           .getChatRecordingService();
         if (liveRecording) {
-          const ok = liveRecording.recordCustomTitle(title, 'manual');
-          await liveRecording.flush();
+          const ok = await liveRecording.recordCustomTitle(title, 'manual');
           return { success: ok };
         }
         const success = await runWithAcpRuntimeOutputDir(
@@ -7981,12 +7771,11 @@ class QwenAgent implements Agent {
             };
           }
         } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
           artifactSnapshotUnavailable =
-            err instanceof Error ? err.message : String(err);
+            'artifact snapshot unavailable after rewind';
           debugLogger.warn(
-            `[ACP] Failed to rebuild artifact snapshot after rewind for session=${sessionId}: ${
-              artifactSnapshotUnavailable
-            }`,
+            `[ACP] Failed to rebuild artifact snapshot after rewind for session=${sessionId}: ${reason}`,
           );
         }
 
@@ -8029,10 +7818,11 @@ class QwenAgent implements Agent {
           records: sessionData.conversation.messages,
           gaps: sessionData.historyGaps,
           cumulativeUsage: createReplayCumulativeUsage(),
+          logger: debugLogger,
         });
 
         return {
-          updates: liftSessionUpdateTimestamps(replay.updates),
+          updates: replay.updates,
           startTime: sessionData.conversation.startTime,
           lastUpdated: sessionData.conversation.lastUpdated,
           // Signal to the client that replay aborted partway so it doesn't
@@ -8563,6 +8353,29 @@ class QwenAgent implements Agent {
           changedKeys: [...changed],
           sessionsRefreshed: refreshed,
           sessionsSkipped: skipped,
+        };
+      }
+      case SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh: {
+        this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+        const sessions = this.getActiveSessions();
+        const results = await Promise.allSettled(
+          sessions.map((session) => session.refreshSkillsFromSettings()),
+        );
+        for (let i = 0; i < results.length; i++) {
+          if (results[i]!.status === 'rejected') {
+            const reason = (results[i] as PromiseRejectedResult).reason;
+            debugLogger.warn(
+              `Session ${sessions[i]!.getId()} skill refresh failed: ${reason}`,
+            );
+          }
+        }
+        return {
+          sessionsRefreshed: results.filter(
+            (result) => result.status === 'fulfilled',
+          ).length,
+          sessionsFailed: results.filter(
+            (result) => result.status === 'rejected',
+          ).length,
         };
       }
       default:

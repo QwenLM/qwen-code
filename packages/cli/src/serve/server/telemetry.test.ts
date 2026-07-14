@@ -118,6 +118,115 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     );
   });
 
+  it('attributes workspace transcript reads to the target workspace and session', () => {
+    const mw = daemonTelemetryMiddleware(() => '/workspace/secondary');
+    const res = mockRes(200);
+
+    mw(
+      mockReq('GET', '/workspaces/ws-secondary/session/session-1/transcript'),
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+    res.emit('finish');
+
+    expect(coreMocks.withDaemonRequestSpan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'GET',
+        route: 'GET /workspaces/:workspace/session/:id/transcript',
+        sessionId: 'session-1',
+        workspaceHash: 'hash:/workspace/secondary',
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('attributes singular rewind and shell routes to the live session owner', () => {
+    const resolveSessionWorkspaceCwd = vi.fn(() => '/workspace/secondary');
+    const mw = daemonTelemetryMiddleware(
+      () => '/workspace/primary',
+      undefined,
+      resolveSessionWorkspaceCwd,
+    );
+
+    for (const [method, path, route] of [
+      [
+        'GET',
+        '/session/secondary-session/rewind/snapshots',
+        'GET /session/:id/rewind/snapshots',
+      ],
+      ['POST', '/session/secondary-session/rewind', 'POST /session/:id/rewind'],
+      ['POST', '/session/secondary-session/shell', 'POST /session/:id/shell'],
+    ] as const) {
+      const res = mockRes(200);
+      mw(mockReq(method, path), res, vi.fn() as unknown as NextFunction);
+      res.emit('finish');
+      expect(coreMocks.withDaemonRequestSpan).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          method,
+          route,
+          sessionId: 'secondary-session',
+          workspaceHash: 'hash:/workspace/secondary',
+        }),
+        expect.any(Function),
+      );
+    }
+
+    expect(resolveSessionWorkspaceCwd).toHaveBeenCalledTimes(3);
+    expect(resolveSessionWorkspaceCwd).toHaveBeenCalledWith(
+      'secondary-session',
+    );
+  });
+
+  it('decodes session ids before owner lookup and span attribution', () => {
+    const resolveSessionWorkspaceCwd = vi.fn(() => '/workspace/secondary');
+    const mw = daemonTelemetryMiddleware(
+      () => '/workspace/primary',
+      undefined,
+      resolveSessionWorkspaceCwd,
+    );
+    const res = mockRes(200);
+
+    mw(
+      mockReq('POST', '/session/secondary%2Fsession/rewind'),
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+    res.emit('finish');
+
+    expect(resolveSessionWorkspaceCwd).toHaveBeenCalledWith(
+      'secondary/session',
+    );
+    expect(coreMocks.withDaemonRequestSpan).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 'secondary/session' }),
+      expect.any(Function),
+    );
+  });
+
+  it('keeps malformed session id encodings without throwing', () => {
+    const resolveSessionWorkspaceCwd = vi.fn(() => undefined);
+    const mw = daemonTelemetryMiddleware(
+      () => '/workspace/primary',
+      undefined,
+      resolveSessionWorkspaceCwd,
+    );
+    const res = mockRes(200);
+
+    expect(() => {
+      mw(
+        mockReq('POST', '/session/bad%ZZ/rewind'),
+        res,
+        vi.fn() as unknown as NextFunction,
+      );
+    }).not.toThrow();
+    res.emit('finish');
+
+    expect(resolveSessionWorkspaceCwd).toHaveBeenCalledWith('bad%ZZ');
+    expect(coreMocks.withDaemonRequestSpan).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 'bad%ZZ' }),
+      expect.any(Function),
+    );
+  });
+
   it('normalizes plural workspace agent routes to stable route labels', () => {
     const mw = daemonTelemetryMiddleware(() => '/ws');
     for (const [method, path, route] of [

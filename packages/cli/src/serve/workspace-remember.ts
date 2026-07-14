@@ -15,6 +15,7 @@ import type {
   BridgeWorkspaceMemoryRememberContextMode,
   BridgeWorkspaceMemoryRememberResult,
 } from './acp-session-bridge.js';
+import { WorkspaceDrainingError } from './acp-session-bridge.js';
 import {
   createWorkspaceMemoryExtractionErrorLogger,
   shouldSuppressRememberErrorDetails,
@@ -169,6 +170,9 @@ export function publicErrorMessage(
       ? 'Workspace memory remember queue is full.'
       : 'Workspace memory task queue is full.';
   }
+  if (code === 'workspace_draining') {
+    return 'Workspace runtime is being removed.';
+  }
   if (
     code === 'remember_timeout' ||
     code === 'forget_timeout' ||
@@ -180,6 +184,7 @@ export function publicErrorMessage(
 }
 
 export function publicErrorStatus(code: string): number {
+  if (code === 'workspace_draining') return 503;
   if (code === 'remember_queue_full') return 429;
   if (code === 'managed_memory_unavailable') return 409;
   return 500;
@@ -216,8 +221,53 @@ export class WorkspaceRememberTaskLane {
   );
   private readonly tasks = new Map<string, WorkspaceMemoryTaskRecord>();
   private tail: Promise<void> = Promise.resolve();
+  private draining = false;
+  private disposed = false;
 
-  constructor(private readonly bridge: AcpSessionBridge) {}
+  constructor(
+    private readonly bridge: AcpSessionBridge,
+    private readonly workspaceCwd = 'workspace',
+  ) {}
+
+  beginDrain(): void {
+    this.draining = true;
+  }
+
+  cancelDrain(): void {
+    if (!this.disposed) this.draining = false;
+  }
+
+  pendingCount(): number {
+    return this.pendingCounts().total;
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.draining = true;
+    for (const task of this.tasks.values()) {
+      if (task.status !== 'queued') continue;
+      task.status = 'failed';
+      task.updatedAt = nowIso();
+      task.error = createTaskError(
+        'workspace_removed',
+        task.kind,
+        'Workspace runtime was removed before the task started.',
+      );
+    }
+  }
+
+  private failRunningTaskAfterRemoval(task: WorkspaceMemoryTaskRecord): void {
+    if (!this.disposed || task.status === 'completed') return;
+    task.status = 'failed';
+    delete task.result;
+    task.updatedAt = nowIso();
+    task.error = createTaskError(
+      'workspace_removed',
+      task.kind,
+      'Workspace runtime was removed while the task was running.',
+    );
+  }
 
   private pendingCounts(): { total: number; nonRemember: number } {
     let total = 0;
@@ -260,6 +310,9 @@ export class WorkspaceRememberTaskLane {
   }
 
   private assertCapacity(kind: WorkspaceMemoryTaskRecord['kind']): void {
+    if (this.draining || this.disposed) {
+      throw new WorkspaceDrainingError(this.workspaceCwd);
+    }
     const pending = this.pendingCounts();
     if (pending.total >= WorkspaceRememberTaskLane.MAX_PENDING) {
       throw Object.assign(new Error('Workspace memory task queue is full'), {
@@ -288,7 +341,11 @@ export class WorkspaceRememberTaskLane {
     this.tasks.set(task.taskId, task);
     this.evictTerminalTasks();
 
-    this.tail = this.tail.then(run, run);
+    const runIfQueued = async () => {
+      if (task.status !== 'queued') return;
+      await run();
+    };
+    this.tail = this.tail.then(runIfQueued, runIfQueued);
     void this.tail.catch((err: unknown) => {
       debugLogger.error('Unhandled task lane error:', err);
     });
@@ -345,16 +402,18 @@ export class WorkspaceRememberTaskLane {
           content: params.content,
           contextMode: params.contextMode,
         });
-        task.status = 'completed';
-        task.result = {
-          summary:
-            result.filesTouched.length > 0
-              ? 'Memory update completed.'
-              : 'No memory files updated.',
-          filesTouched: result.filesTouched,
-          touchedScopes: result.touchedScopes,
-        };
-        task.updatedAt = nowIso();
+        if (!this.disposed) {
+          task.status = 'completed';
+          task.result = {
+            summary:
+              result.filesTouched.length > 0
+                ? 'Memory update completed.'
+                : 'No memory files updated.',
+            filesTouched: result.filesTouched,
+            touchedScopes: result.touchedScopes,
+          };
+          task.updatedAt = nowIso();
+        }
       } catch (err) {
         const code = workspaceMemoryFailureCode(
           err,
@@ -375,6 +434,7 @@ export class WorkspaceRememberTaskLane {
         task.error = createTaskError(code, task.kind, diagnostics.details);
         task.updatedAt = nowIso();
       }
+      this.failRunningTaskAfterRemoval(task);
       try {
         if (task.status === 'completed' && task.result) {
           this.publishManagedMemoryChanged({
@@ -417,16 +477,18 @@ export class WorkspaceRememberTaskLane {
         const result = await this.bridge.runWorkspaceMemoryForget({
           query: params.query,
         });
-        task.status = 'completed';
-        task.result = {
-          summary:
-            result.summary ??
-            formatWorkspaceMemoryForgetSummary(result.removedEntries.length),
-          removedEntries: result.removedEntries,
-          touchedTopics: result.touchedTopics,
-          touchedScopes: result.touchedScopes,
-        };
-        task.updatedAt = nowIso();
+        if (!this.disposed) {
+          task.status = 'completed';
+          task.result = {
+            summary:
+              result.summary ??
+              formatWorkspaceMemoryForgetSummary(result.removedEntries.length),
+            removedEntries: result.removedEntries,
+            touchedTopics: result.touchedTopics,
+            touchedScopes: result.touchedScopes,
+          };
+          task.updatedAt = nowIso();
+        }
       } catch (err) {
         const code = workspaceMemoryFailureCode(
           err,
@@ -447,6 +509,7 @@ export class WorkspaceRememberTaskLane {
         task.error = createTaskError(code, task.kind, diagnostics.details);
         task.updatedAt = nowIso();
       }
+      this.failRunningTaskAfterRemoval(task);
       try {
         if (task.status === 'completed' && task.result) {
           this.publishManagedMemoryChanged({
@@ -486,15 +549,17 @@ export class WorkspaceRememberTaskLane {
       task.updatedAt = nowIso();
       try {
         const result = await this.bridge.runWorkspaceMemoryDream();
-        task.status = 'completed';
-        task.result = {
-          summary:
-            result.summary ??
-            formatWorkspaceMemoryDreamSummary(result.touchedTopics.length),
-          touchedTopics: result.touchedTopics,
-          dedupedEntries: result.dedupedEntries,
-        };
-        task.updatedAt = nowIso();
+        if (!this.disposed) {
+          task.status = 'completed';
+          task.result = {
+            summary:
+              result.summary ??
+              formatWorkspaceMemoryDreamSummary(result.touchedTopics.length),
+            touchedTopics: result.touchedTopics,
+            dedupedEntries: result.dedupedEntries,
+          };
+          task.updatedAt = nowIso();
+        }
       } catch (err) {
         const code = workspaceMemoryFailureCode(
           err,
@@ -515,6 +580,7 @@ export class WorkspaceRememberTaskLane {
         task.error = createTaskError(code, task.kind, diagnostics.details);
         task.updatedAt = nowIso();
       }
+      this.failRunningTaskAfterRemoval(task);
       try {
         if (task.status === 'completed' && task.result) {
           this.publishManagedMemoryChanged({

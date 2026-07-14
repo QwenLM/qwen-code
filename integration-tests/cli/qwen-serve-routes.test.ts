@@ -147,6 +147,7 @@ beforeAll(async () => {
                 'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS',
                 'QWEN_SERVE_RATE_LIMIT',
                 'QWEN_SERVE_NO_MCP_POOL',
+                'QWEN_SERVE_NO_PERSISTENT_REGISTRATION',
                 'QWEN_SERVE_CLIENT_MCP_OVER_WS',
                 'QWEN_SERVE_CDP_TUNNEL_OVER_WS',
               ].includes(k),
@@ -351,6 +352,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_file_write',
       'session_approval_mode_control',
       'workspace_tool_toggle',
+      'workspace_skill_toggle',
       'workspace_settings',
       'workspace_permissions',
       'workspace_voice',
@@ -372,7 +374,11 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_extensions',
       'session_branch',
       'workspace_reload',
+      'channel_control',
+      'persistent_workspace_registration',
+      'workspace_runtime_removal',
       'workspace_qualified_rest_core',
+      'workspace_persisted_transcript',
       'voice_transcribe',
     ]);
   });

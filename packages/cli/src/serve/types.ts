@@ -36,6 +36,12 @@ export type ServeChannelSelection =
   | { mode: 'all' }
   | { mode: 'names'; names: string[] };
 
+export interface ChannelWebhookConfigSource {
+  workspaceCwd: string;
+  channelNames?: readonly string[];
+  env?: Readonly<Record<string, string | undefined>>;
+}
+
 export interface ServeOptions {
   hostname: string;
   port: number;
@@ -308,6 +314,7 @@ export interface CapabilitiesEnvelope {
     cwd: string;
     primary: boolean;
     trusted: boolean;
+    removable?: boolean;
   }>;
   /**
    * Transport families this daemon supports. Always includes `'rest'`;
