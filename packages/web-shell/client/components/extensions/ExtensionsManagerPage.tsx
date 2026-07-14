@@ -498,9 +498,9 @@ export function ExtensionsManagerPage({
       try {
         const { operations } = await actions.activeExtensionOperations();
         if (cancelled) return;
-        const activeInstall = operations.find(
-          (operation) => operation.operation === 'install',
-        );
+        const activeInstall = operations
+          .filter((operation) => operation.operation === 'install')
+          .sort((left, right) => right.createdAt - left.createdAt)[0];
         if (activeInstall) {
           setPendingInstall(
             (current) =>

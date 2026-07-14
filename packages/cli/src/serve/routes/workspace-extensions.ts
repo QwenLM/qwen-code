@@ -268,6 +268,15 @@ export function registerWorkspaceExtensionRoutes(
         new Error('Extension installation superseded by a new install request'),
       );
     }
+    const operation = controller.getOperation(operationId);
+    if (
+      operation &&
+      operation.status !== 'queued' &&
+      operation.status !== 'running' &&
+      operation.status !== 'waiting_for_input'
+    ) {
+      return Promise.reject(new Error('Extension operation already completed'));
+    }
     const pendingInteraction = {
       ...interaction,
       id: crypto.randomUUID(),
@@ -327,9 +336,7 @@ export function registerWorkspaceExtensionRoutes(
               ? plugin.source
               : plugin.source.source === 'github'
                 ? plugin.source.repo
-                : plugin.source.source === 'git-subdir'
-                  ? plugin.source.path
-                  : plugin.source.url,
+                : plugin.source.url,
           ),
           ...(plugin.category ? { category: plugin.category } : {}),
           ...(plugin.tags ? { tags: plugin.tags } : {}),
@@ -724,7 +731,7 @@ export function registerWorkspaceExtensionRoutes(
               error instanceof Error ? error.message : 'Invalid install source';
             res.status(400).json({
               error: redactUrlCredentials(
-                message.replace(
+                message.replaceAll(
                   sourceValue,
                   redactExtensionDisplaySource(sourceValue),
                 ),

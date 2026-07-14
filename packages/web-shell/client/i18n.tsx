@@ -1228,7 +1228,6 @@ const EN: Messages = {
   'extensions.manage.commands': 'Commands:',
   'extensions.manage.contextFiles': 'Context files:',
   'extensions.manage.count': (v) => `${v?.count ?? 0} extensions installed`,
-  'extensions.manage.detailsTitle': 'Extension Details',
   'extensions.manage.disable': 'Disable Extension',
   'extensions.manage.disabled': (v) =>
     `Extension "${v?.name ?? 'extension'}" disabled.`,
@@ -1247,11 +1246,6 @@ const EN: Messages = {
     `Extension "${v?.name ?? 'extension'}" enabled.`,
   'extensions.manage.enabling': (v) =>
     `Enabling extension "${v?.name ?? 'extension'}"…`,
-  'extensions.manage.footer.back': 'Esc to go back',
-  'extensions.manage.footer.confirm': 'Enter confirm · Esc cancel',
-  'extensions.manage.footer.list':
-    '↑↓ to navigate · Enter select · r refresh · Esc close',
-  'extensions.manage.footer.select': '↑↓ to navigate · Enter select · Esc back',
   'extensions.manage.install': 'Install',
   'extensions.manage.installDescription':
     'Enter a GitHub, Git, or npm extension source.',
@@ -3137,7 +3131,6 @@ const ZH: Messages = {
   'extensions.manage.commands': '命令：',
   'extensions.manage.contextFiles': '上下文文件：',
   'extensions.manage.count': (v) => `已安装 ${v?.count ?? 0} 个扩展`,
-  'extensions.manage.detailsTitle': '扩展详情',
   'extensions.manage.disable': '禁用扩展',
   'extensions.manage.disabled': (v) => `扩展 "${v?.name ?? '扩展'}" 已禁用。`,
   'extensions.manage.disabling': (v) => `正在禁用扩展 "${v?.name ?? '扩展'}"…`,
@@ -3152,10 +3145,6 @@ const ZH: Messages = {
   'extensions.manage.enable': '启用扩展',
   'extensions.manage.enabled': (v) => `扩展 "${v?.name ?? '扩展'}" 已启用。`,
   'extensions.manage.enabling': (v) => `正在启用扩展 "${v?.name ?? '扩展'}"…`,
-  'extensions.manage.footer.back': 'Esc 返回',
-  'extensions.manage.footer.confirm': 'Enter 确认 · Esc 取消',
-  'extensions.manage.footer.list': '↑↓ 导航 · Enter 选择 · r 刷新 · Esc 关闭',
-  'extensions.manage.footer.select': '↑↓ 导航 · Enter 选择 · Esc 返回',
   'extensions.manage.install': '安装',
   'extensions.manage.installDescription': '输入 GitHub、Git 或 npm 扩展来源。',
   'extensions.manage.installSelectPluginDescription': (v) =>

@@ -230,6 +230,45 @@ describe('ExtensionsManagerPage', () => {
     expect(document.body.textContent).toContain('installed');
   });
 
+  it('recovers the newest install when multiple operations are active', async () => {
+    actions.extensionOperationStatus.mockResolvedValue({
+      v: 1,
+      operationId: 'op-new',
+      operation: 'install',
+      status: 'succeeded',
+      createdAt: 2,
+      updatedAt: 3,
+      source: 'owner/new',
+      result: { status: 'installed', name: 'new' },
+    });
+
+    await mount(
+      [],
+      [
+        {
+          v: 1,
+          operationId: 'op-old',
+          operation: 'install',
+          status: 'running',
+          createdAt: 1,
+          updatedAt: 2,
+          source: 'owner/old',
+        },
+        {
+          v: 1,
+          operationId: 'op-new',
+          operation: 'install',
+          status: 'queued',
+          createdAt: 2,
+          updatedAt: 2,
+          source: 'owner/new',
+        },
+      ],
+    );
+
+    expect(actions.extensionOperationStatus).toHaveBeenCalledWith('op-new');
+  });
+
   it('recovers and completes an active extension mutation', async () => {
     vi.useFakeTimers();
     actions.extensionOperationStatus

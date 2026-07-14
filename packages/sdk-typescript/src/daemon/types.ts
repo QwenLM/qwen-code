@@ -3082,7 +3082,7 @@ export interface ExtensionMarketplacePluginInteraction {
   plugins: Array<{
     name: string;
     description?: string;
-    source?: string;
+    source: string;
     category?: string;
     tags?: string[];
   }>;
