@@ -294,6 +294,33 @@ describe('caller guards', () => {
     expect(existsSync(marker)).toBe(false);
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'preserves the real Git path required by a PATH wrapper',
+    () => {
+      const root = mkdtempSync(path.join(tmpdir(), 'verify-pr-git-wrapper-'));
+      tempDirs.push(root);
+      const bin = path.join(root, 'bin');
+      mkdirSync(bin);
+      const wrapper = path.join(bin, 'git');
+      writeFileSync(wrapper, '#!/bin/sh\nexec "$QWEN_CI_REAL_GIT" "$@"\n');
+      chmodSync(wrapper, 0o755);
+      const realGit =
+        process.env.QWEN_CI_REAL_GIT ||
+        spawnSync('sh', ['-c', 'command -v git'], {
+          encoding: 'utf8',
+          env: process.env,
+        }).stdout.trim();
+
+      const cwd = createRepository({
+        ...process.env,
+        PATH: [bin, process.env.PATH].filter(Boolean).join(path.delimiter),
+        QWEN_CI_REAL_GIT: realGit,
+      });
+
+      expect(git(cwd, ['log', '--oneline'])).toContain('change');
+    },
+  );
+
   it('resolves the base and reports committed changed paths', () => {
     const cwd = createRepository();
 
@@ -629,6 +656,8 @@ describe('step execution', () => {
         LC_ALL: 'C',
         NPM_CONFIG_GLOBAL: 'false',
         NPM_CONFIG_GLOBALCONFIG: '/dev/null',
+        NPM_CONFIG_CACHE: path.join('/owned/home', '.npm'),
+        NPM_CONFIG_PREFIX: path.join('/owned/home', '.npm-prefix'),
         NPM_CONFIG_USERCONFIG: path.join('/owned/home', '.npmrc'),
         NO_COLOR: 'true',
         PATH: '/usr/bin',
