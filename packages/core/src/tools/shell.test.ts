@@ -2367,6 +2367,28 @@ describe('ShellTool', () => {
       });
     });
 
+    it('reports a foreground non-zero exit as a tool error', async () => {
+      const invocation = shellTool.build({
+        command: 'failing-command',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: 'failed output',
+        exitCode: 3,
+        error: null,
+      });
+
+      const result = await promise;
+
+      expect(result.returnDisplay).toContain('failed output');
+      expect(result.error).toEqual({
+        message: expect.stringContaining('Exit Code: 3'),
+        type: ToolErrorType.SHELL_EXECUTE_ERROR,
+      });
+      expect(result.error?.message).toContain('failed output');
+    });
+
     describe('long-running foreground hint', () => {
       // Auto-bg advisory. Threshold = effectiveTimeout / 2 — for the
       // default 120s timeout that's 60_000ms, which the tests below

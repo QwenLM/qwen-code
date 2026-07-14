@@ -328,7 +328,10 @@ export class HistoryReplayer {
     await this.toolCallEmitter.emitResult({
       toolName,
       callId,
-      success: !result?.error,
+      success:
+        result?.status === undefined
+          ? !result?.error
+          : result.status === 'success' && !result.error,
       message: record.message.parts,
       resultDisplay: result?.resultDisplay,
       artifacts: result?.artifacts,
