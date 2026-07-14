@@ -512,6 +512,9 @@ const EN: Messages = {
   'daemon.charts.queuedPrompts': 'Queued',
   'daemon.charts.reqRejected': 'Rejected',
   'daemon.charts.llmLatency': 'LLM API latency',
+  'daemon.charts.apiHealth': 'Model API health',
+  'daemon.charts.apiErrors': 'API errors',
+  'daemon.charts.apiRetries': 'Retries',
   'daemon.charts.cpu': 'CPU',
   'daemon.charts.pipe': 'IPC pipe',
   'daemon.charts.pipeIn': 'In',
@@ -527,6 +530,30 @@ const EN: Messages = {
   'daemon.charts.tokensIn': 'Input',
   'daemon.charts.tokensOut': 'Output',
   'daemon.charts.peak': 'peak',
+  'daemon.charts.concurrency.help':
+    'Live load at each sample: prompts running now, prompts queued (accepted but not yet dispatched), and active sessions. Queued rising above active is backpressure.',
+  'daemon.charts.requests.help':
+    'Client↔daemon HTTP traffic per window — NOT model calls. Total requests, those returning 4xx/5xx, and those the rate limiter rejected.',
+  'daemon.charts.apiLatency.help':
+    "Client↔daemon HTTP request duration (p50/p95) — how fast the daemon answers, not the model. Compare with LLM API latency to separate 'we are slow' from 'the model is slow'.",
+  'daemon.charts.llmLatency.help':
+    'Per-round model API round-trip (daemon→model→daemon), p50/p95. Model-side latency, distinct from the HTTP API latency above.',
+  'daemon.charts.apiHealth.help':
+    'Provider-side LLM failures. Each failed attempt = 1 error; each automatic backoff = 1 retry. Transient 429/5xx are usually absorbed by retries (errors ≈ retries); errors climbing above retries means calls are failing outright.',
+  'daemon.charts.promptLatency.help':
+    'Per prompt (task): p95 time waiting in the per-session queue before dispatch, and p95 end-to-end run time. Rising queue wait signals backpressure.',
+  'daemon.charts.eventLoop.help':
+    'Daemon event-loop lag p99 per window — the CPU-saturation / blocking signal. High lag means the daemon is starved and everything slows.',
+  'daemon.charts.cpu.help':
+    'CPU utilization (% of all cores) at each sample: the daemon and the ACP child (where LLM/tool work runs). Child at 0% means no child is running.',
+  'daemon.charts.memory.help':
+    'Resident memory at each sample: daemon RSS, daemon V8 heap, and ACP child RSS. Steady growth over time hints at a leak.',
+  'daemon.charts.pipe.help':
+    'Bytes over the stdio pipe to/from the ACP child per window. Sustained high volume points to chatty framing between daemon and child.',
+  'daemon.charts.connections.help':
+    'Live client transport connections at each sample: REST/SSE streams, ACP WebSocket streams, and ACP connections.',
+  'daemon.charts.tokens.help':
+    'Input (prompt) and output (completion) tokens attributed to model turns per window — model spend over time.',
   'daemon.usage.today': 'Today',
   'daemon.usage.period7d': '7D',
   'daemon.usage.period30d': '30D',
@@ -2412,6 +2439,9 @@ const ZH: Messages = {
   'daemon.charts.queuedPrompts': '排队中',
   'daemon.charts.reqRejected': '限流拒绝',
   'daemon.charts.llmLatency': 'LLM 耗时',
+  'daemon.charts.apiHealth': '模型 API 健康',
+  'daemon.charts.apiErrors': 'API 报错',
+  'daemon.charts.apiRetries': '重试',
   'daemon.charts.cpu': 'CPU',
   'daemon.charts.pipe': 'IPC 管道',
   'daemon.charts.pipeIn': '接收',
@@ -2427,6 +2457,30 @@ const ZH: Messages = {
   'daemon.charts.tokensIn': '输入',
   'daemon.charts.tokensOut': '输出',
   'daemon.charts.peak': '峰值',
+  'daemon.charts.concurrency.help':
+    '每次采样的实时负载:正在执行的 prompt、排队中(已接受未派发)、活跃会话数。排队数超过执行数即出现背压。',
+  'daemon.charts.requests.help':
+    '每个窗口内客户端↔守护进程的 HTTP 流量,并非模型调用。总请求数、返回 4xx/5xx 的数量、被限流拒绝的数量。',
+  'daemon.charts.apiLatency.help':
+    '客户端↔守护进程 HTTP 请求耗时(p50/p95)——反映守护进程本身快慢,而非模型。与「LLM 耗时」对比可区分是"我们慢"还是"模型慢"。',
+  'daemon.charts.llmLatency.help':
+    '每轮模型 API 往返耗时(守护进程→模型→守护进程),p50/p95。属模型侧延迟,区别于上面的 HTTP「API 耗时」。',
+  'daemon.charts.apiHealth.help':
+    '服务商侧 LLM 失败。每次失败尝试 = 1 次报错,每次自动退避 = 1 次重试。瞬时 429/5xx 通常被重试吸收(报错 ≈ 重试);报错高于重试说明调用彻底失败。',
+  'daemon.charts.promptLatency.help':
+    '每个 prompt(任务):派发前在会话队列中的等待 p95,以及端到端执行 p95。等待升高即背压信号。',
+  'daemon.charts.eventLoop.help':
+    '守护进程事件循环延迟 p99——CPU 饱和 / 阻塞信号。延迟高说明守护进程被拖住,一切都会变慢。',
+  'daemon.charts.cpu.help':
+    '每次采样的 CPU 占用(占全部核心百分比):守护进程,以及运行实际 LLM/工具的 ACP 子进程。子进程 0% 表示无子进程运行。',
+  'daemon.charts.memory.help':
+    '每次采样的常驻内存:守护进程 RSS、守护进程 V8 堆、ACP 子进程 RSS。若持续增长可能是内存泄漏。',
+  'daemon.charts.pipe.help':
+    '每个窗口内经 stdio 管道与 ACP 子进程收发的字节数。持续偏大说明守护进程与子进程间帧交互频繁。',
+  'daemon.charts.connections.help':
+    '每次采样的客户端传输连接:REST/SSE 流、ACP WebSocket 流、ACP 连接数。',
+  'daemon.charts.tokens.help':
+    '每个窗口内计入模型轮次的输入(prompt)与输出(completion)token——随时间的模型消耗。',
   'daemon.usage.today': '今日',
   'daemon.usage.period7d': '7天',
   'daemon.usage.period30d': '30天',
