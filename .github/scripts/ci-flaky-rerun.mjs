@@ -14,7 +14,7 @@ const DEFAULT_STALE_MINUTES = 30;
 const DEFAULT_ACTIVE_DAYS = 7;
 const DEFAULT_MAX_CANDIDATES = 5;
 const MAX_ACTIONS = 3;
-const ACTIONS = new Set(['rerun', 'update_branch', 'comment', 'no_action']);
+const ACTIONS = new Set(['rerun', 'comment', 'no_action']);
 
 function timeMs(value) {
   const ms = Date.parse(value ?? '');
@@ -295,9 +295,7 @@ function validDecision(target, decision) {
     decision.headSha === target.headSha &&
     decision.runId === target.runId &&
     decision.runAttempt === target.runAttempt &&
-    decision.failureKey === target.failureKey &&
-    (decision.action !== 'update_branch' ||
-      decision.mainHeadSha === target.mainHeadSha)
+    decision.failureKey === target.failureKey
   );
 }
 
@@ -348,18 +346,6 @@ export async function actOnDecision(client, target, decision) {
   const marker = markerFor(target, decision.action, count);
   if (decision.action === 'rerun') {
     await client.rerunFailedJobs(target.runId);
-    await client.comment(target.prNumber, marker);
-  } else if (decision.action === 'update_branch') {
-    const main = await client.mainContext(target.headSha);
-    if (
-      target.behindBy <= 0 ||
-      main.behindBy <= 0 ||
-      main.mainHeadSha !== target.mainHeadSha ||
-      main.mainHeadSha !== decision.mainHeadSha
-    ) {
-      return;
-    }
-    await client.updateBranch(target.prNumber, target.headSha);
     await client.comment(target.prNumber, marker);
   } else if (decision.action === 'comment') {
     await client.comment(
@@ -527,17 +513,6 @@ export class GhClient {
     ]);
   }
 
-  async updateBranch(prNumber, headSha) {
-    await this.gh([
-      'api',
-      '-X',
-      'PUT',
-      `repos/${this.repo}/pulls/${prNumber}/update-branch`,
-      '-f',
-      `expected_head_sha=${headSha}`,
-    ]);
-  }
-
   async comment(prNumber, body) {
     await this.gh([
       'pr',
@@ -554,26 +529,6 @@ export class GhClient {
     return this.gh(['api', `repos/${this.repo}/actions/jobs/${jobId}/logs`]);
   }
 
-  async mainContext(headSha) {
-    const main = JSON.parse(
-      await this.gh(['api', `repos/${this.repo}/commits/main`]),
-    );
-    const comparison = JSON.parse(
-      await this.gh([
-        'api',
-        `repos/${this.repo}/compare/${headSha}...${main.sha}`,
-      ]),
-    );
-    return {
-      // For head...main, ahead_by is how far main is ahead of the branch.
-      behindBy: comparison.ahead_by,
-      mainHeadSha: main.sha,
-      mainCommits: comparison.commits.slice(-20).map((commit) => ({
-        sha: commit.sha,
-        message: commit.commit.message.split('\n')[0],
-      })),
-    };
-  }
 }
 
 export function argsMap(argv) {
@@ -671,19 +626,10 @@ async function scan(args) {
       }
       const actionCount = currentActionCount(pr, comments, trustedLogin);
       if (actionCount >= MAX_ACTIONS) continue;
-      let main = { behindBy: 0, mainHeadSha: null, mainCommits: [] };
-      try {
-        main = await client.mainContext(target.headSha);
-      } catch (error) {
-        process.stderr.write(
-          `scan: main context unavailable for PR ${target.prNumber}: ${error.message}\n`,
-        );
-      }
       candidates.push({
         ...candidate,
         actionCount,
         changedFiles: (pr.files ?? []).map((file) => file.path).slice(0, 100),
-        ...main,
         log,
       });
       selectedPrs.add(target.prNumber);

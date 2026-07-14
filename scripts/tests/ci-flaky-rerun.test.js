@@ -51,9 +51,6 @@ function target(overrides = {}) {
     runAttempt: 2,
     failureKey: 'check-0123456789abcdef',
     actionCount: 0,
-    behindBy: 2,
-    mainHeadSha: 'main123',
-    mainCommits: [],
     ...overrides,
   };
 }
@@ -102,15 +99,8 @@ function client(overrides = {}) {
         run_attempt: 2,
       };
     },
-    async mainContext() {
-      calls.push(['mainContext', 'abc123']);
-      return { behindBy: 2, mainHeadSha: 'main123', mainCommits: [] };
-    },
     async rerunFailedJobs(...args) {
       calls.push(['rerunFailedJobs', ...args]);
-    },
-    async updateBranch(...args) {
-      calls.push(['updateBranch', ...args]);
     },
     async comment(...args) {
       calls.push(['comment', ...args]);
@@ -292,53 +282,6 @@ describe('ci flaky rerun patrol', () => {
     ]);
   });
 
-  it('updates a behind branch only while the scanned main head is current', async () => {
-    const c = client();
-    await actOnDecision(
-      c,
-      target(),
-      decision({ action: 'update_branch', mainHeadSha: 'main123' }),
-    );
-    expect(c.calls).toEqual([
-      ['mainContext', 'abc123'],
-      ['updateBranch', 42, 'abc123'],
-      [
-        'comment',
-        42,
-        expect.stringMatching(/^<!-- .*action=update_branch.* -->$/),
-      ],
-    ]);
-
-    const changedMain = client({
-      async mainContext() {
-        return { behindBy: 2, mainHeadSha: 'new-main', mainCommits: [] };
-      },
-    });
-    await actOnDecision(
-      changedMain,
-      target(),
-      decision({ action: 'update_branch', mainHeadSha: 'main123' }),
-    );
-    expect(changedMain.calls).toEqual([]);
-
-    for (const [candidate, behindBy] of [
-      [target({ behindBy: 0 }), 2],
-      [target(), 0],
-    ]) {
-      const notBehind = client({
-        async mainContext() {
-          return { behindBy, mainHeadSha: 'main123', mainCommits: [] };
-        },
-      });
-      await actOnDecision(
-        notBehind,
-        candidate,
-        decision({ action: 'update_branch', mainHeadSha: 'main123' }),
-      );
-      expect(notBehind.calls).toEqual([]);
-    }
-  });
-
   it('posts deterministic failures in English with folded Chinese', async () => {
     const c = client();
     await actOnDecision(
@@ -377,7 +320,7 @@ describe('ci flaky rerun patrol', () => {
       decision({ confidence: 'low' }),
       decision({ failureKey: 'wrong-key' }),
       decision({ runAttempt: 3 }),
-      decision({ action: 'update_branch', mainHeadSha: 'stale-main' }),
+      decision({ action: 'update_branch' }),
       decision({ reason_en: 'x'.repeat(201) }),
       decision({ reason_en: '' }),
       decision({ reason_zh: ' ' }),

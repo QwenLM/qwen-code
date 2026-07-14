@@ -50,13 +50,12 @@ describe('ci failure patrol workflow', () => {
   });
 
   it('keeps judgment in the skill and GitHub writes in the driver', () => {
-    for (const action of ['rerun', 'update_branch', 'comment', 'no_action']) {
+    for (const action of ['rerun', 'comment', 'no_action']) {
       expect(skill).toContain(action);
     }
     expect(skill).toContain('maximum of 3 actions');
     expect(skill).toContain('main-branch failures');
     expect(skill).toContain('changedFiles');
-    expect(skill).toContain('not caused by the PR');
     expect(skill).toContain('ci-flaky-decisions.json');
   });
 });
