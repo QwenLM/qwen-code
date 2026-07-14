@@ -44,6 +44,7 @@ import {
   detectLoopSentinel,
   detectAutonomousSentinel,
   LoopTickResolver,
+  convertToFunctionErrorResponse,
   convertToFunctionResponse,
   createDuplicateProviderToolCallResponse,
   findRepeatedDuplicateProviderToolCall,
@@ -63,6 +64,7 @@ import {
   clampInlineMediaPart,
   Storage,
   ToolNames,
+  ToolErrorType,
   fireNotificationHook,
   firePermissionRequestHook,
   firePreToolUseHook,
@@ -5262,6 +5264,8 @@ export class Session implements SessionContext {
 
           const execSpan = startToolExecutionSpan();
           let toolResult: ToolResult;
+          let isExecutionTimeout = false;
+          let aborted = false;
           try {
             const sleepInhibitorHandle = acquireSleepInhibitor(
               this.config,
@@ -5272,14 +5276,18 @@ export class Session implements SessionContext {
             } finally {
               sleepInhibitorHandle.release();
             }
-            const aborted = activeToolAbortSignal.aborted;
+            isExecutionTimeout =
+              toolResult.error?.type === ToolErrorType.EXECUTION_TIMEOUT;
+            aborted = activeToolAbortSignal.aborted && !isExecutionTimeout;
             endToolExecutionSpan(execSpan, {
               success: !toolResult.error && !aborted,
               error: aborted
                 ? 'tool_cancelled'
-                : toolResult.error
-                  ? 'tool_error'
-                  : undefined,
+                : isExecutionTimeout
+                  ? 'tool_timeout'
+                  : toolResult.error
+                    ? 'tool_error'
+                    : undefined,
               cancelled: aborted,
             });
           } catch (execError) {
@@ -5314,11 +5322,18 @@ export class Session implements SessionContext {
           }
 
           // Create response parts first (needed for emitResult and recordToolResult)
-          const responseParts = convertToFunctionResponse(
-            toolName,
-            callId,
-            toolResult.llmContent,
-          );
+          const responseParts = toolResult.error
+            ? convertToFunctionErrorResponse(
+                toolName,
+                callId,
+                toolResult.llmContent,
+                toolResult.error.message,
+              )
+            : convertToFunctionResponse(
+                toolName,
+                callId,
+                toolResult.llmContent,
+              );
 
           // A tool can fail "softly" by returning toolResult.error without
           // throwing, and can be cancelled mid-flight. Compute the real outcome
@@ -5327,7 +5342,6 @@ export class Session implements SessionContext {
           // hardcoding success — otherwise failed/cancelled daemon/ACP tools
           // are mislabeled as successful in telemetry, session replay, and the
           // client UI.
-          const aborted = activeToolAbortSignal.aborted;
           const status: 'success' | 'error' | 'cancelled' = aborted
             ? 'cancelled'
             : toolResult.error

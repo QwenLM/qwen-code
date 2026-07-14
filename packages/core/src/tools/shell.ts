@@ -43,7 +43,10 @@ import type {
   ShellPostPromoteHandlers,
   ShellPostPromoteSettleInfo,
 } from '../services/shellExecutionService.js';
-import { ShellExecutionService } from '../services/shellExecutionService.js';
+import {
+  getShellAbortReasonKind,
+  ShellExecutionService,
+} from '../services/shellExecutionService.js';
 import type { ShellTaskRegistration } from '../services/backgroundShellRegistry.js';
 import stripAnsi from 'strip-ansi';
 import { formatMemoryUsage } from '../utils/formatters.js';
@@ -1647,10 +1650,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
   ): ToolResult {
     if (getAbortReasonName(signal) === 'TimeoutError') {
       const message = `Command timed out after ${effectiveTimeout}ms before it could complete.`;
-      return {
-        llmContent: message,
-        returnDisplay: message,
-      };
+      return this.sedEditError(message, ToolErrorType.EXECUTION_TIMEOUT);
     }
     return {
       llmContent: 'Command was cancelled by user before it could complete.',
@@ -2431,14 +2431,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
     setPromoteAbortControllerCallback?.(promoteAbortController);
     armTimeoutWarning();
 
-    // Bracket the spawn → settle wall-clock so the result builder below
+    // Bracket the execution-handle → settle wall-clock so the result builder below
     // can decide whether to append the long-run advisory. Captured AFTER
     // `await ShellExecutionService.execute(...)` returns its handle so
     // pre-spawn setup (PTY dynamic import via `getPty()`, ~50–200ms on
     // first call) is excluded — the elapsed should reflect the
-    // command's actual runtime, not the tool call's total wall time.
-    // The `pid` set above confirms the process has been spawned by this
-    // point, so subtraction below is true post-spawn-to-settle.
+    // command's actual runtime, not the tool call's total wall time. A
+    // startup-stage abort can now return a handle with no process, in which
+    // case this measures only the immediate aborted-result handoff.
     //
     // `performance.now()` (monotonic high-res, ms-precision) instead of
     // `Date.now()` so NTP corrections / VM clock drift between capture
@@ -2512,31 +2512,22 @@ export class ShellToolInvocation extends BaseToolInvocation<
       return promotedToolResult;
     }
 
+    const abortReasonName = getAbortReasonName(combinedSignal);
+    const wasTimeout =
+      result.aborted &&
+      effectiveTimeout > 0 &&
+      abortReasonName === 'TimeoutError';
+    const wasPromoteRefused =
+      result.aborted &&
+      getShellAbortReasonKind(combinedSignal.reason) === 'background';
+    const timeoutSummary = wasTimeout
+      ? `Command timed out after ${effectiveTimeout}ms before it could complete.`
+      : undefined;
+
     let llmContent = '';
     if (result.aborted) {
-      // Check if it was a timeout or user cancellation. Exclude BOTH
-      // the user signal AND the promote signal — the latter matters
-      // when PR-3's Ctrl+B keybind fires `promoteAbortController.abort`
-      // but the service's race guard refused promotion (the child
-      // terminated a beat earlier). The result then lands with
-      // `aborted: true, promoted: false`; without the
-      // `promoteAbortController.signal.aborted` exclusion, the
-      // foreground path would falsely report "Command timed out" for
-      // a process that finished naturally.
-      // When the scheduler's execution timeout fires, execSignal is aborted
-      // with a TimeoutError — distinguish this from a user cancellation.
-      const schedulerTimedOut =
-        signal.aborted && getAbortReasonName(signal) === 'TimeoutError';
-      const wasTimeout =
-        effectiveTimeout &&
-        combinedSignal.aborted &&
-        (!signal.aborted || schedulerTimedOut) &&
-        !promoteAbortController.signal.aborted;
-      const wasPromoteRefused =
-        promoteAbortController.signal.aborted && !signal.aborted;
-
       if (wasTimeout) {
-        llmContent = `Command timed out after ${effectiveTimeout}ms before it could complete.`;
+        llmContent = timeoutSummary!;
         if (result.output.trim()) {
           llmContent += ` Below is the output before it timed out:\n${result.output}`;
         } else {
@@ -2683,25 +2674,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
       returnDisplayMessage = llmContent;
     } else {
       if (result.output.trim()) {
-        returnDisplayMessage = result.output;
+        returnDisplayMessage = wasTimeout
+          ? `${timeoutSummary}\n${result.output}`
+          : result.output;
       } else {
         if (result.aborted) {
-          // Check if it was a timeout, a refused-promote, or a real user
-          // cancellation. See the matching block above for why we also
-          // exclude `promoteAbortController.signal.aborted` from the
-          // timeout discriminator.
-          const schedulerTimedOut =
-            signal.aborted && getAbortReasonName(signal) === 'TimeoutError';
-          const wasTimeout =
-            effectiveTimeout &&
-            combinedSignal.aborted &&
-            (!signal.aborted || schedulerTimedOut) &&
-            !promoteAbortController.signal.aborted;
-          const wasPromoteRefused =
-            promoteAbortController.signal.aborted && !signal.aborted;
-
           returnDisplayMessage = wasTimeout
-            ? `Command timed out after ${effectiveTimeout}ms.`
+            ? `${timeoutSummary} There was no output before it timed out.`
             : wasPromoteRefused
               ? 'Command finished before background-promote could be honoured.'
               : 'Command cancelled by user.';
@@ -2816,16 +2795,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // SIEM alerting, hook-side error parsers) have an unambiguous
     // boundary they can split on rather than getting ~400 chars of
     // advisory text mixed inline with the original error body.
-    const executionError = result.error
+    const executionError = timeoutSummary
       ? {
           error: {
-            message:
-              result.error.message +
-              (longRunHint ? `\n\n---\n${longRunHint}` : ''),
-            type: ToolErrorType.SHELL_EXECUTE_ERROR,
+            message: timeoutSummary,
+            type: ToolErrorType.EXECUTION_TIMEOUT,
           },
         }
-      : {};
+      : result.error
+        ? {
+            error: {
+              message:
+                result.error.message +
+                  (longRunHint ? `\n\n---\n${longRunHint}` : ''),
+              type: ToolErrorType.SHELL_EXECUTE_ERROR,
+            },
+          }
+        : {};
 
     return {
       llmContent,

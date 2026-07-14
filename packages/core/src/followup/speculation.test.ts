@@ -99,6 +99,65 @@ describe('startSpeculation', () => {
 
     await abortSpeculation(state);
   });
+
+  it('encodes soft tool failures as error responses', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'Command timed out.\npartial output',
+      returnDisplay: 'partial output',
+      error: { message: 'Command timed out.', type: 'execution_timeout' },
+    });
+    const toolRegistry = {
+      ensureTool: vi.fn().mockResolvedValue({
+        build: vi.fn().mockReturnValue({ execute }),
+      }),
+    };
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
+    } as unknown as Config;
+
+    forkedAgentMocks.runForkedAgent.mockResolvedValue({
+      jsonResult: { suggestion: '' },
+    });
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      if (forkedAgentMocks.sendMessageStream.mock.calls.length === 1) {
+        yield {
+          type: 'chunk',
+          value: {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'call_timeout',
+                        name: 'read_file',
+                        args: { path: 'a.ts' },
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        };
+      }
+    });
+
+    const state = await startSpeculation(config, 'run command');
+    await vi.waitFor(() => expect(state.status).toBe('completed'));
+
+    const response = state.messages[2].parts?.[0].functionResponse;
+    expect(response?.id).toBe('call_timeout');
+    expect(response?.response).toEqual({
+      error: 'Command timed out.\npartial output',
+    });
+    expect(response?.response).not.toHaveProperty('output');
+
+    await abortSpeculation(state);
+  });
 });
 
 describe.each([

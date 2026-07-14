@@ -1632,6 +1632,30 @@ describe('BaseJsonOutputAdapter', () => {
         expect(result).toBe('Tool failed');
       });
 
+      it('prefers detailed response error over the operational summary', () => {
+        const response = {
+          callId: 'tool-1',
+          resultDisplay: 'partial output',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'tool-1',
+                name: 'shell',
+                response: {
+                  error: 'Command timed out.\npartial output',
+                },
+              },
+            },
+          ],
+          error: new Error('Command timed out.'),
+          errorType: undefined,
+        };
+
+        expect(toolResultContent(response)).toBe(
+          'Command timed out.\npartial output',
+        );
+      });
+
       it('should return undefined if no content', () => {
         const response = {
           callId: 'tool-1',

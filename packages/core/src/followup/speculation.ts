@@ -19,6 +19,10 @@ import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { GeminiClient } from '../core/client.js';
 import { StreamEventType } from '../core/geminiChat.js';
+import {
+  convertToFunctionErrorResponse,
+  convertToFunctionResponse,
+} from '../core/coreToolScheduler.js';
 import { OverlayFs } from './overlayFs.js';
 import { evaluateToolCall, rewritePathArgs } from './speculationToolGate.js';
 import {
@@ -320,17 +324,22 @@ async function runSpeculativeLoop(
           );
           state.toolUseCount++;
 
-          const responseContent =
-            typeof result.llmContent === 'string'
-              ? { output: result.llmContent }
-              : { output: JSON.stringify(result.llmContent) };
-          functionResponses.push({
-            functionResponse: {
-              ...(id ? { id } : {}),
-              name,
-              response: responseContent,
-            },
-          });
+          const responseParts = result.error
+            ? convertToFunctionErrorResponse(
+                name,
+                id ?? '',
+                result.llmContent,
+                result.error.message,
+              )
+            : convertToFunctionResponse(name, id ?? '', result.llmContent);
+          if (!id) {
+            for (const responsePart of responseParts) {
+              if (responsePart.functionResponse) {
+                delete responsePart.functionResponse.id;
+              }
+            }
+          }
+          functionResponses.push(...responseParts);
         } catch (error: unknown) {
           functionResponses.push({
             functionResponse: {
