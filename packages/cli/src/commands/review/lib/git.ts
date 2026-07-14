@@ -9,7 +9,7 @@
 // across platforms.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 
 /** Deadline for a single `git` invocation. Generous; a hang must still end. */
 const GIT_TIMEOUT_MS = 120_000;
@@ -84,9 +84,63 @@ export function refExists(ref: string): boolean {
   return gitOpt('rev-parse', '--verify', '--quiet', ref) !== null;
 }
 
+/** What `releaseWorktree` found at the path, and what it managed to do about it. */
+export interface WorktreeRelease {
+  /** Something was at the path when we started. */
+  existed: boolean;
+  /** The path is free now — a `git worktree add` over it will succeed. */
+  freed: boolean;
+  /**
+   * Why the path is not free, set only when `existed && !freed`. A boolean
+   * cannot say both "there is still something there" and "here is why", and a
+   * caller that has to hand the problem to a human needs the second half:
+   * without it, cleanup either lies ("Removed …") or goes silent, and both were
+   * shipped and caught in review.
+   */
+  reason?: string;
+}
+
 /**
- * Free a review worktree's path **and** its branch. Returns whether a live
- * worktree was there to remove.
+ * Rule on a release attempt: what was there, what is there now, what went wrong.
+ *
+ * Pure, and extracted for that reason. The interesting outcome — `existed` but
+ * not `freed` — needs `rmSync` to hit EPERM or EBUSY, and nothing portable
+ * forces those: as root the permission lever is bypassed outright, and under
+ * CI's unprivileged user it behaves differently, so a `chmod`-based test would
+ * assert one thing locally and another in CI. Mocking `node:fs` does not reach
+ * this module under the suite's config either. The composition is where the
+ * logic lives, so it is testable here on its own.
+ *
+ * `reason` is never left unset when the path survived: a caller that has to tell
+ * a human "this is still on disk" is useless without "and here is why", so when
+ * there is no exception to quote it names the situation instead.
+ */
+export function worktreeReleaseResult(
+  existed: boolean,
+  stillThere: boolean,
+  removeError?: unknown,
+): WorktreeRelease {
+  const freed = existed && !stillThere;
+  if (!existed || freed) {
+    return { existed, freed, reason: undefined };
+  }
+  return {
+    existed,
+    freed,
+    reason: removeError
+      ? removeError instanceof Error
+        ? removeError.message
+        : String(removeError)
+      : 'the path is still there after `git worktree remove --force` and `rm -rf`',
+  };
+}
+
+/**
+ * Free a review worktree's path **and** its branch.
+ *
+ * Never throws — see the `rmSync` below. Reports what happened through the
+ * result: `existed` (something was there), `freed` (it is gone now), and
+ * `reason` when it is still there.
  *
  * `git worktree remove` needs the directory. A user reclaiming disk with
  * `rm -rf .qwen/tmp` leaves the worktree *registered but missing*, and from then
@@ -102,13 +156,32 @@ export function refExists(ref: string): boolean {
  * registration and a no-op when nothing is stale — run it unconditionally, and
  * **before** the branch delete that depends on it.
  */
-export function releaseWorktree(worktreePath: string): boolean {
+export function releaseWorktree(worktreePath: string): WorktreeRelease {
   const existed = existsSync(worktreePath);
+  let removeError: unknown;
   if (existed) {
     gitOpt('worktree', 'remove', worktreePath, '--force');
+    // `worktree remove` only clears a tree git still tracks. A directory left at
+    // the path after metadata loss or a partial cleanup is reported "not a
+    // working tree" and left in place — and a non-empty one then blocks the next
+    // `worktree add` with `already exists`. So remove whatever remains. `rmSync`
+    // unlinks a symlink rather than following it, so a tampered leftover cannot
+    // redirect the delete.
+    //
+    // Not allowed to throw, like every other failure here: `force` suppresses
+    // ENOENT but not EPERM or EBUSY, and this runs on the cleanup path, where an
+    // exception masks the error that got us there. But the reason must not be
+    // lost either — a caller that has to tell a human "this path is still there"
+    // is useless without "and here is why". So: caught, and carried out in the
+    // result.
+    try {
+      rmSync(worktreePath, { recursive: true, force: true });
+    } catch (e) {
+      removeError = e;
+    }
   }
   gitOpt('worktree', 'prune');
-  return existed;
+  return worktreeReleaseResult(existed, existsSync(worktreePath), removeError);
 }
 
 /**
