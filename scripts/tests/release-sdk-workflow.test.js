@@ -21,6 +21,14 @@ describe('TypeScript SDK release workflow', () => {
     expect(workflow).toContain(
       'echo "::notice::No version changes in sdk-typescript; skipping release branch push and PR creation."',
     );
+    expect(workflow).toContain(
+      "HAS_PERSISTED_SOURCE: '${{ steps.persist_source.outputs.HAS_PERSISTED_SOURCE }}'",
+    );
+    expect(workflow).toContain(
+      'elif [[ "${HAS_PERSISTED_SOURCE}" == "true" ]]',
+    );
+    expect(workflow).toContain('TARGET="${RELEASE_BRANCH}"');
+    expect(workflow).toContain('TARGET="${REF}"');
     for (const stepName of [
       'Create GitHub Release and Tag',
       'Create PR to merge release branch into main',
