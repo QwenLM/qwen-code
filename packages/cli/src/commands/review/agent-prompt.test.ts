@@ -12,7 +12,7 @@
 // sentence to recite when it finds nothing.
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -20,12 +20,13 @@ vi.mock('../../utils/stdioHelpers.js', () => ({ writeStdoutLine: vi.fn() }));
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import {
   buildChunkAgentPrompt,
+  buildChunkLaunchPrompt,
   buildWholeDiffBlock,
   buildRoleBrief,
   buildRoleLaunchPrompt,
   agentPromptCommand,
 } from './agent-prompt.js';
-import { readRecordedPrompts } from './lib/prompt-record.js';
+import { readRecordedPrompts, briefPath } from './lib/prompt-record.js';
 
 const PLAN = {
   diffPathAbsolute: '/abs/.qwen/tmp/qwen-review-pr-6771-diff.txt',
@@ -70,19 +71,15 @@ const PLAN = {
 };
 
 describe('buildChunkAgentPrompt — what the real launches left out', () => {
-  it('names the diff file — the agents could not open what they were never given', () => {
-    // The bug, stated as an assertion. All 23 real prompts described the chunk
-    // ("chunk 13 of 23, covering lines 3808-4024") and named no file at all.
+  it('scopes the agent to its own territory, by line', () => {
+    // The diff path and the read moved to the launch prompt — a chunk agent's brief
+    // runs to five kilobytes, and a Step 3B review of a real PR has seventeen of
+    // them. Eighty-seven kilobytes is not something an orchestrator pastes. What is
+    // asserted here is what the BRIEF must still carry; the read is asserted on
+    // `buildChunkLaunchPrompt` below, where it now lives and where coverage reads it.
     const p = buildChunkAgentPrompt(PLAN, 13);
-    expect(p).toContain('/abs/.qwen/tmp/qwen-review-pr-6771-diff.txt');
-  });
-
-  it('spells out the read call, with a 0-based offset', () => {
-    const p = buildChunkAgentPrompt(PLAN, 13);
-    // startLine 3808 (1-based) → offset 3807; limit = 4024 - 3808 + 1 = 217.
-    expect(p).toContain('offset=3807');
-    expect(p).toContain('limit=217');
-    expect(p).toMatch(/read_file\(file_path="[^"]+", offset=3807, limit=217\)/);
+    expect(p).toContain('lines 3808-4024');
+    expect(p).toContain('belong to other agents');
   });
 
   it('does NOT hand the agent a sentence to recite when it finds nothing', () => {
@@ -280,9 +277,15 @@ describe('agent-prompt (command boundary)', () => {
         rules,
       });
 
+      // The rules are in the BRIEF, which the launch prompt points at — not in the
+      // launch prompt itself, which is the thing the orchestrator has to carry.
       const printed = (writeStdoutLine as unknown as Mock).mock.calls[0][0];
-      expect(printed).toContain('Project rules');
-      expect(printed).toContain('No `any` in new code.');
+      expect(printed).toContain('.brief.md');
+      const brief = readRecordedPrompts(plan); // launch prompts, keyed
+      expect(brief.get('chunk-13')).toBe(printed);
+      const briefText = readFileSync(briefPath(plan, 'chunk-13'), 'utf8');
+      expect(briefText).toContain('Project rules');
+      expect(briefText).toContain('No `any` in new code.');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -324,7 +327,14 @@ describe('agent-prompt (command boundary)', () => {
 
       const recorded = readRecordedPrompts(plan);
       expect([...recorded.keys()].sort()).toEqual(['chunk-13', 'whole-diff']);
-      expect(recorded.get('chunk-13')).toBe(buildChunkAgentPrompt(PLAN, 13));
+      // What is recorded is the LAUNCH prompt — the thing the orchestrator must
+      // deliver unedited. The brief it points at is recorded beside it.
+      expect(recorded.get('chunk-13')).toBe(
+        buildChunkLaunchPrompt(PLAN, 13, briefPath(plan, 'chunk-13')),
+      );
+      expect(readFileSync(briefPath(plan, 'chunk-13'), 'utf8')).toBe(
+        buildChunkAgentPrompt(PLAN, 13),
+      );
       expect(recorded.get('whole-diff')).toBe(buildWholeDiffBlock(PLAN));
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -589,5 +599,34 @@ describe('buildRoleLaunchPrompt — small enough to actually be carried', () => 
     }
     const brief = buildRoleBrief(PLAN, '1c');
     expect(brief.length).toBeGreaterThan(3000);
+  });
+});
+
+describe('buildChunkLaunchPrompt — the 87-kilobyte problem', () => {
+  it('carries the chunk id and the read, and nothing else of size', () => {
+    // Coverage is computed from these two, off the prompt the harness recorded:
+    // `chunk N of M` attributes the territory, `offset`/`limit` are the lines the
+    // agent was pointed at. They cannot move to the brief. Everything else did.
+    const p = buildChunkLaunchPrompt(PLAN, 13, '/tmp/p/chunk-13.brief.md');
+    expect(p).toMatch(/chunk 13 of 3/);
+    expect(p).toContain('read_file(file_path="/tmp/p/chunk-13.brief.md")');
+    expect(p).toContain(
+      `read_file(file_path="${PLAN.diffPathAbsolute}", offset=3807, limit=217)`,
+    );
+    expect(p.length).toBeLessThan(1024);
+  });
+
+  it('is a fraction of the brief it points at', () => {
+    // Seventeen chunk briefs with the project rules in them is eighty-seven
+    // kilobytes in one response. Seventeen of these is eleven.
+    const launch = buildChunkLaunchPrompt(PLAN, 13, '/tmp/x.brief.md');
+    const brief = buildChunkAgentPrompt(PLAN, 13, 'No `any` in new code.');
+    expect(brief.length).toBeGreaterThan(launch.length * 2);
+  });
+
+  it('hands the agent no sentence to recite when it finds nothing', () => {
+    const p = buildChunkLaunchPrompt(PLAN, 13, '/tmp/x.brief.md');
+    expect(p).toContain('say what you examined');
+    expect(p).not.toMatch(/say ["`\u2018\u201c]No issues found/i);
   });
 });

@@ -154,11 +154,7 @@ export function buildChunkAgentPrompt(
   id: number,
   rules?: string,
 ): string {
-  const { diffPath, chunk, total } = chunkFrom(report, id);
-
-  // `read_file` takes a 0-based line offset; the plan's ranges are 1-based.
-  const offset = chunk.startLine - 1;
-  const limit = chunk.endLine - chunk.startLine + 1;
+  const { chunk, total } = chunkFrom(report, id);
 
   // The plan is parsed off disk with an unchecked cast, so guard the elements too,
   // not just the array. A malformed entry would otherwise render as
@@ -180,13 +176,7 @@ export function buildChunkAgentPrompt(
   const parts = [
     `You are reviewing chunk ${chunk.id} of ${total} of a code diff.`,
     '',
-    '**Read your chunk first. It is a file on disk — nothing in this prompt contains the code.**',
-    '',
-    '```',
-    `read_file(file_path="${diffPath}", offset=${offset}, limit=${limit})`,
-    '```',
-    '',
-    `That is your territory: lines ${chunk.startLine}-${chunk.endLine} of the diff ` +
+    `Your territory: lines ${chunk.startLine}-${chunk.endLine} of the diff ` +
       `(${chunk.lines} lines, ${chunk.chars} characters). The surrounding chunks belong ` +
       `to other agents — do not review them.`,
     '',
@@ -271,6 +261,56 @@ export function buildChunkAgentPrompt(
   }
 
   return parts.join('\n');
+}
+
+/**
+ * The launch prompt for a territory agent: short, and it points at the brief.
+ *
+ * The same arithmetic that moved the dimension agents' briefs onto disk applies
+ * here, and harder. A chunk agent's brief runs to about five kilobytes with the
+ * project rules in it — and a Step 3B review of a real pull request (#6606: 5 511
+ * diff lines) has **seventeen** of them. Eighty-seven kilobytes, in one response,
+ * pasted without an edit. Measured at a twelfth of that load the orchestrator
+ * already cut nineteen hundred characters out of a single prompt, and then talked
+ * its way past the check that caught it.
+ *
+ * So the brief goes on disk beside the diff, and the launch prompt carries the two
+ * things that cannot live anywhere else: the chunk's identity, and the exact read
+ * that defines its territory. Coverage is computed from those — from the prompt the
+ * harness recorded, not from anything the agent says afterwards — so they stay.
+ */
+export function buildChunkLaunchPrompt(
+  report: PlanReport,
+  id: number,
+  briefFile: string,
+): string {
+  const { diffPath, chunk, total } = chunkFrom(report, id);
+  const offset = chunk.startLine - 1;
+  const limit = chunk.endLine - chunk.startLine + 1;
+
+  return [
+    `You are review agent \`chunk ${chunk.id} of ${total}\` — the territory agent for ` +
+      `lines ${chunk.startLine}-${chunk.endLine} of the diff.`,
+    '',
+    '**Your brief is a file. Read it first — it is the whole of your instructions,',
+    'and nothing in this message replaces it.**',
+    '',
+    '```',
+    `read_file(file_path="${briefFile}")`,
+    '```',
+    '',
+    '**The code is a file too — the diff. Nothing in this message contains it.** Your ' +
+      'territory is exactly this read; page with a larger `offset` if it comes back ' +
+      '`isTruncated`:',
+    '',
+    '```',
+    `read_file(file_path="${diffPath}", offset=${offset}, limit=${limit})`,
+    '```',
+    '',
+    'Report findings in the format your brief specifies, and end with the receipt it ' +
+      'names. If you found nothing, say so **and say what you examined** — a return that ' +
+      'names nothing you read is indistinguishable from never having read anything.',
+  ].join('\n');
 }
 
 /**
@@ -733,8 +773,14 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       file: args.file,
     });
   } else {
-    prompt = buildChunkAgentPrompt(report, args.chunk as number, rules);
-    key = `chunk-${args.chunk}`;
+    const id = args.chunk as number;
+    key = `chunk-${id}`;
+    const briefFile = writeBrief(
+      args.plan,
+      key,
+      buildChunkAgentPrompt(report, id, rules),
+    );
+    prompt = buildChunkLaunchPrompt(report, id, briefFile);
   }
   recordPrompt(args.plan, key, prompt);
   writeStdoutLine(prompt);

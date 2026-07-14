@@ -132,11 +132,25 @@ function transcript(
     calls?: number;
     failed?: boolean;
     text?: string;
-    /** Extra paths this agent successfully opened — its brief, most of all. */
+    /**
+     * Paths this agent successfully opened, beyond the diff.
+     *
+     * Defaults to every brief its launch prompt points at — which is what a
+     * compliant agent does, and what the launch prompt exists to make it do. A test
+     * that wants an agent which ignored its brief passes `opens: []`.
+     */
     opens?: string[];
   } = {},
 ): void {
   const base = { agentId: id, agentName: 'general-purpose', sessionId: 'S1' };
+  const pointedAtBriefs = [
+    ...launchPrompt.matchAll(/read_file\(file_path="([^"]*\.brief\.md)"\)/g),
+  ].map((m) => m[1]);
+  // An agent that did nothing opened nothing — not even its brief. The default
+  // models a *working* agent, which is the only kind that reads what it is pointed
+  // at; a whiff and a failed run leave the briefs unread, as they do the diff.
+  const working = (opts.calls ?? 0) > 0 && !opts.failed;
+  const opens = opts.opens ?? (working ? pointedAtBriefs : []);
   const lines = [
     JSON.stringify({
       ...base,
@@ -175,7 +189,7 @@ function transcript(
       }),
     );
   }
-  for (const path of opts.opens ?? []) {
+  for (const path of opens) {
     lines.push(
       JSON.stringify({
         ...base,
@@ -232,7 +246,12 @@ function transcript(
  */
 const good = (c: number) =>
   `You are reviewing chunk ${c} of 2.\n` +
+  `read_file(file_path="${chunkBrief(c)}")\n` +
   `read_file(file_path="${DIFF}", offset=${(c - 1) * 100}, limit=100)`;
+
+/** Every plan fixture here writes to the same path, so the brief's is derivable. */
+const chunkBrief = (c: number) =>
+  briefPath(join(dir, 'plan.json'), `chunk-${c}`);
 
 /** What Step 3A hands every dimension agent: the whole diff, chunk by chunk. */
 const wholeDiff = () =>
@@ -253,6 +272,7 @@ function built(planPath: string, c: number, prompt = good(c)): void {
   const d = promptRecordDir(planPath);
   mkdirSync(d, { recursive: true });
   writeFileSync(join(d, `chunk-${c}.txt`), prompt);
+  writeFileSync(chunkBrief(c), `The chunk-${c} brief.`);
 }
 
 /** A genuine Step 3A plan: a small source change, every dimension walking it all. */

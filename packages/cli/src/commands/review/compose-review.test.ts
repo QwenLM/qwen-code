@@ -86,6 +86,11 @@ function transcript(
   launchPrompt: string,
   opts: { toolCalls?: number; text?: string; opens?: string[] } = {},
 ): void {
+  const pointedAtBriefs = [
+    ...launchPrompt.matchAll(/read_file\(file_path="([^"]*\.brief\.md)"\)/g),
+  ].map((m) => m[1]);
+  const working = (opts.toolCalls ?? 0) > 0;
+  const opens = opts.opens ?? (working ? pointedAtBriefs : []);
   const base = { agentId: id, agentName: 'general-purpose', sessionId: 'S1' };
   const lines: string[] = [
     JSON.stringify({
@@ -123,7 +128,7 @@ function transcript(
       }),
     );
   }
-  for (const path of opts.opens ?? []) {
+  for (const path of opens) {
     lines.push(
       JSON.stringify({
         ...base,
@@ -175,7 +180,12 @@ function transcript(
  */
 function goodPrompt(chunk: number): string {
   const offset = (chunk - 1) * 100;
-  return `You are reviewing chunk ${chunk} of 2.\nread_file(file_path="${DIFF}", offset=${offset}, limit=100)`;
+  const brief = briefPath(join(dir, 'plan.json'), `chunk-${chunk}`);
+  return (
+    `You are reviewing chunk ${chunk} of 2.\n` +
+    `read_file(file_path="${brief}")\n` +
+    `read_file(file_path="${DIFF}", offset=${offset}, limit=100)`
+  );
 }
 
 /** Lay down the CLI's record of the prompt it built for `chunk`. */
@@ -183,6 +193,7 @@ function recordBuilt(planPath: string, chunk: number): void {
   const d = promptRecordDir(planPath);
   mkdirSync(d, { recursive: true });
   writeFileSync(join(d, `chunk-${chunk}.txt`), goodPrompt(chunk));
+  writeFileSync(briefPath(planPath, `chunk-${chunk}`), `chunk-${chunk} brief`);
 }
 
 /**

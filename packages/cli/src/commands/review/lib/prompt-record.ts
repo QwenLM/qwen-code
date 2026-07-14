@@ -149,24 +149,51 @@ export function removePromptRecord(planPath: string): void {
 /**
  * Was `built` delivered to the agent intact?
  *
- * A launch prompt may *wrap* what the builder emitted — a preamble naming the PR
- * is harmless. It may not edit it. So this is containment, not equality, over a
- * whitespace-normalized form: trailing spaces and CRLF are the shell's business,
- * not the reviewer's, and failing a run over them would teach the reader to
- * distrust the check.
+ * **You may add. You may not remove, alter, or reorder.** Every line the builder
+ * emitted has to turn up in the delivered prompt, in the order it was emitted.
+ * Anything the caller puts *between* them is its own business.
+ *
+ * The first version of this was a straight substring test, and it was wrong in a
+ * way that would have been worse than no check at all. Dogfooded on a Step 3B
+ * review, it failed all nine agents — and both differences were legitimate:
+ *
+ *   - the caller had inserted **the one-sentence summary of the change that the
+ *     skill explicitly tells it to add**, which breaks contiguity by construction;
+ *   - and it had reflowed a hard-wrapped sentence onto one line, which changes not
+ *     one character of meaning.
+ *
+ * A gate that fires on a correct run is a gate that gets talked around — this
+ * skill has the dogfood transcript of a model doing exactly that, reasoning its way
+ * past a refusal it had decided was noise. Precision here is not politeness; it is
+ * the difference between a check that works and a check that trains the reader to
+ * ignore it.
+ *
+ * So: normalize whitespace away entirely (a wrap is not an edit), then walk the
+ * built lines and require each to appear at or after the last one's position.
  */
 export function wasDeliveredVerbatim(
   launchPrompt: string,
   built: string,
 ): boolean {
-  return normalize(launchPrompt).includes(normalize(built));
+  const delivered = flatten(launchPrompt);
+  let at = 0;
+  for (const line of lines(built)) {
+    const i = delivered.indexOf(line, at);
+    if (i === -1) return false;
+    at = i + line.length;
+  }
+  return true;
 }
 
-function normalize(s: string): string {
-  return s
-    .replace(/\r\n?/g, '\n')
+/** Whitespace collapsed to single spaces: a re-wrap is not an edit. */
+function flatten(s: string): string {
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+/** The built prompt's lines, whitespace-normalized, blanks dropped. */
+function lines(built: string): string[] {
+  return built
     .split('\n')
-    .map((l) => l.replace(/[ \t]+$/, ''))
-    .join('\n')
-    .trim();
+    .map((l) => flatten(l))
+    .filter((l) => l.length > 0);
 }

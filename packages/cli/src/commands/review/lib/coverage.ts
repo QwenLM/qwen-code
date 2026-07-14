@@ -366,18 +366,21 @@ export function coverageFromTranscripts(
     }
     // The launch prompt points at the brief rather than containing it, because a
     // 4 652-character prompt is not a thing an orchestrator will paste twelve times
-    // — measured, it delivered 2 893 of them and cut the rest. Which means the
+    // — measured, it delivered 2 893 of them and cut the rest — and a Step 3B review
+    // of a real pull request has seventeen chunk agents whose briefs run to five
+    // kilobytes apiece. Eighty-seven kilobytes, in one response. Which means the
     // instructions now arrive only if the agent opens the file. That is not a hope:
     // it is a tool call, and the harness wrote it down.
-    if (req.role !== 'chunk') {
-      const brief = briefPath(planPath, req.key);
-      const opened = agent.successfulCallArgs.some((a) => a.includes(brief));
-      if (!opened) {
-        unreadBriefs.push(
-          `${roleLabel(req)} — never opened its brief (${brief}), so it reviewed ` +
-            'without the instructions it was launched to follow',
-        );
-      }
+    //
+    // Every role, territory agents included. Their brief is where the severity
+    // definitions, the paging rule, the uncoverable rule and the project rules live.
+    const brief = briefPath(planPath, req.key);
+    const opened = agent.successfulCallArgs.some((a) => a.includes(brief));
+    if (!opened) {
+      unreadBriefs.push(
+        `${roleLabel(req)} — never opened its brief (${brief}), so it reviewed ` +
+          'without the instructions it was launched to follow',
+      );
     }
   }
 
