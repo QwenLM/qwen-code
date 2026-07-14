@@ -92,6 +92,7 @@ export class AcpConnection {
     this.workingDir = workingDir;
 
     const env = { ...process.env };
+    // VS Code's process.execPath is Electron; force Node mode for CLI args.
     env['ELECTRON_RUN_AS_NODE'] = '1';
 
     const proxyArg = extraArgs.find(
