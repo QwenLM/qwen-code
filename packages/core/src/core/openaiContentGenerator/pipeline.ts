@@ -518,7 +518,6 @@ export class ContentGenerationPipeline {
             promptId: event.prompt_id,
             responseId: event.response_id,
             tagName: event.tag_name,
-            handling: event.handling,
             toolCallCount: event.tool_call_count,
           });
           logProtocolTagSanitized(this.config.cliConfig, event);

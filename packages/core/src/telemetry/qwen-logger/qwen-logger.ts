@@ -969,7 +969,6 @@ export class QwenLogger {
         prompt_id: event.prompt_id ?? '',
         response_id: event.response_id ?? '',
         tag_name: event.tag_name,
-        handling: event.handling,
         tool_call_count: event.tool_call_count,
       },
     });

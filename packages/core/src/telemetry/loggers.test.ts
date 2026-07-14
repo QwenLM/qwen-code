@@ -190,7 +190,6 @@ describe('loggers', () => {
           prompt_id: 'prompt-id',
           response_id: 'response-id',
           tag_name: 'think',
-          handling: 'suppress_standalone_closing_tag',
           tool_call_count: 2,
         },
       });

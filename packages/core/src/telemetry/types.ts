@@ -678,7 +678,6 @@ export class ProtocolTagSanitizedEvent implements BaseTelemetryEvent {
   prompt_id?: string;
   response_id?: string;
   tag_name: 'think' | 'thinking';
-  handling: 'suppress_standalone_closing_tag';
   tool_call_count: number;
 
   constructor(opts: {
@@ -694,7 +693,6 @@ export class ProtocolTagSanitizedEvent implements BaseTelemetryEvent {
     this.prompt_id = opts.promptId;
     this.response_id = opts.responseId;
     this.tag_name = opts.tagName;
-    this.handling = 'suppress_standalone_closing_tag';
     this.tool_call_count = opts.toolCallCount;
   }
 }

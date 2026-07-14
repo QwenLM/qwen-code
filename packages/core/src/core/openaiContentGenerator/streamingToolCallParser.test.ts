@@ -1059,20 +1059,16 @@ describe('StreamingToolCallParser', () => {
   });
 
   describe('hasInvalidToolCallArguments', () => {
-    it('accepts empty and object arguments', () => {
-      parser.addChunk(0, '', 'call_empty', 'list_sessions');
-      parser.addChunk(1, '{"path":"a.ts"}', 'call_object', 'read_file');
-
-      expect(parser.hasInvalidToolCallArguments()).toBe(false);
+    it.each([
+      ['', false],
+      ['{"path":"a.ts"}', false],
+      ['{bad}', true],
+      ['null', true],
+      ['[]', true],
+      ['42', true],
+    ])('validates %s', (toolArguments, invalid) => {
+      parser.addChunk(0, toolArguments, 'call_1', 'read_file');
+      expect(parser.hasInvalidToolCallArguments()).toBe(invalid);
     });
-
-    it.each(['{bad}', 'null', '[]', '42'])(
-      'rejects invalid or non-object arguments %s',
-      (toolArguments) => {
-        parser.addChunk(0, toolArguments, 'call_1', 'read_file');
-
-        expect(parser.hasInvalidToolCallArguments()).toBe(true);
-      },
-    );
   });
 });

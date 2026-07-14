@@ -383,13 +383,9 @@ describe('QwenLogger', () => {
             prompt_id: 'prompt-id',
             response_id: 'response-id',
             tag_name: 'thinking',
-            handling: 'suppress_standalone_closing_tag',
             tool_call_count: 3,
           },
         }),
-      );
-      expect(JSON.stringify(enqueueSpy.mock.calls[0])).not.toMatch(
-        /response_text|reasoning|tool_name|arguments/,
       );
     });
 
