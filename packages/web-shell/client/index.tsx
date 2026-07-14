@@ -7,6 +7,8 @@ import { App, type WebShellProps } from './App';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { RootErrorFallback } from './components/RootErrorFallback';
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
+export { WebShellTranscript } from './components/WebShellTranscript';
+export type { WebShellTranscriptProps } from './components/WebShellTranscript';
 
 export interface WebShellWithProvidersProps extends WebShellProps {
   /** Daemon API base URL. Defaults to the browser origin when omitted. */

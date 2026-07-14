@@ -1,4 +1,6 @@
 export { App as WebShell } from './App';
+export { WebShellTranscript } from './components/WebShellTranscript';
+export type { WebShellTranscriptProps } from './components/WebShellTranscript';
 export type {
   WebShellApi,
   WebShellComposerPlaceholders,

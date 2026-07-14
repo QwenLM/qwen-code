@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import type { ACPToolCall } from '../../adapters/types';
 import { I18nProvider } from '../../i18n';
 import { WebShellCustomizationProvider } from '../../customization';
+import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 
 vi.mock('../../App', async () => {
   const { createContext } = await import('react');
@@ -313,6 +314,63 @@ describe('tool group summary logic', () => {
       'dataworks-infra workspace list',
     );
     expect(container.textContent).not.toContain('timeout: 30000ms');
+  });
+});
+
+describe('tool output session links', () => {
+  function renderSessionLinkTool(readonly: boolean): HTMLElement {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const toolLine = (
+      <ToolLine
+        tool={makeTool({
+          toolName: 'custom_tool',
+          rawOutput: '[child](qwen-session://child-session)',
+        })}
+        forceExpanded
+      />
+    );
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          {readonly ? (
+            <TranscriptRenderModeProvider value="readonly">
+              {toolLine}
+            </TranscriptRenderModeProvider>
+          ) : (
+            toolLine
+          )}
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+    return container;
+  }
+
+  it('keeps interactive tool session links clickable by default', () => {
+    const handler = vi.fn();
+    window.addEventListener('qwen:open-session', handler);
+    const container = renderSessionLinkTool(false);
+    const link = container.querySelector('a[role="button"]');
+    expect(link?.textContent).toBe('child');
+    act(() => {
+      link?.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }),
+      );
+    });
+    expect(handler).toHaveBeenCalledOnce();
+    window.removeEventListener('qwen:open-session', handler);
+  });
+
+  it('renders tool session links as inert text in readonly mode', () => {
+    const handler = vi.fn();
+    window.addEventListener('qwen:open-session', handler);
+    const container = renderSessionLinkTool(true);
+    expect(container.querySelector('a[role="button"]')).toBeNull();
+    expect(container.textContent).toContain('child');
+    expect(handler).not.toHaveBeenCalled();
+    window.removeEventListener('qwen:open-session', handler);
   });
 });
 

@@ -32,12 +32,19 @@ vi.mock('./App', async () => {
     App: () => React.createElement('div', { 'data-testid': 'app-ok' }, 'app'),
   };
 });
+vi.mock('./components/WebShellTranscript', async () => {
+  const React = await import('react');
+  return {
+    WebShellTranscript: () =>
+      React.createElement('div', { 'data-testid': 'transcript-ok' }),
+  };
+});
 
 // Bare './index' resolves to the sibling index.ts barrel, which doesn't export
 // WebShellWithProviders (see the dual-entry note in the PR). A variable
 // specifier loads index.tsx at runtime without tripping tsc's ts-extension rule.
 const indexEntry = './index.tsx';
-const { WebShellWithProviders } = await import(indexEntry);
+const { WebShellTranscript, WebShellWithProviders } = await import(indexEntry);
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -65,6 +72,13 @@ afterEach(() => {
 });
 
 describe('WebShellWithProviders top-level boundary', () => {
+  it('exports the readonly transcript entry', () => {
+    const container = render(<WebShellTranscript blocks={[]} />);
+    expect(
+      container.querySelector('[data-testid="transcript-ok"]'),
+    ).not.toBeNull();
+  });
+
   it('renders normally when the providers are healthy', () => {
     const container = render(<WebShellWithProviders />);
     expect(container.querySelector('[data-testid="app-ok"]')).not.toBeNull();
