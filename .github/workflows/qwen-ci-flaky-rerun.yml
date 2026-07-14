@@ -1,4 +1,4 @@
-name: 'Qwen CI Flaky Rerun'
+name: 'Qwen CI Failure Patrol'
 
 on:
   schedule:
@@ -13,12 +13,14 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  ACTIVE_DAYS: '7'
+  MAX_CANDIDATES_PER_RUN: '5'
   STALE_MINUTES: '30'
   WORKDIR: '${{ github.workspace }}/.qwen/ci-flaky-rerun'
 
 jobs:
   classify:
-    name: 'Classify one stale PR failure'
+    name: 'Classify stale PR failures'
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 10
@@ -27,6 +29,7 @@ jobs:
       contents: 'read'
       pull-requests: 'read'
     outputs:
+      bot_login: '${{ steps.identity.outputs.bot_login }}'
       target_found: '${{ steps.scan.outputs.target_found }}'
       input_sha: '${{ steps.scan.outputs.input_sha }}'
     steps:
@@ -60,6 +63,8 @@ jobs:
             --repo "${{ github.repository }}" \
             --workdir "${WORKDIR}" \
             --stale-minutes "${STALE_MINUTES}" \
+            --active-days "${ACTIVE_DAYS}" \
+            --max-candidates "${MAX_CANDIDATES_PER_RUN}" \
             --trusted-marker-login "${{ steps.identity.outputs.bot_login }}" > "${WORKDIR}/scan.out"
           grep -E '^(target_found|input_sha)=' "${WORKDIR}/scan.out" >> "${GITHUB_OUTPUT}"
 
@@ -84,27 +89,27 @@ jobs:
           prompt: |-
             Use .qwen/skills/ci-flaky-patrol/SKILL.md.
             Workdir: ${{ env.WORKDIR }}
-            Read ci-flaky-input.json and write ci-flaky-decision.json.
+            Read ci-flaky-input.json and write ci-flaky-decisions.json.
 
-      - name: 'Validate patrol decision'
+      - name: 'Validate patrol decisions'
         if: "${{ steps.scan.outputs.target_found == 'true' }}"
-        run: 'test -s "${WORKDIR}/ci-flaky-decision.json"'
+        run: 'test -s "${WORKDIR}/ci-flaky-decisions.json"'
 
-      - name: 'Upload patrol input and decision'
+      - name: 'Upload patrol input and decisions'
         if: "${{ steps.scan.outputs.target_found == 'true' }}"
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'
         with:
-          name: 'ci-flaky-patrol-decision'
+          name: 'ci-flaky-patrol-decisions'
           path: |-
             ${{ env.WORKDIR }}/ci-flaky-input.json
-            ${{ env.WORKDIR }}/ci-flaky-decision.json
+            ${{ env.WORKDIR }}/ci-flaky-decisions.json
           if-no-files-found: 'error'
           retention-days: 1
 
   act:
-    name: 'Rerun high-confidence flaky failure'
+    name: 'Act on classified PR failures'
     needs: 'classify'
-    if: "${{ needs.classify.result == 'success' && needs.classify.outputs.target_found == 'true' }}"
+    if: "${{ needs.classify.result == 'success' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:
@@ -123,17 +128,30 @@ jobs:
         with:
           node-version: '22'
 
-      - name: 'Download patrol decision'
+      - name: 'Download patrol decisions'
+        if: "${{ needs.classify.outputs.target_found == 'true' }}"
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c'
         with:
-          name: 'ci-flaky-patrol-decision'
+          name: 'ci-flaky-patrol-decisions'
           path: '${{ env.WORKDIR }}'
 
-      - name: 'Act on flaky decision'
+      - name: 'Act on patrol decisions'
+        if: "${{ needs.classify.outputs.target_found == 'true' }}"
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
         run: |-
           node .github/scripts/ci-flaky-rerun.mjs act \
             --repo "${{ github.repository }}" \
             --workdir "${WORKDIR}" \
-            --input-sha "${{ needs.classify.outputs.input_sha }}"
+            --input-sha "${{ needs.classify.outputs.input_sha }}" \
+            --trusted-marker-login "${{ needs.classify.outputs.bot_login }}"
+
+      - name: 'Reset successful failure state'
+        if: '${{ always() }}'
+        continue-on-error: true
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+        run: |-
+          node .github/scripts/ci-flaky-rerun.mjs reset \
+            --repo "${{ github.repository }}" \
+            --trusted-marker-login "${{ needs.classify.outputs.bot_login }}"

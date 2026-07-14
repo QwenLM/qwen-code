@@ -9,18 +9,20 @@ const workflow = readFileSync(
 const yml = parse(workflow);
 const skill = readFileSync('.qwen/skills/ci-flaky-patrol/SKILL.md', 'utf8');
 
-describe('ci flaky rerun workflow', () => {
-  it('runs every ten minutes and processes one candidate', () => {
+describe('ci failure patrol workflow', () => {
+  it('runs every ten minutes with serialized configurable batches', () => {
     expect(yml.on.schedule[0].cron).toBe('*/10 * * * *');
-    expect(skill).toContain('Classify exactly one');
+    expect(yml.concurrency).toEqual({
+      group: 'qwen-ci-flaky-rerun',
+      'cancel-in-progress': false,
+    });
+    expect(yml.env.ACTIVE_DAYS).toBe('7');
+    expect(yml.env.MAX_CANDIDATES_PER_RUN).toBe('5');
+    expect(workflow).toContain('--active-days "${ACTIVE_DAYS}"');
+    expect(workflow).toContain('--max-candidates "${MAX_CANDIDATES_PER_RUN}"');
   });
 
-  it('keeps GitHub write credentials out of classification', () => {
-    expect(yml.jobs.classify.permissions).toEqual({
-      actions: 'read',
-      contents: 'read',
-      'pull-requests': 'read',
-    });
+  it('keeps classifier credentials isolated and PAT writes explicit', () => {
     const classifier = yml.jobs.classify.steps.find((step) =>
       step.uses?.includes('qwen-code-action'),
     );
@@ -34,20 +36,24 @@ describe('ci flaky rerun workflow', () => {
     expect(JSON.stringify(yml.jobs.act)).toContain('CI_BOT_PAT');
   });
 
-  it('uses a restricted classifier and a trusted fresh act checkout', () => {
-    const classifier = yml.jobs.classify.steps.find((step) =>
-      step.uses?.includes('qwen-code-action'),
-    );
-    expect(classifier.with.settings).toContain('"sandbox": true');
-    expect(classifier.with.settings).toContain('"read_file"');
-    expect(classifier.with.settings).toContain('"write_file"');
-    expect(classifier.with.settings).not.toContain('"shell"');
-    expect(yml.jobs.act.needs).toBe('classify');
-    expect(workflow).toContain('needs.classify.outputs.input_sha');
+  it('passes a decision batch through a trusted act job and always resets', () => {
+    expect(yml.jobs.classify.outputs).toHaveProperty('bot_login');
+    expect(workflow).toContain('ci-flaky-decisions.json');
     expect(workflow).toContain('--input-sha');
-    expect(
-      yml.jobs.act.steps.find((step) => step.name === 'Checkout trusted main')
-        .with['persist-credentials'],
-    ).toBe(false);
+    expect(workflow).toContain('--trusted-marker-login');
+    const reset = yml.jobs.act.steps.find(
+      (step) => step.name === 'Reset successful failure state',
+    );
+    expect(reset.if).toContain('always()');
+    expect(reset['continue-on-error']).toBe(true);
+  });
+
+  it('keeps judgment in the skill and GitHub writes in the driver', () => {
+    for (const action of ['rerun', 'update_branch', 'comment', 'no_action']) {
+      expect(skill).toContain(action);
+    }
+    expect(skill).toContain('maximum of 3 actions');
+    expect(skill).toContain('main-branch failures');
+    expect(skill).toContain('ci-flaky-decisions.json');
   });
 });
