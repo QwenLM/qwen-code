@@ -29,6 +29,7 @@ describe('stable release notes workflow', () => {
 
     expect(step).toContain('--notes-start-tag "${PREVIOUS_RELEASE_TAG}"');
     expect(step).toContain('--generate-notes');
+    expect(step).toContain("GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'");
     expect(releaseWorkflow).not.toContain(
       "name: 'Generate AI-assisted stable release notes'",
     );
@@ -62,7 +63,7 @@ describe('stable release notes workflow', () => {
     expect(update).toContain(
       'gh release edit "${RELEASE_TAG}" --notes-file "${RELEASE_NOTES_FILE}"',
     );
-    expect(changelog).toContain('continue-on-error: true');
+    expect(changelog).not.toContain('continue-on-error: true');
   });
 
   it('updates the changelog before opening the release PR', () => {
