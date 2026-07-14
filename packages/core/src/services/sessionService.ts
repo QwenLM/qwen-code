@@ -46,6 +46,7 @@ import {
   type RebuiltSessionArtifactSnapshot,
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
+import { SessionTranscriptTooLargeError } from './session-transcript-reader.js';
 
 const debugLogger = createDebugLogger('SESSION');
 
@@ -1120,8 +1121,43 @@ export class SessionService {
   async loadSession(
     sessionId: string,
   ): Promise<ResumedSessionData | undefined> {
-    const chatsDir = this.getChatsDir();
-    const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+    return this.loadSessionFromState(sessionId, 'active');
+  }
+
+  /**
+   * Reads an archived session without changing its archive state.
+   * Daemon load/resume paths must continue to use {@link loadSession}.
+   */
+  async loadArchivedSession(
+    sessionId: string,
+    options: { maxBytes: number },
+  ): Promise<ResumedSessionData | undefined> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
+      return undefined;
+    }
+    const filePath = this.getSessionFilePath(sessionId, 'archived');
+    try {
+      const size = fs.statSync(filePath).size;
+      if (size > options.maxBytes) {
+        throw new SessionTranscriptTooLargeError(
+          sessionId,
+          size,
+          options.maxBytes,
+        );
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
+    }
+    return this.loadSessionFromState(sessionId, 'archived');
+  }
+
+  private async loadSessionFromState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): Promise<ResumedSessionData | undefined> {
+    const filePath = this.getSessionFilePath(sessionId, state);
 
     const records = await this.readAllRecords(filePath);
     if (records.length === 0) {

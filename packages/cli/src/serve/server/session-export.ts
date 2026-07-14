@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { SessionService } from '@qwen-code/qwen-code-core';
+import {
+  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+  SessionService,
+} from '@qwen-code/qwen-code-core';
 import { SessionNotFoundError } from '../acp-session-bridge.js';
 import {
   collectSessionData,
@@ -71,12 +74,17 @@ export async function exportSessionTranscript(params: {
   workspaceCwd: string;
   sessionId: string;
   format: SessionExportFormat;
+  archiveState?: 'active' | 'archived';
   config?: ExportConfig;
 }): Promise<SessionExportResult> {
   const { workspaceCwd, sessionId, format } = params;
-  const sessionData = await new SessionService(workspaceCwd).loadSession(
-    sessionId,
-  );
+  const service = new SessionService(workspaceCwd);
+  const sessionData =
+    params.archiveState === 'archived'
+      ? await service.loadArchivedSession(sessionId, {
+          maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+        })
+      : await service.loadSession(sessionId);
   if (!sessionData) {
     throw new SessionNotFoundError(sessionId);
   }

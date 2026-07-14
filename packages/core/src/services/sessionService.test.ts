@@ -25,6 +25,7 @@ import {
   getResumeTokenCounts,
   type ConversationRecord,
 } from './sessionService.js';
+import { SESSION_TRANSCRIPT_MAX_INDEX_BYTES } from './session-transcript-reader.js';
 import {
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   stableSessionArtifactId,
@@ -472,6 +473,49 @@ describe('SessionService', () => {
       expect(loaded?.conversation.messages[0].uuid).toBe('b1');
       expect(loaded?.conversation.messages[1].uuid).toBe('b2');
       expect(loaded?.lastCompletedUuid).toBe('b2');
+    });
+
+    it('reads archived sessions only through the explicit read-only method', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.read).mockResolvedValue([recordB1, recordB2]);
+
+      const loaded = await sessionService.loadArchivedSession(sessionIdB, {
+        maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+      });
+
+      expect(loaded?.conversation.messages).toHaveLength(2);
+      expect(vi.mocked(jsonl.read)).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdB}.jsonl`),
+      );
+    });
+
+    it('accepts an archived session exactly at the requested size limit', async () => {
+      statSyncSpy.mockReturnValue({
+        size: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.read).mockResolvedValue([recordB1, recordB2]);
+
+      await expect(
+        sessionService.loadArchivedSession(sessionIdB, {
+          maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+        }),
+      ).resolves.toBeDefined();
+    });
+
+    it('rejects invalid archived session ids before accessing storage', async () => {
+      await expect(
+        sessionService.loadArchivedSession('../outside', {
+          maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+        }),
+      ).resolves.toBeUndefined();
+      expect(statSyncSpy).not.toHaveBeenCalled();
+      expect(vi.mocked(jsonl.read)).not.toHaveBeenCalled();
     });
 
     it('loads artifact side records attached to the active branch', async () => {

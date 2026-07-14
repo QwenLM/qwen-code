@@ -326,6 +326,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'extension_management_v2',
   'workspace_persisted_transcript',
   'workspace_session_export',
+  'workspace_archived_session_export',
   // Baseline (always advertised) — presence means the `/voice/stream`
   // endpoint exists; the WS errors if no voice model is configured.
   'voice_transcribe',
@@ -374,6 +375,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'extension_management_v2' &&
       f !== 'workspace_persisted_transcript' &&
       f !== 'workspace_session_export' &&
+      f !== 'workspace_archived_session_export' &&
       f !== 'voice_transcribe',
   ),
   'workspace_settings',
@@ -416,6 +418,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'extension_management_v2',
   'workspace_persisted_transcript',
   'workspace_session_export',
+  'workspace_archived_session_export',
   'workspace_qualified_acp',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',

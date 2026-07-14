@@ -14,6 +14,7 @@ import {
   SessionTranscriptTooLargeError,
   TrustGateError,
 } from '@qwen-code/qwen-code-core';
+import { SessionNotArchivedError } from './session-archive.js';
 import type { Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
@@ -322,6 +323,14 @@ export function sendBridgeError(
     res.status(409).json({
       error: err.message,
       code: 'session_archived',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof SessionNotArchivedError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'session_not_archived',
       sessionId: err.sessionId,
     });
     return;

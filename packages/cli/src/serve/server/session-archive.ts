@@ -45,6 +45,15 @@ export interface DaemonDeleteSessionsResult {
 
 export type DaemonDeleteErrorPhase = 'close' | 'remove' | 'delete';
 
+export class SessionNotArchivedError extends Error {
+  constructor(readonly sessionId: string) {
+    super(
+      `Session "${sessionId}" is active. Archive it before exporting from archived storage.`,
+    );
+    this.name = 'SessionNotArchivedError';
+  }
+}
+
 export class SessionArchiveCoordinator {
   private readonly exclusive = new Set<string>();
   private readonly shared = new Map<string, number>();
@@ -216,6 +225,24 @@ export async function assertSessionLoadable(
     throw new SessionConflictError(sessionId);
   }
   return location;
+}
+
+export async function assertSessionArchived(
+  workspaceCwd: string,
+  sessionId: string,
+): Promise<void> {
+  const location = await new SessionService(workspaceCwd).getSessionLocation(
+    sessionId,
+  );
+  if (location === 'active') {
+    throw new SessionNotArchivedError(sessionId);
+  }
+  if (location === 'conflict') {
+    throw new SessionConflictError(sessionId);
+  }
+  if (location === undefined) {
+    throw new SessionNotFoundError(sessionId);
+  }
 }
 
 function isSessionNotFoundError(err: unknown): boolean {

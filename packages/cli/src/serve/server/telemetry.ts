@@ -150,6 +150,15 @@ export function resolveDaemonTelemetryRoute(
       sessionId: workspaceExport[1],
     };
   }
+  const workspaceArchivedExport = path.match(
+    /^\/workspaces\/[^/]+\/session\/([^/]+)\/archive\/export$/,
+  );
+  if (workspaceArchivedExport?.[1] && req.method === 'GET') {
+    return {
+      route: 'GET /workspaces/:workspace/session/:id/archive/export',
+      sessionId: workspaceArchivedExport[1],
+    };
+  }
   const pluralWorkspacePrefix = /^\/workspaces\/[^/]+/;
   if (pluralWorkspacePrefix.test(path)) {
     const suffix = path.replace(pluralWorkspacePrefix, '/workspace');
