@@ -294,16 +294,15 @@ describe('StreamingToolCallParser', () => {
     });
 
     it('accepts a function name that arrives after complete arguments', () => {
-      parser.addChunk(0, '{"path":"a.ts"}', 'call_1');
-      parser.addChunk(0, '{"path":"a.ts"}', 'call_1', 'read_file');
+      parser.addChunk(1, '{"path":"a.ts"}');
+      parser.addChunk(1, '', undefined, 'read_file');
 
       expect(parser.hasNamelessToolCall()).toBe(false);
       expect(parser.getCompletedToolCalls()).toEqual([
         {
-          id: 'call_1',
           name: 'read_file',
           args: { path: 'a.ts' },
-          index: 0,
+          index: 1,
         },
       ]);
     });

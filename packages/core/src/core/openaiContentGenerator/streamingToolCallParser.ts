@@ -126,6 +126,15 @@ export class StreamingToolCallParser {
         // Map this ID to the actual index we're using
         this.idToIndexMap.set(id, actualIndex);
       }
+    } else if (
+      name &&
+      !chunk.trim() &&
+      this.buffers.has(index) &&
+      !this.toolCallMeta.get(index)?.name
+    ) {
+      // A name-only delta belongs to the existing wire index, even when its
+      // argument buffer is already complete.
+      actualIndex = index;
     } else {
       // No ID provided - this is a continuation chunk
       // Try to find which tool call this belongs to based on the index

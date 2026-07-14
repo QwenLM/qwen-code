@@ -1384,9 +1384,13 @@ export function convertOpenAIChunkToGemini(
       .join('');
     const leakedThinkingTag =
       requestContext.hasStructuredReasoningContent === true &&
-      (LEADING_THINKING_TAG_PATTERN.test(visibleText) ||
+      ((requestContext.hasVisibleContent !== true &&
+        LEADING_THINKING_TAG_PATTERN.test(visibleText)) ||
         (requestContext.hasThinkingTagInReasoning === true &&
           CLOSING_THINKING_TAG_PATTERN.test(visibleText)));
+    if (/\S/.test(visibleText)) {
+      requestContext.hasVisibleContent = true;
+    }
     if (leakedThinkingTag) {
       requestContext.pendingUntrustedResponseParts = undefined;
       throw new InvalidStreamError(

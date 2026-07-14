@@ -451,22 +451,29 @@ describe('OpenAIContentConverter', () => {
       ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
     });
 
-    it('preserves a literal closing tag after ordinary reasoning', () => {
+    it('preserves a split literal closing tag after ordinary reasoning', () => {
       const stream = withStreamParser();
       const reasoning = converter.convertOpenAIChunkToGemini(
         streamChunk('reasoning', { reasoning_content: 'Explain the syntax.' }),
         stream,
       );
-      const content = converter.convertOpenAIChunkToGemini(
-        streamChunk('content', { content: 'Use </think> to close the tag.' }),
+      const prefix = converter.convertOpenAIChunkToGemini(
+        streamChunk('prefix', { content: 'Use ' }),
+        stream,
+      );
+      const closingTag = converter.convertOpenAIChunkToGemini(
+        streamChunk('closing-tag', { content: '</think> to close the tag.' }),
         stream,
       );
 
       expect(reasoning.candidates?.[0]?.content?.parts).toEqual([
         { thought: true, text: 'Explain the syntax.' },
       ]);
-      expect(content.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'Use </think> to close the tag.' },
+      expect(prefix.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'Use ' },
+      ]);
+      expect(closingTag.candidates?.[0]?.content?.parts).toEqual([
+        { text: '</think> to close the tag.' },
       ]);
     });
 

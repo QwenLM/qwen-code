@@ -82,6 +82,7 @@ export interface RequestContext {
   pendingUntrustedResponseParts?: Part[];
   hasStructuredReasoningContent?: boolean;
   hasThinkingTagInReasoning?: boolean;
+  hasVisibleContent?: boolean;
 }
 
 export interface ErrorHandler {
