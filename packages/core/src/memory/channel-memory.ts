@@ -87,8 +87,18 @@ async function releaseLock(release: () => Promise<void>): Promise<void> {
   }
 }
 
-async function cleanupLegacyAfterCommit(legacyPath: string): Promise<void> {
+async function cleanupLegacyAfterCommit(
+  legacyPath: string,
+  expectedBytes: Buffer,
+): Promise<void> {
   try {
+    const currentBytes = await fs.readFile(legacyPath);
+    if (
+      legacyHash(currentBytes) !== legacyHash(expectedBytes) ||
+      !currentBytes.equals(expectedBytes)
+    ) {
+      return;
+    }
     await fs.unlink(legacyPath);
   } catch {
     // Canonical data is committed; a matching legacy file is safe to retry.
@@ -177,6 +187,19 @@ function legacyHash(legacyBytes: Buffer): string {
   return createHash('sha256').update(legacyBytes).digest('hex');
 }
 
+async function lockLegacyIfExists(
+  legacyPath: string,
+): Promise<(() => Promise<void>) | undefined> {
+  try {
+    return await lockfile.lock(legacyPath, LOCK_OPTIONS);
+  } catch (error) {
+    if (isMissingFile(error)) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
 function verifyDualFileState(
   document: ChannelMemoryDocument,
   legacyBytes: Buffer | undefined,
@@ -205,7 +228,9 @@ async function loadChannelMemory(
     if (jsonBytes.length > MAX_CHANNEL_MEMORY_BYTES) {
       throw new Error('Channel memory exceeds maximum size');
     }
-    const document = parseChannelMemoryDocument(jsonBytes.toString('utf8'));
+    const document = parseChannelMemoryDocument(
+      new TextDecoder('utf-8', { fatal: true }).decode(jsonBytes),
+    );
     verifyDualFileState(document, legacyBytes);
     return {
       document,
@@ -272,7 +297,9 @@ async function mutateChannelMemory<T>(
     const lockHandle = await fs.open(lockPath, 'a', 0o600);
     await lockHandle.close();
     const release = await lockfile.lock(lockPath, LOCK_OPTIONS);
+    let releaseLegacy: (() => Promise<void>) | undefined;
     try {
+      releaseLegacy = await lockLegacyIfExists(legacyPath);
       const loaded = await loadChannelMemory(target);
       const mutation = apply(
         loaded.document,
@@ -288,10 +315,13 @@ async function mutateChannelMemory<T>(
       }
       await writeChannelMemory(filePath, serialized);
       if (loaded.legacyBytes !== undefined) {
-        await cleanupLegacyAfterCommit(legacyPath);
+        await cleanupLegacyAfterCommit(legacyPath, loaded.legacyBytes);
       }
       return mutation.result;
     } finally {
+      if (releaseLegacy !== undefined) {
+        await releaseLock(releaseLegacy);
+      }
       await releaseLock(release);
     }
   });

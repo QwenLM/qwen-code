@@ -132,6 +132,38 @@ describe('channel memory document', () => {
     ).toThrow('Invalid channel memory document');
   });
 
+  it.each([
+    ['top-level', { version: 1, entries: [], futureMetadata: 'preserve me' }],
+    [
+      'migration',
+      {
+        version: 1,
+        migration: {
+          legacySha256: 'a'.repeat(64),
+          futureMetadata: 'preserve me',
+        },
+        entries: [],
+      },
+    ],
+    [
+      'entry',
+      {
+        version: 1,
+        entries: [
+          {
+            id: 'm-123456789abc',
+            text: 'Use staging',
+            futureMetadata: 'preserve me',
+          },
+        ],
+      },
+    ],
+  ])('rejects unknown %s keys', (_level, value) => {
+    expect(() => parseChannelMemoryDocument(JSON.stringify(value))).toThrow(
+      'Invalid channel memory',
+    );
+  });
+
   it('rejects documents exceeding the entry limit', () => {
     const entries = Array.from(
       { length: MAX_CHANNEL_MEMORY_ENTRIES + 1 },
@@ -203,6 +235,10 @@ describe('channel memory document', () => {
     expect(document.entries[0].text).toBe('  Keep surrounding whitespace  ');
   });
 
+  it('rejects invalid UTF-8 in legacy bytes', () => {
+    expect(() => parseLegacyChannelMemory(Buffer.from([0xff]))).toThrow();
+  });
+
   it('creates a timestamped channel memory entry', () => {
     expect(
       createChannelMemoryEntry({
@@ -247,6 +283,18 @@ describe('channel memory document', () => {
   it('serializes a document as stable pretty JSON', () => {
     expect(serializeChannelMemoryDocument({ version: 1, entries: [] })).toBe(
       '{\n  "version": 1,\n  "entries": []\n}\n',
+    );
+  });
+
+  it('does not silently discard unknown keys during serialization', () => {
+    const document = {
+      version: 1 as const,
+      entries: [],
+      futureMetadata: 'preserve me',
+    };
+
+    expect(() => serializeChannelMemoryDocument(document)).toThrow(
+      'Invalid channel memory document',
     );
   });
 });

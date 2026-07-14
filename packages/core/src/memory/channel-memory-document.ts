@@ -34,10 +34,26 @@ function invalidDocument(message = 'Invalid channel memory document'): Error {
   return new Error(message);
 }
 
+function validateKeys(
+  value: Record<string, unknown>,
+  allowedKeys: readonly string[],
+  message?: string,
+): void {
+  const allowed = new Set(allowedKeys);
+  if (Object.keys(value).some((key) => !allowed.has(key))) {
+    throw invalidDocument(message);
+  }
+}
+
 function validateEntry(value: unknown): ChannelMemoryEntry {
   if (!isRecord(value)) {
     throw invalidDocument('Invalid channel memory entry');
   }
+  validateKeys(
+    value,
+    ['id', 'text', 'createdAt', 'updatedAt', 'createdBy'],
+    'Invalid channel memory entry',
+  );
 
   const { id, text } = value;
   if (
@@ -66,6 +82,7 @@ function parseDocumentValue(value: unknown): ChannelMemoryDocument {
   if (!isRecord(value)) {
     throw invalidDocument();
   }
+  validateKeys(value, ['version', 'migration', 'entries']);
   if (!('version' in value) || typeof value['version'] !== 'number') {
     throw invalidDocument();
   }
@@ -98,6 +115,7 @@ function parseDocumentValue(value: unknown): ChannelMemoryDocument {
     ) {
       throw invalidDocument();
     }
+    validateKeys(value['migration'], ['legacySha256']);
     migration = { legacySha256: value['migration']['legacySha256'] };
   }
 
@@ -287,9 +305,9 @@ export function parseLegacyChannelMemory(raw: Buffer): ChannelMemoryDocument {
   const entries: ChannelMemoryEntry[] = [];
   const normalizedTexts = new Set<string>();
   const ids = new Set<string>();
+  const decoded = new TextDecoder('utf-8', { fatal: true }).decode(raw);
 
-  for (const [sourceLineIndex, line] of raw
-    .toString('utf8')
+  for (const [sourceLineIndex, line] of decoded
     .split(/\r\n|\n|\r/u)
     .entries()) {
     const normalizedText = normalizeChannelMemoryText(line);

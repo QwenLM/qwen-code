@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import lockfile from 'proper-lockfile';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   addChannelMemoryEntries,
@@ -45,7 +46,31 @@ const fsFailure = vi.hoisted(() => ({
   legacyUnlinkPath: undefined as string | undefined,
   readErrorPath: undefined as string | undefined,
   readRace: undefined as ReadRace | undefined,
+  legacyAppendAfterRename: undefined as
+    | { path: string; text: string }
+    | undefined,
 }));
+
+const lockObservation = vi.hoisted(() => ({
+  path: undefined as string | undefined,
+  attempted: undefined as (() => void) | undefined,
+}));
+
+vi.mock('proper-lockfile', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('proper-lockfile')>();
+  return {
+    ...actual,
+    default: {
+      ...actual,
+      async lock(...args: Parameters<typeof actual.lock>) {
+        if (String(args[0]) === lockObservation.path) {
+          lockObservation.attempted?.();
+        }
+        return actual.lock(...args);
+      },
+    },
+  };
+});
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
@@ -98,7 +123,12 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       if (fsFailure.rename) {
         throw new Error('rename failed');
       }
-      return actual.rename(...args);
+      await actual.rename(...args);
+      const append = fsFailure.legacyAppendAfterRename;
+      if (append !== undefined) {
+        fsFailure.legacyAppendAfterRename = undefined;
+        await actual.appendFile(append.path, append.text);
+      }
     },
     async unlink(...args: Parameters<typeof actual.unlink>) {
       if (String(args[0]) === fsFailure.legacyUnlinkPath) {
@@ -130,6 +160,9 @@ describe('channel memory', () => {
     fsFailure.legacyUnlinkPath = undefined;
     fsFailure.readErrorPath = undefined;
     fsFailure.readRace = undefined;
+    fsFailure.legacyAppendAfterRename = undefined;
+    lockObservation.path = undefined;
+    lockObservation.attempted = undefined;
     vi.restoreAllMocks();
     if (originalQwenHome === undefined) {
       delete process.env['QWEN_HOME'];
@@ -275,6 +308,55 @@ describe('channel memory', () => {
       { text: 'Use staging' },
       { text: 'Run tests' },
     ]);
+  });
+
+  it('waits for an old worker lock and migrates its final append', async () => {
+    const legacyPath = writeLegacy('Use staging\n');
+    let releaseOldWorker = await lockfile.lock(legacyPath, {
+      realpath: false,
+      stale: 5000,
+    });
+    const legacyLockAttempted = deferred();
+    lockObservation.path = legacyPath;
+    lockObservation.attempted = legacyLockAttempted.resolve;
+
+    const migration = addChannelMemoryEntries(target, ['Run tests']);
+    try {
+      const first = await Promise.race([
+        legacyLockAttempted.promise.then(() => 'legacy-lock'),
+        migration.then(() => 'migration-completed'),
+      ]);
+      expect(first).toBe('legacy-lock');
+
+      fs.appendFileSync(legacyPath, 'Old worker append\n');
+      await releaseOldWorker();
+      releaseOldWorker = async () => {};
+
+      await expect(migration).resolves.toMatchObject({ changed: true });
+      await expect(readChannelMemory(target)).resolves.toBe(
+        'Use staging\nOld worker append\nRun tests\n',
+      );
+      expect(fs.existsSync(legacyPath)).toBe(false);
+    } finally {
+      await releaseOldWorker();
+    }
+  });
+
+  it('does not delete legacy bytes changed after canonical commit', async () => {
+    const legacyPath = writeLegacy('Use staging\n');
+    fsFailure.legacyAppendAfterRename = {
+      path: legacyPath,
+      text: 'Late append\n',
+    };
+
+    await expect(
+      addChannelMemoryEntries(target, ['Run tests']),
+    ).resolves.toMatchObject({ changed: true });
+
+    expect(fs.readFileSync(legacyPath, 'utf8')).toBe(
+      'Use staging\nLate append\n',
+    );
+    expect(fs.existsSync(getChannelMemoryFilePath(target))).toBe(true);
   });
 
   it('skips normalized duplicate additions and returns their existing IDs', async () => {
@@ -507,6 +589,81 @@ describe('channel memory', () => {
     await expect(listChannelMemoryEntries(target)).rejects.toThrow(
       'Unsupported channel memory version',
     );
+  });
+
+  it('rejects unknown JSON keys without modifying either source', async () => {
+    const legacyPath = writeLegacy('Use staging\n');
+    const legacyBefore = fs.readFileSync(legacyPath);
+    const filePath = writeJson(
+      JSON.stringify({
+        version: 1,
+        migration: {
+          legacySha256: createHash('sha256').update(legacyBefore).digest('hex'),
+        },
+        entries: [{ id: 'm-111111111111', text: 'Use staging' }],
+        futureMetadata: 'preserve me',
+      }),
+    );
+    const canonicalBefore = fs.readFileSync(filePath);
+
+    const readResult = await readChannelMemory(target).then(
+      () => 'fulfilled',
+      () => 'rejected',
+    );
+    const mutationResult = await addChannelMemoryEntries(target, [
+      'Run tests',
+    ]).then(
+      () => 'fulfilled',
+      () => 'rejected',
+    );
+
+    expect(readResult).toBe('rejected');
+    expect(mutationResult).toBe('rejected');
+    expect(fs.readFileSync(filePath)).toEqual(canonicalBefore);
+    expect(fs.readFileSync(legacyPath)).toEqual(legacyBefore);
+  });
+
+  it('rejects invalid UTF-8 JSON without modifying either source', async () => {
+    const legacyPath = writeLegacy('Use staging\n');
+    const legacyBefore = fs.readFileSync(legacyPath);
+    const migrationHash = createHash('sha256')
+      .update(legacyBefore)
+      .digest('hex');
+    const filePath = getChannelMemoryFilePath(target);
+    fs.writeFileSync(
+      filePath,
+      Buffer.concat([
+        Buffer.from(
+          `{"version":1,"migration":{"legacySha256":"${migrationHash}"},"entries":[{"id":"m-111111111111","text":"`,
+        ),
+        Buffer.from([0xff]),
+        Buffer.from('"}]}'),
+      ]),
+    );
+    const canonicalBefore = fs.readFileSync(filePath);
+
+    await expect(readChannelMemory(target)).rejects.toThrow();
+    await expect(
+      addChannelMemoryEntries(target, ['Run tests']),
+    ).rejects.toThrow();
+
+    expect(fs.readFileSync(filePath)).toEqual(canonicalBefore);
+    expect(fs.readFileSync(legacyPath)).toEqual(legacyBefore);
+  });
+
+  it('rejects invalid UTF-8 legacy bytes without migrating or modifying them', async () => {
+    const legacyPath = getLegacyChannelMemoryFilePath(target);
+    fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
+    fs.writeFileSync(legacyPath, Buffer.from([0xff]));
+    const legacyBefore = fs.readFileSync(legacyPath);
+
+    await expect(readChannelMemory(target)).rejects.toThrow();
+    await expect(
+      addChannelMemoryEntries(target, ['Run tests']),
+    ).rejects.toThrow();
+
+    expect(fs.readFileSync(legacyPath)).toEqual(legacyBefore);
+    expect(fs.existsSync(getChannelMemoryFilePath(target))).toBe(false);
   });
 
   it('rejects non-missing read errors without modifying either source', async () => {
