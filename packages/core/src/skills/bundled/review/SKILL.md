@@ -866,13 +866,23 @@ Two failure modes this closes, both observed in this repo's own dogfood: reporti
 
 ### Verdict
 
-Based on **high-confidence findings only** (low-confidence findings do not influence the verdict — they are terminal-only and "Needs Human Review"):
+**You do not decide the verdict, and you do not write it. Ask for it:**
 
-**A review with any uncoverable chunk cannot Approve** — some of the diff was never read. Use Comment and name the chunks.
+```bash
+qwen review compose-review --input .qwen/tmp/qwen-review-{target}-compose.json \
+  --out .qwen/tmp/qwen-review-{target}-composed.json
+```
 
-- **Approve** — No high-confidence critical issues, good to merge
-- **Request changes** — Has high-confidence critical issues that need fixing
-- **Comment** — Has suggestions but no blockers
+It prints a `Verdict:` line to stderr. **That line is the verdict — print it, and nothing else.** It writes nothing, posts nothing, and needs no authorisation, so run it on every high-effort review, whether or not you are going to post. The state file is the same one Step 7 uses (see there for every field): your findings and the states you established — the body Criticals, the discarded suggestions, the `cannot tell` blockers, the unreviewed dimensions, the `planPath`, the presubmit flags, the model id. It does **not** take the coverage or the inline counts. It derives coverage from the harness's transcripts, and Step 7 derives the inline counts from the comments you actually attach.
+
+The rules it applies — so you can read the line it gives you, not so you can apply them yourself:
+
+- Only **high-confidence** findings count. Low-confidence ones are terminal-only, under "Needs Human Review".
+- **Approve** — no high-confidence Critical, and no cap state.
+- **Request changes** — one or more high-confidence Criticals, anchored or in the body.
+- **Comment** — suggestions but no blockers, **or** an Approve that a cap took away: an uncoverable chunk, a chunk nobody read, a dimension nobody reviewed, an existing blocker you could not rule on, a PR whose discussion you could not read. A review that did not read part of the diff cannot certify it.
+
+**Why this is a command and not a paragraph.** It was a paragraph, and the paragraph was skipped. Dogfooded, a run read the coverage check's refusal, concluded that "the agents clearly did their job", never called `compose-review` at all, and printed **`Review complete — Approve`** — a verdict it had composed itself, from prose, on a review whose gate had just refused. There is now one place a verdict exists. Skipping the command does not get you a different one; it gets you none.
 
 Append a follow-up tip after the verdict (high effort only — a quick pass emits no verdict and uses Step 3C's tip instead; its "post comments" follow-up is declined per Step 3C). Choose based on remaining state:
 
@@ -1109,18 +1119,31 @@ qwen review submit \
 
 **If the call fails with HTTP 422**, the review is created all-or-nothing — nothing was posted, including the Critical findings. This should now be unreachable for anchor arithmetic: every `line` you posted came out of `resolve-anchors`, which only ever considers lines it collected from **inside a hunk** of the very diff you are reviewing. So before working the recovery below, check the likelier remaining causes: **the diff you resolved against is not the commit you are posting to** — re-run `gh pr view <n> --repo <owner>/<repo> --json headRefOid` (with `GH_HOST=<host>` for Enterprise; a bare `<n>` queries whatever same-numbered PR the current branch points at) and compare it to the `commit_id` in your review JSON (which is the `fetchedSha` Step 1 captured; `fetchedSha` is a field of the _fetch report_, not of the review JSON). If they differ, the head advanced mid-review and **this review is of a commit that is no longer the pull request.** Do not re-resolve the old findings against the new diff and submit those: re-resolving relocates the _anchors_, it does not review the new code, re-verify the old conclusions, re-check the open Criticals, or re-run presubmit. You would be approving lines nobody read, or filing a blocker the new commit already fixed. **Abandon this submission and start the review again at the new SHA** — say so in your output, and go back to Step 1's `fetch-pr`. Step 8 writes no cache for an abandoned run. The other cause is a `line` hand-edited after the resolver returned it. GitHub's error names the failing field (`pull_request_review_thread.line must be part of the diff`) but **does not tell you which entry is at fault**, so do not try to read the offender out of the error text.
 
-Recovery, if it is genuinely an anchor: recheck them against `files[].hunks[]` from the fetch report — a pure lookup, no API calls (in lightweight mode, against the `gh pr diff` output you already have): an entry is valid if its `line` appears **anywhere inside a diff hunk** for `path` — an added or modified line, or an unchanged context line rendered within the hunk (every comment is on the `RIGHT` side: a single-line one by default, a multi-line one because it says so explicitly). For a multi-line entry, **one hunk must contain the whole range**: `newStart <= start_line <= line <= newEnd` for the _same_ hunk. Checking the two ends independently passes a range whose endpoints sit in different hunks, and a reversed range (`start_line > line`) passes both checks and 422s anyway — a second rejection you paid a round trip to discover. Check that it carries `side` and `start_side` too, whose absence is itself a 422. What GitHub rejects is a line in **no hunk at all**, or a file the PR does not touch. Drop every entry that fails that test, then resubmit once: move each failing **Critical** into the `body` as a whole-PR observation, and discard each failing **Suggestion** (it stays in the terminal output and the Step 8 report — Suggestion text must not enter `body`, see above). **Recompute the event and body before you resubmit — by re-running `compose-review` with the updated counts** (each relocated Critical moves into `bodyCriticals`, each discarded Suggestion increments `suggestionsDiscarded`; everything else is unchanged). The subcommand owns the guarantees the recovery used to hand-derive: a discarded Suggestion still counts toward `S`, so the verdict never upgrades to `APPROVE` on the resubmit; a context-unavailable run keeps its diff-only wording; a relocated blocker keeps `REQUEST_CHANGES`. If the resubmit still 422s, re-run `compose-review` once more with `comments: []` in mind — every remaining Critical in `bodyCriticals`, every Suggestion counted in `suggestionsDiscarded` — and submit its output with `comments: []`: a review with the blockers in prose beats no review at all, and the subcommand's truth table already produces the correct non-empty `COMMENT` body when no Critical remains (`comments: []` plus an empty `body` is the one combination GitHub is documented to reject, and it would lose the review entirely). Never let a single mis-anchored Suggestion suppress a Critical blocker. Relocation can never change the verdict — compose-review's `C` counts body Criticals, so a review whose blockers now live in `body` still submits `REQUEST_CHANGES` with those blockers as the body text. Log which entries were relocated and which were discarded.
+Recovery, if it is genuinely an anchor: recheck them against `files[].hunks[]` from the fetch report — a pure lookup, no API calls (in lightweight mode, against the `gh pr diff` output you already have): an entry is valid if its `line` appears **anywhere inside a diff hunk** for `path` — an added or modified line, or an unchanged context line rendered within the hunk (every comment is on the `RIGHT` side: a single-line one by default, a multi-line one because it says so explicitly). For a multi-line entry, **one hunk must contain the whole range**: `newStart <= start_line <= line <= newEnd` for the _same_ hunk. Checking the two ends independently passes a range whose endpoints sit in different hunks, and a reversed range (`start_line > line`) passes both checks and 422s anyway — a second rejection you paid a round trip to discover. Check that it carries `side` and `start_side` too, whose absence is itself a 422. What GitHub rejects is a line in **no hunk at all**, or a file the PR does not touch. Drop every entry that fails that test, then resubmit once: move each failing **Critical** into the `body` as a whole-PR observation, and discard each failing **Suggestion** (it stays in the terminal output and the Step 8 report — Suggestion text must not enter `body`, see above). **You recompute nothing.** Update the payload and resubmit: each relocated Critical moves into `state.bodyCriticals`, each discarded Suggestion increments `state.suggestionsDiscarded`, and the failing entries come out of `comments`. `submit` recomposes the event and body from what you hand it, so the guarantees the recovery used to hand-derive are structural: a discarded Suggestion still counts toward `S`, so the verdict never upgrades to `APPROVE` on the resubmit; a context-unavailable run keeps its diff-only wording; a relocated blocker keeps `REQUEST_CHANGES` (body Criticals count toward `C` exactly like anchored ones). If the resubmit still 422s, submit once more with `"comments": []` — every remaining Critical in `state.bodyCriticals`, every Suggestion counted in `state.suggestionsDiscarded`: a review with the blockers in prose beats no review at all, and the truth table produces a non-empty `COMMENT` body when no Critical remains, so the one combination GitHub is documented to reject (no body, no comments) cannot be constructed. Never let a single mis-anchored Suggestion suppress a Critical blocker. Log which entries were relocated and which were discarded.
 
-If there are **no confirmed findings**, this branch is **not a shortcut around the invariant**: it is the same `compose-review` call as every other submission, just with zero counts. The cap states (`cannotTellCriticals`, `uncoverableChunks`, `unreviewedDimensions`, `contextUnavailable`) and the presubmit flags still go in, and the output is still used verbatim — the subcommand returns the `APPROVE`/LGTM shape **only when no cap state is present**; zero findings with a whiffed Security lens is not an approval. Build the submission JSON from its output (the `body` already contains the footer and its line breaks — write the JSON with `write_file`, never `-f body` flags, so nothing re-escapes them):
+If there are **no confirmed findings**, this branch is **not a shortcut around the invariant**: it is the same submission as every other, with an empty `comments` array. The cap states (`cannotTellCriticals`, `uncoverableChunks`, `unreviewedDimensions`, `contextUnavailable`) and the presubmit flags still go into `state` — `submit` returns the `APPROVE`/LGTM shape **only when no cap state is present**, and zero findings with a whiffed Security lens is not an approval. Write the same payload shape as any other run:
+
+**The review JSON carries no verdict, and `submit` refuses one that does.** Write it with `write_file`:
+
+```json
+{
+  "commit_id": "<the fetchedSha from Step 1>",
+  "comments": [{ "path": "...", "line": 42, "body": "**[Critical]** ..." }],
+  "state": {
+    /* exactly the compose-review state from Step 6 */
+  }
+}
+```
 
 ```bash
-qwen review compose-review --input .qwen/tmp/qwen-review-{target}-compose.json \
-  --out .qwen/tmp/qwen-review-{target}-composed.json
-# → {"event": "...", "body": "..."} — copy event/body verbatim into the review JSON, then:
 qwen review submit \
   --pr {pr_number} --repo {owner}/{repo} \
   --review .qwen/tmp/qwen-review-{target}-review.json
 ```
+
+`submit` **composes the event and body itself**, from that `state` and from the comments you attached — it is the same computation `compose-review` printed for you in Step 6, run again on the same input, so the posted verdict and the one you told the user are the same thing by construction rather than by transcription. There is no `event` field for you to write and no `body` field for you to build; a payload carrying either is refused.
+
+**And the inline counts are counted, not accepted.** `criticalsInline` and `suggestionsInline` are read off the `**[Critical]**` / `**[Suggestion]**` prefixes of the comments in the payload — a `state` that supplies them is refused. A number typed beside a list is a number that can disagree with the list, and one did: the breaching run posted a body reading "Suggestions are inline" beside an **empty** `comments` array and a summary claiming `0 Suggestion inline`.
 
 A zero-finding run is still a **write**, and it is still gated: an unauthorised `APPROVE` is exactly as public and exactly as unasked-for as an unauthorised `REQUEST_CHANGES`. `submit` refuses it on the same terms.
 

@@ -14,7 +14,9 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const ghMock = vi.hoisted(() => vi.fn(() => ''));
+const ghMock = vi.hoisted(() =>
+  vi.fn((_payload: string, ..._rest: string[]) => ''),
+);
 vi.mock('./lib/gh.js', () => ({
   ghWithInput: ghMock,
   gh: vi.fn(() => ''),
@@ -25,11 +27,19 @@ const { runSubmit } = await import('./submit.js');
 
 let dir: string;
 
+/**
+ * The payload as it is now: findings and states. No verdict.
+ *
+ * `event` and `body` used to be here, transcribed by the model out of
+ * `compose-review`'s output — a decision the CLI had already made, copied into a
+ * document the model writes. `submit` composes them itself now, so there is
+ * nothing to copy and nothing to forge. A payload that still carries them is
+ * refused, and the test for that is below.
+ */
 const REVIEW = {
   commit_id: 'abc123',
-  event: 'COMMENT',
-  body: 'Reviewed — no blockers.',
-  comments: [],
+  comments: [] as unknown[],
+  state: { suggestionsDiscarded: 1, modelId: 'qwen3.7-max' },
 };
 
 /** Write a file under the fixture dir and return its path. */
@@ -225,51 +235,93 @@ describe('payload consistency — refuse before GitHub sees it', () => {
   const authorized = (over: Record<string, unknown>) =>
     args({ userAuthorized: true, ...over });
 
-  it('rejects a body that promises inline comments it does not carry', () => {
-    // The same breaching run posted "Reviewed. Suggestions are inline." with an
-    // empty `comments` array, and closed by reporting `0 Suggestion inline`.
-    // Every count disagreed with every other, and GitHub accepted all of it —
-    // none of it is invalid to the API, so this is the only place it can be
-    // caught.
+  /** What was actually sent to GitHub. */
+  const posted = () => JSON.parse(ghMock.mock.calls[0][0] as string);
+
+  it("refuses a payload that carries a verdict — that is not the caller's to write", () => {
+    // The failure this replaces. Dogfooded, a run read the coverage check's
+    // refusal, decided "the agents clearly did their job", skipped
+    // `compose-review` altogether, and printed an Approve it had written itself.
+    // The event and body used to be fields in a JSON the model wrote, transcribed
+    // out of a decision the CLI had already made — so a run that skipped the
+    // computation could still submit its own conclusion. There is nothing to
+    // transcribe now, and a payload that still tries is refused rather than
+    // silently overruled.
     const review = file('bad-0.json', {
       ...REVIEW,
-      body: 'Reviewed. Suggestions are inline.',
-      comments: [],
+      event: 'APPROVE',
+      body: 'LGTM',
     });
 
     expect(() => runSubmit(authorized({ review }))).toThrow(
-      /body says findings are inline, but `comments` is empty/,
+      /carries `event`\/`body`.*computed here/s,
     );
     expect(ghMock).not.toHaveBeenCalled();
   });
 
-  it('rejects an escaped footer — the fingerprint of a shell-built body', () => {
-    // Verbatim from the breaching dogfood run.
-    const review = file('bad-1.json', {
-      ...REVIEW,
-      body: 'Reviewed.\\n\\n_— qwen3-coder-plus via Qwen Code /review_',
-    });
+  it('cannot promise inline comments it does not carry — the count IS the comments', () => {
+    // The breaching run posted "Reviewed. Suggestions are inline." beside an
+    // EMPTY `comments` array, and closed by reporting `0 Suggestion inline`. Every
+    // count disagreed with every other. It was caught, then, by a check on the
+    // body. It cannot happen now: the count is not a number handed over beside the
+    // comments, it is the comments.
+    runSubmit(authorized({}));
 
-    expect(() => runSubmit(authorized({ review }))).toThrow(/literal/);
-    expect(ghMock).not.toHaveBeenCalled();
+    expect(posted().body).not.toMatch(/\b(are|is) inline\b/i);
+    expect(posted().comments).toEqual([]);
   });
 
-  it('does not refuse a body whose finding text legitimately contains `\\n`', () => {
-    // An unmappable Critical's description is finding text, and finding text
-    // quotes code: `/\n/` in a regex, an escaped string in a snippet. A check
-    // that searched the whole body for the two characters would fire here — and
-    // a false positive does not warn, it REFUSES the post, losing a review that
-    // had a real blocker in it. The bug's signature is the escaped footer, not
-    // the character.
-    const review = file('good-1.json', {
+  it('counts the blockers it is actually carrying, not the ones it was told about', () => {
+    // A Critical attached inline is a Critical, whatever the state says. There is
+    // no `criticalsInline` field to under-report it with — and one supplied
+    // anyway is refused.
+    const review = file('c1.json', {
       ...REVIEW,
-      body:
-        '**[Critical]** the splitter uses `/\\n/` where the input is CRLF, so ' +
-        'every line keeps a trailing `\\r`.\n\n_— model via Qwen Code /review_',
+      comments: [
+        { path: 'a.ts', line: 12, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 3, body: '**[Suggestion]** tidy' },
+      ],
     });
 
     runSubmit(authorized({ review }));
-    expect(ghMock).toHaveBeenCalledOnce();
+    expect(posted().event).toBe('REQUEST_CHANGES');
+  });
+
+  it('refuses an inline count supplied beside the comments', () => {
+    const review = file('c2.json', {
+      ...REVIEW,
+      state: { ...REVIEW.state, criticalsInline: 0 },
+      comments: [{ path: 'a.ts', line: 12, body: '**[Critical]** boom' }],
+    });
+
+    expect(() => runSubmit(authorized({ review }))).toThrow(
+      /counted from the `comments` you attached/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('writes the body as JSON, so a finding that quotes `\\n` survives intact', () => {
+    // Finding text quotes code: `/\n/` in a regex, an escaped string in a snippet.
+    // The body used to be built by the caller — sometimes with `-f body=`, which
+    // posted the newlines as the two literal characters. It is built here now, in
+    // JS, and the finding's own text is carried through untouched.
+    const review = file('good-1.json', {
+      ...REVIEW,
+      state: {
+        ...REVIEW.state,
+        bodyCriticals: [
+          'the splitter uses `/\\n/` where the input is CRLF, so every line ' +
+            'keeps a trailing `\\r`',
+        ],
+      },
+    });
+
+    runSubmit(authorized({ review }));
+    expect(posted().event).toBe('REQUEST_CHANGES');
+    expect(posted().body).toContain('`/\\n/`');
+    // Real newlines, not the two characters.
+    expect(posted().body).toContain('\n');
+    expect(posted().body).not.toMatch(/\\n\s*_—/);
   });
 
   it('rejects a payload with no commit_id', () => {
@@ -278,9 +330,11 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(ghMock).not.toHaveBeenCalled();
   });
 
-  it('rejects a payload with no event', () => {
-    const review = file('bad-7.json', { ...REVIEW, event: undefined });
-    expect(() => runSubmit(authorized({ review }))).toThrow(/`event`/);
+  it('rejects a payload with no state — there is nothing to compose from', () => {
+    const review = file('bad-7.json', { ...REVIEW, state: undefined });
+    expect(() => runSubmit(authorized({ review }))).toThrow(
+      /`state` is missing/,
+    );
     expect(ghMock).not.toHaveBeenCalled();
   });
 
@@ -302,8 +356,6 @@ describe('payload consistency — refuse before GitHub sees it', () => {
   it('accepts a multi-line comment that carries both side fields', () => {
     const review = file('bad-3.json', {
       ...REVIEW,
-      body: '',
-      event: 'REQUEST_CHANGES',
       comments: [
         {
           path: 'a.ts',
@@ -330,27 +382,25 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(ghMock).not.toHaveBeenCalled();
   });
 
-  it('does not refuse a blocker that merely says the word "inline"', () => {
-    // A body IS finding text. An unmappable Critical reading "the inline cache
-    // is stale" is a real blocker, and a `/\binline\b/` search refused to post
-    // it. The check is for a body that *promises* comments it did not bring — so
-    // look for the promise, not for the word.
+  it('posts an unanchorable blocker as body text, and blocks on it', () => {
+    // A finding whose anchor could not be resolved has no line to hang on, and its
+    // only copy is the review body. It is still a blocker: `bodyCriticals` counts
+    // toward `C` exactly like an anchored one, so the verdict cannot drift to
+    // Comment just because the arithmetic failed.
     const review = file('good-2.json', {
       ...REVIEW,
-      body: '**[Critical]** the inline cache is stale after a rebase.',
+      state: {
+        ...REVIEW.state,
+        bodyCriticals: ['the inline cache is stale after a rebase'],
+      },
       comments: [],
     });
 
     runSubmit(authorized({ review }));
     expect(ghMock).toHaveBeenCalledOnce();
-  });
-
-  it('rejects an event GitHub does not accept', () => {
-    const review = file('bad-8.json', { ...REVIEW, event: 'LGTM' });
-    expect(() => runSubmit(authorized({ review }))).toThrow(
-      /GitHub accepts only/,
-    );
-    expect(ghMock).not.toHaveBeenCalled();
+    const sent = JSON.parse(ghMock.mock.calls[0][0] as string);
+    expect(sent.event).toBe('REQUEST_CHANGES');
+    expect(sent.body).toContain('the inline cache is stale after a rebase');
   });
 
   it('rejects a line that is not a positive whole number', () => {
@@ -394,18 +444,80 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(ghMock).not.toHaveBeenCalled();
   });
 
-  it('rejects the one combination GitHub itself rejects', () => {
-    // A COMMENT with neither a body nor comments loses the review entirely.
+  it('never produces the one combination GitHub itself rejects', () => {
+    // A COMMENT with neither a body nor comments loses the review entirely. It used
+    // to be a shape the caller could hand over, and this refused it. The caller
+    // cannot hand over a body at all now — so the guarantee moves from a refusal to
+    // a property: whatever the state, compose-review's COMMENT always carries text.
     const review = file('bad-5.json', {
       commit_id: 'abc123',
-      event: 'COMMENT',
-      body: '',
       comments: [],
+      state: { suggestionsDiscarded: 1, modelId: 'm' },
     });
 
-    expect(() => runSubmit(authorized({ review }))).toThrow(
-      /rejected by GitHub/,
-    );
+    runSubmit(authorized({ review }));
+    const sent = JSON.parse(ghMock.mock.calls[0][0] as string);
+    expect(sent.event).toBe('COMMENT');
+    expect(sent.body.length).toBeGreaterThan(0);
+  });
+});
+
+// The failure this whole change exists for.
+describe('the verdict is computed, not carried', () => {
+  const authorized = (over: Record<string, unknown> = {}) =>
+    args({ userAuthorized: true, ...over });
+  const posted = () => JSON.parse(ghMock.mock.calls[0][0] as string);
+
+  it('cannot be told to Approve a review whose diff was never read', () => {
+    // Dogfooded: a run read the coverage check's refusal, decided "the agents
+    // clearly did their job", skipped compose-review, and reported an Approve.
+    // Under the old shape it could then have posted one, because `event` was a
+    // field in a JSON it wrote. Now the caps are recomputed from the harness's
+    // transcripts on the way to the wire, and the Approve is simply not available.
+    const review = file('cap.json', {
+      commit_id: 'abc',
+      comments: [],
+      state: {
+        modelId: 'm',
+        unreviewedDimensions: ['security — the agent returned nothing twice'],
+      },
+    });
+
+    runSubmit(authorized({ review }));
+
+    expect(posted().event).toBe('COMMENT');
+    expect(posted().body).toContain('security');
+  });
+
+  it('cannot approve a submission that brought no plan — it can show it read nothing', () => {
+    // `planPath` is what coverage is recomputed from. Without it there is no
+    // evidence any of the diff was opened, and a review that cannot show what it
+    // read must not certify it. Fail-closed, at the wire.
+    //
+    // (The positive path — a clean state over a plan whose transcripts show the
+    // chunks were read — is pinned in compose-review.test.ts, which owns the
+    // transcript fixtures.)
+    const review = file('noplan.json', {
+      commit_id: 'abc',
+      comments: [],
+      state: { modelId: 'm' },
+    });
+
+    runSubmit(authorized({ review }));
+    expect(posted().event).toBe('COMMENT');
+    expect(posted().body).toMatch(/no plan was given/i);
+  });
+
+  it('does not let a hand-written Approve reach GitHub even once', () => {
+    const review = file('forged.json', {
+      commit_id: 'abc',
+      event: 'APPROVE',
+      body: 'LGTM — no blockers.',
+      comments: [],
+      state: { modelId: 'm', uncoverableChunks: ['chunk 5 (src/big.min.js)'] },
+    });
+
+    expect(() => runSubmit(authorized({ review }))).toThrow(/not inputs/);
     expect(ghMock).not.toHaveBeenCalled();
   });
 });

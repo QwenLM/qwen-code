@@ -24,12 +24,31 @@
 //
 // So the write lives here, behind that fact. A model that wants to post must ask
 // something that checks.
+//
+// **And the verdict is no longer an input.** For a while, `compose-review`
+// computed the event and the body and the skill then told the orchestrator to
+// "copy event/body verbatim into the review JSON" — a transcription, into a
+// document the model writes, of a decision the CLI had already made. That is the
+// exact shape this file's own comment repudiates two paragraphs up, and it is the
+// shape that has failed at every layer of this skill. Dogfooded, one run went
+// further and skipped `compose-review` altogether: it read the coverage check's
+// refusal, decided "the agents clearly did their job", and printed an **Approve it
+// had written itself**.
+//
+// So `submit` composes. What it takes is the *findings* — the inline comments and
+// the states Step 6 established — and it derives everything that follows from
+// them, including how many blockers there are, by counting the comments actually
+// attached rather than believing a number typed beside them. There is no `event`
+// field to forge and no `body` field to write, and a payload that carries one is
+// refused: the caller was trying to author a verdict, and the verdict is not the
+// caller's.
 
 import type { CommandModule } from 'yargs';
 import { readFileSync } from 'node:fs';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { ghWithInput, setGhHost } from './lib/gh.js';
 import { parseReviewArgs } from './parse-args.js';
+import { composeReview, type ComposeReviewInput } from './compose-review.js';
 import {
   skillArgsPath,
   currentSessionId,
@@ -75,19 +94,43 @@ interface SubmitArgs {
   dryRun: boolean;
 }
 
+interface ReviewComment {
+  path?: string;
+  line?: number;
+  start_line?: number;
+  side?: string;
+  start_side?: string;
+  body?: string;
+}
+
+/**
+ * What the caller brings: the findings, and the states Step 6 established.
+ *
+ * Not the verdict. `event` and `body` are computed here, from `state` and from the
+ * comments themselves — see the file header.
+ */
 interface ReviewPayload {
   commit_id?: string;
-  event?: string;
-  body?: string;
-  comments?: Array<{
-    path?: string;
-    line?: number;
-    start_line?: number;
-    side?: string;
-    start_side?: string;
-    body?: string;
-  }>;
+  comments?: ReviewComment[];
+  state?: ComposeReviewInput;
+  /** Refused if present. The caller was trying to author the verdict. */
+  event?: unknown;
+  body?: unknown;
 }
+
+/**
+ * The prefixes the skill mandates on every posted comment, and the autofix
+ * workflow keys off.
+ *
+ * They are what makes the inline counts *derivable*. A caller used to hand
+ * `criticalsInline` over as a number beside the comments — and a number beside a
+ * thing is a number that can disagree with it. The breaching dogfood run posted a
+ * body reading "Suggestions are inline" next to an empty `comments` array and a
+ * summary claiming `0 Suggestion inline`; every count in it disagreed with every
+ * other. Count the comments.
+ */
+const CRITICAL_PREFIX = '**[Critical]**';
+const SUGGESTION_PREFIX = '**[Suggestion]**';
 
 /**
  * Was this run authorised to write to the pull request?
@@ -211,56 +254,94 @@ function authorization(args: SubmitArgs): { ok: boolean; why: string } {
  * disagreed with every other. GitHub accepts all of it — none of it is invalid
  * to the API — so the only place it can be caught is here.
  */
-function inconsistencies(payload: ReviewPayload): string[] {
+/**
+ * The verdict, computed — from the states the caller established and the comments
+ * it actually attached.
+ *
+ * The two inline counts are **derived, not accepted**. They used to be numbers
+ * handed over beside the comments, and a number beside a thing is a number that can
+ * disagree with it.
+ */
+function compose(payload: ReviewPayload): {
+  event: string;
+  body: string;
+  cappedBy: string[];
+} {
+  const comments = payload.comments ?? [];
+  const state = payload.state ?? ({} as ComposeReviewInput);
+  const criticalsInline = comments.filter((c) =>
+    (c.body ?? '').trimStart().startsWith(CRITICAL_PREFIX),
+  ).length;
+  const suggestionsInline = comments.filter((c) =>
+    (c.body ?? '').trimStart().startsWith(SUGGESTION_PREFIX),
+  ).length;
+
+  // `env` decides where the harness transcripts are read from, and it must not
+  // come from a JSON the caller wrote: a run that wanted an approval could point
+  // it at a directory of transcripts it fabricated, and the coverage gate reopens
+  // through one extra key. compose-review's own CLI strips it for the same reason.
+  const { env: _dropped, ...rest } = state;
+  void _dropped;
+
+  const r = composeReview({
+    ...rest,
+    criticalsInline,
+    suggestionsInline,
+  });
+  return { event: r.event, body: r.body, cappedBy: r.cappedBy };
+}
+
+/** What the caller may not bring. Checked before the verdict is computed from it. */
+function structuralProblems(payload: ReviewPayload): string[] {
+  const problems: string[] = [];
+
+  if (!payload.commit_id) problems.push('`commit_id` is missing');
+
+  // The verdict is not the caller's to write. Refusing is deliberate: silently
+  // ignoring a hand-written `event` would let a run believe it had posted the
+  // verdict it typed, and go on saying so in the terminal.
+  if (payload.event !== undefined || payload.body !== undefined) {
+    problems.push(
+      'the payload carries `event`/`body`. Those are computed here, from ' +
+        '`state` and from the comments you attached — they are not inputs. ' +
+        'Remove them. (A run that skipped `compose-review` and typed its own ' +
+        'Approve is exactly what this refuses.)',
+    );
+  }
+  if (payload.state === undefined) {
+    problems.push(
+      '`state` is missing — the verdict is computed from it. It is the same ' +
+        'object `compose-review` takes: the body Criticals, the discarded ' +
+        'suggestions, the cannot-tell blockers, the unreviewed dimensions, the ' +
+        '`planPath`, the presubmit flags and the model id.',
+    );
+  }
+  if (
+    payload.state?.criticalsInline !== undefined ||
+    payload.state?.suggestionsInline !== undefined
+  ) {
+    problems.push(
+      '`state.criticalsInline` / `state.suggestionsInline` are counted from the ' +
+        '`comments` you attached, not taken from you. Remove them.',
+    );
+  }
+  return problems;
+}
+
+function inconsistencies(payload: ReviewPayload, event: string): string[] {
   const problems: string[] = [];
   const comments = payload.comments ?? [];
 
-  if (!payload.commit_id) problems.push('`commit_id` is missing');
-  if (!payload.event) problems.push('`event` is missing');
-  else if (!EVENTS.has(payload.event)) {
+  if (!EVENTS.has(event)) {
+    // Unreachable through `composeReview`, which returns one of the three. Kept
+    // because "unreachable" is a claim about today's code, and this is the last
+    // thing standing between a bad payload and a public write.
     problems.push(
-      `\`event\` is ${JSON.stringify(payload.event)}; GitHub accepts only ` +
+      `computed \`event\` is ${JSON.stringify(event)}; GitHub accepts only ` +
         `${[...EVENTS].join(', ')}`,
     );
   }
 
-  // The exact sentence `compose-review` writes when it puts findings inline —
-  // not the word "inline" anywhere in the body. A body IS finding text: an
-  // unmappable Critical reading "the inline cache is stale" is a real blocker,
-  // and a `/\binline\b/` search refuses to post it. The check exists to catch a
-  // body that *promises* comments it did not bring, so look for the promise.
-  const promisesInline = /\b(are|is) inline\b/i.test(payload.body ?? '');
-  if (promisesInline && comments.length === 0) {
-    problems.push(
-      'the body says findings are inline, but `comments` is empty — the ' +
-        'author would be told to look for comments that do not exist',
-    );
-  }
-  if (payload.event === 'COMMENT' && !payload.body && comments.length === 0) {
-    problems.push(
-      'a COMMENT event with no body and no comments is rejected by GitHub and ' +
-        'would lose the review entirely',
-    );
-  }
-  // The escaped footer, which is the fingerprint of a body built by shell string
-  // interpolation (`-f body=...`) instead of written as JSON: the newlines before
-  // `_— <model> via Qwen Code /review_` arrive as the two literal characters
-  // backslash-n and the footer lands mid-sentence. The breaching dogfood run
-  // posted exactly this.
-  //
-  // Deliberately not a bare search for `\n` anywhere in the body. A body may
-  // legitimately carry one — an unmappable Critical whose description quotes a
-  // regex (`/\n/`) or an escaped string is exactly the finding text this field
-  // exists to hold — and a false positive here does not warn, it **refuses the
-  // post**, which loses a review that had a real blocker in it. Match the bug's
-  // actual signature, not a character that resembles it.
-  if (/\\n\s*(\\n)?\s*_—/.test(payload.body ?? '')) {
-    problems.push(
-      'the footer is preceded by a literal `\\n` — the body was built with ' +
-        '`-f body=` (or another shell interpolation) instead of written as ' +
-        'JSON, so its newlines will be posted as text',
-    );
-  }
   // Everything below is a shape GitHub 422s — and a 422 is all-or-nothing, so
   // each of these discards every blocker in the review along with itself. The
   // API is the wrong place to find out.
@@ -366,13 +447,46 @@ export function runSubmit(args: SubmitArgs): void {
     return;
   }
 
-  const problems = inconsistencies(payload);
+  // What the caller may not bring, checked before anything is computed from it: a
+  // verdict of its own, or no state to compute one from. "Your state does not
+  // compose" is a poor way to say "you gave me no state".
+  const structural = structuralProblems(payload);
+  if (structural.length > 0) {
+    throw new Error(
+      `The review payload contradicts itself; refusing to post it:\n` +
+        structural.map((p) => `  - ${p}`).join('\n'),
+    );
+  }
+
+  // The verdict, computed here. It was never in the payload.
+  let event: string;
+  let body: string;
+  let cappedBy: string[];
+  try {
+    ({ event, body, cappedBy } = compose(payload));
+  } catch (err) {
+    throw new Error(
+      `The review state does not compose into a verdict; refusing to post:\n` +
+        `  - ${(err as Error).message}`,
+    );
+  }
+
+  const problems = inconsistencies(payload, event);
   if (problems.length > 0) {
     throw new Error(
       `The review payload contradicts itself; refusing to post it:\n` +
         problems.map((p) => `  - ${p}`).join('\n'),
     );
   }
+
+  // What GitHub actually receives: the caller's findings, under the verdict this
+  // command computed. `event` and `body` were never in the object the caller wrote.
+  const post = {
+    commit_id: payload.commit_id,
+    event,
+    body,
+    comments: payload.comments ?? [],
+  };
 
   const target = `repos/${args.repo}/pulls/${args.pr}/reviews`;
   if (args.dryRun) {
@@ -382,7 +496,7 @@ export function runSubmit(args: SubmitArgs): void {
     );
     writeStdoutLine(
       JSON.stringify(
-        { posted: false, wouldPost: true, target, event: payload.event },
+        { posted: false, wouldPost: true, target, event },
         null,
         2,
       ),
@@ -396,16 +510,19 @@ export function runSubmit(args: SubmitArgs): void {
   // GitHub would receive a payload that never passed the gate. `--input -` posts
   // exactly the object we parsed and checked. (Still `--input`, never `-f body=`,
   // so the body's newlines reach GitHub as newlines.)
-  ghWithInput(JSON.stringify(payload), 'api', target, '--input', '-');
+  ghWithInput(JSON.stringify(post), 'api', target, '--input', '-');
   writeStderrLine(
-    `Posted ${payload.event} to ${args.repo}#${args.pr} — ${auth.why}.`,
+    `Posted ${event} to ${args.repo}#${args.pr} — ${auth.why}` +
+      (cappedBy.length ? ` (capped by ${cappedBy.join(', ')})` : '') +
+      '.',
   );
   writeStdoutLine(
     JSON.stringify(
       {
         posted: true,
-        event: payload.event,
-        inlineComments: (payload.comments ?? []).length,
+        event,
+        cappedBy,
+        inlineComments: post.comments.length,
       },
       null,
       2,

@@ -25,6 +25,7 @@ import {
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
+  writeStderrLine: vi.fn(),
 }));
 
 const MODEL = 'test-model';

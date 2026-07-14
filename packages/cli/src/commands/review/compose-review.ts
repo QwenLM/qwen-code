@@ -22,7 +22,7 @@
 import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   coverageFromTranscripts,
   TranscriptsUnavailableError,
@@ -533,5 +533,41 @@ export const composeReviewCommand: CommandModule = {
       writeFileSync(out, json, 'utf8');
     }
     writeStdoutLine(json);
+    // The verdict a human reads, next to the JSON a program reads.
+    //
+    // Step 6 prints a verdict to the terminal, and until now it *composed* one —
+    // from the same prose rules this file exists to replace. So a run could skip
+    // this command entirely and tell the user whatever it had concluded: dogfooded,
+    // one did, and reported an Approve on a review whose coverage check had refused.
+    // There is now nothing to compose. This is the sentence; print it.
+    writeStderrLine(verdictLine(result));
   },
 };
+
+/** The terminal verdict, in the words Step 6 is told to print. */
+export function verdictLine(r: ComposeReviewResult): string {
+  const label: Record<ReviewEvent, string> = {
+    APPROVE: 'Approve',
+    REQUEST_CHANGES: 'Request changes',
+    COMMENT: 'Comment',
+  };
+  const why: Record<string, string> = {
+    'cannot-tell-existing-critical':
+      'an existing blocker could not be ruled on',
+    'chunk-nobody-read': 'part of the diff was never read',
+    'uncoverable-chunk': 'part of the diff cannot be read at all',
+    'unreviewed-dimension': 'a dimension nobody reviewed',
+    'context-unavailable': "the PR's existing discussion could not be read",
+  };
+  let line = `Verdict: ${label[r.event]}`;
+  // A cap only ever takes an Approve away. Naming one on a Request changes — which
+  // a confirmed blocker earned, and which no cap can soften — would report a
+  // constraint that did not bind, and the reader would go looking for its effect.
+  if (r.baseEvent === 'APPROVE' && r.event !== 'APPROVE') {
+    line +=
+      ` — an Approve was NOT available: ` +
+      r.cappedBy.map((c) => why[c] ?? c).join('; ');
+  }
+  if (r.downgraded) line += ' — downgraded by a presubmit check';
+  return line;
+}
