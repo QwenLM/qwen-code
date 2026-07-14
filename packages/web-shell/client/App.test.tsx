@@ -615,7 +615,32 @@ vi.doMock('./components/dialogs/ScheduledTasksDialog', async () => {
     },
   };
 });
-mockComponent('./components/dialogs/ExtensionsDialog', 'ExtensionsDialog');
+vi.doMock('./components/extensions/ExtensionsManagerPage', async () => {
+  const React = await import('react');
+  return {
+    ExtensionsManagerPage: (props: {
+      onClose: () => void;
+      initialFocusRef?: React.Ref<HTMLHeadingElement>;
+    }) =>
+      React.createElement(
+        'div',
+        { 'data-testid': 'extensions-manager-page' },
+        React.createElement(
+          'h1',
+          {
+            ref: props.initialFocusRef,
+            tabIndex: -1,
+            'data-testid': 'extensions-manager-heading',
+          },
+          'Manage extensions',
+        ),
+        React.createElement('button', {
+          'data-testid': 'extensions-manager-back',
+          onClick: props.onClose,
+        }),
+      ),
+  };
+});
 mockComponent('./components/dialogs/ThemeDialog', 'ThemeDialog');
 mockComponent(
   './components/dialogs/DeleteSessionDialog',
@@ -1652,6 +1677,53 @@ describe('App session callbacks', () => {
     });
 
     expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
+
+  it('does not open the extensions manager page with /extension manage', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/extension manage';
+    await clickSubmit(container);
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="extensions-manager-page"]'),
+    ).toBeNull();
+  });
+
+  it('opens the extensions manager page with /extensions manage', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/extensions manage';
+    await clickSubmit(container);
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="extensions-manager-page"]'),
+    ).not.toBeNull();
+    const backButton = container.querySelector(
+      '[data-testid="extensions-manager-back"]',
+    );
+    expect(document.activeElement).not.toBe(backButton);
+    expect(document.activeElement).toBe(
+      container.querySelector('[data-testid="extensions-manager-heading"]'),
+    );
+
+    editorFocus.mockClear();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="extensions-manager-back"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="extensions-manager-page"]'),
+    ).toBeNull();
+    expect(editorFocus).toHaveBeenCalled();
   });
 
   it('auto-closes an open panel when an AskUserQuestion approval becomes pending', async () => {
