@@ -15,6 +15,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runGenerateSettingsSchema } from '../generate-settings-schema.js';
@@ -43,6 +44,21 @@ afterEach(() => {
 });
 
 describe('runGenerateSettingsSchema', () => {
+  it('runs the real entry point with the default path and exit status', () => {
+    const script = path.resolve('scripts/generate-settings-schema.ts');
+    const current = spawnSync('npx', ['tsx', script, '--check'], {
+      encoding: 'utf8',
+    });
+    const invalid = spawnSync('npx', ['tsx', script, '--unknown'], {
+      encoding: 'utf8',
+    });
+
+    expect(current.status, current.stderr).toBe(0);
+    expect(current.stdout).toContain('Settings JSON Schema is current');
+    expect(invalid.status).toBe(1);
+    expect(invalid.stderr).toContain('Unknown argument: --unknown');
+  });
+
   it('returns success without rewriting a current schema', () => {
     const schemaPath = makeSchemaPath();
     expect(runGenerateSettingsSchema([], schemaPath)).toBe(0);

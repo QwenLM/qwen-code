@@ -15,7 +15,7 @@ import {
   rmSync,
 } from 'node:fs';
 import { createServer } from 'node:net';
-import { tmpdir } from 'node:os';
+import { constants as osConstants, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -23,29 +23,25 @@ import { classifyChangedFiles } from '../.github/scripts/ci/classify-profile.mjs
 
 const SETTINGS_SCHEMA_PATH =
   'packages/vscode-ide-companion/schemas/settings.schema.json';
-const TEST_AUTH_ENV_KEYS = [
-  'ANTHROPIC_API_KEY',
-  'ANTHROPIC_AUTH_TOKEN',
-  'BAILIAN_CODING_PLAN_API_KEY',
-  'BAILIAN_TOKEN_PLAN_API_KEY',
-  'DASHSCOPE_API_KEY',
-  'DEEPSEEK_API_KEY',
-  'GEMINI_API_KEY',
-  'GOOGLE_API_KEY',
-  'GOOGLE_APPLICATION_CREDENTIALS',
-  'IDEALAB_API_KEY',
-  'MINIMAX_API_KEY',
-  'MODELSCOPE_API_KEY',
-  'OPENAI_API_KEY',
-  'OPENCODE_GO_API_KEY',
-  'OPENROUTER_API_KEY',
-  'QWEN_API_KEY',
-  'QWEN_DAEMON_TOKEN',
-  'QWEN_DEFAULT_AUTH_TYPE',
-  'QWEN_SERVER_TOKEN',
-  'REQUESTY_API_KEY',
-  'ZAI_API_KEY',
-];
+const SUPPORTED_HOSTS = new Set(['darwin/arm64', 'darwin/x64', 'linux/x64']);
+const PASSTHROUGH_ENV_KEYS = new Set([
+  'ALL_PROXY',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'NODE_EXTRA_CA_CERTS',
+  'NO_PROXY',
+  'PATH',
+  'RUNNER_TEMP',
+  'SSL_CERT_DIR',
+  'SSL_CERT_FILE',
+  'TEMP',
+  'TMP',
+  'TMPDIR',
+  'all_proxy',
+  'http_proxy',
+  'https_proxy',
+  'no_proxy',
+]);
 
 export function parseArgs(argv) {
   const options = {
@@ -88,10 +84,51 @@ export function assertNode22(version) {
   }
 }
 
-function runGit(cwd, args) {
+export function assertSupportedHost(
+  platform = process.platform,
+  arch = process.arch,
+) {
+  if (!SUPPORTED_HOSTS.has(`${platform}/${arch}`)) {
+    throw new Error(
+      `npm run verify:pr supports macOS x64/ARM64 and Linux x64; found ${platform}/${arch}. Use GitHub CI for unsupported hosts.`,
+    );
+  }
+}
+
+function createBaseEnvironment(baseEnv) {
+  const env = {};
+  for (const [key, value] of Object.entries(baseEnv)) {
+    if (PASSTHROUGH_ENV_KEYS.has(key) && value !== undefined) env[key] = value;
+  }
+  return { ...env, LANG: 'C', LC_ALL: 'C', TZ: 'UTC' };
+}
+
+export function createGitEnvironment(baseEnv, { home, hooksPath } = {}) {
+  const env = createBaseEnvironment(baseEnv);
+  Object.assign(env, {
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+  });
+  if (home) {
+    env.HOME = home;
+    env.USERPROFILE = home;
+  }
+  if (hooksPath) {
+    Object.assign(env, {
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'core.hooksPath',
+      GIT_CONFIG_VALUE_0: hooksPath,
+    });
+  }
+  return env;
+}
+
+function runGit(cwd, args, baseEnv) {
   const result = spawnSync('git', args, {
     cwd,
     encoding: 'utf8',
+    env: createGitEnvironment(baseEnv),
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
@@ -102,42 +139,36 @@ function runGit(cwd, args) {
   return result.stdout;
 }
 
-export function inspectRepository({ base, cwd }) {
-  const status = runGit(cwd, [
-    'status',
-    '--porcelain=v1',
-    '-z',
-    '--untracked-files=all',
-  ]);
+export function inspectRepository({ base, cwd, env = process.env }) {
+  const status = runGit(
+    cwd,
+    ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
+    env,
+  );
   if (status) {
     throw new Error(
       'The caller working tree must have no staged, unstaged, or untracked changes.',
     );
   }
 
-  const head = runGit(cwd, ['rev-parse', 'HEAD']).trim();
+  const head = runGit(cwd, ['rev-parse', 'HEAD'], env).trim();
   let baseSha;
   try {
-    baseSha = runGit(cwd, [
-      'rev-parse',
-      '--verify',
-      '--end-of-options',
-      `${base}^{commit}`,
-    ]).trim();
+    baseSha = runGit(
+      cwd,
+      ['rev-parse', '--verify', '--end-of-options', `${base}^{commit}`],
+      env,
+    ).trim();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Unable to resolve base ref ${base}: ${message}`);
   }
-  const mergeBase = runGit(cwd, ['merge-base', baseSha, head]).trim();
-  const changedFiles = runGit(cwd, [
-    'diff',
-    '--name-only',
-    '--no-renames',
-    '-z',
-    mergeBase,
-    head,
-    '--',
-  ])
+  const mergeBase = runGit(cwd, ['merge-base', baseSha, head], env).trim();
+  const changedFiles = runGit(
+    cwd,
+    ['diff', '--name-only', '--no-renames', '-z', mergeBase, head, '--'],
+    env,
+  )
     .split('\0')
     .filter(Boolean);
 
@@ -159,6 +190,15 @@ export function selectProfile({
 function step(name, ...command) {
   return { command, name };
 }
+
+const GITHUB_HELPER_TEST = [
+  'Run GitHub CI helper tests',
+  'node',
+  '--test',
+  '.github/scripts/pr-safety-precheck.test.mjs',
+  '.github/scripts/ci/classify-profile.test.mjs',
+  '.github/scripts/resolve-sandbox-image.test.mjs',
+];
 
 function isRegularWorktreeFile(worktree, file) {
   let currentPath = worktree;
@@ -183,14 +223,7 @@ export function createValidationSteps({ prettierFiles = [], profile }) {
           ['Set up linters', 'node', 'scripts/lint.js', '--setup'],
           ['Run actionlint', 'node', 'scripts/lint.js', '--actionlint'],
           ['Run yamllint', 'node', 'scripts/lint.js', '--yamllint'],
-          [
-            'Run GitHub CI helper tests',
-            'node',
-            '--test',
-            '.github/scripts/pr-safety-precheck.test.mjs',
-            '.github/scripts/ci/classify-profile.test.mjs',
-            '.github/scripts/resolve-sandbox-image.test.mjs',
-          ],
+          GITHUB_HELPER_TEST,
         ]
       : [
           [
@@ -220,6 +253,7 @@ export function createValidationSteps({ prettierFiles = [], profile }) {
           ['Run actionlint', 'node', 'scripts/lint.js', '--actionlint'],
           ['Run shellcheck', 'node', 'scripts/lint.js', '--shellcheck'],
           ['Run yamllint', 'node', 'scripts/lint.js', '--yamllint'],
+          GITHUB_HELPER_TEST,
           ...(prettierFiles.length > 0
             ? [
                 [
@@ -244,18 +278,18 @@ export function createValidationSteps({ prettierFiles = [], profile }) {
             '--check',
           ],
           [
-            'Ensure settings schema is tracked',
+            'Ensure settings schema is committed',
             'git',
-            'ls-files',
-            '--error-unmatch',
-            '--',
-            SETTINGS_SCHEMA_PATH,
+            'cat-file',
+            '-e',
+            `HEAD:${SETTINGS_SCHEMA_PATH}`,
           ],
           [
             'Check committed settings schema',
             'git',
             'diff',
             '--exit-code',
+            'HEAD',
             '--',
             SETTINGS_SCHEMA_PATH,
           ],
@@ -294,6 +328,13 @@ export function createValidationSteps({ prettierFiles = [], profile }) {
             'test:integration:no-ak:sandbox:none',
           ],
           [
+            'Install Playwright Chromium',
+            'npx',
+            'playwright',
+            'install',
+            'chromium',
+          ],
+          [
             'Run web shell smoke tests',
             'npm',
             'run',
@@ -307,19 +348,11 @@ export function createValidationSteps({ prettierFiles = [], profile }) {
       ({ name }) => name === 'Install dependencies',
     ).installEnvironment = true;
     for (const name of [
-      'Run unit tests',
-      'Run script tests',
-      'Run no-AK integration tests',
+      'Install Playwright Chromium',
       'Run web shell smoke tests',
     ]) {
-      steps.find((candidate) => candidate.name === name).testEnvironment = true;
-    }
-    for (const name of [
-      'Run unit tests',
-      'Run script tests',
-      'Run no-AK integration tests',
-    ]) {
-      steps.find((candidate) => candidate.name === name).isolatedHome = true;
+      steps.find((candidate) => candidate.name === name).playwrightEnvironment =
+        true;
     }
     steps.find(({ name }) => name === 'Run web shell smoke tests').playwright =
       true;
@@ -414,11 +447,29 @@ export function createPythonSteps({ platform = process.platform, pythonRoot }) {
     );
   }
 
+  for (const pythonStep of steps) {
+    pythonStep.pythonEnvironment = true;
+  }
   return steps;
 }
 
 export function createStepEnvironment({ baseEnv, home, playwrightPort, step }) {
-  const env = { ...baseEnv };
+  const env = createBaseEnvironment(baseEnv);
+  Object.assign(env, {
+    CI: 'true',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+    HOME: home,
+    NPM_CONFIG_CACHE: join(home, '.npm'),
+    NPM_CONFIG_GLOBAL: 'false',
+    NPM_CONFIG_GLOBALCONFIG: '/dev/null',
+    NPM_CONFIG_PREFIX: join(home, '.npm-prefix'),
+    NPM_CONFIG_UPDATE_NOTIFIER: 'false',
+    NPM_CONFIG_USERCONFIG: join(home, '.npmrc'),
+    NO_COLOR: 'true',
+    USERPROFILE: home,
+  });
 
   if (step.installEnvironment) {
     Object.assign(env, {
@@ -427,24 +478,25 @@ export function createStepEnvironment({ baseEnv, home, playwrightPort, step }) {
       NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT: '120000',
       NPM_CONFIG_FETCH_RETRY_MINTIMEOUT: '20000',
       NPM_CONFIG_FETCH_TIMEOUT: '300000',
+      NPM_CONFIG_IGNORE_SCRIPTS: 'false',
     });
-    delete env.QWEN_SKIP_PREPARE;
   }
 
-  if (step.testEnvironment) {
+  if (step.pythonEnvironment) {
     Object.assign(env, {
-      CI: 'true',
-      NO_COLOR: 'true',
+      PIP_CONFIG_FILE: '/dev/null',
+      PIP_DISABLE_PIP_VERSION_CHECK: '1',
+      PIP_NO_INPUT: '1',
+      PIP_REQUIRE_VIRTUALENV: 'false',
+      PIP_USER: 'false',
+      PYTHONNOUSERSITE: '1',
+      PYTHONUTF8: '1',
+      UV_NO_CONFIG: '1',
     });
-    for (const key of TEST_AUTH_ENV_KEYS) delete env[key];
-    for (const key of Object.keys(env)) {
-      if (key.startsWith('QWEN_CUSTOM_API_KEY_')) delete env[key];
-    }
   }
 
-  if (step.isolatedHome) {
-    env.HOME = home;
-    env.USERPROFILE = home;
+  if (step.playwrightEnvironment) {
+    env.PLAYWRIGHT_BROWSERS_PATH = join(home, 'playwright');
   }
 
   if (step.playwright) env.PLAYWRIGHT_PORT = String(playwrightPort);
@@ -452,9 +504,13 @@ export function createStepEnvironment({ baseEnv, home, playwrightPort, step }) {
 }
 
 function quoteArgument(argument) {
-  return /^[A-Za-z0-9_./:=@%+,-]+$/.test(argument)
-    ? argument
-    : `'${argument.replaceAll("'", `'"'"'`)}'`;
+  const display = argument.replace(
+    /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu,
+    (character) => `\\u{${character.codePointAt(0).toString(16)}}`,
+  );
+  return /^[A-Za-z0-9_./:=@%+,-]+$/.test(display)
+    ? display
+    : `'${display.replaceAll("'", `'"'"'`)}'`;
 }
 
 function formatCommand(command) {
@@ -496,7 +552,10 @@ export function executeChild({ command, cwd, env }) {
 
     for (const signal of ['SIGINT', 'SIGTERM']) {
       const handler = () => {
-        if (forwardedSignal) return;
+        if (forwardedSignal) {
+          signalChild(child, 'SIGKILL');
+          return;
+        }
         forwardedSignal = signal;
         signalChild(child, signal);
       };
@@ -505,20 +564,30 @@ export function executeChild({ command, cwd, env }) {
     }
 
     child.once('error', (error) => {
-      finish({ error, signal: forwardedSignal, status: null });
+      finish({
+        error,
+        relaySignal: forwardedSignal,
+        signal: forwardedSignal,
+        status: null,
+      });
     });
     child.once('exit', (status, signal) => {
-      finish({ signal: forwardedSignal ?? signal, status });
+      finish({
+        relaySignal: forwardedSignal,
+        signal: forwardedSignal ?? signal,
+        status,
+      });
     });
   });
 }
 
 class ValidationFailure extends Error {
-  constructor({ command, detail, exitCode, signal, stage }) {
+  constructor({ command, detail, exitCode, relaySignal, signal, stage }) {
     super(`${stage}: ${detail}`);
     this.command = command;
     this.detail = detail;
     this.exitCode = exitCode;
+    this.relaySignal = relaySignal;
     this.signal = signal;
     this.stage = stage;
   }
@@ -526,7 +595,15 @@ class ValidationFailure extends Error {
 
 function commandFailure(stage, command, result) {
   if (!result.error && !result.signal && result.status === 0) return undefined;
-  const exitCode = typeof result.status === 'number' ? result.status : 1;
+  const signalNumber = result.signal
+    ? osConstants.signals[result.signal]
+    : undefined;
+  const exitCode =
+    typeof result.status === 'number'
+      ? result.status
+      : typeof signalNumber === 'number'
+        ? 128 + signalNumber
+        : 1;
   const detail = result.error
     ? `spawn error: ${result.error.message}`
     : result.signal
@@ -536,6 +613,7 @@ function commandFailure(stage, command, result) {
     command,
     detail,
     exitCode,
+    relaySignal: result.relaySignal,
     signal: result.signal ?? undefined,
     stage,
   });
@@ -554,10 +632,20 @@ export async function runSteps({
   for (const [index, currentStep] of steps.entries()) {
     log(`[${index + 1}/${steps.length}] ${currentStep.name}`);
     log(`Command: ${formatCommand(currentStep.command)}`);
-    const playwrightPort = currentStep.playwright
-      ? await allocatePort()
-      : undefined;
     const startedAt = now();
+    let playwrightPort;
+    if (currentStep.playwright) {
+      try {
+        playwrightPort = await allocatePort();
+      } catch (error) {
+        throw new ValidationFailure({
+          command: currentStep.command,
+          detail: `unable to allocate Playwright port: ${error instanceof Error ? error.message : String(error)}`,
+          exitCode: 1,
+          stage: currentStep.name,
+        });
+      }
+    }
     const result = await execute({
       command: currentStep.command,
       cwd,
@@ -584,13 +672,15 @@ export async function runSteps({
   }
 }
 
-function runWorktreeGit({ args, cwd }) {
-  return spawnSync('git', args, { cwd, stdio: 'inherit' });
+function runWorktreeGit({ args, cwd, env }) {
+  return spawnSync('git', args, { cwd, env, stdio: 'inherit' });
 }
 
 export async function withTemporaryWorktree({
+  baseEnv = process.env,
   cwd,
   gitCommand = runWorktreeGit,
+  head,
   makeContainer = () =>
     mkdtempSync(
       join(
@@ -603,28 +693,50 @@ export async function withTemporaryWorktree({
   reportCleanup = console.error,
   validate,
 }) {
-  const container = realpathSync(makeContainer());
-  const paths = {
-    container,
-    home: join(container, 'home'),
-    pythonRoot: join(container, 'python'),
-    temp: join(container, 'tmp'),
-    worktree: join(container, 'worktree'),
-  };
-  mkdirSync(paths.home, { recursive: true });
-  mkdirSync(paths.pythonRoot, { recursive: true });
-  mkdirSync(paths.temp, { recursive: true });
+  if (!head) throw new Error('Temporary worktree requires an inspected HEAD.');
+  const createdContainer = makeContainer();
+  let container = createdContainer;
+  let gitBaseEnv;
+  let paths;
   let added = false;
-  let cleanupFailure;
+  const cleanupFailures = [];
   let primaryError;
   let validationResult;
 
   try {
-    const addCommand = ['worktree', 'add', '--detach', paths.worktree, 'HEAD'];
+    container = realpathSync(createdContainer);
+    paths = {
+      container,
+      home: join(container, 'home'),
+      hooks: join(container, 'hooks'),
+      pythonRoot: join(container, 'python'),
+      temp: join(container, 'tmp'),
+      worktree: join(container, 'worktree'),
+    };
+    for (const directory of [
+      paths.home,
+      paths.hooks,
+      paths.pythonRoot,
+      paths.temp,
+    ]) {
+      mkdirSync(directory, { recursive: true });
+    }
+    gitBaseEnv = {
+      ...baseEnv,
+      RUNNER_TEMP: container,
+      TEMP: paths.temp,
+      TMP: paths.temp,
+      TMPDIR: paths.temp,
+    };
+    const gitEnv = createGitEnvironment(gitBaseEnv, {
+      home: paths.home,
+      hooksPath: paths.hooks,
+    });
+    const addCommand = ['worktree', 'add', '--detach', paths.worktree, head];
     const addFailure = commandFailure(
       'Create temporary worktree',
       ['git', ...addCommand],
-      gitCommand({ args: addCommand, cwd }),
+      gitCommand({ args: addCommand, cwd, env: gitEnv }),
     );
     if (addFailure) throw addFailure;
     added = true;
@@ -632,32 +744,53 @@ export async function withTemporaryWorktree({
   } catch (error) {
     primaryError = error;
   } finally {
-    if (added) {
-      const removeCommand = ['worktree', 'remove', '--force', paths.worktree];
-      cleanupFailure = commandFailure(
+    if (added && paths) {
+      const removeCommand = [
+        'worktree',
+        'remove',
+        '--force',
+        '--force',
+        paths.worktree,
+      ];
+      const cleanupFailure = commandFailure(
         'Clean up temporary worktree',
         ['git', ...removeCommand],
-        gitCommand({ args: removeCommand, cwd }),
+        gitCommand({
+          args: removeCommand,
+          cwd,
+          env: createGitEnvironment(gitBaseEnv, {
+            home: paths.home,
+            hooksPath: paths.hooks,
+          }),
+        }),
       );
+      if (cleanupFailure) cleanupFailures.push(cleanupFailure);
     }
     try {
       removeContainer(container);
     } catch (error) {
-      cleanupFailure ??= new ValidationFailure({
-        command: ['remove temporary container', container],
-        detail: error instanceof Error ? error.message : String(error),
-        exitCode: 1,
-        stage: 'Clean up temporary container',
-      });
+      cleanupFailures.push(
+        new ValidationFailure({
+          detail: error instanceof Error ? error.message : String(error),
+          exitCode: 1,
+          stage: 'Clean up temporary container',
+        }),
+      );
     }
   }
 
   if (primaryError) {
-    if (cleanupFailure)
-      reportCleanup(`Cleanup also failed: ${cleanupFailure.message}`);
+    for (const failure of cleanupFailures) {
+      reportCleanup(`Cleanup also failed: ${failure.message}`);
+    }
     throw primaryError;
   }
-  if (cleanupFailure) throw cleanupFailure;
+  if (cleanupFailures.length > 0) {
+    for (const failure of cleanupFailures.slice(1)) {
+      reportCleanup(`Cleanup also failed: ${failure.message}`);
+    }
+    throw cleanupFailures[0];
+  }
   return validationResult;
 }
 
@@ -681,19 +814,22 @@ export async function verifyPullRequest(
   { base, cwd, requestedProfile },
   {
     allocatePort = allocateFreePort,
+    arch = process.arch,
     baseEnv = process.env,
     error = console.error,
     inspect = inspectRepository,
     log = console.log,
     nodeVersion = process.versions.node,
     now = Date.now,
+    platform = process.platform,
     runValidationSteps = runSteps,
     temporaryWorktree = withTemporaryWorktree,
   } = {},
 ) {
   const startedAt = now();
   assertNode22(nodeVersion);
-  const repository = inspect({ base, cwd });
+  assertSupportedHost(platform, arch);
+  const repository = inspect({ base, cwd, env: baseEnv });
   const profile = selectProfile({
     changedFiles: repository.changedFiles,
     requestedProfile,
@@ -712,7 +848,9 @@ export async function verifyPullRequest(
 
   try {
     await temporaryWorktree({
+      baseEnv,
       cwd,
+      head: repository.head,
       reportCleanup: error,
       validate: async ({ container, home, pythonRoot, temp, worktree }) => {
         const prettierFiles =
@@ -808,12 +946,10 @@ export async function runCli(
     error(`Profile: ${context.profile ?? options.profile}`);
     error(`Error: ${context.detail ?? context.message ?? String(failure)}`);
     error(
-      Array.isArray(context.command)
-        ? `Rerun failed step: ${command}`
-        : `Rerun: npm run verify:pr -- --base ${quoteArgument(options.base)} --profile ${options.profile}`,
+      `Rerun: npm run verify:pr -- --base ${quoteArgument(options.base)} --profile ${options.profile}`,
     );
-    if (typeof context.signal === 'string') {
-      relaySignal(context.signal);
+    if (typeof context.relaySignal === 'string') {
+      relaySignal(context.relaySignal);
       return 1;
     }
     return Number.isInteger(context.exitCode) && context.exitCode > 0

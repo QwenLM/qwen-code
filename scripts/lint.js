@@ -87,7 +87,7 @@ const platformArch = getPlatformArch();
  */
 const LINTERS = {
   actionlint: {
-    check: 'command -v actionlint',
+    check: `test "$(actionlint -version 2>/dev/null)" = "${ACTIONLINT_VERSION}"`,
     installer: `
       mkdir -p "${TEMP_DIR}/actionlint"
       curl -sSLo "${TEMP_DIR}/.actionlint.tgz" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_${platformArch.actionlint}.tar.gz"
@@ -106,7 +106,7 @@ const LINTERS = {
     `,
   },
   shellcheck: {
-    check: 'command -v shellcheck',
+    check: `test "$(shellcheck --version 2>/dev/null | awk '/^version:/ { print $2 }')" = "${SHELLCHECK_VERSION}"`,
     installer: `
       mkdir -p "${TEMP_DIR}/shellcheck"
       curl -sSLo "${TEMP_DIR}/.shellcheck.txz" "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.${platformArch.shellcheck}.tar.xz"
@@ -125,7 +125,7 @@ const LINTERS = {
     `,
   },
   yamllint: {
-    check: 'command -v yamllint',
+    check: `test "$(yamllint --version 2>/dev/null)" = "yamllint ${YAMLLINT_VERSION}"`,
     installer: `python3 -m pip install --target "${TEMP_DIR}/yamllint" "yamllint==${YAMLLINT_VERSION}"`,
     run: "git ls-files | grep -E '\\.(yaml|yml)' | xargs yamllint --format github",
   },
@@ -139,6 +139,9 @@ export function createLinterEnvironment({
   const yamllintTarget = join(tempDir, 'yamllint');
   return {
     ...env,
+    PIP_CONFIG_FILE: '/dev/null',
+    PIP_REQUIRE_VIRTUALENV: 'false',
+    PIP_USER: 'false',
     PATH: [
       join(cwd, 'node_modules', '.bin'),
       join(tempDir, 'actionlint'),
@@ -151,6 +154,7 @@ export function createLinterEnvironment({
     PYTHONPATH: [yamllintTarget, env.PYTHONPATH]
       .filter(Boolean)
       .join(delimiter),
+    PYTHONNOUSERSITE: '1',
   };
 }
 

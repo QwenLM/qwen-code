@@ -6,6 +6,7 @@
 
 import {
   existsSync,
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -21,6 +22,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   assertNode22,
+  assertSupportedHost,
+  createGitEnvironment,
   createPythonSteps,
   createStepEnvironment,
   createValidationSteps,
@@ -43,26 +46,36 @@ afterEach(() => {
   }
 });
 
-function git(cwd, args) {
-  const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
+function git(cwd, args, baseEnv = process.env) {
+  const result = spawnSync('git', ['-c', 'commit.gpgSign=false', ...args], {
+    cwd,
+    encoding: 'utf8',
+    env: createGitEnvironment(baseEnv, {
+      home: cwd,
+      hooksPath: '/dev/null',
+    }),
+  });
   if (result.status !== 0) {
     throw new Error(result.stderr || `git ${args.join(' ')} failed`);
   }
   return result.stdout.trim();
 }
 
-function createRepository() {
+function createRepository(baseEnv = process.env) {
   const cwd = mkdtempSync(path.join(tmpdir(), 'verify-pr-test-'));
   tempDirs.push(cwd);
-  git(cwd, ['init', '--quiet']);
-  git(cwd, ['config', 'user.email', 'verify-pr@example.com']);
-  git(cwd, ['config', 'user.name', 'Verify PR Test']);
+  const template = path.join(cwd, '.git-template');
+  mkdirSync(template);
+  git(cwd, ['init', '--quiet', `--template=${template}`], baseEnv);
+  rmSync(template, { recursive: true });
+  git(cwd, ['config', 'user.email', 'verify-pr@example.com'], baseEnv);
+  git(cwd, ['config', 'user.name', 'Verify PR Test'], baseEnv);
   writeFileSync(path.join(cwd, 'README.md'), 'initial\n');
-  git(cwd, ['add', 'README.md']);
-  git(cwd, ['commit', '--quiet', '-m', 'initial']);
+  git(cwd, ['add', 'README.md'], baseEnv);
+  git(cwd, ['commit', '--quiet', '-m', 'initial'], baseEnv);
   writeFileSync(path.join(cwd, 'source.js'), 'export {};\n');
-  git(cwd, ['add', 'source.js']);
-  git(cwd, ['commit', '--quiet', '-m', 'change']);
+  git(cwd, ['add', 'source.js'], baseEnv);
+  git(cwd, ['commit', '--quiet', '-m', 'change'], baseEnv);
   return cwd;
 }
 
@@ -83,14 +96,17 @@ async function captureValidation({ baseEnv, changedFiles, worktree }) {
       runValidationSteps: async (options) => {
         execution = options;
       },
-      temporaryWorktree: async ({ validate }) =>
-        validate({
+      temporaryWorktree: async ({ head, validate }) => {
+        expect(head).toBe('2'.repeat(40));
+        return validate({
           container: '/owned/container',
           home: '/owned/home',
+          hooks: '/owned/hooks',
           pythonRoot: '/owned/python',
           temp: '/owned/tmp',
           worktree,
-        }),
+        });
+      },
     },
   );
   return execution;
@@ -149,6 +165,21 @@ describe('verify-pr CLI', () => {
     expect(output.join('\n')).toMatch(/--base <ref>.*--profile <full\|auto>/s);
   });
 
+  it('runs the real entry point for help and invalid arguments', () => {
+    const script = path.resolve('scripts/verify-pr.js');
+    const help = spawnSync(process.execPath, [script, '--help'], {
+      encoding: 'utf8',
+    });
+    const invalid = spawnSync(process.execPath, [script, '--unknown'], {
+      encoding: 'utf8',
+    });
+
+    expect(help.status, help.stderr).toBe(0);
+    expect(help.stdout).toContain('npm run verify:pr');
+    expect(invalid.status).toBe(1);
+    expect(invalid.stderr).toMatch(/Unknown option.*Usage:/s);
+  });
+
   it('reports failure context and a single-step rerun hint', async () => {
     const errors = [];
     const exitCode = await runCli([], {
@@ -169,7 +200,7 @@ describe('verify-pr CLI', () => {
 
     expect(exitCode).toBe(7);
     expect(errors.join('\n')).toMatch(
-      /Stage: Run unit tests.*Command: npm run test:ci.*HEAD: a{40}.*Base: origin\/main.*Profile: full.*Rerun failed step: npm run test:ci/s,
+      /Stage: Run unit tests.*Command: npm run test:ci.*HEAD: a{40}.*Base: origin\/main.*Profile: full.*Rerun: npm run verify:pr -- --base origin\/main --profile full/s,
     );
   });
 
@@ -183,6 +214,7 @@ describe('verify-pr CLI', () => {
         throw Object.assign(new Error('terminated'), {
           command: ['npm', 'run', 'test:ci'],
           detail: 'terminated by signal SIGTERM',
+          relaySignal: 'SIGTERM',
           signal: 'SIGTERM',
           stage: 'Run unit tests',
         });
@@ -195,6 +227,29 @@ describe('verify-pr CLI', () => {
       /error:PR verification failed.*error:Error: terminated by signal SIGTERM/s,
     );
   });
+
+  it('uses a conventional exit code for a child-only signal', async () => {
+    let relayed = false;
+    const exitCode = await runCli([], {
+      error: () => {},
+      log: () => {},
+      relaySignal: () => {
+        relayed = true;
+      },
+      verify: async () => {
+        throw Object.assign(new Error('terminated'), {
+          command: ['node', 'child.js'],
+          detail: 'terminated by signal SIGPIPE',
+          exitCode: 141,
+          signal: 'SIGPIPE',
+          stage: 'Run child',
+        });
+      },
+    });
+
+    expect(exitCode).toBe(141);
+    expect(relayed).toBe(false);
+  });
 });
 
 describe('caller guards', () => {
@@ -202,6 +257,41 @@ describe('caller guards', () => {
     expect(() => assertNode22('22.17.0')).not.toThrow();
     expect(() => assertNode22('20.19.0')).toThrow(/Node 22/);
     expect(() => assertNode22('23.0.0')).toThrow(/Node 22/);
+  });
+
+  it('rejects hosts that the pinned linter toolchain does not support', () => {
+    expect(() => assertSupportedHost('darwin', 'arm64')).not.toThrow();
+    expect(() => assertSupportedHost('linux', 'x64')).not.toThrow();
+    expect(() => assertSupportedHost('win32', 'x64')).toThrow(
+      /supports macOS.*Linux x64.*GitHub CI/i,
+    );
+    expect(() => assertSupportedHost('linux', 'arm64')).toThrow(
+      /supports macOS.*Linux x64.*GitHub CI/i,
+    );
+  });
+
+  it('isolates fixture commits from global signing and hooks', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'verify-pr-git-config-'));
+    tempDirs.push(root);
+    const hooks = path.join(root, 'hooks');
+    const marker = path.join(root, 'hook-ran');
+    const config = path.join(root, 'gitconfig');
+    mkdirSync(hooks);
+    const hook = path.join(hooks, 'post-commit');
+    writeFileSync(hook, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\n`);
+    chmodSync(hook, 0o755);
+    writeFileSync(
+      config,
+      `[commit]\n\tgpgSign = true\n[core]\n\thooksPath = ${hooks}\n`,
+    );
+
+    const cwd = createRepository({
+      ...process.env,
+      GIT_CONFIG_GLOBAL: config,
+    });
+
+    expect(git(cwd, ['log', '--oneline'])).toContain('change');
+    expect(existsSync(marker)).toBe(false);
   });
 
   it('resolves the base and reports committed changed paths', () => {
@@ -215,6 +305,25 @@ describe('caller guards', () => {
       git(cwd, ['merge-base', 'HEAD^', 'HEAD']),
     );
     expect(repository.changedFiles).toEqual(['source.js']);
+  });
+
+  it('ignores Git routing variables when inspecting the caller', () => {
+    const caller = createRepository();
+    const other = createRepository();
+    writeFileSync(path.join(caller, 'source.js'), 'dirty\n');
+
+    expect(() =>
+      inspectRepository({
+        base: 'HEAD^',
+        cwd: caller,
+        env: {
+          ...process.env,
+          GIT_DIR: path.join(other, '.git'),
+          GIT_INDEX_FILE: path.join(other, '.git', 'index'),
+          GIT_WORK_TREE: other,
+        },
+      }),
+    ).toThrow(/working tree/);
   });
 
   it.each(['staged', 'unstaged', 'untracked'])(
@@ -320,28 +429,74 @@ describe('validation profiles', () => {
       createValidationSteps({
         prettierFiles: ['scripts/verify-pr.js'],
         profile: 'full',
-      }).map(({ command }) => command.join(' ')),
+      }).map(({ command }) => command),
     ).toEqual([
-      'npm ci --prefer-offline --no-audit --progress=false --ignore-scripts=false',
-      'npm run audit:runtime:critical',
-      'npm run check:lockfile',
-      'npm run check:desktop-isolation',
-      'node scripts/lint.js --setup',
-      'node scripts/lint.js --eslint',
-      'node scripts/lint.js --actionlint',
-      'node scripts/lint.js --shellcheck',
-      'node scripts/lint.js --yamllint',
-      'npx prettier --experimental-cli --check --ignore-unknown -- scripts/verify-pr.js',
-      'npm run check-i18n',
-      'npm run generate:settings-schema -- --check',
-      'git ls-files --error-unmatch -- packages/vscode-ide-companion/schemas/settings.schema.json',
-      'git diff --exit-code -- packages/vscode-ide-companion/schemas/settings.schema.json',
-      'npm run typecheck',
-      'npm run check:serve-fast-path-bundle',
-      'npx cross-env NODE_OPTIONS=--max-old-space-size=3072 npm run test:ci --workspaces --if-present -- --no-file-parallelism',
-      'npm run test:scripts -- --no-file-parallelism',
-      'npm run test:integration:no-ak:sandbox:none',
-      'npm run test:e2e:smoke --workspace=packages/web-shell',
+      [
+        'npm',
+        'ci',
+        '--prefer-offline',
+        '--no-audit',
+        '--progress=false',
+        '--ignore-scripts=false',
+      ],
+      ['npm', 'run', 'audit:runtime:critical'],
+      ['npm', 'run', 'check:lockfile'],
+      ['npm', 'run', 'check:desktop-isolation'],
+      ['node', 'scripts/lint.js', '--setup'],
+      ['node', 'scripts/lint.js', '--eslint'],
+      ['node', 'scripts/lint.js', '--actionlint'],
+      ['node', 'scripts/lint.js', '--shellcheck'],
+      ['node', 'scripts/lint.js', '--yamllint'],
+      [
+        'node',
+        '--test',
+        '.github/scripts/pr-safety-precheck.test.mjs',
+        '.github/scripts/ci/classify-profile.test.mjs',
+        '.github/scripts/resolve-sandbox-image.test.mjs',
+      ],
+      [
+        'npx',
+        'prettier',
+        '--experimental-cli',
+        '--check',
+        '--ignore-unknown',
+        '--',
+        'scripts/verify-pr.js',
+      ],
+      ['npm', 'run', 'check-i18n'],
+      ['npm', 'run', 'generate:settings-schema', '--', '--check'],
+      [
+        'git',
+        'cat-file',
+        '-e',
+        'HEAD:packages/vscode-ide-companion/schemas/settings.schema.json',
+      ],
+      [
+        'git',
+        'diff',
+        '--exit-code',
+        'HEAD',
+        '--',
+        'packages/vscode-ide-companion/schemas/settings.schema.json',
+      ],
+      ['npm', 'run', 'typecheck'],
+      ['npm', 'run', 'check:serve-fast-path-bundle'],
+      [
+        'npx',
+        'cross-env',
+        'NODE_OPTIONS=--max-old-space-size=3072',
+        'npm',
+        'run',
+        'test:ci',
+        '--workspaces',
+        '--if-present',
+        '--',
+        '--no-file-parallelism',
+      ],
+      ['npm', 'run', 'test:scripts', '--', '--no-file-parallelism'],
+      ['npm', 'run', 'test:integration:no-ak:sandbox:none'],
+      ['npx', 'playwright', 'install', 'chromium'],
+      ['npm', 'run', 'test:e2e:smoke', '--workspace=packages/web-shell'],
     ]);
   });
 
@@ -352,19 +507,9 @@ describe('validation profiles', () => {
     expect(
       steps.find(({ name }) => name === 'Install dependencies'),
     ).toMatchObject({ installEnvironment: true });
-    for (const name of [
-      'Run unit tests',
-      'Run script tests',
-      'Run no-AK integration tests',
-    ]) {
-      expect(steps.find((candidate) => candidate.name === name)).toMatchObject({
-        isolatedHome: true,
-        testEnvironment: true,
-      });
-    }
     expect(
       steps.find(({ name }) => name === 'Run web shell smoke tests'),
-    ).toMatchObject({ playwright: true, testEnvironment: true });
+    ).toMatchObject({ playwright: true, playwrightEnvironment: true });
   });
 
   it('adds Python checks only for SDK or workflow changes', () => {
@@ -387,95 +532,143 @@ describe('validation profiles', () => {
     const commands = createPythonSteps({
       platform: 'linux',
       pythonRoot,
-    }).map(({ command }) => command.join(' '));
-
-    expect(commands[0]).toBe('uv --version');
-    expect(commands).toHaveLength(22);
+    }).map(({ command }) => command);
+    const expected = [['uv', '--version']];
     for (const version of ['3.10', '3.11', '3.12']) {
       const venv = path.join(pythonRoot, version);
       const python = path.join(venv, 'bin', 'python');
-      expect(commands).toContain(`uv venv --python ${version} --seed ${venv}`);
-      expect(commands).toContain(`${python} -m pip install --upgrade pip`);
-      expect(commands).toContain(
-        `${python} -m pip install -e packages/sdk-python[dev]`,
-      );
-      expect(commands).toContain(
-        `${python} -m ruff check --config packages/sdk-python/pyproject.toml packages/sdk-python`,
-      );
-      expect(commands).toContain(
-        `${python} -m ruff format --check --config packages/sdk-python/pyproject.toml packages/sdk-python`,
-      );
-      expect(commands).toContain(
-        `${python} -m mypy --config-file packages/sdk-python/pyproject.toml packages/sdk-python/src`,
-      );
-      expect(commands).toContain(
-        `${python} -m pytest -c packages/sdk-python/pyproject.toml packages/sdk-python/tests -q`,
+      expected.push(
+        ['uv', 'venv', '--python', version, '--seed', venv],
+        [python, '-m', 'pip', 'install', '--upgrade', 'pip'],
+        [python, '-m', 'pip', 'install', '-e', 'packages/sdk-python[dev]'],
+        [
+          python,
+          '-m',
+          'ruff',
+          'check',
+          '--config',
+          'packages/sdk-python/pyproject.toml',
+          'packages/sdk-python',
+        ],
+        [
+          python,
+          '-m',
+          'ruff',
+          'format',
+          '--check',
+          '--config',
+          'packages/sdk-python/pyproject.toml',
+          'packages/sdk-python',
+        ],
+        [
+          python,
+          '-m',
+          'mypy',
+          '--config-file',
+          'packages/sdk-python/pyproject.toml',
+          'packages/sdk-python/src',
+        ],
+        [
+          python,
+          '-m',
+          'pytest',
+          '-c',
+          'packages/sdk-python/pyproject.toml',
+          'packages/sdk-python/tests',
+          '-q',
+        ],
       );
     }
+    expect(commands).toEqual(expected);
+    expect(
+      createPythonSteps({ platform: 'linux', pythonRoot }).every(
+        (pythonStep) => pythonStep.pythonEnvironment,
+      ),
+    ).toBe(true);
   });
 });
 
 describe('step execution', () => {
-  it('keeps caller HOME for Playwright while isolating other tests', () => {
-    const testSteps = createValidationSteps({ profile: 'full' }).filter(
-      ({ testEnvironment }) => testEnvironment,
-    );
-    const credentialKeys = [
-      'ANTHROPIC_API_KEY',
-      'ANTHROPIC_AUTH_TOKEN',
-      'BAILIAN_CODING_PLAN_API_KEY',
-      'BAILIAN_TOKEN_PLAN_API_KEY',
-      'DASHSCOPE_API_KEY',
-      'DEEPSEEK_API_KEY',
-      'GEMINI_API_KEY',
-      'GOOGLE_API_KEY',
-      'GOOGLE_APPLICATION_CREDENTIALS',
-      'IDEALAB_API_KEY',
-      'MINIMAX_API_KEY',
-      'MODELSCOPE_API_KEY',
-      'OPENAI_API_KEY',
-      'OPENCODE_GO_API_KEY',
-      'OPENROUTER_API_KEY',
-      'QWEN_API_KEY',
-      'QWEN_DAEMON_TOKEN',
-      'QWEN_DEFAULT_AUTH_TYPE',
-      'QWEN_SERVER_TOKEN',
-      'REQUESTY_API_KEY',
-      'ZAI_API_KEY',
+  it('uses a controlled environment and isolated HOME for every step', () => {
+    const steps = [
+      ...createValidationSteps({ profile: 'full' }),
+      ...createPythonSteps({ pythonRoot: '/owned/python' }),
     ];
     const baseEnv = {
-      ...Object.fromEntries(credentialKeys.map((key) => [key, 'secret'])),
       HOME: '/caller/home',
-      QWEN_CUSTOM_API_KEY_OPENAI_EXAMPLE: 'custom-secret',
-      SAFE: 'kept',
+      HTTPS_PROXY: 'http://proxy.example',
+      NPM_CONFIG_GLOBAL: 'true',
+      NODE_ENV: 'production',
+      OPENAI_API_KEY: 'secret',
+      PATH: '/usr/bin',
+      PIP_REQUIRE_VIRTUALENV: 'true',
+      PLAYWRIGHT_BROWSERS_PATH: '/caller/browsers',
+      PYTEST_ADDOPTS: '--collect-only',
+      QwEn_OaUtH: 'secret',
+      QWEN_HOME: '/caller/qwen',
+      SAFE: 'must-not-pass',
+      SHELL: '/caller/shell',
+      TZ: 'Pacific/Honolulu',
+      USER: 'caller',
       USERPROFILE: '/caller/profile',
+      XAI_API_KEY: 'secret',
     };
 
-    for (const step of testSteps) {
+    for (const currentStep of steps) {
       const env = createStepEnvironment({
         baseEnv,
-        home: '/tmp/verify-pr-home',
-        playwrightPort: step.playwright ? 43123 : undefined,
-        step,
+        home: '/owned/home',
+        playwrightPort: currentStep.playwright ? 43123 : undefined,
+        step: currentStep,
       });
       expect(env).toMatchObject({
         CI: 'true',
+        HOME: '/owned/home',
+        HTTPS_PROXY: 'http://proxy.example',
+        LANG: 'C',
+        LC_ALL: 'C',
+        NPM_CONFIG_GLOBAL: 'false',
+        NPM_CONFIG_GLOBALCONFIG: '/dev/null',
+        NPM_CONFIG_USERCONFIG: path.join('/owned/home', '.npmrc'),
         NO_COLOR: 'true',
-        SAFE: 'kept',
+        PATH: '/usr/bin',
+        TZ: 'UTC',
+        USERPROFILE: '/owned/home',
       });
-      expect(env.HOME).toBe(
-        step.playwright ? '/caller/home' : '/tmp/verify-pr-home',
-      );
-      expect(env.USERPROFILE).toBe(
-        step.playwright ? '/caller/profile' : '/tmp/verify-pr-home',
-      );
       for (const key of [
-        ...credentialKeys,
-        'QWEN_CUSTOM_API_KEY_OPENAI_EXAMPLE',
+        'NODE_ENV',
+        'OPENAI_API_KEY',
+        'PYTEST_ADDOPTS',
+        'QwEn_OaUtH',
+        'QWEN_HOME',
+        'SAFE',
+        'SHELL',
+        'USER',
+        'XAI_API_KEY',
       ]) {
         expect(env).not.toHaveProperty(key);
       }
-      expect(env.PLAYWRIGHT_PORT).toBe(step.playwright ? '43123' : undefined);
+      if (currentStep.playwrightEnvironment) {
+        expect(env.PLAYWRIGHT_BROWSERS_PATH).toBe(
+          path.join('/owned/home', 'playwright'),
+        );
+      } else {
+        expect(env).not.toHaveProperty('PLAYWRIGHT_BROWSERS_PATH');
+      }
+      if (currentStep.pythonEnvironment) {
+        expect(env).toMatchObject({
+          PIP_CONFIG_FILE: '/dev/null',
+          PIP_REQUIRE_VIRTUALENV: 'false',
+          PIP_USER: 'false',
+          PYTHONNOUSERSITE: '1',
+          UV_NO_CONFIG: '1',
+        });
+      } else {
+        expect(env).not.toHaveProperty('PIP_REQUIRE_VIRTUALENV');
+      }
+      expect(env.PLAYWRIGHT_PORT).toBe(
+        currentStep.playwright ? '43123' : undefined,
+      );
     }
   });
 
@@ -511,24 +704,31 @@ describe('step execution', () => {
       'spawn error',
       { error: new Error('command not found'), status: null },
       /spawn error: command not found/,
+      1,
     ],
-    ['signal', { signal: 'SIGTERM', status: null }, /signal SIGTERM/],
-  ])('reports a %s as a non-zero failure', async (_label, result, message) => {
-    await expect(
-      runSteps({
-        allocatePort: async () => 43123,
-        baseEnv: {},
-        cwd: '/temporary-worktree',
-        execute: () => result,
-        home: '/temporary-home',
-        log: () => {},
-        steps: createValidationSteps({ profile: 'github_ci_only' }).slice(0, 1),
-      }),
-    ).rejects.toMatchObject({
-      detail: expect.stringMatching(message),
-      exitCode: 1,
-    });
-  });
+    ['signal', { signal: 'SIGTERM', status: null }, /signal SIGTERM/, 143],
+  ])(
+    'reports a %s as a non-zero failure',
+    async (_label, result, message, exitCode) => {
+      await expect(
+        runSteps({
+          allocatePort: async () => 43123,
+          baseEnv: {},
+          cwd: '/temporary-worktree',
+          execute: () => result,
+          home: '/temporary-home',
+          log: () => {},
+          steps: createValidationSteps({ profile: 'github_ci_only' }).slice(
+            0,
+            1,
+          ),
+        }),
+      ).rejects.toMatchObject({
+        detail: expect.stringMatching(message),
+        exitCode,
+      });
+    },
+  );
 
   it('reports an actionable error when uv is unavailable', async () => {
     await expect(
@@ -558,7 +758,9 @@ describe('step execution', () => {
   it('allocates the Playwright port immediately before its step', async () => {
     const events = [];
     const steps = createValidationSteps({ profile: 'full' }).filter(
-      ({ testEnvironment }) => testEnvironment,
+      ({ name }) =>
+        name === 'Install Playwright Chromium' ||
+        name === 'Run web shell smoke tests',
     );
 
     await runSteps({
@@ -586,6 +788,66 @@ describe('step execution', () => {
     ]);
   });
 
+  it('attributes Playwright port allocation failures to the current step', async () => {
+    const step = createValidationSteps({ profile: 'full' }).find(
+      ({ playwright }) => playwright,
+    );
+
+    await expect(
+      runSteps({
+        allocatePort: async () => {
+          throw new Error('bind failed');
+        },
+        baseEnv: {},
+        cwd: '/temporary-worktree',
+        execute: () => {
+          throw new Error('must not execute');
+        },
+        home: '/temporary-home',
+        log: () => {},
+        steps: [step],
+      }),
+    ).rejects.toMatchObject({
+      command: step.command,
+      detail: expect.stringMatching(/Playwright port.*bind failed/),
+      stage: step.name,
+    });
+  });
+
+  it('escapes control characters only in command display', async () => {
+    const command = [
+      'npx',
+      'prettier',
+      'bad\u001b]52;c;payload\u0007\nname.js',
+    ];
+    const output = [];
+    let executed;
+
+    await runSteps({
+      allocatePort: async () => 43123,
+      baseEnv: {},
+      cwd: '/temporary-worktree',
+      execute: ({ command: childCommand }) => {
+        executed = childCommand;
+        return { status: 0 };
+      },
+      home: '/temporary-home',
+      log: (message) => output.push(message),
+      steps: [{ command, name: 'Display unsafe path' }],
+    });
+
+    expect(executed).toEqual(command);
+    const display = output.join(' ');
+    expect(
+      [...display].every((character) => {
+        const codePoint = character.codePointAt(0);
+        return !(codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f));
+      }),
+    ).toBe(true);
+    expect(display).toContain('\\u{1b}');
+    expect(display).toContain('\\u{a}');
+  });
+
   it('rejects a schema rewritten before the committed freshness check', async () => {
     const cwd = createRepository();
     const schemaPath = path.join(
@@ -600,9 +862,10 @@ describe('step execution', () => {
     git(cwd, ['add', schemaPath]);
     git(cwd, ['commit', '--quiet', '-m', 'add schema']);
     writeFileSync(schemaPath, 'schema rewritten by build\n');
+    git(cwd, ['add', schemaPath]);
     const steps = createValidationSteps({ profile: 'full' }).filter(
       ({ name }) =>
-        name === 'Ensure settings schema is tracked' ||
+        name === 'Ensure settings schema is committed' ||
         name === 'Check committed settings schema',
     );
 
@@ -633,7 +896,7 @@ describe('step execution', () => {
     mkdirSync(path.dirname(schemaPath), { recursive: true });
     writeFileSync(schemaPath, 'untracked generated schema\n');
     const steps = createValidationSteps({ profile: 'full' }).filter(
-      ({ name }) => name === 'Ensure settings schema is tracked',
+      ({ name }) => name === 'Ensure settings schema is committed',
     );
 
     await expect(
@@ -646,14 +909,16 @@ describe('step execution', () => {
         steps,
       }),
     ).rejects.toMatchObject({
-      exitCode: 1,
-      stage: 'Ensure settings schema is tracked',
+      exitCode: 128,
+      stage: 'Ensure settings schema is committed',
     });
   });
 
   it.skipIf(process.platform === 'win32')(
     'cleans an owned worktree before relaying a real termination signal',
     async () => {
+      const cwd = createRepository();
+      const head = git(cwd, ['rev-parse', 'HEAD']);
       const harnessRoot = mkdtempSync(path.join(tmpdir(), 'verify-pr-signal-'));
       tempDirs.push(harnessRoot);
       const marker = path.join(harnessRoot, 'cleanup.json');
@@ -668,6 +933,7 @@ describe('step execution', () => {
         try {
           await withTemporaryWorktree({
             cwd: process.cwd(),
+            head: ${JSON.stringify(head)},
             validate: async (paths) => {
               ownedPaths = paths;
               await runSteps({
@@ -681,7 +947,7 @@ describe('step execution', () => {
                     process.execPath,
                     '--input-type=module',
                     '--eval',
-                    'console.log("READY"); setInterval(() => {}, 1000);',
+                    'process.on("SIGTERM", () => {}); console.log("READY"); setInterval(() => {}, 1000);',
                   ],
                   name: 'Wait for signal',
                 }],
@@ -711,7 +977,7 @@ describe('step execution', () => {
         process.execPath,
         ['--input-type=module', '--eval', harnessScript],
         {
-          cwd: process.cwd(),
+          cwd,
           stdio: ['ignore', 'pipe', 'pipe'],
         },
       );
@@ -727,30 +993,39 @@ describe('step execution', () => {
       const completion = new Promise((resolve) => {
         harness.once('exit', (code, signal) => resolve({ code, signal }));
       });
-      await new Promise((resolve, reject) => {
-        const timeout = setTimeout(
-          () => reject(new Error(`Signal harness did not start:\n${output}`)),
-          10_000,
-        );
-        const checkReady = () => {
-          if (!output.includes('READY')) return;
-          clearTimeout(timeout);
-          harness.stdout.off('data', checkReady);
-          resolve();
-        };
-        harness.stdout.on('data', checkReady);
-        checkReady();
-      });
+      try {
+        await new Promise((resolve, reject) => {
+          const timeout = setTimeout(
+            () => reject(new Error(`Signal harness did not start:\n${output}`)),
+            10_000,
+          );
+          const checkReady = () => {
+            if (!output.includes('READY')) return;
+            clearTimeout(timeout);
+            harness.stdout.off('data', checkReady);
+            resolve();
+          };
+          harness.stdout.on('data', checkReady);
+          checkReady();
+        });
 
-      harness.kill('SIGTERM');
-      const result = await completion;
+        harness.kill('SIGTERM');
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        harness.kill('SIGTERM');
+        const result = await completion;
 
-      expect(result).toEqual({ code: null, signal: 'SIGTERM' });
-      expect(JSON.parse(readFileSync(marker, 'utf8'))).toEqual({
-        containerExists: false,
-        registered: false,
-        signal: 'SIGTERM',
-      });
+        expect(result).toEqual({ code: null, signal: 'SIGTERM' });
+        expect(JSON.parse(readFileSync(marker, 'utf8'))).toEqual({
+          containerExists: false,
+          registered: false,
+          signal: 'SIGTERM',
+        });
+      } finally {
+        if (harness.exitCode === null && harness.signalCode === null) {
+          harness.kill('SIGKILL');
+          await completion;
+        }
+      }
     },
     15_000,
   );
@@ -760,6 +1035,7 @@ describe('step execution', () => {
     const installEnv = createStepEnvironment({
       baseEnv: {
         HUSKY: 'caller-value',
+        NPM_CONFIG_GLOBAL: 'true',
         QWEN_SKIP_PREPARE: '1',
         npm_config_ignore_scripts: 'true',
       },
@@ -772,27 +1048,81 @@ describe('step execution', () => {
       NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT: '120000',
       NPM_CONFIG_FETCH_RETRY_MINTIMEOUT: '20000',
       NPM_CONFIG_FETCH_TIMEOUT: '300000',
-      npm_config_ignore_scripts: 'true',
+      NPM_CONFIG_GLOBAL: 'false',
+      NPM_CONFIG_IGNORE_SCRIPTS: 'false',
     });
-    expect(installEnv).not.toHaveProperty('QWEN_SKIP_PREPARE');
-    expect(
-      createStepEnvironment({
-        baseEnv: { HUSKY: 'caller-value', QWEN_SKIP_PREPARE: '1' },
-        home: '/temporary-home',
-        step: steps[1],
-      }),
-    ).not.toHaveProperty('NPM_CONFIG_FETCH_RETRIES');
-    expect(
-      createStepEnvironment({
-        baseEnv: { HUSKY: 'caller-value', QWEN_SKIP_PREPARE: '1' },
-        home: '/temporary-home',
-        step: steps[1],
-      }),
-    ).toMatchObject({ HUSKY: 'caller-value', QWEN_SKIP_PREPARE: '1' });
+    for (const key of ['QWEN_SKIP_PREPARE', 'npm_config_ignore_scripts']) {
+      expect(installEnv).not.toHaveProperty(key);
+    }
+    const laterEnv = createStepEnvironment({
+      baseEnv: { HUSKY: 'caller-value', QWEN_SKIP_PREPARE: '1' },
+      home: '/temporary-home',
+      step: steps[1],
+    });
+    expect(laterEnv).not.toHaveProperty('NPM_CONFIG_FETCH_RETRIES');
+    expect(laterEnv).not.toHaveProperty('HUSKY');
+    expect(laterEnv).not.toHaveProperty('QWEN_SKIP_PREPARE');
   });
 });
 
 describe('temporary worktree isolation', () => {
+  it('checks out the inspected SHA without running caller checkout hooks', async () => {
+    const cwd = createRepository();
+    const inspectedHead = git(cwd, ['rev-parse', 'HEAD']);
+    const root = mkdtempSync(path.join(tmpdir(), 'verify-pr-hooks-'));
+    tempDirs.push(root);
+    const hooks = path.join(root, 'hooks');
+    const marker = path.join(root, 'post-checkout-ran');
+    mkdirSync(hooks);
+    const hook = path.join(hooks, 'post-checkout');
+    writeFileSync(hook, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\n`);
+    chmodSync(hook, 0o755);
+    writeFileSync(path.join(cwd, 'source.js'), 'new head\n');
+    git(cwd, ['add', 'source.js']);
+    git(cwd, ['commit', '--quiet', '-m', 'move head']);
+
+    await withTemporaryWorktree({
+      baseEnv: {
+        ...process.env,
+        GIT_CONFIG_COUNT: '1',
+        GIT_CONFIG_KEY_0: 'core.hooksPath',
+        GIT_CONFIG_VALUE_0: hooks,
+      },
+      cwd,
+      head: inspectedHead,
+      validate: async (paths) => {
+        expect(
+          readFileSync(path.join(paths.worktree, 'source.js'), 'utf8'),
+        ).toBe('export {};\n');
+      },
+    });
+
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it('cleans the created container when canonicalization fails', async () => {
+    const cwd = createRepository();
+    const created = path.join(
+      tmpdir(),
+      `verify-pr-loop-${process.pid}-${Date.now()}`,
+    );
+    symlinkSync(created, created);
+    tempDirs.push(created);
+    const removed = [];
+
+    await expect(
+      withTemporaryWorktree({
+        cwd,
+        head: git(cwd, ['rev-parse', 'HEAD']),
+        makeContainer: () => created,
+        removeContainer: (container) => removed.push(container),
+        validate: async () => {},
+      }),
+    ).rejects.toThrow();
+
+    expect(removed).toEqual([created]);
+  });
+
   it('runs prepare during the first npm ci despite caller skip settings', async () => {
     const cwd = createRepository();
     writeFileSync(
@@ -815,10 +1145,20 @@ writeFileSync('prepare-marker.json', JSON.stringify({
 }));
 `,
     );
+    const npmHome = mkdtempSync(path.join(tmpdir(), 'verify-pr-npm-home-'));
+    tempDirs.push(npmHome);
     const lockResult = spawnSync(
       'npm',
       ['install', '--package-lock-only', '--ignore-scripts'],
-      { cwd, encoding: 'utf8' },
+      {
+        cwd,
+        encoding: 'utf8',
+        env: createStepEnvironment({
+          baseEnv: process.env,
+          home: npmHome,
+          step: { installEnvironment: true },
+        }),
+      },
     );
     expect(lockResult.status, lockResult.stderr).toBe(0);
     git(cwd, ['add', 'package.json', 'package-lock.json', 'prepare.mjs']);
@@ -828,6 +1168,7 @@ writeFileSync('prepare-marker.json', JSON.stringify({
 
     await withTemporaryWorktree({
       cwd,
+      head: git(cwd, ['rev-parse', 'HEAD']),
       validate: async (paths) => {
         ownedContainer = paths.container;
         await runSteps({
@@ -868,6 +1209,7 @@ writeFileSync('prepare-marker.json', JSON.stringify({
 
     await withTemporaryWorktree({
       cwd,
+      head: git(cwd, ['rev-parse', 'HEAD']),
       validate: async (paths) => {
         ownedPaths = paths;
         expect(paths.container).toBe(realpathSync(paths.container));
@@ -901,6 +1243,7 @@ writeFileSync('prepare-marker.json', JSON.stringify({
       try {
         await withTemporaryWorktree({
           cwd,
+          head: git(cwd, ['rev-parse', 'HEAD']),
           validate: async (paths) => {
             container = paths.container;
           },
@@ -921,10 +1264,11 @@ writeFileSync('prepare-marker.json', JSON.stringify({
     await expect(
       withTemporaryWorktree({
         cwd,
-        gitCommand: ({ args, cwd: gitCwd }) => {
+        head: git(cwd, ['rev-parse', 'HEAD']),
+        gitCommand: ({ args, cwd: gitCwd, env }) => {
           commands.push(args);
           if (args[1] === 'remove') return { status: 9 };
-          return spawnSync('git', args, { cwd: gitCwd });
+          return spawnSync('git', args, { cwd: gitCwd, env });
         },
         validate: async () => {},
       }),
@@ -932,11 +1276,13 @@ writeFileSync('prepare-marker.json', JSON.stringify({
       exitCode: 9,
       stage: 'Clean up temporary worktree',
     });
-    expect(commands.at(-1).slice(0, 3)).toEqual([
+    expect(commands.at(-1).slice(0, 4)).toEqual([
       'worktree',
       'remove',
       '--force',
+      '--force',
     ]);
+    git(cwd, ['worktree', 'prune']);
   });
 
   it('preserves validation status and reports a simultaneous cleanup failure', async () => {
@@ -945,15 +1291,24 @@ writeFileSync('prepare-marker.json', JSON.stringify({
       exitCode: 7,
     });
     const cleanupReports = [];
+    const ownedContainer = mkdtempSync(
+      path.join(tmpdir(), 'verify-pr-cleanup-'),
+    );
+    tempDirs.push(ownedContainer);
     let caught;
 
     try {
       await withTemporaryWorktree({
         cwd,
-        gitCommand: ({ args, cwd: gitCwd }) =>
+        head: git(cwd, ['rev-parse', 'HEAD']),
+        gitCommand: ({ args, cwd: gitCwd, env }) =>
           args[1] === 'remove'
             ? { status: 9 }
-            : spawnSync('git', args, { cwd: gitCwd }),
+            : spawnSync('git', args, { cwd: gitCwd, env }),
+        makeContainer: () => ownedContainer,
+        removeContainer: () => {
+          throw new Error('filesystem cleanup failed');
+        },
         reportCleanup: (message) => cleanupReports.push(message),
         validate: async () => {
           throw validationFailure;
@@ -966,7 +1321,9 @@ writeFileSync('prepare-marker.json', JSON.stringify({
     expect(caught).toBe(validationFailure);
     expect(cleanupReports).toEqual([
       expect.stringMatching(/Cleanup also failed.*status 9/),
+      expect.stringMatching(/Cleanup also failed.*filesystem cleanup failed/),
     ]);
+    git(cwd, ['worktree', 'prune']);
   });
 });
 

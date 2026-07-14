@@ -29,13 +29,14 @@ The default base is `origin/main`, and the default profile is `full`. Full is
 intentionally conservative. `--profile auto` is an opt-in optimization that
 reuses the CI changed-file classifier.
 
-Before validation starts, the command requires Node 22.x, a caller working
-tree with no staged, unstaged, or untracked files, a resolvable base commit and
-merge base, and at least one committed change between that merge base and
-`HEAD`.
+Before validation starts, the command requires Node 22.x on macOS x64/ARM64 or
+Linux x64. It also requires a caller working tree with no staged, unstaged, or
+untracked files, a resolvable base commit and merge base, and at least one
+committed change between that merge base and `HEAD`.
 
 For profiles that run commands, the gate creates an owned detached temporary
-worktree at the exact `HEAD`, runs validation there, and removes it afterward.
+worktree at the exact SHA captured during caller inspection, disables checkout
+hooks, runs validation there, and removes it afterward.
 Commands that install, build, or generate files therefore do not change the
 caller's tracked checkout. Developers do not need to create a separate worktree
 themselves. A docs-only auto profile finishes after the same caller guards
@@ -43,8 +44,8 @@ without creating the temporary worktree.
 
 On POSIX systems, the owned container is created below the canonical `/tmp`
 path. This avoids both macOS `/var` aliases and excessively long per-user
-temporary paths. Build outputs and verifier-owned temporary files stay inside
-the container; npm may still reuse the caller's cache, and Git temporarily
+temporary paths. Build outputs, dependency caches, browser binaries, homes, and
+verifier-owned temporary files stay inside the container. Git temporarily
 registers the detached worktree in repository metadata until cleanup.
 
 Installation forces lifecycle scripts to run so the build and bundle cannot
@@ -74,24 +75,21 @@ The full profile runs these categories in fail-fast order:
   workspace isolation;
 - ESLint, actionlint, shellcheck, yamllint, and a read-only Prettier check of
   regular files changed by the PR that still exist at `HEAD`;
+- the GitHub CI profile-classifier and safety-helper tests;
 - i18n validation, read-only settings-schema freshness plus a check that the
   build left the committed schema unchanged, type checking, and the serve
   fast-path bundle-closure check;
 - all workspace unit tests plus script tests, with workspaces and test files
   scheduled serially to keep the repository-wide run stable under local load;
-  the test contents and coverage settings stay unchanged, and the tests use an
-  isolated temporary home, CI settings, and have the known model credentials
-  and default auth selection removed;
-- no-AK integration tests and the web-shell Playwright smoke test on a
-  dynamically allocated localhost port.
+  the test contents and coverage settings stay unchanged;
+- no-AK integration tests, an isolated Chromium installation, and the web-shell
+  Playwright smoke test on a dynamically allocated localhost port.
 
-Install Chromium once before using the web-shell smoke test:
-
-```bash
-npx playwright install chromium
-```
-
-Linux developers may need `npx playwright install --with-deps chromium`.
+Every validation subprocess receives an isolated temporary home and a small
+allowlist of transport-related caller variables such as `PATH`, proxy settings,
+and certificate paths. Caller credentials, npm/pip modes, Qwen state paths,
+test overrides, and Playwright redirects are not inherited. Python and npm use
+owned configuration and cache paths.
 
 When the PR changes `packages/sdk-python/` or its CI workflow, the full profile
 also requires `uv` and creates isolated Python 3.10, 3.11, and 3.12
@@ -102,17 +100,22 @@ The existing sensitive-keyword no-op is intentionally not part of this gate.
 
 ## Failures and remote boundaries
 
-The gate stops at the first failed step. Output includes the step and a
-copyable command before execution; validation failures also report the exact
-`HEAD`, selected base and profile, and a rerun command. It preserves a child's
-numeric exit code or relays its terminating signal after cleanup. The gate
+The gate stops at the first failed step. Output includes the step and a safely
+escaped command before execution; validation failures also report the exact
+`HEAD`, selected base and profile, and direct developers to rerun the gate.
+It preserves a child's numeric exit code. `SIGINT` and `SIGTERM` received by
+the verifier are relayed after cleanup; other child-only signals use the
+conventional `128 + signal` exit status. The gate
 always attempts to remove the temporary worktree on success or failure.
 `SIGINT` and `SIGTERM` received while a validation command is running are
-forwarded to its process group; the gate cleans up and then relays the signal.
+forwarded to its process group; a second signal force-terminates that group,
+and the gate cleans up before relaying the original signal.
 Cleanup failures are reported, including separately when a validation failure
 already exists.
 
-This gate does not replace remote CI. It cannot reproduce ECS runner load or
-cache behavior, Windows and macOS merge-queue jobs, integrations that use real
-secrets, GitHub permissions and artifact handling, review bots, or every
-residual test flake. Remote checks remain authoritative for those surfaces.
+This gate does not replace remote CI. Unsupported hosts, including Windows and
+Linux ARM64, fail before repository inspection. The gate cannot reproduce ECS
+runner load or cache behavior, Windows and macOS merge-queue jobs, integrations
+that use real secrets, GitHub permissions and artifact handling, review bots,
+or every residual test flake. Remote checks remain authoritative for those
+surfaces.

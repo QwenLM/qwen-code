@@ -74,6 +74,9 @@ describe('getLinterTempDir', () => {
       env: {
         HOME: '/caller/home',
         PATH: '/usr/bin',
+        PIP_CONFIG_FILE: '/caller/pip.conf',
+        PIP_REQUIRE_VIRTUALENV: 'true',
+        PIP_USER: 'true',
         PYTHONPATH: '/caller/python',
       },
       tempDir: '/owned/linters',
@@ -89,6 +92,12 @@ describe('getLinterTempDir', () => {
     expect(environment.PYTHONPATH).toBe(
       ['/owned/linters/yamllint', '/caller/python'].join(path.delimiter),
     );
+    expect(environment).toMatchObject({
+      PIP_CONFIG_FILE: '/dev/null',
+      PIP_REQUIRE_VIRTUALENV: 'false',
+      PIP_USER: 'false',
+      PYTHONNOUSERSITE: '1',
+    });
     expect(Object.values(environment).join(path.delimiter)).not.toContain(
       'Python/3.12',
     );
