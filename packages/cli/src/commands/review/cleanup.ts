@@ -37,23 +37,30 @@ function runCleanup(target: string): void {
   if (prMatch) {
     const prNumber = prMatch[1];
 
+    // Report what actually happened, in both directions. Announcing "Removed …"
+    // off a path that is still on disk is a lie; saying nothing at all when we
+    // could not remove it leaves a leftover that will wedge the next run's
+    // `git worktree add` with nobody told why. Both have been shipped here.
+    const report = (label: string, path: string) => {
+      const { existed, freed, reason } = releaseWorktree(path);
+      if (freed) {
+        writeStdoutLine(`Removed ${label}: ${path}`);
+        removedAny = true;
+      } else if (existed) {
+        writeStderrLine(`Failed to remove ${label} ${path}: ${reason}`);
+      }
+    };
+
     const wt = worktreePath(prNumber);
     // Prunes a registration left behind by a hand-deleted directory, which is
     // also what unblocks the `git branch -D` below.
-    if (releaseWorktree(wt)) {
-      writeStdoutLine(`Removed worktree: ${wt}`);
-      removedAny = true;
-    }
+    report('worktree', wt);
 
     // The test-efficacy probe runs in a disposable sibling worktree and removes
     // it itself; sweep one a crashed probe left behind so it does not block the
     // next run's `git worktree add` (see #6832 / test-efficacy.ts). Shares the
     // path helper with the probe so the suffix cannot drift between the two.
-    const probeWt = probeWorktreePath(wt);
-    if (releaseWorktree(probeWt)) {
-      writeStdoutLine(`Removed probe worktree: ${probeWt}`);
-      removedAny = true;
-    }
+    report('probe worktree', probeWorktreePath(wt));
 
     const branch = reviewBranch(prNumber);
     if (refExists(branch)) {

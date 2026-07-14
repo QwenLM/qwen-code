@@ -71,7 +71,10 @@ describe('releaseWorktree', () => {
     git('worktree', 'add', '-q', 'wt', '-b', 'topic');
     expect(existsSync(join(repo, 'wt'))).toBe(true);
 
-    expect(releaseWorktree(join(repo, 'wt'))).toBe(true);
+    expect(releaseWorktree(join(repo, 'wt'))).toMatchObject({
+      existed: true,
+      freed: true,
+    });
 
     expect(existsSync(join(repo, 'wt'))).toBe(false);
     // Not `.not.toContain('wt')` — the fixture's own path holds that substring.
@@ -88,7 +91,10 @@ describe('releaseWorktree', () => {
     // Negative control: it is not a registered worktree.
     expect(git('worktree', 'list')).not.toContain(join(repo, 'wt'));
 
-    expect(releaseWorktree(join(repo, 'wt'))).toBe(true);
+    expect(releaseWorktree(join(repo, 'wt'))).toMatchObject({
+      existed: true,
+      freed: true,
+    });
 
     expect(existsSync(join(repo, 'wt'))).toBe(false);
     // And the path is reusable — the `already exists` wedge is gone.
@@ -107,7 +113,11 @@ describe('releaseWorktree', () => {
       /missing but already registered/,
     );
 
-    expect(releaseWorktree(join(repo, 'wt'))).toBe(false); // nothing to remove
+    // Nothing was there: not an existence, and nothing to free.
+    expect(releaseWorktree(join(repo, 'wt'))).toMatchObject({
+      existed: false,
+      freed: false,
+    });
     expect(() => git('worktree', 'add', '-q', 'wt', 'topic')).not.toThrow();
   });
 
@@ -127,7 +137,10 @@ describe('releaseWorktree', () => {
   });
 
   it('is a no-op when there is nothing registered', () => {
-    expect(releaseWorktree(join(repo, 'never-existed'))).toBe(false);
+    expect(releaseWorktree(join(repo, 'never-existed'))).toMatchObject({
+      existed: false,
+      freed: false,
+    });
     expect(git('worktree', 'list').trim().split('\n')).toHaveLength(1);
   });
 
