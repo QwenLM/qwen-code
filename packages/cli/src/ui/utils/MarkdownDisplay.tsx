@@ -195,6 +195,14 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   // line/table alone overflows (e.g. a single very wide/CJK line that wraps past
   // the budget): render nothing rather than an oversized row.
   let lines = allLines;
+  // Track how many source lines were dropped by the pre-slice so a non-streaming
+  // caller (e.g. the `exit_plan_mode` confirmation dialog) can render a visible
+  // "N more lines" cue. For streaming content the cue is intentionally omitted:
+  // the rest is still on its way. But when the caller opts into the budget for
+  // a COMPLETE plan (`enforceHeightBudget && !isPending`), silently dropping the
+  // tail means the user is asked to approve a plan whose remainder never
+  // appears — a model could hide steps past the budget. See #6867.
+  let droppedSourceLines = 0;
   if (pendingRenderedBudget !== undefined) {
     const tableClampRows =
       availableTerminalHeight !== undefined
@@ -208,8 +216,11 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     );
     if (keptLines < allLines.length) {
       lines = allLines.slice(0, keptLines);
+      droppedSourceLines = allLines.length - keptLines;
     }
   }
+  const showTruncationCue =
+    enforceHeightBudget && !isPending && droppedSourceLines > 0;
 
   // Hold back a still-forming table at the streaming frontier. A table is only
   // recognized once its separator line (matching the header's column count) has
@@ -784,6 +795,23 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   // "... generating more ..." cue — incremental scrollback commit (PR #6170)
   // already streams content to <Static> in real-time, so clipped content is
   // not "delayed output" but rather "still streaming".
+  //
+  // For non-streaming callers that opted in via `enforceHeightBudget` (currently
+  // the `exit_plan_mode` confirmation dialog), the tail is NOT still on its way
+  // — the rest of the plan simply won't render. Show a dim, single-line cue so
+  // the approver knows content was cut and cannot be tricked into approving a
+  // plan whose dangerous steps sit past the budget. See #6867.
+  if (showTruncationCue) {
+    contentBlocks.push(
+      <Text
+        key={`truncation-cue-${contentBlocks.length}`}
+        color={theme.text.secondary}
+        wrap="truncate-end"
+      >
+        {`... ${droppedSourceLines} more line${droppedSourceLines === 1 ? '' : 's'} not shown (viewport too small) ...`}
+      </Text>,
+    );
+  }
   return <>{contentBlocks}</>;
 };
 
