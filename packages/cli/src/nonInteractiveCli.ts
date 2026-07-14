@@ -4,11 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from 'node:crypto';
 import type {
   BackgroundTaskStatus,
   Config,
   CronJob,
   CronScheduler,
+  InvocationContextV1,
   ToolCallRequestInfo,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
@@ -21,6 +23,7 @@ import {
   GeminiEventType,
   FatalInputError,
   promptIdContext,
+  runWithInvocationContext,
   OutputFormat,
   InputFormat,
   LoopType,
@@ -76,6 +79,30 @@ const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
  * slow agent can't block exit indefinitely.
  */
 const STRUCTURED_SHUTDOWN_HOLDBACK_MS = 500;
+
+async function* iterateWithInvocationContext<T>(
+  iterable: AsyncIterable<T>,
+  context: InvocationContextV1,
+): AsyncGenerator<T> {
+  const iterator = iterable[Symbol.asyncIterator]();
+  let completed = false;
+  try {
+    while (true) {
+      const result = await runWithInvocationContext(context, () =>
+        iterator.next(),
+      );
+      if (result.done) {
+        completed = true;
+        return;
+      }
+      yield result.value;
+    }
+  } finally {
+    if (!completed && iterator.return) {
+      await runWithInvocationContext(context, () => iterator.return!());
+    }
+  }
+}
 
 function isHeadlessLoopSentinel(prompt: string): boolean {
   return (
@@ -308,6 +335,32 @@ export async function runNonInteractive(
   input: string,
   prompt_id: string,
   options: RunNonInteractiveOptions = {},
+): Promise<number> {
+  const ingress =
+    options.sendMessageType === SendMessageType.Cron
+      ? ('scheduler' as const)
+      : options.sendMessageType === SendMessageType.Notification ||
+          options.sendMessageType === SendMessageType.Teammate
+        ? ('internal' as const)
+        : ('cli' as const);
+  return runWithInvocationContext(
+    {
+      version: 1,
+      ingress,
+      sessionId: config.getSessionId(),
+      promptId: ingress === 'cli' ? prompt_id : randomUUID(),
+    },
+    () =>
+      runNonInteractiveWithContext(config, settings, input, prompt_id, options),
+  );
+}
+
+async function runNonInteractiveWithContext(
+  config: Config,
+  settings: LoadedSettings,
+  input: string,
+  prompt_id: string,
+  options: RunNonInteractiveOptions,
 ): Promise<number> {
   return promptIdContext.run(prompt_id, async (): Promise<number> => {
     // Create output adapter based on format
@@ -1585,6 +1638,13 @@ export async function runNonInteractive(
               modelText: batch.map((i) => i.modelText).join('\n\n'),
               sendMessageType: targetType,
             };
+            const itemInvocationContext: InvocationContextV1 = {
+              version: 1,
+              ingress:
+                targetType === SendMessageType.Cron ? 'scheduler' : 'internal',
+              sessionId: config.getSessionId(),
+              promptId: randomUUID(),
+            };
 
             turnCount++;
             if (
@@ -1604,19 +1664,24 @@ export async function runNonInteractive(
             while (true) {
               const itemToolCallRequests: ToolCallRequestInfo[] = [];
               const itemApiStartTime = Date.now();
-              const itemStream = geminiClient.sendMessageStream(
-                itemMessages[0]?.parts || [],
-                abortController.signal,
-                prompt_id,
-                {
-                  type: itemIsFirstTurn
-                    ? item.sendMessageType
-                    : SendMessageType.ToolResult,
-                  modelOverride: itemModelOverride,
-                  ...(itemIsFirstTurn && {
-                    notificationDisplayText: item.displayText,
-                  }),
-                },
+              const itemStream = iterateWithInvocationContext(
+                runWithInvocationContext(itemInvocationContext, () =>
+                  geminiClient.sendMessageStream(
+                    itemMessages[0]?.parts || [],
+                    abortController.signal,
+                    prompt_id,
+                    {
+                      type: itemIsFirstTurn
+                        ? item.sendMessageType
+                        : SendMessageType.ToolResult,
+                      modelOverride: itemModelOverride,
+                      ...(itemIsFirstTurn && {
+                        notificationDisplayText: item.displayText,
+                      }),
+                    },
+                  ),
+                ),
+                itemInvocationContext,
               );
               itemIsFirstTurn = false;
 
@@ -1689,11 +1754,10 @@ export async function runNonInteractive(
                 const {
                   responseParts: itemToolResponseParts,
                   repeatedDuplicateProviderToolCall,
-                } = await processToolCallBatch(
-                  itemToolCallRequests,
-                  (override) => {
+                } = await runWithInvocationContext(itemInvocationContext, () =>
+                  processToolCallBatch(itemToolCallRequests, (override) => {
                     itemModelOverride = override;
-                  },
+                  }),
                 );
 
                 if (structuredSubmission !== undefined) {

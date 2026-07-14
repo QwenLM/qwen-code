@@ -1589,6 +1589,66 @@ describe('DaemonClient', () => {
       expect(calls[0]?.method).toBe('POST');
       const body = JSON.parse(calls[0]!.body!);
       expect(body.prompt).toEqual([{ type: 'text', text: 'hi' }]);
+      expect(body._meta).toEqual({
+        'qwen-code/invocation-ingress': 'daemon',
+      });
+    });
+
+    it('stamps the configured ingress on blocking and non-blocking prompts', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { stopReason: 'end_turn' }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        invocationIngress: 'external_mcp',
+      });
+
+      const blockingRequest = {
+        prompt: [{ type: 'text' as const, text: 'blocking' }],
+        _meta: { keep: true },
+      };
+      await client.prompt('s-1', blockingRequest);
+      await client.promptNonBlocking('s-1', {
+        prompt: [{ type: 'text', text: 'non-blocking' }],
+      });
+
+      expect(JSON.parse(calls[0]!.body!)).toMatchObject({
+        _meta: {
+          keep: true,
+          'qwen-code/invocation-ingress': 'external_mcp',
+        },
+      });
+      expect(JSON.parse(calls[1]!.body!)).toMatchObject({
+        _meta: { 'qwen-code/invocation-ingress': 'external_mcp' },
+      });
+      expect(blockingRequest._meta).toEqual({ keep: true });
+    });
+
+    it('lets an explicit per-prompt ingress override caller meta and the client default', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { stopReason: 'end_turn' }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        invocationIngress: 'channel',
+      });
+
+      await client.prompt(
+        's-1',
+        {
+          prompt: [{ type: 'text', text: 'hi' }],
+          _meta: { 'qwen-code/invocation-ingress': 'internal' },
+        },
+        undefined,
+        undefined,
+        { invocationIngress: 'scheduler' },
+      );
+
+      expect(JSON.parse(calls[0]!.body!)._meta).toEqual({
+        'qwen-code/invocation-ingress': 'scheduler',
+      });
     });
 
     it('url-encodes the sessionId', async () => {
@@ -1621,14 +1681,22 @@ describe('DaemonClient', () => {
       // signal arg on `sendPrompt`; the SDK had the parameter wired
       // but no test, so a regression that dropped it on the floor
       // would silently leave callers unable to cancel.
-      const fetch = vi.fn(
-        (_input: RequestInfo | URL, init?: RequestInit) =>
-          new Promise<Response>((_res, rej) => {
-            init?.signal?.addEventListener('abort', () =>
-              rej(new DOMException('aborted', 'AbortError')),
-            );
-          }),
-      ) as unknown as typeof globalThis.fetch;
+      const fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === 'string'
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        if (url.endsWith('/cancel')) {
+          return Promise.resolve(new Response(null, { status: 204 }));
+        }
+        return new Promise<Response>((_res, rej) => {
+          init?.signal?.addEventListener('abort', () =>
+            rej(new DOMException('aborted', 'AbortError')),
+          );
+        });
+      }) as unknown as typeof globalThis.fetch;
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       const ctrl = new AbortController();
       setTimeout(() => ctrl.abort(), 30);
@@ -2055,6 +2123,113 @@ describe('DaemonClient', () => {
         client.prompt('s-1', { prompt: [{ type: 'text', text: 'second' }] }),
       ).resolves.toEqual({ stopReason: 'end_turn' });
       expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(2);
+    });
+
+    it('does not cancel an unadmitted legacy prompt after caller abort', async () => {
+      let promptCount = 0;
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          promptCount++;
+          if (promptCount > 1) {
+            return jsonResponse(200, { stopReason: 'end_turn' });
+          }
+          return new Promise<Response>((_resolve, reject) => {
+            req.signal?.addEventListener(
+              'abort',
+              () => reject(req.signal?.reason),
+              { once: true },
+            );
+          });
+        }
+        if (req.url.endsWith('/session/s-1/cancel')) {
+          return new Response(null, { status: 204 });
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        maxPendingPromptsPerSession: 1,
+      });
+      const ctrl = new AbortController();
+      const pending = client
+        .prompt(
+          's-1',
+          { prompt: [{ type: 'text', text: 'first' }] },
+          ctrl.signal,
+        )
+        .catch((err: unknown) => err);
+      await vi.waitFor(() => {
+        expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(1);
+      });
+
+      ctrl.abort();
+      const result = await pending;
+
+      expect(result).toBeInstanceOf(DOMException);
+      expect((result as DOMException).name).toBe('AbortError');
+      expect(calls.filter((c) => c.url.endsWith('/cancel'))).toHaveLength(0);
+      await expect(
+        client.prompt('s-1', {
+          prompt: [{ type: 'text', text: 'next' }],
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+    });
+
+    it('waits for a transient 202 cancellation failure before rejecting caller abort', async () => {
+      let rejectCancel!: (reason?: unknown) => void;
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          return jsonResponse(202, { promptId: 'p-1', lastEventId: 0 });
+        }
+        if (req.url.endsWith('/session/s-1/events')) {
+          return pendingSseResponse();
+        }
+        if (req.url.endsWith('/session/s-1/cancel')) {
+          return new Promise<Response>((_resolve, reject) => {
+            rejectCancel = reject;
+          });
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        maxPendingPromptsPerSession: 1,
+      });
+      const ctrl = new AbortController();
+      let settled = false;
+      const pending = client
+        .prompt(
+          's-1',
+          { prompt: [{ type: 'text', text: 'first' }] },
+          ctrl.signal,
+        )
+        .catch((err: unknown) => err)
+        .finally(() => {
+          settled = true;
+        });
+      await vi.waitFor(() => {
+        expect(calls.filter((c) => c.url.endsWith('/events'))).toHaveLength(1);
+      });
+
+      ctrl.abort();
+      await vi.waitFor(() => expect(rejectCancel).toBeTypeOf('function'));
+      expect(calls.filter((c) => c.url.endsWith('/cancel'))).toHaveLength(1);
+      expect(settled).toBe(false);
+      await expect(
+        client.prompt('s-1', {
+          prompt: [{ type: 'text', text: 'too early' }],
+        }),
+      ).rejects.toBeInstanceOf(DaemonPendingPromptLimitError);
+      expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(1);
+
+      rejectCancel(new Error('cancel network failed'));
+      const result = await pending;
+
+      expect(result).toBeInstanceOf(DOMException);
+      expect((result as DOMException).name).toBe('AbortError');
+      expect(calls.filter((c) => c.url.endsWith('/cancel'))).toHaveLength(1);
     });
   });
 

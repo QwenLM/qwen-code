@@ -5,6 +5,7 @@
  */
 
 import { Buffer } from 'node:buffer';
+import { randomUUID } from 'node:crypto';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type {
@@ -129,6 +130,11 @@ import {
   shouldRunVisionBridge,
   splitImageParts,
   approxBase64Bytes,
+  INVOCATION_CONTEXT_META_KEY,
+  INVOCATION_INGRESS_META_KEY,
+  PRIVATE_PARENT_CAPABILITY_META_KEY,
+  parseInvocationContext,
+  runWithInvocationContext,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
@@ -1659,27 +1665,73 @@ export class Session implements SessionContext {
     params: PromptRequest,
     pendingSend: AbortController,
   ): Promise<PromptResponse> {
+    this.turn += 1;
+    const sessionId = this.config.getSessionId();
+    const promptId = sessionId + '########' + this.turn;
+    const promptMeta =
+      params._meta && typeof params._meta === 'object'
+        ? { ...params._meta }
+        : {};
+    const suppliedContext = promptMeta[INVOCATION_CONTEXT_META_KEY];
+    const suppliedIngress = promptMeta[INVOCATION_INGRESS_META_KEY];
+    delete promptMeta[INVOCATION_CONTEXT_META_KEY];
+    delete promptMeta[INVOCATION_INGRESS_META_KEY];
+    delete promptMeta[PRIVATE_PARENT_CAPABILITY_META_KEY];
+    const sanitizedParams = { ...params };
+    if (Object.keys(promptMeta).length > 0) {
+      sanitizedParams._meta = promptMeta;
+    } else {
+      delete sanitizedParams._meta;
+    }
+    const trustedContext =
+      suppliedContext === undefined
+        ? undefined
+        : parseInvocationContext(suppliedContext);
+    if (suppliedContext !== undefined && !trustedContext) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid trusted ACP invocation context',
+      );
+    }
+    const trustedIngress =
+      suppliedIngress === 'channel' ||
+      suppliedIngress === 'scheduler' ||
+      suppliedIngress === 'internal'
+        ? suppliedIngress
+        : undefined;
+    if (suppliedIngress !== undefined && !trustedIngress) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid trusted ACP invocation ingress',
+      );
+    }
+    const invocationContext = trustedContext ?? {
+      version: 1 as const,
+      ingress: trustedIngress ?? ('acp' as const),
+      sessionId,
+      promptId,
+    };
+
     // Bind this turn to the session's ID via AsyncLocalStorage so shell
     // subprocesses (and hooks) read the CURRENT session's ID instead of
     // the process-global env slot, which in daemon mode only ever holds
     // the first session created in this process.
-    return sessionIdContext.run(this.config.getSessionId(), () =>
-      this.#executePromptInner(params, pendingSend),
+    return runWithInvocationContext(invocationContext, () =>
+      sessionIdContext.run(sessionId, () =>
+        this.#executePromptInner(sanitizedParams, pendingSend, promptId),
+      ),
     );
   }
 
   async #executePromptInner(
     params: PromptRequest,
     pendingSend: AbortController,
+    promptId: string,
   ): Promise<PromptResponse> {
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
       this.config.getWorkingDir(),
       async () => {
-        // Increment turn counter for each user prompt
-        this.turn += 1;
-
-        const promptId = this.config.getSessionId() + '########' + this.turn;
         const parentContext = extractDaemonTraceContext(params);
 
         return await withInteractionSpan(
@@ -3083,8 +3135,17 @@ export class Session implements SessionContext {
    */
   async #executeCronPrompt(item: CronQueueItem): Promise<void> {
     // Same session-ID binding rationale as #executePrompt.
-    return sessionIdContext.run(this.config.getSessionId(), () =>
-      this.#executeCronPromptInner(item),
+    return runWithInvocationContext(
+      {
+        version: 1,
+        ingress: 'scheduler',
+        sessionId: this.config.getSessionId(),
+        promptId: randomUUID(),
+      },
+      () =>
+        sessionIdContext.run(this.config.getSessionId(), () =>
+          this.#executeCronPromptInner(item),
+        ),
     );
   }
 
@@ -3533,8 +3594,17 @@ export class Session implements SessionContext {
         // toolUseId) used in display and response _meta. Merging would
         // misattribute the combined response to a single task.
         const item = this.notificationQueue.shift()!;
-        await sessionIdContext.run(this.config.getSessionId(), () =>
-          this.#executeBackgroundNotificationPromptInner(item),
+        await runWithInvocationContext(
+          {
+            version: 1,
+            ingress: 'internal',
+            sessionId: this.config.getSessionId(),
+            promptId: randomUUID(),
+          },
+          () =>
+            sessionIdContext.run(this.config.getSessionId(), () =>
+              this.#executeBackgroundNotificationPromptInner(item),
+            ),
         );
       }
     } finally {

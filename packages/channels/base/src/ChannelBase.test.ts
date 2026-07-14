@@ -3821,7 +3821,11 @@ describe('ChannelBase', () => {
 
       await ch.handleInbound(envelope({ text: '/schedule list' }));
 
-      expect(bridge.prompt).toHaveBeenCalledWith('s-1', '/schedule list', {});
+      expect(bridge.prompt).toHaveBeenCalledWith('s-1', '/schedule list', {
+        imageBase64: undefined,
+        imageMimeType: undefined,
+        invocationIngress: 'channel',
+      });
       expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
     });
 
@@ -8660,6 +8664,7 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).toHaveBeenCalledWith('s-1', '!echo hello', {
         imageBase64: undefined,
         imageMimeType: undefined,
+        invocationIngress: 'channel',
       });
     });
 
@@ -10685,7 +10690,7 @@ describe('ChannelBase', () => {
           expect.stringContaining(
             '[External event "ci_failed" from github-ci]',
           ),
-          {},
+          { invocationIngress: 'scheduler' },
         );
         expect(ch.proactive).toEqual([
           { chatId: 'group-1', text: 'CI failed because lint broke.' },
@@ -11262,7 +11267,7 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).toHaveBeenLastCalledWith(
         expect.any(String),
         '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost summary',
-        {},
+        { invocationIngress: 'scheduler' },
       );
       expect(ch.proactive).toEqual([
         { chatId: 'group-1', text: 'loop response' },
@@ -12288,7 +12293,7 @@ describe('ChannelBase', () => {
         expect(bridge.prompt).toHaveBeenLastCalledWith(
           's-1',
           '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost again',
-          {},
+          { invocationIngress: 'scheduler' },
         );
         expect(ch.proactive).toEqual([
           { chatId: 'chat1', text: 'second response' },

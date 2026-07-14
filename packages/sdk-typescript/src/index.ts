@@ -100,6 +100,8 @@ export {
   type DaemonStateResyncRequiredData,
   type DaemonStateResyncRequiredEvent,
   type DaemonClientOptions,
+  type DaemonInvocationIngress,
+  type DaemonPromptOptions,
   type DaemonContentHash,
   type DaemonControlEvent,
   type DaemonEvent,
@@ -324,7 +326,10 @@ export type {
   McpSdkServerConfigWithInstance,
 } from './daemon-mcp/createSdkMcpServer.js';
 
-export type { ServeBridgeMcpServerOptions } from './daemon-mcp/serve-bridge/index.js';
+export type {
+  ServeBridgeMcpServer,
+  ServeBridgeMcpServerOptions,
+} from './daemon-mcp/serve-bridge/index.js';
 
 export type { QueryOptions } from './query/createQuery.js';
 export type { LogLevel, LoggerConfig, ScopedLogger } from './utils/logger.js';

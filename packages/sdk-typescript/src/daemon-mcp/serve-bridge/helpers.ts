@@ -10,6 +10,10 @@
 
 import type { BridgeState } from './types.js';
 
+export interface HandlerExtra {
+  signal: AbortSignal | undefined;
+}
+
 /**
  * Resolve the session ID from explicit arg or default state.
  * Returns the session ID or throws a descriptive error.
@@ -25,9 +29,9 @@ export function resolveSessionId(
     );
   }
   // Bump activity timestamp so workspace operations reset the idle TTL
-  const stream = state.eventStreams.get(sessionId);
-  if (stream) {
-    stream.lastActivityMs = Date.now();
+  const binding = state.bindings.get(sessionId);
+  if (binding) {
+    binding.stream.lastActivityMs = Date.now();
   }
   return sessionId;
 }
@@ -38,11 +42,18 @@ export function resolveSessionId(
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 export function handler<T>(
-  fn: (args: T) => Promise<any>,
+  fn: (args: T, extra: HandlerExtra) => Promise<any>,
 ): (args: T, extra: unknown) => Promise<any> {
-  return async (args: T, _extra: unknown) => {
+  return async (args: T, extra: unknown) => {
     try {
-      return await fn(args);
+      const signal =
+        typeof extra === 'object' &&
+        extra !== null &&
+        'signal' in extra &&
+        extra.signal instanceof AbortSignal
+          ? extra.signal
+          : undefined;
+      return await fn(args, { signal });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       // Log full error with stack for debugging

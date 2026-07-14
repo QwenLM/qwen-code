@@ -23,3 +23,15 @@ export class DaemonHttpError extends Error {
     this.body = body;
   }
 }
+
+export function isInvalidDaemonClientIdError(
+  err: unknown,
+): err is DaemonHttpError {
+  return (
+    err instanceof DaemonHttpError &&
+    err.status === 400 &&
+    typeof err.body === 'object' &&
+    err.body !== null &&
+    (err.body as { code?: unknown }).code === 'invalid_client_id'
+  );
+}

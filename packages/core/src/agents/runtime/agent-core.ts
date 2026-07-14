@@ -20,6 +20,10 @@ import { randomUUID } from 'node:crypto';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { reportError } from '../../utils/errorReporting.js';
 import { subagentNameContext } from '../../utils/subagentNameContext.js';
+import {
+  getInvocationContext,
+  runWithInvocationContext,
+} from '../../utils/invocation-context.js';
 import type { Config } from '../../config/config.js';
 import {
   getCurrentAgentDepth,
@@ -1608,6 +1612,7 @@ export class AgentCore {
             // can restore it. See `runInAgentFrames` for why this matters
             // (mis-attributed `from="leader"` + leader-guard bypass).
             const inheritedTeammateIdentity = getTeammateContext();
+            const inheritedInvocationContext = getInvocationContext();
             this.eventEmitter?.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
               subagentId: this.subagentId,
               round: currentRound,
@@ -1633,12 +1638,15 @@ export class AgentCore {
                 // tool body runs. See `runInAgentFrames` for rationale.
                 // Also restore the logical owner agent id when present so
                 // approved tools such as Monitor keep owner routing.
-                await this.runInAgentFrames(
-                  () => waiting.confirmationDetails.onConfirm(outcome, payload),
-                  inheritedView,
-                  inheritedAgentId ?? undefined,
-                  inheritedTeammateIdentity,
-                  inheritedAgentDepth,
+                await runWithInvocationContext(inheritedInvocationContext, () =>
+                  this.runInAgentFrames(
+                    () =>
+                      waiting.confirmationDetails.onConfirm(outcome, payload),
+                    inheritedView,
+                    inheritedAgentId ?? undefined,
+                    inheritedTeammateIdentity,
+                    inheritedAgentDepth,
+                  ),
                 );
               },
               timestamp: Date.now(),

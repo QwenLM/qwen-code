@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 1,
+  "metaKeys": {
+    "invocation": "qwen-code/invocation",
+    "ingress": "qwen-code/invocation-ingress",
+    "privateParentCapability": "qwen-code/private-parent-capability"
+  },
+  "contextCases": [
+    {
+      "name": "valid-with-originator",
+      "valid": true,
+      "input": {
+        "version": 1,
+        "ingress": "external_mcp",
+        "sessionId": "session-1",
+        "promptId": "prompt-1",
+        "originatorClientId": "client-1"
+      }
+    },
+    {
+      "name": "valid-without-originator",
+      "valid": true,
+      "input": {
+        "version": 1,
+        "ingress": "cli",
+        "sessionId": "session-2",
+        "promptId": "prompt-2"
+      }
+    },
+    {
+      "name": "missing-context",
+      "valid": false
+    },
+    {
+      "name": "future-version",
+      "valid": false,
+      "input": {
+        "version": 2,
+        "ingress": "cli",
+        "sessionId": "session-3",
+        "promptId": "prompt-3"
+      }
+    },
+    {
+      "name": "unknown-ingress",
+      "valid": false,
+      "input": {
+        "version": 1,
+        "ingress": "webhook",
+        "sessionId": "session-4",
+        "promptId": "prompt-4"
+      }
+    },
+    {
+      "name": "blank-session-id",
+      "valid": false,
+      "input": {
+        "version": 1,
+        "ingress": "daemon",
+        "sessionId": "  ",
+        "promptId": "prompt-5"
+      }
+    },
+    {
+      "name": "empty-prompt-id",
+      "valid": false,
+      "input": {
+        "version": 1,
+        "ingress": "daemon",
+        "sessionId": "session-6",
+        "promptId": ""
+      }
+    },
+    {
+      "name": "blank-originator",
+      "valid": false,
+      "input": {
+        "version": 1,
+        "ingress": "daemon",
+        "sessionId": "session-7",
+        "promptId": "prompt-7",
+        "originatorClientId": " "
+      }
+    },
+    {
+      "name": "extra-field",
+      "valid": false,
+      "input": {
+        "version": 1,
+        "ingress": "daemon",
+        "sessionId": "session-8",
+        "promptId": "prompt-8",
+        "trusted": true
+      }
+    }
+  ],
+  "metadataCases": [
+    {
+      "name": "legacy-metadata-coexists",
+      "existing": {
+        "progressToken": "progress-1",
+        "vendor.example/trace": "legacy-trace"
+      },
+      "expectPreserved": ["progressToken", "vendor.example/trace"],
+      "expectInvocation": true
+    },
+    {
+      "name": "denied-transport-removes-only-reserved-key",
+      "existing": {
+        "progressToken": "progress-2",
+        "qwen-code/invocation": {
+          "forged": true
+        }
+      },
+      "expectPreserved": ["progressToken"],
+      "expectInvocation": false
+    }
+  ],
+  "consumerBehavior": {
+    "missing": "omit-reserved-metadata",
+    "malformedTrustedPrivateAcp": "fail-prompt",
+    "malformedUntrustedAcp": "strip-and-create-acp-root",
+    "unknownDaemonIngress": "normalize-to-daemon"
+  }
+}

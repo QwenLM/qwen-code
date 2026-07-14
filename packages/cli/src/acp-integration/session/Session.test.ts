@@ -2011,6 +2011,59 @@ describe('Session', () => {
   });
 
   describe('prompt', () => {
+    it('creates a native ACP invocation root with the durable prompt id', async () => {
+      let observed: core.InvocationContextV1 | undefined;
+      mockChat.sendMessageStream = vi.fn().mockImplementation(() => {
+        observed = core.getInvocationContext();
+        return Promise.resolve(createEmptyStream());
+      });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'direct ACP prompt' }],
+      });
+
+      expect(observed).toEqual({
+        version: 1,
+        ingress: 'acp',
+        sessionId: 'test-session-id',
+        promptId: 'test-session-id########1',
+      });
+      expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(Object),
+        'test-session-id########1',
+      );
+    });
+
+    it('keeps the native durable prompt id under a trusted parent root', async () => {
+      const trustedContext: core.InvocationContextV1 = {
+        version: 1,
+        ingress: 'daemon',
+        sessionId: 'test-session-id',
+        promptId: 'daemon-request-id',
+        originatorClientId: 'client-1',
+      };
+      let observed: core.InvocationContextV1 | undefined;
+      mockChat.sendMessageStream = vi.fn().mockImplementation(() => {
+        observed = core.getInvocationContext();
+        return Promise.resolve(createEmptyStream());
+      });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'daemon prompt' }],
+        _meta: { 'qwen-code/invocation': trustedContext },
+      });
+
+      expect(observed).toEqual(trustedContext);
+      expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(Object),
+        'test-session-id########1',
+      );
+    });
+
     it('records the latest file history snapshot after makeSnapshot', async () => {
       const latestSnapshot = {
         promptId: 'test-session-id########1',
@@ -2125,25 +2178,29 @@ describe('Session', () => {
     });
 
     it('drains background task notifications through ACP after the prompt is idle', async () => {
+      let notificationInvocation: core.InvocationContextV1 | undefined;
       mockChat.sendMessageStream = vi
         .fn()
         .mockResolvedValueOnce(createEmptyStream())
-        .mockResolvedValueOnce(
-          createStreamWithChunks([
-            {
-              type: core.StreamEventType.CHUNK,
-              value: {
-                candidates: [
-                  {
-                    content: {
-                      parts: [{ text: 'I saw the background result.' }],
+        .mockImplementationOnce(() => {
+          notificationInvocation = core.getInvocationContext();
+          return Promise.resolve(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [{ text: 'I saw the background result.' }],
+                      },
                     },
-                  },
-                ],
+                  ],
+                },
               },
-            },
-          ]),
-        );
+            ]),
+          );
+        });
 
       await session.prompt({
         sessionId: 'test-session-id',
@@ -2170,6 +2227,13 @@ describe('Session', () => {
       await vi.waitFor(() => {
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
       });
+
+      expect(notificationInvocation).toMatchObject({
+        version: 1,
+        ingress: 'internal',
+        sessionId: 'test-session-id',
+      });
+      expect(notificationInvocation?.promptId).not.toMatch(/notification/u);
 
       expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
         2,
@@ -6342,6 +6406,7 @@ describe('Session', () => {
       });
 
       it('runs automatic compression before cron-fired ACP prompt sends', async () => {
+        let cronInvocation: core.InvocationContextV1 | undefined;
         const scheduler = {
           size: 1,
           hasPendingWork: true,
@@ -6356,7 +6421,10 @@ describe('Session', () => {
         mockChat.sendMessageStream = vi
           .fn()
           .mockResolvedValueOnce(createEmptyStream())
-          .mockResolvedValueOnce(createEmptyStream());
+          .mockImplementationOnce(() => {
+            cronInvocation = core.getInvocationContext();
+            return Promise.resolve(createEmptyStream());
+          });
 
         await session.prompt({
           sessionId: 'test-session-id',
@@ -6368,6 +6436,12 @@ describe('Session', () => {
         });
 
         expect(scheduler.start).toHaveBeenCalledTimes(1);
+        expect(cronInvocation).toMatchObject({
+          version: 1,
+          ingress: 'scheduler',
+          sessionId: 'test-session-id',
+        });
+        expect(cronInvocation?.promptId).not.toMatch(/cron/u);
         expect(mockGeminiClient.tryCompressChat).toHaveBeenNthCalledWith(
           1,
           'test-session-id########1',

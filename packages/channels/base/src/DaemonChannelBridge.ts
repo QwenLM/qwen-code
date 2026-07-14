@@ -7,6 +7,7 @@ import type {
   AvailableCommand,
   BridgeSessionInfo,
   ChannelAgentBridge,
+  ChannelPromptOptions,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
 import { readAvailableCommandAltNames } from './AcpBridge.js';
@@ -31,6 +32,7 @@ export interface DaemonChannelSessionClient {
       prompt: Array<Record<string, unknown>>;
     },
     signal?: AbortSignal,
+    options?: { invocationIngress?: ChannelPromptOptions['invocationIngress'] },
   ): Promise<{ stopReason?: string; [key: string]: unknown }>;
   events(opts?: {
     signal?: AbortSignal;
@@ -302,7 +304,7 @@ export class DaemonChannelBridge
   async prompt(
     sessionId: string,
     text: string,
-    options?: { imageBase64?: string; imageMimeType?: string },
+    options?: ChannelPromptOptions,
   ): Promise<string> {
     const session = this.ensureSession(sessionId);
     if (this.activePrompts.has(sessionId)) {
@@ -360,7 +362,11 @@ export class DaemonChannelBridge
     prompt.push({ type: 'text', text });
 
     try {
-      const result = await session.prompt({ prompt }, controller.signal);
+      const result = options?.invocationIngress
+        ? await session.prompt({ prompt }, controller.signal, {
+            invocationIngress: options.invocationIngress,
+          })
+        : await session.prompt({ prompt }, controller.signal);
       // Prefer turn_complete for deterministic chunk collection (SSE path).
       // Fall back to one event-loop tick for non-SSE prompt paths (blocking
       // HTTP, non-202 responses) where turn_complete never arrives.

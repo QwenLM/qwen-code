@@ -21,6 +21,7 @@
 
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createServeBridgeMcpServer } from './createServeBridgeMcpServer.js';
+import { createShutdownController } from './shutdown.js';
 
 const server = createServeBridgeMcpServer({
   daemonUrl: process.env['QWEN_DAEMON_URL'] ?? 'http://127.0.0.1:4170',
@@ -31,18 +32,24 @@ const server = createServeBridgeMcpServer({
 
 const transport = new StdioServerTransport();
 
-// Graceful shutdown on signals
-async function shutdown() {
-  try {
-    await server.instance.close();
-  } catch (e) {
-    process.stderr.write(`[qwen-serve-bridge] close error: ${e}\n`);
-  }
-  process.exit(0);
-}
+const { shutdown, markInstanceClosed } = createShutdownController({
+  close: () => server.instance.close(),
+  dispose: () => server.dispose(),
+  exit: (code) => process.exit(code),
+  reportCloseError: (err) => {
+    process.stderr.write(`[qwen-serve-bridge] close error: ${err}\n`);
+  },
+});
 
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+const previousOnclose = server.instance.server.onclose;
+server.instance.server.onclose = () => {
+  markInstanceClosed();
+  previousOnclose?.();
+  void shutdown();
+};
+
+process.on('SIGINT', () => void shutdown());
+process.on('SIGTERM', () => void shutdown());
 
 // Prevent silent crashes from unhandled rejections
 process.on('unhandledRejection', (err) => {
@@ -53,6 +60,6 @@ process.on('unhandledRejection', (err) => {
 });
 
 // Exit cleanly when stdio pipe closes (parent process gone)
-process.stdin.on('close', shutdown);
+process.stdin.on('close', () => void shutdown());
 
 await server.instance.connect(transport);

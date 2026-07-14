@@ -14,6 +14,8 @@ export {
   matchTurnEvent,
   type CreateSessionRequest,
   type DaemonClientOptions,
+  type DaemonInvocationIngress,
+  type DaemonPromptOptions,
   type DaemonTurnError,
   type NonBlockingPromptAccepted,
   type PromptRequest,

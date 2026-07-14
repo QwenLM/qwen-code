@@ -12,8 +12,12 @@ import { DaemonClient } from '../../daemon/DaemonClient.js';
 import { createSdkMcpServer } from '../createSdkMcpServer.js';
 import type { McpSdkServerConfigWithInstance } from '../createSdkMcpServer.js';
 import type { ServeBridgeMcpServerOptions, BridgeState } from './types.js';
-import { startSessionCleanup, stopEventStream } from './sse.js';
+import { disposeBindings, startSessionCleanup } from './bindings.js';
 import { allTools } from './tools/index.js';
+
+export type ServeBridgeMcpServer = McpSdkServerConfigWithInstance & {
+  dispose(): Promise<void>;
+};
 
 /** Strip trailing slashes without regex (avoids CodeQL ReDoS flag). */
 function stripTrailingSlashes(url: string): string {
@@ -37,21 +41,30 @@ function stripTrailingSlashes(url: string): string {
  *
  * const transport = new StdioServerTransport();
  * await server.instance.connect(transport);
+ *
+ * // During shutdown:
+ * await server.instance.close();
+ * await server.dispose();
  * ```
  */
 export function createServeBridgeMcpServer(
   opts: ServeBridgeMcpServerOptions,
-): McpSdkServerConfigWithInstance {
+): ServeBridgeMcpServer {
   const state: BridgeState = {
     client: new DaemonClient({
       baseUrl: opts.daemonUrl,
       token: opts.token,
+      invocationIngress: 'external_mcp',
     }),
     daemonUrl: stripTrailingSlashes(opts.daemonUrl),
     token: opts.token,
     defaultSessionId: undefined,
     workspaceCwd: opts.workspaceCwd,
-    eventStreams: new Map(),
+    bindings: new Map(),
+    sessionLocks: new Map(),
+    pendingLifecycles: new Set(),
+    pendingReleases: new Set(),
+    disposed: false,
     allowGlobalScope: opts.allowGlobalScope ?? false,
   };
 
@@ -66,16 +79,20 @@ export function createServeBridgeMcpServer(
     tools,
   });
 
-  // Stop cleanup timer and abort all active SSE streams when server closes.
-  // Use the SDK's onclose lifecycle hook (Protocol.onclose) instead of
-  // monkey-patching close() — the SDK calls onclose after transport shutdown
-  // and internal state cleanup, which is the supported extension point.
-  server.instance.server.onclose = () => {
-    stopCleanup();
-    for (const sessionId of [...state.eventStreams.keys()]) {
-      stopEventStream(state, sessionId);
-    }
+  let disposePromise: Promise<void> | undefined;
+  const dispose = (): Promise<void> => {
+    disposePromise ??= (async () => {
+      stopCleanup();
+      await disposeBindings(state);
+    })();
+    return disposePromise;
   };
 
-  return server;
+  // Programmatic callers should await dispose(); onclose is a backstop for
+  // callers that only close the underlying MCP server.
+  server.instance.server.onclose = () => {
+    void dispose();
+  };
+
+  return { ...server, dispose };
 }

@@ -32,7 +32,7 @@ describe('BridgeChannelMemoryIntentClassifier', () => {
     expect(bridge.prompt).toHaveBeenCalledWith(
       'classifier-session',
       expect.stringContaining('"你记一下以后回复前说 1122"'),
-      {},
+      { invocationIngress: 'internal' },
     );
     expect(bridge.cancelSession).toHaveBeenCalledWith('classifier-session');
   });

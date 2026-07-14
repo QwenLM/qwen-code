@@ -8,7 +8,15 @@ import { z } from 'zod';
 import { tool } from '../../tool.js';
 import { formatJsonResult } from '../../formatters.js';
 import type { BridgeState } from '../types.js';
-import { startEventStream, stopEventStream } from '../sse.js';
+import {
+  createBinding,
+  releaseBinding,
+  replaceBinding,
+  resolveBinding,
+  rethrowBindingError,
+  trackLifecycle,
+  withSessionLock,
+} from '../bindings.js';
 import { handler, resolveSessionId } from '../helpers.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -31,24 +39,22 @@ export function sessionTools(state: BridgeState): any[] {
           .optional()
           .describe('Session scope.'),
       },
-      handler(async (args) => {
-        const session = await state.client.createOrAttachSession({
-          workspaceCwd: args.workspace_cwd ?? state.workspaceCwd,
-          modelServiceId: args.model_service_id,
-          sessionScope: args.session_scope,
-        });
-        // Stop old SSE only after new session is confirmed
-        if (
-          state.defaultSessionId &&
-          state.defaultSessionId !== session.sessionId
-        ) {
-          stopEventStream(state, state.defaultSessionId);
-        }
-        state.defaultSessionId = session.sessionId;
-        // Start persistent SSE connection for this session
-        startEventStream(state, session.sessionId);
-        return formatJsonResult(session);
-      }),
+      handler((args) =>
+        trackLifecycle(state, async () => {
+          const session = await state.client.createOrAttachSession({
+            workspaceCwd: args.workspace_cwd ?? state.workspaceCwd,
+            modelServiceId: args.model_service_id,
+            sessionScope: args.session_scope,
+          });
+          await withSessionLock(state, session.sessionId, async () => {
+            await replaceBinding(
+              state,
+              createBinding(session.sessionId, session.clientId),
+            );
+          });
+          return formatJsonResult(session);
+        }),
+      ),
     ),
 
     tool(
@@ -58,21 +64,35 @@ export function sessionTools(state: BridgeState): any[] {
         session_id: z.string().describe('Session ID to restore.'),
         workspace_cwd: z.string().optional().describe('Workspace path.'),
       },
-      handler(async (args) => {
-        const result = await state.client.loadSession(args.session_id, {
-          workspaceCwd: args.workspace_cwd ?? state.workspaceCwd,
-        });
-        // Stop old SSE only after load is confirmed
-        if (
-          state.defaultSessionId &&
-          state.defaultSessionId !== result.sessionId
-        ) {
-          stopEventStream(state, state.defaultSessionId);
-        }
-        state.defaultSessionId = result.sessionId;
-        startEventStream(state, result.sessionId);
-        return formatJsonResult(result);
-      }),
+      handler((args) =>
+        trackLifecycle(state, async () => {
+          const result = await withSessionLock(
+            state,
+            args.session_id,
+            async () => {
+              const current = state.bindings.get(args.session_id);
+              if (current?.stream.activeCollector) {
+                throw new Error(
+                  'Cannot replace a session binding while a prompt is in progress.',
+                );
+              }
+              const loaded = await state.client.loadSession(
+                args.session_id,
+                {
+                  workspaceCwd: args.workspace_cwd ?? state.workspaceCwd,
+                },
+                current?.clientId,
+              );
+              await replaceBinding(
+                state,
+                createBinding(loaded.sessionId, loaded.clientId),
+              );
+              return loaded;
+            },
+          );
+          return formatJsonResult(result);
+        }),
+      ),
     ),
 
     tool(
@@ -82,21 +102,35 @@ export function sessionTools(state: BridgeState): any[] {
         session_id: z.string().describe('Session ID to resume.'),
         workspace_cwd: z.string().optional().describe('Workspace path.'),
       },
-      handler(async (args) => {
-        const result = await state.client.resumeSession(args.session_id, {
-          workspaceCwd: args.workspace_cwd ?? state.workspaceCwd,
-        });
-        // Stop old SSE only after resume is confirmed
-        if (
-          state.defaultSessionId &&
-          state.defaultSessionId !== result.sessionId
-        ) {
-          stopEventStream(state, state.defaultSessionId);
-        }
-        state.defaultSessionId = result.sessionId;
-        startEventStream(state, result.sessionId);
-        return formatJsonResult(result);
-      }),
+      handler((args) =>
+        trackLifecycle(state, async () => {
+          const result = await withSessionLock(
+            state,
+            args.session_id,
+            async () => {
+              const current = state.bindings.get(args.session_id);
+              if (current?.stream.activeCollector) {
+                throw new Error(
+                  'Cannot replace a session binding while a prompt is in progress.',
+                );
+              }
+              const resumed = await state.client.resumeSession(
+                args.session_id,
+                {
+                  workspaceCwd: args.workspace_cwd ?? state.workspaceCwd,
+                },
+                current?.clientId,
+              );
+              await replaceBinding(
+                state,
+                createBinding(resumed.sessionId, resumed.clientId),
+              );
+              return resumed;
+            },
+          );
+          return formatJsonResult(result);
+        }),
+      ),
     ),
 
     tool(
@@ -108,19 +142,21 @@ export function sessionTools(state: BridgeState): any[] {
           .optional()
           .describe('Session ID. Uses default session if omitted.'),
       },
-      handler(async (args) => {
-        const sessionId = resolveSessionId(state, args.session_id);
-        try {
-          await state.client.closeSession(sessionId);
-        } finally {
-          // Always clean up SSE even if closeSession throws
-          stopEventStream(state, sessionId);
-          if (state.defaultSessionId === sessionId) {
-            state.defaultSessionId = undefined;
-          }
-        }
-        return formatJsonResult({ ok: true, sessionId });
-      }),
+      handler((args) =>
+        trackLifecycle(state, async () => {
+          const sessionId = resolveSessionId(state, args.session_id);
+          await withSessionLock(state, sessionId, async () => {
+            const binding = resolveBinding(state, sessionId);
+            try {
+              await state.client.closeSession(sessionId, binding.clientId);
+            } catch (err) {
+              await rethrowBindingError(state, binding, err);
+            }
+            await releaseBinding(state, binding, false);
+          });
+          return formatJsonResult({ ok: true, sessionId });
+        }),
+      ),
     ),
 
     tool(

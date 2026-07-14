@@ -10,7 +10,10 @@ import {
 } from '@qwen-code/acp-bridge/mcpTimeouts';
 import { CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS } from '@qwen-code/acp-bridge/channelControlTimeouts';
 import { DaemonAuthFlow } from './DaemonAuthFlow.js';
-import { DaemonHttpError } from './DaemonHttpError.js';
+import {
+  DaemonHttpError,
+  isInvalidDaemonClientIdError,
+} from './DaemonHttpError.js';
 import type { DaemonTransport } from './DaemonTransport.js';
 import { RestSseTransport } from './RestSseTransport.js';
 import type {
@@ -216,6 +219,18 @@ export interface DaemonClientOptions {
    * owner routing and strict mutation authentication remain authoritative.
    */
   transport?: DaemonTransport;
+  /** Default prompt ingress advisory sent to the daemon. */
+  invocationIngress?: DaemonInvocationIngress;
+}
+
+export type DaemonInvocationIngress =
+  | 'channel'
+  | 'scheduler'
+  | 'internal'
+  | 'external_mcp';
+
+export interface DaemonPromptOptions {
+  invocationIngress?: DaemonInvocationIngress;
 }
 
 const DEFAULT_SESSION_LIST_PAGE_SIZE = 20;
@@ -230,6 +245,7 @@ const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 const MCP_RESTART_DEFAULT_TIMEOUT_MS =
   MCP_RESTART_SERVER_DEADLINE_MS + MCP_RESTART_CLIENT_HEADROOM_MS;
 const CLIENT_ID_HEADER = 'X-Qwen-Client-Id';
+const INVOCATION_INGRESS_META_KEY = 'qwen-code/invocation-ingress';
 const urlEncode = encodeURIComponent;
 
 function normalizePermissionRuleInput(rule: string): string {
@@ -438,6 +454,7 @@ export class DaemonClient {
   private readonly _fetch: typeof globalThis.fetch;
   private readonly fetchTimeoutMs: number;
   private readonly promptLimit: number;
+  private readonly invocationIngress: DaemonInvocationIngress | 'daemon';
   private readonly promptCounts: Record<string, number> = Object.create(null);
   /**
    * Pluggable transport layer. Defaults to `RestSseTransport` when
@@ -486,6 +503,7 @@ export class DaemonClient {
     this.promptLimit = normalizePendingPromptLimit(
       opts.maxPendingPromptsPerSession,
     );
+    this.invocationIngress = opts.invocationIngress ?? 'daemon';
     this.transport =
       opts.transport ??
       new RestSseTransport(this.baseUrl, this.token, this._fetch);
@@ -493,6 +511,16 @@ export class DaemonClient {
 
   get maxPendingPromptsPerSession(): number {
     return this.promptLimit;
+  }
+
+  private withPromptIngress(
+    req: PromptRequest,
+    options?: DaemonPromptOptions,
+  ): PromptRequest {
+    const meta = req._meta ? { ...req._meta } : {};
+    meta[INVOCATION_INGRESS_META_KEY] =
+      options?.invocationIngress ?? this.invocationIngress;
+    return { ...req, _meta: meta };
   }
 
   /** @internal */
@@ -3196,10 +3224,12 @@ export class DaemonClient {
     req: PromptRequest,
     signal?: AbortSignal,
     clientId?: string,
+    options?: DaemonPromptOptions,
   ): Promise<PromptResult> {
     signal?.throwIfAborted();
+    const stampedRequest = this.withPromptIngress(req, options);
     const releasePromptSlot = this.reservePromptSlot(sessionId);
-    let releaseOnExit = true;
+    let acceptedAsynchronousPrompt = false;
     try {
       const res = await this.transport.fetch(
         `${this.baseUrl}/session/${urlEncode(sessionId)}/prompt`,
@@ -3209,25 +3239,20 @@ export class DaemonClient {
             { 'Content-Type': 'application/json' },
             clientId,
           ),
-          body: JSON.stringify(req),
+          body: JSON.stringify(stampedRequest),
           signal,
         },
       );
 
       if (res.status === 202) {
+        acceptedAsynchronousPrompt = true;
         const accept = (await res.json()) as NonBlockingPromptAccepted;
-        releaseOnExit = false;
-        try {
-          return await this._awaitTurnComplete(
-            sessionId,
-            accept.promptId,
-            accept.lastEventId,
-            signal,
-            clientId,
-          );
-        } finally {
-          releasePromptSlot();
-        }
+        return await this._awaitTurnComplete(
+          sessionId,
+          accept.promptId,
+          accept.lastEventId,
+          signal,
+        );
       }
 
       if (!res.ok) {
@@ -3238,8 +3263,18 @@ export class DaemonClient {
         );
       }
       return (await res.json()) as PromptResult;
+    } catch (err) {
+      if (acceptedAsynchronousPrompt && signal?.aborted) {
+        try {
+          await this.cancel(sessionId, clientId);
+        } catch (cancelError) {
+          if (isInvalidDaemonClientIdError(cancelError)) throw cancelError;
+        }
+        throw signal.reason ?? err;
+      }
+      throw err;
     } finally {
-      if (releaseOnExit) releasePromptSlot();
+      releasePromptSlot();
     }
   }
 
@@ -3266,13 +3301,15 @@ export class DaemonClient {
     req: PromptRequest,
     signal?: AbortSignal,
     clientId?: string,
+    options?: DaemonPromptOptions,
   ): Promise<NonBlockingPromptAccepted | PromptResult> {
+    const stampedRequest = this.withPromptIngress(req, options);
     const res = await this.transport.fetch(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/prompt`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
-        body: JSON.stringify(req),
+        body: JSON.stringify(stampedRequest),
         signal,
       },
     );
@@ -3292,7 +3329,6 @@ export class DaemonClient {
     promptId: string,
     lastEventId: number,
     signal?: AbortSignal,
-    clientId?: string,
   ): Promise<PromptResult> {
     const sseAbort = new AbortController();
     const composedSignal = signal
@@ -3309,16 +3345,6 @@ export class DaemonClient {
         if (result !== undefined) return result;
       }
       throw new Error('SSE stream ended');
-    } catch (err) {
-      if (
-        signal?.aborted &&
-        err instanceof DOMException &&
-        err.name === 'AbortError'
-      ) {
-        this.cancel(sessionId, clientId).catch(() => {});
-        throw err;
-      }
-      throw err;
     } finally {
       if (!sseAbort.signal.aborted) sseAbort.abort();
     }

@@ -193,6 +193,7 @@ export async function start_sandbox(
   nodeArgs: string[] = [],
   cliConfig?: Config,
   cliArgs: string[] = [],
+  childEnv?: Readonly<Record<string, string>>,
 ): Promise<number> {
   if (config.command === 'sandbox-exec') {
     // disallow BUILD_SANDBOX
@@ -342,6 +343,7 @@ export async function start_sandbox(
     process.stdin.pause();
     sandboxProcess = spawn(config.command, args, {
       stdio: 'inherit',
+      ...(childEnv ? { env: { ...process.env, ...childEnv } } : {}),
     });
     return new Promise((resolve, reject) => {
       sandboxProcess?.on('error', reject);
@@ -759,6 +761,10 @@ export async function start_sandbox(
     }
   }
 
+  for (const name of Object.keys(childEnv ?? {})) {
+    args.push('--env', name);
+  }
+
   // copy NODE_OPTIONS
   const existingNodeOptions = process.env['NODE_OPTIONS'] || '';
   const allNodeOptions = [
@@ -896,6 +902,7 @@ export async function start_sandbox(
   process.stdin.pause();
   sandboxProcess = spawn(config.command, args, {
     stdio: 'inherit',
+    ...(childEnv ? { env: { ...process.env, ...childEnv } } : {}),
   });
 
   return new Promise<number>((resolve, reject) => {

@@ -207,17 +207,34 @@ await esbuild.build({
 });
 
 // Build serve-bridge CLI bin entry
+const serveBridgeBinPath = join(
+  rootDir,
+  'dist',
+  'daemon-mcp',
+  'serve-bridge',
+  'bin.js',
+);
 await esbuild.build({
   entryPoints: [join(rootDir, 'src', 'daemon-mcp', 'serve-bridge', 'bin.ts')],
   bundle: true,
   format: 'esm',
   platform: 'node',
   target: 'node22',
-  outfile: join(rootDir, 'dist', 'daemon-mcp', 'serve-bridge', 'bin.js'),
+  outfile: serveBridgeBinPath,
   external: ['@modelcontextprotocol/sdk'],
   sourcemap: false,
-  banner: { js: '#!/usr/bin/env node' },
 });
+
+const serveBridgeBin = readFileSync(serveBridgeBinPath, 'utf8');
+const nodeShebang = '#!/usr/bin/env node';
+const shebangCount = serveBridgeBin
+  .split(/\r?\n/)
+  .filter((line) => line === nodeShebang).length;
+if (!serveBridgeBin.startsWith(`${nodeShebang}\n`) || shebangCount !== 1) {
+  throw new Error(
+    `qwen-serve-mcp bundle must start with exactly one Node shebang; found ${shebangCount}`,
+  );
+}
 
 // Copy LICENSE from root directory to dist
 const licenseSource = join(rootDir, '..', '..', 'LICENSE');

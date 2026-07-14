@@ -16,6 +16,11 @@ import {
   type RuntimeContentGeneratorView,
 } from './agent-context.js';
 import { subagentNameContext } from '../../utils/subagentNameContext.js';
+import {
+  getInvocationContext,
+  runWithInvocationContext,
+  type InvocationContextV1,
+} from '../../utils/invocation-context.js';
 import { runInForkContext } from '../../tools/agent/fork-subagent.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import {
@@ -136,6 +141,58 @@ describe('AgentCore.runInAgentFrames', () => {
     expect(onConfirmInvocations).toHaveLength(1);
     expect(onConfirmInvocations[0]!.view).toBe(view);
     expect(onConfirmInvocations[0]!.name).toBe('approval-agent');
+  });
+
+  it('restores the captured invocation context for deferred approval', async () => {
+    const core = makeCore('approval-agent');
+    const capturedContext: InvocationContextV1 = {
+      version: 1,
+      ingress: 'channel',
+      sessionId: 'session-a',
+      promptId: 'prompt-a',
+    };
+    const unrelatedContext: InvocationContextV1 = {
+      version: 1,
+      ingress: 'daemon',
+      sessionId: 'session-b',
+      promptId: 'prompt-b',
+    };
+    let respond: (() => Promise<void>) | undefined;
+    let observed: InvocationContextV1 | undefined;
+
+    await runWithInvocationContext(capturedContext, async () => {
+      const inherited = getInvocationContext();
+      respond = () =>
+        runWithInvocationContext(inherited, () =>
+          core.runInAgentFrames(async () => {
+            observed = getInvocationContext();
+          }),
+        );
+    });
+
+    await runWithInvocationContext(unrelatedContext, () => respond!());
+    expect(observed).toBe(capturedContext);
+  });
+
+  it('clears an unrelated invocation context when deferred approval captured none', async () => {
+    const core = makeCore('approval-agent');
+    const inherited = getInvocationContext();
+    const unrelatedContext: InvocationContextV1 = {
+      version: 1,
+      ingress: 'daemon',
+      sessionId: 'session-b',
+      promptId: 'prompt-b',
+    };
+    let observed: InvocationContextV1 | undefined;
+    const respond = () =>
+      runWithInvocationContext(inherited, () =>
+        core.runInAgentFrames(async () => {
+          observed = getInvocationContext();
+        }),
+      );
+
+    await runWithInvocationContext(unrelatedContext, respond);
+    expect(observed).toBeUndefined();
   });
 
   it('still publishes the agent name when no runtime view is set (inheriting agent)', async () => {

@@ -57,6 +57,15 @@ export interface SessionEventStream {
   lastActivityMs: number;
 }
 
+/** One daemon attachment and its matching event stream. */
+export interface SessionBinding {
+  readonly sessionId: string;
+  readonly clientId: string | undefined;
+  readonly stream: SessionEventStream;
+  /** One-shot release latch. Identity fields remain immutable. */
+  releasePromise?: Promise<void>;
+}
+
 /**
  * Mutable bridge state shared across all tool handlers.
  */
@@ -68,8 +77,15 @@ export interface BridgeState {
   token: string | undefined;
   defaultSessionId: string | undefined;
   workspaceCwd: string | undefined;
-  /** Persistent SSE connections keyed by sessionId. */
-  eventStreams: Map<string, SessionEventStream>;
+  /** Live daemon attachments keyed by sessionId. */
+  bindings: Map<string, SessionBinding>;
+  /** Promise tails for the few lifecycle operations that must be serialized. */
+  sessionLocks: Map<string, Promise<void>>;
+  /** In-flight session lifecycle operations that disposal must drain. */
+  pendingLifecycles: Set<Promise<void>>;
+  /** Releases that may outlive removal from `bindings`. */
+  pendingReleases: Set<Promise<void>>;
+  disposed: boolean;
   /** Whether global scope writes are allowed (default: false). */
   allowGlobalScope: boolean;
 }

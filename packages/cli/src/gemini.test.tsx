@@ -793,6 +793,7 @@ describe('gemini.tsx main function', () => {
   const runSandboxRelaunch = async (
     argv: string[],
     sessionId = '123e4567-e89b-12d3-a456-426614174000',
+    acp = false,
   ): Promise<string[]> => {
     const originalArgv = process.argv;
     process.argv = argv;
@@ -814,6 +815,7 @@ describe('gemini.tsx main function', () => {
       debug: true,
       prompt: 'hello',
       extensions: [],
+      acp,
     } as unknown as CliArgs);
     vi.mocked(loadSettings).mockReturnValue({
       errors: [],
@@ -863,6 +865,31 @@ describe('gemini.tsx main function', () => {
     expect(idx).not.toBe(-1);
     expect(sandboxArgs[idx + 1]).toBe(sessionId);
     expect(sandboxArgs).not.toContain('--session-id');
+  });
+
+  it('passes the private ACP capability only to the sandbox child', async () => {
+    const envName = 'QWEN_CODE_PRIVATE_ACP_CAPABILITY';
+    const originalCapability = process.env[envName];
+    process.env[envName] = 'private-capability';
+
+    try {
+      await runSandboxRelaunch(
+        ['node', 'script.js', '--acp'],
+        '123e4567-e89b-12d3-a456-426614174000',
+        true,
+      );
+      const { start_sandbox } = await import('./utils/sandbox.js');
+      expect(vi.mocked(start_sandbox).mock.calls[0]?.[4]).toEqual({
+        [envName]: 'private-capability',
+      });
+      expect(process.env[envName]).toBeUndefined();
+    } finally {
+      if (originalCapability === undefined) {
+        delete process.env[envName];
+      } else {
+        process.env[envName] = originalCapability;
+      }
+    }
   });
 
   it('does not pass an empty session ID into the sandbox child process', async () => {
@@ -1545,10 +1572,15 @@ describe('gemini.tsx main function kitty protocol', () => {
   });
 
   it('should not defer IDE connection when Zed integration is enabled', async () => {
+    const privateCapability = 'private-capability';
+    const originalPrivateCapability =
+      process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY'];
+    process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY'] = privateCapability;
     const { loadCliConfig, parseArguments } = await import(
       './config/config.js'
     );
     const { loadSettings } = await import('./config/settings.js');
+    const { relaunchAppInChildProcess } = await import('./utils/relaunch.js');
     const initializerModule = await import('./core/initializer.js');
     const initializeAppSpy = vi
       .spyOn(initializerModule, 'initializeApp')
@@ -1578,19 +1610,22 @@ describe('gemini.tsx main function kitty protocol', () => {
       getUsageStatisticsEnabled: () => true,
       getSessionId: () => 'test-session-id',
     } as unknown as Config);
-    vi.mocked(loadSettings).mockReturnValue({
-      errors: [],
-      merged: {
-        advanced: {},
-        security: { auth: {} },
-        ui: {},
-      },
-      setValue: vi.fn(),
-      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
-      migrationWarnings: [],
-      getUserHooks: () => undefined,
-      getProjectHooks: () => undefined,
-    } as never);
+    vi.mocked(loadSettings).mockImplementation(() => {
+      expect(process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY']).toBeUndefined();
+      return {
+        errors: [],
+        merged: {
+          advanced: {},
+          security: { auth: {} },
+          ui: {},
+        },
+        setValue: vi.fn(),
+        forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+        migrationWarnings: [],
+        getUserHooks: () => undefined,
+        getProjectHooks: () => undefined,
+      } as never;
+    });
     vi.mocked(parseArguments).mockResolvedValue({
       model: undefined,
       sandbox: undefined,
@@ -1613,7 +1648,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       allowedMcpServerNames: undefined,
       mcpConfig: undefined,
       allowedTools: undefined,
-      acp: undefined,
+      acp: true,
       experimentalAcp: undefined,
       extensions: undefined,
       listExtensions: undefined,
@@ -1656,6 +1691,12 @@ describe('gemini.tsx main function kitty protocol', () => {
       if (!(e instanceof MockProcessExitError)) throw e;
     } finally {
       process.exit = originalExit;
+      if (originalPrivateCapability === undefined) {
+        delete process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY'];
+      } else {
+        process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY'] =
+          originalPrivateCapability;
+      }
     }
 
     expect(initializeAppSpy).toHaveBeenCalledWith(
@@ -1669,6 +1710,16 @@ describe('gemini.tsx main function kitty protocol', () => {
       expect.any(Object),
       expect.any(Object),
       expect.any(Object),
+      { privateParentCapability: privateCapability },
+    );
+    expect(relaunchAppInChildProcess).toHaveBeenCalledWith(
+      expect.any(Array),
+      [],
+      expect.objectContaining({
+        childEnv: {
+          QWEN_CODE_PRIVATE_ACP_CAPABILITY: privateCapability,
+        },
+      }),
     );
     expect(mockStartEarlyStartupPrefetches).toHaveBeenCalledWith(
       expect.any(Object),

@@ -94,7 +94,7 @@ export class BridgeChannelMemoryIntentClassifier
       const response = await bridge.prompt(
         sessionId,
         `${CLASSIFIER_PROMPT}${JSON.stringify(text)}`,
-        {},
+        { invocationIngress: 'internal' },
       );
       return normalizeClassifierResult(extractJsonObject(response));
     } finally {

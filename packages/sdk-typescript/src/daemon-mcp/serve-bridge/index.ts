@@ -5,4 +5,5 @@
  */
 
 export { createServeBridgeMcpServer } from './createServeBridgeMcpServer.js';
+export type { ServeBridgeMcpServer } from './createServeBridgeMcpServer.js';
 export type { ServeBridgeMcpServerOptions, BridgeState } from './types.js';

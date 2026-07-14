@@ -116,6 +116,10 @@ const server = createServeBridgeMcpServer({
 
 const transport = new StdioServerTransport();
 await server.instance.connect(transport);
+
+// During shutdown, close the protocol first, then release daemon bindings.
+await server.instance.close();
+await server.dispose();
 ```
 
 ## 提供的工具（共 31 个）

@@ -128,6 +128,12 @@ vi.mock('node:stream', async (importOriginal) => {
 
 // Mock core dependencies
 vi.mock('@qwen-code/qwen-code-core', () => ({
+  INVOCATION_CONTEXT_META_KEY: 'qwen-code/invocation',
+  INVOCATION_INGRESS_META_KEY: 'qwen-code/invocation-ingress',
+  PRIVATE_PARENT_CAPABILITY_META_KEY: 'qwen-code/private-parent-capability',
+  parseInvocationContext: vi.fn((value: unknown) =>
+    typeof value === 'object' && value !== null ? value : undefined,
+  ),
   SESSION_ARTIFACT_PERSISTENCE_VERSION: 2,
   normalizeEventPayload: vi.fn((payload: unknown) =>
     typeof payload === 'object' &&
@@ -748,6 +754,7 @@ describe('runAcpAgent shutdown cleanup', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY'];
     // Reset mockConfig after clearAllMocks
     mockConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
@@ -803,6 +810,7 @@ describe('runAcpAgent shutdown cleanup', () => {
   });
 
   afterEach(() => {
+    delete process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY'];
     processExitSpy.mockRestore();
     stdinDestroySpy.mockRestore();
     stdoutDestroySpy.mockRestore();
@@ -936,6 +944,31 @@ describe('runAcpAgent shutdown cleanup', () => {
     await agentPromise;
 
     expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('removes the private parent capability before config initialization', async () => {
+    const envName = 'QWEN_CODE_PRIVATE_ACP_CAPABILITY';
+    const previous = process.env[envName];
+    process.env[envName] = 'private-capability';
+    let observedDuringInitialize: string | undefined;
+    mockConfig.initialize = vi.fn().mockImplementation(async () => {
+      observedDuringInitialize = process.env[envName];
+    });
+
+    try {
+      const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
+      await vi.waitFor(() =>
+        expect(mockConfig.initialize).toHaveBeenCalledTimes(1),
+      );
+      expect(observedDuringInitialize).toBeUndefined();
+      expect(process.env[envName]).toBeUndefined();
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    } finally {
+      if (previous === undefined) delete process.env[envName];
+      else process.env[envName] = previous;
+    }
   });
 
   it('disposes the event loop monitor when connection setup fails', async () => {
@@ -1291,6 +1324,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   type AgentLike = {
     initialize: (args: Record<string, unknown>) => Promise<unknown>;
     newSession: (args: Record<string, unknown>) => Promise<unknown>;
+    prompt: (args: Record<string, unknown>) => Promise<unknown>;
     extMethod: (
       method: string,
       args: Record<string, unknown>,
@@ -1305,6 +1339,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         restoreHistory: ReturnType<typeof vi.fn>;
         rewindToTurn: ReturnType<typeof vi.fn>;
         getRewindableUserTurnCount: ReturnType<typeof vi.fn>;
+        prompt: ReturnType<typeof vi.fn>;
       }
     | undefined;
   let processExitSpy: MockInstance<typeof process.exit>;
@@ -1316,6 +1351,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY'];
     mockConnectionState.reset();
     mockRunExitCleanup.mockResolvedValue(undefined);
     mockExtensionManagerState.extensions = [];
@@ -1368,6 +1404,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   });
 
   afterEach(() => {
+    delete process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY'];
     processExitSpy.mockRestore();
     stdinDestroySpy.mockRestore();
     stdoutDestroySpy.mockRestore();
@@ -1406,6 +1443,178 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
     });
 
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects every initialize retry after a private capability mismatch', async () => {
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+      {
+        privateParentCapability: 'expected-capability',
+      },
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.initialize({
+        clientCapabilities: {},
+        _meta: {
+          'qwen-code/private-parent-capability': 'wrong-capability',
+        },
+      }),
+    ).rejects.toThrow('Invalid private ACP parent capability');
+    await expect(
+      agent.initialize({
+        clientCapabilities: {},
+        _meta: {
+          'qwen-code/private-parent-capability': 'expected-capability',
+        },
+      }),
+    ).rejects.toThrow('Invalid private ACP parent capability');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects every initialize retry after a private capability is missing', async () => {
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+      {
+        privateParentCapability: 'expected-capability',
+      },
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(agent.initialize({ clientCapabilities: {} })).rejects.toThrow(
+      'Invalid private ACP parent capability',
+    );
+    await expect(
+      agent.initialize({
+        clientCapabilities: {},
+        _meta: {
+          'qwen-code/private-parent-capability': 'expected-capability',
+        },
+      }),
+    ).rejects.toThrow('Invalid private ACP parent capability');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('preserves trusted parent invocation metadata and strips the advisory', async () => {
+    await setupSessionMocks('trusted-session');
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+      {
+        privateParentCapability: 'expected-capability',
+      },
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        'qwen-code/private-parent-capability': 'expected-capability',
+      },
+    });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const invocation = {
+      version: 1,
+      ingress: 'channel',
+      sessionId: 'trusted-session',
+      promptId: 'trusted-prompt',
+    };
+
+    await agent.prompt({
+      sessionId: 'trusted-session',
+      prompt: [{ type: 'text', text: 'hello' }],
+      _meta: {
+        keep: true,
+        'qwen-code/invocation': invocation,
+        'qwen-code/invocation-ingress': 'scheduler',
+        'qwen-code/private-parent-capability': 'must-not-propagate',
+      },
+    });
+
+    expect(lastSessionMock?.prompt).toHaveBeenCalledWith({
+      sessionId: 'trusted-session',
+      prompt: [{ type: 'text', text: 'hello' }],
+      _meta: {
+        keep: true,
+        'qwen-code/invocation': invocation,
+      },
+    });
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('strips forged invocation metadata from an untrusted ACP client', async () => {
+    const envName = 'QWEN_CODE_PRIVATE_ACP_CAPABILITY';
+    process.env[envName] = 'late-env-capability';
+    await setupSessionMocks('untrusted-session');
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+      { privateParentCapability: undefined },
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    expect(process.env[envName]).toBeUndefined();
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        'qwen-code/private-parent-capability': 'late-env-capability',
+      },
+    });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await agent.prompt({
+      sessionId: 'untrusted-session',
+      prompt: [{ type: 'text', text: 'hello' }],
+      _meta: {
+        keep: true,
+        'qwen-code/invocation': {
+          version: 1,
+          ingress: 'daemon',
+          sessionId: 'forged-session',
+          promptId: 'forged-prompt',
+        },
+        'qwen-code/invocation-ingress': 'scheduler',
+        'qwen-code/private-parent-capability': 'must-not-propagate',
+      },
+    });
+
+    expect(lastSessionMock?.prompt).toHaveBeenCalledWith({
+      sessionId: 'untrusted-session',
+      prompt: [{ type: 'text', text: 'hello' }],
+      _meta: { keep: true },
+    });
     mockConnectionState.resolve();
     await agentPromise;
   });
@@ -1901,6 +2110,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           .fn()
           .mockReturnValue({ targetTurnIndex: 1, apiTruncateIndex: 2 }),
         getRewindableUserTurnCount: vi.fn().mockReturnValue(1),
+        prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
       };
       lastSessionMock = sessionMock;
       return sessionMock as unknown as InstanceType<typeof Session>;

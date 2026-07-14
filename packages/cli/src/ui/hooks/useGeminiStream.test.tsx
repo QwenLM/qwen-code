@@ -23,6 +23,7 @@ import type {
   EditorType,
   GeminiClient,
   AnyToolInvocation,
+  InvocationContextV1,
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
@@ -32,6 +33,8 @@ import {
   SendMessageType,
   ToolErrorType,
   ToolConfirmationOutcome,
+  getInvocationContext,
+  runWithInvocationContext,
 } from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
@@ -387,6 +390,17 @@ describe('useGeminiStream', () => {
 
   it('queues background shell terminal notifications for the model loop', async () => {
     const { mockSendMessageStream } = renderTestHook();
+    const inheritedContext: InvocationContextV1 = {
+      version: 1,
+      ingress: 'cli',
+      sessionId: 'inherited-session',
+      promptId: 'test-session-id########5',
+    };
+    let observedContext: InvocationContextV1 | undefined;
+    mockSendMessageStream.mockImplementationOnce(async function* () {
+      observedContext = getInvocationContext();
+      yield* [];
+    });
     const displayText = 'Background shell "npm test" completed.';
     const modelText =
       '<task-notification>\n<kind>shell</kind>\n<status>completed</status>\n</task-notification>';
@@ -400,9 +414,11 @@ describe('useGeminiStream', () => {
     const callback = mockBackgroundShellRegistry.setNotificationCallback.mock
       .calls[0][0] as (displayText: string, modelText: string) => void;
 
-    act(() => {
-      callback(displayText, modelText);
-    });
+    act(() =>
+      runWithInvocationContext(inheritedContext, () =>
+        callback(displayText, modelText),
+      ),
+    );
 
     await waitFor(() => {
       expect(mockAddItem).toHaveBeenCalledWith(
@@ -421,6 +437,12 @@ describe('useGeminiStream', () => {
         }),
       );
     });
+    expect(observedContext).toMatchObject({
+      version: 1,
+      ingress: 'internal',
+      sessionId: mockConfig.getSessionId(),
+    });
+    expect(observedContext?.promptId).not.toBe(inheritedContext.promptId);
   });
 
   describe('vision bridge gate', () => {

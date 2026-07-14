@@ -1247,7 +1247,9 @@ export abstract class ChannelBase {
     jobId: string,
     timeoutMs: number | undefined,
   ): Promise<string> {
-    const prompt = promptBridge.prompt(sessionId, promptText, {});
+    const prompt = promptBridge.prompt(sessionId, promptText, {
+      invocationIngress: 'scheduler',
+    });
     prompt.catch(() => {});
     if (timeoutMs === undefined) {
       return prompt;
@@ -3872,6 +3874,7 @@ export abstract class ChannelBase {
         const response = await promptBridge.prompt(sessionId, promptToSend, {
           imageBase64,
           imageMimeType,
+          invocationIngress: 'channel',
         });
 
         await this.settleCancelRequested(promptState);

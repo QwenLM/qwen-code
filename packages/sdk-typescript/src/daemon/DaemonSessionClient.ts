@@ -5,13 +5,14 @@
  */
 
 import type { DaemonClient } from './DaemonClient.js';
-import { DaemonHttpError } from './DaemonHttpError.js';
+import { isInvalidDaemonClientIdError } from './DaemonHttpError.js';
 import {
   isNonBlockingAccepted,
   matchTurnEvent,
   normalizePendingPromptLimit,
   type CreateSessionRequest,
   type NonBlockingPromptAccepted,
+  type DaemonPromptOptions,
   type PromptRequest,
   type RestoreSessionRequest,
   type SubscribeOptions,
@@ -267,11 +268,12 @@ export class DaemonSessionClient {
   async prompt(
     req: PromptRequest,
     signal?: AbortSignal,
+    options?: DaemonPromptOptions,
   ): Promise<PromptResult> {
     signal?.throwIfAborted();
     if (!this.subscriptionActive) {
       return await this.withClientIdSelfHeal(() =>
-        this.client.prompt(this.sessionId, req, signal, this.clientId),
+        this.client.prompt(this.sessionId, req, signal, this.clientId, options),
       );
     }
 
@@ -287,6 +289,7 @@ export class DaemonSessionClient {
           req,
           signal,
           this.clientId,
+          options,
         ),
       );
       if (!isNonBlockingAccepted(accepted)) {
@@ -343,10 +346,17 @@ export class DaemonSessionClient {
   async submitPrompt(
     req: PromptRequest,
     signal?: AbortSignal,
+    options?: DaemonPromptOptions,
   ): Promise<NonBlockingPromptAccepted> {
     signal?.throwIfAborted();
     const accepted = await this.withClientIdSelfHeal(() =>
-      this.client.promptNonBlocking(this.sessionId, req, signal, this.clientId),
+      this.client.promptNonBlocking(
+        this.sessionId,
+        req,
+        signal,
+        this.clientId,
+        options,
+      ),
     );
     if (!isNonBlockingAccepted(accepted)) {
       throw new Error('Expected non-blocking prompt acceptance');
@@ -369,7 +379,7 @@ export class DaemonSessionClient {
     try {
       return await fn();
     } catch (err) {
-      if (!isInvalidClientId(err)) throw err;
+      if (!isInvalidDaemonClientIdError(err)) throw err;
       await this.reattach();
       return await fn();
     }
@@ -774,18 +784,4 @@ function validateLastEventId(
     throw new TypeError('invalid lastEventId');
   }
   return lastEventId;
-}
-
-/**
- * True for the daemon's `400 invalid_client_id` prompt-admission rejection
- * (the stale-clientId signal a daemon restart / session reload produces).
- */
-function isInvalidClientId(err: unknown): boolean {
-  return (
-    err instanceof DaemonHttpError &&
-    err.status === 400 &&
-    typeof err.body === 'object' &&
-    err.body !== null &&
-    (err.body as { code?: unknown }).code === 'invalid_client_id'
-  );
 }

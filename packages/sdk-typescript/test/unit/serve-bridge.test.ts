@@ -17,10 +17,14 @@ import {
   resolveSessionId,
   handler,
 } from '../../src/daemon-mcp/serve-bridge/helpers.js';
-import type {
-  BridgeState,
-  SessionEventStream,
-} from '../../src/daemon-mcp/serve-bridge/types.js';
+import type { BridgeState } from '../../src/daemon-mcp/serve-bridge/types.js';
+import {
+  createBinding,
+  disposeBindings,
+  replaceBinding,
+  startSessionCleanup,
+} from '../../src/daemon-mcp/serve-bridge/bindings.js';
+import { createPromptCollector } from '../../src/daemon-mcp/serve-bridge/sse.js';
 import { DaemonClient } from '../../src/daemon/DaemonClient.js';
 
 // --- Helpers ---
@@ -37,6 +41,7 @@ interface CapturedRequest {
   method: string;
   headers: Record<string, string>;
   body: string | null;
+  signal: AbortSignal | null;
 }
 
 function recordingFetch(
@@ -58,7 +63,13 @@ function recordingFetch(
         h.forEach((v, k) => (headers[k.toLowerCase()] = v));
       }
       const body = typeof init?.body === 'string' ? init.body : null;
-      const captured: CapturedRequest = { url, method, headers, body };
+      const captured: CapturedRequest = {
+        url,
+        method,
+        headers,
+        body,
+        signal: init?.signal ?? null,
+      };
       calls.push(captured);
       return reply(captured);
     },
@@ -80,16 +91,42 @@ function makeMockState(opts?: {
       baseUrl: 'http://127.0.0.1:4170',
       token,
       fetch,
+      invocationIngress: 'external_mcp',
     }),
     daemonUrl: 'http://127.0.0.1:4170',
     token,
     defaultSessionId: opts?.defaultSessionId,
     workspaceCwd: '/tmp/test-workspace',
-    eventStreams: new Map(),
+    bindings: new Map(),
+    sessionLocks: new Map(),
+    pendingLifecycles: new Set(),
+    pendingReleases: new Set(),
+    disposed: false,
     allowGlobalScope: false,
   };
 
+  vi.spyOn(state.client, 'subscribeEvents').mockImplementation(
+    async function* (_sessionId, subscribeOpts) {
+      await new Promise<void>((resolve) => {
+        if (subscribeOpts.signal?.aborted) {
+          resolve();
+        } else {
+          subscribeOpts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        }
+      });
+      yield* [];
+    },
+  );
+
   return { state, calls };
+}
+
+function bindSession(state: BridgeState, sessionId: string, clientId?: string) {
+  const binding = createBinding(sessionId, clientId);
+  state.bindings.set(sessionId, binding);
+  return binding;
 }
 
 // --- Tests ---
@@ -106,6 +143,7 @@ describe('serve-bridge', () => {
       expect(server).toBeDefined();
       expect(server.name).toBe('qwen-serve-bridge');
       expect(server.instance).toBeDefined();
+      expect(server.dispose).toBeTypeOf('function');
     });
 
     it('should strip trailing slashes from daemonUrl', () => {
@@ -114,6 +152,17 @@ describe('serve-bridge', () => {
         token: 'test',
       });
       expect(server).toBeDefined();
+    });
+
+    it('should return one idempotent dispose promise', async () => {
+      const server = createServeBridgeMcpServer({
+        daemonUrl: 'http://127.0.0.1:4170',
+        token: 'test',
+      });
+
+      const first = server.dispose();
+      expect(server.dispose()).toBe(first);
+      await first;
     });
   });
 
@@ -143,7 +192,7 @@ describe('serve-bridge', () => {
         .mockResolvedValue({ content: [{ type: 'text', text: 'ok' }] });
       const wrapped = handler(fn);
       const result = await wrapped({ foo: 'bar' }, {});
-      expect(fn).toHaveBeenCalledWith({ foo: 'bar' });
+      expect(fn).toHaveBeenCalledWith({ foo: 'bar' }, { signal: undefined });
       expect(result).toEqual({ content: [{ type: 'text', text: 'ok' }] });
     });
 
@@ -219,6 +268,208 @@ describe('serve-bridge', () => {
         expect(result.content[0].text).toContain('new-session-id');
         expect(state.defaultSessionId).toBe('new-session-id');
       });
+
+      it('should retain bindings for multiple created sessions', async () => {
+        let createCount = 0;
+        const { state, calls } = makeMockState({
+          fetchReply: (req) => {
+            if (req.url.endsWith('/session') && req.method === 'POST') {
+              createCount++;
+              return jsonResponse(200, {
+                sessionId: createCount === 1 ? 'session-a' : 'session-b',
+                clientId: createCount === 1 ? 'client-a' : 'client-b',
+                workspaceCwd: '/tmp',
+                attached: false,
+              });
+            }
+            return new Response(null, { status: 204 });
+          },
+        });
+        const { sessionTools } = await import(
+          '../../src/daemon-mcp/serve-bridge/tools/session.js'
+        );
+        const createTool = sessionTools(state).find(
+          (t: { name: string }) => t.name === 'session_create',
+        );
+
+        await createTool.handler({}, {});
+        await createTool.handler({}, {});
+
+        expect(state.defaultSessionId).toBe('session-b');
+        expect([...state.bindings.keys()]).toEqual(['session-a', 'session-b']);
+        expect(state.bindings.get('session-a')?.clientId).toBe('client-a');
+        expect(state.bindings.get('session-b')?.clientId).toBe('client-b');
+        expect(calls.some((call) => call.url.endsWith('/detach'))).toBe(false);
+      });
+
+      it('should discard a create acquisition when its session has an active prompt', async () => {
+        const { state, calls } = makeMockState({
+          defaultSessionId: 'session-a',
+          fetchReply: (req) => {
+            if (req.url.endsWith('/session') && req.method === 'POST') {
+              return jsonResponse(200, {
+                sessionId: 'session-a',
+                clientId: 'client-new',
+                workspaceCwd: '/tmp',
+                attached: true,
+              });
+            }
+            return new Response(null, { status: 204 });
+          },
+        });
+        const existing = bindSession(state, 'session-a', 'client-old');
+        existing.stream.activeCollector = createPromptCollector();
+        const { sessionTools } = await import(
+          '../../src/daemon-mcp/serve-bridge/tools/session.js'
+        );
+        const createTool = sessionTools(state).find(
+          (t: { name: string }) => t.name === 'session_create',
+        );
+
+        const result = await createTool.handler({}, {});
+
+        expect(result.isError).toBe(true);
+        expect(state.bindings.get('session-a')).toBe(existing);
+        expect(state.defaultSessionId).toBe('session-a');
+        const detachCalls = calls.filter((call) =>
+          call.url.endsWith('/session/session-a/detach'),
+        );
+        expect(detachCalls).toHaveLength(1);
+        expect(detachCalls[0]?.headers['x-qwen-client-id']).toBe('client-new');
+      });
+
+      it('should keep disposal pending until an in-flight create is released', async () => {
+        let resolveCreate!: (response: Response) => void;
+        const { state, calls } = makeMockState({
+          fetchReply: (req) => {
+            if (req.url.endsWith('/session') && req.method === 'POST') {
+              return new Promise<Response>((resolve) => {
+                resolveCreate = resolve;
+              });
+            }
+            return new Response(null, { status: 204 });
+          },
+        });
+        const { sessionTools } = await import(
+          '../../src/daemon-mcp/serve-bridge/tools/session.js'
+        );
+        const createTool = sessionTools(state).find(
+          (t: { name: string }) => t.name === 'session_create',
+        );
+
+        const creating = createTool.handler({}, {});
+        await vi.waitFor(() => expect(resolveCreate).toBeTypeOf('function'));
+        let disposed = false;
+        const disposing = disposeBindings(state).finally(() => {
+          disposed = true;
+        });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(disposed).toBe(false);
+
+        resolveCreate(
+          jsonResponse(200, {
+            sessionId: 'session-a',
+            clientId: 'client-new',
+            workspaceCwd: '/tmp',
+            attached: false,
+          }),
+        );
+        const result = await creating;
+        await disposing;
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('shutting down');
+        expect(state.bindings.size).toBe(0);
+        const detachCalls = calls.filter((call) =>
+          call.url.endsWith('/detach'),
+        );
+        expect(detachCalls).toHaveLength(1);
+        expect(detachCalls[0]?.headers['x-qwen-client-id']).toBe('client-new');
+      });
+
+      it('should reject a create started after disposal without acquiring a session', async () => {
+        const { state, calls } = makeMockState({
+          fetchReply: () =>
+            jsonResponse(200, {
+              sessionId: 'unexpected',
+              clientId: 'unexpected-client',
+              workspaceCwd: '/tmp',
+              attached: false,
+            }),
+        });
+        const { sessionTools } = await import(
+          '../../src/daemon-mcp/serve-bridge/tools/session.js'
+        );
+        const createTool = sessionTools(state).find(
+          (t: { name: string }) => t.name === 'session_create',
+        );
+        await disposeBindings(state);
+
+        const result = await createTool.handler({}, {});
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('shutting down');
+        expect(calls).toHaveLength(0);
+      });
+    });
+
+    describe('session_resume', () => {
+      it('should serialize replacements and detach every prior acquisition', async () => {
+        let resolveFirst!: (response: Response) => void;
+        let resumeCount = 0;
+        const { state, calls } = makeMockState({
+          defaultSessionId: 'session-a',
+          fetchReply: (req) => {
+            if (req.url.endsWith('/resume')) {
+              resumeCount++;
+              if (resumeCount === 1) {
+                return new Promise<Response>((resolve) => {
+                  resolveFirst = resolve;
+                });
+              }
+              return jsonResponse(200, {
+                sessionId: 'session-a',
+                clientId: 'client-old',
+                workspaceCwd: '/tmp',
+              });
+            }
+            return new Response(null, { status: 204 });
+          },
+        });
+        await replaceBinding(state, createBinding('session-a', 'client-old'));
+        const { sessionTools } = await import(
+          '../../src/daemon-mcp/serve-bridge/tools/session.js'
+        );
+        const resumeTool = sessionTools(state).find(
+          (t: { name: string }) => t.name === 'session_resume',
+        );
+
+        const first = resumeTool.handler({ session_id: 'session-a' }, {});
+        const second = resumeTool.handler({ session_id: 'session-a' }, {});
+        await vi.waitFor(() => expect(resumeCount).toBe(1));
+        resolveFirst(
+          jsonResponse(200, {
+            sessionId: 'session-a',
+            clientId: 'client-old',
+            workspaceCwd: '/tmp',
+          }),
+        );
+        await first;
+        await second;
+
+        const resumeCalls = calls.filter((call) =>
+          call.url.endsWith('/resume'),
+        );
+        expect(resumeCalls).toHaveLength(2);
+        expect(resumeCalls[0]?.headers['x-qwen-client-id']).toBe('client-old');
+        expect(resumeCalls[1]?.headers['x-qwen-client-id']).toBe('client-old');
+        const detachIds = calls
+          .filter((call) => call.url.endsWith('/detach'))
+          .map((call) => call.headers['x-qwen-client-id']);
+        expect(detachIds).toEqual(['client-old', 'client-old']);
+        expect(state.bindings.get('session-a')?.clientId).toBe('client-old');
+        expect(state.defaultSessionId).toBe('session-a');
+      });
     });
 
     describe('session_close', () => {
@@ -227,6 +478,10 @@ describe('serve-bridge', () => {
           defaultSessionId: 'sess-to-close',
           fetchReply: () => new Response(null, { status: 204 }),
         });
+        state.bindings.set(
+          'sess-to-close',
+          createBinding('sess-to-close', 'client-close'),
+        );
 
         const { sessionTools } = await import(
           '../../src/daemon-mcp/serve-bridge/tools/session.js'
@@ -243,8 +498,12 @@ describe('serve-bridge', () => {
       it('should not clear defaultSessionId when closing a different session', async () => {
         const { state } = makeMockState({
           defaultSessionId: 'keep-this',
-          fetchReply: () => new Response(null, { status: 204 }),
+          fetchReply: () => jsonResponse(404, { code: 'not_found' }),
         });
+        state.bindings.set(
+          'other-session',
+          createBinding('other-session', 'client-other'),
+        );
 
         const { sessionTools } = await import(
           '../../src/daemon-mcp/serve-bridge/tools/session.js'
@@ -256,6 +515,133 @@ describe('serve-bridge', () => {
 
         await closeTool.handler({ session_id: 'other-session' }, {});
         expect(state.defaultSessionId).toBe('keep-this');
+        expect(state.bindings.has('other-session')).toBe(false);
+      });
+
+      it('should not detach when the SSE stream ends during close', async () => {
+        let resolveClose!: (response: Response) => void;
+        let endStream!: () => void;
+        const { state, calls } = makeMockState({
+          defaultSessionId: 'session-a',
+          fetchReply: (req) => {
+            if (req.method === 'DELETE') {
+              return new Promise<Response>((resolve) => {
+                resolveClose = resolve;
+              });
+            }
+            return new Response(null, { status: 204 });
+          },
+        });
+        vi.spyOn(state.client, 'subscribeEvents').mockImplementation(
+          async function* () {
+            await new Promise<void>((resolve) => {
+              endStream = resolve;
+            });
+            yield* [];
+          },
+        );
+        await replaceBinding(state, createBinding('session-a', 'client-old'));
+        await vi.waitFor(() => expect(endStream).toBeTypeOf('function'));
+        const { sessionTools } = await import(
+          '../../src/daemon-mcp/serve-bridge/tools/session.js'
+        );
+        const closeTool = sessionTools(state).find(
+          (t: { name: string }) => t.name === 'session_close',
+        );
+
+        const pending = closeTool.handler({ session_id: 'session-a' }, {});
+        await vi.waitFor(() => expect(resolveClose).toBeTypeOf('function'));
+        endStream();
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        resolveClose(new Response(null, { status: 204 }));
+        await pending;
+
+        expect(
+          calls.filter((call) => call.url.endsWith('/detach')),
+        ).toHaveLength(0);
+      });
+
+      it('should invalidate the current binding on invalid_client_id', async () => {
+        const { state, calls } = makeMockState({
+          defaultSessionId: 'session-a',
+          fetchReply: (req) =>
+            req.method === 'DELETE'
+              ? jsonResponse(400, { code: 'invalid_client_id' })
+              : new Response(null, { status: 204 }),
+        });
+        const binding = bindSession(state, 'session-a', 'client-old');
+        const { sessionTools } = await import(
+          '../../src/daemon-mcp/serve-bridge/tools/session.js'
+        );
+        const closeTool = sessionTools(state).find(
+          (t: { name: string }) => t.name === 'session_close',
+        );
+
+        const result = await closeTool.handler({ session_id: 'session-a' }, {});
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('Call session_resume');
+        expect(state.bindings.has('session-a')).toBe(false);
+        expect(binding.stream.abortCtrl.signal.aborted).toBe(true);
+        expect(
+          calls.filter((call) => call.url.endsWith('/detach')),
+        ).toHaveLength(0);
+      });
+
+      it('should preserve the binding on a transient close failure', async () => {
+        const { state } = makeMockState({
+          defaultSessionId: 'session-a',
+          fetchReply: (req) =>
+            req.method === 'DELETE'
+              ? jsonResponse(500, { code: 'internal_error' })
+              : new Response(null, { status: 204 }),
+        });
+        const binding = bindSession(state, 'session-a', 'client-old');
+        const { sessionTools } = await import(
+          '../../src/daemon-mcp/serve-bridge/tools/session.js'
+        );
+        const closeTool = sessionTools(state).find(
+          (t: { name: string }) => t.name === 'session_close',
+        );
+
+        const result = await closeTool.handler({ session_id: 'session-a' }, {});
+
+        expect(result.isError).toBe(true);
+        expect(state.bindings.get('session-a')).toBe(binding);
+        expect(binding.stream.abortCtrl.signal.aborted).toBe(false);
+      });
+
+      it('should preserve a newer binding on a stale close rejection', async () => {
+        let resolveClose!: (response: Response) => void;
+        const { state } = makeMockState({
+          defaultSessionId: 'session-a',
+          fetchReply: (req) => {
+            if (req.method === 'DELETE') {
+              return new Promise<Response>((resolve) => {
+                resolveClose = resolve;
+              });
+            }
+            return new Response(null, { status: 204 });
+          },
+        });
+        bindSession(state, 'session-a', 'client-old');
+        const { sessionTools } = await import(
+          '../../src/daemon-mcp/serve-bridge/tools/session.js'
+        );
+        const closeTool = sessionTools(state).find(
+          (t: { name: string }) => t.name === 'session_close',
+        );
+
+        const pending = closeTool.handler({ session_id: 'session-a' }, {});
+        await vi.waitFor(() => expect(resolveClose).toBeTypeOf('function'));
+        const newer = createBinding('session-a', 'client-new');
+        state.bindings.set('session-a', newer);
+        resolveClose(jsonResponse(400, { code: 'invalid_client_id' }));
+        const result = await pending;
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('Retry the request');
+        expect(state.bindings.get('session-a')).toBe(newer);
       });
     });
 
@@ -335,7 +721,7 @@ describe('serve-bridge', () => {
 
   describe('prompt tool with persistent SSE', () => {
     it('should collect response text via the persistent event stream', async () => {
-      const { state } = makeMockState({
+      const { state, calls } = makeMockState({
         defaultSessionId: 'test-session',
         fetchReply: (req) => {
           if (req.url.includes('/prompt')) {
@@ -343,7 +729,7 @@ describe('serve-bridge', () => {
             // persistent SSE stream will have populated the collector.
             // We simulate this by filling the collector just before the
             // prompt response resolves.
-            const stream = state.eventStreams.get('test-session')!;
+            const stream = state.bindings.get('test-session')!.stream;
             const collector = stream.activeCollector!;
             collector.texts.push('hello');
             collector.texts.push(' world');
@@ -354,14 +740,9 @@ describe('serve-bridge', () => {
         },
       });
 
-      // Set up a fake persistent event stream (normally created by session_create)
-      const fakeStream: SessionEventStream = {
-        sessionId: 'test-session',
-        abortCtrl: new AbortController(),
-        activeCollector: null,
-        lastActivityMs: Date.now(),
-      };
-      state.eventStreams.set('test-session', fakeStream);
+      const binding = createBinding('test-session', 'client-test');
+      const fakeStream = binding.stream;
+      state.bindings.set('test-session', binding);
 
       const { agentTools } = await import(
         '../../src/daemon-mcp/serve-bridge/tools/agent.js'
@@ -377,6 +758,11 @@ describe('serve-bridge', () => {
       expect(parsed.stop_reason).toBe('end_turn');
       expect(parsed.session_id).toBe('test-session');
       expect(parsed.response).toBe('hello world');
+      expect(
+        calls.find((call) => call.url.endsWith('/prompt'))?.headers[
+          'x-qwen-client-id'
+        ],
+      ).toBe('client-test');
       // Collector should be cleared after prompt completes
       expect(fakeStream.activeCollector).toBeNull();
     });
@@ -396,7 +782,7 @@ describe('serve-bridge', () => {
 
       const result = await promptTool.handler({ prompt: 'test' }, {});
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('No SSE stream');
+      expect(result.content[0].text).toContain('No active binding');
     });
 
     it('should reject concurrent prompts on the same session', async () => {
@@ -408,13 +794,10 @@ describe('serve-bridge', () => {
       const { createPromptCollector } = await import(
         '../../src/daemon-mcp/serve-bridge/sse.js'
       );
-      const fakeStream: SessionEventStream = {
-        sessionId: 'test-session',
-        abortCtrl: new AbortController(),
-        activeCollector: createPromptCollector(), // already has an active collector
-        lastActivityMs: Date.now(),
-      };
-      state.eventStreams.set('test-session', fakeStream);
+      const binding = createBinding('test-session', 'client-test');
+      const fakeStream = binding.stream;
+      fakeStream.activeCollector = createPromptCollector();
+      state.bindings.set('test-session', binding);
 
       const { agentTools } = await import(
         '../../src/daemon-mcp/serve-bridge/tools/agent.js'
@@ -439,13 +822,10 @@ describe('serve-bridge', () => {
         '../../src/daemon-mcp/serve-bridge/sse.js'
       );
       const collector = createPromptCollector();
-      const fakeStream: SessionEventStream = {
-        sessionId: 'test-session',
-        abortCtrl: new AbortController(),
-        activeCollector: collector,
-        lastActivityMs: Date.now(),
-      };
-      state.eventStreams.set('test-session', fakeStream);
+      const binding = createBinding('test-session', 'client-test');
+      const fakeStream = binding.stream;
+      fakeStream.activeCollector = collector;
+      state.bindings.set('test-session', binding);
 
       const { agentTools } = await import(
         '../../src/daemon-mcp/serve-bridge/tools/agent.js'
@@ -458,6 +838,609 @@ describe('serve-bridge', () => {
       await cancelTool.handler({}, {});
       expect(collector.resolved).toBe(true);
       expect(collector.interrupted).toBe(true);
+    });
+
+    it('should keep legacy anonymous bindings usable', async () => {
+      const { state, calls } = makeMockState({
+        defaultSessionId: 'legacy-session',
+        fetchReply: (req) => {
+          if (req.url.endsWith('/prompt')) {
+            const collector =
+              state.bindings.get('legacy-session')!.stream.activeCollector!;
+            collector.resolve();
+            return jsonResponse(200, { stopReason: 'end_turn' });
+          }
+          return new Response(null, { status: 204 });
+        },
+      });
+      bindSession(state, 'legacy-session');
+      const { agentTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/agent.js'
+      );
+      const promptTool = agentTools(state).find(
+        (t: { name: string }) => t.name === 'prompt',
+      );
+
+      const result = await promptTool.handler({ prompt: 'test' }, {});
+
+      expect(result.isError).toBeUndefined();
+      expect(
+        calls.find((call) => call.url.endsWith('/prompt'))?.headers[
+          'x-qwen-client-id'
+        ],
+      ).toBeUndefined();
+    });
+
+    it('should not cancel an unadmitted legacy prompt after abort', async () => {
+      const controller = new AbortController();
+      const { state, calls } = makeMockState({
+        defaultSessionId: 'test-session',
+        fetchReply: (req) => {
+          if (req.url.endsWith('/prompt')) {
+            return new Promise<Response>((_resolve, reject) => {
+              req.signal?.addEventListener(
+                'abort',
+                () => reject(req.signal?.reason),
+                { once: true },
+              );
+            });
+          }
+          if (req.url.endsWith('/cancel')) {
+            return new Response(null, { status: 204 });
+          }
+          return new Response(null, { status: 204 });
+        },
+      });
+      bindSession(state, 'test-session', 'client-test');
+      const { agentTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/agent.js'
+      );
+      const promptTool = agentTools(state).find(
+        (t: { name: string }) => t.name === 'prompt',
+      );
+
+      const pending = promptTool.handler(
+        { prompt: 'test' },
+        { signal: controller.signal },
+      );
+      await vi.waitFor(() =>
+        expect(calls.some((call) => call.url.endsWith('/prompt'))).toBe(true),
+      );
+      controller.abort();
+      const result = await pending;
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('aborted');
+      expect(state.bindings.has('test-session')).toBe(true);
+      expect(calls.filter((call) => call.url.endsWith('/cancel'))).toHaveLength(
+        0,
+      );
+    });
+
+    it('should wait for active prompt cancellation before detaching on disposal', async () => {
+      let resolveCancel!: (response: Response) => void;
+      const controller = new AbortController();
+      const { state, calls } = makeMockState({
+        defaultSessionId: 'test-session',
+        fetchReply: (req) => {
+          if (req.url.endsWith('/prompt')) {
+            return jsonResponse(200, { stopReason: 'end_turn' });
+          }
+          if (req.url.endsWith('/cancel')) {
+            return new Promise<Response>((resolve) => {
+              resolveCancel = resolve;
+            });
+          }
+          return new Response(null, { status: 204 });
+        },
+      });
+      bindSession(state, 'test-session', 'client-test');
+      const { agentTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/agent.js'
+      );
+      const promptTool = agentTools(state).find(
+        (t: { name: string }) => t.name === 'prompt',
+      );
+
+      const prompting = promptTool.handler(
+        { prompt: 'test' },
+        { signal: controller.signal },
+      );
+      await vi.waitFor(() =>
+        expect(
+          state.bindings.get('test-session')?.stream.activeCollector,
+        ).not.toBeNull(),
+      );
+      controller.abort();
+      await vi.waitFor(() => expect(resolveCancel).toBeTypeOf('function'));
+
+      let disposalSettled = false;
+      const disposing = disposeBindings(state).finally(() => {
+        disposalSettled = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const detachedBeforeCancel = calls.some((call) =>
+        call.url.endsWith('/detach'),
+      );
+      const settledBeforeCancel = disposalSettled;
+
+      resolveCancel(new Response(null, { status: 204 }));
+      await Promise.all([prompting, disposing]);
+
+      expect(detachedBeforeCancel).toBe(false);
+      expect(settledBeforeCancel).toBe(false);
+      expect(calls.filter((call) => call.url.endsWith('/detach'))).toHaveLength(
+        1,
+      );
+    });
+
+    it('should invalidate the current binding when abort cancellation is rejected', async () => {
+      const controller = new AbortController();
+      const { state, calls } = makeMockState({
+        defaultSessionId: 'test-session',
+        fetchReply: (req) => {
+          if (req.url.endsWith('/prompt')) {
+            return jsonResponse(202, {
+              promptId: 'prompt-accepted',
+              lastEventId: 0,
+            });
+          }
+          if (req.url.endsWith('/events')) {
+            return pendingSseResponse();
+          }
+          if (req.url.endsWith('/cancel')) {
+            return jsonResponse(400, { code: 'invalid_client_id' });
+          }
+          return new Response(null, { status: 204 });
+        },
+      });
+      const binding = bindSession(state, 'test-session', 'client-stale');
+      const { agentTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/agent.js'
+      );
+      const promptTool = agentTools(state).find(
+        (t: { name: string }) => t.name === 'prompt',
+      );
+
+      const pending = promptTool.handler(
+        { prompt: 'test' },
+        { signal: controller.signal },
+      );
+      await vi.waitFor(() =>
+        expect(state.client.subscribeEvents).toHaveBeenCalled(),
+      );
+      controller.abort();
+      const result = await pending;
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('session_resume');
+      expect(state.bindings.has('test-session')).toBe(false);
+      expect(binding.stream.abortCtrl.signal.aborted).toBe(true);
+      expect(calls.filter((call) => call.url.endsWith('/cancel'))).toHaveLength(
+        1,
+      );
+    });
+
+    it('should cancel an aborted settled prompt exactly once with its captured binding', async () => {
+      const controller = new AbortController();
+      let resolveCancel!: (response: Response) => void;
+      const { state, calls } = makeMockState({
+        defaultSessionId: 'test-session',
+        fetchReply: (req) => {
+          if (req.url.endsWith('/prompt')) {
+            return jsonResponse(200, { stopReason: 'end_turn' });
+          }
+          if (req.url.endsWith('/cancel')) {
+            return new Promise<Response>((resolve) => {
+              resolveCancel = resolve;
+            });
+          }
+          return new Response(null, { status: 204 });
+        },
+      });
+      bindSession(state, 'test-session', 'client-test');
+      const { agentTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/agent.js'
+      );
+      const promptTool = agentTools(state).find(
+        (t: { name: string }) => t.name === 'prompt',
+      );
+
+      let settled = false;
+      const pending = promptTool
+        .handler(
+          { prompt: 'test' },
+          { signal: controller.signal, _meta: { forged: true } },
+        )
+        .finally(() => {
+          settled = true;
+        });
+      await vi.waitFor(() =>
+        expect(calls.some((call) => call.url.endsWith('/prompt'))).toBe(true),
+      );
+      controller.abort();
+      await vi.waitFor(() => expect(resolveCancel).toBeTypeOf('function'));
+      expect(settled).toBe(false);
+      expect(calls.filter((call) => call.url.endsWith('/cancel'))).toHaveLength(
+        1,
+      );
+
+      resolveCancel(new Response(null, { status: 204 }));
+      const result = await pending;
+
+      expect(result.isError).toBe(true);
+      const cancelCalls = calls.filter((call) => call.url.endsWith('/cancel'));
+      expect(cancelCalls).toHaveLength(1);
+      expect(cancelCalls[0]?.headers['x-qwen-client-id']).toBe('client-test');
+    });
+
+    it('should preserve 202 SSE abort after a transient cancellation failure', async () => {
+      const controller = new AbortController();
+      let promptCount = 0;
+      let rejectCancel!: (reason?: unknown) => void;
+      const { state, calls } = makeMockState({
+        defaultSessionId: 'test-session',
+        fetchReply: (req) => {
+          if (req.url.endsWith('/prompt')) {
+            promptCount++;
+            if (promptCount === 1) {
+              return jsonResponse(202, {
+                promptId: 'prompt-1',
+                lastEventId: 0,
+              });
+            }
+            const collector =
+              state.bindings.get('test-session')!.stream.activeCollector!;
+            collector.texts.push('second response');
+            collector.resolve();
+            return jsonResponse(200, { stopReason: 'end_turn' });
+          }
+          if (req.url.endsWith('/cancel')) {
+            return new Promise<Response>((_resolve, reject) => {
+              rejectCancel = reject;
+            });
+          }
+          return new Response(null, { status: 204 });
+        },
+      });
+      bindSession(state, 'test-session', 'client-test');
+      const { agentTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/agent.js'
+      );
+      const promptTool = agentTools(state).find(
+        (t: { name: string }) => t.name === 'prompt',
+      );
+
+      let settled = false;
+      const first = promptTool
+        .handler({ prompt: 'first' }, { signal: controller.signal })
+        .finally(() => {
+          settled = true;
+        });
+      await vi.waitFor(() =>
+        expect(
+          calls.filter((call) => call.url.endsWith('/prompt')),
+        ).toHaveLength(1),
+      );
+      controller.abort();
+      await vi.waitFor(() => expect(rejectCancel).toBeTypeOf('function'));
+
+      expect(settled).toBe(false);
+      expect(calls.filter((call) => call.url.endsWith('/cancel'))).toHaveLength(
+        1,
+      );
+      rejectCancel(new Error('cancel network failed'));
+      const firstResult = await first;
+      expect(firstResult.isError).toBe(true);
+      expect(firstResult.content[0].text).toContain('aborted');
+
+      const secondResult = await promptTool.handler({ prompt: 'second' }, {});
+
+      expect(secondResult.isError).toBeUndefined();
+      expect(JSON.parse(secondResult.content[0].text).response).toBe(
+        'second response',
+      );
+      expect(calls.filter((call) => call.url.endsWith('/cancel'))).toHaveLength(
+        1,
+      );
+    });
+
+    it('should use the captured binding for timeout cancellation', async () => {
+      vi.useFakeTimers();
+      try {
+        const { state, calls } = makeMockState({
+          defaultSessionId: 'test-session',
+          fetchReply: (req) => {
+            if (req.url.endsWith('/prompt')) {
+              return jsonResponse(200, { stopReason: 'end_turn' });
+            }
+            if (req.url.endsWith('/cancel')) {
+              return jsonResponse(400, { code: 'invalid_client_id' });
+            }
+            return new Response(null, { status: 204 });
+          },
+        });
+        bindSession(state, 'test-session', 'client-test');
+        const { agentTools } = await import(
+          '../../src/daemon-mcp/serve-bridge/tools/agent.js'
+        );
+        const promptTool = agentTools(state).find(
+          (t: { name: string }) => t.name === 'prompt',
+        );
+
+        const pending = promptTool.handler({ prompt: 'test' }, {});
+        await vi.advanceTimersByTimeAsync(30000);
+        const result = await pending;
+
+        expect(result.isError).toBe(true);
+        const parsed = JSON.parse(result.content[0].text);
+        expect(parsed.stop_reason).toBe('timeout');
+        expect(parsed.warning).toContain('session_resume');
+        expect(parsed.warning).toContain('test-session');
+        const cancelCalls = calls.filter((call) =>
+          call.url.endsWith('/cancel'),
+        );
+        expect(cancelCalls).toHaveLength(1);
+        expect(cancelCalls[0]?.headers['x-qwen-client-id']).toBe('client-test');
+        expect(state.bindings.has('test-session')).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should preserve a newer binding when stale timeout cancellation is rejected', async () => {
+      vi.useFakeTimers();
+      try {
+        let resolveCancel!: (response: Response) => void;
+        const { state, calls } = makeMockState({
+          defaultSessionId: 'test-session',
+          fetchReply: (req) => {
+            if (req.url.endsWith('/prompt')) {
+              return jsonResponse(200, { stopReason: 'end_turn' });
+            }
+            if (req.url.endsWith('/cancel')) {
+              return new Promise<Response>((resolve) => {
+                resolveCancel = resolve;
+              });
+            }
+            return new Response(null, { status: 204 });
+          },
+        });
+        bindSession(state, 'test-session', 'client-stale');
+        const { agentTools } = await import(
+          '../../src/daemon-mcp/serve-bridge/tools/agent.js'
+        );
+        const promptTool = agentTools(state).find(
+          (t: { name: string }) => t.name === 'prompt',
+        );
+
+        const pending = promptTool.handler({ prompt: 'test' }, {});
+        await vi.advanceTimersByTimeAsync(30000);
+        expect(resolveCancel).toBeTypeOf('function');
+        const newer = createBinding('test-session', 'client-new');
+        state.bindings.set('test-session', newer);
+        resolveCancel(jsonResponse(400, { code: 'invalid_client_id' }));
+        const result = await pending;
+
+        const parsed = JSON.parse(result.content[0].text);
+        expect(parsed.stop_reason).toBe('timeout');
+        expect(parsed.warning).not.toContain('session_resume');
+        expect(state.bindings.get('test-session')).toBe(newer);
+        const cancelCalls = calls.filter((call) =>
+          call.url.endsWith('/cancel'),
+        );
+        expect(cancelCalls).toHaveLength(1);
+        expect(cancelCalls[0]?.headers['x-qwen-client-id']).toBe(
+          'client-stale',
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should invalidate the current binding on explicit cancel rejection', async () => {
+      const { state } = makeMockState({
+        defaultSessionId: 'test-session',
+        fetchReply: (req) =>
+          req.url.endsWith('/cancel')
+            ? jsonResponse(400, { code: 'invalid_client_id' })
+            : new Response(null, { status: 204 }),
+      });
+      const current = bindSession(state, 'test-session', 'client-old');
+      current.stream.activeCollector = createPromptCollector();
+      const { agentTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/agent.js'
+      );
+      const cancelTool = agentTools(state).find(
+        (t: { name: string }) => t.name === 'prompt_cancel',
+      );
+
+      const currentResult = await cancelTool.handler({}, {});
+      expect(currentResult.isError).toBe(true);
+      expect(currentResult.content[0].text).toContain('Call session_resume');
+      expect(current.stream.activeCollector?.resolved).toBe(true);
+      expect(state.bindings.has('test-session')).toBe(false);
+    });
+
+    it('should preserve a newer binding on a stale cancel rejection', async () => {
+      let resolveCancel!: (response: Response) => void;
+      const { state } = makeMockState({
+        defaultSessionId: 'test-session',
+        fetchReply: (req) => {
+          if (req.url.endsWith('/cancel')) {
+            return new Promise<Response>((resolve) => {
+              resolveCancel = resolve;
+            });
+          }
+          return new Response(null, { status: 204 });
+        },
+      });
+      const old = bindSession(state, 'test-session', 'client-stale');
+      const { agentTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/agent.js'
+      );
+      const cancelTool = agentTools(state).find(
+        (t: { name: string }) => t.name === 'prompt_cancel',
+      );
+
+      const pending = cancelTool.handler({}, {});
+      await vi.waitFor(() => expect(resolveCancel).toBeTypeOf('function'));
+      const newer = createBinding('test-session', 'client-new');
+      state.bindings.set('test-session', newer);
+      resolveCancel(jsonResponse(400, { code: 'invalid_client_id' }));
+      const staleResult = await pending;
+
+      expect(staleResult.isError).toBe(true);
+      expect(staleResult.content[0].text).toContain('Retry the request');
+      expect(state.bindings.get('test-session')).toBe(newer);
+      expect(old).not.toBe(newer);
+    });
+  });
+
+  describe('binding cleanup', () => {
+    it.each([
+      {
+        toolName: 'session_load',
+        request: { session_id: 'session-a' },
+        matches: (req: CapturedRequest) => req.url.endsWith('/load'),
+        response: () =>
+          jsonResponse(200, {
+            sessionId: 'session-a',
+            clientId: 'client-new',
+            workspaceCwd: '/tmp',
+          }),
+        expectedDetachIds: ['client-new', 'client-old'],
+      },
+      {
+        toolName: 'session_resume',
+        request: { session_id: 'session-a' },
+        matches: (req: CapturedRequest) => req.url.endsWith('/resume'),
+        response: () =>
+          jsonResponse(200, {
+            sessionId: 'session-a',
+            clientId: 'client-new',
+            workspaceCwd: '/tmp',
+          }),
+        expectedDetachIds: ['client-new', 'client-old'],
+      },
+      {
+        toolName: 'session_close',
+        request: { session_id: 'session-a' },
+        matches: (req: CapturedRequest) => req.method === 'DELETE',
+        response: () => new Response(null, { status: 204 }),
+        expectedDetachIds: [],
+      },
+    ])(
+      'should drain a pending $toolName before disposal releases bindings',
+      async ({ toolName, request, matches, response, expectedDetachIds }) => {
+        let resolveOperation!: (response: Response) => void;
+        const { state, calls } = makeMockState({
+          defaultSessionId: 'session-a',
+          fetchReply: (req) => {
+            if (matches(req)) {
+              return new Promise<Response>((resolve) => {
+                resolveOperation = resolve;
+              });
+            }
+            return new Response(null, { status: 204 });
+          },
+        });
+        bindSession(state, 'session-a', 'client-old');
+        const { sessionTools } = await import(
+          '../../src/daemon-mcp/serve-bridge/tools/session.js'
+        );
+        const lifecycleTool = sessionTools(state).find(
+          (tool: { name: string }) => tool.name === toolName,
+        );
+
+        const operation = lifecycleTool.handler(request, {});
+        await vi.waitFor(() => expect(resolveOperation).toBeTypeOf('function'));
+        let disposed = false;
+        const disposing = disposeBindings(state).finally(() => {
+          disposed = true;
+        });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(disposed).toBe(false);
+
+        resolveOperation(response());
+        await operation;
+        await disposing;
+
+        const detachIds = calls
+          .filter((call) => call.url.endsWith('/detach'))
+          .map((call) => call.headers['x-qwen-client-id']);
+        expect(detachIds).toEqual(expectedDetachIds);
+        expect(new Set(detachIds).size).toBe(detachIds.length);
+        expect(state.bindings.size).toBe(0);
+      },
+    );
+
+    it('should skip active prompts during idle cleanup, then detach once idle', async () => {
+      vi.useFakeTimers();
+      try {
+        const { state, calls } = makeMockState({
+          defaultSessionId: 'session-a',
+          fetchReply: () => new Response(null, { status: 204 }),
+        });
+        const binding = bindSession(state, 'session-a', 'client-a');
+        binding.stream.lastActivityMs = 0;
+        binding.stream.activeCollector = createPromptCollector();
+        const stopCleanup = startSessionCleanup(state);
+
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+        expect(state.bindings.get('session-a')).toBe(binding);
+        expect(
+          calls.filter((call) => call.url.endsWith('/detach')),
+        ).toHaveLength(0);
+
+        binding.stream.activeCollector = null;
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+        expect(state.bindings.has('session-a')).toBe(false);
+        expect(
+          calls.filter((call) => call.url.endsWith('/detach')),
+        ).toHaveLength(1);
+        stopCleanup();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should await an in-flight detach across repeated disposal', async () => {
+      let resolveDetach!: (response: Response) => void;
+      const { state, calls } = makeMockState({
+        defaultSessionId: 'session-a',
+        fetchReply: (req) => {
+          if (req.url.endsWith('/detach')) {
+            return new Promise<Response>((resolve) => {
+              resolveDetach = resolve;
+            });
+          }
+          return new Response(null, { status: 204 });
+        },
+      });
+      bindSession(state, 'session-a', 'client-a');
+
+      const first = disposeBindings(state);
+      const second = disposeBindings(state);
+      await vi.waitFor(() => expect(resolveDetach).toBeTypeOf('function'));
+      expect(calls.filter((call) => call.url.endsWith('/detach'))).toHaveLength(
+        1,
+      );
+      expect(state.pendingReleases.size).toBe(1);
+      resolveDetach(new Response(null, { status: 204 }));
+      await Promise.all([first, second]);
+
+      expect(state.pendingReleases.size).toBe(0);
+    });
+
+    it('should dispose a legacy anonymous binding without a detach request', async () => {
+      const { state, calls } = makeMockState();
+      bindSession(state, 'legacy-session');
+
+      await disposeBindings(state);
+
+      expect(state.bindings.size).toBe(0);
+      expect(calls.some((call) => call.url.endsWith('/detach'))).toBe(false);
     });
   });
 

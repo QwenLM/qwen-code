@@ -16,12 +16,23 @@ import {
 import type { ToolResult } from './tools.js';
 import { ToolConfirmationOutcome } from './tools.js';
 import type { CallableTool, Part } from '@google/genai';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import {
+  LATEST_PROTOCOL_VERSION,
+  type JSONRPCMessage,
+} from '@modelcontextprotocol/sdk/types.js';
 import { ToolErrorType } from './tool-error.js';
 import {
   MCPServerStatus,
   removeMCPServerStatus,
   updateMCPServerStatus,
 } from './mcp-client.js';
+import {
+  INVOCATION_CONTEXT_META_KEY,
+  runWithInvocationContext,
+  type InvocationContextV1,
+} from '../utils/invocation-context.js';
 
 vi.mock('node:fs/promises');
 
@@ -1086,6 +1097,197 @@ describe('DiscoveredMCPTool', () => {
     });
   });
 
+  describe('invocation context metadata', () => {
+    const invocationContext: InvocationContextV1 = {
+      version: 1,
+      ingress: 'daemon',
+      sessionId: 'session-1',
+      promptId: 'prompt-1',
+      originatorClientId: 'client-1',
+    };
+
+    const createDirectTool = (
+      mcpClient: McpDirectClient,
+      allowInvocationContext: boolean,
+    ) =>
+      new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        mcpClient,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        allowInvocationContext,
+      );
+
+    const successfulClient = () =>
+      ({
+        callTool: vi.fn<McpDirectClient['callTool']>(async () => ({
+          content: [{ type: 'text', text: 'ok' }],
+        })),
+      }) satisfies McpDirectClient;
+
+    it('injects request metadata only for an allowed tool with a context', async () => {
+      const mcpClient = successfulClient();
+      const modelArguments = {
+        param: 'test',
+        _meta: {
+          [INVOCATION_CONTEXT_META_KEY]: { forged: true },
+        },
+      };
+
+      await runWithInvocationContext(invocationContext, () =>
+        createDirectTool(mcpClient, true)
+          .build(modelArguments)
+          .execute(new AbortController().signal),
+      );
+
+      expect(mcpClient.callTool).toHaveBeenCalledWith(
+        {
+          name: serverToolName,
+          arguments: modelArguments,
+          _meta: {
+            [INVOCATION_CONTEXT_META_KEY]: invocationContext,
+          },
+        },
+        undefined,
+        expect.objectContaining({
+          onprogress: expect.any(Function),
+        }),
+      );
+    });
+
+    it.each([
+      { allowInvocationContext: false, runWithContext: true },
+      { allowInvocationContext: true, runWithContext: false },
+    ])(
+      'omits reserved request metadata for $allowInvocationContext/$runWithContext',
+      async ({ allowInvocationContext, runWithContext }) => {
+        const mcpClient = successfulClient();
+        const execute = () =>
+          createDirectTool(mcpClient, allowInvocationContext)
+            .build({ param: 'test' })
+            .execute(new AbortController().signal);
+
+        if (runWithContext) {
+          await runWithInvocationContext(invocationContext, execute);
+        } else {
+          await execute();
+        }
+
+        expect(mcpClient.callTool).toHaveBeenCalled();
+        expect(
+          Object.hasOwn(
+            vi.mocked(mcpClient.callTool).mock.calls[0][0],
+            '_meta',
+          ),
+        ).toBe(false);
+      },
+    );
+
+    it('preserves the policy through qualification and trust clones', async () => {
+      const mcpClient = successfulClient();
+      const clonedTool = createDirectTool(mcpClient, true)
+        .asFullyQualifiedTool()
+        .withTrust(true);
+
+      await runWithInvocationContext(invocationContext, () =>
+        clonedTool
+          .build({ param: 'test' })
+          .execute(new AbortController().signal),
+      );
+
+      expect(vi.mocked(mcpClient.callTool).mock.calls[0][0]._meta).toEqual({
+        [INVOCATION_CONTEXT_META_KEY]: invocationContext,
+      });
+    });
+
+    it('coexists with MCP SDK progress metadata on allowed and denied calls', async () => {
+      const sentMessages: JSONRPCMessage[] = [];
+      const transport: Transport = {
+        start: vi.fn(async () => undefined),
+        close: vi.fn(async () => undefined),
+        send: vi.fn(async (message: JSONRPCMessage) => {
+          sentMessages.push(message);
+          if (!('id' in message) || !('method' in message)) {
+            return;
+          }
+
+          if (message.method === 'initialize') {
+            queueMicrotask(() =>
+              transport.onmessage?.({
+                jsonrpc: '2.0',
+                id: message.id,
+                result: {
+                  protocolVersion: LATEST_PROTOCOL_VERSION,
+                  capabilities: { tools: {} },
+                  serverInfo: { name: 'test-server', version: '1.0.0' },
+                },
+              }),
+            );
+          } else if (message.method === 'tools/call') {
+            queueMicrotask(() =>
+              transport.onmessage?.({
+                jsonrpc: '2.0',
+                id: message.id,
+                result: {
+                  content: [{ type: 'text', text: 'ok' }],
+                },
+              }),
+            );
+          }
+        }),
+      };
+      const client = new Client({ name: 'test-client', version: '1.0.0' });
+      await client.connect(transport);
+
+      await runWithInvocationContext(invocationContext, () =>
+        createDirectTool(client, true)
+          .build({ param: 'test' })
+          .execute(new AbortController().signal),
+      );
+      await runWithInvocationContext(invocationContext, () =>
+        createDirectTool(client, false)
+          .build({ param: 'test' })
+          .execute(new AbortController().signal),
+      );
+
+      const callRequests = sentMessages.filter(
+        (message) => 'method' in message && message.method === 'tools/call',
+      );
+      expect(callRequests[0]).toMatchObject({
+        params: {
+          _meta: {
+            [INVOCATION_CONTEXT_META_KEY]: invocationContext,
+            progressToken: expect.any(Number),
+          },
+        },
+      });
+      expect(callRequests[1]).toMatchObject({
+        params: {
+          _meta: {
+            progressToken: expect.any(Number),
+          },
+        },
+      });
+      expect(callRequests[1]).not.toMatchObject({
+        params: {
+          _meta: {
+            [INVOCATION_CONTEXT_META_KEY]: expect.anything(),
+          },
+        },
+      });
+      await client.close();
+    });
+  });
+
   describe('streaming progress for long-running MCP tools', () => {
     it('should have canUpdateOutput set to true so the scheduler creates liveOutputCallback', () => {
       // For long-running MCP tools (e.g., browseruse), the scheduler needs
@@ -1302,6 +1504,73 @@ describe('DiscoveredMCPTool', () => {
       expect(newMockMcpClient.callTool).toHaveBeenCalledTimes(1);
       expect(discoverToolsForServer).toHaveBeenCalledWith(serverName);
       expect(result.llmContent).toEqual([{ text: 'Success after reconnect' }]);
+    });
+
+    it('uses the newly discovered tool policy after reconnect', async () => {
+      const invocationContext: InvocationContextV1 = {
+        version: 1,
+        ingress: 'daemon',
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+      };
+      const oldMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValueOnce(new Error('Connection closed')),
+      };
+      const newMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockResolvedValueOnce({
+          content: [{ type: 'text', text: 'reconnected' }],
+        }),
+      };
+      const newTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        newMcpClient,
+      );
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer: vi.fn().mockResolvedValue(undefined),
+          ensureTool: vi.fn().mockResolvedValue(newTool),
+        }),
+        getTruncateToolOutputThreshold: () => 0,
+        getTruncateToolOutputLines: () => 0,
+      };
+      const oldTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        oldMcpClient,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        true,
+      );
+
+      await runWithInvocationContext(invocationContext, () =>
+        oldTool.build({ param: 'test' }).execute(new AbortController().signal),
+      );
+
+      expect(vi.mocked(oldMcpClient.callTool).mock.calls[0][0]._meta).toEqual({
+        [INVOCATION_CONTEXT_META_KEY]: invocationContext,
+      });
+      expect(
+        Object.hasOwn(
+          vi.mocked(newMcpClient.callTool).mock.calls[0][0],
+          '_meta',
+        ),
+      ).toBe(false);
     });
 
     it('should not retry on non-connection errors', async () => {

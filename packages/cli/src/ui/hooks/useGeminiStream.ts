@@ -12,6 +12,7 @@ import {
   useMemo,
   useLayoutEffect,
 } from 'react';
+import { randomUUID } from 'node:crypto';
 import {
   type Config,
   type EditorType,
@@ -28,6 +29,7 @@ import {
   type StopFailureErrorType,
   type ActiveGoal,
   type VisionBridgeResult,
+  type InvocationContextV1,
   GeminiEventType as ServerGeminiEventType,
   SendMessageType,
   createDebugLogger,
@@ -45,6 +47,8 @@ import {
   ApprovalMode,
   parseAndFormatApiError,
   promptIdContext,
+  getInvocationContext,
+  runWithInvocationContext,
   ToolConfirmationOutcome,
   logApiCancel,
   ApiCancelEvent,
@@ -112,6 +116,16 @@ import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import process from 'node:process';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
+
+function runWithPromptContexts<T>(
+  invocation: InvocationContextV1,
+  promptId: string,
+  callback: () => T,
+): T {
+  return runWithInvocationContext(invocation, () =>
+    promptIdContext.run(promptId, callback),
+  );
+}
 
 // The per-turn model override is held in two coupled refs: the model id and a
 // flag marking whether it came from an explicit inline `/model <id> <prompt>`
@@ -2465,7 +2479,32 @@ export const useGeminiStream = (
         prompt_id = config.getSessionId() + '########' + getPromptCount();
       }
 
-      return promptIdContext.run(prompt_id, async () => {
+      const inheritedInvocation = getInvocationContext();
+      const asyncIngress =
+        submitType === SendMessageType.Cron
+          ? ('scheduler' as const)
+          : submitType === SendMessageType.Notification ||
+              submitType === SendMessageType.Teammate
+            ? ('internal' as const)
+            : undefined;
+      const invocation =
+        asyncIngress !== undefined
+          ? {
+              version: 1 as const,
+              ingress: asyncIngress,
+              sessionId: config.getSessionId(),
+              promptId: randomUUID(),
+            }
+          : inheritedInvocation?.promptId === prompt_id
+            ? inheritedInvocation
+            : {
+                version: 1 as const,
+                ingress: 'cli' as const,
+                sessionId: config.getSessionId(),
+                promptId: prompt_id,
+              };
+
+      return runWithPromptContexts(invocation, prompt_id, async () => {
         const { queryToSend, shouldProceed } =
           submitType === SendMessageType.Retry
             ? { queryToSend: query, shouldProceed: true }

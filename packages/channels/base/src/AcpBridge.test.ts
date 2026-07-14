@@ -57,7 +57,7 @@ const child = vi.hoisted(() => {
       cancel: ReturnType<typeof vi.fn>;
     }>,
     MockChild,
-    spawn: vi.fn(() => {
+    spawn: vi.fn((_command?: unknown, _args?: unknown, _options?: unknown) => {
       const instance = new MockChild();
       child.instances.push(instance);
       return instance;
@@ -578,6 +578,32 @@ describe('AcpBridge', () => {
     expect(proc.kill).toHaveBeenCalledWith('SIGKILL');
     expect(bridge.isConnected).toBe(false);
     expect(disconnected).toHaveBeenCalledWith(null, 'SIGKILL');
+  });
+
+  it('uses the same fresh private capability for child env and initialize', async () => {
+    vi.useFakeTimers();
+    try {
+      const bridge = new AcpBridge({
+        cliEntryPath: '/tmp/qwen',
+        cwd: '/tmp',
+      });
+      const started = bridge.start();
+      await vi.advanceTimersByTimeAsync(1000);
+      await started;
+
+      const env = child.spawn.mock.calls[0]?.[2]?.env as
+        | Record<string, string | undefined>
+        | undefined;
+      const capability = env?.['QWEN_CODE_PRIVATE_ACP_CAPABILITY'];
+      expect(capability).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+      expect(
+        child.connections[0]?.initialize.mock.calls[0]?.[0]?._meta?.[
+          'qwen-code/private-parent-capability'
+        ],
+      ).toBe(capability);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('kills the ACP child when a stall line is coalesced with prior stderr', async () => {

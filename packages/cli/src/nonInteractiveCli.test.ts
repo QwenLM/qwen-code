@@ -29,6 +29,7 @@ import {
   AUTONOMOUS_SENTINEL_DYNAMIC,
   LOOP_SENTINEL_CRON,
   LOOP_SENTINEL_DYNAMIC,
+  getInvocationContext,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import {
@@ -446,6 +447,39 @@ describe('runNonInteractive', () => {
     );
     expect(processStdoutSpy).toHaveBeenCalledWith('Hello World\n');
     expect(mockShutdownTelemetry).toHaveBeenCalled();
+  });
+
+  it('runs a direct notification turn in a fresh internal invocation context', async () => {
+    setupMetricsMock();
+    const contexts: Array<ReturnType<typeof getInvocationContext>> = [];
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      (async function* () {
+        contexts.push(getInvocationContext());
+        yield {
+          type: GeminiEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 1 },
+          },
+        };
+      })(),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'background update',
+      'durable-notification-prompt',
+      { sendMessageType: SendMessageType.Notification },
+    );
+
+    expect(contexts).toHaveLength(1);
+    expect(contexts[0]).toMatchObject({
+      version: 1,
+      ingress: 'internal',
+      sessionId: 'test-session-id',
+    });
+    expect(contexts[0]?.promptId).not.toBe('durable-notification-prompt');
   });
 
   describe('continueInterrupted', () => {
@@ -2290,6 +2324,22 @@ describe('runNonInteractive', () => {
       );
     });
 
+    const drainInvocationContexts: Array<
+      ReturnType<typeof getInvocationContext>
+    > = [];
+    const notificationStream = async function* () {
+      drainInvocationContexts.push(getInvocationContext());
+      yield { type: GeminiEventType.Content, value: 'Observed.' };
+      drainInvocationContexts.push(getInvocationContext());
+      yield {
+        type: GeminiEventType.Finished,
+        value: {
+          reason: undefined,
+          usageMetadata: { totalTokenCount: 1 },
+        },
+      };
+    };
+
     mockGeminiClient.sendMessageStream
       .mockReturnValueOnce(
         createStreamFromEvents([
@@ -2303,18 +2353,7 @@ describe('runNonInteractive', () => {
           },
         ]),
       )
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          { type: GeminiEventType.Content, value: 'Observed.' },
-          {
-            type: GeminiEventType.Finished,
-            value: {
-              reason: undefined,
-              usageMetadata: { totalTokenCount: 1 },
-            },
-          },
-        ]),
-      );
+      .mockReturnValueOnce(notificationStream());
 
     await runNonInteractive(
       mockConfig,
@@ -2324,6 +2363,14 @@ describe('runNonInteractive', () => {
     );
 
     expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    expect(drainInvocationContexts).toHaveLength(2);
+    expect(drainInvocationContexts[0]).toMatchObject({
+      version: 1,
+      ingress: 'internal',
+      sessionId: 'test-session-id',
+    });
+    expect(drainInvocationContexts[0]?.promptId).not.toBe('prompt-monitor');
+    expect(drainInvocationContexts[1]).toEqual(drainInvocationContexts[0]);
     expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
       2,
       [{ text: notificationXml }],
@@ -3622,6 +3669,62 @@ describe('runNonInteractive', () => {
       true,
     );
     expect(predicate({ prompt: 'regular cron job' } as CronJob)).toBe(false);
+  });
+
+  it('runs each drained cron stream in a fresh scheduler invocation context', async () => {
+    setupMetricsMock();
+    let fire: ((job: CronJob) => void) | undefined;
+    const scheduler = {
+      sessionSize: 0,
+      setSkipDurableFire: vi.fn(),
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn((callback: (job: CronJob) => void) => {
+        fire = callback;
+        callback({
+          prompt: 'scheduled check',
+          cronExpr: '* * * * *',
+        } as CronJob);
+      }),
+      stop: vi.fn(),
+    } as unknown as CronScheduler;
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+
+    const observedContexts: Array<ReturnType<typeof getInvocationContext>> = [];
+    const cronStream = async function* () {
+      observedContexts.push(getInvocationContext());
+      yield { type: GeminiEventType.Content, value: 'Scheduled result.' };
+    };
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Initial result.' },
+        ]),
+      )
+      .mockReturnValueOnce(cronStream());
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'initial prompt',
+      'durable-prompt-id',
+    );
+
+    expect(fire).toBeTypeOf('function');
+    expect(observedContexts).toHaveLength(1);
+    expect(observedContexts[0]).toMatchObject({
+      version: 1,
+      ingress: 'scheduler',
+      sessionId: 'test-session-id',
+    });
+    expect(observedContexts[0]?.promptId).not.toBe('durable-prompt-id');
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      2,
+      [{ text: 'scheduled check' }],
+      expect.any(AbortSignal),
+      'durable-prompt-id',
+      expect.objectContaining({ type: SendMessageType.Cron }),
+    );
   });
 
   describe('--json-schema structured output', () => {

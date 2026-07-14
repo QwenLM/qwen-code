@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import {
   ClientSideConnection,
@@ -24,10 +24,15 @@ import type {
 import {
   DAEMON_TRACEPARENT_META_KEY,
   DAEMON_TRACESTATE_META_KEY,
+  INVOCATION_CONTEXT_META_KEY,
+  INVOCATION_INGRESS_META_KEY,
+  PRIVATE_PARENT_CAPABILITY_META_KEY,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   TrustGateError,
   normalizeSnapshotPayload,
+  runWithInvocationContext,
   ShellExecutionService,
+  type InvocationContextV1,
   type ShellOutputEvent,
 } from '@qwen-code/qwen-code-core';
 import type { ShellCommandResult } from './bridgeTypes.js';
@@ -137,6 +142,8 @@ import {
   type SessionArtifactInput,
   type SessionArtifactMutationResult,
 } from './sessionArtifacts.js';
+
+const PRIVATE_ACP_CAPABILITY_ENV = 'QWEN_CODE_PRIVATE_ACP_CAPABILITY';
 
 const NOOP_BRIDGE_TELEMETRY: BridgeTelemetry = {
   captureContext: () => undefined,
@@ -1754,13 +1761,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     if (inFlightChannelSpawn) return await inFlightChannelSpawn;
 
     const promise = (async () => {
+      const privateParentCapability = randomBytes(32).toString('base64url');
       const channel = await telemetry.withSpan(
         'channel.spawn',
         {
           'qwen-code.daemon.bridge.operation': 'channel.spawn',
           'qwen-code.daemon.channel.reused': false,
         },
-        async () => await channelFactory(boundWorkspace, childEnvOverrides),
+        async () =>
+          await channelFactory(boundWorkspace, {
+            ...childEnvOverrides,
+            [PRIVATE_ACP_CAPABILITY_ENV]: privateParentCapability,
+          }),
       );
       const sessionIds = new Set<string>();
       const client = new BridgeClient(
@@ -1994,6 +2006,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   fs: { readTextFile: true, writeTextFile: true },
                 },
                 clientInfo: { name: 'qwen-serve-bridge', version: '0' },
+                _meta: {
+                  [PRIVATE_PARENT_CAPABILITY_META_KEY]: privateParentCapability,
+                },
               }),
               initTimeoutMs,
               'initialize',
@@ -4260,6 +4275,26 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // the first prompt on an idle session starts immediately and
       // doesn't need a queue event.
       const promptId = context?.promptId ?? randomUUID();
+      const advisoryIngress = (() => {
+        const value = req._meta?.[INVOCATION_INGRESS_META_KEY];
+        return value === 'channel' ||
+          value === 'scheduler' ||
+          value === 'internal' ||
+          value === 'external_mcp'
+          ? value
+          : 'daemon';
+      })();
+      const invocationContext: InvocationContextV1 = {
+        version: 1,
+        ingress: advisoryIngress,
+        sessionId,
+        promptId,
+        ...((advisoryIngress === 'daemon' ||
+          advisoryIngress === 'external_mcp') &&
+        originatorClientId
+          ? { originatorClientId }
+          : {}),
+      };
       const isQueued = entry.pendingPromptCount > 1;
       const pendingAbort = new AbortController();
       if (signal) {
@@ -4297,7 +4332,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // Force the body's sessionId to match the routing id — a client that
       // sent a stale id in the body would otherwise be dispatched to the
       // wrong agent process.
-      const result = entry.promptQueue.then(() =>
+      const executePrompt = () =>
         telemetry.runWithContext(capturedContext, async () => {
           const queueWaitMs = Date.now() - queuedAt;
           telemetry.metrics?.promptQueueWait(queueWaitMs);
@@ -4363,6 +4398,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                       ? { ...copy._meta }
                       : {};
                   delete meta[DAEMON_RETRY_META_KEY];
+                  delete meta[INVOCATION_CONTEXT_META_KEY];
+                  delete meta[INVOCATION_INGRESS_META_KEY];
+                  delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
                   // External prompt callers cannot self-trigger a continuation;
                   // only `continueSession` (via the trusted `isContinue` flag
                   // below) re-arms it after this strip.
@@ -4373,6 +4411,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   if (isContinue) {
                     meta[DAEMON_CONTINUE_META_KEY] = true;
                   }
+                  meta[INVOCATION_CONTEXT_META_KEY] = invocationContext;
                   if (Object.keys(meta).length > 0) {
                     copy._meta = meta;
                   } else {
@@ -4556,7 +4595,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           } finally {
             telemetry.metrics?.promptDuration(Date.now() - dispatchStartMs);
           }
-        }),
+        });
+      const result = entry.promptQueue.then(() =>
+        runWithInvocationContext(invocationContext, executePrompt),
       );
       result.then(
         (promptResult) => {

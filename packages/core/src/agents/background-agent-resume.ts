@@ -6,6 +6,7 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import type { Content, FunctionDeclaration, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import * as jsonl from '../utils/jsonl-utils.js';
@@ -28,6 +29,7 @@ import type { ChatRecord } from '../services/chatRecordingService.js';
 import { buildOrderedUuidChain } from '../utils/conversation-chain.js';
 import { getInitialChatHistory } from '../utils/environmentContext.js';
 import { getGitBranch } from '../utils/gitUtils.js';
+import { runWithInvocationContext } from '../utils/invocation-context.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 import {
   appendStopHookBlockingCapWarning,
@@ -1040,7 +1042,19 @@ export class BackgroundAgentResumeService {
           runBody,
           normalizeResumedAgentDepth(meta.depth),
         );
-      void (target.isFork ? runInForkContext(framedRunBody) : framedRunBody());
+      const invocationRunBody = () =>
+        runWithInvocationContext(
+          {
+            version: 1,
+            ingress: 'internal',
+            sessionId: meta.parentSessionId,
+            promptId: randomUUID(),
+          },
+          framedRunBody,
+        );
+      void (target.isFork
+        ? runInForkContext(invocationRunBody)
+        : invocationRunBody());
       return entry;
     } catch (error) {
       cleanupOwnedMonitorNotifications?.();

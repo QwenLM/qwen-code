@@ -141,6 +141,7 @@ export interface FakeAgentOpts {
 }
 
 export class FakeAgent implements Agent {
+  initializeCalls: InitializeRequest[] = [];
   newSessionCalls: NewSessionRequest[] = [];
   loadSessionCalls: LoadSessionRequest[] = [];
   resumeSessionCalls: ResumeSessionRequest[] = [];
@@ -150,7 +151,8 @@ export class FakeAgent implements Agent {
     [];
   constructor(private readonly opts: FakeAgentOpts = {}) {}
 
-  async initialize(_p: InitializeRequest): Promise<InitializeResponse> {
+  async initialize(p: InitializeRequest): Promise<InitializeResponse> {
+    this.initializeCalls.push(p);
     if (this.opts.initializeThrows) throw this.opts.initializeThrows;
     if (this.opts.initializeDelayMs) {
       await new Promise((r) => setTimeout(r, this.opts.initializeDelayMs));

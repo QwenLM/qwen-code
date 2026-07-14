@@ -80,6 +80,7 @@ import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js'
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
 
 const debugLogger = createDebugLogger('STARTUP');
+const PRIVATE_ACP_CAPABILITY_ENV = 'QWEN_CODE_PRIVATE_ACP_CAPABILITY';
 
 interface RuntimeLspReinitializeResult {
   reconcile: {
@@ -234,6 +235,9 @@ export async function main() {
   setupUnhandledRejectionHandler();
   initializeWarningHandler();
 
+  const privateAcpParentCapability = process.env[PRIVATE_ACP_CAPABILITY_ENV];
+  delete process.env[PRIVATE_ACP_CAPABILITY_ENV];
+
   if (process.argv.includes('--bare')) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
   }
@@ -244,6 +248,11 @@ export async function main() {
 
   let argv = await parseArguments();
   profileCheckpoint('after_parse_arguments');
+  const isAcpMode = argv.acp || argv.experimentalAcp;
+  const privateAcpChildEnv =
+    isAcpMode && privateAcpParentCapability !== undefined
+      ? { [PRIVATE_ACP_CAPABILITY_ENV]: privateAcpParentCapability }
+      : undefined;
 
   if (isBareMode(argv.bare)) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
@@ -378,7 +387,6 @@ export async function main() {
       // protocol data (not a user prompt) and should be forwarded to the sandbox
       // intact via stdio: 'inherit'.
       const inputFormat = argv.inputFormat as string | undefined;
-      const isAcpMode = argv.acp || argv.experimentalAcp;
       let stdinData = '';
       if (!process.stdin.isTTY && inputFormat !== 'stream-json' && !isAcpMode) {
         stdinData = await readStdin();
@@ -443,7 +451,13 @@ export async function main() {
         : injectStdinIntoArgs(process.argv, stdinData);
 
       await relaunchOnExitCode(() =>
-        start_sandbox(sandboxConfig, memoryArgs, partialConfig, sandboxArgs),
+        start_sandbox(
+          sandboxConfig,
+          memoryArgs,
+          partialConfig,
+          sandboxArgs,
+          privateAcpChildEnv,
+        ),
       );
       process.exit(0);
     } else {
@@ -451,6 +465,7 @@ export async function main() {
       // restarted if needed.
       await relaunchAppInChildProcess(memoryArgs, [], {
         afterSpawn: clearCorruptionEnvVars,
+        childEnv: privateAcpChildEnv,
       });
     }
   }
@@ -809,7 +824,11 @@ export async function main() {
 
     if (config.getExperimentalZedIntegration()) {
       const { runAcpAgent } = await import('./acp-integration/acpAgent.js');
-      await runAcpAgent(config, settings, argv);
+      await runAcpAgent(config, settings, argv, {
+        privateParentCapability: isAcpMode
+          ? privateAcpParentCapability
+          : undefined,
+      });
       // Clean up child processes and force exit, matching other non-interactive modes
       await runExitCleanup();
       process.exit(0);

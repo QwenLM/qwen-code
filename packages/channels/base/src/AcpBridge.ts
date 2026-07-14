@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { Readable, Writable } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import {
@@ -18,6 +18,7 @@ import type {
   AvailableCommand,
   ChannelLoopToolHandler,
   ChannelAgentBridge,
+  ChannelPromptOptions,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
 import {
@@ -32,6 +33,9 @@ import { sanitizeLogText } from './sanitize.js';
 export type { AvailableCommand, ToolCallEvent } from './ChannelAgentBridge.js';
 
 const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+const PRIVATE_ACP_CAPABILITY_ENV = 'QWEN_CODE_PRIVATE_ACP_CAPABILITY';
+const PRIVATE_PARENT_CAPABILITY_META_KEY =
+  'qwen-code/private-parent-capability';
 
 export interface AcpBridgeOptions {
   cliEntryPath: string;
@@ -99,6 +103,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
 
   async start(): Promise<void> {
     const { cliEntryPath, cwd } = this.options;
+    const privateParentCapability = randomBytes(32).toString('base64url');
 
     const args = [
       ...process.execArgv.filter((a) => !/^--inspect(-brk)?($|=)/.test(a)),
@@ -112,7 +117,11 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     this.child = spawn(process.execPath, args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, QWEN_CODE_DISABLE_CRON: '1' },
+      env: {
+        ...process.env,
+        QWEN_CODE_DISABLE_CRON: '1',
+        [PRIVATE_ACP_CAPABILITY_ENV]: privateParentCapability,
+      },
       shell: false,
     });
 
@@ -174,6 +183,9 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     await this.connection.initialize({
       protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: {},
+      _meta: {
+        [PRIVATE_PARENT_CAPABILITY_META_KEY]: privateParentCapability,
+      },
     });
     await this.registerChannelLoopMcpServer();
   }
@@ -214,7 +226,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   async prompt(
     sessionId: string,
     text: string,
-    options?: { imageBase64?: string; imageMimeType?: string },
+    options?: ChannelPromptOptions,
   ): Promise<string> {
     const conn = this.ensureConnection();
 
@@ -250,6 +262,13 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       await conn.prompt({
         sessionId,
         prompt: prompt as Array<{ type: 'text'; text: string }>,
+        ...(options?.invocationIngress
+          ? {
+              _meta: {
+                'qwen-code/invocation-ingress': options.invocationIngress,
+              },
+            }
+          : {}),
       });
     } finally {
       this.off('textChunk', onChunk);
