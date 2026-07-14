@@ -612,10 +612,9 @@ export class ContentGenerationPipeline {
     if (isFinishChunk) {
       if (hasPendingFinish) {
         // Duplicate finish chunk (e.g. from OpenRouter providers that send two
-        // finish_reason chunks for tool calls). The streaming tool call parser
-        // was already reset after the first finish chunk, so the second one
-        // carries no functionCall parts. Merge only usageMetadata and keep the
-        // candidates (including functionCall parts) from the first finish chunk.
+        // finish_reason chunks for tool calls). The first finish response owns
+        // the candidates, including functionCall parts. Merge only usageMetadata
+        // from later finish chunks.
         const lastResponse =
           collectedGeminiResponses[collectedGeminiResponses.length - 1];
         if (response.usageMetadata) {

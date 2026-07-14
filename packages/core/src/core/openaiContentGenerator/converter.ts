@@ -1088,7 +1088,9 @@ function hasThoughtPart(parts: Part[]): boolean {
 }
 
 const THINKING_TAG_PATTERN = /<\/?think(?:ing)?\s*>/i;
-const CLOSING_THINKING_TAG_PATTERN = /\n\s*<\/think(?:ing)?\s*>/i;
+const CLOSING_THINKING_TAG_PATTERN = /\n[^\S\r\n]*<\/think(?:ing)?[^\S\r\n]*>/i;
+const LEADING_CLOSING_THINKING_TAG_PATTERN =
+  /^[^\S\r\n]*<\/think(?:ing)?[^\S\r\n]*>/i;
 const LEADING_THINKING_TAG_PATTERN = /^\s*<\/?think(?:ing)?\s*>/i;
 
 /**
@@ -1387,9 +1389,18 @@ export function convertOpenAIChunkToGemini(
       ((requestContext.hasVisibleContent !== true &&
         LEADING_THINKING_TAG_PATTERN.test(visibleText)) ||
         (requestContext.hasThinkingTagInReasoning === true &&
-          CLOSING_THINKING_TAG_PATTERN.test(visibleText)));
+          (CLOSING_THINKING_TAG_PATTERN.test(visibleText) ||
+            (requestContext.atVisibleLineStart === true &&
+              LEADING_CLOSING_THINKING_TAG_PATTERN.test(visibleText)))));
     if (/\S/.test(visibleText)) {
       requestContext.hasVisibleContent = true;
+    }
+    if (visibleText && requestContext.hasThinkingTagInReasoning === true) {
+      const lastLineBreak = visibleText.lastIndexOf('\n');
+      const lineSuffix = visibleText.slice(lastLineBreak + 1);
+      requestContext.atVisibleLineStart =
+        (lastLineBreak >= 0 || requestContext.atVisibleLineStart === true) &&
+        /^[^\S\r\n]*$/.test(lineSuffix);
     }
     if (leakedThinkingTag) {
       requestContext.pendingUntrustedResponseParts = undefined;

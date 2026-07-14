@@ -83,6 +83,7 @@ export interface RequestContext {
   hasStructuredReasoningContent?: boolean;
   hasThinkingTagInReasoning?: boolean;
   hasVisibleContent?: boolean;
+  atVisibleLineStart?: boolean;
 }
 
 export interface ErrorHandler {

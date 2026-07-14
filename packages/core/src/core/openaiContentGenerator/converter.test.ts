@@ -451,6 +451,31 @@ describe('OpenAIContentConverter', () => {
       ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
     });
 
+    it('rejects a closing tag split after a visible line break', () => {
+      const stream = withStreamParser();
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', {
+          reasoning_content: 'Let me check<think>',
+        }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('content', { content: 'the result\n' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('blank-lines', { content: '\n'.repeat(256) }),
+        stream,
+      );
+
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('closing-tag', { content: '</think>\n' }),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
     it('preserves a split literal closing tag after ordinary reasoning', () => {
       const stream = withStreamParser();
       const reasoning = converter.convertOpenAIChunkToGemini(
