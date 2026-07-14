@@ -5,7 +5,11 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import type { ChildProcess } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { FatalSandboxError, QWEN_DIR } from '@qwen-code/qwen-code-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -14,7 +18,21 @@ import { resolveSeatbeltProfileFile, start_sandbox } from './sandbox.js';
 import { parseSandboxImageName } from './sandboxImageName.js';
 import { parseSandboxMountSpec } from './sandboxMounts.js';
 
+const { spawnMock } = vi.hoisted(() => ({
+  spawnMock: vi.fn<typeof import('node:child_process').spawn>(),
+}));
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    default: { ...actual, spawn: spawnMock },
+    spawn: spawnMock,
+  };
+});
+
 afterEach(() => {
+  spawnMock.mockReset();
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
 });
@@ -73,6 +91,74 @@ describe('resolveSeatbeltProfileFile', () => {
         `Missing macos seatbelt profile file '${expectedPath}'`,
       ),
     );
+  });
+});
+
+describe('start_sandbox', () => {
+  it('passes child-only environment into a Docker sandbox', async () => {
+    const envName = 'QWEN_CODE_PRIVATE_ACP_CAPABILITY';
+    const originalCapability = process.env[envName];
+    const tempDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-sandbox-test-'),
+    );
+    delete process.env[envName];
+    vi.stubEnv('QWEN_CODE_INTEGRATION_TEST', 'true');
+    vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+    vi.stubEnv('QWEN_HOME', path.join(tempDir, 'settings'));
+    vi.stubEnv('QWEN_RUNTIME_DIR', path.join(tempDir, 'runtime'));
+    vi.spyOn(process.stdin, 'pause').mockImplementation(() => process.stdin);
+    vi.spyOn(process.stdin, 'resume').mockImplementation(() => process.stdin);
+    spawnMock.mockImplementation((_command, args) => {
+      const isImageCheck = args?.[0] === 'images';
+      const stdout = isImageCheck ? new PassThrough() : null;
+      const child = Object.assign(new EventEmitter(), {
+        stdout,
+        stderr: null,
+        connected: false,
+        disconnect: vi.fn(),
+      }) as unknown as ChildProcess;
+      queueMicrotask(() => {
+        stdout?.end('image-id\n');
+        child.emit('close', 0, null);
+      });
+      return child;
+    });
+
+    try {
+      await expect(
+        start_sandbox(
+          { command: 'docker', image: 'test-image' },
+          [],
+          undefined,
+          ['node', 'script.js'],
+          { [envName]: 'private-capability' },
+        ),
+      ).resolves.toBe(0);
+
+      const runCall = spawnMock.mock.calls.find(
+        ([, args]) => args?.[0] === 'run',
+      );
+      expect(runCall).toBeDefined();
+      const runArgs = runCall?.[1] as readonly string[] | undefined;
+      const runOptions = runCall?.[2] as
+        | { env?: NodeJS.ProcessEnv }
+        | undefined;
+      expect(
+        runArgs?.findIndex(
+          (arg, index) => arg === '--env' && runArgs[index + 1] === envName,
+        ),
+      ).toBeGreaterThanOrEqual(0);
+      expect(runArgs).not.toContain(`${envName}=private-capability`);
+      expect(runOptions?.env?.[envName]).toBe('private-capability');
+      expect(process.env[envName]).toBeUndefined();
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+      if (originalCapability === undefined) {
+        delete process.env[envName];
+      } else {
+        process.env[envName] = originalCapability;
+      }
+    }
   });
 });
 
