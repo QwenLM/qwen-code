@@ -302,6 +302,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // unconditional because the route also serves a trusted single-workspace
   // primary; authorization is evaluated for the selected runtime per request.
   workspace_persisted_transcript: { since: 'v1' },
+  // Workspace-qualified full session export from active persisted storage.
+  // This is separate from `session_export` so clients do not infer the plural
+  // route from the legacy primary-workspace export capability.
+  workspace_session_export: { since: 'v1' },
   // Workspace-qualified ACP transport (issue #6378 Phase 4):
   // `/workspaces/:workspace/acp` mounts a per-runtime ACP dispatcher (HTTP +
   // WebSocket) for each registered workspace, with per-runtime device-flow and

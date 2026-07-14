@@ -1126,6 +1126,7 @@ describe('DaemonClient', () => {
           authorization: 'Bearer secret',
           'x-qwen-client-id': 'client-1',
         },
+        signal: expect.any(AbortSignal),
       });
     });
 
@@ -5558,6 +5559,68 @@ describe('DaemonClient', () => {
         url: 'http://daemon/workspaces/workspace%2Fid/session/session%2F1/transcript?cursor=cur+1&limit=500',
       });
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('workspace export uses encoded native REST and parses attachment metadata', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        textResponse(200, '# secondary export', {
+          'content-type': 'text/markdown; charset=utf-8',
+          'content-disposition': 'attachment; filename="secondary.md"',
+        }),
+      );
+      const transportFetch = vi.fn(async () => {
+        throw new Error('replaceable transport must not be used');
+      });
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        token: 'secret',
+        fetch,
+        transport,
+      });
+
+      await expect(
+        client.workspaceByCwd('/tmp/work space').exportSession('session/1', {
+          format: 'md',
+          clientId: 'client-1',
+        }),
+      ).resolves.toEqual({
+        content: '# secondary export',
+        filename: 'secondary.md',
+        mimeType: 'text/markdown; charset=utf-8',
+        format: 'md',
+      });
+
+      expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspaces/%2Ftmp%2Fwork%20space/session/session%2F1/export?format=md',
+        headers: {
+          authorization: 'Bearer secret',
+          'x-qwen-client-id': 'client-1',
+        },
+      });
+    });
+
+    it('workspace export throws DaemonHttpError on non-2xx responses', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(403, {
+          error: 'Workspace is not trusted.',
+          code: 'untrusted_workspace',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.workspaceById('workspace-id').exportSession('session-1'),
+      ).rejects.toBeInstanceOf(DaemonHttpError);
     });
 
     it('workspaceByCwd deleteSessionGroup uses workspace-qualified group route', async () => {

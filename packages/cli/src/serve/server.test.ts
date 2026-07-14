@@ -324,6 +324,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_qualified_rest_core',
   'extension_management_v2',
   'workspace_persisted_transcript',
+  'workspace_session_export',
   // Baseline (always advertised) — presence means the `/voice/stream`
   // endpoint exists; the WS errors if no voice model is configured.
   'voice_transcribe',
@@ -371,6 +372,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_qualified_rest_core' &&
       f !== 'extension_management_v2' &&
       f !== 'workspace_persisted_transcript' &&
+      f !== 'workspace_session_export' &&
       f !== 'voice_transcribe',
   ),
   'workspace_settings',
@@ -412,6 +414,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_qualified_voice',
   'extension_management_v2',
   'workspace_persisted_transcript',
+  'workspace_session_export',
   'workspace_qualified_acp',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',
@@ -13112,6 +13115,57 @@ describe('createServeApp', () => {
         code: 'session_archived',
         sessionId: sid,
       });
+    });
+
+    it('keeps archive blocked while a legacy export is in flight', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeef';
+      await writeExportSession(sid);
+      let loadStarted!: () => void;
+      let releaseLoad!: () => void;
+      const loadStartedPromise = new Promise<void>((resolve) => {
+        loadStarted = resolve;
+      });
+      const loadReleasedPromise = new Promise<void>((resolve) => {
+        releaseLoad = resolve;
+      });
+      const originalLoadSession = SessionService.prototype.loadSession;
+      const loadSpy = vi
+        .spyOn(SessionService.prototype, 'loadSession')
+        .mockImplementation(async function (this: SessionService, id) {
+          const result = await originalLoadSession.call(this, id);
+          if (id === sid) {
+            loadStarted();
+            await loadReleasedPromise;
+          }
+          return result;
+        });
+      const app = createExportApp();
+      const exportPromise = request(app)
+        .get(`/session/${sid}/export`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .then((response) => response);
+
+      try {
+        await loadStartedPromise;
+        const archive = await request(app)
+          .post('/sessions/archive')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sessionIds: [sid] });
+        expect(archive.status).toBe(409);
+        expect(archive.body).toMatchObject({
+          code: 'session_archiving',
+          sessionId: sid,
+        });
+
+        releaseLoad();
+        const exported = await exportPromise;
+        expect(exported.status).toBe(200);
+        expect(exported.text).toContain('hello export');
+      } finally {
+        releaseLoad();
+        loadSpy.mockRestore();
+        await Promise.allSettled([exportPromise]);
+      }
     });
   });
 
