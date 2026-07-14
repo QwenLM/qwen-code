@@ -352,7 +352,9 @@ describe('ci flaky rerun patrol', () => {
       async comments() {
         return [
           markerComment({
-            body: markerComment().body.replace('count=2', 'count=3'),
+            body: markerComment()
+              .body.replace('attempt=2', 'attempt=1')
+              .replace('count=2', 'count=3'),
           }),
         ];
       },
