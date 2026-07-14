@@ -454,7 +454,12 @@ export function createPythonSteps({ platform = process.platform, pythonRoot }) {
   return steps;
 }
 
-export function createStepEnvironment({ baseEnv, home, playwrightPort, step }) {
+export function createStepEnvironment({
+  baseEnv,
+  home,
+  playwrightPort,
+  step: currentStep,
+}) {
   const env = createBaseEnvironment(baseEnv);
   Object.assign(env, {
     CI: 'true',
@@ -472,7 +477,7 @@ export function createStepEnvironment({ baseEnv, home, playwrightPort, step }) {
     USERPROFILE: home,
   });
 
-  if (step.installEnvironment) {
+  if (currentStep.installEnvironment) {
     Object.assign(env, {
       HUSKY: '0',
       NPM_CONFIG_FETCH_RETRIES: '5',
@@ -483,7 +488,7 @@ export function createStepEnvironment({ baseEnv, home, playwrightPort, step }) {
     });
   }
 
-  if (step.pythonEnvironment) {
+  if (currentStep.pythonEnvironment) {
     Object.assign(env, {
       PIP_CONFIG_FILE: '/dev/null',
       PIP_DISABLE_PIP_VERSION_CHECK: '1',
@@ -496,11 +501,11 @@ export function createStepEnvironment({ baseEnv, home, playwrightPort, step }) {
     });
   }
 
-  if (step.playwrightEnvironment) {
+  if (currentStep.playwrightEnvironment) {
     env.PLAYWRIGHT_BROWSERS_PATH = join(home, 'playwright');
   }
 
-  if (step.playwright) env.PLAYWRIGHT_PORT = String(playwrightPort);
+  if (currentStep.playwright) env.PLAYWRIGHT_PORT = String(playwrightPort);
   return env;
 }
 
