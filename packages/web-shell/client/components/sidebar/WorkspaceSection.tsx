@@ -270,7 +270,7 @@ export function WorkspaceSection({
           )}
           {readOnly && <span className={styles.badge}>{readOnlyLabel}</span>}
         </button>
-        {!readOnly && !disabled && headerActions?.(actionsVisible)}
+        {headerActions?.(actionsVisible)}
       </div>
       {renderSessions &&
         (expanded || Boolean(searchQuery.trim())) &&

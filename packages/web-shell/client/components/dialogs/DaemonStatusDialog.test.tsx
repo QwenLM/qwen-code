@@ -147,6 +147,8 @@ function makeBucket(t: number): DaemonMetricsSeriesBucket {
     promptDurationP95Ms: 0,
     llmApiP50Ms: 0,
     llmApiP95Ms: 0,
+    llmApiErrors: 0,
+    llmApiRetries: 0,
     cpuPercent: 1,
     rssBytes: 200 * 1024 * 1024,
     heapUsedBytes: 50 * 1024 * 1024,
@@ -361,11 +363,13 @@ describe('DaemonStatusDialog', () => {
     // Chart cards render (spot-check i18n'd titles across the set)...
     expect(text).toContain('Concurrency');
     expect(text).toContain('LLM API latency');
+    expect(text).toContain('Model API health');
     expect(text).toContain('Token burn');
-    // ...one SvgLineChart per card...
+    // ...one SvgLineChart per card (12 charts on the Metrics tab); a floor of
+    // 12 catches a regression that silently drops a chart card.
     expect(
       container!.querySelectorAll('svg[role="img"]').length,
-    ).toBeGreaterThanOrEqual(10);
+    ).toBeGreaterThanOrEqual(12);
     // ...and the panels are mutually exclusive: Overview content is gone.
     expect(text).not.toContain('4242');
   });
@@ -402,6 +406,93 @@ describe('DaemonStatusDialog', () => {
     expect(text).toContain('15k');
     expect(text).toContain('120%');
     expect(text).toContain('5.0 KB');
+  });
+
+  it('charts model API errors and automatic retries on the Metrics tab', () => {
+    const b = makeBucket(1000);
+    b.llmApiErrors = 4;
+    b.llmApiRetries = 7;
+    summaryState = {
+      report: {
+        ...summaryReport,
+        runtime: { ...summaryReport.runtime, metrics: { series: [b] } },
+      },
+      loading: false,
+      error: undefined,
+    };
+    mount();
+    const metricsTab = container!.querySelector('#daemon-tab-metrics')!;
+    act(() => {
+      metricsTab.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const text = container!.textContent ?? '';
+    // The dedicated model-API-health card renders with both series legends and
+    // their peak values (distinct 4 / 7 so neither collides with fixture data).
+    expect(text).toContain('Model API health');
+    expect(text).toContain('API errors');
+    expect(text).toContain('Retries');
+    expect(text).toContain('4');
+    expect(text).toContain('7');
+  });
+
+  it('gives every metrics chart a hover help affordance with self-explaining copy', () => {
+    summaryState = {
+      report: summaryWithSeries(2),
+      loading: false,
+      error: undefined,
+    };
+    mount();
+    const metricsTab = container!.querySelector('#daemon-tab-metrics')!;
+    act(() => {
+      metricsTab.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    // One ⓘ help button per chart card; its aria-label carries the full
+    // explanation to assistive tech (filter to the long help sentences so the
+    // toolbar/tab buttons don't count).
+    const helpButtons = Array.from(
+      container!.querySelectorAll('button[aria-label]'),
+    ).filter((b) => (b.getAttribute('aria-label') ?? '').length > 20);
+    expect(helpButtons.length).toBeGreaterThanOrEqual(12);
+    // The ⓘ must be a SIBLING of the heading, not a child: a nested button's
+    // aria-label folds the whole help sentence into the heading's accessible
+    // name. No <h3> may contain a button.
+    for (const h of container!.querySelectorAll('h3')) {
+      expect(h.querySelector('button')).toBeNull();
+    }
+    // The two highest-value disambiguations render in the DOM: the model-health
+    // errors-vs-retries explanation, and that the HTTP "Requests" chart is NOT
+    // model calls (resolving the "two errors charts" confusion).
+    const text = container!.textContent ?? '';
+    expect(text).toContain('Each failed attempt = 1 error');
+    expect(text).toContain('NOT model calls');
+    expect(
+      container!.querySelector(
+        'button[aria-label*="Provider-side LLM failures"]',
+      ),
+    ).not.toBeNull();
+  });
+
+  it('tolerates a metrics bucket from a daemon predating the API-health fields', () => {
+    // Older daemon: the wire bucket omits llmApiErrors/llmApiRetries. The chart
+    // must fall back to zero rather than throwing or gapping.
+    const legacy = makeBucket(1000) as Partial<DaemonMetricsSeriesBucket>;
+    delete legacy.llmApiErrors;
+    delete legacy.llmApiRetries;
+    summaryState = {
+      report: {
+        ...summaryReport,
+        runtime: { ...summaryReport.runtime, metrics: { series: [legacy] } },
+      },
+      loading: false,
+      error: undefined,
+    };
+    mount();
+    const metricsTab = container!.querySelector('#daemon-tab-metrics')!;
+    act(() => {
+      metricsTab.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    // Renders without a crash; the card is still present.
+    expect(container!.textContent ?? '').toContain('Model API health');
   });
 
   it('moves between tabs with arrow / Home / End keys (roving tabindex)', () => {

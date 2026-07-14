@@ -44,6 +44,7 @@ import type {
   DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryStatus,
+  DaemonWorkspaceRemovalResult,
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillsStatus,
@@ -452,4 +453,8 @@ export interface DaemonWorkspaceActions {
     cwd: string,
     options?: { persist?: boolean },
   ): Promise<DaemonAddWorkspaceResult>;
+  removeWorkspace(
+    workspaceId: string,
+    options?: { force?: boolean; timeoutMs?: number },
+  ): Promise<DaemonWorkspaceRemovalResult>;
 }

@@ -1294,9 +1294,20 @@
       }
     },
     "agents": {
-      "description": "Settings for multi-agent collaboration features (Arena, Team, Swarm).",
+      "description": "Settings for built-in agents and multi-agent collaboration features (Arena, Team, Swarm).",
       "type": "object",
       "properties": {
+        "builtin": {
+          "description": "Settings for built-in subagents.",
+          "type": "object",
+          "properties": {
+            "exploreModel": {
+              "description": "Model selector for the built-in Explore subagent. Use \"inherit\" for the main session model, \"fast\" for fastModel, a model ID, or an authType:model-id selector. Custom same-name agents are unaffected.",
+              "type": "string",
+              "default": "inherit"
+            }
+          }
+        },
         "maxParallelAgents": {
           "type": "integer",
           "minimum": 1,

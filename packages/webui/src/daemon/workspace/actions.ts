@@ -727,6 +727,17 @@ export function createDaemonWorkspaceActions({
         'Add workspace timed out',
       );
     },
+
+    async removeWorkspace(workspaceId, options) {
+      const client = requireClient(getClient, 'Remove workspace failed');
+      const removal = client.workspaceById(workspaceId).remove(options);
+      if (options?.timeoutMs === 0) return removal;
+      return withActionTimeout(
+        removal,
+        'Remove workspace timed out',
+        options?.timeoutMs,
+      );
+    },
   };
 }
 

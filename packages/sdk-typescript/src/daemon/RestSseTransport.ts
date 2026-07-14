@@ -30,6 +30,7 @@ export class RestSseTransport implements DaemonTransport {
 
   readonly type = 'rest' as const;
   readonly supportsReplay = true;
+  readonly restFetch: typeof globalThis.fetch;
 
   constructor(
     baseUrl: string,
@@ -39,6 +40,7 @@ export class RestSseTransport implements DaemonTransport {
     this.baseUrl = baseUrl;
     this.token = token;
     this._fetch = fetchFn;
+    this.restFetch = fetchFn;
   }
 
   get connected(): boolean {

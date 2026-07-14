@@ -512,6 +512,9 @@ const EN: Messages = {
   'daemon.charts.queuedPrompts': 'Queued',
   'daemon.charts.reqRejected': 'Rejected',
   'daemon.charts.llmLatency': 'LLM API latency',
+  'daemon.charts.apiHealth': 'Model API health',
+  'daemon.charts.apiErrors': 'API errors',
+  'daemon.charts.apiRetries': 'Retries',
   'daemon.charts.cpu': 'CPU',
   'daemon.charts.pipe': 'IPC pipe',
   'daemon.charts.pipeIn': 'In',
@@ -527,6 +530,30 @@ const EN: Messages = {
   'daemon.charts.tokensIn': 'Input',
   'daemon.charts.tokensOut': 'Output',
   'daemon.charts.peak': 'peak',
+  'daemon.charts.concurrency.help':
+    'Live load at each sample: prompts running now, prompts queued (accepted but not yet dispatched), and active sessions. Queued rising above active is backpressure.',
+  'daemon.charts.requests.help':
+    'Client↔daemon HTTP traffic per window — NOT model calls. Total requests, those returning 4xx/5xx, and those the rate limiter rejected.',
+  'daemon.charts.apiLatency.help':
+    "Client↔daemon HTTP request duration (p50/p95) — how fast the daemon answers, not the model. Compare with LLM API latency to separate 'we are slow' from 'the model is slow'.",
+  'daemon.charts.llmLatency.help':
+    'Per-round model API round-trip (daemon→model→daemon), p50/p95. Model-side latency, distinct from the HTTP API latency above.',
+  'daemon.charts.apiHealth.help':
+    'Provider-side LLM failures. Each failed attempt = 1 error; each automatic backoff = 1 retry. Transient 429/5xx are usually absorbed by retries (errors ≈ retries); errors climbing above retries means calls are failing outright.',
+  'daemon.charts.promptLatency.help':
+    'Per prompt (task): p95 time waiting in the per-session queue before dispatch, and p95 end-to-end run time. Rising queue wait signals backpressure.',
+  'daemon.charts.eventLoop.help':
+    'Daemon event-loop lag p99 per window — the CPU-saturation / blocking signal. High lag means the daemon is starved and everything slows.',
+  'daemon.charts.cpu.help':
+    'CPU utilization (% of all cores) at each sample: the daemon and the ACP child (where LLM/tool work runs). Child at 0% means no child is running.',
+  'daemon.charts.memory.help':
+    'Resident memory at each sample: daemon RSS, daemon V8 heap, and ACP child RSS. Steady growth over time hints at a leak.',
+  'daemon.charts.pipe.help':
+    'Bytes over the stdio pipe to/from the ACP child per window. Sustained high volume points to chatty framing between daemon and child.',
+  'daemon.charts.connections.help':
+    'Live client transport connections at each sample: REST/SSE streams, ACP WebSocket streams, and ACP connections.',
+  'daemon.charts.tokens.help':
+    'Input (prompt) and output (completion) tokens attributed to model turns per window — model spend over time.',
   'daemon.usage.today': 'Today',
   'daemon.usage.period7d': '7D',
   'daemon.usage.period30d': '30D',
@@ -827,6 +854,27 @@ const EN: Messages = {
   'sidebar.addWorkspacePersistHint':
     'Persist this workspace registration in the daemon configuration.',
   'sidebar.addWorkspaceAdding': 'Adding…',
+  'sidebar.removeWorkspace': 'Remove workspace',
+  'sidebar.workspaceActions': 'Workspace actions',
+  'sidebar.forceRemoveWorkspace': 'Force remove',
+  'sidebar.removeWorkspaceTitle': 'Remove Workspace',
+  'sidebar.removeWorkspaceConfirm': (v) =>
+    `Remove the runtime and persistent registration for “${v?.name ?? ''}”? Files, settings, and session history will not be deleted.`,
+  'sidebar.removeWorkspaceBusy': (v) =>
+    `“${v?.name ?? ''}” still has active runtime resources. Force removal will terminate them.`,
+  'sidebar.removeWorkspaceCurrentSession':
+    'Switch to another workspace or close the current session before forcing removal.',
+  'sidebar.removeWorkspaceInProgress':
+    'Another client is already removing this workspace. Refresh after that operation finishes.',
+  'sidebar.removeWorkspaceError': 'Failed to remove workspace',
+  'sidebar.removeWorkspaceSessions': (v) => `Sessions: ${v?.count ?? 0}`,
+  'sidebar.removeWorkspacePrompts': (v) => `Active prompts: ${v?.count ?? 0}`,
+  'sidebar.removeWorkspaceStarts': (v) =>
+    `Pending session starts: ${v?.count ?? 0}`,
+  'sidebar.removeWorkspaceConnections': (v) =>
+    `ACP connections: ${v?.count ?? 0}`,
+  'sidebar.removeWorkspaceMemoryTasks': (v) => `Memory tasks: ${v?.count ?? 0}`,
+  'sidebar.removeWorkspaceWorkers': (v) => `Channel workers: ${v?.count ?? 0}`,
   'sidebar.noSessions': 'No sessions.',
   'sidebar.projectFallback': 'Project',
   'sidebar.sessionsOverview': 'Session Overview',
@@ -1775,6 +1823,7 @@ const EN: Messages = {
   'thinking.expand': 'Expand thinking',
   'thinking.collapse': 'Collapse thinking',
   'thinking.running': (v) => `Thinking${v?.duration ? ` ${v.duration}` : ''}`,
+  'thinking.doneBriefly': 'Thought briefly',
   'thinking.done': (v) =>
     v?.duration ? `Thought for ${v.duration}` : 'Done thinking',
   'sessionsOverview.count': (v) => `${v?.count ?? 0} sessions`,
@@ -2390,6 +2439,9 @@ const ZH: Messages = {
   'daemon.charts.queuedPrompts': '排队中',
   'daemon.charts.reqRejected': '限流拒绝',
   'daemon.charts.llmLatency': 'LLM 耗时',
+  'daemon.charts.apiHealth': '模型 API 健康',
+  'daemon.charts.apiErrors': 'API 报错',
+  'daemon.charts.apiRetries': '重试',
   'daemon.charts.cpu': 'CPU',
   'daemon.charts.pipe': 'IPC 管道',
   'daemon.charts.pipeIn': '接收',
@@ -2405,6 +2457,30 @@ const ZH: Messages = {
   'daemon.charts.tokensIn': '输入',
   'daemon.charts.tokensOut': '输出',
   'daemon.charts.peak': '峰值',
+  'daemon.charts.concurrency.help':
+    '每次采样的实时负载:正在执行的 prompt、排队中(已接受未派发)、活跃会话数。排队数超过执行数即出现背压。',
+  'daemon.charts.requests.help':
+    '每个窗口内客户端↔守护进程的 HTTP 流量,并非模型调用。总请求数、返回 4xx/5xx 的数量、被限流拒绝的数量。',
+  'daemon.charts.apiLatency.help':
+    '客户端↔守护进程 HTTP 请求耗时(p50/p95)——反映守护进程本身快慢,而非模型。与「LLM 耗时」对比可区分是"我们慢"还是"模型慢"。',
+  'daemon.charts.llmLatency.help':
+    '每轮模型 API 往返耗时(守护进程→模型→守护进程),p50/p95。属模型侧延迟,区别于上面的 HTTP「API 耗时」。',
+  'daemon.charts.apiHealth.help':
+    '服务商侧 LLM 失败。每次失败尝试 = 1 次报错,每次自动退避 = 1 次重试。瞬时 429/5xx 通常被重试吸收(报错 ≈ 重试);报错高于重试说明调用彻底失败。',
+  'daemon.charts.promptLatency.help':
+    '每个 prompt(任务):派发前在会话队列中的等待 p95,以及端到端执行 p95。等待升高即背压信号。',
+  'daemon.charts.eventLoop.help':
+    '守护进程事件循环延迟 p99——CPU 饱和 / 阻塞信号。延迟高说明守护进程被拖住,一切都会变慢。',
+  'daemon.charts.cpu.help':
+    '每次采样的 CPU 占用(占全部核心百分比):守护进程,以及运行实际 LLM/工具的 ACP 子进程。子进程 0% 表示无子进程运行。',
+  'daemon.charts.memory.help':
+    '每次采样的常驻内存:守护进程 RSS、守护进程 V8 堆、ACP 子进程 RSS。若持续增长可能是内存泄漏。',
+  'daemon.charts.pipe.help':
+    '每个窗口内经 stdio 管道与 ACP 子进程收发的字节数。持续偏大说明守护进程与子进程间帧交互频繁。',
+  'daemon.charts.connections.help':
+    '每次采样的客户端传输连接:REST/SSE 流、ACP WebSocket 流、ACP 连接数。',
+  'daemon.charts.tokens.help':
+    '每个窗口内计入模型轮次的输入(prompt)与输出(completion)token——随时间的模型消耗。',
   'daemon.usage.today': '今日',
   'daemon.usage.period7d': '7天',
   'daemon.usage.period30d': '30天',
@@ -2686,6 +2762,25 @@ const ZH: Messages = {
   'sidebar.addWorkspacePersist': '服务重启后保留',
   'sidebar.addWorkspacePersistHint': '将此工作区注册持久化到守护进程配置中。',
   'sidebar.addWorkspaceAdding': '添加中…',
+  'sidebar.removeWorkspace': '移除工作区',
+  'sidebar.workspaceActions': '工作区操作',
+  'sidebar.forceRemoveWorkspace': '强制移除',
+  'sidebar.removeWorkspaceTitle': '移除工作区',
+  'sidebar.removeWorkspaceConfirm': (v) =>
+    `确定移除“${v?.name ?? ''}”的运行时和持久化注册吗？文件、设置和会话历史不会被删除。`,
+  'sidebar.removeWorkspaceBusy': (v) =>
+    `“${v?.name ?? ''}”仍有活动运行时资源。强制移除会终止这些资源。`,
+  'sidebar.removeWorkspaceCurrentSession':
+    '请先切换到其他工作区或关闭当前会话，再执行强制移除。',
+  'sidebar.removeWorkspaceInProgress':
+    '另一个客户端正在移除此工作区，请在操作完成后刷新。',
+  'sidebar.removeWorkspaceError': '移除工作区失败',
+  'sidebar.removeWorkspaceSessions': (v) => `会话：${v?.count ?? 0}`,
+  'sidebar.removeWorkspacePrompts': (v) => `活动提示：${v?.count ?? 0}`,
+  'sidebar.removeWorkspaceStarts': (v) => `待启动会话：${v?.count ?? 0}`,
+  'sidebar.removeWorkspaceConnections': (v) => `ACP 连接：${v?.count ?? 0}`,
+  'sidebar.removeWorkspaceMemoryTasks': (v) => `Memory 任务：${v?.count ?? 0}`,
+  'sidebar.removeWorkspaceWorkers': (v) => `Channel worker：${v?.count ?? 0}`,
   'sidebar.noSessions': '暂无会话',
   'sidebar.projectFallback': '项目',
   'sidebar.sessionsOverview': '会话总览',
@@ -3578,6 +3673,7 @@ const ZH: Messages = {
   'thinking.expand': '展开思考',
   'thinking.collapse': '收起思考',
   'thinking.running': (v) => `正在思考${v?.duration ? ` ${v.duration}` : ''}`,
+  'thinking.doneBriefly': '思考片刻',
   'thinking.done': (v) => (v?.duration ? `已思考 ${v.duration}` : '思考完成'),
   'welcome.changeModel': '(/model 切换)',
   'welcome.defaultModel': '未知模型',

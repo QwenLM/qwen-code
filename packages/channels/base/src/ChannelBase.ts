@@ -3825,8 +3825,10 @@ export abstract class ChannelBase {
       // to any visible sink could send output the cancel can't recall. On a
       // failed cancel they're replayed; on success, discarded.
       const heldChunks: string[] = [];
+      let hasStreamedText = false;
       const releaseHeldChunks = () => {
         for (const held of heldChunks.splice(0)) {
+          hasStreamedText = true;
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
               envelope.chatId,
@@ -3858,6 +3860,7 @@ export abstract class ChannelBase {
           return;
         }
         heldChunks.length = 0;
+        hasStreamedText = false;
         this.onResponseBoundary(envelope.chatId, sessionId);
         streamer?.stop();
       };
@@ -3880,6 +3883,9 @@ export abstract class ChannelBase {
         if (!promptState.cancelled && response) {
           promptState.deliveryStarted = true;
           if (streamer) {
+            if (!hasStreamedText) {
+              streamer.push(response);
+            }
             await streamer.flush();
           } else {
             await this.onResponseComplete(envelope.chatId, response, sessionId);

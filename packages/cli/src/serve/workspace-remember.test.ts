@@ -16,6 +16,7 @@ import type {
   BridgeWorkspaceMemoryRememberRequest,
   BridgeWorkspaceMemoryRememberResult,
 } from './acp-session-bridge.js';
+import { WorkspaceDrainingError } from './acp-session-bridge.js';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   mountWorkspaceMemoryRememberRoutes,
@@ -649,6 +650,76 @@ describe('workspace memory remember routes', () => {
     expect(lane.get(first.taskId)).toBeUndefined();
   });
 
+  it('rolls back the enqueue gate and fails queued tasks on disposal', async () => {
+    const first = deferred<BridgeWorkspaceMemoryRememberResult>();
+    const bridge = buildBridgeStub({
+      rememberImpl: vi.fn(async () => first.promise),
+    });
+    const lane = new WorkspaceRememberTaskLane(bridge, '/work/remove-me');
+    const running = lane.enqueue({
+      content: 'running',
+      contextMode: 'workspace',
+    });
+    const queued = lane.enqueue({
+      content: 'queued',
+      contextMode: 'workspace',
+    });
+    await waitFor(() => lane.get(running.taskId)?.status === 'running');
+
+    lane.beginDrain();
+    expect(() =>
+      lane.enqueue({ content: 'blocked', contextMode: 'workspace' }),
+    ).toThrow(WorkspaceDrainingError);
+    lane.cancelDrain();
+    const queuedAfterRollback = lane.enqueue({
+      content: 'queued after rollback',
+      contextMode: 'workspace',
+    });
+
+    lane.dispose();
+    expect(lane.get(queued.taskId)).toMatchObject({
+      status: 'failed',
+      error: { code: 'workspace_removed' },
+    });
+    expect(lane.get(queuedAfterRollback.taskId)).toMatchObject({
+      status: 'failed',
+      error: { code: 'workspace_removed' },
+    });
+    expect(lane.pendingCount()).toBe(1);
+
+    first.reject(new Error('bridge closed'));
+    await waitFor(() => lane.get(running.taskId)?.status === 'failed');
+    expect(lane.get(running.taskId)).toMatchObject({
+      error: { code: 'workspace_removed' },
+    });
+    expect(bridge.events).toEqual([]);
+    expect(bridge.rememberCalls.map((call) => call.content)).toEqual([
+      'running',
+    ]);
+  });
+
+  it('fails a successful bridge result that settles after disposal', async () => {
+    const first = deferred<BridgeWorkspaceMemoryRememberResult>();
+    const bridge = buildBridgeStub({
+      rememberImpl: vi.fn(async () => first.promise),
+    });
+    const lane = new WorkspaceRememberTaskLane(bridge, '/work/remove-me');
+    const running = lane.enqueue({
+      content: 'running',
+      contextMode: 'workspace',
+    });
+    await waitFor(() => lane.get(running.taskId)?.status === 'running');
+
+    lane.dispose();
+    first.resolve({ filesTouched: [], touchedScopes: [] });
+
+    await waitFor(() => lane.get(running.taskId)?.status === 'failed');
+    expect(lane.get(running.taskId)).toMatchObject({
+      error: { code: 'workspace_removed' },
+    });
+    expect(bridge.events).toEqual([]);
+  });
+
   it('runs hidden remember tasks serially within the remember lane', async () => {
     const first = deferred<BridgeWorkspaceMemoryRememberResult>();
     const second = deferred<BridgeWorkspaceMemoryRememberResult>();
@@ -935,6 +1006,24 @@ describe('workspace memory remember routes', () => {
       'Failed to extract workspace memory error code:',
       { extractionError: 'code getter failed' },
     );
+  });
+
+  it('maps a draining workspace to a stable 503 response', async () => {
+    const bridge = buildBridgeStub({});
+    const lane = new WorkspaceRememberTaskLane(bridge, '/work/draining');
+    lane.beginDrain();
+    const app = buildApp(bridge, undefined, lane);
+
+    await request(app)
+      .post('/workspace/memory/remember')
+      .send({ content: 'remember me' })
+      .expect(503)
+      .expect((res) => {
+        expect(res.body).toEqual({
+          error: 'Workspace runtime is being removed.',
+          code: 'workspace_draining',
+        });
+      });
   });
 
   it('records bridge failures with stable public error codes', async () => {

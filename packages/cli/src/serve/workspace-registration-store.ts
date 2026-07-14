@@ -45,6 +45,8 @@ export class WorkspaceRegistrationStoreError extends Error {
 
 export class WorkspaceRegistrationStoreLimitError extends WorkspaceRegistrationStoreError {}
 
+export class WorkspaceRegistrationStoreCommittedError extends WorkspaceRegistrationStoreError {}
+
 function normalizedScopePath(primaryWorkspace: string): string {
   return os.platform() === 'win32'
     ? primaryWorkspace.toLowerCase()
@@ -340,14 +342,24 @@ export class WorkspaceRegistrationStore {
   }
 
   async removeById(id: string): Promise<boolean> {
-    return this.update((snapshot) => {
-      const index = snapshot.workspaces.findIndex(
-        (workspace) => workspaceRegistrationId(workspace) === id,
-      );
-      if (index < 0) return false;
-      snapshot.workspaces.splice(index, 1);
+    return (await this.removeByIds([id])) > 0;
+  }
+
+  async removeByIds(ids: readonly string[]): Promise<number> {
+    const requested = new Set(ids);
+    if (requested.size === 0) return 0;
+    let removed = 0;
+    await this.update((snapshot) => {
+      const retained = snapshot.workspaces.filter((workspace) => {
+        if (!requested.has(workspaceRegistrationId(workspace))) return true;
+        removed++;
+        return false;
+      });
+      if (removed === 0) return false;
+      snapshot.workspaces.splice(0, snapshot.workspaces.length, ...retained);
       return true;
     });
+    return removed;
   }
 
   private async update(
@@ -356,21 +368,47 @@ export class WorkspaceRegistrationStore {
     const { atomicWriteFile } = await import('@qwen-code/qwen-code-core');
     return withInProcessLock(this.filePath, async () => {
       const lock = await acquireFileLock(this.filePath);
+      let committed = false;
+      let changed = false;
+      let workError: unknown;
       try {
         const snapshot = await this.read();
         lock.assertOwned();
-        const changed = mutate(snapshot);
-        if (!changed) return false;
-        lock.assertOwned();
-        await atomicWriteFile(
-          this.filePath,
-          `${JSON.stringify(snapshot, null, 2)}\n`,
-          { mode: 0o600, forceMode: true, noFollow: true },
-        );
-        return true;
-      } finally {
-        await lock.release();
+        changed = mutate(snapshot);
+        if (changed) {
+          lock.assertOwned();
+          await atomicWriteFile(
+            this.filePath,
+            `${JSON.stringify(snapshot, null, 2)}\n`,
+            { mode: 0o600, forceMode: true, noFollow: true },
+          );
+          committed = true;
+        }
+      } catch (err) {
+        workError = err;
       }
+      let releaseError: unknown;
+      try {
+        await lock.release();
+      } catch (err) {
+        releaseError = committed
+          ? new WorkspaceRegistrationStoreCommittedError(
+              `Workspace registration update committed but lock release failed: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            )
+          : err;
+      }
+      if (
+        workError instanceof Error &&
+        releaseError !== undefined &&
+        workError.cause === undefined
+      ) {
+        workError.cause = releaseError;
+      }
+      if (workError !== undefined) throw workError;
+      if (releaseError !== undefined) throw releaseError;
+      return changed;
     });
   }
 }
