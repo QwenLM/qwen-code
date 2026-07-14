@@ -571,6 +571,7 @@ describe('ci flaky rerun patrol', () => {
         'Cookie: session=cookie-secret',
         'https://user:url-secret@example.com/path',
         'API_SECRET=env-secret',
+        '"db_password": "quoted-secret"',
       ].join('\n'),
     );
     const lines = evidence.split('\n');
@@ -588,6 +589,7 @@ describe('ci flaky rerun patrol', () => {
       'cookie-secret',
       'url-secret',
       'env-secret',
+      'quoted-secret',
     ]) {
       expect(evidence).not.toContain(secret);
     }

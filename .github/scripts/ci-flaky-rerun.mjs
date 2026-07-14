@@ -213,8 +213,8 @@ function redactLog(log) {
     .replace(/\bnpm_[A-Za-z0-9]{20,}/g, '[redacted]')
     .replace(/\b([a-z][a-z0-9+.-]*:\/\/)(?:[^/\s]+@)+/gi, '$1[redacted]@')
     .replace(
-      /\b([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL)[A-Za-z0-9_]*)\s*[:=]\s*\S+/gi,
-      '$1=[redacted]',
+      /(["']?)([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL)[A-Za-z0-9_]*)(\1\s*[:=]\s*)["']?[^"',\s}]+["']?/gi,
+      '$1$2$3[redacted]',
     );
 }
 
