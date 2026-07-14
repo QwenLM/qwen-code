@@ -1209,7 +1209,13 @@ describe('toolResultContent', () => {
         notice:
           'Vision bridge (qwen3-vl-plus (dashscope.aliyuncs.com)) failed.',
       },
-      responseParts: [],
+      responseParts: [
+        {
+          functionResponse: {
+            response: { error: 'No extractable text layer.' },
+          },
+        },
+      ],
       error: new Error('No extractable text layer.'),
       errorType: ToolErrorType.READ_CONTENT_FAILURE,
     };

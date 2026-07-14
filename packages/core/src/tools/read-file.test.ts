@@ -740,31 +740,46 @@ describe('ReadFileTool', () => {
         expect(display.notice).toContain('dashscope.aliyuncs.com');
       });
 
-      it('fails closed when a successful bridge result still contains media data', async () => {
-        visionBridgeMocks.runVisionBridge.mockResolvedValue({
-          applied: true,
-          status: 'ok',
-          parts: [
-            {
-              inlineData: { data: 'unsafe', mimeType: 'application/pdf' },
+      it.each([
+        [
+          'inlineData',
+          { inlineData: { data: 'unsafe', mimeType: 'application/pdf' } },
+        ],
+        [
+          'fileData',
+          {
+            fileData: {
+              fileUri: 'file:///tmp/unsafe.pdf',
+              mimeType: 'application/pdf',
             },
-          ],
-          convertedCount: 4,
-          omittedCount: 0,
-          modelId: 'qwen3-vl-plus',
-          modelEndpoint: 'dashscope.aliyuncs.com',
-          egressOccurred: true,
-        });
+          },
+        ],
+      ])(
+        'fails closed when a successful bridge result still contains %s',
+        async (mediaKey, mediaPart) => {
+          visionBridgeMocks.runVisionBridge.mockResolvedValue({
+            applied: true,
+            status: 'ok',
+            parts: [mediaPart],
+            convertedCount: 4,
+            omittedCount: 0,
+            modelId: 'qwen3-vl-plus',
+            modelEndpoint: 'dashscope.aliyuncs.com',
+            egressOccurred: true,
+          });
 
-        const result = await readCandidate();
+          const result = await readCandidate();
 
-        expect(result.error?.type).toBe(ToolErrorType.READ_CONTENT_FAILURE);
-        expect(result.llmContent).toContain('Cannot extract text from PDF');
-        expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
-        const display = bridgeDisplay(result);
-        expect(display.notice).toContain('qwen3-vl-plus');
-        expect(display.notice).toContain('dashscope.aliyuncs.com');
-      });
+          expect(result.error?.type).toBe(ToolErrorType.READ_CONTENT_FAILURE);
+          expect(result.llmContent).toContain('Cannot extract text from PDF');
+          expect(JSON.stringify(result.llmContent)).not.toContain(mediaKey);
+          const display = bridgeDisplay(result);
+          expect(display.notice).toContain('qwen3-vl-plus');
+          expect(display.notice).toContain('dashscope.aliyuncs.com');
+          expect(display.notice).toContain('transcription was discarded');
+          expect(display.notice).not.toContain('vision model request failed');
+        },
+      );
 
       it('restores the PDF error when the bridge omits a rendered page', async () => {
         visionBridgeMocks.runVisionBridge.mockResolvedValue({
@@ -785,7 +800,29 @@ describe('ReadFileTool', () => {
         expect(bridgeDisplay(result).notice).toContain(
           'dashscope.aliyuncs.com',
         );
+        expect(bridgeDisplay(result).notice).toContain(
+          'transcription was discarded',
+        );
+        expect(bridgeDisplay(result).notice).not.toContain(
+          'vision model request failed',
+        );
         expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
+      });
+
+      it('restores the PDF error when the bridge throws before replacement', async () => {
+        visionBridgeMocks.runVisionBridge.mockRejectedValue(
+          new Error('network failure'),
+        );
+
+        const result = await readCandidate();
+
+        expect(result.error?.type).toBe(ToolErrorType.READ_CONTENT_FAILURE);
+        expect(result.error?.message).toBe('No extractable text layer.');
+        expect(result.llmContent).toContain('Cannot extract text from PDF');
+        expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
+        expect(bridgeDisplay(result).notice).toContain(
+          'failed before producing a transcription',
+        );
       });
 
       it('propagates cancellation instead of restoring a PDF error', async () => {

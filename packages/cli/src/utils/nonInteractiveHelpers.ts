@@ -594,7 +594,8 @@ export function functionResponsePartsToString(parts: Part[]): string {
   return parts
     .map((part) => {
       if ('functionResponse' in part) {
-        const content = part.functionResponse?.response?.['output'] ?? '';
+        const response = part.functionResponse?.response;
+        const content = response?.['output'] ?? response?.['error'] ?? '';
         return content;
       }
       return JSON.stringify(part);

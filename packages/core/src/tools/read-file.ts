@@ -402,7 +402,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
           debugLogger.debug('pdf vision bridge omitted candidate pages');
           return this.restorePdfFallback(
             result,
-            `${formatVisionBridgeNotice({ ...bridgeResult, status: 'failed' })} The bridge did not transcribe every rendered PDF page.`,
+            `${notice} The transcription was discarded because the bridge did not transcribe every rendered PDF page.`,
           );
         }
         const bridgedParts = normalizeParts(bridgeResult.parts);
@@ -414,7 +414,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
           debugLogger.debug('pdf vision bridge returned media data');
           return this.restorePdfFallback(
             result,
-            `${formatVisionBridgeNotice({ ...bridgeResult, status: 'failed' })} The bridge returned an unsafe media payload.`,
+            `${notice} The transcription was discarded because the bridge returned an unsafe media payload.`,
           );
         }
         return {
