@@ -293,19 +293,27 @@ describe('StreamingToolCallParser', () => {
       expect(parser.hasNamelessToolCall()).toBe(true);
     });
 
-    it('accepts a function name that arrives after complete arguments', () => {
-      parser.addChunk(1, '{"path":"a.ts"}');
-      parser.addChunk(1, '', undefined, 'read_file');
+    it.each([
+      { index: 1, id: undefined },
+      { index: 2, id: 'call_2' },
+    ])(
+      'accepts and deduplicates a name after complete arguments at index $index',
+      ({ index, id }) => {
+        parser.addChunk(index, '{"path":"a.ts"}', id);
+        parser.addChunk(index, '', id, 'read_file');
+        parser.addChunk(index, '', id, 'read_file');
 
-      expect(parser.hasNamelessToolCall()).toBe(false);
-      expect(parser.getCompletedToolCalls()).toEqual([
-        {
-          name: 'read_file',
-          args: { path: 'a.ts' },
-          index: 1,
-        },
-      ]);
-    });
+        expect(parser.hasNamelessToolCall()).toBe(false);
+        expect(parser.getCompletedToolCalls()).toEqual([
+          {
+            id,
+            name: 'read_file',
+            args: { path: 'a.ts' },
+            index,
+          },
+        ]);
+      },
+    );
 
     it('should store and retrieve tool call metadata', () => {
       parser.addChunk(0, '{"param": "value"}', 'call_123', 'my_function');
@@ -724,11 +732,18 @@ describe('StreamingToolCallParser', () => {
       // known-ID chunk carrying argument content is a continuation, not a
       // replay, and must not be swallowed by the replay guard.
       parser.addChunk(0, '', 'call_1', 'function1');
-      const result = parser.addChunk(0, '{"x":1}', 'call_1');
+      parser.addChunk(0, '{"text":"hello', 'call_1');
+      parser.addChunk(0, ' ', 'call_1');
+      const result = parser.addChunk(0, 'world"}', 'call_1');
 
       expect(result.complete).toBe(true);
       expect(parser.getCompletedToolCalls()).toEqual([
-        { id: 'call_1', name: 'function1', args: { x: 1 }, index: 0 },
+        {
+          id: 'call_1',
+          name: 'function1',
+          args: { text: 'hello world' },
+          index: 0,
+        },
       ]);
     });
 

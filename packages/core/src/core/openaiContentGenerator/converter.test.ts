@@ -477,12 +477,16 @@ describe('OpenAIContentConverter', () => {
       ]);
     });
 
-    it('releases a thinking-tag reference confined to reasoning', () => {
+    it('releases inline thinking-tag references in both channels', () => {
       const stream = withStreamParser();
       const reasoning = converter.convertOpenAIChunkToGemini(
         streamChunk('reasoning', {
           reasoning_content: 'The format may contain <think> tags.',
         }),
+        stream,
+      );
+      const content = converter.convertOpenAIChunkToGemini(
+        streamChunk('content', { content: 'Use </think> to close the tag.' }),
         stream,
       );
       const finish = converter.convertOpenAIChunkToGemini(
@@ -491,8 +495,10 @@ describe('OpenAIContentConverter', () => {
       );
 
       expect(reasoning.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(content.candidates?.[0]?.content?.parts).toEqual([]);
       expect(finish.candidates?.[0]?.content?.parts).toEqual([
         { thought: true, text: 'The format may contain <think> tags.' },
+        { text: 'Use </think> to close the tag.' },
       ]);
     });
   });

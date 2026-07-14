@@ -1088,7 +1088,7 @@ function hasThoughtPart(parts: Part[]): boolean {
 }
 
 const THINKING_TAG_PATTERN = /<\/?think(?:ing)?\s*>/i;
-const CLOSING_THINKING_TAG_PATTERN = /<\/think(?:ing)?\s*>/i;
+const CLOSING_THINKING_TAG_PATTERN = /\n\s*<\/think(?:ing)?\s*>/i;
 const LEADING_THINKING_TAG_PATTERN = /^\s*<\/?think(?:ing)?\s*>/i;
 
 /**

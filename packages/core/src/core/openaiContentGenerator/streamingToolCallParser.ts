@@ -82,6 +82,7 @@ export class StreamingToolCallParser {
 
     let actualIndex = index;
     const isKnownId = Boolean(id && this.idToIndexMap.has(id));
+    const isNameOnlyDelta = Boolean(name && chunk.length === 0);
 
     // Handle tool call ID mapping for collision detection
     if (id) {
@@ -126,16 +127,7 @@ export class StreamingToolCallParser {
         // Map this ID to the actual index we're using
         this.idToIndexMap.set(id, actualIndex);
       }
-    } else if (
-      name &&
-      !chunk.trim() &&
-      this.buffers.has(index) &&
-      !this.toolCallMeta.get(index)?.name
-    ) {
-      // A name-only delta belongs to the existing wire index, even when its
-      // argument buffer is already complete.
-      actualIndex = index;
-    } else {
+    } else if (!isNameOnlyDelta) {
       // No ID provided - this is a continuation chunk
       // Try to find which tool call this belongs to based on the index
       // Look for an existing tool call at this index that's not complete
@@ -172,15 +164,22 @@ export class StreamingToolCallParser {
 
     const currentBuffer = this.buffers.get(actualIndex)!;
     const currentDepth = this.depths.get(actualIndex)!;
+    const meta = this.toolCallMeta.get(actualIndex)!;
+    if (chunk.length === 0 && (id || name)) {
+      if (id) meta.id = id;
+      if (name && !meta.name) meta.name = name;
+      if (!meta.name && meta.id) {
+        this.namelessToolCallIndices.add(actualIndex);
+      } else {
+        this.namelessToolCallIndices.delete(actualIndex);
+      }
+      return { complete: false };
+    }
+
     if (isKnownId && currentDepth === 0) {
       if (currentBuffer.trim()) {
         try {
           JSON.parse(currentBuffer);
-          const existingMeta = this.toolCallMeta.get(actualIndex)!;
-          if (name && !existingMeta.name) {
-            existingMeta.name = name;
-            this.namelessToolCallIndices.delete(actualIndex);
-          }
           debugLogger.debug(
             `Ignoring replay chunk for completed toolCall id=${id}`,
           );
@@ -188,25 +187,10 @@ export class StreamingToolCallParser {
         } catch {
           // Not complete yet; append the incoming chunk below.
         }
-      } else if (
-        this.toolCallMeta.get(actualIndex)?.name &&
-        name &&
-        !chunk.trim()
-      ) {
-        // The call at this index may be a completed no-argument call. An
-        // incoming chunk that carries a name but no argument content is an
-        // opener-shaped replay (duplicate ID) and must not mutate the
-        // surviving call; a chunk with argument content is a continuation
-        // for a call whose opener streamed empty arguments and must append.
-        debugLogger.debug(
-          `Ignoring replayed opener for no-argument toolCall id=${id}`,
-        );
-        return { complete: false };
       }
     }
 
     // Update metadata
-    const meta = this.toolCallMeta.get(actualIndex)!;
     if (id) meta.id = id;
     if (name) meta.name = name;
 
