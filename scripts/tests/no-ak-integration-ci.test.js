@@ -109,14 +109,17 @@ describe('no-AK integration CI wiring', () => {
     expect(webShellJob).toContain('github.event.pull_request.head.sha');
   });
 
-  it('keeps the lightweight coverage comment job on the hosted runner', () => {
+  it('keeps coverage reporting and Playwright installation on hosted runners', () => {
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/ci.yml'),
       'utf8',
     );
     const coverageJob = getWorkflowJob(workflow, 'post_coverage_comment');
+    const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
 
-    expect(coverageJob).toContain("runs-on: 'ubuntu-latest'");
-    expect(coverageJob).not.toContain('ubuntu_runner');
+    for (const job of [coverageJob, webShellJob]) {
+      expect(job).toContain("runs-on: 'ubuntu-latest'");
+      expect(job).not.toContain('ubuntu_runner');
+    }
   });
 });
