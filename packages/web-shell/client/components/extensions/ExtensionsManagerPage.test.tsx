@@ -287,6 +287,42 @@ describe('ExtensionsManagerPage', () => {
     expect(buttonIncluding('Add Extension')?.disabled).toBe(true);
   });
 
+  it('keeps the add dialog open until the install request is accepted', async () => {
+    let acceptInstall:
+      | ((value: { accepted: true; operationId: string }) => void)
+      | undefined;
+    actions.installExtension.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          acceptInstall = resolve;
+        }),
+    );
+    actions.extensionOperationStatus.mockResolvedValue({
+      v: 1,
+      operationId: 'op-1',
+      operation: 'install',
+      status: 'running',
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    await mount();
+
+    click(buttonIncluding('Add Extension'));
+    changeInput(document.querySelector('#extension-source'), 'owner/repo');
+    click(buttonIncluding('Install'));
+    await flush();
+
+    expect(document.querySelector('#extension-source')).not.toBeNull();
+    expect(buttonIncluding('Install')?.disabled).toBe(true);
+
+    await act(async () => {
+      acceptInstall?.({ accepted: true, operationId: 'op-1' });
+    });
+    await flush();
+
+    expect(document.querySelector('#extension-source')).toBeNull();
+  });
+
   it('closes a failed interaction and resumes polling the install', async () => {
     actions.installExtension.mockResolvedValue({
       accepted: true,
@@ -337,7 +373,13 @@ describe('ExtensionsManagerPage', () => {
       document.querySelector('input[aria-label="API key"]'),
       'secret',
     );
-    click(buttonIncluding('Install'));
+    act(() => {
+      document
+        .querySelector('input[aria-label="API key"]')
+        ?.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+        );
+    });
     await flush();
 
     expect(actions.respondToExtensionInteraction).toHaveBeenCalledWith(

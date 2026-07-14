@@ -431,8 +431,9 @@ export function registerWorkspaceExtensionRoutes(
       const timeout = setTimeout(() => {
         pendingExtensionInteractions.delete(operationId);
         updateExtensionOperation(operationId, {
-          status: 'running',
+          status: 'failed',
           interaction: undefined,
+          error: 'Extension interaction timed out',
         });
         reject(new Error('Extension interaction timed out'));
       }, timeoutMs);
@@ -827,8 +828,9 @@ export function registerWorkspaceExtensionRoutes(
           clearTimeout(pending.timeout);
           pendingExtensionInteractions.delete(operationId);
           updateExtensionOperation(operationId, {
-            status: 'running',
+            status: 'failed',
             interaction: undefined,
+            error: 'Extension operation cancelled',
           });
           pending.reject(new Error('Extension operation cancelled'));
           res.status(200).json({ accepted: true });
@@ -954,45 +956,51 @@ export function registerWorkspaceExtensionRoutes(
           return;
         }
 
-        let installMetadata:
-          | Awaited<ReturnType<typeof parseInstallSource>>
-          | undefined;
+        let installMetadata: Awaited<ReturnType<typeof parseInstallSource>>;
         try {
           installMetadata = await parseInstallSource(sourceValue);
-        } catch {
-          installMetadata = undefined;
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : 'Invalid install source';
+          res.status(400).json({
+            error: redactUrlCredentials(
+              message.replace(
+                sourceValue,
+                redactExtensionDisplaySource(sourceValue),
+              ),
+            ),
+          });
+          return;
         }
-        if (installMetadata) {
-          if (
-            installMetadata.type !== 'git' &&
-            installMetadata.type !== 'github-release' &&
-            installMetadata.type !== 'npm'
-          ) {
-            res.status(400).json({
-              error:
-                'Only GitHub, Git, and npm extension installs are supported over the daemon endpoint.',
-            });
-            return;
-          }
-          if (installMetadata.type === 'npm' && refValue) {
-            res
-              .status(400)
-              .json({ error: '--ref is not applicable for npm extensions.' });
-            return;
-          }
-          if (installMetadata.type !== 'npm' && registryValue) {
-            res.status(400).json({
-              error: '--registry is only applicable for npm extensions.',
-            });
-            return;
-          }
-          if (!validateExtensionSourceMetadata(installMetadata)) {
-            res.status(400).json({ error: '`source` host is not allowed' });
-            return;
-          }
-          if (installMetadata.type === 'npm' && registryUrl) {
-            installMetadata.registryUrl = registryUrl;
-          }
+        if (
+          installMetadata.type !== 'git' &&
+          installMetadata.type !== 'github-release' &&
+          installMetadata.type !== 'npm'
+        ) {
+          res.status(400).json({
+            error:
+              'Only GitHub, Git, and npm extension installs are supported over the daemon endpoint.',
+          });
+          return;
+        }
+        if (installMetadata.type === 'npm' && refValue) {
+          res
+            .status(400)
+            .json({ error: '--ref is not applicable for npm extensions.' });
+          return;
+        }
+        if (installMetadata.type !== 'npm' && registryValue) {
+          res.status(400).json({
+            error: '--registry is only applicable for npm extensions.',
+          });
+          return;
+        }
+        if (!validateExtensionSourceMetadata(installMetadata)) {
+          res.status(400).json({ error: '`source` host is not allowed' });
+          return;
+        }
+        if (installMetadata.type === 'npm' && registryUrl) {
+          installMetadata.registryUrl = registryUrl;
         }
 
         supersedeActiveInstallOperations(
@@ -1004,11 +1012,9 @@ export function registerWorkspaceExtensionRoutes(
           { source: sourceValue },
           res,
           async (extensionManager) => {
-            const resolvedInstallMetadata =
-              installMetadata ?? (await parseInstallSource(sourceValue));
             const extension = await extensionManager.installExtension(
               {
-                ...resolvedInstallMetadata,
+                ...installMetadata,
                 ref: refValue,
                 autoUpdate: autoUpdateValue,
                 allowPreRelease: allowPreReleaseValue,

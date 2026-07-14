@@ -355,6 +355,12 @@ function ExtensionInteractionDialog({
               }
               value={interactionValue}
               onChange={(event) => setInteractionValue(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !submitting) {
+                  event.preventDefault();
+                  submit({ value: interactionValue });
+                }
+              }}
             />
             <DialogFooter>
               <Button
@@ -838,7 +844,7 @@ export function ExtensionsManagerPage({
       name: string,
       run: (clientId?: string) => Promise<unknown>,
       options: { suppressMessage?: boolean } = {},
-    ) => {
+    ): boolean => {
       const clientId = connection.clientId;
       if (
         !operationsRecovered ||
@@ -846,7 +852,7 @@ export function ExtensionsManagerPage({
         pendingMutation ||
         mutationInFlightRef.current
       ) {
-        return;
+        return false;
       }
       mutationInFlightRef.current = true;
       setBusyName(name);
@@ -884,6 +890,7 @@ export function ExtensionsManagerPage({
             void load(true);
           }
         });
+      return true;
     },
     [
       connection.clientId,
@@ -1245,10 +1252,13 @@ export function ExtensionsManagerPage({
                 variant="destructive"
                 onClick={() => {
                   if (!uninstallName) return;
-                  runMutation(uninstallName, (clientId) =>
-                    actions.uninstallExtension(uninstallName, clientId),
-                  );
-                  setUninstallName(null);
+                  if (
+                    runMutation(uninstallName, (clientId) =>
+                      actions.uninstallExtension(uninstallName, clientId),
+                    )
+                  ) {
+                    setUninstallName(null);
+                  }
                 }}
               >
                 {t('extensions.manage.uninstallAction')}
@@ -1456,7 +1466,12 @@ export function ExtensionsManagerPage({
         )}
       </div>
 
-      <AlertDialog open={installOpen} onOpenChange={setInstallOpen}>
+      <AlertDialog
+        open={installOpen}
+        onOpenChange={(open) => {
+          if (open || !installing) setInstallOpen(open);
+        }}
+      >
         <AlertDialogContent size="middle">
           <AlertDialogHeader className="place-items-start text-left">
             <AlertDialogTitle>{t('extensions.manage.add')}</AlertDialogTitle>
@@ -1477,7 +1492,7 @@ export function ExtensionsManagerPage({
             <AlertDialogCancel disabled={installing}>
               {t('common.cancel')}
             </AlertDialogCancel>
-            <AlertDialogAction
+            <Button
               disabled={
                 installing ||
                 !operationsRecovered ||
@@ -1488,7 +1503,7 @@ export function ExtensionsManagerPage({
             >
               {installing ? <Spinner /> : null}
               {t('extensions.manage.install')}
-            </AlertDialogAction>
+            </Button>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

@@ -4315,11 +4315,9 @@ describe('createServeApp', () => {
           expect(poll.body.status).toBe('waiting_for_input');
         });
 
-        const invalid = await request(app)
-          .post('/workspace/extensions/install')
-          .set('Host', `127.0.0.1:${tokenOpts.port}`)
-          .set('Authorization', 'Bearer secret')
-          .send({ source: '@scope/ext', ref: 'v1', consent: true });
+        const invalid = await install(
+          'C:\\Users\\test\\missing-qwen-extension',
+        );
         expect(invalid.status).toBe(400);
 
         const stillWaiting = await request(app)
@@ -5042,7 +5040,7 @@ describe('createServeApp', () => {
       expect(bridge.extensionEvents).toEqual([]);
     });
 
-    it('treats Windows drive paths as local extension sources', async () => {
+    it('rejects missing Windows local extension sources before queuing', async () => {
       const restore = mockExtensionManagerMethods();
       try {
         const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
@@ -5061,14 +5059,9 @@ describe('createServeApp', () => {
           .set('X-Qwen-Client-Id', 'client-1')
           .send({ source, consent: true });
 
-        expect(res.status).toBe(202);
-        await vi.waitFor(() => {
-          expect(bridge.extensionEvents.at(-1)).toMatchObject({
-            status: 'failed',
-            source,
-            error: `Install source not found: ${source}`,
-          });
-        });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe(`Install source not found: ${source}`);
+        expect(bridge.extensionEvents).toEqual([]);
       } finally {
         restore();
       }
