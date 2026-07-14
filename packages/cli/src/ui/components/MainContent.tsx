@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Box, Static, type DOMElement, useBoxMetrics } from 'ink';
+import { Box, Static } from 'ink';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 import { isHistoryItemVisibleAfterRestore } from '../types.js';
@@ -83,12 +83,25 @@ function initialReplayCount(length: number): number {
 // stable completed items when unrelated UIState fields change during streaming.
 const VirtualHistoryItem = memo(HistoryItemDisplay);
 
+// Banner sentinel injected as the first virtual-scroll item so it scrolls with
+// content instead of being pinned at the top (saves vertical space on small
+// terminals).
+type VpBannerItem = { type: 'vp-banner'; id: number };
+type VpItem = HistoryItem | VpBannerItem;
+const VP_BANNER_ID = Number.MIN_SAFE_INTEGER;
+const VP_BANNER_ITEM: VpBannerItem = { type: 'vp-banner', id: VP_BANNER_ID };
+
 // Pure functions with no closure deps — defined outside the component so they
 // are stable references and never trigger useMemo/useCallback invalidation.
-const virtualEstimatedItemHeight = () => 3;
-const virtualKeyExtractor = (item: HistoryItem) =>
-  item.id >= 0 ? `h-${item.id}` : `p-${-item.id - 1}`;
-const virtualIsStaticItem = (item: HistoryItem) => item.id > 0;
+const virtualEstimatedItemHeight = (index: number) => (index === 0 ? 7 : 3);
+const virtualKeyExtractor = (item: VpItem) =>
+  item.id === VP_BANNER_ID
+    ? 'vp-banner'
+    : item.id >= 0
+      ? `h-${item.id}`
+      : `p-${-item.id - 1}`;
+const virtualIsStaticItem = (item: VpItem) =>
+  item.id === VP_BANNER_ID || item.id > 0;
 
 export const MainContent = () => {
   const { version } = useAppContext();
@@ -243,9 +256,11 @@ export const MainContent = () => {
       : historyItemsWithSourceCopyOffsets.slice(0, replayCount);
 
   // Combine completed history + live pending items for the virtualized list.
+  // The banner sentinel is prepended so it scrolls with content (not pinned).
   // Pending items get negative IDs (-(i+1)) so renderItem can tell them apart.
   const allVirtualItems = useMemo(
-    (): HistoryItem[] => [
+    (): VpItem[] => [
+      VP_BANNER_ITEM,
       ...visibleHistory,
       ...pendingHistoryItems.map((item, i) => ({ ...item, id: -(i + 1) })),
     ],
@@ -327,7 +342,16 @@ export const MainContent = () => {
   // Streaming-only state — including pending source-copy offsets — is read
   // from refs so callback identity is stable.
   const renderVirtualItem = useCallback(
-    ({ item }: { item: HistoryItem }) => {
+    ({ item }: { item: VpItem }) => {
+      if (item.type === 'vp-banner') {
+        return (
+          <Box flexDirection="column">
+            <AppHeader version={version} />
+            <DebugModeNotification />
+            <Notifications />
+          </Box>
+        );
+      }
       const isPending = item.id < 0;
       const sourceCopyIndexOffsets = isPending
         ? pendingSourceCopyOffsetsRef.current[-item.id - 1]
@@ -366,6 +390,7 @@ export const MainContent = () => {
       );
     },
     [
+      version,
       terminalWidth,
       mainAreaWidth,
       staticAreaMaxItemHeight,
@@ -374,37 +399,27 @@ export const MainContent = () => {
     ],
   );
 
-  const vpHeaderRef = useRef<DOMElement>(null);
-  const { height: vpHeaderHeight } = useBoxMetrics(vpHeaderRef);
-
   if (useVirtualScroll) {
     const scrollContainerHeight = Math.max(
       0,
-      (uiState.availableTerminalHeight ?? 0) - vpHeaderHeight,
+      uiState.availableTerminalHeight ?? 0,
     );
 
     return (
-      <>
-        <Box ref={vpHeaderRef} flexDirection="column" flexShrink={0}>
-          <AppHeader version={version} />
-          <DebugModeNotification />
-          <Notifications />
-        </Box>
-        <OverflowProvider>
-          <ScrollableList
-            hasFocus={!uiState.dialogsVisible}
-            data={allVirtualItems}
-            renderItem={renderVirtualItem}
-            estimatedItemHeight={virtualEstimatedItemHeight}
-            keyExtractor={virtualKeyExtractor}
-            initialScrollIndex={SCROLL_TO_ITEM_END}
-            isStaticItem={virtualIsStaticItem}
-            containerHeight={scrollContainerHeight}
-            showScrollbar={showScrollbar}
-          />
-          <ShowMoreLines constrainHeight={uiState.constrainHeight} />
-        </OverflowProvider>
-      </>
+      <OverflowProvider>
+        <ScrollableList
+          hasFocus={!uiState.dialogsVisible}
+          data={allVirtualItems}
+          renderItem={renderVirtualItem}
+          estimatedItemHeight={virtualEstimatedItemHeight}
+          keyExtractor={virtualKeyExtractor}
+          initialScrollIndex={SCROLL_TO_ITEM_END}
+          isStaticItem={virtualIsStaticItem}
+          containerHeight={scrollContainerHeight}
+          showScrollbar={showScrollbar}
+        />
+        <ShowMoreLines constrainHeight={uiState.constrainHeight} />
+      </OverflowProvider>
     );
   }
 
