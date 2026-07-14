@@ -200,7 +200,26 @@ describe('voice-stream-session', () => {
 
   it('resolves finish when task-finished arrives before finish is called', async () => {
     const socket = new FakeSocket();
-    const session = await startSession(socket);
+    const controller = new AbortController();
+    const removeAbortListener = vi.spyOn(
+      controller.signal,
+      'removeEventListener',
+    );
+    const sessionPromise = openVoiceStream(
+      {
+        baseUrl: 'https://dashscope.example/v1',
+        model: 'paraformer-realtime-v2',
+      },
+      {},
+      { createWebSocket: () => socket, abortSignal: controller.signal },
+    );
+    socket.emit('open');
+    socket.emit(
+      'message',
+      JSON.stringify({ header: { event: 'task-started' } }),
+      false,
+    );
+    const session = await sessionPromise;
 
     socket.emit(
       'message',
@@ -219,6 +238,10 @@ describe('voice-stream-session', () => {
     );
 
     await expect(session.finish()).resolves.toBe('hello world');
+    expect(removeAbortListener).toHaveBeenCalledWith(
+      'abort',
+      expect.any(Function),
+    );
   });
 
   it('drops audio chunks when the socket buffer is backed up', async () => {

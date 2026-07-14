@@ -124,6 +124,11 @@ describe('qwen-asr-realtime-session', () => {
   it('streams PCM chunks as base64 events and resolves the completed transcript', async () => {
     const socket = new FakeSocket();
     const createWebSocket = vi.fn(() => socket);
+    const controller = new AbortController();
+    const removeAbortListener = vi.spyOn(
+      controller.signal,
+      'removeEventListener',
+    );
     const interim = vi.fn();
     const sessionPromise = openQwenAsrRealtimeStream(
       {
@@ -134,7 +139,7 @@ describe('qwen-asr-realtime-session', () => {
         keytermsContext: 'grep regex OAuth',
       },
       { onInterim: interim },
-      { createWebSocket },
+      { createWebSocket, abortSignal: controller.signal },
     );
 
     expect(createWebSocket).toHaveBeenCalledWith(
@@ -207,6 +212,10 @@ describe('qwen-asr-realtime-session', () => {
     );
 
     await expect(transcriptPromise).resolves.toBe('hello world');
+    expect(removeAbortListener).toHaveBeenCalledWith(
+      'abort',
+      expect.any(Function),
+    );
   });
 
   it('drops realtime audio chunks when the socket buffer is backed up', async () => {

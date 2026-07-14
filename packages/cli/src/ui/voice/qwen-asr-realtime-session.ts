@@ -86,6 +86,13 @@ export function openQwenAsrRealtimeStream(
     let terminalError: Error | null = null;
     let failed = false;
     let backpressureWarned = false;
+    let onAbort: (() => void) | undefined;
+
+    const removeAbortListener = () => {
+      if (!onAbort) return;
+      deps.abortSignal?.removeEventListener('abort', onAbort);
+      onAbort = undefined;
+    };
 
     const sendJson = (body: Record<string, unknown>) => {
       ws.send(JSON.stringify({ event_id: randomUUID(), ...body }));
@@ -116,6 +123,7 @@ export function openQwenAsrRealtimeStream(
     const fail = (error: unknown) => {
       if (failed) return;
       failed = true;
+      removeAbortListener();
       const normalized = toError(error);
       clearConnectTimer();
       clearFinishTimer();
@@ -135,11 +143,14 @@ export function openQwenAsrRealtimeStream(
       callbacks.onError?.(normalized);
     };
 
-    deps.abortSignal?.addEventListener(
-      'abort',
-      () => fail(new Error('Voice stream opening was aborted.')),
-      { once: true },
-    );
+    if (deps.abortSignal) {
+      onAbort = () => fail(new Error('Voice stream opening was aborted.'));
+      if (deps.abortSignal.aborted) {
+        onAbort();
+        return;
+      }
+      deps.abortSignal.addEventListener('abort', onAbort, { once: true });
+    }
 
     connectTimer = setTimeout(() => {
       if (!opened) fail(new Error('Qwen ASR realtime connection timed out.'));
@@ -271,6 +282,7 @@ export function openQwenAsrRealtimeStream(
             break;
           }
           failed = true;
+          removeAbortListener();
           clearFinishTimer();
           finishedTranscript = committed.trim();
           finishResolve?.(finishedTranscript);
@@ -296,6 +308,7 @@ export function openQwenAsrRealtimeStream(
 
     ws.on('error', fail);
     ws.on('close', () => {
+      removeAbortListener();
       clearConnectTimer();
       clearFinishTimer();
       if (failed) return;

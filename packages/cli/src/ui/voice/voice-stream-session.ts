@@ -119,6 +119,13 @@ export function openVoiceStream(
     let terminalError: Error | null = null;
     let finishedTranscript: string | null = null;
     let backpressureWarned = false;
+    let onAbort: (() => void) | undefined;
+
+    const removeAbortListener = () => {
+      if (!onAbort) return;
+      deps.abortSignal?.removeEventListener('abort', onAbort);
+      onAbort = undefined;
+    };
 
     const clearFinishTimer = () => {
       if (finishTimer) {
@@ -137,6 +144,7 @@ export function openVoiceStream(
     const fail = (error: unknown) => {
       if (settled) return;
       settled = true;
+      removeAbortListener();
       const normalized =
         error instanceof Error ? error : new Error(String(error));
       clearConnectTimer();
@@ -160,11 +168,14 @@ export function openVoiceStream(
       }
     };
 
-    deps.abortSignal?.addEventListener(
-      'abort',
-      () => fail(new Error('Voice stream opening was aborted.')),
-      { once: true },
-    );
+    if (deps.abortSignal) {
+      onAbort = () => fail(new Error('Voice stream opening was aborted.'));
+      if (deps.abortSignal.aborted) {
+        onAbort();
+        return;
+      }
+      deps.abortSignal.addEventListener('abort', onAbort, { once: true });
+    }
 
     connectTimer = setTimeout(() => {
       if (!started) fail(new Error('Voice stream connection timed out.'));
@@ -305,6 +316,7 @@ export function openVoiceStream(
         }
         finishedTranscript = committed.trim();
         settled = true;
+        removeAbortListener();
         clearConnectTimer();
         clearFinishTimer();
         try {
@@ -334,6 +346,7 @@ export function openVoiceStream(
     });
 
     ws.on('close', () => {
+      removeAbortListener();
       clearConnectTimer();
       clearFinishTimer();
       if (settled) return;

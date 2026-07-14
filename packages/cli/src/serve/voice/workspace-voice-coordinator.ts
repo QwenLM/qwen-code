@@ -125,6 +125,7 @@ export class WorkspaceVoiceCoordinator {
             timedOut = true;
             resolve();
           }, DISPOSE_WAIT_MS);
+          timeout.unref?.();
         }),
       ]);
     } finally {
