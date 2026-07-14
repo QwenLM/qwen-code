@@ -1371,14 +1371,14 @@ export function ExtensionsManagerPage({
                   }}
                 >
                   <CardHeader className="block">
-                    <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
-                      <div className="row-span-2 flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted">
+                    <div className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3 gap-y-1">
+                      <div className="row-span-3 flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted">
                         <PackageIcon className="size-5" />
                       </div>
                       <CardTitle className="min-w-0 truncate">
                         {extensionTitle(extension)}
                       </CardTitle>
-                      <div className="flex shrink-0 flex-wrap justify-end gap-2">
+                      <div className="col-start-2 flex flex-wrap gap-2">
                         <Badge variant="outline">v{extension.version}</Badge>
                         <Badge
                           variant="secondary"
@@ -1394,7 +1394,7 @@ export function ExtensionsManagerPage({
                           <Badge>{updateLabel(state, t)}</Badge>
                         ) : null}
                       </div>
-                      <CardDescription className="col-span-2 col-start-2 row-start-2 line-clamp-2">
+                      <CardDescription className="col-start-2 line-clamp-2">
                         {extension.description ||
                           t('extensions.manage.noDescription')}
                       </CardDescription>
