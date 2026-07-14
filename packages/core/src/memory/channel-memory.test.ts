@@ -423,6 +423,24 @@ describe('channel memory', () => {
     expect(result.entry?.updatedAt).not.toBe(entry.updatedAt);
   });
 
+  it('rejects updates that duplicate another entry after normalization', async () => {
+    const [first, second] = (
+      await addChannelMemoryEntries(target, ['Use staging', 'Run tests'])
+    ).added;
+
+    await expect(
+      updateChannelMemoryEntry(target, {
+        id: second.id,
+        text: ' use   STAGING ',
+      }),
+    ).rejects.toThrow('Channel memory entry already exists');
+
+    await expect(listChannelMemoryEntries(target)).resolves.toMatchObject([
+      { id: first.id, text: 'Use staging' },
+      { id: second.id, text: 'Run tests' },
+    ]);
+  });
+
   it('returns no change for missing update IDs', async () => {
     await expect(
       updateChannelMemoryEntry(target, {

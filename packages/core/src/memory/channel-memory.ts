@@ -421,6 +421,16 @@ export async function updateChannelMemoryEntry(
       now: new Date().toISOString(),
       randomHex: '000000000000',
     });
+    if (
+      document.entries.some(
+        (candidate) =>
+          candidate.id !== entry.id &&
+          normalizeChannelMemoryText(candidate.text) ===
+            normalizeChannelMemoryText(replacement.text),
+      )
+    ) {
+      throw new Error('Channel memory entry already exists');
+    }
     entry.text = replacement.text;
     entry.updatedAt = replacement.updatedAt;
     return {
