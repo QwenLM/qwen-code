@@ -1288,6 +1288,7 @@
 
 .toolBtnText {
   min-width: 0;
+  overflow: hidden;
   display: inline-flex;
   align-items: center;
   color: var(--agent-gray-500);

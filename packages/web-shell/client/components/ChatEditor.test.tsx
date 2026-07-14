@@ -27,6 +27,7 @@ const mockComposerCoreState = vi.hoisted(() => ({
 const composerCoreState = vi.hoisted(() => ({
   slashMenu: null as SlashMenuState | null,
   focus: vi.fn(),
+  closeSlashMenu: vi.fn(),
 }));
 
 Object.defineProperty(window, 'matchMedia', {
@@ -102,7 +103,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
       onAcceptFollowup: vi.fn(),
       onDismissFollowup: vi.fn(),
       slashMenu: composerCoreState.slashMenu,
-      closeSlashMenu: vi.fn(),
+      closeSlashMenu: composerCoreState.closeSlashMenu,
       selectSlashCompletion: vi.fn(),
       acceptSlashCompletion: vi.fn(),
       atMenu: null,
@@ -126,6 +127,7 @@ const mounted: Array<{
 afterEach(() => {
   composerCoreState.slashMenu = null;
   composerCoreState.focus.mockReset();
+  composerCoreState.closeSlashMenu.mockReset();
   for (const { root, container, portalRoot } of mounted.splice(0)) {
     act(() => root.unmount());
     container.remove();
@@ -573,5 +575,10 @@ describe('ChatEditor slash command popovers', () => {
     const detail = document.querySelector('[data-web-shell-slash-detail]');
     expect(detail?.getAttribute('data-slot')).toBe('popover-content');
     expect(detail?.textContent).toContain('Show available commands');
+
+    act(() => {
+      detail?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    });
+    expect(composerCoreState.closeSlashMenu).not.toHaveBeenCalled();
   });
 });

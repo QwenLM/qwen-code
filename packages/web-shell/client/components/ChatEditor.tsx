@@ -763,6 +763,7 @@ function SlashCommandPanel({
   menu,
   anchorRef,
   panelRef,
+  detailRef,
   onClose,
   onSelect,
   onAccept,
@@ -770,6 +771,7 @@ function SlashCommandPanel({
   menu: SlashMenuState;
   anchorRef: RefObject<HTMLElement | null>;
   panelRef: RefObject<HTMLDivElement | null>;
+  detailRef: RefObject<HTMLDivElement | null>;
   onClose: () => void;
   onSelect: (index: number) => boolean;
   onAccept: (index?: number) => boolean;
@@ -780,7 +782,6 @@ function SlashCommandPanel({
     label: string;
     detail: string;
   } | null>(null);
-  const detailRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     itemRefs.current[menu.selectedIndex]?.scrollIntoView({
@@ -1108,6 +1109,7 @@ export const ChatEditor = memo(
     const [showQuickActions, setShowQuickActions] = useState(isTouchLikeDevice);
     const containerRef = useRef<HTMLDivElement>(null);
     const slashPanelRef = useRef<HTMLDivElement>(null);
+    const slashDetailRef = useRef<HTMLDivElement>(null);
     const atPanelRef = useRef<HTMLDivElement>(null);
     const toolbarRef = useRef<HTMLDivElement>(null);
     const toolbarLeadingRef = useRef<HTMLDivElement>(null);
@@ -1159,6 +1161,7 @@ export const ChatEditor = memo(
           container &&
           !container.contains(target) &&
           !slashPanelRef.current?.contains(target) &&
+          !slashDetailRef.current?.contains(target) &&
           !atPanelRef.current?.contains(target)
         ) {
           closeSlashMenu();
@@ -1838,6 +1841,7 @@ export const ChatEditor = memo(
                 menu={core.slashMenu}
                 anchorRef={containerRef}
                 panelRef={slashPanelRef}
+                detailRef={slashDetailRef}
                 onClose={core.closeSlashMenu}
                 onSelect={core.selectSlashCompletion}
                 onAccept={core.acceptSlashCompletion}
