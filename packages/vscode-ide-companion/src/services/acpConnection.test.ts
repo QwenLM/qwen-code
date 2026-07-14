@@ -50,6 +50,7 @@ function createMockChild(overrides?: Record<string, unknown>) {
 
 describe('AcpConnection process spawning', () => {
   it('runs the bundled CLI with Electron in Node mode', async () => {
+    spawnMock.mockReset();
     spawnMock.mockReturnValue(createMockChild());
     const conn = new AcpConnection() as unknown as {
       connect: (cliEntryPath: string) => Promise<void>;
