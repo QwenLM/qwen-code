@@ -42,6 +42,15 @@ jobs:
     runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     steps:
+      # Trusted base-repo script (staging + comment builder). workflow_run
+      # checks out the default branch, never PR code. Sparse — just the script.
+      - name: 'Checkout the publish script'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          sparse-checkout: '.github/scripts/web-shell-visuals-publish.mjs'
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: 'Download visuals artifact'
         id: 'download'
         continue-on-error: true
@@ -111,61 +120,14 @@ jobs:
           SHORT_SHA="${RUN_HEAD_SHA:0:7}"
 
           # --- Stage + validate the images ----------------------------------
-          # Untrusted PR content: bound BOTH the number of candidates EXAMINED
-          # (so tens of thousands of junk files can't burn the job's budget on
-          # wc/od before reaching valid files) and the number ACCEPTED, plus a
-          # per-file size cap. Validate magic bytes with coreutils `od`.
+          # Delegated to the unit-tested script: magic-byte validation, filename
+          # sanitization, and the examined/accepted/size caps over untrusted
+          # artifact content live in web-shell-visuals-publish.mjs (covered by
+          # web-shell-visuals-publish.test.mjs). It prints the accepted count.
           STAGE="${RUNNER_TEMP}/visuals-stage"
           rm -rf "${STAGE}"
-          mkdir -p "${STAGE}"
-          shopt -s nullglob
-          MAX_CANDIDATES=200
-          MAX_IMAGES=14
-          MAX_BYTES=$((3 * 1024 * 1024))
-          examined=0
-          count=0
-          for f in "${ART}"/screenshots/*.png "${ART}"/gifs/*.gif; do
-            [ -f "${f}" ] || continue
-            examined=$((examined + 1))
-            if [ "${examined}" -gt "${MAX_CANDIDATES}" ]; then
-              echo "::warning::Examined ${MAX_CANDIDATES} candidate files; stopping."
-              break
-            fi
-            if [ "${count}" -ge "${MAX_IMAGES}" ]; then
-              echo "::warning::Reached the ${MAX_IMAGES}-image cap; skipping the rest."
-              break
-            fi
-            if [ "$(wc -c < "${f}")" -gt "${MAX_BYTES}" ]; then
-              echo "::warning::$(basename "${f}") exceeds ${MAX_BYTES} bytes; skipping."
-              continue
-            fi
-            sig="$(od -An -v -tx1 -N8 "${f}" | tr -d ' \n')"
-            case "${f}" in
-              *.png)
-                [ "${sig:0:16}" = "89504e470d0a1a0a" ] || {
-                  echo "::warning::${f} is not a PNG; skipping."
-                  continue
-                }
-                ;;
-              *.gif)
-                case "${sig:0:12}" in
-                  474946383961 | 474946383761) : ;; # GIF89a / GIF87a
-                  *)
-                    echo "::warning::${f} is not a GIF; skipping."
-                    continue
-                    ;;
-                esac
-                ;;
-            esac
-            # Capture basename FIRST so command substitution strips its trailing
-            # newline BEFORE `tr` — otherwise `tr -c` turns that newline into `_`,
-            # producing "name.png_" and breaking the .png/.gif extension filter.
-            base="$(basename "${f}")"
-            safe="$(printf '%s' "${base}" | tr -c 'A-Za-z0-9._-' '_')"
-            cp "${f}" "${STAGE}/${safe}"
-            count=$((count + 1))
-          done
-          if [ "${count}" -eq 0 ]; then
+          count="$(node .github/scripts/web-shell-visuals-publish.mjs stage "${ART}/screenshots" "${ART}/gifs" "${STAGE}")"
+          if [ -z "${count}" ] || [ "${count}" = "0" ]; then
             echo "::notice::No valid images in the artifact; nothing to publish."
             exit 0
           fi
@@ -199,102 +161,13 @@ jobs:
           echo "web-shell visuals hosted on ${BRANCH} at ${ASSET_SHA}."
 
           # --- Build the comment body ---------------------------------------
+          # Delegated to the same unit-tested script (light/dark pairing, flow
+          # labels, and HTML escaping live in web-shell-visuals-publish.mjs).
           BODY_FILE="${RUNNER_TEMP}/visuals-comment.md"
-          export STAGE
-          export BODY_FILE
-          export RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${ASSET_SHA}/imgs"
-          export SHORT_SHA RUN_URL
-          node <<'NODE'
-          const fs = require('node:fs');
-          const path = require('node:path');
-          const stage = process.env.STAGE;
-          const rawBase = process.env.RAW_BASE;
-          const shortSha = process.env.SHORT_SHA || '';
-          const runUrl = process.env.RUN_URL || '';
-          const files = fs.readdirSync(stage);
-
-          const url = (name) => `${rawBase}/${encodeURIComponent(name)}`;
-          // Self-defending HTML escaping for interpolated values. Filenames are
-          // already sanitized to [A-Za-z0-9._-] upstream, but don't rely on that
-          // being an HTML defense — escape at the interpolation point too.
-          const esc = (s) =>
-            String(s)
-              .replace(/&/g, '&amp;')
-              .replace(/"/g, '&quot;')
-              .replace(/</g, '&lt;')
-              .replace(/>/g, '&gt;');
-          const pretty = (s) =>
-            s.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-
-          // Screenshots: pair <view>-light.png with <view>-dark.png.
-          const shots = files.filter((f) => /\.png$/i.test(f));
-          const views = new Map();
-          for (const f of shots) {
-            const m = f.match(/^(.*)-(light|dark)\.png$/i);
-            if (!m) continue;
-            const [, view, theme] = m;
-            const entry = views.get(view) || {};
-            entry[theme.toLowerCase()] = f;
-            views.set(view, entry);
-          }
-
-          const gifs = files.filter((f) => /\.gif$/i.test(f)).sort();
-          const flowLabels = {
-            'model-switch': 'Open the slash menu and switch model',
-            'prompt-stream': 'Submit a prompt and watch the reply stream in',
-          };
-
-          const out = [];
-          out.push('<!-- qwen:web-shell-visuals -->');
-          out.push('### 🖼️ web-shell visual preview');
-          out.push(
-            `Auto-rendered from this PR head \`${shortSha}\` against a mock daemon (no real backend). Refreshes on every push.`,
-          );
-          out.push('');
-
-          if (views.size > 0) {
-            out.push('#### Screenshots · light / dark');
-            out.push('');
-            out.push('<table>');
-            out.push('<tr><th align="left">view</th><th>light</th><th>dark</th></tr>');
-            for (const [view, pair] of [...views.entries()].sort()) {
-              const light = pair.light
-                ? `<img src="${url(pair.light)}" width="360" alt="${esc(view)} light">`
-                : '—';
-              const dark = pair.dark
-                ? `<img src="${url(pair.dark)}" width="360" alt="${esc(view)} dark">`
-                : '—';
-              out.push(
-                `<tr><td valign="top"><sub>${esc(pretty(view))}</sub></td><td>${light}</td><td>${dark}</td></tr>`,
-              );
-            }
-            out.push('</table>');
-            out.push('');
-          }
-
-          if (gifs.length > 0) {
-            out.push('#### Flows');
-            out.push('');
-            for (const g of gifs) {
-              const key = g.replace(/\.gif$/i, '');
-              out.push(`**${esc(flowLabels[key] || pretty(key))}**`);
-              out.push('');
-              out.push(`<img src="${url(g)}" width="640" alt="${esc(key)} flow">`);
-              out.push('');
-            }
-          }
-
-          if (runUrl) {
-            out.push(
-              `<sub>Full-resolution recordings (.webm) are attached to the <a href="${esc(runUrl)}">workflow run</a>.</sub>`,
-            );
-          }
-          out.push('');
-          out.push('— _Qwen Code · web-shell visuals_');
-
-          fs.writeFileSync(process.env.BODY_FILE, out.join('\n') + '\n');
-          console.log(`Comment body: ${out.length} lines, ${shots.length} screenshots, ${gifs.length} gifs.`);
-          NODE
+          node .github/scripts/web-shell-visuals-publish.mjs comment \
+            "${STAGE}" \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${ASSET_SHA}/imgs" \
+            "${SHORT_SHA}" "${RUN_URL}" "${BODY_FILE}"
 
           # --- Post or update the PR comment --------------------------------
           # Re-validate immediately before the write (TOCTOU): a push/close during
