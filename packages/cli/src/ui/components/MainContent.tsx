@@ -93,15 +93,16 @@ const VP_BANNER_ITEM: VpBannerItem = { type: 'vp-banner', id: VP_BANNER_ID };
 
 // Pure functions with no closure deps — defined outside the component so they
 // are stable references and never trigger useMemo/useCallback invalidation.
-const virtualEstimatedItemHeight = (index: number) => (index === 0 ? 7 : 3);
+// index 0 is always the banner sentinel (VP_BANNER_ITEM is prepended first).
+const virtualEstimatedItemHeight = (index: number) => (index === 0 ? 10 : 3);
 const virtualKeyExtractor = (item: VpItem) =>
-  item.id === VP_BANNER_ID
+  item.type === 'vp-banner'
     ? 'vp-banner'
     : item.id >= 0
       ? `h-${item.id}`
       : `p-${-item.id - 1}`;
 const virtualIsStaticItem = (item: VpItem) =>
-  item.id === VP_BANNER_ID || item.id > 0;
+  item.type === 'vp-banner' || item.id > 0;
 
 export const MainContent = () => {
   const { version } = useAppContext();
@@ -413,7 +414,9 @@ export const MainContent = () => {
           renderItem={renderVirtualItem}
           estimatedItemHeight={virtualEstimatedItemHeight}
           keyExtractor={virtualKeyExtractor}
-          initialScrollIndex={SCROLL_TO_ITEM_END}
+          initialScrollIndex={
+            allVirtualItems.length <= 1 ? 0 : SCROLL_TO_ITEM_END
+          }
           isStaticItem={virtualIsStaticItem}
           containerHeight={scrollContainerHeight}
           showScrollbar={showScrollbar}
