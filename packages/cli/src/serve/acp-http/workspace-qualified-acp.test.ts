@@ -137,6 +137,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
   let secondaryBridge: HttpAcpBridge;
   let workspaceRegistry: ReturnType<typeof createWorkspaceRegistry>;
   let secondaryRuntime: WorkspaceRuntime;
+  let workspaceVoiceConnection: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     primaryBridge = makeBridge();
@@ -176,6 +177,12 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     });
     cdpRegistry = new CdpTunnelRegistry();
     checkRate = vi.fn().mockReturnValue(true);
+    workspaceVoiceConnection = vi.fn(
+      (runtime: WorkspaceRuntime, ws: WebSocket) => {
+        ws.send(JSON.stringify({ workspaceCwd: runtime.workspaceCwd }));
+        ws.close(1000, 'done');
+      },
+    );
 
     const app = express();
     app.use(express.json());
@@ -190,6 +197,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       checkRate,
       sessionShellCommandEnabled: true,
       workspaceRememberLane: new WorkspaceRememberTaskLane(primaryBridge),
+      workspaceVoiceConnection,
     });
 
     await new Promise<void>((resolve) => {
@@ -674,6 +682,81 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     );
   });
 
+  it('routes workspace-qualified Voice WS by id and encoded cwd', async () => {
+    const connect = (selector: string) =>
+      new Promise<{ workspaceCwd?: string }>((resolve, reject) => {
+        const ws = new WebSocket(
+          `ws://127.0.0.1:${port}/workspaces/${selector}/voice/stream`,
+          { handshakeTimeout: 2000 },
+        );
+        ws.on('message', (data: WebSocket.RawData) => {
+          resolve(JSON.parse(data.toString()) as { workspaceCwd?: string });
+        });
+        ws.on('error', reject);
+      });
+
+    await expect(connect('secondary-id')).resolves.toEqual({
+      workspaceCwd: '/ws-b',
+    });
+    await expect(connect(encodeURIComponent('/ws-b'))).resolves.toEqual({
+      workspaceCwd: '/ws-b',
+    });
+    expect(workspaceVoiceConnection).toHaveBeenCalledTimes(2);
+    expect(workspaceVoiceConnection.mock.calls[0]?.[0]).toBe(secondaryRuntime);
+    expect(workspaceVoiceConnection.mock.calls[1]?.[0]).toBe(secondaryRuntime);
+  });
+
+  it('rejects unknown and untrusted workspace-qualified Voice WS upgrades', async () => {
+    const status = (selector: string) =>
+      new Promise<number>((resolve, reject) => {
+        const ws = new WebSocket(
+          `ws://127.0.0.1:${port}/workspaces/${selector}/voice/stream`,
+          { handshakeTimeout: 2000 },
+        );
+        ws.on('unexpected-response', (_req, response) => {
+          resolve(response.statusCode ?? 0);
+          ws.terminate();
+        });
+        ws.on('open', () => {
+          ws.close();
+          reject(new Error('rejected Voice WS upgrade should not open'));
+        });
+        ws.on('error', (err) =>
+          reject(
+            new Error(
+              `unexpected Voice WS error for ${selector}: ${err.message}`,
+            ),
+          ),
+        );
+      });
+
+    await expect(status('missing')).resolves.toBe(400);
+    await expect(status('untrusted-id')).resolves.toBe(403);
+    expect(workspaceVoiceConnection).not.toHaveBeenCalled();
+  });
+
+  it('rejects an encoded relative workspace-qualified Voice selector', async () => {
+    const relativeSelector = path.relative(process.cwd(), '/ws-b');
+    const status = await new Promise<number>((resolve, reject) => {
+      const ws = new WebSocket(
+        `ws://127.0.0.1:${port}/workspaces/${encodeURIComponent(relativeSelector)}/voice/stream`,
+        { handshakeTimeout: 2000 },
+      );
+      ws.on('unexpected-response', (_req, response) => {
+        resolve(response.statusCode ?? 0);
+        ws.terminate();
+      });
+      ws.on('open', () => {
+        ws.close();
+        reject(new Error('relative Voice WS selector should not open'));
+      });
+      ws.on('error', reject);
+    });
+
+    expect(status).toBe(400);
+    expect(workspaceVoiceConnection).not.toHaveBeenCalled();
+  });
+
   it('rejects a WS upgrade to an untrusted workspace', async () => {
     const status = await new Promise<number>((resolve, reject) => {
       const ws = new WebSocket(
@@ -688,9 +771,9 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
         ws.close();
         reject(new Error('untrusted WS upgrade should not open'));
       });
-      // Some ws versions surface a rejected upgrade as an error rather than
-      // `unexpected-response`; treat that as the expected 403.
-      ws.on('error', () => resolve(403));
+      ws.on('error', (err) =>
+        reject(new Error(`unexpected ACP WS error: ${err.message}`)),
+      );
     });
     expect(status).toBe(403);
   });

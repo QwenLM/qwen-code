@@ -676,10 +676,10 @@ export class ContentRetryEvent implements BaseTelemetryEvent {
  * the `onRetry` callback opt-in) for HTTP 429 / 5xx retries at LLM call sites.
  *
  * Distinct from {@link ContentRetryEvent}, which is emitted by `geminiChat`'s
- * for-loop for `InvalidStreamError` retries that go through a SEPARATE retry
- * budget (`INVALID_CONTENT_RETRY_OPTIONS`, NOT `retryWithBackoff`). A single
- * user prompt may fire BOTH event types; sum across event types to count total
- * retries per prompt_id.
+ * for-loop for `InvalidStreamError` retries that use
+ * `INVALID_STREAM_RETRY_CONFIG`, not `retryWithBackoff`. A single user prompt
+ * may fire BOTH event types; sum across event types to count total retries per
+ * prompt_id.
  */
 export class ApiRetryEvent implements BaseTelemetryEvent {
   'event.name': 'api_retry';

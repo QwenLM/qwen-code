@@ -71,11 +71,36 @@ describe('releaseWorktree', () => {
     git('worktree', 'add', '-q', 'wt', '-b', 'topic');
     expect(existsSync(join(repo, 'wt'))).toBe(true);
 
-    expect(releaseWorktree(join(repo, 'wt'))).toBe(true);
+    expect(releaseWorktree(join(repo, 'wt'))).toMatchObject({
+      existed: true,
+      freed: true,
+    });
 
     expect(existsSync(join(repo, 'wt'))).toBe(false);
     // Not `.not.toContain('wt')` — the fixture's own path holds that substring.
     expect(git('worktree', 'list')).not.toContain(join(repo, 'wt'));
+  });
+
+  it('removes an unregistered non-empty leftover git no longer tracks', () => {
+    // A crashed run can leave a directory at the worktree path that git does not
+    // track as a worktree. `git worktree remove` says "not a working tree" and
+    // leaves it, and a non-empty one then blocks the next `worktree add` with
+    // `already exists`. releaseWorktree must still leave the path gone.
+    mkdirSync(join(repo, 'wt', 'junk'), { recursive: true });
+    writeFileSync(join(repo, 'wt', 'junk', 'f'), 'x');
+    // Negative control: it is not a registered worktree.
+    expect(git('worktree', 'list')).not.toContain(join(repo, 'wt'));
+
+    expect(releaseWorktree(join(repo, 'wt'))).toMatchObject({
+      existed: true,
+      freed: true,
+    });
+
+    expect(existsSync(join(repo, 'wt'))).toBe(false);
+    // And the path is reusable — the `already exists` wedge is gone.
+    expect(() =>
+      git('worktree', 'add', '-q', 'wt', '-b', 'topic'),
+    ).not.toThrow();
   });
 
   it('frees a path whose directory was deleted by hand', () => {
@@ -88,7 +113,11 @@ describe('releaseWorktree', () => {
       /missing but already registered/,
     );
 
-    expect(releaseWorktree(join(repo, 'wt'))).toBe(false); // nothing to remove
+    // Nothing was there: not an existence, and nothing to free.
+    expect(releaseWorktree(join(repo, 'wt'))).toMatchObject({
+      existed: false,
+      freed: false,
+    });
     expect(() => git('worktree', 'add', '-q', 'wt', 'topic')).not.toThrow();
   });
 
@@ -108,7 +137,10 @@ describe('releaseWorktree', () => {
   });
 
   it('is a no-op when there is nothing registered', () => {
-    expect(releaseWorktree(join(repo, 'never-existed'))).toBe(false);
+    expect(releaseWorktree(join(repo, 'never-existed'))).toMatchObject({
+      existed: false,
+      freed: false,
+    });
     expect(git('worktree', 'list').trim().split('\n')).toHaveLength(1);
   });
 

@@ -173,6 +173,10 @@ import {
 import { DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES } from '../utils/qwenIgnoreParser.js';
 import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaults.js';
 import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
+import {
+  registerSessionProjectDir,
+  unregisterSessionProjectDir,
+} from '../utils/sessionIdContext.js';
 import { Storage } from './storage.js';
 import {
   ChatRecordingService,
@@ -607,6 +611,7 @@ function normalizeGitCoAuthor(value: GitCoAuthorParam | undefined): {
 }
 
 export type ExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
+export type ExtensionNetworkPolicy = 'public';
 
 export interface ExtensionInstallMetadata {
   source: string;
@@ -619,6 +624,7 @@ export interface ExtensionInstallMetadata {
   allowPreRelease?: boolean;
   marketplaceConfig?: ClaudeMarketplaceConfig;
   pluginName?: string;
+  networkPolicy?: ExtensionNetworkPolicy;
 }
 
 export const DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD = 25_000;
@@ -1427,6 +1433,7 @@ const EMPTY_DISABLED_SKILL_NAMES: ReadonlySet<string> = Object.freeze(
 // overwriting the real session's ID while still allowing nested qwen-code
 // processes to claim their own (they start with a fresh module scope).
 let sessionEnvClaimed = false;
+let projectDirEnvClaimed = false;
 
 function resolveSensitiveSpanAttributeMaxLength(
   value: number | undefined,
@@ -2062,6 +2069,22 @@ export class Config {
     this.inputFile = params.inputFile;
     this.defaultFileEncoding = params.defaultFileEncoding;
     this.storage = new Storage(this.targetDir);
+    // Publish the project dir a subprocess needs to find this session's harness
+    // records. It is derived from the session's *launch* cwd, so a subprocess
+    // that has `cd`-ed elsewhere — which the /review skill explicitly does, into
+    // a PR worktree — cannot recompute it from `process.cwd()`; it would land on
+    // a directory that never existed.
+    //
+    // Registered per session, not claimed in one process-global slot. In daemon
+    // mode one process serves many sessions: a single slot would hold whichever
+    // booted first, and every later session would hand its subprocesses another
+    // session's directory. The env var is still set for the single-session CLI,
+    // where it is the only consumer and there is nothing to collide with.
+    registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
+    if (!projectDirEnvClaimed && process.env) {
+      process.env['QWEN_CODE_PROJECT_DIR'] = this.storage.getProjectDir();
+      projectDirEnvClaimed = true;
+    }
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
     this.fileExclusions = new FileExclusions(this);
     this.eventEmitter = params.eventEmitter;
@@ -4038,6 +4061,12 @@ export class Config {
    */
   async shutdown(): Promise<void> {
     try {
+      // Drop this session's project-dir registry entry. It is registered in the
+      // constructor, so it is released here regardless of initialization state —
+      // in daemon mode, where one process serves many sessions, an unreleased
+      // entry per session is a leak that grows for the life of the process.
+      unregisterSessionProjectDir(this.sessionId);
+
       // Stop the settings watcher regardless of initialization state —
       // it is started before Config.initialize() and would leak otherwise.
       this.settingsWatcher?.stopWatching();

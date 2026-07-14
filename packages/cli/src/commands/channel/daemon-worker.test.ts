@@ -883,6 +883,29 @@ describe('runChannelDaemonWorker', () => {
     ).resolves.toBeDefined();
   });
 
+  it('preserves the legacy trust behavior for a singleton workspace', async () => {
+    const sdk = createSdk();
+    sdk.client.capabilities.mockResolvedValueOnce({
+      v: 1,
+      mode: 'http-bridge',
+      features: [],
+      modelServices: [],
+      workspaceCwd: '/workspace',
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: false },
+      ],
+    });
+
+    await expect(
+      runChannelDaemonWorker({
+        daemonUrl: 'http://127.0.0.1:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        loadDaemonSdk: async () => sdk,
+      }),
+    ).resolves.toBeDefined();
+  });
+
   it('accepts a trusted registered non-primary workspace', async () => {
     const sdk = createSdk();
     sdk.client.capabilities.mockResolvedValueOnce({
@@ -917,6 +940,7 @@ describe('runChannelDaemonWorker', () => {
       workspaceCwd: '/primary',
       workspaces: [
         { id: 'primary', cwd: '/primary', primary: true, trusted: true },
+        { id: 'other', cwd: '/other', primary: false, trusted: true },
       ],
     });
 
@@ -939,6 +963,7 @@ describe('runChannelDaemonWorker', () => {
       modelServices: [],
       workspaceCwd: '/primary',
       workspaces: [
+        { id: 'primary', cwd: '/primary', primary: true, trusted: true },
         { id: 'worker', cwd: '/workspace', primary: false, trusted: false },
       ],
     });
