@@ -322,10 +322,13 @@ const EN: Messages = {
     const count = Number(v?.count ?? 0);
     return `${count} filter${count === 1 ? '' : 's'}`;
   },
-  'markdownTable.cellsSelected': (v) => {
-    const count = Number(v?.count ?? 0);
-    return `${count} cell${count === 1 ? '' : 's'} selected`;
-  },
+  'markdownTable.selection.selected': 'Selected',
+  'markdownTable.selection.nonEmpty': 'Non-empty',
+  'markdownTable.selection.numeric': 'Numeric',
+  'markdownTable.selection.sum': 'Sum',
+  'markdownTable.selection.average': 'Average',
+  'markdownTable.selection.min': 'Min',
+  'markdownTable.selection.max': 'Max',
   'markdownTable.copyTsv': 'Copy TSV',
   'markdownTable.copyVisible': 'Quick copy',
   'markdownTable.freezeFirstColumn': 'Freeze first column',
@@ -875,6 +878,8 @@ const EN: Messages = {
     `ACP connections: ${v?.count ?? 0}`,
   'sidebar.removeWorkspaceMemoryTasks': (v) => `Memory tasks: ${v?.count ?? 0}`,
   'sidebar.removeWorkspaceWorkers': (v) => `Channel workers: ${v?.count ?? 0}`,
+  'sidebar.removeWorkspaceVoiceSessions': (v) =>
+    `Voice sessions: ${v?.count ?? 0}`,
   'sidebar.noSessions': 'No sessions.',
   'sidebar.projectFallback': 'Project',
   'sidebar.sessionsOverview': 'Session Overview',
@@ -2276,7 +2281,13 @@ const ZH: Messages = {
   'markdownTable.rowsFiltered': (v) => `${v?.visible ?? 0}/${v?.total ?? 0} 行`,
   'markdownTable.hint': '点击表头排序，点击 ▾ 打开筛选。',
   'markdownTable.filtersActive': (v) => `${v?.count ?? 0} 个筛选`,
-  'markdownTable.cellsSelected': (v) => `${v?.count ?? 0} 个单元格已选中`,
+  'markdownTable.selection.selected': '已选',
+  'markdownTable.selection.nonEmpty': '非空',
+  'markdownTable.selection.numeric': '数值',
+  'markdownTable.selection.sum': '求和',
+  'markdownTable.selection.average': '平均',
+  'markdownTable.selection.min': '最小',
+  'markdownTable.selection.max': '最大',
   'markdownTable.copyTsv': '复制 TSV',
   'markdownTable.copyVisible': '快捷复制',
   'markdownTable.freezeFirstColumn': '冻结首列',
@@ -2796,6 +2807,7 @@ const ZH: Messages = {
   'sidebar.removeWorkspaceConnections': (v) => `ACP 连接：${v?.count ?? 0}`,
   'sidebar.removeWorkspaceMemoryTasks': (v) => `Memory 任务：${v?.count ?? 0}`,
   'sidebar.removeWorkspaceWorkers': (v) => `Channel worker：${v?.count ?? 0}`,
+  'sidebar.removeWorkspaceVoiceSessions': (v) => `语音会话：${v?.count ?? 0}`,
   'sidebar.noSessions': '暂无会话',
   'sidebar.projectFallback': '项目',
   'sidebar.sessionsOverview': '会话总览',

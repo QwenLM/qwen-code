@@ -443,6 +443,12 @@ export interface DaemonWorkspaceServiceDeps {
     writes: WorkspaceSettingsWrite[],
   ) => Promise<void>;
 
+  /** Runtime-local environment used by workspace Voice operations. */
+  voiceEnv?: Readonly<Record<string, string | undefined>>;
+
+  /** Force Voice settings writes into this scope for workspace-qualified ACP. */
+  voiceSettingsScope?: SettingScope;
+
   /** Reload daemon-side process.env from .env / settings.env. */
   reloadDaemonEnv?: (workspace: string) => Promise<EnvReloadResult>;
 

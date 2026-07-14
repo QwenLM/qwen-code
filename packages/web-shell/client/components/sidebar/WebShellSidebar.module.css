@@ -642,18 +642,6 @@
   cursor: pointer;
 }
 
-.groupedSessionRow {
-  min-height: 42px;
-  margin-left: 12px;
-  padding: 8px;
-  color: var(--muted-foreground);
-}
-
-.groupedSessionRow:not(.currentSession):hover,
-.groupedSessionRow:not(.currentSession):focus-visible {
-  color: var(--sidebar-accent-foreground);
-}
-
 .currentSession {
   background: var(--sidebar-accent);
   color: var(--sidebar-accent-foreground);
