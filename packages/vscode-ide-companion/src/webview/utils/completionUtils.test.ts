@@ -82,12 +82,20 @@ describe('completionUtils', () => {
       expect(at('hello @wor')).toEqual({ char: '@', pos: 6, query: 'wor' });
     });
 
+    it('treats a newline as a word boundary for @', () => {
+      expect(at('hello\n@wor')).toEqual({ char: '@', pos: 6, query: 'wor' });
+    });
+
     it('resolves a / slash command at the start of input', () => {
       expect(at('/he')).toEqual({ char: '/', pos: 0, query: 'he' });
     });
 
     it('returns null when the only @ is inside a word and there is no /', () => {
       expect(at('email foo@bar.com')).toBeNull();
+    });
+
+    it('returns null when / is not at a word boundary and no valid @ exists', () => {
+      expect(at('foo/bar')).toBeNull();
     });
 
     it('returns null when neither trigger is present', () => {
