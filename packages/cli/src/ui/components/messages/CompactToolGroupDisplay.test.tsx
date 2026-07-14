@@ -147,6 +147,20 @@ describe('<CompactToolGroupDisplay /> — summary label', () => {
     );
     expect(lastFrame()).toContain('Ran ls -la');
   });
+
+  it('wraps long summaries instead of truncating them', () => {
+    const description =
+      'packages/cli/src/ui/components/messages/CompactToolGroupDisplay.tsx';
+    const tool = toolCall({ name: 'ReadFile', description });
+    const { lastFrame } = render(
+      <CompactToolGroupDisplay toolCalls={[tool]} contentWidth={30} />,
+    );
+    const frame = lastFrame()!;
+
+    expect(frame.split('\n').length).toBeGreaterThan(1);
+    expect(frame).not.toContain('…');
+    expect(frame.replace(/\s/g, '')).toContain(`Read${description}`);
+  });
 });
 
 describe('buildToolSummary', () => {
