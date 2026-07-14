@@ -3053,7 +3053,7 @@ describe('loadCliConfig safe mode', () => {
     } as unknown as Settings;
     const config = await loadCliConfig(settings, argv, undefined, []);
 
-    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.AUTO);
   });
 
   it('should ignore settings-sourced disabled slash commands in safe mode', async () => {
@@ -3510,11 +3510,11 @@ describe('loadCliConfig approval mode', () => {
     vi.restoreAllMocks();
   });
 
-  it('should default to DEFAULT approval mode when no flags are set', async () => {
+  it('should default to AUTO approval mode when no flags are set', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
-    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.AUTO);
   });
 
   it('should set PLAN approval mode when --approval-mode=plan', async () => {
@@ -3614,6 +3614,13 @@ describe('loadCliConfig approval mode', () => {
         isTrusted: false,
         source: 'file',
       });
+    });
+
+    it('should override default AUTO mode to DEFAULT', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv, undefined, []);
+      expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
     });
 
     it('should override --approval-mode=yolo to DEFAULT', async () => {

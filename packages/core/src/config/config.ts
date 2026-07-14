@@ -1901,7 +1901,7 @@ export class Config {
     this.userMemory = params.userMemory ?? '';
     this.geminiMdFileCount = params.geminiMdFileCount ?? 0;
     this.contextRuleExcludes = params.contextRuleExcludes ?? [];
-    this.approvalMode = params.approvalMode ?? ApprovalMode.DEFAULT;
+    this.approvalMode = params.approvalMode ?? ApprovalMode.AUTO;
     this.accessibility = params.accessibility ?? {};
     this.showResponseTokensPerSecond =
       params.showResponseTokensPerSecond ?? false;

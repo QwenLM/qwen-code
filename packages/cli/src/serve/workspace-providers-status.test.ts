@@ -161,9 +161,9 @@ describe('createWorkspaceProvidersStatusProvider', () => {
 
     const result = await provider(workspace, false);
 
-    expect(result.approvalMode).toBe('default');
+    expect(result.approvalMode).toBe('auto');
     expect(coreMock.debugLogger.warn).toHaveBeenCalledWith(
-      '[workspace-providers-status] unrecognized approvalMode "auto-edt", falling back to default',
+      '[workspace-providers-status] unrecognized approvalMode "auto-edt", falling back to auto',
     );
   });
 
