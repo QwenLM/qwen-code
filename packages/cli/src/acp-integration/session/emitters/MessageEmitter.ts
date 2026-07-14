@@ -8,6 +8,7 @@ import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import type { SubagentMeta } from '../types.js';
 import type { Usage } from '@agentclientprotocol/sdk';
 import {
+  apiActivityTracker,
   getActiveGoal,
   type GoalTerminalEvent,
 } from '@qwen-code/qwen-code-core';
@@ -215,10 +216,26 @@ export class MessageEmitter extends BaseEmitter {
       cumulative.apiTimeMs = addFinite(cumulative.apiTimeMs, durationMs);
     }
 
-    const meta =
-      typeof durationMs === 'number'
-        ? { usage, durationMs, ...subagentMeta }
-        : { usage, ...subagentMeta };
+    // A live model round is discriminated by a present `durationMs` (replay
+    // frames omit it). Only then do we drain the model-API-error / auto-retry
+    // counters onto this frame's `_meta`, so the daemon host's metrics ring
+    // windows the increments alongside token burn and LLM latency. Draining on
+    // a replayed frame would consume real pending counts the bridge ignores for
+    // replay, silently dropping them — hence the `durationMs` guard. Absent /
+    // zero keys keep no-error frames byte-identical to before.
+    let meta: Record<string, unknown>;
+    if (typeof durationMs === 'number') {
+      const activity = apiActivityTracker.drain();
+      meta = {
+        usage,
+        durationMs,
+        ...(activity.errors > 0 ? { apiErrors: activity.errors } : {}),
+        ...(activity.retries > 0 ? { apiRetries: activity.retries } : {}),
+        ...subagentMeta,
+      };
+    } else {
+      meta = { usage, ...subagentMeta };
+    }
 
     await this.sendUpdate({
       sessionUpdate: 'agent_message_chunk',

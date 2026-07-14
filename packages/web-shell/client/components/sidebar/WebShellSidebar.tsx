@@ -122,6 +122,14 @@ export interface WebShellSidebarBranding {
   hideWhenCompact?: boolean;
 }
 
+export interface WebShellSidebarLockedWorkspace {
+  /** Replace the locked workspace row content while preserving its built-in behavior. */
+  render?: (
+    workspace: DaemonWorkspaceCapability,
+    state: { expanded: boolean },
+  ) => ReactNode;
+}
+
 export interface WebShellSidebarFooterOptions {
   /** Built-in footer entries to expose. Entries use the canonical footer order. */
   items?: readonly WebShellSidebarFooterItem[];
@@ -212,6 +220,9 @@ interface WebShellSidebarProps {
    */
   selectedWorkspaceCwd?: string;
   onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
+  workspaces?: DaemonWorkspaceCapability[];
+  lockedWorkspaceCwd?: string;
+  lockedWorkspace?: WebShellSidebarLockedWorkspace;
   branding?: false | WebShellSidebarBranding;
   footer?: false | WebShellSidebarFooterOptions;
 }
@@ -394,6 +405,9 @@ export function WebShellSidebar({
   sessionListReloadToken,
   selectedWorkspaceCwd,
   onSelectWorkspace,
+  workspaces: providedWorkspaces,
+  lockedWorkspaceCwd,
+  lockedWorkspace: lockedWorkspaceOptions,
   branding,
   footer,
 }: WebShellSidebarProps) {
@@ -415,9 +429,14 @@ export function WebShellSidebar({
   // Phase 4: registered workspaces on a multi-workspace daemon (absent or a
   // single entry otherwise). Drives the new-session workspace picker.
   const workspaces = useMemo(
-    () => workspace.capabilities?.workspaces ?? [],
-    [workspace.capabilities?.workspaces],
+    () => providedWorkspaces ?? workspace.capabilities?.workspaces ?? [],
+    [providedWorkspaces, workspace.capabilities?.workspaces],
   );
+  const lockedWorkspace = lockedWorkspaceCwd
+    ? workspaces.find((entry) => entry.cwd === lockedWorkspaceCwd)
+    : undefined;
+  const includePrimaryWorkspaceSessions =
+    !lockedWorkspaceCwd || lockedWorkspace?.primary === true;
   const {
     sessions,
     loading,
@@ -428,6 +447,7 @@ export function WebShellSidebar({
     archiveSession,
   } = useSessions({
     autoLoad: true,
+    enabled: includePrimaryWorkspaceSessions,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
     ...(organizationEnabled
@@ -437,7 +457,7 @@ export function WebShellSidebar({
   const { sessions: primaryPinnedSessions, reload: reloadPinnedSessions } =
     useSessions({
       autoLoad: organizationEnabled,
-      enabled: organizationEnabled,
+      enabled: organizationEnabled && includePrimaryWorkspaceSessions,
       pageSize: SESSION_LIST_PAGE_SIZE,
       archiveState: 'active',
       view: 'organized',
@@ -457,7 +477,7 @@ export function WebShellSidebar({
     unarchiveSession,
   } = useSessions({
     autoLoad: true,
-    enabled: archivedExpanded,
+    enabled: archivedExpanded && includePrimaryWorkspaceSessions,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'archived',
     ...(organizationEnabled
@@ -564,8 +584,8 @@ export function WebShellSidebar({
     connection.capabilities?.features?.includes('session_export') ?? false;
   const projectName =
     getWorkspaceName(connection.workspaceCwd) || t('sidebar.projectFallback');
-  const displayedWorkspaces = useMemo<DaemonWorkspaceCapability[]>(
-    () =>
+  const displayedWorkspaces = useMemo<DaemonWorkspaceCapability[]>(() => {
+    const availableWorkspaces =
       workspaces.length > 0
         ? workspaces
         : [
@@ -575,19 +595,25 @@ export function WebShellSidebar({
               primary: true,
               trusted: true,
             },
-          ],
-    [connection.workspaceCwd, projectName, workspaces],
-  );
+          ];
+    return lockedWorkspaceCwd
+      ? availableWorkspaces.filter((entry) => entry.cwd === lockedWorkspaceCwd)
+      : availableWorkspaces;
+  }, [connection.workspaceCwd, lockedWorkspaceCwd, projectName, workspaces]);
   const pinnedSessions = useMemo(() => {
     const byId = new Map<string, DaemonSessionSummary>();
     for (const session of [
-      ...primaryPinnedSessions,
+      ...(includePrimaryWorkspaceSessions ? primaryPinnedSessions : []),
       ...secondaryPinnedSessions,
     ]) {
       byId.set(session.sessionId, session);
     }
     return [...byId.values()];
-  }, [primaryPinnedSessions, secondaryPinnedSessions]);
+  }, [
+    includePrimaryWorkspaceSessions,
+    primaryPinnedSessions,
+    secondaryPinnedSessions,
+  ]);
   const getSessionWorkspaceActions = useCallback(
     (session: DaemonSessionSummary) => {
       const sessionWorkspace = displayedWorkspaces.find(
@@ -649,9 +675,22 @@ export function WebShellSidebar({
     workspaceSessionsReloadToken,
   ]);
   const allArchivedSessions = useMemo(
-    () => [...archivedSessions, ...secondaryArchivedSessions],
-    [archivedSessions, secondaryArchivedSessions],
+    () => [
+      ...(includePrimaryWorkspaceSessions ? archivedSessions : []),
+      ...secondaryArchivedSessions,
+    ],
+    [
+      archivedSessions,
+      includePrimaryWorkspaceSessions,
+      secondaryArchivedSessions,
+    ],
   );
+  const effectiveArchivedLoading =
+    (includePrimaryWorkspaceSessions && archivedLoading) ||
+    secondaryArchivedLoading;
+  const effectiveArchivedError =
+    (includePrimaryWorkspaceSessions && Boolean(archivedError)) ||
+    secondaryArchivedError;
 
   useEffect(() => {
     if (!archivedExpanded) return;
@@ -660,6 +699,7 @@ export function WebShellSidebar({
     );
     if (secondaryWorkspaces.length === 0) {
       setSecondaryArchivedSessions([]);
+      setSecondaryArchivedLoading(false);
       setSecondaryArchivedError(false);
       return;
     }
@@ -2038,7 +2078,6 @@ export function WebShellSidebar({
       session: DaemonSessionSummary,
       options: {
         isArchived?: boolean;
-        grouped?: boolean;
         // Suppress the per-session mutation actions (pin/group/archive/export/
         // more). Used for non-primary workspace rows: the daemon is bound to the
         // primary workspace, so those routes can't resolve another workspace's
@@ -2046,7 +2085,7 @@ export function WebShellSidebar({
         readOnly?: boolean;
       } = {},
     ) => {
-      const { isArchived = false, grouped = false, readOnly = false } = options;
+      const { isArchived = false, readOnly = false } = options;
       const label = getSessionLabel(session);
       const stamp = session.updatedAt || session.createdAt;
       const time = stamp ? formatRelativeTime(stamp, t) : '';
@@ -2156,7 +2195,6 @@ export function WebShellSidebar({
           key={session.sessionId}
           className={cx(
             styles.sessionRow,
-            grouped && styles.groupedSessionRow,
             isCurrent && styles.currentSession,
             session.isPinned && styles.pinnedSession,
             session.hasActivePrompt && styles.runningSession,
@@ -2439,9 +2477,7 @@ export function WebShellSidebar({
           deleteLabel={t('sidebar.groupDelete')}
           actionsDisabled={groupBusy}
         >
-          {section.sessions.map((session) =>
-            renderSessionRow(session, { grouped: true }),
-          )}
+          {section.sessions.map((session) => renderSessionRow(session))}
         </SessionGroupSection>
       );
     });
@@ -2504,17 +2540,11 @@ export function WebShellSidebar({
       </button>
     );
     let content: ReactNode;
-    if (
-      (archivedLoading || secondaryArchivedLoading) &&
-      allArchivedSessions.length === 0
-    ) {
+    if (effectiveArchivedLoading && allArchivedSessions.length === 0) {
       content = (
         <div className={styles.notice}>{t('sidebar.loadingSessions')}</div>
       );
-    } else if (
-      (archivedError || secondaryArchivedError) &&
-      allArchivedSessions.length === 0
-    ) {
+    } else if (effectiveArchivedError && allArchivedSessions.length === 0) {
       content = retry;
     } else if (allArchivedSessions.length === 0) {
       content = (
@@ -2526,7 +2556,7 @@ export function WebShellSidebar({
           {allArchivedSessions.map((session) =>
             renderSessionRow(session, { isArchived: true }),
           )}
-          {(archivedError || secondaryArchivedError) && retry}
+          {effectiveArchivedError && retry}
         </>
       );
     }
@@ -2538,17 +2568,15 @@ export function WebShellSidebar({
       </div>
     );
   }, [
-    archivedError,
     archivedExpanded,
-    archivedLoading,
     allArchivedSessions,
     collapsed,
+    effectiveArchivedError,
+    effectiveArchivedLoading,
     reloadArchived,
     renderSessionRow,
     searchQuery,
     setSecondaryArchivedReloadToken,
-    secondaryArchivedError,
-    secondaryArchivedLoading,
     t,
   ]);
 
@@ -2751,6 +2779,11 @@ export function WebShellSidebar({
                   <li>
                     {t('sidebar.removeWorkspaceWorkers', {
                       count: workspaceRemovalActivity.channelWorkers,
+                    })}
+                  </li>
+                  <li>
+                    {t('sidebar.removeWorkspaceVoiceSessions', {
+                      count: workspaceRemovalActivity.voiceSessions ?? 0,
                     })}
                   </li>
                 </ul>
@@ -3056,17 +3089,19 @@ export function WebShellSidebar({
                   >
                     <SearchIcon />
                   </button>
-                  <button
-                    className={styles.projectsHeaderAction}
-                    type="button"
-                    title={t('sidebar.addWorkspace')}
-                    aria-label={t('sidebar.addWorkspace')}
-                    onClick={() => {
-                      setShowAddWorkspaceDialog(true);
-                    }}
-                  >
-                    <PlusIcon />
-                  </button>
+                  {!lockedWorkspaceCwd && (
+                    <button
+                      className={styles.projectsHeaderAction}
+                      type="button"
+                      title={t('sidebar.addWorkspace')}
+                      aria-label={t('sidebar.addWorkspace')}
+                      onClick={() => {
+                        setShowAddWorkspaceDialog(true);
+                      }}
+                    >
+                      <PlusIcon />
+                    </button>
+                  )}
                 </div>
               </div>
             )}
@@ -3097,14 +3132,16 @@ export function WebShellSidebar({
                         <Fragment key={ws.id}>
                           <WorkspaceSection
                             workspace={ws}
-                            client={workspace.client}
-                            isActive={
-                              currentSessionId
-                                ? connection.workspaceCwd === ws.cwd
-                                : ws.primary
-                                  ? selectedWorkspaceCwd === undefined
-                                  : selectedWorkspaceCwd === ws.cwd
+                            renderHeader={
+                              lockedWorkspaceCwd &&
+                              lockedWorkspaceOptions?.render
+                                ? (expanded) =>
+                                    lockedWorkspaceOptions.render?.(ws, {
+                                      expanded,
+                                    })
+                                : undefined
                             }
+                            client={workspace.client}
                             reloadToken={workspaceSessionsReloadToken}
                             primaryLabel={
                               displayedWorkspaces.length > 1
@@ -3136,17 +3173,21 @@ export function WebShellSidebar({
                               ws.primary ? setProjectExpanded : undefined
                             }
                             renderSessions={!ws.primary}
-                            renderSession={(session, options) =>
-                              renderSessionRow(
-                                {
-                                  ...session,
-                                  workspaceCwd: ws.cwd,
-                                },
-                                options,
-                              )
+                            renderSession={(session) =>
+                              renderSessionRow({
+                                ...session,
+                                workspaceCwd: ws.cwd,
+                              })
                             }
                             headerActions={(visible) => {
+                              if (
+                                lockedWorkspaceCwd &&
+                                lockedWorkspaceOptions?.render
+                              ) {
+                                return null;
+                              }
                               const canRemove =
+                                !lockedWorkspaceCwd &&
                                 workspaceRemovalEnabled &&
                                 !ws.primary &&
                                 ws.removable === true;
@@ -3388,7 +3429,7 @@ export function WebShellSidebar({
           onPointerDown={handleResizePointerDown}
         />
       </aside>
-      {showAddWorkspaceDialog && (
+      {!lockedWorkspaceCwd && showAddWorkspaceDialog && (
         <AddWorkspaceDialog
           onClose={() => setShowAddWorkspaceDialog(false)}
           onAdd={handleAddWorkspace}

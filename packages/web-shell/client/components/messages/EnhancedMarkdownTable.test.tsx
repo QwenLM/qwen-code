@@ -460,6 +460,14 @@ describe('EnhancedMarkdownTable', () => {
 
     expect(rowTexts(container)).toEqual(['Alpha|10', 'Gamma|30']);
     expect(container.textContent).toContain('2/3 rows');
+
+    dragCells(dataCell(container, 0, 1), dataCell(container, 1, 1));
+    expect(container.textContent).toContain('Selected 2');
+    expect(container.textContent).toContain('Numeric 2');
+    expect(container.textContent).toContain('Sum 40');
+    expect(container.textContent).toContain('Average 20');
+    expect(container.textContent).toContain('Min 10');
+    expect(container.textContent).toContain('Max 30');
   });
 
   it('applies a custom number filter', () => {
@@ -976,14 +984,14 @@ describe('EnhancedMarkdownTable', () => {
     const container = renderTable();
 
     dragCells(dataCell(container, 0, 0), dataCell(container, 0, 0));
-    expect(container.textContent).toContain('1 cell selected');
+    expect(container.textContent).toContain('Selected 1');
 
     click(button(container, 'View details for row 1'));
     expect(container.textContent).toContain('Row details');
 
     doubleClick(dataCell(container, 0, 0));
 
-    expect(container.textContent).not.toContain('1 cell selected');
+    expect(container.textContent).not.toContain('Selected 1');
     expect(container.textContent).not.toContain('Row details');
     expect(cellDialog()).not.toBeNull();
   });
@@ -1528,6 +1536,15 @@ describe('EnhancedMarkdownTable', () => {
     click(button(container, 'Filter Region'));
     click(textButton(container, 'Hide column'));
     dragCells(dataCell(container, 0, 0), dataCell(container, 1, 1));
+
+    expect(container.textContent).toContain('Selected 4');
+    expect(container.textContent).toContain('Non-empty 4');
+    expect(container.textContent).toContain('Numeric 2');
+    expect(container.textContent).toContain('Sum 12');
+    expect(container.textContent).toContain('Average 6');
+    expect(container.textContent).toContain('Min 2');
+    expect(container.textContent).toContain('Max 10');
+
     click(textButton(container, 'Copy TSV'));
 
     expect(writeText).toHaveBeenCalledWith(['10\tAlpha', '2\tBeta'].join('\n'));
@@ -1688,7 +1705,7 @@ describe('EnhancedMarkdownTable', () => {
     click(textButton(container, 'Expand text'));
 
     expect(textButton(container, 'Collapse text')).toBeDefined();
-    expect(container.textContent).not.toContain('1 cell selected');
+    expect(container.textContent).not.toContain('Selected 1');
     expect(cell.querySelector<HTMLElement>('[title]')).toBeNull();
 
     click(textButton(container, 'Collapse text'));
@@ -1956,13 +1973,266 @@ describe('EnhancedMarkdownTable', () => {
     expect(textButton(container, 'Collapse text')).toBeDefined();
   });
 
+  it('shows statistics for a numeric selection', () => {
+    const container = renderTable();
+
+    dragCells(dataCell(container, 0, 1), dataCell(container, 2, 1));
+
+    expect(container.textContent).toContain('Selected 3');
+    expect(container.textContent).toContain('Non-empty 3');
+    expect(container.textContent).toContain('Numeric 3');
+    expect(container.textContent).toContain('Sum 42');
+    expect(container.textContent).toContain('Average 14');
+    expect(container.textContent).toContain('Min 2');
+    expect(container.textContent).toContain('Max 30');
+  });
+
+  it('clears a selection when updated rows no longer contain it', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const render = (rows: string[]) => {
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <EnhancedMarkdownTable>
+              <thead>
+                <tr>
+                  <th>Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((value) => (
+                  <tr key={value}>
+                    <td>{value}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </EnhancedMarkdownTable>
+          </I18nProvider>,
+        );
+      });
+    };
+    mounted.push({ root, container });
+
+    render(['10', '20', '30']);
+    dragCells(dataCell(container, 2, 0), dataCell(container, 2, 0));
+    expect(container.textContent).toContain('Selected 1');
+
+    render(['10']);
+
+    expect(container.textContent).not.toContain('Selected');
+    expect(container.textContent).not.toContain('Copy TSV');
+  });
+
+  it('uses numeric cells only for mixed-selection arithmetic', () => {
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Label</th>
+          <th>Value</th>
+          <th>Extra</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>Alpha</td>
+          <td>10</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Beta</td>
+          <td>2</td>
+          <td>-4</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    dragCells(dataCell(container, 0, 0), dataCell(container, 1, 2));
+
+    expect(container.textContent).toContain('Selected 6');
+    expect(container.textContent).toContain('Non-empty 5');
+    expect(container.textContent).toContain('Numeric 3');
+    expect(container.textContent).toContain('Sum 8');
+    expect(container.textContent).toContain('Average 2.666667');
+    expect(container.textContent).toContain('Min -4');
+    expect(container.textContent).toContain('Max 10');
+  });
+
+  it('hides arithmetic statistics when the selection has no numbers', () => {
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Value</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>Alpha</td>
+        </tr>
+        <tr>
+          <td></td>
+        </tr>
+      </tbody>,
+    ]);
+
+    dragCells(dataCell(container, 0, 0), dataCell(container, 1, 0));
+
+    expect(container.textContent).toContain('Selected 2');
+    expect(container.textContent).toContain('Non-empty 1');
+    expect(container.textContent).toContain('Numeric 0');
+    expect(container.textContent).not.toContain('Sum ');
+    expect(container.textContent).not.toContain('Average ');
+    expect(container.textContent).not.toContain('Min ');
+    expect(container.textContent).not.toContain('Max ');
+  });
+
+  it('preserves percent formatting for percent-only selections', () => {
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Ratio</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>40%</td>
+        </tr>
+        <tr>
+          <td>60%</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    dragCells(dataCell(container, 0, 0), dataCell(container, 1, 0));
+
+    expect(container.textContent).toContain('Sum 100%');
+    expect(container.textContent).toContain('Average 50%');
+    expect(container.textContent).toContain('Min 40%');
+    expect(container.textContent).toContain('Max 60%');
+  });
+
+  it('preserves a shared currency symbol for currency-only selections', () => {
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Amount</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>$10</td>
+        </tr>
+        <tr>
+          <td>$20</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    dragCells(dataCell(container, 0, 0), dataCell(container, 1, 0));
+
+    expect(container.textContent).toContain('Sum $30');
+    expect(container.textContent).toContain('Average $15');
+    expect(container.textContent).toContain('Min $10');
+    expect(container.textContent).toContain('Max $20');
+  });
+
+  it('formats negative currency statistics with one leading sign', () => {
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Amount</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>-$10</td>
+        </tr>
+        <tr>
+          <td>-$20</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    dragCells(dataCell(container, 0, 0), dataCell(container, 1, 0));
+
+    expect(container.textContent).toContain('Sum -$30');
+    expect(container.textContent).toContain('Average -$15');
+    expect(container.textContent).toContain('Min -$20');
+    expect(container.textContent).toContain('Max -$10');
+    expect(container.textContent).not.toContain('--$');
+  });
+
+  it('uses plain number formatting for mixed currencies', () => {
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Amount</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>$10</td>
+        </tr>
+        <tr>
+          <td>€20</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    dragCells(dataCell(container, 0, 0), dataCell(container, 1, 0));
+
+    expect(container.textContent).toContain('Sum 30');
+    expect(container.textContent).toContain('Average 15');
+    expect(container.textContent).not.toContain('Sum $');
+    expect(container.textContent).not.toContain('Sum €');
+  });
+
+  it('normalizes negative zero in selection statistics', () => {
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Value</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>-0</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    dragCells(dataCell(container, 0, 0), dataCell(container, 0, 0));
+
+    expect(container.textContent).toContain('Sum 0');
+    expect(container.textContent).toContain('Average 0');
+    expect(container.textContent).toContain('Min 0');
+    expect(container.textContent).toContain('Max 0');
+    expect(container.textContent).not.toContain('Min -0');
+    expect(container.textContent).not.toContain('Max -0');
+  });
+
+  it('localizes selection statistics', () => {
+    const container = renderTable('zh-CN');
+
+    dragCells(dataCell(container, 0, 1), dataCell(container, 2, 1));
+
+    expect(container.textContent).toContain('已选 3');
+    expect(container.textContent).toContain('非空 3');
+    expect(container.textContent).toContain('数值 3');
+    expect(container.textContent).toContain('求和 42');
+    expect(container.textContent).toContain('平均 14');
+    expect(container.textContent).toContain('最小 2');
+    expect(container.textContent).toContain('最大 30');
+  });
+
   it('keeps selected cell classes visible on a frozen column', () => {
     const container = renderWideTable();
 
     freezeFirstColumn(container);
     dragCells(dataCell(container, 0, 0), dataCell(container, 1, 1));
 
-    expect(container.textContent).toContain('4 cells selected');
+    expect(container.textContent).toContain('Selected 4');
     expect(dataCell(container, 0, 0).className).toContain('frozenCell');
     expect(dataCell(container, 0, 0).className).toContain('selectedCell');
     expect(dataCell(container, 0, 1).className).toContain('selectedCell');
