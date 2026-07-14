@@ -241,7 +241,7 @@ function createStreamWithChunks(
 function createPreparationResponse(
   callId: string,
   toolName: string,
-  overrides: Partial<GenerateContentResponse> = {},
+  const response = {} as GenerateContentResponse;
 ): GenerateContentResponse {
   const response = overrides as GenerateContentResponse;
   core.setToolCallPreparations(response, [{ callId, toolName }]);
