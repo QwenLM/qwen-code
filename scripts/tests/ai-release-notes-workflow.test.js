@@ -47,12 +47,16 @@ describe('stable release notes workflow', () => {
     const changelog = getStep(finalizeWorkflow, 'Regenerate CHANGELOG.md');
 
     expect(finalizeWorkflow).toContain("types: ['published']");
+    expect(finalizeWorkflow).toContain(
+      'github.event.release.prerelease == false',
+    );
     expect(finalizeWorkflow).toContain('workflow_dispatch:');
     expect(finalizeWorkflow).toContain(
       'if [[ "${TAG}" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]',
     );
     expect(generate).toContain('timeout-minutes: 15');
     expect(generate).toContain('continue-on-error: true');
+    expect(generate).toContain('GitHub-generated notes');
     expect(generate).toContain('node scripts/generate-release-notes.js');
     expect(update).toContain('continue-on-error: true');
     expect(update).toContain(

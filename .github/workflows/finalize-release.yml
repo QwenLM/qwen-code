@@ -19,7 +19,7 @@ jobs:
     name: 'Finalize Stable Release'
     runs-on: 'ubuntu-latest'
     if: |-
-      ${{ github.repository == 'QwenLM/qwen-code' }}
+      ${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false) }}
     environment:
       name: 'production-release'
     permissions:
@@ -116,6 +116,7 @@ jobs:
           RELEASE_NOTES_FILE: '${{ runner.temp }}/release-notes.md'
           RELEASE_TAG: '${{ env.RELEASE_TAG }}'
         run: |-
+          # The first publish keeps GitHub-generated notes; this improves them after the tag exists.
           node scripts/generate-release-notes.js \
             --repo="${GITHUB_REPOSITORY}" \
             --tag="${RELEASE_TAG}" \
@@ -168,6 +169,7 @@ jobs:
         run: |-
           set -euo pipefail
 
+          # Merge the release branch back to main so package metadata and CHANGELOG converge.
           pr_data="$(gh pr list --head "${RELEASE_BRANCH}" --base main --state all --json url,state --jq '(map(select(.state == "MERGED"))[0] // map(select(.state == "OPEN"))[0]) // empty | [.url, .state] | @tsv')"
           pr_url=""
           pr_state=""
