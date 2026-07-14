@@ -43,6 +43,7 @@ const fsFailure = vi.hoisted(() => ({
   tempBytesAtSync: 0,
   rename: false,
   legacyUnlinkPath: undefined as string | undefined,
+  readErrorPath: undefined as string | undefined,
   readRace: undefined as ReadRace | undefined,
 }));
 
@@ -71,6 +72,9 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     async readFile(...args: Parameters<typeof actual.readFile>) {
       const race = fsFailure.readRace;
       const filePath = String(args[0]);
+      if (filePath === fsFailure.readErrorPath) {
+        throw Object.assign(new Error('read failed'), { code: 'EIO' });
+      }
       if (
         race !== undefined &&
         filePath === race.jsonPath &&
@@ -124,6 +128,7 @@ describe('channel memory', () => {
     fsFailure.tempBytesAtSync = 0;
     fsFailure.rename = false;
     fsFailure.legacyUnlinkPath = undefined;
+    fsFailure.readErrorPath = undefined;
     fsFailure.readRace = undefined;
     vi.restoreAllMocks();
     if (originalQwenHome === undefined) {
@@ -502,6 +507,28 @@ describe('channel memory', () => {
     await expect(listChannelMemoryEntries(target)).rejects.toThrow(
       'Unsupported channel memory version',
     );
+  });
+
+  it('rejects non-missing read errors without modifying either source', async () => {
+    const legacyPath = writeLegacy('Use staging\n');
+    const legacy = fs.readFileSync(legacyPath);
+    const filePath = writeJson(
+      serializeChannelMemoryDocument(parseLegacyChannelMemory(legacy)),
+    );
+    const canonicalBefore = fs.readFileSync(filePath);
+    const legacyBefore = fs.readFileSync(legacyPath);
+    fsFailure.readErrorPath = filePath;
+
+    await expect(listChannelMemoryEntries(target)).rejects.toMatchObject({
+      code: 'EIO',
+      message: 'read failed',
+    });
+    await expect(readChannelMemory(target)).rejects.toMatchObject({
+      code: 'EIO',
+      message: 'read failed',
+    });
+    expect(fs.readFileSync(filePath)).toEqual(canonicalBefore);
+    expect(fs.readFileSync(legacyPath)).toEqual(legacyBefore);
   });
 
   it('accepts matching dual files and cleans up legacy only after a mutation', async () => {
