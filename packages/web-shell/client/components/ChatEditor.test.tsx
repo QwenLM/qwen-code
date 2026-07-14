@@ -521,6 +521,7 @@ describe('ChatEditor toolbar popovers', () => {
       '[data-web-shell-toolbar-popover] input[type="search"]',
     );
     expect(search).not.toBeNull();
+    expect(document.activeElement).toBe(search);
     expect(search?.getAttribute('data-slot')).toBe('input');
     act(() => {
       const valueSetter = Object.getOwnPropertyDescriptor(

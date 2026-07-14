@@ -657,7 +657,7 @@ function ToolbarPopover({
     if (!open) {
       setSearchQuery('');
     }
-  }, [open, searchable]);
+  }, [open]);
 
   const hasCheckItems = hasRichItems || showCheck;
 

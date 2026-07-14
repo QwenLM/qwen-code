@@ -257,7 +257,7 @@ for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
 
     const modeButton = page.locator('[data-web-shell-mode-button]');
     await modeButton.click();
-    const modeDropdown = modeButton.locator('..').locator(':scope > div');
+    const modeDropdown = page.locator('[data-web-shell-toolbar-popover]');
     await expect(modeDropdown).toBeVisible();
     await expect
       .poll(async () => {
