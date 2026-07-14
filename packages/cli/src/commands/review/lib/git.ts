@@ -111,14 +111,26 @@ export function releaseWorktree(worktreePath: string): boolean {
     // `worktree remove` only clears a tree git still tracks. A directory left at
     // the path after metadata loss or a partial cleanup is reported "not a
     // working tree" and left in place — and a non-empty one then blocks the next
-    // `worktree add` with `already exists`. So remove whatever remains, which
-    // also keeps this function's promise honest: a `true` return means the path
-    // is gone, not merely unregistered. `rmSync` unlinks a symlink rather than
-    // following it, so a tampered leftover cannot redirect the delete.
-    rmSync(worktreePath, { recursive: true, force: true });
+    // `worktree add` with `already exists`. So remove whatever remains. `rmSync`
+    // unlinks a symlink rather than following it, so a tampered leftover cannot
+    // redirect the delete.
+    //
+    // Swallowed on purpose, like every other failure here: `force` suppresses
+    // ENOENT but not EPERM or EBUSY, and this function runs on the cleanup path,
+    // where throwing would mask the error that got us there. The caller learns
+    // the outcome from the return value, not from an exception.
+    try {
+      rmSync(worktreePath, { recursive: true, force: true });
+    } catch {
+      // Fall through — the existence check below is the real signal.
+    }
   }
   gitOpt('worktree', 'prune');
-  return existed;
+  // `true` means the path is GONE, not merely unregistered — so a caller can
+  // report "Removed …" without lying. A leftover we could not delete returns
+  // false even though something was there, which is the honest answer to
+  // "is this path free now?".
+  return existed && !existsSync(worktreePath);
 }
 
 /**

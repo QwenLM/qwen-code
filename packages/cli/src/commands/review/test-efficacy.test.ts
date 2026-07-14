@@ -11,6 +11,7 @@ import {
   classifyProbeRun,
   safeRmWithin,
   probeCreateFailureDetail,
+  probeCleanupFailureDetail,
 } from './test-efficacy.js';
 import {
   mkdtempSync,
@@ -185,6 +186,40 @@ describe('probeCreateFailureDetail', () => {
   it('survives a non-Error throw', () => {
     expect(probeCreateFailureDetail('boom', '')).toBe(
       'probe worktree could not be created: boom',
+    );
+  });
+});
+
+describe('probeCleanupFailureDetail', () => {
+  // Sibling of probeCreateFailureDetail, and pure for the same reason: the path
+  // fires only when the tree outlives BOTH `worktree remove` and `rmSync`, which
+  // no portable test can force. The reason is the whole value of the message —
+  // it dropped out of an earlier cut of this code and a reviewer caught it.
+  it('keeps the exception reason — the rmSync error that explains the survival', () => {
+    const got = probeCleanupFailureDetail(
+      '/w/wt-probe',
+      new Error("EBUSY: resource busy, rmdir '/w/wt-probe'"),
+      "fatal: '/w/wt-probe' is not a working tree\n",
+    );
+    expect(got).toContain('could not remove probe worktree /w/wt-probe');
+    expect(got).toContain('EBUSY: resource busy');
+  });
+
+  it("falls back to git's refusal when rmSync itself did not throw", () => {
+    const got = probeCleanupFailureDetail(
+      '/w/wt-probe',
+      undefined,
+      "fatal: '/w/wt-probe' contains modified files\n",
+    );
+    expect(got).toBe(
+      "could not remove probe worktree /w/wt-probe: fatal: '/w/wt-probe' contains modified files",
+    );
+  });
+
+  it('says only what it knows when neither had anything to say', () => {
+    // No dangling ": " — the bare path is the honest message here.
+    expect(probeCleanupFailureDetail('/w/wt-probe', undefined, '  \n')).toBe(
+      'could not remove probe worktree /w/wt-probe',
     );
   });
 });

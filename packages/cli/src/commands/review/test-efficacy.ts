@@ -339,6 +339,40 @@ export function safeRmWithin(worktree: string, relPath: string): void {
   rmSync(cur, { force: true });
 }
 
+type SweepResult = ReturnType<typeof spawnSync>;
+
+/**
+ * Free the probe worktree's path: unregister it, then remove whatever is left.
+ *
+ * `git worktree remove --force` only clears a tree git still tracks. A directory
+ * left at the path after metadata loss or a partial cleanup is reported "not a
+ * working tree" and left in place — and a *non-empty* one then makes
+ * `git worktree add` fail `already exists`, wedging every probe as
+ * `inconclusive` until someone clears it by hand. So the unregister is followed
+ * by a plain remove of whatever dir remains. `rmSync` unlinks a symlink rather
+ * than following it, so a tampered leftover cannot redirect the delete outside
+ * `tree`.
+ *
+ * This is `releaseWorktree`'s two-step, and deliberately NOT a call to it:
+ * `releaseWorktree` runs git from the process cwd, which need not be this
+ * worktree's repo, and it discards the sweep's stderr — which is usually the
+ * only thing that explains a subsequent `add` failure. Both callers here need
+ * `cwd: worktree` and that stderr, so the step lives here and is shared between
+ * them.
+ *
+ * Best-effort by design: a clean path is the normal case, so the unregister does
+ * not go through the throwing `git()` wrapper. `rmSync` can still throw (`force`
+ * suppresses ENOENT but not EPERM/EBUSY) — callers decide what that means.
+ */
+function discardWorktree(cwd: string, tree: string): SweepResult {
+  const sweep = spawnSync('git', ['worktree', 'remove', '--force', tree], {
+    cwd,
+    encoding: 'utf8',
+  });
+  rmSync(tree, { recursive: true, force: true });
+  return sweep;
+}
+
 const existsAtBase = (cwd: string, base: string, path: string) =>
   existsAtRev(cwd, base, path);
 
@@ -365,6 +399,29 @@ export function probeCreateFailureDetail(
     `probe worktree could not be created: ${err instanceof Error ? err.message : String(err)}` +
     (sweepErr ? ` (stale-tree sweep also reported: ${sweepErr})` : '')
   );
+}
+
+/**
+ * The warning for a probe worktree that survived its discard.
+ *
+ * Pure, and for the same reason as its sibling above: the branch it lives on
+ * fires only when the path outlives both `worktree remove` and `rmSync`, which
+ * no portable test can force. The reason is what makes it useful — whoever has
+ * to delete the tree by hand needs to know WHY it would not go, and a bare
+ * "could not remove <path>" tells them nothing. Prefer the exception (`rmSync`
+ * hit EPERM/EBUSY); fall back to what git said when it refused to unregister.
+ */
+export function probeCleanupFailureDetail(
+  probeTree: string,
+  removeError: unknown,
+  sweepStderr: string,
+): string {
+  const why = removeError
+    ? removeError instanceof Error
+      ? removeError.message
+      : String(removeError)
+    : sweepStderr.trim();
+  return `could not remove probe worktree ${probeTree}${why ? `: ${why}` : ''}`;
 }
 
 async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
@@ -425,32 +482,11 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     const headSha = gitOut(worktree, 'rev-parse', 'HEAD');
     const probeTree = probeWorktreePath(worktree);
     let created = false;
-    let sweep: ReturnType<typeof spawnSync> | undefined;
+    let sweep: SweepResult | undefined;
     try {
-      // Sweep a stale probe tree left by a crashed run — it would fail `add`.
-      // Two ways it can be stale, and `worktree remove` only clears one:
-      //   - REGISTERED (metadata intact) — `worktree remove --force` unregisters
-      //     it and deletes the dir.
-      //   - an UNREGISTERED directory (metadata lost, or a partial cleanup) —
-      //     `worktree remove` says "not a working tree" and leaves it, and then a
-      //     *non-empty* leftover makes `worktree add` fail `already exists`,
-      //     wedging every probe as `inconclusive` until someone clears it by hand.
-      // So follow the unregister sweep with a plain remove of whatever dir is
-      // still there. Both are best-effort — no stale tree is the normal case — so
-      // the unregister does not go through the throwing `git()` wrapper, and its
-      // stderr is kept to explain a subsequent `add` failure. `rmSync` on the
-      // path unlinks a symlink rather than following it, so even a tampered
-      // leftover cannot redirect the delete outside `probeTree`.
-      //
-      // This is `releaseWorktree`'s two-step, kept inline rather than shared: the
-      // probe must target THIS repo via `cwd: worktree` (`releaseWorktree` runs
-      // git from the process cwd, which need not be this worktree's repo), and it
-      // keeps the sweep's stderr for the diagnostic in the catch below.
-      sweep = spawnSync('git', ['worktree', 'remove', '--force', probeTree], {
-        cwd: worktree,
-        encoding: 'utf8',
-      });
-      rmSync(probeTree, { recursive: true, force: true });
+      // Clear a stale probe tree left by a crashed run — it would fail `add`.
+      // Its stderr is kept to explain a subsequent `add` failure.
+      sweep = discardWorktree(worktree, probeTree);
       git(worktree, 'worktree', 'add', '--detach', probeTree, headSha);
       created = true;
     } catch (e) {
@@ -525,24 +561,29 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           })),
         );
       } finally {
-        // Discard the whole probe tree. There is no in-place restore to fail:
-        // the shared worktree was never mutated. Mirror the pre-sweep's two steps
-        // so an unregistered or non-empty leftover cannot survive a failed
-        // `worktree remove` — unregister (best-effort), then remove whatever dir
-        // remains. Only a path that still exists after both is a real cleanup
-        // failure, and even then it corrupts nothing: the next run's pre-sweep
-        // and cleanup.ts both sweep it. So this is a warning, not the "every
-        // later step reads the wrong source" alarm the old in-place restore had.
+        // Discard the whole probe tree. There is no in-place restore to fail —
+        // the shared worktree was never mutated — and a path that survives the
+        // discard corrupts nothing: the next run's pre-sweep and cleanup.ts both
+        // sweep it. So this is a warning, not the "every later step reads the
+        // wrong source" alarm the old in-place restore had to raise.
+        //
+        // Whether the path is still THERE is the signal, not whether a call
+        // threw: `worktree remove` can fail while `rmSync` still frees the path.
+        // But keep the reason — a bare "could not remove <path>" tells whoever
+        // has to clean it up by hand nothing about why they must.
+        let removeError: unknown;
+        let discard: SweepResult | undefined;
         try {
-          spawnSync('git', ['worktree', 'remove', '--force', probeTree], {
-            cwd: worktree,
-          });
-          rmSync(probeTree, { recursive: true, force: true });
-        } catch {
-          // Fall through to the existence check — that is the real signal.
+          discard = discardWorktree(worktree, probeTree);
+        } catch (e) {
+          removeError = e;
         }
         if (existsSync(probeTree)) {
-          cleanupFailure = `could not remove probe worktree ${probeTree}`;
+          cleanupFailure = probeCleanupFailureDetail(
+            probeTree,
+            removeError,
+            String(discard?.stderr ?? ''),
+          );
         }
       }
     }
