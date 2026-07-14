@@ -21,7 +21,10 @@ let sessionsState: any[];
 let otherWorkspaceSessions: Record<string, any[]>;
 // Stable client object (assigned once per test) so the other-workspace hook's
 // load callback keeps a stable identity and its effect doesn't loop.
-let workspaceClient: { listWorkspaceSessions: ReturnType<typeof vi.fn> };
+let workspaceClient: {
+  listWorkspaceSessions: ReturnType<typeof vi.fn>;
+  workspaceByCwd: ReturnType<typeof vi.fn>;
+};
 // Stable across renders (assigned once per test) so SplitView's reload effects,
 // which depend on `reload`'s identity, don't re-fire on every render.
 let reloadMock: ReturnType<typeof vi.fn>;
@@ -97,6 +100,11 @@ beforeEach(() => {
     listWorkspaceSessions: vi.fn(
       async (cwd: string) => otherWorkspaceSessions[cwd] ?? [],
     ),
+    workspaceByCwd: vi.fn((cwd: string) => ({
+      listWorkspaceSessions: vi.fn(
+        async () => otherWorkspaceSessions[cwd] ?? [],
+      ),
+    })),
   };
   reloadMock = vi.fn();
 });
@@ -501,6 +509,31 @@ describe('SplitView', () => {
         ?.querySelector('[data-testid="chat-pane"]')
         ?.getAttribute('data-pane-workspace'),
     ).toBe('/wsB');
+  });
+
+  it('loads and attaches only the locked secondary workspace', async () => {
+    connectionState.capabilities = MULTI_WORKSPACE_CAPS;
+    otherWorkspaceSessions['/wsB'] = [
+      { sessionId: 'b1', workspaceCwd: '/wsB', displayName: 'Beta' },
+    ];
+
+    render({
+      sessionIds: ['b1'],
+      includeOtherWorkspaces: false,
+      workspaceCwd: '/wsB',
+    });
+    await flushAsync();
+
+    expect(titles()).toEqual(['Beta']);
+    expect(
+      container!
+        .querySelector('[data-session="b1"]')
+        ?.getAttribute('data-workspace'),
+    ).toBe('/wsB');
+    openPicker();
+    expect(pickerOptions().some((option) => option.includes('One'))).toBe(
+      false,
+    );
   });
 
   it('remounts a deep-linked pane under its workspace once the session list resolves', async () => {

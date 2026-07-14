@@ -44,8 +44,8 @@ function WorkspaceFolderIcon({ open }: { open: boolean }) {
 
 interface WorkspaceSectionProps {
   workspace: DaemonWorkspaceCapability;
+  renderHeader?: (expanded: boolean) => ReactNode;
   client: DaemonClient;
-  isActive: boolean;
   reloadToken: number;
   primaryLabel: string;
   untrustedLabel: string;
@@ -67,10 +67,7 @@ interface WorkspaceSectionProps {
    * type scale, hover actions (pin, archive, export, more…), and states —
    * instead of a bespoke, feature-poor row.
    */
-  renderSession: (
-    session: DaemonSessionSummary,
-    options?: { grouped?: boolean },
-  ) => ReactNode;
+  renderSession: (session: DaemonSessionSummary) => ReactNode;
   headerActions?: (visible: boolean) => ReactNode;
   onRenameGroup?: (group: DaemonSessionGroup, workspaceCwd: string) => void;
   onDeleteGroup?: (group: DaemonSessionGroup, workspaceCwd: string) => void;
@@ -82,8 +79,8 @@ interface WorkspaceSectionProps {
 
 export function WorkspaceSection({
   workspace,
+  renderHeader,
   client,
-  isActive,
   reloadToken,
   primaryLabel,
   untrustedLabel,
@@ -229,11 +226,7 @@ export function WorkspaceSection({
   return (
     <div className={styles.section}>
       <div
-        className={cx(
-          styles.headerRow,
-          isActive && styles.headerActive,
-          disabled && styles.headerDisabled,
-        )}
+        className={cx(styles.headerRow, disabled && styles.headerDisabled)}
         onMouseEnter={() => setActionsVisible(true)}
         onMouseLeave={() => setActionsVisible(false)}
         onFocus={() => setActionsVisible(true)}
@@ -254,21 +247,31 @@ export function WorkspaceSection({
             onExpandedChange?.(nextExpanded);
           }}
         >
-          <span className={cx(styles.chevron, expanded && styles.chevronOpen)}>
-            <WorkspaceFolderIcon open={expanded} />
-          </span>
-          <span className={styles.headerContent}>
-            <span className={styles.name}>
-              {getWorkspaceName(workspace.cwd)}
-            </span>
-            {workspace.primary && primaryLabel && (
-              <span className={styles.badge}>{primaryLabel}</span>
-            )}
-          </span>
-          {!workspace.trusted && (
-            <span className={styles.badge}>{untrustedLabel}</span>
+          {renderHeader ? (
+            renderHeader(expanded)
+          ) : (
+            <>
+              <span
+                className={cx(styles.chevron, expanded && styles.chevronOpen)}
+              >
+                <WorkspaceFolderIcon open={expanded} />
+              </span>
+              <span className={styles.headerContent}>
+                <span className={styles.name}>
+                  {getWorkspaceName(workspace.cwd)}
+                </span>
+                {workspace.primary && primaryLabel && (
+                  <span className={styles.badge}>{primaryLabel}</span>
+                )}
+              </span>
+              {!workspace.trusted && (
+                <span className={styles.badge}>{untrustedLabel}</span>
+              )}
+              {readOnly && (
+                <span className={styles.badge}>{readOnlyLabel}</span>
+              )}
+            </>
           )}
-          {readOnly && <span className={styles.badge}>{readOnlyLabel}</span>}
         </button>
         {headerActions?.(actionsVisible)}
       </div>
@@ -314,9 +317,7 @@ export function WorkspaceSection({
                     deleteLabel={deleteGroupLabel}
                     actionsDisabled={groupActionsDisabled}
                   >
-                    {sessions.map((session) =>
-                      renderSession(session, { grouped: true }),
-                    )}
+                    {sessions.map((session) => renderSession(session))}
                   </SessionGroupSection>
                 ))}
                 {groupedSessions.ungrouped.length > 0 && (
@@ -335,7 +336,7 @@ export function WorkspaceSection({
                     }}
                   >
                     {groupedSessions.ungrouped.map((session) =>
-                      renderSession(session, { grouped: true }),
+                      renderSession(session),
                     )}
                   </SessionGroupSection>
                 )}

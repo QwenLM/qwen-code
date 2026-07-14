@@ -2,15 +2,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { ReactNode } from 'react';
 import {
   DaemonHttpError,
+  type DaemonSessionSummary,
   type DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 
 const { connection, workspace, workspaceActions, active, archived } =
   vi.hoisted(() => {
     const makeSessions = () => ({
-      sessions: [],
+      sessions: [] as DaemonSessionSummary[],
       loading: false,
       error: null,
       reload: vi.fn().mockResolvedValue(undefined),
@@ -123,6 +125,10 @@ function renderSidebar(
     selectedWorkspaceCwd?: string;
     onSelectWorkspace?: (cwd: string | undefined) => void;
     onError?: (error: unknown, message: string) => void;
+    lockedWorkspaceCwd?: string;
+    lockedWorkspace?: {
+      render?: (workspace: DaemonWorkspaceCapability) => ReactNode;
+    };
   } = {},
 ) {
   act(() => {
@@ -141,6 +147,8 @@ function renderSidebar(
           onError={overrides.onError ?? (() => {})}
           selectedWorkspaceCwd={overrides.selectedWorkspaceCwd}
           onSelectWorkspace={overrides.onSelectWorkspace}
+          lockedWorkspaceCwd={overrides.lockedWorkspaceCwd}
+          lockedWorkspace={overrides.lockedWorkspace}
         />
       </I18nProvider>,
     );
@@ -196,10 +204,17 @@ beforeEach(() => {
   workspace.capabilities = capabilities;
   workspace.refreshCapabilities.mockReset();
   workspace.refreshCapabilities.mockResolvedValue(capabilities);
+  workspace.client.workspaceByCwd.mockReset();
+  workspace.client.workspaceByCwd.mockImplementation(() => ({
+    listWorkspaceSessions: vi.fn().mockResolvedValue([]),
+    listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+  }));
   workspaceActions.removeWorkspace.mockReset();
   workspaceActions.removeWorkspace.mockResolvedValue({ removed: true });
   active.reload.mockClear();
   archived.reload.mockClear();
+  active.sessions.length = 0;
+  archived.sessions.length = 0;
 });
 
 afterEach(() => {
@@ -209,6 +224,135 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar workspace removal', () => {
+  it('scopes pinned and archived sessions to a locked secondary workspace', async () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'session_organization'],
+    };
+    active.sessions.push({
+      sessionId: 'primary-pinned',
+      displayName: 'Primary pinned',
+      workspaceCwd: '/tmp/project',
+    });
+    archived.sessions.push({
+      sessionId: 'primary-archived',
+      displayName: 'Primary archived',
+      workspaceCwd: '/tmp/project',
+      isArchived: true,
+    });
+    const listSecondarySessions = vi.fn(
+      async (options?: { archiveState?: string; group?: string }) => {
+        if (options?.group === 'pinned') {
+          return [
+            {
+              sessionId: 'secondary-pinned',
+              displayName: 'Secondary pinned',
+            },
+          ];
+        }
+        if (options?.archiveState === 'archived') {
+          return [
+            {
+              sessionId: 'secondary-archived',
+              displayName: 'Secondary archived',
+              isArchived: true,
+            },
+          ];
+        }
+        return [];
+      },
+    );
+    workspace.client.workspaceByCwd.mockImplementation(() => ({
+      listWorkspaceSessions: listSecondarySessions,
+      listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+    }));
+
+    renderSidebar({ lockedWorkspaceCwd: '/tmp/other' });
+    const pinnedCallIndex = listSecondarySessions.mock.calls.findIndex(
+      ([options]) => options?.group === 'pinned',
+    );
+    expect(pinnedCallIndex).toBeGreaterThanOrEqual(0);
+    await act(async () => {
+      await listSecondarySessions.mock.results[pinnedCallIndex]?.value;
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('Secondary pinned');
+    expect(container.textContent).not.toContain('Primary pinned');
+
+    const archivedButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.includes('Archived'));
+    expect(archivedButton).toBeDefined();
+    act(() => click(archivedButton!));
+    const archivedCallIndex = listSecondarySessions.mock.calls.findIndex(
+      ([options]) => options?.archiveState === 'archived',
+    );
+    expect(archivedCallIndex).toBeGreaterThanOrEqual(0);
+    await act(async () => {
+      await listSecondarySessions.mock.results[archivedCallIndex]?.value;
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('Secondary archived');
+    expect(container.textContent).not.toContain('Primary archived');
+  });
+
+  it('shows only the locked workspace without registration controls', () => {
+    renderSidebar({ lockedWorkspaceCwd: '/tmp/other' });
+
+    expect(container.textContent).toContain('other');
+    expect(container.textContent).not.toContain('project');
+    expect(container.textContent).not.toContain('danger');
+    expect(
+      container.querySelector('button[aria-label="Add workspace"]'),
+    ).toBeNull();
+    expect(workspaceAction('/tmp/other')).toBeUndefined();
+  });
+
+  it('uses custom workspace row content only when the workspace is locked', async () => {
+    const render = vi.fn((ws: DaemonWorkspaceCapability) => (
+      <span data-testid="custom-workspace">Custom {ws.cwd}</span>
+    ));
+    const lockedWorkspace = { render };
+
+    renderSidebar({ lockedWorkspace });
+    expect(render).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('project');
+
+    renderSidebar({
+      lockedWorkspaceCwd: '/tmp/other',
+      lockedWorkspace,
+    });
+    expect(render).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: 'secondary', cwd: '/tmp/other' }),
+      { expanded: false },
+    );
+    expect(
+      container.querySelector('[data-testid="custom-workspace"]')?.textContent,
+    ).toBe('Custom /tmp/other');
+    expect(
+      container
+        .querySelector('[data-testid="custom-workspace"]')
+        ?.closest('button')
+        ?.parentElement?.querySelectorAll('button'),
+    ).toHaveLength(1);
+    expect(container.textContent).not.toContain('project');
+
+    await act(async () => {
+      click(
+        container
+          .querySelector('[data-testid="custom-workspace"]')!
+          .closest('button')!,
+      );
+      await Promise.resolve();
+    });
+    expect(render).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: 'secondary', cwd: '/tmp/other' }),
+      { expanded: true },
+    );
+  });
+
   it('hides removal when the daemon does not publish the feature', () => {
     connection.capabilities = {
       ...capabilities,
