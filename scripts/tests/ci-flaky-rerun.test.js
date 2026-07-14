@@ -212,7 +212,7 @@ describe('ci flaky rerun patrol', () => {
   });
 
   it('rejects a command-line flag without a value', () => {
-    expect(() => argsMap(['--repo'])).toThrow('unexpected argument: --repo');
+    expect(() => argsMap(['--repo'])).toThrow('missing value for --repo');
   });
 
   it('handles an exact run attempt once and allows a new attempt', () => {
@@ -287,6 +287,23 @@ describe('ci flaky rerun patrol', () => {
       decision({ action: 'update_branch', mainHeadSha: 'main123' }),
     );
     expect(changedMain.calls).toEqual([]);
+
+    for (const [candidate, behindBy] of [
+      [target({ behindBy: 0 }), 2],
+      [target(), 0],
+    ]) {
+      const notBehind = client({
+        async mainContext() {
+          return { behindBy, mainHeadSha: 'main123', mainCommits: [] };
+        },
+      });
+      await actOnDecision(
+        notBehind,
+        candidate,
+        decision({ action: 'update_branch', mainHeadSha: 'main123' }),
+      );
+      expect(notBehind.calls).toEqual([]);
+    }
   });
 
   it('posts deterministic failures in English with folded Chinese', async () => {
@@ -327,6 +344,7 @@ describe('ci flaky rerun patrol', () => {
       decision({ confidence: 'low' }),
       decision({ failureKey: 'wrong-key' }),
       decision({ runAttempt: 3 }),
+      decision({ action: 'update_branch', mainHeadSha: 'stale-main' }),
       decision({ reason_en: 'x'.repeat(201) }),
     ]) {
       const c = client();
@@ -500,9 +518,9 @@ describe('ci flaky rerun patrol', () => {
       ].join('\n'),
     );
     const lines = evidence.split('\n');
-    expect(lines.length).toBeLessThanOrEqual(200);
+    expect(lines.length).toBeLessThanOrEqual(120);
     expect(Math.max(...lines.map((line) => line.length))).toBeLessThanOrEqual(
-      500,
+      300,
     );
     expect(evidence).not.toContain('private-material');
     expect(evidence).not.toContain('bearer-secret');

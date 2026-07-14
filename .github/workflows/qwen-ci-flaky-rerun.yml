@@ -111,7 +111,7 @@ jobs:
     needs: 'classify'
     if: "${{ needs.classify.result == 'success' }}"
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 5
+    timeout-minutes: 10
     # GitHub writes use CI_BOT_PAT; keep the generated GITHUB_TOKEN read-only.
     permissions:
       actions: 'read'

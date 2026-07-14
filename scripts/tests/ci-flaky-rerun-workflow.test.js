@@ -46,6 +46,7 @@ describe('ci failure patrol workflow', () => {
     );
     expect(reset.if).toContain('always()');
     expect(reset['continue-on-error']).toBe(true);
+    expect(reset.env.GH_TOKEN).toContain('CI_BOT_PAT');
   });
 
   it('keeps judgment in the skill and GitHub writes in the driver', () => {

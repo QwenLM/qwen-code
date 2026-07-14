@@ -387,10 +387,17 @@ export async function actOnDecisions(client, targets, decisions) {
     if (handled.has(key)) continue;
     handled.add(key);
     try {
-      await actOnDecision(client, byKey.get(key), decision);
+      const target = byKey.get(key);
+      if (!target) {
+        process.stderr.write(
+          `act: no candidate for decision on PR ${decision?.prNumber ?? 'unknown'}\n`,
+        );
+        continue;
+      }
+      await actOnDecision(client, target, decision);
     } catch (error) {
       process.stderr.write(
-        `act: skipping PR ${decision?.prNumber ?? 'unknown'}: ${error.message}\n`,
+        `act: skipping PR ${decision?.prNumber ?? 'unknown'}: ${error.message}${error.stderr ? `\n${String(error.stderr).trim()}` : ''}\n`,
       );
     }
   }
@@ -554,6 +561,7 @@ class GhClient {
       ]),
     );
     return {
+      // For head...main, ahead_by is how far main is ahead of the branch.
       behindBy: comparison.ahead_by,
       mainHeadSha: main.sha,
       mainCommits: comparison.commits.slice(-20).map((commit) => ({
@@ -567,8 +575,11 @@ class GhClient {
 export function argsMap(argv) {
   const args = new Map();
   for (let index = 0; index < argv.length; index += 2) {
-    if (!argv[index]?.startsWith('--') || argv[index + 1] === undefined) {
+    if (!argv[index]?.startsWith('--')) {
       throw new Error(`unexpected argument: ${argv[index] ?? ''}`);
+    }
+    if (argv[index + 1] === undefined) {
+      throw new Error(`missing value for ${argv[index]}`);
     }
     args.set(argv[index].replace(/^--/, ''), argv[index + 1]);
   }
