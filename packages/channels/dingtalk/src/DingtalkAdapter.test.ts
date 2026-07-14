@@ -1902,6 +1902,13 @@ describe('DingtalkChannel proactive send', () => {
     isGroup: true,
   };
 
+  const directTarget: SessionTarget = {
+    channelName: 'test-dingtalk',
+    senderId: 'webhook:github-ci',
+    chatId: 'manager-user-id',
+    isGroup: false,
+  };
+
   function proactive(channel: DingtalkChannelInstance) {
     return channel as unknown as {
       supportsProactiveTarget(target: SessionTarget): boolean;
@@ -1938,6 +1945,8 @@ describe('DingtalkChannel proactive send', () => {
       spy,
       sendCalls: () =>
         calls('https://api.dingtalk.com/v1.0/robot/groupMessages/send'),
+      directSendCalls: () =>
+        calls('https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend'),
       tokenCalls: () => calls('https://oapi.dingtalk.com/gettoken'),
     };
   }
@@ -1951,12 +1960,10 @@ describe('DingtalkChannel proactive send', () => {
     expect(createChannel().supportsProactiveSend()).toBe(true);
   });
 
-  it('accepts only group conversation targets', () => {
+  it('accepts explicit group and direct-message targets', () => {
     const channel = proactive(createChannel());
     expect(channel.supportsProactiveTarget(groupTarget)).toBe(true);
-    expect(
-      channel.supportsProactiveTarget({ ...groupTarget, isGroup: false }),
-    ).toBe(false);
+    expect(channel.supportsProactiveTarget(directTarget)).toBe(true);
     expect(
       channel.supportsProactiveTarget({
         channelName: groupTarget.channelName,
@@ -2000,12 +2007,35 @@ describe('DingtalkChannel proactive send', () => {
     expect(msgParamOf(sends[0]!).text).toContain('loop output');
   });
 
-  it('reuses the cached token across sends', async () => {
+  it('sends proactive direct messages through the one-to-one robot API', async () => {
+    const channel = proactive(createChannel());
+    const { directSendCalls, tokenCalls } = stubProactiveFetch();
+
+    await channel.pushProactive(directTarget, '# Result\nloop output');
+
+    expect(tokenCalls()).toHaveLength(1);
+    const sends = directSendCalls();
+    expect(sends).toHaveLength(1);
+    const init = sends[0]![1] as RequestInit;
+    expect(init.method).toBe('POST');
+    expect(
+      (init.headers as Record<string, string>)['x-acs-dingtalk-access-token'],
+    ).toBe('proactive-token');
+    const body = JSON.parse(String(init.body));
+    expect(body.robotCode).toBe('client-id');
+    expect(body.userIds).toEqual([directTarget.chatId]);
+    expect(body.openConversationId).toBeUndefined();
+    expect(body.msgKey).toBe('sampleMarkdown');
+    expect(msgParamOf(sends[0]!).title).toBe('Result');
+    expect(msgParamOf(sends[0]!).text).toContain('loop output');
+  });
+
+  it('reuses the cached token across group and direct-message sends', async () => {
     const channel = proactive(createChannel());
     const { tokenCalls } = stubProactiveFetch();
 
     await channel.pushProactive(groupTarget, 'first');
-    await channel.pushProactive(groupTarget, 'second');
+    await channel.pushProactive(directTarget, 'second');
 
     expect(tokenCalls()).toHaveLength(1);
   });

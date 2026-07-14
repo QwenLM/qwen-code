@@ -421,7 +421,12 @@ Example channel config:
           "github-ci": {
             "secretEnv": "QWEN_CHANNEL_GITHUB_CI_SECRET",
             "targets": {
-              "default": {
+              "operator": {
+                "chatId": "DINGTALK_USER_ID",
+                "senderId": "webhook:github-ci",
+                "isGroup": false
+              },
+              "team": {
                 "chatId": "OPEN_CONVERSATION_ID",
                 "senderId": "webhook:github-ci",
                 "isGroup": true
@@ -435,7 +440,7 @@ Example channel config:
 }
 ```
 
-For DingTalk, `chatId` must be the group `openConversationId`; other adapters may require their own proactive target shape.
+For DingTalk, set `isGroup` explicitly on every target. A direct-message target uses the DingTalk user ID as `chatId` with `isGroup: false`; a group target uses the group `openConversationId` with `isGroup: true`. Other adapters may require their own proactive target shape.
 
 Start `qwen serve` with the channel worker enabled:
 
@@ -451,7 +456,7 @@ curl -X POST "http://127.0.0.1:4170/channels/dingtalk-main/webhooks/github-ci" \
   -H "Content-Type: application/json" \
   -d '{
     "eventType": "push",
-    "targetRef": "default",
+    "targetRef": "operator",
     "title": "CI pipeline finished",
     "payload": {
       "targetRef": "refs/heads/main",

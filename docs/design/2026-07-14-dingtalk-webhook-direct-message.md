@@ -2,7 +2,7 @@
 
 ## 状态
 
-方案已确认，可以进入实现阶段。对应 Issue：
+已实现并完成单聊真实链路验证。对应 Issue：
 [QwenLM/qwen-code#6883](https://github.com/QwenLM/qwen-code/issues/6883)。
 
 ## 背景

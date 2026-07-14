@@ -88,7 +88,9 @@ const ACK_EMOTION_ID = '2659900';
 const ACK_EMOTION_BG_ID = 'im_bg_1';
 const EMOTION_API = 'https://api.dingtalk.com/v1.0/robot/emotion';
 const GROUP_MSG_API = 'https://api.dingtalk.com/v1.0/robot/groupMessages/send';
-const GROUP_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text} markdown template key
+const DIRECT_MSG_API =
+  'https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend';
+const PROACTIVE_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text} markdown template key
 const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
 const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
 const TEXT_MESSAGE_LIMIT = 3800;
@@ -482,15 +484,12 @@ export class DingtalkChannel extends ChannelBase {
     return true;
   }
 
-  /**
-   * The group-message API needs a real openConversationId — reject DMs
-   * (a different API) and webhook-URL fallback chatIds.
-   */
+  /** Proactive APIs need a stable group conversation or user ID. */
   protected override supportsProactiveTarget(target: SessionTarget): boolean {
     return (
-      target.isGroup === true &&
+      typeof target.isGroup === 'boolean' &&
       target.threadId === undefined &&
-      this.isConversationId(target.chatId)
+      this.isStableTargetId(target.chatId)
     );
   }
 
@@ -509,7 +508,7 @@ export class DingtalkChannel extends ChannelBase {
 
     for (let i = 0; i < chunks.length; i++) {
       await this.sendProactiveChunk(
-        target.chatId,
+        target,
         i === 0 ? title : `${title} (cont.)`,
         chunks[i]!,
         `chunk ${i + 1}/${chunks.length}`,
@@ -557,7 +556,7 @@ export class DingtalkChannel extends ChannelBase {
   }
 
   private async sendProactiveChunk(
-    conversationId: string,
+    target: SessionTarget,
     title: string,
     text: string,
     chunkLabel: string,
@@ -566,20 +565,27 @@ export class DingtalkChannel extends ChannelBase {
       const token = await this.getProactiveToken();
       let resp: Response;
       try {
-        resp = await fetch(GROUP_MSG_API, {
-          method: 'POST',
-          headers: {
-            'x-acs-dingtalk-access-token': token,
-            'Content-Type': 'application/json',
+        const targetBody =
+          target.isGroup === true
+            ? { openConversationId: target.chatId }
+            : { userIds: [target.chatId] };
+        resp = await fetch(
+          target.isGroup === true ? GROUP_MSG_API : DIRECT_MSG_API,
+          {
+            method: 'POST',
+            headers: {
+              'x-acs-dingtalk-access-token': token,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              robotCode: this.config.clientId!,
+              ...targetBody,
+              msgKey: PROACTIVE_MSG_KEY,
+              msgParam: JSON.stringify({ title, text }),
+            }),
+            signal: AbortSignal.timeout(PROACTIVE_FETCH_TIMEOUT_MS),
           },
-          body: JSON.stringify({
-            robotCode: this.config.clientId!,
-            openConversationId: conversationId,
-            msgKey: GROUP_MSG_KEY,
-            msgParam: JSON.stringify({ title, text }),
-          }),
-          signal: AbortSignal.timeout(PROACTIVE_FETCH_TIMEOUT_MS),
-        });
+        );
       } catch (err) {
         const cause = (err as { cause?: unknown }).cause;
         process.stderr.write(
@@ -684,12 +690,8 @@ export class DingtalkChannel extends ChannelBase {
     process.stderr.write(`[DingTalk:${this.name}] Disconnected.\n`);
   }
 
-  /**
-   * The chatId passed to onPromptStart/onPromptEnd is `conversationId ||
-   * sessionWebhook` (see message handler below). Reactions and proactive
-   * sends require a real conversation ID — skip the webhook-URL fallback case.
-   */
-  private isConversationId(chatId: string): boolean {
+  /** Stable API targets are conversation or user IDs, never webhook URLs. */
+  private isStableTargetId(chatId: string): boolean {
     return !!chatId && !/^https?:\/\//i.test(chatId);
   }
 
@@ -717,7 +719,7 @@ export class DingtalkChannel extends ChannelBase {
     messageId?: string,
     sessionId?: string,
   ): void {
-    if (!messageId || !this.isConversationId(chatId)) return;
+    if (!messageId || !this.isStableTargetId(chatId)) return;
     // Loop lifecycle events carry the internal job id as messageId; the
     // emotion API only accepts ids of real inbound messages, so skip anything
     // we never saw arrive.
@@ -752,7 +754,7 @@ export class DingtalkChannel extends ChannelBase {
     messageId?: string,
     sessionId?: string,
   ): void {
-    if (!messageId || !this.isConversationId(chatId)) return;
+    if (!messageId || !this.isStableTargetId(chatId)) return;
     const key = this.reactionKey(messageId, chatId);
     if (sessionId) {
       const keys = this.sessionReactionKeys.get(sessionId);
