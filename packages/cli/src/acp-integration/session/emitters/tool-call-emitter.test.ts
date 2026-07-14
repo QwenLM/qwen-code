@@ -223,6 +223,31 @@ describe('ToolCallEmitter', () => {
       );
     });
 
+    it('sanitizes terminal controls in the ACP vision bridge disclosure', async () => {
+      const resultDisplay = {
+        type: 'vision_bridge_notice' as const,
+        summary: 'Transcribed evil\x1b]52;c;ZXZpbA==\x07\u202E.pdf pages 20-23',
+        notice: 'Converted via qwen3-vl-plus.',
+      };
+
+      await emitter.emitResult({
+        toolName: 'read_file',
+        callId: 'call-pdf-unsafe-name',
+        success: true,
+        message: createMockMessage('Page 20: transcribed content'),
+        resultDisplay,
+      });
+
+      const update = sendUpdateSpy.mock.calls[0][0] as {
+        content: Array<{ content?: { text?: string } }>;
+      };
+      const disclosure = update.content[0].content?.text;
+      expect(disclosure).toContain('evil');
+      expect(disclosure).not.toContain('\x1b');
+      expect(disclosure).not.toContain('\x07');
+      expect(disclosure).not.toContain('\u202e');
+    });
+
     it('keeps the vision bridge disclosure in ACP content on failure', async () => {
       const resultDisplay = {
         type: 'vision_bridge_notice' as const,

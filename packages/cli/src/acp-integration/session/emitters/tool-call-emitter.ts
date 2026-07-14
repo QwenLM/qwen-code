@@ -27,6 +27,7 @@ import {
   Kind,
 } from '@qwen-code/qwen-code-core';
 import { buildTruncatedDiffPreviewText } from '../../../utils/truncatedDiffPreview.js';
+import { sanitizeTerminalText } from '../../../ui/utils/textUtils.js';
 
 const KIND_MAP: Record<Kind, ToolKind> = {
   [Kind.Read]: 'read',
@@ -160,7 +161,9 @@ export class ToolCallEmitter extends BaseEmitter {
         type: 'content',
         content: {
           type: 'text',
-          text: formatVisionBridgeNoticeDisplay(params.resultDisplay),
+          text: sanitizeTerminalText(
+            formatVisionBridgeNoticeDisplay(params.resultDisplay),
+          ),
         },
       });
     }

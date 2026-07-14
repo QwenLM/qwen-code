@@ -428,7 +428,21 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       return this.restorePdfFallback(
         result,
         bridgeResult.status === 'ok'
-          ? formatVisionBridgeNotice({ ...bridgeResult, status: 'failed' })
+          ? formatVisionBridgeNotice({
+              applied: false,
+              status: 'failed',
+              convertedCount: 0,
+              omittedCount: 0,
+              ...(bridgeResult.modelId !== undefined && {
+                modelId: bridgeResult.modelId,
+              }),
+              ...(bridgeResult.modelEndpoint !== undefined && {
+                modelEndpoint: bridgeResult.modelEndpoint,
+              }),
+              ...(bridgeResult.egressOccurred !== undefined && {
+                egressOccurred: bridgeResult.egressOccurred,
+              }),
+            })
           : notice,
       );
     } catch (error) {

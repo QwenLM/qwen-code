@@ -740,6 +740,26 @@ describe('ReadFileTool', () => {
         expect(display.notice).toContain('dashscope.aliyuncs.com');
       });
 
+      it('restores the PDF error for an unusable successful bridge result', async () => {
+        visionBridgeMocks.runVisionBridge.mockResolvedValue({
+          applied: false,
+          status: 'ok',
+          convertedCount: 4,
+          omittedCount: 0,
+          modelId: 'qwen3-vl-plus',
+          modelEndpoint: 'dashscope.aliyuncs.com',
+          egressOccurred: true,
+        });
+
+        const result = await readCandidate();
+
+        expect(result.error?.type).toBe(ToolErrorType.READ_CONTENT_FAILURE);
+        expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
+        expect(bridgeDisplay(result).notice).toContain(
+          'dashscope.aliyuncs.com',
+        );
+      });
+
       it.each([
         [
           'inlineData',

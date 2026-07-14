@@ -15,7 +15,9 @@ import type {
   McpToolProgressData,
 } from '@qwen-code/qwen-code-core';
 import {
+  formatVisionBridgeNoticeDisplay,
   GeminiEventType,
+  isVisionBridgeNoticeDisplay,
   ToolErrorType,
   parseAndFormatApiError,
 } from '@qwen-code/qwen-code-core';
@@ -1400,6 +1402,13 @@ function checkResponsePartsForError(
 export function toolResultContent(
   response: ToolCallResponseInfo,
 ): string | undefined {
+  if (isVisionBridgeNoticeDisplay(response.resultDisplay)) {
+    const notice = formatVisionBridgeNoticeDisplay(response.resultDisplay);
+    if (response.responseParts && response.responseParts.length > 0) {
+      return `${notice}\n${functionResponsePartsToString(response.responseParts)}`;
+    }
+    return response.error ? `${notice}\n${response.error.message}` : notice;
+  }
   if (response.error) {
     return response.error.message;
   }
