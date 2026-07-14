@@ -89,6 +89,27 @@ describe('ToolCallPreparationTracker', () => {
     );
   });
 
+  it('keeps preparations unresolved for missing or empty function call IDs', async () => {
+    const tracker = new ToolCallPreparationTracker(emitter);
+    const response = new GenerateContentResponse();
+    setToolCallPreparations(response, [
+      { callId: 'call-1', toolName: 'read_file' },
+    ]);
+
+    await tracker.observe(response);
+    tracker.resolve([
+      { id: undefined, name: 'read_file', args: {} },
+      { id: '', name: 'read_file', args: {} },
+    ]);
+    await tracker.discard();
+
+    expect(emitPreparationDiscarded).toHaveBeenCalledOnce();
+    expect(emitPreparationDiscarded).toHaveBeenCalledWith(
+      'call-1',
+      'read_file',
+    );
+  });
+
   it('attempts every unresolved discard before surfacing the first cleanup error', async () => {
     const cleanupError = new Error('first discard failed');
     emitPreparationDiscarded

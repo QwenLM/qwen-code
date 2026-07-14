@@ -74,6 +74,12 @@ export class ToolCallEmitter extends BaseEmitter {
     if (this.isTodoWriteTool(params.toolName)) {
       return false;
     }
+    if (
+      params.phase === 'preparing' &&
+      this.preparedCallIds.has(params.callId)
+    ) {
+      return false;
+    }
 
     const { title, locations, kind } = this.resolveToolMetadata(
       params.toolName,

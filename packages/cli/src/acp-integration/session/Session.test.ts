@@ -241,9 +241,8 @@ function createStreamWithChunks(
 function createPreparationResponse(
   callId: string,
   toolName: string,
-  const response = {} as GenerateContentResponse;
 ): GenerateContentResponse {
-  const response = overrides as GenerateContentResponse;
+  const response = {} as GenerateContentResponse;
   core.setToolCallPreparations(response, [{ callId, toolName }]);
   return response;
 }
@@ -8538,6 +8537,7 @@ describe('Session', () => {
       ])(
         'continues after preparation cleanup fails during %s',
         async (resetEvent) => {
+          debugLoggerWarnSpy.mockClear();
           const execute = vi.fn().mockResolvedValue({
             llmContent: 'current result',
             returnDisplay: 'current result',
@@ -8587,6 +8587,7 @@ describe('Session', () => {
       );
 
       it('preserves the stream error when discarding its unresolved preparation also fails', async () => {
+        debugLoggerWarnSpy.mockClear();
         vi.mocked(mockClient.sessionUpdate).mockImplementation(
           async ({ update }) => {
             if (update._meta?.['preparationDiscarded'] === true) {
@@ -8616,6 +8617,7 @@ describe('Session', () => {
       });
 
       it('preserves a cancelled return when discarding its unresolved preparation fails', async () => {
+        debugLoggerWarnSpy.mockClear();
         vi.mocked(mockClient.sessionUpdate).mockImplementation(
           async ({ update }) => {
             if (update._meta?.['preparationDiscarded'] === true) {
@@ -8666,6 +8668,7 @@ describe('Session', () => {
       });
 
       it('preserves a normally completed stream when preparation cleanup fails', async () => {
+        debugLoggerWarnSpy.mockClear();
         vi.mocked(mockClient.sessionUpdate).mockImplementation(
           async ({ update }) => {
             if (update._meta?.['preparationDiscarded'] === true) {

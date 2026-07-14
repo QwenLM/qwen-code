@@ -186,6 +186,23 @@ describe('ToolCallEmitter', () => {
       );
     });
 
+    it('suppresses duplicate preparing frames for the same call ID', async () => {
+      const params = {
+        callId: 'call-1',
+        toolName: 'read_file',
+        args: {},
+        status: 'pending' as const,
+        phase: 'preparing' as const,
+      };
+
+      const first = await emitter.emitStart(params);
+      const duplicate = await emitter.emitStart(params);
+
+      expect(first).toBe(true);
+      expect(duplicate).toBe(false);
+      expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
+    });
+
     it('updates the prepared tool call when execution starts', async () => {
       await emitter.emitStart({
         callId: 'call-1',
@@ -236,6 +253,44 @@ describe('ToolCallEmitter', () => {
         },
       });
     });
+
+    it.each(['result', 'error'] as const)(
+      'clears prepared state after terminal %s',
+      async (terminal) => {
+        const preparation = {
+          callId: 'call-1',
+          toolName: 'read_file',
+          args: {},
+          status: 'pending' as const,
+          phase: 'preparing' as const,
+        };
+        await emitter.emitStart(preparation);
+
+        if (terminal === 'result') {
+          await emitter.emitResult({
+            callId: 'call-1',
+            toolName: 'read_file',
+            success: true,
+            message: [],
+          });
+        } else {
+          await emitter.emitError('call-1', 'read_file', new Error('failed'));
+        }
+        sendUpdateSpy.mockClear();
+
+        const emitted = await emitter.emitStart(preparation);
+
+        expect(emitted).toBe(true);
+        expect(sendUpdateSpy).toHaveBeenCalledOnce();
+        expect(sendUpdateSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sessionUpdate: 'tool_call',
+            toolCallId: 'call-1',
+            _meta: expect.objectContaining({ phase: 'preparing' }),
+          }),
+        );
+      },
+    );
 
     it('suppresses preparation lifecycle frames for TodoWrite', async () => {
       const emitted = await emitter.emitStart({
