@@ -145,6 +145,37 @@ describe('channel memory document', () => {
     ).toThrow('maximum number of entries');
   });
 
+  it('counts astral Unicode text by code point', () => {
+    const astralCharacter = '\u{1f600}';
+    const acceptedText = astralCharacter.repeat(
+      MAX_CHANNEL_MEMORY_ENTRY_CODE_POINTS,
+    );
+
+    expect(
+      parseChannelMemoryDocument(
+        JSON.stringify({
+          version: 1,
+          entries: [{ id: 'm-123456789abc', text: acceptedText }],
+        }),
+      ).entries[0].text,
+    ).toBe(acceptedText);
+    expect(() =>
+      parseChannelMemoryDocument(
+        JSON.stringify({
+          version: 1,
+          entries: [
+            {
+              id: 'm-123456789abc',
+              text: astralCharacter.repeat(
+                MAX_CHANNEL_MEMORY_ENTRY_CODE_POINTS + 1,
+              ),
+            },
+          ],
+        }),
+      ),
+    ).toThrow('Invalid channel memory entry');
+  });
+
   it('converts legacy lines with stable ids and a migration hash', () => {
     const raw = Buffer.from('Use staging\n\n use   STAGING \nRun tests\n');
     const first = parseLegacyChannelMemory(raw);
@@ -156,11 +187,20 @@ describe('channel memory document', () => {
       'Use staging',
       'Run tests',
     ]);
+    expect(first.entries[0].id).toBe('m-5c1888e97dc2');
     expect(
       first.entries.every((entry) => CHANNEL_MEMORY_ID_RE.test(entry.id)),
     ).toBe(true);
     expect(first.entries.every((entry) => !('createdAt' in entry))).toBe(true);
     expect(first.migration?.legacySha256).toMatch(/^[a-f0-9]{64}$/u);
+  });
+
+  it('preserves surrounding whitespace in legacy entry text', () => {
+    const document = parseLegacyChannelMemory(
+      Buffer.from('  Keep surrounding whitespace  \n'),
+    );
+
+    expect(document.entries[0].text).toBe('  Keep surrounding whitespace  ');
   });
 
   it('creates a timestamped channel memory entry', () => {

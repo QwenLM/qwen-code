@@ -306,7 +306,7 @@ export function parseLegacyChannelMemory(raw: Buffer): ChannelMemoryDocument {
       throw new Error('Channel memory legacy ID collision');
     }
     ids.add(id);
-    entries.push(validateEntry({ id, text: line.trim() }));
+    entries.push(validateEntry({ id, text: line }));
     if (entries.length > MAX_CHANNEL_MEMORY_ENTRIES) {
       throw new Error('Channel memory exceeds maximum number of entries');
     }
