@@ -3971,6 +3971,22 @@ describe('DaemonClient', () => {
   });
 
   describe('extension operations', () => {
+    it('GETs active extension operations', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { v: 1, operations: [] }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.activeExtensionOperations()).resolves.toEqual({
+        v: 1,
+        operations: [],
+      });
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/extensions/operations',
+      );
+      expect(calls[0]?.method).toBe('GET');
+    });
+
     it('GETs an extension operation status by id', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, {
@@ -3994,6 +4010,63 @@ describe('DaemonClient', () => {
         operationId: 'op/1',
         status: 'succeeded',
       });
+    });
+
+    it('POSTs an extension interaction response with encoded ids', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { accepted: true }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.respondToExtensionInteraction(
+        'op/1',
+        'interaction/1',
+        { cancelled: true },
+        'client-1',
+      );
+
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/extensions/operations/op%2F1/interactions/interaction%2F1',
+      );
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(calls[0]?.body).toBe(JSON.stringify({ cancelled: true }));
+      expect(result).toEqual({ accepted: true });
+    });
+
+    it('routes extension operation recovery and interaction responses through REST', async () => {
+      const { fetch, calls } = recordingFetch((req) =>
+        req.method === 'GET'
+          ? jsonResponse(200, { v: 1, operations: [] })
+          : jsonResponse(200, { accepted: true }),
+      );
+      const transportFetch = vi.fn(async () =>
+        jsonResponse(500, { error: 'transport should not be used' }),
+      );
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+
+      await client.activeExtensionOperations();
+      await client.respondToExtensionInteraction(
+        'op-1',
+        'interaction-1',
+        { cancelled: true },
+        'client-1',
+      );
+
+      expect(calls.map((call) => call.method)).toEqual(['GET', 'POST']);
+      expect(transportFetch).not.toHaveBeenCalled();
     });
   });
 
@@ -5359,6 +5432,26 @@ describe('DaemonClient', () => {
           DaemonHttpError,
         );
       }
+    });
+
+    it('passes glob limits and cancellation to workspace-qualified requests', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { matches: [] }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const controller = new AbortController();
+
+      await client.workspaceByCwd('/tmp/work space').glob('**/*readme*', {
+        maxResults: 50,
+        signal: controller.signal,
+      });
+
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/%2Ftmp%2Fwork%20space/glob?pattern=**%2F*readme*&maxResults=50',
+      );
+      expect(calls[0]?.signal?.aborted).toBe(false);
+      controller.abort();
+      expect(calls[0]?.signal?.aborted).toBe(true);
     });
 
     it('workspaceById and workspaceByCwd call workspace-qualified agents routes', async () => {
