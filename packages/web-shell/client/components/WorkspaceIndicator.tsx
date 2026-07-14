@@ -24,22 +24,24 @@ function WorkspaceFolderIcon() {
  * session belongs to. Mirrors {@link GitBranchIndicator}; both sit in the
  * composer toolbar. Shown only on a multi-workspace daemon (the pane composer
  * opts into the `workspace` toolbar action) so it's clear which workspace a
- * message goes to. Unlike the toolbar action buttons, the name stays visible as
- * the pane narrows — it's the pane's identity — and only tightens and ellipsizes
- * (the full cwd stays in the tooltip).
+ * message goes to.
  */
 export function WorkspaceIndicator({
   name,
   title,
   ariaLabel,
+  compact = false,
 }: {
   name: string;
   title: string;
   ariaLabel: string;
+  compact?: boolean;
 }) {
   return (
     <output
-      className={styles.workspaceChip}
+      className={`${styles.workspaceChip} ${
+        compact ? styles.workspaceChipCompact : ''
+      }`}
       title={title}
       aria-label={ariaLabel}
       data-web-shell-workspace

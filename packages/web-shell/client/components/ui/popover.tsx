@@ -1,4 +1,4 @@
-import type * as React from 'react';
+import * as React from 'react';
 import { Popover as PopoverPrimitive } from 'radix-ui';
 
 import { cn } from '@/lib/utils';
@@ -10,22 +10,31 @@ function Popover({
   return <PopoverPrimitive.Root data-slot="popover" {...props} />;
 }
 
-function PopoverTrigger({
-  ...props
-}: React.ComponentProps<typeof PopoverPrimitive.Trigger>) {
-  return <PopoverPrimitive.Trigger data-slot="popover-trigger" {...props} />;
-}
+const PopoverTrigger = React.forwardRef<
+  React.ComponentRef<typeof PopoverPrimitive.Trigger>,
+  React.ComponentProps<typeof PopoverPrimitive.Trigger>
+>(function PopoverTrigger(props, ref) {
+  return (
+    <PopoverPrimitive.Trigger
+      ref={ref}
+      data-slot="popover-trigger"
+      {...props}
+    />
+  );
+});
 
-function PopoverContent({
-  className,
-  align = 'center',
-  sideOffset = 4,
-  ...props
-}: React.ComponentProps<typeof PopoverPrimitive.Content>) {
+const PopoverContent = React.forwardRef<
+  React.ComponentRef<typeof PopoverPrimitive.Content>,
+  React.ComponentProps<typeof PopoverPrimitive.Content>
+>(function PopoverContent(
+  { className, align = 'center', sideOffset = 4, ...props },
+  ref,
+) {
   const portalRoot = useWebShellPortalRoot();
   return (
     <PopoverPrimitive.Portal container={portalRoot ?? undefined}>
       <PopoverPrimitive.Content
+        ref={ref}
         data-slot="popover-content"
         align={align}
         sideOffset={sideOffset}
@@ -37,13 +46,16 @@ function PopoverContent({
       />
     </PopoverPrimitive.Portal>
   );
-}
+});
 
-function PopoverAnchor({
-  ...props
-}: React.ComponentProps<typeof PopoverPrimitive.Anchor>) {
-  return <PopoverPrimitive.Anchor data-slot="popover-anchor" {...props} />;
-}
+const PopoverAnchor = React.forwardRef<
+  React.ComponentRef<typeof PopoverPrimitive.Anchor>,
+  React.ComponentProps<typeof PopoverPrimitive.Anchor>
+>(function PopoverAnchor(props, ref) {
+  return (
+    <PopoverPrimitive.Anchor ref={ref} data-slot="popover-anchor" {...props} />
+  );
+});
 
 function PopoverHeader({ className, ...props }: React.ComponentProps<'div'>) {
   return (
