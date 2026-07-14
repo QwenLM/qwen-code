@@ -788,6 +788,10 @@ export class ToolRegistry {
     );
   }
 
+  clearProxySchemaPresentations(): void {
+    this.proxySchemaPresentations.clear();
+  }
+
   /**
    * Whether a deferred tool is currently hidden from the model's
    * function-declaration list. Returns `true` when the tool:

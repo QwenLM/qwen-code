@@ -503,6 +503,7 @@ describe('Gemini Client (client.ts)', () => {
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
       getDeferredToolSummary: vi.fn().mockReturnValue([]),
       clearRevealedDeferredTools: vi.fn(),
+      clearProxySchemaPresentations: vi.fn(),
       revealDeferredTool: vi.fn(),
       markProxySchemaPresented: vi.fn(),
       isProxyEligibleDeferredTool: vi.fn().mockReturnValue(false),
@@ -1186,6 +1187,7 @@ describe('Gemini Client (client.ts)', () => {
         isDeferredToolRevealed: ReturnType<typeof vi.fn>;
         revealDeferredTool: ReturnType<typeof vi.fn>;
         markProxySchemaPresented: ReturnType<typeof vi.fn>;
+        clearProxySchemaPresentations: ReturnType<typeof vi.fn>;
       };
     }
 
@@ -1220,6 +1222,24 @@ describe('Gemini Client (client.ts)', () => {
       expect(reg.revealDeferredTool).toHaveBeenCalledWith('cron_create');
       // cron_list NOT in history → must NOT be revealed by the resume scan.
       expect(reg.revealDeferredTool).not.toHaveBeenCalledWith('cron_list');
+    });
+
+    it('clears stale proxy presentations before rebuilding resume state', async () => {
+      const reg = getRegistryMock();
+      reg.getDeferredToolSummary.mockReturnValue([]);
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      reg.clearProxySchemaPresentations.mockClear();
+
+      await client.startChat([
+        {
+          role: 'user',
+          parts: [{ text: 'compressed history without schema blocks' }],
+        },
+      ]);
+
+      expect(reg.clearProxySchemaPresentations).toHaveBeenCalled();
     });
 
     it('restores proxy presentations that appear in resumed deferred_tool_call history', async () => {
@@ -1347,6 +1367,172 @@ describe('Gemini Client (client.ts)', () => {
       expect(reg.markProxySchemaPresented).not.toHaveBeenCalledWith(
         'cron_create',
       );
+    });
+
+    it('does not pair an unmatched response id with a no-id proxy call on resume', async () => {
+      const reg = getRegistryMock();
+      const cronCreateSchema = {
+        name: 'cron_create',
+        description: 'schedule',
+        parametersJsonSchema: {
+          type: 'object',
+          properties: {
+            schedule: { type: 'string' },
+          },
+          required: ['schedule'],
+        },
+      };
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'cron_create', description: 'schedule' },
+      ]);
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search'
+          ? ({} as never)
+          : n === 'cron_create'
+            ? ({
+                schema: cronCreateSchema,
+              } as never)
+            : null,
+      );
+      reg.isProxyEligibleDeferredTool.mockImplementation(
+        (n: string) => n === 'cron_create',
+      );
+      reg.markProxySchemaPresented.mockClear();
+
+      await client.startChat([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: ToolNames.DEFERRED_TOOL_CALL,
+                args: {
+                  name: 'cron_create',
+                  arguments: { schedule: '0 9 * * *' },
+                },
+              },
+            } as never,
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'orphan-response-id',
+                name: ToolNames.DEFERRED_TOOL_CALL,
+                response: { output: 'cron created' },
+              },
+            } as never,
+          ],
+        },
+      ]);
+
+      expect(reg.markProxySchemaPresented).not.toHaveBeenCalledWith(
+        'cron_create',
+      );
+    });
+
+    it('consumes no-id failed proxy responses before matching later no-id successes on resume', async () => {
+      const reg = getRegistryMock();
+      const cronCreateSchema = {
+        name: 'cron_create',
+        description: 'schedule',
+        parametersJsonSchema: {
+          type: 'object',
+          properties: {
+            schedule: { type: 'string' },
+          },
+          required: ['schedule'],
+        },
+      };
+      const cronListSchema = {
+        name: 'cron_list',
+        description: 'list',
+        parametersJsonSchema: {
+          type: 'object',
+          properties: {},
+        },
+      };
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'cron_create', description: 'schedule' },
+        { name: 'cron_list', description: 'list' },
+      ]);
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search'
+          ? ({} as never)
+          : n === 'cron_create'
+            ? ({
+                schema: cronCreateSchema,
+              } as never)
+            : n === 'cron_list'
+              ? ({
+                  schema: cronListSchema,
+                } as never)
+              : null,
+      );
+      reg.isProxyEligibleDeferredTool.mockImplementation(
+        (n: string) => n === 'cron_create' || n === 'cron_list',
+      );
+      reg.markProxySchemaPresented.mockClear();
+
+      await client.startChat([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: ToolNames.DEFERRED_TOOL_CALL,
+                args: {
+                  name: 'cron_create',
+                  arguments: { schedule: '0 9 * * *' },
+                },
+              },
+            } as never,
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: ToolNames.DEFERRED_TOOL_CALL,
+                response: { error: 'has not been fetched' },
+              },
+            } as never,
+          ],
+        },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: ToolNames.DEFERRED_TOOL_CALL,
+                args: {
+                  name: 'cron_list',
+                  arguments: {},
+                },
+              },
+            } as never,
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: ToolNames.DEFERRED_TOOL_CALL,
+                response: { output: 'cron list' },
+              },
+            } as never,
+          ],
+        },
+      ]);
+
+      expect(reg.markProxySchemaPresented).not.toHaveBeenCalledWith(
+        'cron_create',
+      );
+      expect(reg.markProxySchemaPresented).toHaveBeenCalledWith('cron_list');
     });
 
     it('gracefully ignores stale proxy presentations for removed deferred targets', async () => {
@@ -2377,6 +2563,10 @@ describe('Gemini Client (client.ts)', () => {
   describe('history mutation invalidates FileReadCache', () => {
     it('setHistory clears the cache', () => {
       const cacheClear = mockFileReadCacheClear();
+      const clearProxySchemaPresentations = vi.mocked(
+        mockConfig.getToolRegistry,
+      )().clearProxySchemaPresentations;
+      vi.mocked(clearProxySchemaPresentations).mockClear();
       client['chat'] = {
         setHistory: vi.fn(),
       } as unknown as GeminiChat;
@@ -2384,6 +2574,7 @@ describe('Gemini Client (client.ts)', () => {
       client.setHistory([{ role: 'user', parts: [{ text: 'replaced' }] }]);
 
       expect(cacheClear).toHaveBeenCalled();
+      expect(clearProxySchemaPresentations).toHaveBeenCalledOnce();
     });
 
     /**
@@ -2404,25 +2595,36 @@ describe('Gemini Client (client.ts)', () => {
 
     it('truncateHistory clears the cache when entries are actually removed', () => {
       const cacheClear = mockFileReadCacheClear();
+      const clearProxySchemaPresentations = vi.mocked(
+        mockConfig.getToolRegistry,
+      )().clearProxySchemaPresentations;
+      vi.mocked(clearProxySchemaPresentations).mockClear();
       client['chat'] = mockChatWithLengths(3, 2);
 
       client.truncateHistory(2);
 
       expect(cacheClear).toHaveBeenCalled();
+      expect(clearProxySchemaPresentations).toHaveBeenCalledOnce();
     });
 
     it('truncateHistory does NOT clear the cache when nothing was removed (keepCount >= history length)', () => {
       const cacheClear = mockFileReadCacheClear();
+      const clearProxySchemaPresentations = vi.mocked(
+        mockConfig.getToolRegistry,
+      )().clearProxySchemaPresentations;
+      vi.mocked(clearProxySchemaPresentations).mockClear();
 
       // keepCount equals history length — nothing dropped.
       client['chat'] = mockChatWithLengths(2, 2);
       client.truncateHistory(2);
       expect(cacheClear).not.toHaveBeenCalled();
+      expect(clearProxySchemaPresentations).not.toHaveBeenCalled();
 
       // keepCount exceeds history length — also a no-op.
       client['chat'] = mockChatWithLengths(2, 2);
       client.truncateHistory(99);
       expect(cacheClear).not.toHaveBeenCalled();
+      expect(clearProxySchemaPresentations).not.toHaveBeenCalled();
     });
 
     it('truncateHistory clears the cache when a non-finite keepCount empties history (NaN regression)', () => {
@@ -2456,6 +2658,10 @@ describe('Gemini Client (client.ts)', () => {
 
     it('stripOrphanedUserEntriesFromHistory forces full IDE context only when entries were removed', async () => {
       const cacheClear = mockFileReadCacheClear();
+      const clearProxySchemaPresentations = vi.mocked(
+        mockConfig.getToolRegistry,
+      )().clearProxySchemaPresentations;
+      vi.mocked(clearProxySchemaPresentations).mockClear();
       const strip = vi.fn();
       // Case 1: history actually shrank → forceFullIdeContext + cache clear.
       client['chat'] = {
@@ -2468,10 +2674,12 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(strip).toHaveBeenCalledOnce();
       expect(cacheClear).toHaveBeenCalled();
+      expect(clearProxySchemaPresentations).toHaveBeenCalledOnce();
       expect(client['forceFullIdeContext']).toBe(true);
 
       // Case 2: no entries removed → don't touch caches / IDE context.
       const cacheClear2 = mockFileReadCacheClear();
+      vi.mocked(clearProxySchemaPresentations).mockClear();
       const strip2 = vi.fn();
       client['chat'] = {
         getHistoryLength: vi.fn().mockReturnValue(2),
@@ -2483,6 +2691,7 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(strip2).toHaveBeenCalledOnce();
       expect(cacheClear2).not.toHaveBeenCalled();
+      expect(clearProxySchemaPresentations).not.toHaveBeenCalled();
       expect(client['forceFullIdeContext']).toBe(false);
     });
 

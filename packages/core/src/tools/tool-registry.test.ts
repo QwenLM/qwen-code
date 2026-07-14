@@ -773,6 +773,25 @@ describe('ToolRegistry', () => {
         'web_fetch',
       );
     });
+
+    it('clears proxy presentations without clearing revealed deferred tools', () => {
+      const registry = new ToolRegistry(config);
+      registry.registerTool(
+        new MockTool({ name: 'deferred_tool', shouldDefer: true }),
+      );
+
+      registry.revealDeferredTool('deferred_tool');
+      expect(registry.markProxySchemaPresented('deferred_tool')).toBe(true);
+      expect(registry.hasPresentedProxySchema('deferred_tool')).toBe(true);
+
+      registry.clearProxySchemaPresentations();
+
+      expect(registry.hasPresentedProxySchema('deferred_tool')).toBe(false);
+      expect(registry.isDeferredToolRevealed('deferred_tool')).toBe(true);
+      expect(registry.getFunctionDeclarations().map((d) => d.name)).toContain(
+        'deferred_tool',
+      );
+    });
   });
 
   describe('getToolsByServer', () => {

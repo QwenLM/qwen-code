@@ -1223,7 +1223,7 @@ describe('CoreToolScheduler', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
-  it('commits deferred tool presentations only after successful completion callback', async () => {
+  it('commits deferred tool presentations after successful tool call finalization', async () => {
     const presentedProxySchemas = new Set<string>();
     const toolsByName = new Map<string, MockTool>([
       [
@@ -12420,6 +12420,38 @@ describe('CoreToolScheduler validation retry loop detection', () => {
 
     await scheduler.schedule(
       [makeRequest('p3', ToolNames.DEFERRED_TOOL_CALL, proxyArgs)],
+      new AbortController().signal,
+    );
+    msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
+
+  it('should keep retry counts for deferred_tool_call normalization failures', async () => {
+    const tool = new StrictStringTool();
+    const { scheduler, onToolCallsUpdate } = createSchedulerWithTool(tool);
+
+    const malformedProxyArgs = {
+      name: StrictStringTool.Name,
+      arguments: 'not an object',
+    };
+
+    await scheduler.schedule(
+      [makeRequest('p1', ToolNames.DEFERRED_TOOL_CALL, malformedProxyArgs)],
+      new AbortController().signal,
+    );
+    let msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).toBeDefined();
+    expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+
+    await scheduler.schedule(
+      [makeRequest('p2', ToolNames.DEFERRED_TOOL_CALL, malformedProxyArgs)],
+      new AbortController().signal,
+    );
+    msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+
+    await scheduler.schedule(
+      [makeRequest('p3', ToolNames.DEFERRED_TOOL_CALL, malformedProxyArgs)],
       new AbortController().signal,
     );
     msg = getLastErrorMessage(onToolCallsUpdate);

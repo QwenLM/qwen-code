@@ -162,8 +162,9 @@ The implementation must preserve all of the following invariants:
    eligibility.
 6. Compression and resume must not preserve only proxy eligibility without also
    restoring the corresponding current schema into model-visible context.
-7. `includeDeferred`, `visibleTools`, `alwaysLoad`, direct compatibility
-   exposure, and proxy eligibility remain independent from one another.
+7. `includeDeferred`, `visibleTools`, `alwaysLoad`, resume-time direct
+   compatibility exposure, and proxy eligibility remain independent from one
+   another.
 
 ## Scope by Execution Context
 
@@ -296,8 +297,8 @@ when all of these conditions hold:
 
 - It currently exists.
 - It is deferred.
-- It is not `alwaysLoad`, not in `visibleTools`, and not directly exposed for
-  compatibility.
+- It is not `alwaysLoad`, not in `visibleTools`, and not directly revealed for
+  resume compatibility.
 - Its current schema fingerprint matches the recorded fingerprint.
 - The current execution context is the main session.
 
@@ -314,16 +315,19 @@ include in declarations when:
   OR not shouldDefer
   OR alwaysLoad
   OR visibleTools contains the name
-  OR directVisibleForSession contains the name
+  OR revealDeferredTool(name) marked it revealed for this session
 ```
 
 `proxySchemaPresentations` must never affect
 `ToolRegistry.getFunctionDeclarations()`. Therefore, `tool_search` does not
 change the API tools block.
 
-`directVisibleForSession` is only for compatibility scenarios established before
-the first request of a newly created or resumed chat. Normal `tool_search` calls
-do not modify it, so declarations stay stable within that chat.
+For old direct-call history, resume uses the existing
+`ToolRegistry.revealDeferredTool(name)` compatibility path before the first
+request of the resumed chat. This keeps real deferred tool names that already
+appear in history callable by direct declaration for that resumed session.
+Normal `tool_search` calls do not use this direct compatibility path; they
+return model-visible schemas for `deferred_tool_call` instead.
 
 ## Tool Search Flow
 
@@ -397,8 +401,8 @@ Before the existing target permission flow:
 5. Reject self-target recursion, where the proxy envelope names
    `deferred_tool_call` itself as the target tool. This check does not reject
    multiple proxy calls to different real deferred tools in the same session.
-6. Reject missing, normally visible, `alwaysLoad`, or directly exposed targets
-   and tell the model to call them by their real names.
+6. Reject missing, normally visible, `alwaysLoad`, or already-revealed direct
+   targets and tell the model to call them by their real names.
 7. Compare the current target schema fingerprint with the presentation record.
 8. Construct a normalized request using the real target `name` and `args`, while
    preserving `providerName`, call ID, provider call ID, prompt ID, response
@@ -507,9 +511,10 @@ Resume handles two history formats:
 - New proxy history: scan `deferred_tool_call` arguments for target names,
   resolve current schemas, append them to the startup runtime reminder, and
   rebuild presentation fingerprints.
-- Old direct history: collect real deferred function-call names and add them to
-  `directVisibleForSession` before building initial declarations. In that
-  resumed chat, their declarations stay direct and stable.
+- Old direct history: collect real deferred function-call names and pass them
+  through `ToolRegistry.revealDeferredTool(name)` before building initial
+  declarations. In that resumed chat, their declarations stay direct and
+  stable.
 
 History itself never grants execution permission. Current registry existence,
 current schema presentation, execution-context policy, and target permissions
@@ -658,8 +663,8 @@ instead of assuming that stable schema necessarily yields a net benefit.
 - Proxy presentation does not affect `getFunctionDeclarations()`.
 - A constructed but cancelled or uncommitted `tool_search` result does not grant
   proxy eligibility.
-- `includeDeferred`, `visibleTools`, `alwaysLoad`, and
-  `directVisibleForSession` preserve their documented behavior.
+- `includeDeferred`, `visibleTools`, `alwaysLoad`, and resume-time direct
+  compatibility reveal preserve their documented behavior.
 - All registration sources reject reserved-name collisions.
 - MCP removal/reconnect invalidates prior fingerprints.
 

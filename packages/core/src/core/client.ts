@@ -480,6 +480,13 @@ export class GeminiClient {
     return this.getChat().getHistoryFunctionResponseIds();
   }
 
+  private clearProxySchemaPresentationsAfterHistoryMutation(reason: string) {
+    debugLogger.debug(
+      `[DEFERRED_TOOL_CALL] clear proxy schema presentations after ${reason}`,
+    );
+    this.config.getToolRegistry().clearProxySchemaPresentations();
+  }
+
   /**
    * Pop orphaned trailing user entries from the in-memory chat history.
    * Used by:
@@ -509,6 +516,9 @@ export class GeminiClient {
     // the model has nothing to fall back on. Clear to be safe.
     debugLogger.debug(
       `[FILE_READ_CACHE] clear after stripOrphanedUserEntriesFromHistory(prev=${before}, new=${after})`,
+    );
+    this.clearProxySchemaPresentationsAfterHistoryMutation(
+      'stripOrphanedUserEntriesFromHistory',
     );
     this.config.getFileReadCache().clear();
     // The stripped user turn may have carried the IDE context (open files,
@@ -578,6 +588,7 @@ export class GeminiClient {
 
   setHistory(history: Content[]) {
     this.getChat().setHistory(history);
+    this.clearProxySchemaPresentationsAfterHistoryMutation('setHistory');
     // Replacing history wholesale drops any prior read_file tool
     // results the FileReadCache still believes the model has seen.
     // Without clearing, a follow-up Read of an unchanged file would
@@ -604,6 +615,7 @@ export class GeminiClient {
       debugLogger.debug(
         `[FILE_READ_CACHE] clear after truncateHistory(keep=${keepCount}, prev=${prevLen}, new=${newLen})`,
       );
+      this.clearProxySchemaPresentationsAfterHistoryMutation('truncateHistory');
       this.config.getFileReadCache().clear();
     }
     this.forceFullIdeContext = true;
@@ -1252,6 +1264,7 @@ export class GeminiClient {
       // calling us.
       const toolRegistry = this.config.getToolRegistry();
       await profiler.time('tool_registry_warm', () => toolRegistry.warmAll());
+      toolRegistry.clearProxySchemaPresentations();
       // Resume support: when a transcript contains prior calls to a deferred
       // tool, re-reveal that tool so `setTools()` below sends its schema in
       // the declaration list. Without this, the model sees history like
@@ -1281,18 +1294,28 @@ export class GeminiClient {
                 }
               }
               const response = part.functionResponse;
+              // Match each deferred proxy response to its corresponding call
+              // to determine which tools were successfully invoked. Responses
+              // with an id are matched exactly via the map; responses without
+              // an id fall back to FIFO ordering from the no-id queue. A
+              // response whose id is absent from the map is skipped rather
+              // than consuming the no-id queue, to avoid mis-pairing.
               if (response?.name === ToolNames.DEFERRED_TOOL_CALL) {
+                let targetName: string | undefined;
+                if (response.id) {
+                  targetName = pendingProxyTargetsById.get(response.id);
+                  if (targetName) {
+                    pendingProxyTargetsById.delete(response.id);
+                  }
+                } else {
+                  targetName = pendingProxyTargetsWithoutId.shift();
+                }
+                if (!targetName) continue;
                 const responseBody = response.response as
                   | { error?: unknown }
                   | undefined;
                 if (responseBody?.error) continue;
-                const targetName =
-                  response.id && pendingProxyTargetsById.has(response.id)
-                    ? pendingProxyTargetsById.get(response.id)
-                    : pendingProxyTargetsWithoutId.shift();
-                if (targetName) {
-                  successfulDeferredProxyTargets.add(targetName);
-                }
+                successfulDeferredProxyTargets.add(targetName);
               }
             }
           }
@@ -1861,6 +1884,9 @@ export class GeminiClient {
       const changed = m.tokensSaved > 0;
       if (changed) {
         this.getChat().setHistory(mcResult.history);
+        this.clearProxySchemaPresentationsAfterHistoryMutation(
+          'microcompaction',
+        );
         await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
       }
       if (m.triggerReason === 'size') {
@@ -2555,6 +2581,9 @@ export class GeminiClient {
           // compaction inside chat.sendMessageStream may have summarized away
           // the previous merged IDE context.
           if (event.type === GeminiEventType.ChatCompressed) {
+            this.clearProxySchemaPresentationsAfterHistoryMutation(
+              'auto-compression',
+            );
             this.forceFullIdeContext = true;
             // Auto-compaction summarized away the startup prelude. Rebuild it
             // before the next turn so env/tool/MCP context isn't lost for the
@@ -3040,6 +3069,7 @@ export class GeminiClient {
       customInstructions ? { customInstructions } : undefined,
     );
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
+      this.clearProxySchemaPresentationsAfterHistoryMutation('tryCompressChat');
       const chat = this.getChat();
       const compressedHistory = chat.getHistoryShallow?.() ?? chat.getHistory();
       await this.startChat(compressedHistory, SessionStartSource.Compact);
@@ -3137,6 +3167,7 @@ export class GeminiClient {
     }
 
     if (microcompactMeta) {
+      this.clearProxySchemaPresentationsAfterHistoryMutation('compress-fast');
       await this.disarmFileReadCacheAfterEviction(
         microcompactMeta,
         'compress-fast',

@@ -1908,6 +1908,7 @@ const ZH: Messages = {
   'toolName.monitor': '监控',
   'toolName.notebook_edit': '编辑 Notebook',
   'toolName.tool_search': '工具搜索',
+  'toolName.deferred_tool_call': '延迟工具调用',
   'toolName.enter_worktree': '进入 Worktree',
   'toolName.exit_worktree': '退出 Worktree',
   'toolName.workflow': '工作流',

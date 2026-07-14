@@ -2000,12 +2000,22 @@ export class CoreToolScheduler {
             ...reqInfo,
             providerName: normalizedRequest.providerName,
           };
+          const count = this.recordRetryableToolError(
+            errorRequest.name,
+            normalizedRequest.error.message,
+          );
+          const finalError =
+            count >= VALIDATION_RETRY_LOOP_THRESHOLD
+              ? new Error(
+                  `${normalizedRequest.error.message}${RETRY_LOOP_STOP_DIRECTIVE}`,
+                )
+              : normalizedRequest.error;
           newToolCalls.push({
             status: 'error',
             request: errorRequest,
             response: createErrorResponse(
               errorRequest,
-              normalizedRequest.error,
+              finalError,
               normalizedRequest.errorType,
             ),
             durationMs: 0,
