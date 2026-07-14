@@ -4087,6 +4087,108 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
+  it('archives and unarchives only the selected workspace when session ids collide', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440122';
+      await writeStoredSession({
+        sessionId,
+        cwd: PRIMARY_CWD,
+        timestamp: '2026-07-08T00:12:00.000Z',
+        prompt: 'primary collision target',
+        mtime: new Date('2026-07-08T00:12:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:13:00.000Z',
+        prompt: 'secondary collision target',
+        mtime: new Date('2026-07-08T00:13:00.000Z'),
+      });
+      const primaryChatsDir = path.join(
+        new Storage(PRIMARY_CWD).getProjectDir(),
+        'chats',
+      );
+      const secondaryChatsDir = path.join(
+        new Storage(SECONDARY_CWD).getProjectDir(),
+        'chats',
+      );
+      const primaryActivePath = path.join(
+        primaryChatsDir,
+        `${sessionId}.jsonl`,
+      );
+      const primaryArchivedPath = path.join(
+        primaryChatsDir,
+        'archive',
+        `${sessionId}.jsonl`,
+      );
+      const secondaryActivePath = path.join(
+        secondaryChatsDir,
+        `${sessionId}.jsonl`,
+      );
+      const secondaryArchivedPath = path.join(
+        secondaryChatsDir,
+        'archive',
+        `${sessionId}.jsonl`,
+      );
+      const { app, primaryBridge, secondaryBridge } = makeHarness({
+        primarySummaries: [],
+        secondarySummaries: [],
+      });
+
+      const archived = await request(app)
+        .post('/workspaces/secondary-id/sessions/archive')
+        .set('Host', host())
+        .send({ sessionIds: [sessionId] })
+        .expect(200);
+      expect(archived.body).toMatchObject({
+        archived: [sessionId],
+        alreadyArchived: [],
+        notFound: [],
+        errors: [],
+      });
+      await expect(fsp.readFile(primaryActivePath, 'utf8')).resolves.toContain(
+        'primary collision target',
+      );
+      await expect(fsp.stat(primaryArchivedPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await expect(
+        fsp.readFile(secondaryArchivedPath, 'utf8'),
+      ).resolves.toContain('secondary collision target');
+      await expect(fsp.stat(secondaryActivePath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      expect(primaryBridge.closeCalls).toEqual([]);
+      expect(secondaryBridge.closeCalls).toEqual([sessionId]);
+
+      const unarchived = await request(app)
+        .post('/workspaces/secondary-id/sessions/unarchive')
+        .set('Host', host())
+        .send({ sessionIds: [sessionId] })
+        .expect(200);
+      expect(unarchived.body).toMatchObject({
+        unarchived: [sessionId],
+        alreadyActive: [],
+        notFound: [],
+        errors: [],
+      });
+      await expect(fsp.readFile(primaryActivePath, 'utf8')).resolves.toContain(
+        'primary collision target',
+      );
+      await expect(fsp.stat(primaryArchivedPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await expect(
+        fsp.readFile(secondaryActivePath, 'utf8'),
+      ).resolves.toContain('secondary collision target');
+      await expect(fsp.stat(secondaryArchivedPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      expect(primaryBridge.closeCalls).toEqual([]);
+      expect(secondaryBridge.closeCalls).toEqual([sessionId]);
+    });
+  });
+
   it('routes plural session group CRUD to the selected workspace', async () => {
     await withRuntimeDir(async () => {
       const { app } = makeHarness();
