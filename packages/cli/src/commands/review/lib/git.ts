@@ -101,27 +101,6 @@ export interface WorktreeRelease {
 }
 
 /**
- * Free a review worktree's path **and** its branch.
- *
- * Never throws — see the `rmSync` below. Reports what happened through the
- * result: `existed` (something was there), `freed` (it is gone now), and
- * `reason` when it is still there.
- *
- * `git worktree remove` needs the directory. A user reclaiming disk with
- * `rm -rf .qwen/tmp` leaves the worktree *registered but missing*, and from then
- * on git refuses both of the things the next review needs:
- *
- *     $ git worktree add .qwen/tmp/review-pr-6457 qwen-review/pr-6457
- *     fatal: '...' is a missing but already registered worktree;
- *     use 'add -f' to override, or 'prune' or 'remove' to clear
- *
- * and `git branch -D qwen-review/pr-6457`, because the branch is still checked
- * out in that phantom. So `/review <same PR>` never runs again until someone
- * prunes by hand. `git worktree prune` is the only thing that clears the
- * registration and a no-op when nothing is stale — run it unconditionally, and
- * **before** the branch delete that depends on it.
- */
-/**
  * Rule on a release attempt: what was there, what is there now, what went wrong.
  *
  * Pure, and extracted for that reason. The interesting outcome — `existed` but
@@ -156,6 +135,27 @@ export function worktreeReleaseResult(
   };
 }
 
+/**
+ * Free a review worktree's path **and** its branch.
+ *
+ * Never throws — see the `rmSync` below. Reports what happened through the
+ * result: `existed` (something was there), `freed` (it is gone now), and
+ * `reason` when it is still there.
+ *
+ * `git worktree remove` needs the directory. A user reclaiming disk with
+ * `rm -rf .qwen/tmp` leaves the worktree *registered but missing*, and from then
+ * on git refuses both of the things the next review needs:
+ *
+ *     $ git worktree add .qwen/tmp/review-pr-6457 qwen-review/pr-6457
+ *     fatal: '...' is a missing but already registered worktree;
+ *     use 'add -f' to override, or 'prune' or 'remove' to clear
+ *
+ * and `git branch -D qwen-review/pr-6457`, because the branch is still checked
+ * out in that phantom. So `/review <same PR>` never runs again until someone
+ * prunes by hand. `git worktree prune` is the only thing that clears the
+ * registration and a no-op when nothing is stale — run it unconditionally, and
+ * **before** the branch delete that depends on it.
+ */
 export function releaseWorktree(worktreePath: string): WorktreeRelease {
   const existed = existsSync(worktreePath);
   let removeError: unknown;

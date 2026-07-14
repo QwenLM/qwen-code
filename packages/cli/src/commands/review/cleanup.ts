@@ -31,6 +31,12 @@ interface CleanupArgs {
 
 function runCleanup(target: string): void {
   let removedAny = false;
+  // Tracked separately from `removedAny`, because a failure is neither. Without
+  // it, a run that could not delete something goes on to announce "Nothing to
+  // clean" on stdout while stderr says it failed to remove a thing that is very
+  // much still there — the two streams contradicting each other, and the stdout
+  // half being the one a script reads.
+  let failedAny = false;
 
   // --- Worktree + branch (only for PR targets) -------------------------
   const prMatch = /^pr-(\d+)$/.exec(target);
@@ -48,6 +54,7 @@ function runCleanup(target: string): void {
         removedAny = true;
       } else if (existed) {
         writeStderrLine(`Failed to remove ${label} ${path}: ${reason}`);
+        failedAny = true;
       }
     };
 
@@ -96,10 +103,14 @@ function runCleanup(target: string): void {
       removedAny = true;
     } catch (err) {
       writeStderrLine(`Failed to remove ${full}: ${(err as Error).message}`);
+      failedAny = true;
     }
   }
 
-  if (!removedAny) {
+  // "Nothing to clean" is a claim about the tree, not about this run's luck. It
+  // is only true when there was nothing there — not when there was and we could
+  // not get rid of it.
+  if (!removedAny && !failedAny) {
     writeStdoutLine(`Nothing to clean for target "${target}".`);
   }
 }
