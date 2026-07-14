@@ -5,10 +5,12 @@
  */
 
 import path from 'node:path';
+import fs from 'node:fs';
 import os from 'node:os';
 import picomatch from 'picomatch';
 import { parse } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { isNodeError } from '../utils/errors.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
 
@@ -1009,11 +1011,14 @@ export function resolvePathPattern(
  * Uses picomatch for the actual glob matching, following gitignore semantics:
  *   - `*` matches files in a single directory (does not cross `/`)
  *   - `**` matches recursively across directories
+ * Both the lexical absolute path and its canonical filesystem destination are
+ * considered. For new files, the closest existing ancestor is canonicalized.
  *
  * @param specifier - The raw specifier from the rule (e.g. "./secrets/**")
  * @param filePath - The absolute path of the file being accessed
  * @param projectRoot - The project root directory (absolute)
  * @param cwd - The current working directory (absolute)
+ * @param matchMode - Whether to also match the canonical filesystem destination
  * @returns True if the file path matches the pattern
  */
 export function matchesPathPattern(
@@ -1021,22 +1026,104 @@ export function matchesPathPattern(
   filePath: string,
   projectRoot: string,
   cwd: string,
+  matchMode: 'lexical' | 'canonical' = 'lexical',
 ): boolean {
   const resolvedPattern = resolvePathPattern(specifier, projectRoot, cwd);
+  const patterns =
+    matchMode === 'canonical'
+      ? getCanonicalPatternCandidates(resolvedPattern)
+      : [resolvedPattern];
+  const matchers = patterns.map((pattern) =>
+    picomatch(pattern, {
+      dot: true,
+      nocase: false,
+    }),
+  );
+  const paths =
+    matchMode === 'canonical'
+      ? getCanonicalPathMatchCandidates(filePath, cwd)
+      : [toPosixPath(filePath)];
 
-  // Normalize filePath to forward slashes for cross-platform picomatch compatibility.
-  // On Windows, incoming paths may use backslashes; picomatch expects forward slashes.
-  const normalizedFilePath = toPosixPath(filePath);
+  return paths.some((candidate) =>
+    matchers.some((isMatch) => isMatch(candidate)),
+  );
+}
 
-  // Use picomatch for gitignore-style matching
-  const isMatch = picomatch(resolvedPattern, {
-    dot: true, // Match dotfiles (e.g. .env)
-    nocase: false, // Case-sensitive (filesystem convention)
-    // Note: do NOT set bash: true — it makes `*` match across directories.
-    // Default picomatch behavior is gitignore-style: `*` = single dir, `**` = recursive.
-  });
+function getCanonicalPatternCandidates(resolvedPattern: string): string[] {
+  const candidates = new Set([resolvedPattern]);
+  const { base } = picomatch.scan(resolvedPattern);
+  const canonicalBase = realpathNearestExisting(base);
+  if (canonicalBase !== undefined) {
+    candidates.add(
+      `${toPosixPath(canonicalBase)}${resolvedPattern.slice(base.length)}`,
+    );
+  }
+  return [...candidates];
+}
 
-  return isMatch(normalizedFilePath);
+function getCanonicalPathMatchCandidates(
+  filePath: string,
+  cwd: string,
+): string[] {
+  const candidates = new Set([toPosixPath(filePath)]);
+  const absolutePath = resolveWithoutNormalizing(cwd, filePath);
+  const canonicalPath = realpathNearestExisting(absolutePath);
+  if (canonicalPath !== undefined) {
+    candidates.add(toPosixPath(canonicalPath));
+  }
+  return [...candidates];
+}
+
+function resolveWithoutNormalizing(base: string, filePath: string): string {
+  return path.isAbsolute(filePath)
+    ? filePath
+    : `${base}${/[\\/]$/.test(base) ? '' : path.sep}${filePath}`;
+}
+
+function realpathNearestExisting(filePath: string): string | undefined {
+  let current = filePath;
+  const missingSegments: string[] = [];
+  let symlinkHops = 0;
+  const maxSymlinkHops = 40;
+
+  while (true) {
+    try {
+      return path.join(fs.realpathSync.native(current), ...missingSegments);
+    } catch (error: unknown) {
+      if (
+        !isNodeError(error) ||
+        (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')
+      ) {
+        return undefined;
+      }
+    }
+
+    try {
+      if (fs.lstatSync(current).isSymbolicLink()) {
+        if (symlinkHops++ >= maxSymlinkHops) {
+          return undefined;
+        }
+        const target = fs.readlinkSync(current);
+        const parent = fs.realpathSync.native(path.dirname(current));
+        current = resolveWithoutNormalizing(parent, target);
+        continue;
+      }
+    } catch (error: unknown) {
+      if (
+        !isNodeError(error) ||
+        (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')
+      ) {
+        return undefined;
+      }
+    }
+
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return undefined;
+    }
+    missingSegments.unshift(path.basename(current));
+    current = parent;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1163,6 +1250,7 @@ export interface PathMatchContext {
  * @param filePath - Absolute file path (for Read/Edit rules)
  * @param domain - Domain (for WebFetch rules)
  * @param pathContext - Project root and cwd for resolving relative path patterns
+ * @param pathMatchMode - Whether path rules also match canonical destinations
  */
 export function matchesRule(
   rule: PermissionRule,
@@ -1173,6 +1261,7 @@ export function matchesRule(
   pathContext?: PathMatchContext,
   specifier?: string,
   toolParams?: Record<string, unknown>,
+  pathMatchMode: 'lexical' | 'canonical' = 'lexical',
 ): boolean {
   const canonicalCtxToolName = resolveToolName(toolName);
 
@@ -1250,6 +1339,7 @@ export function matchesRule(
           filePath,
           ctx.projectRoot,
           ctx.cwd,
+          pathMatchMode,
         );
         break;
       }

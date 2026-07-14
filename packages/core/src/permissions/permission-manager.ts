@@ -295,14 +295,14 @@ export class PermissionManager {
         ...this.sessionRules.deny,
         ...this.persistentRules.deny,
       ]) {
-        if (matchesRule(rule, ...matchArgs)) return 'deny';
+        if (matchesRule(rule, ...matchArgs, 'canonical')) return 'deny';
       }
       // Priority 2: ask rules
       for (const rule of [
         ...this.sessionRules.ask,
         ...this.persistentRules.ask,
       ]) {
-        if (matchesRule(rule, ...matchArgs)) return 'ask';
+        if (matchesRule(rule, ...matchArgs, 'canonical')) return 'ask';
       }
       // Priority 3: allow rules
       for (const rule of [
@@ -646,7 +646,7 @@ export class PermissionManager {
       ...this.sessionRules.deny,
       ...this.persistentRules.deny,
     ]) {
-      if (matchesRule(rule, ...matchArgs)) {
+      if (matchesRule(rule, ...matchArgs, 'canonical')) {
         return rule.raw;
       }
     }
@@ -747,7 +747,9 @@ export class PermissionManager {
             pathCtx,
             undefined,
           ] as const;
-          return allRules.some((rule) => matchesRule(rule, ...opMatchArgs));
+          return allRules.some((rule) =>
+            matchesRule(rule, ...opMatchArgs, undefined, 'canonical'),
+          );
         })
       ) {
         return true;
@@ -773,7 +775,9 @@ export class PermissionManager {
       toolParams,
     ] as const;
 
-    return allRules.some((rule) => matchesRule(rule, ...matchArgs));
+    return allRules.some((rule) =>
+      matchesRule(rule, ...matchArgs, 'canonical'),
+    );
   }
 
   /**
@@ -824,7 +828,9 @@ export class PermissionManager {
             pathCtx,
             undefined,
           ] as const;
-          return askRules.some((rule) => matchesRule(rule, ...opMatchArgs));
+          return askRules.some((rule) =>
+            matchesRule(rule, ...opMatchArgs, undefined, 'canonical'),
+          );
         })
       ) {
         return true;
@@ -850,7 +856,9 @@ export class PermissionManager {
       toolParams,
     ] as const;
 
-    return askRules.some((rule) => matchesRule(rule, ...matchArgs));
+    return askRules.some((rule) =>
+      matchesRule(rule, ...matchArgs, 'canonical'),
+    );
   }
 
   private hasAskRuleForTool(toolName: string): boolean {
