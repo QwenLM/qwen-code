@@ -78,4 +78,29 @@ describe('QwenAgent tool_call_update handling', () => {
     expect(first.value?.isError).toBe(false);
     expect(first.value?.result).toBe('done');
   });
+
+  it('does not drop an in_progress frame that carries a kind', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-agent-tool-updates-'));
+    const agent = createAgent(cwd);
+    const internals = agent as unknown as QwenToolUpdateInternals;
+
+    // The drop guard is scoped to kind-less heartbeats (matching the
+    // web-shell normalizer): an in_progress frame WITH a kind is not a bare
+    // heartbeat and must still flow through to a tool_result.
+    internals.handleToolCallUpdate({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'call-1',
+      status: 'in_progress',
+      kind: 'execute',
+      _meta: {
+        toolName: 'run_shell_command',
+        shellProgress: { type: 'shell_progress', elapsedMs: 10_000 },
+      },
+    });
+
+    const iterator = internals.eventQueue.drain();
+    const first = await iterator.next();
+    await iterator.return?.(undefined);
+    expect(first.value?.type).toBe('tool_result');
+  });
 });
