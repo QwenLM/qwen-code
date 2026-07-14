@@ -154,17 +154,29 @@ function parseTranscript(file: string): AgentRecord | null {
     }
 
     const type = rec['type'];
-    const body = JSON.stringify(rec['message'] ?? {});
 
     // The first `user` record is the launch prompt: the harness writes it when it
     // attaches, before the model has produced anything.
     if (!launchPrompt && type === 'user') launchPrompt = textOf(rec);
 
-    if (/"functionCall"/.test(body)) {
+    // Read the message PARTS, not a regex over the serialized record. An agent
+    // reviewing this module's own diff will have `"functionCall"` and
+    // `"functionResponse"` sitting inside a `read_file` result as ordinary text,
+    // and a substring match would count that as a tool call the agent never made.
+    const msg = rec['message'] as { parts?: unknown } | undefined;
+    const parts = Array.isArray(msg?.parts) ? msg.parts : [];
+    const hasCall = parts.some(
+      (p) => (p as { functionCall?: unknown }).functionCall,
+    );
+    const hasResponse = parts.some(
+      (p) => (p as { functionResponse?: unknown }).functionResponse,
+    );
+
+    if (hasCall) {
       toolCalls++;
       pendingCalls.push('call');
     }
-    if (/"functionResponse"/.test(body)) {
+    if (hasResponse) {
       if (!isErrorResponse(rec) && pendingCalls.length > 0) {
         successfulToolCalls++;
       }

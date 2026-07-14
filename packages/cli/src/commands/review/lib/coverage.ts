@@ -125,17 +125,20 @@ export function coverageFromTranscripts(
       continue; // Its silence proves nothing about the diff; the prompt failed.
     }
 
-    const u = UNCOVERABLE_RE.exec(rec.finalText);
-    if (u && chunk !== null && Number(u[1]) === chunk) {
-      uncoverable.add(chunk);
+    // Did it work? Zero successful tool calls means it read nothing — whatever
+    // its prose says. This is checked BEFORE the Uncoverable claim below, and the
+    // order is load-bearing: `Uncoverable: chunk N` is a line the prompt hands the
+    // agent, and an honest one requires having read the chunk to discover the line
+    // is too long. A zero-tool-call agent that merely copied the template must not
+    // be credited with a disclosed gap — that is the whiff wearing a costume.
+    if (rec.successfulToolCalls === 0) {
+      idleAgents.push(label);
       continue;
     }
 
-    // Did it work? Zero successful tool calls means it read nothing — whatever
-    // its prose says. Of 129 real transcripts, 80 made no call and every one of
-    // them returned more than forty characters of confident, specific text.
-    if (rec.successfulToolCalls === 0) {
-      idleAgents.push(label);
+    const u = UNCOVERABLE_RE.exec(rec.finalText);
+    if (u && chunk !== null && Number(u[1]) === chunk) {
+      uncoverable.add(chunk);
       continue;
     }
 
@@ -151,6 +154,10 @@ export function coverageFromTranscripts(
     ok:
       blindAgents.length === 0 &&
       idleAgents.length === 0 &&
+      // An uncoverable chunk is a disclosed gap, not coverage: a diff with a line
+      // no read can reach was not reviewed, and the verdict may not be Approve on
+      // its strength. `compose-review` already caps on it; the report must agree.
+      uncoverable.size === 0 &&
       missingChunks.length === 0,
     agents: records.length,
     blindAgents,

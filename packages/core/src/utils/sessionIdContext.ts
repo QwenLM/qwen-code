@@ -50,3 +50,14 @@ export function registerSessionProjectDir(
 export function getSessionProjectDir(sessionId: string): string | undefined {
   return projectDirBySession.get(sessionId);
 }
+
+/**
+ * Drop a session's entry when it ends.
+ *
+ * The map would otherwise grow one entry per session for the life of a daemon
+ * process. A session's own dispose path calls this; a single-session CLI never
+ * needs to, since the process is the session.
+ */
+export function unregisterSessionProjectDir(sessionId: string): void {
+  projectDirBySession.delete(sessionId);
+}

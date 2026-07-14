@@ -484,7 +484,15 @@ export const composeReviewCommand: CommandModule = {
   handler: (argv) => {
     const { input, out } = argv as unknown as ComposeReviewCliArgs;
     const raw = readFileSync(input ?? 0, 'utf8');
-    const result = composeReview(JSON.parse(raw) as ComposeReviewInput);
+    // The input is a JSON the model wrote. `env` decides where the harness
+    // transcripts are read from, and it must NOT come from that JSON: a model
+    // that wanted an approval could point it at a directory of transcripts it
+    // fabricated, which is the whole gate reopened through one extra key. It is a
+    // unit-test seam and nothing else, so it is stripped here — the real run
+    // always resolves the transcripts from the environment the CLI exported.
+    const parsed = JSON.parse(raw) as ComposeReviewInput;
+    delete parsed.env;
+    const result = composeReview(parsed);
     const json = JSON.stringify(result, null, 2);
     if (out) {
       mkdirSync(dirname(out), { recursive: true });

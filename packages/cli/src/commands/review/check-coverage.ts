@@ -90,7 +90,11 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
     report.agents - report.blindAgents.length - report.idleAgents.length;
   writeStderrLine(
     `Coverage: ${report.coveredChunks.length}/${totalChunks} chunk(s) reviewed. ` +
-      `${report.agents} agent(s) ran; ${worked} of them opened the diff` +
+      // "did work", not "opened the diff": `worked` includes the whole-diff agents
+      // whose job needs no diff (Build & Test, Issue Fidelity), and claiming they
+      // opened it would be the same kind of overstatement this report exists to
+      // stop. What is asserted is a tool call, which is all the transcript shows.
+      `${report.agents} agent(s) ran; ${worked} did work` +
       (report.blindAgents.length
         ? `, ${report.blindAgents.length} were launched blind`
         : '') +

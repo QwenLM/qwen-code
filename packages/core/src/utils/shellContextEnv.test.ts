@@ -11,6 +11,7 @@ import { promptIdContext } from './promptIdContext.js';
 import {
   sessionIdContext,
   registerSessionProjectDir,
+  unregisterSessionProjectDir,
 } from './sessionIdContext.js';
 import {
   isShellTracePropagationEnabled,
@@ -95,6 +96,22 @@ describe('getShellContextEnvVars', () => {
 
       expect(a['QWEN_CODE_PROJECT_DIR']).toBe('/proj/A');
       expect(b['QWEN_CODE_PROJECT_DIR']).toBe('/proj/B'); // NOT A's
+    });
+
+    it('drops a session entry on unregister — no daemon leak', () => {
+      registerSessionProjectDir('sess-X', '/proj/X');
+      expect(
+        sessionIdContext.run('sess-X', () => getShellContextEnvVars())[
+          'QWEN_CODE_PROJECT_DIR'
+        ],
+      ).toBe('/proj/X');
+      unregisterSessionProjectDir('sess-X');
+      delete process.env['QWEN_CODE_PROJECT_DIR'];
+      expect(
+        sessionIdContext.run('sess-X', () => getShellContextEnvVars())[
+          'QWEN_CODE_PROJECT_DIR'
+        ],
+      ).toBeUndefined();
     });
 
     it('falls back to the env var for the single-session CLI', () => {

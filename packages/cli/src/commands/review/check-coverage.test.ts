@@ -232,6 +232,48 @@ describe('coverage — from the harness, not from the caller', () => {
     );
   });
 
+  it('does not count "functionCall" appearing in a tool OUTPUT as a tool call', () => {
+    // Structural part inspection, not a substring over the serialized record.
+    // (JSON.stringify escapes quotes inside text, so a naive substring happens to
+    // be safe for well-formed records — but reading the parts is correct by
+    // construction rather than by that accident, and this pins the behaviour.)
+    const base = {
+      agentId: 'a1',
+      agentName: 'general-purpose',
+      sessionId: 'S1',
+    };
+    const lines = [
+      JSON.stringify({
+        ...base,
+        type: 'user',
+        message: { role: 'user', parts: [{ text: good(1) }] },
+      }),
+      // No real functionCall part — only text that mentions the words.
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              text: 'The diff adds `parts.some(p => p.functionCall)` and a functionResponse handler.',
+            },
+          ],
+        },
+      }),
+    ];
+    writeFileSync(
+      join(dir, 'subagents', 'S1', 'agent-a1.jsonl'),
+      lines.join('\n') + '\n',
+    );
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    // a1 made no real call → idle, not covered.
+    expect(r.idleAgents).toEqual(['chunk 1']);
+    expect(r.coveredChunks).toEqual([2]);
+  });
+
   it('does not treat a tool output containing "error": as a failed call', () => {
     // The response *object* is what says whether the call failed. A tool whose
     // OUTPUT happens to contain that text — a JSON payload with `error: null`, a
@@ -334,6 +376,53 @@ describe('coverage — from the harness, not from the caller', () => {
       }),
     );
     expect(() => coverageFromTranscripts(p, ENV)).toThrow(/duplicate chunk/);
+  });
+
+  it('does not credit a zero-tool-call agent that copied the Uncoverable line', () => {
+    // `Uncoverable: chunk N` is a line the prompt hands the agent. An honest one
+    // means the agent read the chunk and found a line too long to reach; a
+    // whiff can copy it verbatim without reading anything. The idle check must
+    // win, or the whiff passes wearing a costume.
+    transcript('a1', good(1), {
+      calls: 0,
+      text: 'Uncoverable: chunk 1 — line exceeds the read limit',
+    });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.idleAgents).toEqual(['chunk 1']); // idle, NOT a disclosed gap
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.ok).toBe(false);
+  });
+
+  it('an uncoverable chunk is a gap, not coverage — ok stays false', () => {
+    // A working agent legitimately declares its chunk unreachable. That is a
+    // disclosed gap: the diff was not reviewed, and the verdict may not approve
+    // on its strength. The old formula left `ok` true.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), {
+      calls: 1,
+      text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+    });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.uncoverableChunks).toEqual([2]);
+    expect(r.missingChunks).toEqual([]);
+    expect(r.ok).toBe(false);
+  });
+
+  it('a whole-diff agent that made no chunk claim does not gate the chunks', () => {
+    // Build & Test / Issue Fidelity have no `chunk N of M` in their prompt. They
+    // are not blind (no chunk to be blind to) and, having made real tool calls,
+    // are not idle. They simply contribute no chunk coverage.
+    transcript('build', 'Run the build and tests for this PR.', { calls: 4 });
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.ok).toBe(true);
+    expect(r.blindAgents).toEqual([]);
+    expect(r.coveredChunks).toEqual([1, 2]);
   });
 
   it('refuses a plan that is not one', () => {
