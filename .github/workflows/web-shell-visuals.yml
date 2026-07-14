@@ -43,7 +43,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: 'Checkout PR head'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ github.event.pull_request.head.sha }}'
           fetch-depth: 1
@@ -98,13 +98,16 @@ jobs:
             gif="${OUT_DIR}/gifs/${name}.gif"
             # -ss 1 trims the ~1s blank while the page loads. Two-pass palette
             # (generate + apply) keeps the GIF sharp at a fraction of naive size.
-            if ffmpeg -y -ss 1 -i "${webm}" \
+            if err="$(ffmpeg -y -ss 1 -i "${webm}" \
               -vf "fps=12,scale=960:-1:flags=lanczos,split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3" \
-              "${gif}" >/dev/null 2>&1; then
+              "${gif}" 2>&1)"; then
               echo "converted ${name}.webm -> gifs/${name}.gif ($(du -h "${gif}" | cut -f1))"
               converted=$((converted + 1))
             else
-              echo "::warning::ffmpeg failed to convert ${name}.webm; skipping its GIF."
+              # Surface ffmpeg's own diagnostic (codec/container/filter error)
+              # instead of a bare "failed", so a future breakage is actionable.
+              detail="$(printf '%s' "${err}" | tr '\n' ' ' | tail -c 400)"
+              echo "::warning::ffmpeg failed to convert ${name}.webm; skipping its GIF. ${detail}"
               rm -f "${gif}"
             fi
           done

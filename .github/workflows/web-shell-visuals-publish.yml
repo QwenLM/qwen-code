@@ -18,10 +18,14 @@ on:
 permissions:
   actions: 'read'
 
-# All publishes push to the single `pr-assets` branch, so serialize them to
-# avoid racing on that push. Never cancel an in-flight publish.
+# Serialize publishes for the SAME PR (identified by its source repo + branch),
+# since they push to that PR's own `pr-assets/web-shell-visuals-<n>` branch; the
+# push-retry loop below covers any residual same-branch race. Different PRs —
+# including forks that happen to share a branch name like `main` — get distinct
+# groups and publish in parallel. Never cancel an in-flight publish.
 concurrency:
-  group: 'web-shell-visuals-publish-${{ github.event.workflow_run.head_branch }}'
+  group: >-
+    web-shell-visuals-publish-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
   cancel-in-progress: false
 
 defaults:
@@ -213,6 +217,15 @@ jobs:
           const files = fs.readdirSync(stage);
 
           const url = (name) => `${rawBase}/${encodeURIComponent(name)}`;
+          // Self-defending HTML escaping for interpolated values. Filenames are
+          // already sanitized to [A-Za-z0-9._-] upstream, but don't rely on that
+          // being an HTML defense — escape at the interpolation point too.
+          const esc = (s) =>
+            String(s)
+              .replace(/&/g, '&amp;')
+              .replace(/"/g, '&quot;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;');
           const pretty = (s) =>
             s.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 
@@ -249,13 +262,13 @@ jobs:
             out.push('<tr><th align="left">view</th><th>light</th><th>dark</th></tr>');
             for (const [view, pair] of [...views.entries()].sort()) {
               const light = pair.light
-                ? `<img src="${url(pair.light)}" width="360" alt="${view} light">`
+                ? `<img src="${url(pair.light)}" width="360" alt="${esc(view)} light">`
                 : '—';
               const dark = pair.dark
-                ? `<img src="${url(pair.dark)}" width="360" alt="${view} dark">`
+                ? `<img src="${url(pair.dark)}" width="360" alt="${esc(view)} dark">`
                 : '—';
               out.push(
-                `<tr><td valign="top"><sub>${pretty(view)}</sub></td><td>${light}</td><td>${dark}</td></tr>`,
+                `<tr><td valign="top"><sub>${esc(pretty(view))}</sub></td><td>${light}</td><td>${dark}</td></tr>`,
               );
             }
             out.push('</table>');
@@ -267,9 +280,9 @@ jobs:
             out.push('');
             for (const g of gifs) {
               const key = g.replace(/\.gif$/i, '');
-              out.push(`**${flowLabels[key] || pretty(key)}**`);
+              out.push(`**${esc(flowLabels[key] || pretty(key))}**`);
               out.push('');
-              out.push(`<img src="${url(g)}" width="640" alt="${key} flow">`);
+              out.push(`<img src="${url(g)}" width="640" alt="${esc(key)} flow">`);
               out.push('');
             }
           }

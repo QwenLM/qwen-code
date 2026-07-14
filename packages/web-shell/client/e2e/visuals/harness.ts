@@ -184,10 +184,18 @@ export async function recordFlow(
     try {
       await video.saveAs(join(VIDEO_DIR, `${name}.webm`));
       await video.delete(); // drop the hash-named raw copy; keep only the named one
-    } catch {
-      // Best-effort video capture; if `drive` failed the video may never have
-      // finalized — don't let that I/O error mask the real drive failure below.
+    } catch (videoError) {
+      // If drive() failed, the video may never have finalized — keep the real
+      // driveError (rethrown below) rather than masking it. If drive() SUCCEEDED,
+      // surface the video failure so a missing recording isn't swallowed silently.
+      if (!driveError) {
+        console.warn(`video.saveAs failed for flow "${name}":`, videoError);
+      }
     }
+  } else if (!driveError) {
+    console.warn(
+      `No video recorded for flow "${name}" — recording may not have started.`,
+    );
   }
   if (driveError) throw driveError;
 }
