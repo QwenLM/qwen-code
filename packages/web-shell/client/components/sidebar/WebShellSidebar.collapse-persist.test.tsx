@@ -91,8 +91,10 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
 }));
 
 const { I18nProvider } = await import('../../i18n');
-const { COLLAPSED_SESSION_SECTIONS_STORAGE_KEY, WebShellSidebar } =
-  await import('./WebShellSidebar');
+const { WebShellSidebar } = await import('./WebShellSidebar');
+const { COLLAPSED_SESSION_SECTIONS_STORAGE_KEY } = await import(
+  './collapsedSessionSections'
+);
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 if (!globalThis.PointerEvent) {

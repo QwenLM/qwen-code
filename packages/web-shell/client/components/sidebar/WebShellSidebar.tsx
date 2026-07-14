@@ -81,7 +81,6 @@ import { AddWorkspaceDialog } from '../dialogs/AddWorkspaceDialog';
 import { WorkspaceSection } from './WorkspaceSection';
 import { SessionGroupSection } from './SessionGroupSection';
 import {
-  COLLAPSED_SESSION_SECTIONS_STORAGE_KEY,
   isPrimaryCollapsedSectionId,
   readCollapsedSessionSectionIds,
   replaceOwnedCollapsedSessionSectionIds,
@@ -93,7 +92,6 @@ import {
 import styles from './WebShellSidebar.module.css';
 
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
-export { COLLAPSED_SESSION_SECTIONS_STORAGE_KEY };
 const SIDEBAR_DEFAULT_WIDTH = 260;
 const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 420;
@@ -463,13 +461,15 @@ export function WebShellSidebar({
       : {}),
   });
   // useDaemonResource starts with loading=false before autoLoad runs, so
-  // !loading is not “settled”. Treat the first data/error as the ready signal
-  // (empty lists are still defined data) so the initial-catalog latch waits.
+  // !loading is not “settled”. Treat the first data as the ready signal (empty
+  // lists are still defined data) so the initial-catalog latch waits. Errors
+  // must NOT settle it: a latch consumed against a failed request would treat
+  // every section from the eventual successful reload as brand-new,
+  // auto-collapsing and persisting over the user's restored expansions.
   const sessionsCatalogReady =
     !organizationEnabled ||
     !includePrimaryWorkspaceSessions ||
-    sessionsPage !== undefined ||
-    Boolean(error);
+    sessionsPage !== undefined;
   const { sessions: primaryPinnedSessions, reload: reloadPinnedSessions } =
     useSessions({
       autoLoad: organizationEnabled,
@@ -556,6 +556,16 @@ export function WebShellSidebar({
   const awaitingInitialSessionCatalogRef = useRef(true);
   const [groupsCatalogReady, setGroupsCatalogReady] =
     useState(!organizationEnabled);
+  // organizationEnabled can flip true mid-session (capabilities can land after
+  // the flat sessions request settles). Close the gate during that same render:
+  // deferring to the reload effect would let the auto-collapse effect consume
+  // the first-sync latch against the stale pre-organized catalog first.
+  const [prevOrganizationEnabled, setPrevOrganizationEnabled] =
+    useState(organizationEnabled);
+  if (prevOrganizationEnabled !== organizationEnabled) {
+    setPrevOrganizationEnabled(organizationEnabled);
+    setGroupsCatalogReady(!organizationEnabled);
+  }
   const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
   const [projectExpanded, setProjectExpanded] = useState(false);
   const [projectsExpanded, setProjectsExpanded] = useState(true);
@@ -875,12 +885,12 @@ export function WebShellSidebar({
       setGroups(catalog.groups);
       setMenuGroups(catalog.groups);
       setColorOptions(catalog.colorOptions);
-    } catch (err) {
-      onError(err, t('sidebar.groupsLoadFailed'));
-    } finally {
       // Empty catalogs still settle the latch — sessions/groups hydrate on
       // independent requests, so readiness cannot wait for a non-empty list.
+      // Failures must not settle it (see sessionsCatalogReady above).
       setGroupsCatalogReady(true);
+    } catch (err) {
+      onError(err, t('sidebar.groupsLoadFailed'));
     }
   }, [onError, organizationEnabled, t, workspaceActions]);
 

@@ -126,20 +126,11 @@ export function WorkspaceSection({
     if (controlledExpanded === undefined) setInternalExpanded(false);
   }, [controlledExpanded, workspace.id]);
 
-  // Remounted workspace folders must reload their own collapse prefs from the
-  // shared key (ids are namespaced as `ws:<id>|…` so they cannot collide with
-  // the primary catalog or another workspace).
+  // The render site keys this component by workspace id, so an id change
+  // always remounts and the lazy useState initializer re-reads storage.
   useEffect(() => {
-    setCollapsedGroupIds(readWorkspaceCollapsedGroupIds(workspace.id));
-  }, [workspace.id]);
-
-  useEffect(() => {
-    // Depend on collapsedGroupIds only. Including workspace.id would briefly
-    // write the previous folder's local ids under the new workspace key before
-    // the reload effect above replaces state.
     writeWorkspaceCollapsedGroupIds(workspace.id, collapsedGroupIds);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- see comment above
-  }, [collapsedGroupIds]);
+  }, [collapsedGroupIds, workspace.id]);
 
   useEffect(() => {
     if (controlledExpanded === undefined && autoExpandKey) {
