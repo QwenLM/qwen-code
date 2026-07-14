@@ -5,7 +5,12 @@
  */
 
 import { vi, describe, it, expect, beforeEach } from 'vitest';
-import { checkForUpdates, checkForUpdatesDetailed } from './updateCheck.js';
+import {
+  checkForUpdates,
+  checkForUpdatesDetailed,
+  FETCH_TIMEOUT_MS,
+  UpdateCheckTimeoutError,
+} from './updateCheck.js';
 
 const getPackageJson = vi.hoisted(() => vi.fn());
 vi.mock('../../utils/package.js', () => ({
@@ -252,6 +257,56 @@ describe('checkForUpdates', () => {
       const result = await checkForUpdates();
       expect(result?.message).toContain('1.2.3-nightly.1 → 1.2.3-nightly.2');
       expect(result?.update.latest).toBe('1.2.3-nightly.2');
+    });
+  });
+
+  describe('fetchInfo timeout (#6857)', () => {
+    it('returns a detailed error when fetchInfo does not resolve within FETCH_TIMEOUT_MS', async () => {
+      // update-notifier's fetchInfo() takes no timeout option, so an
+      // unreachable registry (proxy, offline, corporate mirror without
+      // scoped .npmrc auth) would hang the check. We race it against a
+      // bounded timer instead — this asserts the timer actually fires and
+      // surfaces a real error rather than silently reporting "up to date".
+      getPackageJson.mockResolvedValue({
+        name: 'test-package',
+        version: '1.0.0',
+      });
+      updateNotifier.mockReturnValue({
+        // never resolves
+        fetchInfo: vi.fn().mockReturnValue(new Promise(() => {})),
+      });
+
+      const resultPromise = checkForUpdatesDetailed();
+      await vi.advanceTimersByTimeAsync(FETCH_TIMEOUT_MS + 1);
+      const result = await resultPromise;
+
+      expect(result.status).toBe('error');
+      if (result.status === 'error') {
+        expect(result.error).toBeInstanceOf(UpdateCheckTimeoutError);
+        expect(result.error.message).toContain(`${FETCH_TIMEOUT_MS}ms`);
+        expect(result.currentVersion).toBe('1.0.0');
+      }
+    });
+
+    it('still resolves the update path when fetchInfo returns before the timeout', async () => {
+      // Guards against the timer accidentally firing on a healthy fast fetch —
+      // if it did, every /update call would silently drop back to error.
+      getPackageJson.mockResolvedValue({
+        name: 'test-package',
+        version: '1.0.0',
+      });
+      updateNotifier.mockReturnValue({
+        fetchInfo: vi
+          .fn()
+          .mockResolvedValue({ current: '1.0.0', latest: '1.1.0' }),
+      });
+
+      const result = await checkForUpdatesDetailed();
+
+      expect(result.status).toBe('update');
+      if (result.status === 'update') {
+        expect(result.info.update.latest).toBe('1.1.0');
+      }
     });
   });
 });

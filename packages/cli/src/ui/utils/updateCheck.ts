@@ -15,6 +15,42 @@ const debugLogger = createDebugLogger('UPDATE_CHECK');
 
 export const FETCH_TIMEOUT_MS = 2000;
 
+/**
+ * Sentinel error thrown when `fetchInfo()` does not resolve within
+ * `FETCH_TIMEOUT_MS`. `update-notifier`'s `fetchInfo()` does not accept a
+ * timeout option, so slow / unreachable registries (corporate proxies, offline
+ * networks, DNS failures) would otherwise hang the check indefinitely or fall
+ * through to a stale configstore cache. Race the call against a bounded timer
+ * and surface a real error so `/update` can report "check failed" instead of
+ * silently returning "up to date". Related: #6857.
+ */
+export class UpdateCheckTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`update-notifier fetchInfo timed out after ${timeoutMs}ms`);
+    this.name = 'UpdateCheckTimeoutError';
+  }
+}
+
+async function fetchInfoWithTimeout(
+  notifier: { fetchInfo(): UpdateInfo | Promise<UpdateInfo> },
+  timeoutMs: number,
+): Promise<UpdateInfo> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve(notifier.fetchInfo()),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new UpdateCheckTimeoutError(timeoutMs)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 export interface UpdateObject {
   message: string;
   update: UpdateInfo;
@@ -77,9 +113,13 @@ export async function checkForUpdatesDetailed(): Promise<UpdateCheckResult> {
 
     if (isNightly) {
       const [nightlyUpdateInfo, latestUpdateInfo] = await Promise.all([
-        createNotifier('nightly').fetchInfo(),
-        createNotifier('latest').fetchInfo(),
+        fetchInfoWithTimeout(createNotifier('nightly'), FETCH_TIMEOUT_MS),
+        fetchInfoWithTimeout(createNotifier('latest'), FETCH_TIMEOUT_MS),
       ]);
+
+      debugLogger.debug(
+        `fetchInfo returned nightly=${JSON.stringify(nightlyUpdateInfo)} latest=${JSON.stringify(latestUpdateInfo)} for current=${version}`,
+      );
 
       const bestUpdate = getBestAvailableUpdate(
         nightlyUpdateInfo,
@@ -99,7 +139,14 @@ export async function checkForUpdatesDetailed(): Promise<UpdateCheckResult> {
         };
       }
     } else {
-      const updateInfo = await createNotifier('latest').fetchInfo();
+      const updateInfo = await fetchInfoWithTimeout(
+        createNotifier('latest'),
+        FETCH_TIMEOUT_MS,
+      );
+
+      debugLogger.debug(
+        `fetchInfo returned ${JSON.stringify(updateInfo)} for current=${version}`,
+      );
 
       if (updateInfo && semver.gt(updateInfo.latest, version)) {
         return {
