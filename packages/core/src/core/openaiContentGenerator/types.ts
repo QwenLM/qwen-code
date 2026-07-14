@@ -39,6 +39,7 @@ export interface StreamingTextDeltaState {
 
 export interface RequestContext {
   model: string;
+  userPromptId?: string;
   modalities: InputModalities;
   startTime: number;
   toolCallParser?: StreamingToolCallParser;
@@ -84,6 +85,14 @@ export interface RequestContext {
   hasThinkingTagInReasoning?: boolean;
   hasVisibleContent?: boolean;
   atVisibleLineStart?: boolean;
+  pendingThinkingTagCandidate?: {
+    text: string;
+    closingTagName?: 'think' | 'thinking';
+  };
+  protocolTagSanitized?: {
+    tagName: 'think' | 'thinking';
+    toolCallCount: number;
+  };
 }
 
 export interface ErrorHandler {

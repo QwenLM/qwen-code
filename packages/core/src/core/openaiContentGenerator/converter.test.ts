@@ -451,6 +451,252 @@ describe('OpenAIContentConverter', () => {
       ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
     });
 
+    it('sanitizes a standalone closing thinking tag when complete tool calls are available', () => {
+      const stream = withStreamParser();
+      const reasoning = converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me check.' }),
+        stream,
+      );
+      const leakedTag = converter.convertOpenAIChunkToGemini(
+        streamChunk('tool-call', {
+          content: '\n</think>\n\n',
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_read',
+              function: { name: 'read_file', arguments: '{}' },
+            },
+          ],
+        }),
+        stream,
+      );
+      const finish = converter.convertOpenAIChunkToGemini(
+        streamChunk('finish', {}, 'tool_calls'),
+        stream,
+      );
+
+      expect(reasoning.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'Let me check.' },
+      ]);
+      expect(leakedTag.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
+        {
+          functionCall: { id: 'call_read', name: 'read_file', args: {} },
+        },
+      ]);
+      expect(stream.protocolTagSanitized).toEqual({
+        tagName: 'think',
+        toolCallCount: 1,
+      });
+    });
+
+    it('sanitizes a standalone closing thinking tag alias', () => {
+      const stream = withStreamParser();
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me check.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('tool-call', {
+          content: ' </thinking> ',
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_read',
+              function: { name: 'read_file', arguments: '{}' },
+            },
+          ],
+        }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('finish', {}, 'tool_calls'),
+        stream,
+      );
+
+      expect(stream.protocolTagSanitized).toEqual({
+        tagName: 'thinking',
+        toolCallCount: 1,
+      });
+    });
+
+    it('sanitizes a standalone closing thinking tag split across chunks', () => {
+      const stream = withStreamParser();
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me check.' }),
+        stream,
+      );
+      const firstHalf = converter.convertOpenAIChunkToGemini(
+        streamChunk('tag-start', { content: '\n</thi' }),
+        stream,
+      );
+      const secondHalf = converter.convertOpenAIChunkToGemini(
+        streamChunk('tag-end', {
+          content: 'nk>\n',
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_read',
+              function: { name: 'read_file', arguments: '{}' },
+            },
+          ],
+        }),
+        stream,
+      );
+      const finish = converter.convertOpenAIChunkToGemini(
+        streamChunk('finish', {}, 'tool_calls'),
+        stream,
+      );
+
+      expect(firstHalf.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(secondHalf.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
+        {
+          functionCall: { id: 'call_read', name: 'read_file', args: {} },
+        },
+      ]);
+      expect(stream.protocolTagSanitized).toEqual({
+        tagName: 'think',
+        toolCallCount: 1,
+      });
+    });
+
+    it('releases a split tag-like prefix when it becomes ordinary text', () => {
+      const stream = withStreamParser();
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Explain the syntax.' }),
+        stream,
+      );
+      const prefix = converter.convertOpenAIChunkToGemini(
+        streamChunk('prefix', { content: '</thi' }),
+        stream,
+      );
+      const suffix = converter.convertOpenAIChunkToGemini(
+        streamChunk('suffix', { content: 'ng is not a tag.' }),
+        stream,
+      );
+
+      expect(prefix.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(suffix.candidates?.[0]?.content?.parts).toEqual([
+        { text: '</thing is not a tag.' },
+      ]);
+      expect(stream.protocolTagSanitized).toBeUndefined();
+    });
+
+    it('does not accumulate whitespace after a complete closing tag candidate', () => {
+      const stream = withStreamParser();
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me check.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('tag', {
+          content: '</think>',
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_read',
+              function: { name: 'read_file', arguments: '{}' },
+            },
+          ],
+        }),
+        stream,
+      );
+
+      for (let i = 0; i < 1_000; i++) {
+        converter.convertOpenAIChunkToGemini(
+          streamChunk(`whitespace-${i}`, { content: ' ' }),
+          stream,
+        );
+      }
+
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '</think>',
+        closingTagName: 'think',
+      });
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('finish', {}, 'tool_calls'),
+        stream,
+      );
+      expect(stream.protocolTagSanitized).toEqual({
+        tagName: 'think',
+        toolCallCount: 1,
+      });
+    });
+
+    it('rejects a standalone closing thinking tag without a complete tool call', () => {
+      const stream = withStreamParser();
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me check.' }),
+        stream,
+      );
+      const leakedTag = converter.convertOpenAIChunkToGemini(
+        streamChunk('content', { content: '</think>' }),
+        stream,
+      );
+
+      expect(leakedTag.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('finish', {}, 'stop'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+      expect(stream.protocolTagSanitized).toBeUndefined();
+    });
+
+    it('rejects visible content after a deferred closing thinking tag', () => {
+      const stream = withStreamParser();
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me check.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('content', { content: '</think>' }),
+        stream,
+      );
+
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('content-after-tag', { content: 'unexpected' }),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+      expect(stream.protocolTagSanitized).toBeUndefined();
+    });
+
+    it('rejects a standalone closing thinking tag with an incomplete tool call', () => {
+      const stream = withStreamParser();
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me check.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('tool-call', {
+          content: '</think>',
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_read',
+              function: {
+                name: 'read_file',
+                arguments: '{"path":',
+              },
+            },
+          ],
+        }),
+        stream,
+      );
+
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('finish', {}, 'tool_calls'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+      expect(stream.protocolTagSanitized).toBeUndefined();
+    });
+
     it('rejects a closing tag split after a visible line break', () => {
       const stream = withStreamParser();
       converter.convertOpenAIChunkToGemini(

@@ -1092,6 +1092,22 @@ const CLOSING_THINKING_TAG_PATTERN = /\n[^\S\r\n]*<\/think(?:ing)?[^\S\r\n]*>/i;
 const LEADING_CLOSING_THINKING_TAG_PATTERN =
   /^[^\S\r\n]*<\/think(?:ing)?[^\S\r\n]*>/i;
 const LEADING_THINKING_TAG_PATTERN = /^\s*<\/?think(?:ing)?\s*>/i;
+const STANDALONE_CLOSING_THINKING_TAG_PATTERN =
+  /^\s*<\/(think|thinking)\s*>\s*$/i;
+const STANDALONE_OPENING_THINKING_TAG_PATTERN =
+  /^\s*<(think|thinking)\s*>\s*$/i;
+const MAX_THINKING_TAG_CANDIDATE_LENGTH = 128;
+
+function canBeStandaloneThinkingTagPrefix(text: string): boolean {
+  const candidate = text.trimStart().toLowerCase();
+  if (!candidate) return true;
+
+  return ['<think', '<thinking', '</think', '</thinking'].some((tag) => {
+    if (tag.startsWith(candidate)) return true;
+    if (!candidate.startsWith(tag)) return false;
+    return /^\s*(?:>\s*)?$/.test(candidate.slice(tag.length));
+  });
+}
 
 /**
  * Convert OpenAI response to Gemini format.
@@ -1379,11 +1395,86 @@ export function convertOpenAIChunkToGemini(
       }
     }
 
-    const visibleText = parts
-      .map((part) =>
-        part.thought !== true && typeof part.text === 'string' ? part.text : '',
-      )
-      .join('');
+    const getVisibleText = (part: Part): string =>
+      part.thought !== true && typeof part.text === 'string' ? part.text : '';
+    let visibleText = parts.map(getVisibleText).join('');
+
+    const pendingTagCandidate = requestContext.pendingThinkingTagCandidate;
+    const combinedCandidateText =
+      (pendingTagCandidate?.text ?? '') + visibleText;
+    const canStartTagCandidate =
+      requestContext.hasStructuredReasoningContent === true &&
+      requestContext.hasVisibleContent !== true &&
+      /\S/.test(visibleText) &&
+      canBeStandaloneThinkingTagPrefix(combinedCandidateText);
+
+    if (pendingTagCandidate || canStartTagCandidate) {
+      const closingTag = STANDALONE_CLOSING_THINKING_TAG_PATTERN.exec(
+        combinedCandidateText,
+      )?.[1]?.toLowerCase();
+      const closingTagName =
+        closingTag === 'think' || closingTag === 'thinking'
+          ? closingTag
+          : undefined;
+      const openingTag = STANDALONE_OPENING_THINKING_TAG_PATTERN.test(
+        combinedCandidateText,
+      );
+      const isPossibleTag = canBeStandaloneThinkingTagPrefix(
+        combinedCandidateText,
+      );
+
+      if (openingTag) {
+        requestContext.pendingThinkingTagCandidate = undefined;
+        requestContext.pendingUntrustedResponseParts = undefined;
+        throw new InvalidStreamError(
+          'Model response leaked thinking tags.',
+          'PROTOCOL_TAG_LEAK',
+        );
+      }
+
+      if (pendingTagCandidate?.closingTagName && !closingTagName) {
+        requestContext.pendingThinkingTagCandidate = undefined;
+        requestContext.pendingUntrustedResponseParts = undefined;
+        throw new InvalidStreamError(
+          'Model response leaked thinking tags.',
+          'PROTOCOL_TAG_LEAK',
+        );
+      }
+
+      if (isPossibleTag) {
+        if (
+          !closingTagName &&
+          combinedCandidateText.length > MAX_THINKING_TAG_CANDIDATE_LENGTH
+        ) {
+          requestContext.pendingThinkingTagCandidate = undefined;
+          requestContext.pendingUntrustedResponseParts = undefined;
+          throw new InvalidStreamError(
+            'Model response leaked thinking tags.',
+            'PROTOCOL_TAG_LEAK',
+          );
+        }
+        requestContext.pendingThinkingTagCandidate = closingTagName
+          ? { text: `</${closingTagName}>`, closingTagName }
+          : { text: combinedCandidateText };
+        parts = parts.filter((part) => !getVisibleText(part));
+        visibleText = '';
+
+        if (choice.finish_reason && !closingTagName) {
+          requestContext.pendingThinkingTagCandidate = undefined;
+          requestContext.pendingUntrustedResponseParts = undefined;
+          throw new InvalidStreamError(
+            'Model response leaked thinking tags.',
+            'PROTOCOL_TAG_LEAK',
+          );
+        }
+      } else if (pendingTagCandidate) {
+        parts = parts.filter((part) => !getVisibleText(part));
+        parts.push({ text: combinedCandidateText });
+        visibleText = combinedCandidateText;
+        requestContext.pendingThinkingTagCandidate = undefined;
+      }
+    }
+
     const leakedThinkingTag =
       requestContext.hasStructuredReasoningContent === true &&
       ((requestContext.hasVisibleContent !== true &&
@@ -1392,6 +1483,7 @@ export function convertOpenAIChunkToGemini(
           (CLOSING_THINKING_TAG_PATTERN.test(visibleText) ||
             (requestContext.atVisibleLineStart === true &&
               LEADING_CLOSING_THINKING_TAG_PATTERN.test(visibleText)))));
+
     if (/\S/.test(visibleText)) {
       requestContext.hasVisibleContent = true;
     }
@@ -1414,6 +1506,34 @@ export function convertOpenAIChunkToGemini(
     const completedToolCalls = choice.finish_reason
       ? toolCallParser.getCompletedToolCalls()
       : [];
+    // Some providers report "stop" or "tool_calls" for JSON cut off by the
+    // token limit, so validate the parser state independently of finish_reason.
+    const toolCallsTruncated = choice.finish_reason
+      ? toolCallParser.hasIncompleteToolCalls()
+      : false;
+
+    if (
+      choice.finish_reason &&
+      requestContext.pendingThinkingTagCandidate?.closingTagName
+    ) {
+      if (
+        completedToolCalls.length === 0 ||
+        toolCallWithoutName ||
+        toolCallsTruncated
+      ) {
+        requestContext.pendingUntrustedResponseParts = undefined;
+        throw new InvalidStreamError(
+          'Model response leaked thinking tags.',
+          'PROTOCOL_TAG_LEAK',
+        );
+      }
+      requestContext.protocolTagSanitized = {
+        tagName: requestContext.pendingThinkingTagCandidate.closingTagName,
+        toolCallCount: completedToolCalls.length,
+      };
+      requestContext.pendingThinkingTagCandidate = undefined;
+    }
+
     if (
       choice.finish_reason &&
       (toolCallWithoutName ||
@@ -1430,7 +1550,8 @@ export function convertOpenAIChunkToGemini(
     const shouldHoldParts =
       !choice.finish_reason &&
       (toolCallWithoutName ||
-        requestContext.hasThinkingTagInReasoning === true);
+        requestContext.hasThinkingTagInReasoning === true ||
+        requestContext.pendingThinkingTagCandidate !== undefined);
     if (shouldHoldParts) {
       (requestContext.pendingUntrustedResponseParts ??= []).push(...parts);
       parts.length = 0;
@@ -1440,13 +1561,7 @@ export function convertOpenAIChunkToGemini(
     }
 
     // Only emit function calls when streaming is complete (finish_reason is present)
-    let toolCallsTruncated = false;
     if (choice.finish_reason) {
-      // Detect truncation the provider may not report correctly.
-      // Some providers (e.g. DashScope/Qwen) send "stop" or "tool_calls"
-      // even when output was cut off mid-JSON due to max_tokens.
-      toolCallsTruncated = toolCallParser.hasIncompleteToolCalls();
-
       for (const toolCall of completedToolCalls) {
         if (toolCall.name) {
           parts.push({

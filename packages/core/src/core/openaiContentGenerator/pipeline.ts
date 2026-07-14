@@ -28,6 +28,8 @@ import {
 } from './constants.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { InvalidStreamError } from '../invalid-stream-error.js';
+import { logProtocolTagSanitized } from '../../telemetry/loggers.js';
+import { ProtocolTagSanitizedEvent } from '../../telemetry/types.js';
 
 const debugLogger = createDebugLogger('OPENAI_PIPELINE');
 
@@ -499,6 +501,27 @@ export class ContentGenerationPipeline {
           context,
         );
 
+        const sanitization = context.protocolTagSanitized;
+        if (sanitization) {
+          context.protocolTagSanitized = undefined;
+          const event = new ProtocolTagSanitizedEvent({
+            model: context.model,
+            promptId: context.userPromptId,
+            responseId: response.responseId,
+            tagName: sanitization.tagName,
+            toolCallCount: sanitization.toolCallCount,
+          });
+          debugLogger.warn('Sanitized a model protocol tag', {
+            model: event.model,
+            promptId: event.prompt_id,
+            responseId: event.response_id,
+            tagName: event.tag_name,
+            handling: event.handling,
+            toolCallCount: event.tool_call_count,
+          });
+          logProtocolTagSanitized(this.config.cliConfig, event);
+        }
+
         // Stage 2b: Filter empty responses to avoid downstream issues
         if (
           response.candidates?.[0]?.content?.parts?.length === 0 &&
@@ -550,6 +573,13 @@ export class ContentGenerationPipeline {
             yield response;
           }
         }
+      }
+
+      if (context.pendingThinkingTagCandidate) {
+        throw new InvalidStreamError(
+          'Model response leaked thinking tags.',
+          'PROTOCOL_TAG_LEAK',
+        );
       }
 
       // Stage 2d: If there's still a pending finish response at the end
@@ -941,7 +971,11 @@ export class ContentGenerationPipeline {
       context: RequestContext,
     ) => Promise<T>,
   ): Promise<T> {
-    const context = this.createRequestContext(request, isStreaming);
+    const context = this.createRequestContext(
+      request,
+      isStreaming,
+      userPromptId,
+    );
 
     try {
       const openaiRequest = await this.buildRequest(
@@ -983,6 +1017,7 @@ export class ContentGenerationPipeline {
   private createRequestContext(
     request: GenerateContentParameters,
     isStreaming: boolean,
+    userPromptId: string,
   ): RequestContext {
     const effectiveModel = request.model || this.contentGeneratorConfig.model;
     const providerOverrides =
@@ -999,6 +1034,7 @@ export class ContentGenerationPipeline {
 
     return {
       model: effectiveModel,
+      userPromptId,
       modalities: this.contentGeneratorConfig.modalities ?? {},
       startTime: Date.now(),
       splitToolMedia:

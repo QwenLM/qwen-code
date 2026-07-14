@@ -27,6 +27,7 @@ import {
   MAX_STREAM_IDLE_TIMEOUT_MS,
   QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
 } from './constants.js';
+import { logProtocolTagSanitized } from '../../telemetry/loggers.js';
 
 // Mock dependencies
 vi.mock('./converter.js', () => ({
@@ -38,6 +39,9 @@ vi.mock('./converter.js', () => ({
   },
 }));
 vi.mock('openai');
+vi.mock('../../telemetry/loggers.js', () => ({
+  logProtocolTagSanitized: vi.fn(),
+}));
 
 describe('ContentGenerationPipeline', () => {
   let pipeline: ContentGenerationPipeline;
@@ -1650,6 +1654,131 @@ describe('ContentGenerationPipeline', () => {
       // Assert
       expect(results).toHaveLength(1); // Empty response should be filtered out
       expect(results[0]).toBe(mockValidResponse);
+    });
+
+    it('logs a protocol tag sanitization marker exactly once', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const finishChunk = {
+        id: 'response-id',
+        choices: [{ delta: {}, finish_reason: 'tool_calls' }],
+      } as OpenAI.Chat.ChatCompletionChunk;
+      const usageChunk = {
+        id: 'response-id',
+        choices: [],
+        usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield finishChunk;
+          yield usageChunk;
+        },
+      };
+      const finishResponse = new GenerateContentResponse();
+      finishResponse.responseId = 'response-id';
+      finishResponse.candidates = [
+        {
+          content: {
+            parts: [
+              {
+                functionCall: { id: 'call-1', name: 'read_file', args: {} },
+              },
+            ],
+            role: 'model',
+          },
+          finishReason: FinishReason.STOP,
+        },
+      ];
+      const usageResponse = new GenerateContentResponse();
+      usageResponse.responseId = 'response-id';
+      usageResponse.candidates = [];
+      usageResponse.usageMetadata = {
+        promptTokenCount: 1,
+        candidatesTokenCount: 2,
+        totalTokenCount: 3,
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock)
+        .mockImplementationOnce((_chunk, context) => {
+          context.protocolTagSanitized = {
+            tagName: 'think',
+            toolCallCount: 1,
+          };
+          return finishResponse;
+        })
+        .mockReturnValueOnce(usageResponse);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+      for await (const _ of resultGenerator) {
+        // Consume the stream so the trailing usage chunk is processed.
+      }
+
+      expect(logProtocolTagSanitized).toHaveBeenCalledTimes(1);
+      expect(logProtocolTagSanitized).toHaveBeenCalledWith(
+        mockCliConfig,
+        expect.objectContaining({
+          model: 'test-model',
+          prompt_id: 'test-prompt-id',
+          response_id: 'response-id',
+          tag_name: 'think',
+          handling: 'suppress_standalone_closing_tag',
+          tool_call_count: 1,
+        }),
+      );
+    });
+
+    it('rejects an unresolved thinking-tag candidate at clean stream EOF', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'response-id',
+            choices: [{ delta: { content: '</think>' }, finish_reason: null }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+      const emptyResponse = new GenerateContentResponse();
+      emptyResponse.candidates = [
+        { content: { parts: [], role: 'model' }, index: 0 },
+      ];
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+        (_chunk, context) => {
+          context.pendingThinkingTagCandidate = {
+            text: '</think>',
+            closingTagName: 'think',
+          };
+          return emptyResponse;
+        },
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+
+      await expect(async () => {
+        for await (const _ of resultGenerator) {
+          // Consume until EOF validation runs.
+        }
+      }).rejects.toMatchObject({ type: 'PROTOCOL_TAG_LEAK' });
+      expect(logProtocolTagSanitized).not.toHaveBeenCalled();
     });
 
     it('should handle streaming errors and reset tool calls', async () => {

@@ -25,6 +25,7 @@ import {
   IdeConnectionType,
   HookCallEvent,
   SkillLaunchEvent,
+  ProtocolTagSanitizedEvent,
 } from '../types.js';
 import type { RumEvent, RumPayload } from './event-types.js';
 
@@ -359,6 +360,39 @@ describe('QwenLogger', () => {
   });
 
   describe('event handlers', () => {
+    it('logs protocol tag sanitization without model content', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+      const event = new ProtocolTagSanitizedEvent({
+        model: 'test-model',
+        promptId: 'prompt-id',
+        responseId: 'response-id',
+        tagName: 'thinking',
+        toolCallCount: 3,
+      });
+
+      logger.logProtocolTagSanitizedEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event_type: 'action',
+          type: 'misc',
+          name: 'protocol_tag_sanitized',
+          properties: {
+            model: 'test-model',
+            prompt_id: 'prompt-id',
+            response_id: 'response-id',
+            tag_name: 'thinking',
+            handling: 'suppress_standalone_closing_tag',
+            tool_call_count: 3,
+          },
+        }),
+      );
+      expect(JSON.stringify(enqueueSpy.mock.calls[0])).not.toMatch(
+        /response_text|reasoning|tool_name|arguments/,
+      );
+    });
+
     it('should log IDE connection events', () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
       const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
