@@ -1501,6 +1501,7 @@ export function convertOpenAIChunkToGemini(
       requestContext.pendingThinkingTagCandidate?.closingTagName
     ) {
       if (
+        choice.finish_reason !== 'tool_calls' ||
         completedToolCalls.length === 0 ||
         toolCallWithoutName ||
         toolCallsTruncated ||

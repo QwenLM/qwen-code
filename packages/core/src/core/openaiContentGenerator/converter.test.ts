@@ -595,6 +595,20 @@ describe('OpenAIContentConverter', () => {
       expect(stream.protocolTagSanitized).toBeUndefined();
     });
 
+    it.each(['stop', 'length', 'content_filter', 'unknown'])(
+      'rejects recovery when the stream finishes with %s',
+      (finishReason) => {
+        const stream = withStreamParser();
+        emitReasoning(stream);
+        emitToolCall(stream, '</think>');
+
+        expect(() => finishStream(stream, finishReason)).toThrowError(
+          expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+        );
+        expect(stream.protocolTagSanitized).toBeUndefined();
+      },
+    );
+
     it('rejects visible content after a deferred closing thinking tag', () => {
       const stream = withStreamParser();
       emitReasoning(stream);

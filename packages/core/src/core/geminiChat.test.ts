@@ -1892,6 +1892,17 @@ describe('GeminiChat', async () => {
     );
 
     it('sanitizes a standalone closing thinking tag without retrying valid tool calls', async () => {
+      const recordAssistantTurn = vi.fn();
+      const chatWithRecording = new GeminiChat(
+        mockConfig,
+        config,
+        [],
+        {
+          recordAssistantTurn,
+          recordChatCompression: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
       const create = vi.fn().mockImplementation(async () =>
         (async function* () {
           yield {
@@ -1938,7 +1949,7 @@ describe('GeminiChat', async () => {
         authType: AuthType.USE_OPENAI,
       });
 
-      const stream = await chat.sendMessageStream(
+      const stream = await chatWithRecording.sendMessageStream(
         'test-model',
         { message: 'test' },
         'prompt-id-sanitized-protocol-tag',
@@ -1968,6 +1979,13 @@ describe('GeminiChat', async () => {
         functionCall: { id: 'call_read', name: 'read_file', args: {} },
       });
       expect(parts.some((part) => part.text?.includes('</think>'))).toBe(false);
+      expect(JSON.stringify(chatWithRecording.getHistory())).not.toContain(
+        '</think>',
+      );
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(
+        JSON.stringify(recordAssistantTurn.mock.calls[0]?.[0].message),
+      ).not.toContain('</think>');
     });
 
     it('falls back to coerced totalTokenCount when promptTokenCount is hostile', async () => {
