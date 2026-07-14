@@ -427,6 +427,57 @@ describe('ExtensionsManagerPage', () => {
     ).toBe('');
   });
 
+  it('submits a marketplace plugin selection while installing', async () => {
+    actions.installExtension.mockResolvedValue({
+      accepted: true,
+      operationId: 'op-marketplace',
+    });
+    actions.extensionOperationStatus
+      .mockResolvedValueOnce({
+        v: 1,
+        operationId: 'op-marketplace',
+        operation: 'install',
+        status: 'waiting_for_input',
+        createdAt: 1,
+        updatedAt: 2,
+        interaction: {
+          id: 'interaction-marketplace',
+          kind: 'marketplace_plugin',
+          marketplace: { name: 'Example Marketplace' },
+          plugins: [
+            {
+              name: 'example-plugin',
+              description: 'Example plugin description',
+            },
+          ],
+        },
+      })
+      .mockResolvedValueOnce({
+        v: 1,
+        operationId: 'op-marketplace',
+        operation: 'install',
+        status: 'succeeded',
+        createdAt: 1,
+        updatedAt: 3,
+      });
+    actions.respondToExtensionInteraction.mockResolvedValue({ accepted: true });
+    await mount();
+
+    await startInstall();
+    expect(document.body.textContent).toContain('Example plugin description');
+    click(document.querySelector('[role="radio"]') ?? undefined);
+    click(buttonIncluding('Install'));
+    await flush();
+
+    expect(actions.respondToExtensionInteraction).toHaveBeenCalledWith(
+      'op-marketplace',
+      'interaction-marketplace',
+      { pluginName: 'example-plugin' },
+      'client-1',
+    );
+    expect(actions.extensionOperationStatus).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps polling while an interaction is waiting', async () => {
     vi.useFakeTimers();
     actions.installExtension.mockResolvedValue({
@@ -619,6 +670,7 @@ describe('ExtensionsManagerPage', () => {
 
     const card = document.querySelector('[data-slot="card"]');
     expect(card?.getAttribute('role')).toBe('button');
+    expect(card?.getAttribute('aria-label')).toBe('Demo');
     act(() => {
       card?.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),

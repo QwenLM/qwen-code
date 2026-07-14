@@ -3986,6 +3986,31 @@ describe('createServeApp', () => {
           });
           interactionId = poll.body.interaction.id as string;
         });
+        const invalidSetting = await request(app)
+          .post(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              res.body.operationId as string,
+            )}/interactions/${encodeURIComponent(interactionId)}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ value: 123 });
+        expect(invalidSetting.status).toBe(400);
+
+        const stillWaiting = await request(app)
+          .get(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              res.body.operationId as string,
+            )}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(stillWaiting.body).toMatchObject({
+          status: 'waiting_for_input',
+          interaction: { id: interactionId, kind: 'setting' },
+        });
+
         const answer = await request(app)
           .post(
             `/workspace/extensions/operations/${encodeURIComponent(
@@ -4717,6 +4742,12 @@ describe('createServeApp', () => {
         await vi.waitFor(() => {
           expect(bridge.extensionEvents.length).toBeGreaterThanOrEqual(3);
         });
+        const activeAfterCompletion = await request(app)
+          .get('/workspace/extensions/operations')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(activeAfterCompletion.status).toBe(200);
+        expect(activeAfterCompletion.body.operations).toEqual([]);
       } finally {
         releaseInstall?.();
         restore();
@@ -6156,6 +6187,106 @@ describe('createServeApp', () => {
       }
     });
 
+    it('accepts a setting interaction while updating', async () => {
+      let submittedSetting: string | undefined;
+      const restore = mockExtensionManagerMethods({
+        async prepareExtensionUpdate(extension) {
+          const manager = this as unknown as {
+            requestSetting?: (setting: {
+              name: string;
+              description: string;
+              envVar: string;
+              sensitive?: boolean;
+            }) => Promise<string>;
+          };
+          submittedSetting = await manager.requestSetting?.({
+            name: 'Updated API key',
+            description: 'API key required by the new version',
+            envVar: 'UPDATED_API_KEY',
+            sensitive: true,
+          });
+          return {
+            ...extension,
+            config: { ...extension.config, version: '1.2.4' },
+            version: '1.2.4',
+          } as Extension;
+        },
+      });
+      const checkForExtensionUpdate = vi
+        .spyOn(qwenCore, 'checkForExtensionUpdate')
+        .mockResolvedValue(ExtensionUpdateState.UPDATE_AVAILABLE);
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const update = await request(app)
+          .post('/workspace/extensions/test-ext/update')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({});
+        expect(update.status).toBe(202);
+
+        let interactionId = '';
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(
+              `/workspace/extensions/operations/${encodeURIComponent(
+                update.body.operationId as string,
+              )}`,
+            )
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body).toMatchObject({
+            operation: 'update',
+            status: 'waiting_for_input',
+            interaction: {
+              kind: 'setting',
+              setting: { name: 'Updated API key', sensitive: true },
+            },
+          });
+          interactionId = poll.body.interaction.id as string;
+        });
+
+        const answer = await request(app)
+          .post(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              update.body.operationId as string,
+            )}/interactions/${encodeURIComponent(interactionId)}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ value: 'updated-secret' });
+        expect(answer.status).toBe(200);
+
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(
+              `/workspace/extensions/operations/${encodeURIComponent(
+                update.body.operationId as string,
+              )}`,
+            )
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body).toMatchObject({
+            operation: 'update',
+            status: 'succeeded',
+            result: { status: 'updated', name: 'test-ext' },
+          });
+        });
+        expect(submittedSetting).toBe('updated-secret');
+      } finally {
+        checkForExtensionUpdate.mockRestore();
+        restore();
+      }
+    });
+
     it('broadcasts failed extension update when the extension is missing', async () => {
       const restore = mockExtensionManagerMethods({
         getLoadedExtensions: () => [],
@@ -6266,20 +6397,20 @@ describe('createServeApp', () => {
 
     it('queues extension uninstall without a workspace client id', async () => {
       const restore = mockExtensionManagerMethods();
-      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
-      const bridge = fakeBridge();
-      const app = createServeApp(
-        { ...tokenOpts, workspace: WS_BOUND },
-        undefined,
-        { bridge },
-      );
-
-      const res = await request(app)
-        .delete('/workspace/extensions/test-ext')
-        .set('Host', `127.0.0.1:${tokenOpts.port}`)
-        .set('Authorization', 'Bearer secret');
-
       try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .delete('/workspace/extensions/test-ext')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+
         expect(res.status).toBe(202);
         await vi.waitFor(() => {
           expect(bridge.extensionEvents.at(-1)).toMatchObject({

@@ -4032,6 +4032,41 @@ describe('DaemonClient', () => {
       expect(calls[0]?.body).toBe(JSON.stringify({ cancelled: true }));
       expect(result).toEqual({ accepted: true });
     });
+
+    it('routes extension operation recovery and interaction responses through REST', async () => {
+      const { fetch, calls } = recordingFetch((req) =>
+        req.method === 'GET'
+          ? jsonResponse(200, { v: 1, operations: [] })
+          : jsonResponse(200, { accepted: true }),
+      );
+      const transportFetch = vi.fn(async () =>
+        jsonResponse(500, { error: 'transport should not be used' }),
+      );
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+
+      await client.activeExtensionOperations();
+      await client.respondToExtensionInteraction(
+        'op-1',
+        'interaction-1',
+        { cancelled: true },
+        'client-1',
+      );
+
+      expect(calls.map((call) => call.method)).toEqual(['GET', 'POST']);
+      expect(transportFetch).not.toHaveBeenCalled();
+    });
   });
 
   describe('extension management v2', () => {

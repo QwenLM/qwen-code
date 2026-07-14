@@ -39,7 +39,8 @@ describe('extensions manager logic', () => {
   ];
 
   it('filters by name, display name, and description', () => {
-    expect(filterExtensions(extensions, 'GSD')).toEqual([extensions[0]]);
+    expect(filterExtensions(extensions, 'gsd-core')).toEqual([extensions[0]]);
+    expect(filterExtensions(extensions, 'Core')).toEqual([extensions[0]]);
     expect(filterExtensions(extensions, 'automation')).toEqual([extensions[1]]);
   });
 

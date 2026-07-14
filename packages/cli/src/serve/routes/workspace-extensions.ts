@@ -33,6 +33,7 @@ import type {
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 import {
   createExtensionsController,
+  redactExtensionDisplaySource,
   type ExtensionPendingInteraction,
   type ExtensionOperationContext,
   type ExtensionsController,
@@ -139,19 +140,6 @@ const validateExtensionSourceMetadata = (
       : parsed.protocol === 'https:' || parsed.protocol === 'ssh:') &&
     !isBlockedAuthProviderHost(parsed.hostname)
   );
-};
-
-const redactExtensionDisplaySource = (source: string): string => {
-  const redacted = redactUrlCredentials(source);
-  if (/^[A-Za-z]:[\\/]/.test(redacted)) return redacted;
-  try {
-    const url = new URL(redacted);
-    url.search = '';
-    url.hash = '';
-    return url.toString();
-  } catch {
-    return redacted;
-  }
 };
 
 const findLoadedExtension = (
@@ -1143,6 +1131,12 @@ export function registerWorkspaceExtensionRoutes(
                   undefined,
                   extensionInteractionHandlers(ctrl, operationId),
                 ),
+              onSettled: (operationId) => {
+                cancelPendingExtensionInteraction(
+                  operationId,
+                  'Extension operation ended',
+                );
+              },
               deadlineMs: EXTENSION_INTERACTIVE_PREPARE_DEADLINE_MS,
               ...globalReconciliationOptions(),
             },

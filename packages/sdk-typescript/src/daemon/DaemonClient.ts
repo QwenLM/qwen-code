@@ -998,6 +998,7 @@ export class DaemonClient {
     return await this.jsonRequest<ExtensionActiveOperations>(
       '/workspace/extensions/operations',
       'GET /workspace/extensions/operations',
+      { mode: 'rest' },
     );
   }
 
@@ -1010,7 +1011,7 @@ export class DaemonClient {
     return await this.jsonRequest<ExtensionInteractionResponseResult>(
       `/workspace/extensions/operations/${urlEncode(operationId)}/interactions/${urlEncode(interactionId)}`,
       'POST /workspace/extensions/operations/:operationId/interactions/:interactionId',
-      { method: 'POST', body: response, clientId },
+      { method: 'POST', body: response, clientId, mode: 'rest' },
     );
   }
 

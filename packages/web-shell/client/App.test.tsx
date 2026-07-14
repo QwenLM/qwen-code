@@ -593,6 +593,7 @@ vi.doMock('./components/extensions/ExtensionsManagerPage', async () => {
   const React = await import('react');
   return {
     ExtensionsManagerPage: (props: {
+      onClose: () => void;
       initialFocusRef?: React.Ref<HTMLHeadingElement>;
     }) =>
       React.createElement(
@@ -609,6 +610,7 @@ vi.doMock('./components/extensions/ExtensionsManagerPage', async () => {
         ),
         React.createElement('button', {
           'data-testid': 'extensions-manager-back',
+          onClick: props.onClose,
         }),
       ),
   };
@@ -1511,6 +1513,20 @@ describe('App session callbacks', () => {
     expect(document.activeElement).toBe(
       container.querySelector('[data-testid="extensions-manager-heading"]'),
     );
+
+    editorFocus.mockClear();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="extensions-manager-back"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="extensions-manager-page"]'),
+    ).toBeNull();
+    expect(editorFocus).toHaveBeenCalled();
   });
 
   it('auto-closes an open panel when an AskUserQuestion approval becomes pending', async () => {

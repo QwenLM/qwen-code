@@ -35,6 +35,20 @@ const MAX_UNFINISHED_EXTENSION_OPERATIONS = 10;
 
 const sanitizeDaemonMessage = (message: string): string =>
   redactUrlCredentials(stripAnsiAndControl(message));
+
+export const redactExtensionDisplaySource = (source: string): string => {
+  const redacted = redactUrlCredentials(source);
+  if (/^[A-Za-z]:[\\/]/.test(redacted)) return redacted;
+  try {
+    const url = new URL(redacted);
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return redacted;
+  }
+};
+
 const EXTENSION_PREPARATION_CONCURRENCY = 2;
 const EXTENSION_REFRESH_TIMEOUT_MS = 30_000;
 const RECONCILE_SLOW_MS = 30_000;
@@ -298,18 +312,6 @@ export function createExtensionsController(
     operation.status !== 'queued' &&
     operation.status !== 'running' &&
     operation.status !== 'waiting_for_input';
-  const redactExtensionDisplaySource = (source: string): string => {
-    const redacted = redactUrlCredentials(source);
-    if (/^[A-Za-z]:[\\/]/.test(redacted)) return redacted;
-    try {
-      const url = new URL(redacted);
-      url.search = '';
-      url.hash = '';
-      return url.toString();
-    } catch {
-      return redacted;
-    }
-  };
   const redactExtensionOperationResult = (
     event: ExtensionMutationEvent,
   ): ExtensionMutationEvent => ({

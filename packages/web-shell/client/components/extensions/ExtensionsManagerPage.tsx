@@ -1340,6 +1340,7 @@ export function ExtensionsManagerPage({
                   size="sm"
                   role="button"
                   tabIndex={0}
+                  aria-label={extensionTitle(extension)}
                   className="cursor-pointer transition-colors hover:bg-accent/30 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
                   onClick={() => setSelectedName(extension.name)}
                   onKeyDown={(event) => {
