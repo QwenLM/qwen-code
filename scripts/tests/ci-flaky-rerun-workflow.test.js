@@ -26,6 +26,11 @@ describe('ci flaky rerun workflow', () => {
     );
     expect(classifier.env).toEqual({ GH_TOKEN: '', GITHUB_TOKEN: '' });
     expect(JSON.stringify(classifier)).not.toContain('CI_BOT_PAT');
+    expect(yml.jobs.act.permissions).toEqual({
+      actions: 'read',
+      contents: 'read',
+      'pull-requests': 'read',
+    });
     expect(JSON.stringify(yml.jobs.act)).toContain('CI_BOT_PAT');
   });
 

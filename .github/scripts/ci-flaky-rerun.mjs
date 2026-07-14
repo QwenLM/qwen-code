@@ -333,8 +333,9 @@ async function scan(args) {
       input = { target: { ...candidate, runAttempt }, log };
       break;
     } catch (error) {
+      const stderr = error.stderr ? `\n${String(error.stderr).trim()}` : '';
       process.stderr.write(
-        `scan: skipping PR ${candidate.prNumber}: ${error.message}\n`,
+        `scan: skipping PR ${candidate.prNumber}: ${error.message}${stderr}\n`,
       );
     }
   }

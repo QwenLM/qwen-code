@@ -179,6 +179,13 @@ describe('ci flaky rerun patrol', () => {
         currentPr: async () => ({
           ...pr(),
           state: 'OPEN',
+          headRefOid: 'newcommit456',
+        }),
+      }),
+      client({
+        currentPr: async () => ({
+          ...pr(),
+          state: 'OPEN',
           statusCheckRollup: [
             run({
               status: 'IN_PROGRESS',
@@ -197,6 +204,14 @@ describe('ci flaky rerun patrol', () => {
           conclusion: 'success',
           head_sha: 'abc123',
           run_attempt: 2,
+        }),
+      }),
+      client({
+        run: async () => ({
+          status: 'completed',
+          conclusion: 'failure',
+          head_sha: 'abc123',
+          run_attempt: 3,
         }),
       }),
     ];
@@ -236,5 +251,17 @@ describe('ci flaky rerun patrol', () => {
     ]) {
       expect(evidence).not.toContain(secret);
     }
+  });
+
+  it('bounds classifier evidence to 200 lines of 500 characters', () => {
+    const evidence = skillLog(
+      [
+        ...Array.from({ length: 201 }, (_, i) => `line-${i}`),
+        'x'.repeat(600),
+      ].join('\n'),
+    ).split('\n');
+    expect(evidence).toHaveLength(200);
+    expect(evidence[0]).toBe('line-2');
+    expect(evidence.at(-1)).toHaveLength(500);
   });
 });
