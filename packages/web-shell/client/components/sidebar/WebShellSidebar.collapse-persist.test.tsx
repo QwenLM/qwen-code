@@ -4,9 +4,6 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 
-const COLLAPSED_SESSION_SECTIONS_STORAGE_KEY =
-  'qwen-code-web-shell-collapsed-session-groups';
-
 const { connection, workspace, workspaceActions, active, pinned, archived } =
   vi.hoisted(() => {
     const makeSessions = () => ({
@@ -87,7 +84,8 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
 }));
 
 const { I18nProvider } = await import('../../i18n');
-const { WebShellSidebar } = await import('./WebShellSidebar');
+const { COLLAPSED_SESSION_SECTIONS_STORAGE_KEY, WebShellSidebar } =
+  await import('./WebShellSidebar');
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 if (!globalThis.PointerEvent) {
@@ -283,5 +281,74 @@ describe('WebShellSidebar collapsed session group persistence', () => {
 
     expect(groupHeader('Backend').getAttribute('aria-expanded')).toBe('true');
     expect(container.textContent).toContain('API review');
+  });
+
+  it('tolerates corrupt localStorage data', async () => {
+    window.localStorage.setItem(
+      COLLAPSED_SESSION_SECTIONS_STORAGE_KEY,
+      'not valid json',
+    );
+
+    renderSidebar();
+    await flushSidebar();
+
+    expect(groupHeader('Backend').getAttribute('aria-expanded')).toBe('true');
+    expect(container.textContent).toContain('API review');
+  });
+
+  it('ignores non-array localStorage payloads', async () => {
+    window.localStorage.setItem(
+      COLLAPSED_SESSION_SECTIONS_STORAGE_KEY,
+      JSON.stringify({ group: 'group-1' }),
+    );
+
+    renderSidebar();
+    await flushSidebar();
+
+    expect(groupHeader('Backend').getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('does not crash when localStorage.setItem throws', async () => {
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('quota exceeded');
+    });
+
+    renderSidebar();
+    await flushSidebar();
+    act(() => click(groupHeader('Backend')));
+    await flushSidebar();
+
+    expect(groupHeader('Backend').getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('auto-collapses a brand-new section that appears mid-session', async () => {
+    renderSidebar();
+    await flushSidebar();
+    expect(groupHeader('Backend').getAttribute('aria-expanded')).toBe('true');
+    expect(container.querySelector('section[aria-label="Red"]')).toBeNull();
+
+    // Keep the same React root so the first-catalog latch stays flipped.
+    // Color sections are derived from the session list, so tagging a session
+    // mid-session invents a new `color:red` section id.
+    active.sessions = [
+      makeSession('session-a', {
+        displayName: 'API review',
+        groupId: 'group-1',
+      }),
+      makeSession('session-b', {
+        displayName: 'Release notes',
+        groupId: null,
+        color: 'red',
+      }),
+    ];
+    renderSidebar();
+    await flushSidebar();
+
+    const redHeader = groupHeader('Red');
+    expect(redHeader.getAttribute('aria-expanded')).toBe('false');
+    expect(
+      container.querySelector('section[aria-label="Red"]')?.textContent,
+    ).not.toContain('Release notes');
+    expect(groupHeader('Backend').getAttribute('aria-expanded')).toBe('true');
   });
 });

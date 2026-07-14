@@ -89,7 +89,7 @@ import styles from './WebShellSidebar.module.css';
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
 // Same `qwen-code-web-shell-*` prefix as sidebar width / chat width / theme.
 // App-wide JSON array of collapsed section ids (`group:<id>`, `recent`, `color:<name>`).
-const COLLAPSED_SESSION_SECTIONS_STORAGE_KEY =
+export const COLLAPSED_SESSION_SECTIONS_STORAGE_KEY =
   'qwen-code-web-shell-collapsed-session-groups';
 const SIDEBAR_DEFAULT_WIDTH = 260;
 const SIDEBAR_MIN_WIDTH = 220;
@@ -561,6 +561,11 @@ export function WebShellSidebar({
     Set<string>
   >(() => readCollapsedSessionSectionIds());
   const knownSessionSectionIdsRef = useRef<Set<string>>(new Set());
+  // Dedicated first-sync latch: do NOT infer initial catalog from
+  // knownSessionSectionIdsRef.size === 0. If a future change seeds that set
+  // before this effect, a size check would falsely treat the first sync as a
+  // mid-session update and auto-collapse every restored expanded section.
+  const awaitingInitialSessionCatalogRef = useRef(true);
   const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
   const [projectExpanded, setProjectExpanded] = useState(false);
   const [projectsExpanded, setProjectsExpanded] = useState(true);
@@ -1974,8 +1979,9 @@ export function WebShellSidebar({
     if (unseenIds.length === 0) return;
     // First catalog sync: register ids only. Restored localStorage (or the
     // empty default) owns expand/collapse; auto-collapse would otherwise wipe
-    // expanded sections on every remount because the known set resets.
-    const isInitialCatalog = knownSessionSectionIdsRef.current.size === 0;
+    // expanded sections on every remount.
+    const isInitialCatalog = awaitingInitialSessionCatalogRef.current;
+    awaitingInitialSessionCatalogRef.current = false;
     for (const id of unseenIds) knownSessionSectionIdsRef.current.add(id);
     if (isInitialCatalog) return;
     // Brand-new sections that appear mid-session still start collapsed.
