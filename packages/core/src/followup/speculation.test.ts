@@ -100,7 +100,10 @@ describe('startSpeculation', () => {
     await abortSpeculation(state);
   });
 
-  it('encodes soft tool failures as error responses', async () => {
+  it.each([
+    { callId: 'call_timeout', description: 'with an id' },
+    { callId: undefined, description: 'without an id' },
+  ])('encodes soft tool failures $description', async ({ callId }) => {
     const execute = vi.fn().mockResolvedValue({
       llmContent: 'Command timed out.\npartial output',
       returnDisplay: 'partial output',
@@ -132,7 +135,7 @@ describe('startSpeculation', () => {
                   parts: [
                     {
                       functionCall: {
-                        id: 'call_timeout',
+                        ...(callId ? { id: callId } : {}),
                         name: 'read_file',
                         args: { path: 'a.ts' },
                       },
@@ -150,7 +153,11 @@ describe('startSpeculation', () => {
     await vi.waitFor(() => expect(state.status).toBe('completed'));
 
     const response = state.messages[2].parts?.[0].functionResponse;
-    expect(response?.id).toBe('call_timeout');
+    if (callId) {
+      expect(response?.id).toBe(callId);
+    } else {
+      expect(response).not.toHaveProperty('id');
+    }
     expect(response?.response).toEqual({
       error: 'Command timed out.\npartial output',
     });

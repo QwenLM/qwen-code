@@ -324,7 +324,7 @@ async function runSpeculativeLoop(
           );
           state.toolUseCount++;
 
-          const responseParts = result.error
+          const convertedResponseParts = result.error
             ? convertToFunctionErrorResponse(
                 name,
                 id ?? '',
@@ -332,13 +332,16 @@ async function runSpeculativeLoop(
                 result.error.message,
               )
             : convertToFunctionResponse(name, id ?? '', result.llmContent);
-          if (!id) {
-            for (const responsePart of responseParts) {
-              if (responsePart.functionResponse) {
-                delete responsePart.functionResponse.id;
-              }
-            }
-          }
+          const responseParts = id
+            ? convertedResponseParts
+            : convertedResponseParts.map((responsePart) => {
+                if (!responsePart.functionResponse) {
+                  return responsePart;
+                }
+                const { id: _id, ...functionResponse } =
+                  responsePart.functionResponse;
+                return { ...responsePart, functionResponse };
+              });
           functionResponses.push(...responseParts);
         } catch (error: unknown) {
           functionResponses.push({
