@@ -125,7 +125,7 @@ describe('standalone-update', () => {
   describe('ensureBinWrapper', () => {
     it('uses an independent launcher wait budget in the deferred Windows swap script', () => {
       const source = fs.readFileSync(
-        new URL('./standalone-update.ts', import.meta.url),
+        path.resolve('src/utils/standalone-update.ts'),
         'utf8',
       );
 
