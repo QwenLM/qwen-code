@@ -184,7 +184,7 @@ export async function startInteractiveUI(
     );
   };
 
-  const useVP = settings.merged.ui?.useTerminalBuffer ?? false;
+  const useVP = settings.merged.ui?.useTerminalBuffer ?? true;
   const instance = render(
     process.env['DEBUG'] ? (
       <React.StrictMode>

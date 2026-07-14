@@ -151,7 +151,7 @@ export function useMouseEvents(
   // pass `bypassVpGate` to opt in. This keeps the non-VP transcript scrollable
   // no matter how many click/hover subscribers are added later.
   const settings = useContext(SettingsContext);
-  const isVpMode = settings?.merged.ui?.useTerminalBuffer ?? false;
+  const isVpMode = settings?.merged.ui?.useTerminalBuffer ?? true;
   const vpGateOpen = isVpMode || bypassVpGate;
 
   const handlerRef = useRef(handler);

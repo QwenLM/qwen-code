@@ -180,9 +180,12 @@ function ScrollableList<T>(
     [scheduleScrollFlush, cancelPendingScroll],
   );
 
-  // The VP viewport owns the wheel (this IS the in-app scroller), so opt out
-  // of the VP gate — though in practice ScrollableList only mounts in VP mode.
-  useMouseEvents(handleMouseEvent, { isActive: hasFocus, bypassVpGate: true });
+  // ScrollableList only mounts inside the VP-mode branch of MainContent, so
+  // the useMouseEvents VP gate (`isVpMode`) is already satisfied — no need for
+  // bypassVpGate. Omitting it keeps the hook's behavior purely data-driven by
+  // the setting, and avoids enabling mouse tracking in any hypothetical non-VP
+  // context where ScrollableList might be reused.
+  useMouseEvents(handleMouseEvent, { isActive: hasFocus });
 
   // ScrollableList is a thin keyboard / mouse wrapper around VirtualizedList.
   // The previous outer <Box flexGrow={1}> wrapper carried a never-read
