@@ -128,8 +128,7 @@ describe('no-AK integration CI wiring', () => {
     const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
 
     expect(webShellJob).toContain('ubuntu_runner');
-    expect(webShellJob).toContain(
-      "if: \"${{ runner.environment == 'self-hosted' }}\"\n        run: 'npx playwright install chromium'",
-    );
+    expect(webShellJob).toContain("run: 'npx playwright install chromium'");
+    expect(webShellJob).toContain('--with-deps chromium');
   });
 });
