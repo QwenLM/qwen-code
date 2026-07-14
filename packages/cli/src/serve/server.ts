@@ -113,6 +113,7 @@ import {
 import {
   createDaemonWorkspaceService,
   type DaemonWorkspaceService,
+  type DaemonWorkspaceServiceDeps,
 } from './workspace-service/index.js';
 import { registerCapabilitiesRoutes } from './routes/capabilities.js';
 import {
@@ -197,6 +198,10 @@ import {
   registerWorkspaceQualifiedToolsRoutes,
   registerWorkspaceToolsRoutes,
 } from './routes/workspace-tools.js';
+import {
+  registerWorkspaceQualifiedSkillsRoutes,
+  registerWorkspaceSkillsRoutes,
+} from './routes/workspace-skills.js';
 import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
 import {
   parseChannelWebhookConfigLenient,
@@ -427,6 +432,7 @@ export interface ServeAppDeps {
     toolName: string,
     enabled: boolean,
   ) => Promise<void>;
+  persistDisabledSkills?: DaemonWorkspaceServiceDeps['persistDisabledSkills'];
   contextFilename?: string;
   persistSetting?: (
     workspace: string,
@@ -804,6 +810,13 @@ export function createServeApp(
         (async () => {
           throw new Error(
             'setWorkspaceToolEnabled requires persistDisabledTools in ServeAppDeps',
+          );
+        }),
+      persistDisabledSkills:
+        deps.persistDisabledSkills ??
+        (async () => {
+          throw new Error(
+            'setWorkspaceSkillEnabled requires persistDisabledSkills in ServeAppDeps',
           );
         }),
       queryWorkspaceStatus: (method, idle) =>
@@ -1449,6 +1462,20 @@ export function createServeApp(
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
   registerWorkspaceQualifiedToolsRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    sendBridgeError,
+  });
+  registerWorkspaceSkillsRoutes(app, {
+    workspaceRuntime: primaryRuntime,
+    mutate,
+    safeBody,
+    sendBridgeError,
+    parseAndValidateClientId: (req, res) =>
+      parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+  });
+  registerWorkspaceQualifiedSkillsRoutes(app, {
     workspaceRegistry,
     mutate,
     safeBody,

@@ -11345,6 +11345,71 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
+  it('refreshes busy skill sessions and reports per-session failures', async () => {
+    const bootstrapSettings = {
+      merged: {},
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    const cfg1 = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('skill-1'),
+    });
+    const cfg2 = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('skill-2'),
+    });
+    const refresh1 = vi.fn().mockResolvedValue(undefined);
+    const refresh2 = vi.fn().mockRejectedValue(new Error('client closed'));
+
+    vi.mocked(loadSettings).mockReturnValue(bootstrapSettings);
+    vi.mocked(loadCliConfig)
+      .mockResolvedValueOnce(cfg1 as unknown as Config)
+      .mockResolvedValueOnce(cfg2 as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      (id) =>
+        ({
+          getId: vi.fn().mockReturnValue(id),
+          getConfig: vi.fn().mockReturnValue(id === 'skill-1' ? cfg1 : cfg2),
+          isIdle: vi.fn().mockReturnValue(false),
+          refreshSkillsFromSettings: id === 'skill-1' ? refresh1 : refresh2,
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      bootstrapSettings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/skills', mcpServers: [] });
+    await agent.newSession({ cwd: '/skills', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh, {}),
+    ).resolves.toEqual({ sessionsRefreshed: 1, sessionsFailed: 1 });
+
+    expect(bootstrapSettings.reloadScopeFromDisk).toHaveBeenCalledWith(
+      SettingScope.Workspace,
+    );
+    expect(refresh1).toHaveBeenCalledOnce();
+    expect(refresh2).toHaveBeenCalledOnce();
+    expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+      'Session skill-2 skill refresh failed: Error: client closed',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('refreshes extension commands for the live session', async () => {
     const extensionManager = {
       refreshCache: vi.fn().mockResolvedValue(undefined),

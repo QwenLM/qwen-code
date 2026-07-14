@@ -47,6 +47,15 @@ describe('mapSkillConfigToStatus', () => {
     expect(status.name).toBe('internal');
   });
 
+  it('only emits userInvocable when manual invocation is disabled', () => {
+    expect(mapSkillConfigToStatus(makeSkill())).not.toHaveProperty(
+      'userInvocable',
+    );
+    expect(
+      mapSkillConfigToStatus(makeSkill({ userInvocable: false })),
+    ).toMatchObject({ userInvocable: false });
+  });
+
   it('marks a settings-disabled skill as disabled', () => {
     const status = mapSkillConfigToStatus(
       makeSkill({ name: 'internal' }),

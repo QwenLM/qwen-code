@@ -155,6 +155,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
   workspaceReload: 'qwen/control/workspace/reload',
+  workspaceSkillsRefresh: 'qwen/control/workspace/skills/refresh',
   workspaceExtensionsRefresh: 'qwen/control/workspace/extensions/refresh',
   /**
    * Reverse tool channel (issue #5626, Phase 2). Unlike every other entry
@@ -416,10 +417,16 @@ export interface ServeWorkspaceSkillStatus extends ServeStatusCell {
   description: string;
   level: ServeSkillLevel;
   modelInvocable: boolean;
+  userInvocable?: false;
   installedPath?: string;
   argumentHint?: string;
   model?: string;
   extensionName?: string;
+}
+
+export interface ServeWorkspaceSkillsRefreshResult {
+  sessionsRefreshed: number;
+  sessionsFailed: number;
 }
 
 export interface ServeWorkspaceSkillsStatus {
