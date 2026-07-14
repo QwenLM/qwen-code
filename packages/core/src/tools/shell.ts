@@ -2825,18 +2825,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
             type: ToolErrorType.SHELL_EXECUTE_ERROR,
           },
         }
-      : result.exitCode !== null && result.exitCode !== 0
-        ? {
-            error: {
-              // Schedulers use error.message as the model-facing response.
-              message:
-                typeof llmContent === 'string'
-                  ? llmContent
-                  : returnDisplayMessage,
-              type: ToolErrorType.SHELL_EXECUTE_ERROR,
-            },
-          }
-        : {};
+      : {};
 
     return {
       llmContent,
