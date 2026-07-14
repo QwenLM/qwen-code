@@ -916,7 +916,12 @@ describe('ShellTool', () => {
           expect(mockShellExecutionService).not.toHaveBeenCalled();
           expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
           expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
-          expect(result.llmContent).toContain('Command timed out after 5000ms');
+          expect(result.llmContent).toBe(
+            'Command timed out after 5000ms before it could complete. There was no output before it timed out.',
+          );
+          expect(result.returnDisplay).toBe(
+            'Command timed out after 5000ms before it could complete. There was no output before it timed out.',
+          );
           expect(result.error).toEqual({
             message: 'Command timed out after 5000ms before it could complete.',
             type: ToolErrorType.EXECUTION_TIMEOUT,

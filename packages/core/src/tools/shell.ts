@@ -1650,7 +1650,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
   ): ToolResult {
     if (getAbortReasonName(signal) === 'TimeoutError') {
       const message = `Command timed out after ${effectiveTimeout}ms before it could complete.`;
-      return this.sedEditError(message, ToolErrorType.EXECUTION_TIMEOUT);
+      const detail = `${message} There was no output before it timed out.`;
+      return {
+        llmContent: detail,
+        returnDisplay: detail,
+        error: {
+          message,
+          type: ToolErrorType.EXECUTION_TIMEOUT,
+        },
+      };
     }
     return {
       llmContent: 'Command was cancelled by user before it could complete.',
