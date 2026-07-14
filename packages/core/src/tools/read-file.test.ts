@@ -633,7 +633,11 @@ describe('ReadFileTool', () => {
         visionBridgeMocks.runVisionBridge.mockResolvedValue({
           applied: true,
           status: 'ok',
-          parts: [{ text: '[Untrusted transcription]\nPage 20: heading' }],
+          parts: [
+            {
+              text: '[Untrusted transcription]\nPage 20: heading\nPages 24-25 exist but were not transcribed; call read_file on the original PDF with a later page range to continue.',
+            },
+          ],
           convertedCount: 4,
           omittedCount: 0,
           modelId: 'qwen3-vl-plus',
@@ -649,6 +653,9 @@ describe('ReadFileTool', () => {
           'Untrusted transcription',
         );
         expect(JSON.stringify(result.llmContent)).toContain(
+          'Pages 24-25 exist but were not transcribed',
+        );
+        expect(JSON.stringify(result.llmContent)).not.toContain(
           'pages 24-25 were not included',
         );
         const display = bridgeDisplay(result);

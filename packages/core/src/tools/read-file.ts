@@ -367,7 +367,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     const candidate = result.pdfVisionBridgeCandidate;
     if (!candidate) return result;
 
-    const { imageParts, nonImageParts } = splitImageParts(result.llmContent);
+    const { imageParts } = splitImageParts(result.llmContent);
     if (imageParts.length === 0 || !hasImageParts(imageParts)) {
       debugLogger.debug('pdf vision bridge candidate contained no images');
       return this.restorePdfFallback(result, 'Vision bridge could not run.');
@@ -419,7 +419,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
         }
         return {
           ...result,
-          llmContent: [...bridgedParts, ...nonImageParts],
+          llmContent: bridgedParts,
           returnDisplay: `${result.returnDisplay} (${this.formatPdfBridgeRange(candidate, 'transcribed')})`,
           pdfVisionBridgeNotice: notice,
           pdfVisionBridgeCandidate: undefined,
