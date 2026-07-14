@@ -493,7 +493,7 @@ export async function updateSetting(
         newValue,
       );
       try {
-        await settingsStorage.setSecret(settingToUpdate.envVar, newValue);
+        await keychain.setSecret(settingToUpdate.envVar, newValue);
       } catch (error) {
         debugLogger.warn(
           `Failed to synchronize legacy extension setting "${settingToUpdate.envVar}": ${error instanceof Error ? error.message : String(error)}`,

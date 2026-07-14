@@ -1042,6 +1042,46 @@ describe('extensionSettings', () => {
       expect(await userKeychain.getSecret('VAR2')).toBe('new-value2');
     });
 
+    it('synchronizes legacy sensitive settings through the current backend', async () => {
+      const previousStorageOverride =
+        process.env['QWEN_CODE_FORCE_FILE_STORAGE'];
+      process.env['QWEN_CODE_FORCE_FILE_STORAGE'] = 'true';
+      try {
+        await maybePromptForSettings(
+          config,
+          '12345',
+          async () => 'initial-value2',
+          undefined,
+          undefined,
+          path.join(extensionDir, '.env'),
+        );
+      } finally {
+        if (previousStorageOverride === undefined) {
+          delete process.env['QWEN_CODE_FORCE_FILE_STORAGE'];
+        } else {
+          process.env['QWEN_CODE_FORCE_FILE_STORAGE'] = previousStorageOverride;
+        }
+      }
+
+      await updateSetting(
+        config,
+        '12345',
+        'VAR2',
+        async () => 'new-value2',
+        ExtensionSettingScope.USER,
+      );
+
+      await fsPromises.rm(
+        path.join(extensionDir, '.qwen-extension-settings.json'),
+      );
+      await expect(
+        getScopedEnvContents(config, '12345', ExtensionSettingScope.USER),
+      ).resolves.toEqual({
+        VAR1: 'initial-value2',
+        VAR2: 'new-value2',
+      });
+    });
+
     it('should update a sensitive setting in WORKSPACE scope', async () => {
       mockRequestSetting.mockResolvedValue('new-workspace-secret');
 
