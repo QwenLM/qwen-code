@@ -630,3 +630,125 @@ describe('buildChunkLaunchPrompt — the 87-kilobyte problem', () => {
     expect(p).not.toMatch(/say ["`\u2018\u201c]No issues found/i);
   });
 });
+
+// `/review` runs on other people's repositories. A checklist that arrives when it
+// is not wanted is worse than one that never existed.
+describe('path rules — they arrive where they belong, and nowhere else', () => {
+  const WF_PLAN = {
+    diffPathAbsolute: '/abs/d.txt',
+    prNumber: '1',
+    ownerRepo: 'a/b',
+    worktreePath: 'w',
+    files: [{ path: '.github/workflows/patrol.yml' }, { path: 'src/pay.ts' }],
+    chunks: [
+      {
+        id: 1,
+        startLine: 1,
+        endLine: 100,
+        lines: 100,
+        chars: 500,
+        maxLineChars: 80,
+        oversized: false,
+        files: [
+          { path: '.github/workflows/patrol.yml', newStart: 1, newEnd: 90 },
+        ],
+      },
+      {
+        id: 2,
+        startLine: 101,
+        endLine: 200,
+        lines: 100,
+        chars: 500,
+        maxLineChars: 80,
+        oversized: false,
+        files: [{ path: 'src/pay.ts', newStart: 1, newEnd: 90 }],
+      },
+    ],
+  };
+
+  it('reaches the chunk agent whose territory holds the workflow', () => {
+    expect(buildChunkAgentPrompt(WF_PLAN, 1)).toContain('pull_request_target');
+  });
+
+  it('does not reach the chunk agent next door, whose territory does not', () => {
+    // The scoping that keeps this from being noise. Chunk 2 is TypeScript.
+    expect(buildChunkAgentPrompt(WF_PLAN, 2)).not.toContain(
+      'pull_request_target',
+    );
+  });
+
+  it.each(['1a', '1b', '2', '3', '4', '5', '6a', '6b', '6c'] as const)(
+    'reaches the code-reviewing dimension %s',
+    (role) => {
+      expect(buildRoleBrief(WF_PLAN, role)).toContain('pull_request_target');
+    },
+  );
+
+  it.each(['0', '7', 'test-matrix'] as const)(
+    'does not reach %s — it is not sitting that exam',
+    (role) => {
+      // Build & Test runs commands. Issue Fidelity reads an issue. The test matrix
+      // maps behaviours to tests. None of them reviews the workflow's code, and a
+      // security syllabus in their brief is a syllabus that gets skimmed.
+      expect(buildRoleBrief(WF_PLAN, role)).not.toContain(
+        'pull_request_target',
+      );
+    },
+  );
+
+  it('scopes an invariant agent to its own file', () => {
+    const plan = {
+      ...WF_PLAN,
+      files: [
+        {
+          path: 'src/pay.ts',
+          heavy: true,
+          addedRanges: [{ start: 1, end: 9 }],
+          diffRange: { startLine: 1, endLine: 9 },
+        },
+        { path: '.github/workflows/patrol.yml' },
+      ],
+    };
+    // It owns pay.ts. The workflow elsewhere in the diff is not its problem.
+    expect(
+      buildRoleBrief(plan, 'invariant-a', { file: 'src/pay.ts' }),
+    ).not.toContain('pull_request_target');
+  });
+
+  it('is silent on a diff that touches no workflow at all', () => {
+    // The common case. It must cost nothing.
+    const plain = { ...WF_PLAN, files: [{ path: 'src/pay.ts' }] };
+    expect(buildRoleBrief(plain, '2')).not.toContain('GitHub Actions');
+    expect(buildRoleBrief(plain, '2')).not.toContain('Rules for the files');
+  });
+});
+
+// The degradation the orchestrator used to add by hand — and now cannot, because it
+// does not write these prompts any more.
+describe('lightweight mode — the diff, and nothing else', () => {
+  const LIGHT = { ...PLAN }; // no worktreePath, no untrackedFiles → diff-only
+  const LOCAL = { ...PLAN, worktreePath: '.qwen/tmp/review-pr-1' };
+
+  it('tells a code-reviewing agent there is no tree to read', () => {
+    expect(buildRoleBrief(LIGHT, '1a')).toContain(
+      'You have the diff, and nothing else',
+    );
+    expect(buildRoleBrief(LOCAL, '1a')).not.toContain(
+      'You have the diff, and nothing else',
+    );
+  });
+
+  it('stops 1b and 1c asserting what they cannot check', () => {
+    // A precision rule, not a convenience. An agent that cannot grep for a
+    // re-establishment and asserts one is missing files a false Critical, and a
+    // false Critical blocks a merge.
+    for (const role of ['1b', '1c'] as const) {
+      const b = buildRoleBrief(LIGHT, role);
+      expect(b).toContain('`Confidence: low`');
+      expect(b).toContain('must not assert it is missing');
+      expect(buildRoleBrief(LOCAL, role)).not.toContain(
+        'must not assert it is missing',
+      );
+    }
+  });
+});

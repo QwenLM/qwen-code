@@ -44,6 +44,8 @@ import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { READ_FILE_CHAR_CAP, type DiffChunk } from './lib/diff-plan.js';
 import { recordPrompt, writeBrief } from './lib/prompt-record.js';
 import { BRIEFS, type RoleId } from './lib/agent-briefs.js';
+import { pathRulesFor } from './lib/path-rules.js';
+import { reviewMode, type RosterPlan } from './lib/roster.js';
 
 interface AgentPromptArgs {
   plan: string;
@@ -84,20 +86,65 @@ interface HeavyFile {
  * calibrate it, and an uncalibrated agent files "zero test coverage" as Critical.
  * It has happened.
  */
-const SEVERITY = `Apply the severity definitions:
-- **Critical** — the code does something wrong. A bug that produces incorrect behaviour, a security hole, data loss, a resource or state leak, a build or test failure.
+const SEVERITY = `Apply the severity definitions. **Severity describes the code, not your feelings about the finding.**
+- **Critical** — the code does something wrong. A bug that produces incorrect behaviour, a security hole, data loss, a resource or state leak, a build or test failure. Not "important", not "large", not "I am confident": *wrong*.
 - **Suggestion** — a recommended improvement to code that works.
-- **Nice to have** — optional.`;
+- **Nice to have** — optional.
 
+**A missing test is a Suggestion.** Absent code that does something wrong, nothing is broken, and "this file has zero references to \`X\`" is a coverage statistic, not a defect. Two shapes ARE Critical, because in both of them something *is* wrong: a test that asserts the **opposite** of the intended behaviour (it will bless the very regression it was written to catch), and a test **weakened, disabled or deleted in this diff** so that new behaviour passes. If a missing test would let a specific incorrect behaviour ship, report **that behaviour** as the Critical and cite the missing test as your evidence — naming the bug is the work; naming the gap is not.
+
+An inflated severity blocks a merge: the verdict is computed from Criticals alone. Measured on one run of this skill, four "zero test coverage" findings were filed as Critical and two identical ones as Suggestion, in the same review, and the pull request was blocked partly on the strength of the four.`;
+
+/**
+ * The finding format, and the rules that make an anchor resolvable.
+ *
+ * The anchor rules used to live only in the skill — in a section addressed to the
+ * orchestrator, which the agents never see. So the agents were asked for an anchor
+ * and never told what makes one work: prefer the added lines, a removed line cannot
+ * be anchored at all, and one lonely `}` matches everywhere. `resolve-anchors` is
+ * downstream of a snippet it was never given the rules to produce.
+ */
 const FINDING_FORMAT = `Format each finding using this structure:
 - **File:** <file path>:<line number or range>
-- **Anchor:** <1-3 consecutive lines copied VERBATIM from the diff>
+- **Anchor:** <1-3 consecutive lines copied VERBATIM from the diff — the code this finding is about>
 - **Source:** [review]
 - **Issue:** <one-line statement of the defect>
 - **Failure scenario:** <the concrete trigger and the concrete wrong outcome: what input, state, timing, or config makes this code misbehave, and what incorrect output / crash / leak / exposure results>
 - **Suggested fix:** <concrete code suggestion when possible, or "N/A">
 - **Severity:** Critical | Suggestion | Nice to have
-- **Confidence:** high | low`;
+- **Confidence:** high | low
+
+**The anchor is what places the comment, not the line number.** The line is computed from your snippet downstream; a bad snippet lands a real blocker on unrelated code, or gets it dropped. So:
+
+- Copy it **verbatim** from the diff, indentation included. Strip the leading \`+\`.
+- Prefer **added (\`+\`) lines** — that is what a review comments on. An unchanged context line inside a hunk resolves too. A **removed (\`-\`) line does not**: deleted code has no line on the side a comment can attach to. To comment on a deletion, anchor on the line that *replaced* it.
+- Give **enough lines to be unique**. A bare \`}\` or \`});\` appears everywhere in the file and will resolve to whichever one happens to be nearest. Two or three lines are almost always unique; one distinctive line is fine.
+- Fill in **File** and the line number anyway. The path selects the file and the line breaks a tie when the snippet genuinely repeats. Neither is trusted as the answer.
+
+**The failure scenario is the finding's evidence, and it gates reporting.** For a quality finding, state the concrete cost instead of a crash — what is duplicated, wasted, or made harder to change — or quote the rule it violates. A **Suggestion** or **Nice to have** whose failure scenario you cannot fill in concretely **is not a finding: do not report it.** A suspected **Critical** whose trigger you cannot pin down IS still reported, at \`Confidence: low\`, with the scenario naming the mechanism and what remains uncertain — a later verification stage rules on it. "This looks risky", with no nameable trigger and no nameable cost, is how a hallucinated finding reaches a pull request.`;
+
+/**
+ * What not to report.
+ *
+ * These are the skill's Exclusion Criteria, and **they had never reached an agent.**
+ * The skill states them at the end of the document and tells the orchestrator to
+ * "apply the Exclusion Criteria" — but the agents do not read the document; they
+ * read the prompt they are launched with, and the orchestrator composed those from
+ * memory. So the single largest precision control in this review has been governing
+ * nobody, in every run, since it was written.
+ */
+const EXCLUSIONS = `## What is NOT a finding
+
+Do not report anything that matches these. Silence is better than noise — but a silently dropped **Critical** is neither, and it is unrecoverable, because no later stage ever sees it.
+
+- **Pre-existing issues in unchanged code.** Review the diff. A defect entirely in code this change does not touch is out of scope, unless this change is what makes it newly reachable or newly wrong — in which case report it as an effect of this diff.
+- **Style or formatting a formatter would auto-normalize**, and naming that matches the surrounding conventions. But a substantive issue a linter or type checker would flag — an unused variable, unreachable code, a type error — IS in scope, even where the surrounding code tolerates it.
+- **Pedantic nitpicks** a senior engineer would not raise, and subjective "consider doing X" that names no real problem.
+- **A Suggestion or Nice-to-have with no concrete failure scenario** — no nameable trigger, no nameable cost. (A suspected Critical in that state is reported at \`Confidence: low\` instead of dropped.)
+- **A description of what the diff does, filed as a finding.** If your Suggested fix reads \`N/A (already implemented)\`, or the Issue praises the change instead of naming something wrong with it, that is a changelog entry. Drop it. Every finding must be something the author should **do**. A review of a good pull request is allowed to be empty, and an empty review is more useful than a padded one — dogfooded, one run reported five "Suggestions" that each summarised something the pull request already did, and the reader had to read all five to discover there was nothing to do.
+- **If you are unsure whether a Suggestion or Nice to have is a problem, do not report it.** This does **not** apply to a suspected Critical.
+- Minor refactors that address no real problem; missing documentation unless the logic is genuinely confusing; "best practice" citations that point to no concrete bug or risk.
+- Issues already discussed in the pull request's existing comments.`;
 
 /** Validate the plan and pull out the one chunk this agent owns. */
 function chunkFrom(
@@ -226,8 +273,18 @@ export function buildChunkAgentPrompt(
     '',
     SEVERITY,
     '',
-    'Review the diff, not pre-existing issues in unchanged code.',
+    EXCLUSIONS,
   );
+
+  // The checklists that attach to a path rather than to a dimension, scoped to the
+  // files in THIS agent's territory. A chunk agent owns every dimension for its own
+  // lines, so if a workflow is in front of it, the workflow's attack classes are its
+  // problem — and no dimension would otherwise have told it so.
+  const chunkPaths = (Array.isArray(chunk.files) ? chunk.files : [])
+    .map((f) => f?.path)
+    .filter((p): p is string => typeof p === 'string');
+  const pathRules = pathRulesFor(chunkPaths);
+  if (pathRules) parts.push('', pathRules);
 
   if (rules && rules.trim()) {
     parts.push('', '## Project rules', '', rules.trim());
@@ -411,14 +468,7 @@ function diffReadingBlock(report: PlanReport, diffPath: string): string[] {
 
 /** The closing half every prompt shares: how to report, and what "nothing" means. */
 function tail(rules?: string): string[] {
-  const parts = [
-    '',
-    FINDING_FORMAT,
-    '',
-    SEVERITY,
-    '',
-    'Review the diff, not pre-existing issues in unchanged code.',
-  ];
+  const parts = ['', FINDING_FORMAT, '', SEVERITY, '', EXCLUSIONS];
   if (rules && rules.trim()) {
     parts.push('', '## Project rules', '', rules.trim());
   }
@@ -550,6 +600,34 @@ export function buildRoleBrief(
 
   parts.push('## Your dimension', '', brief.brief);
 
+  // Cross-repo lightweight mode: there is no tree, only the diff. Two briefs assume
+  // one, and the degradation used to be a sentence the orchestrator was told to add
+  // by hand — which is not a thing that survives, and is now not a thing it can do:
+  // it does not write these any more. So the builder degrades them, from the same
+  // plan the roster reads.
+  //
+  // 1b's is a *precision* rule, not a convenience: an agent that cannot grep for a
+  // re-establishment and asserts one is missing files a false Critical, and a false
+  // Critical blocks a merge.
+  if (reviewMode(report as RosterPlan) === 'diff-only' && brief.reviewsCode) {
+    parts.push(
+      '',
+      '**You have the diff, and nothing else.** This is a cross-repo review: there is no ' +
+        'local checkout to read enclosing functions from, and nothing to `grep_search`. ' +
+        'Work from the diff alone.',
+    );
+    if (role === '1b' || role === '1c') {
+      parts.push(
+        '',
+        'Which changes what you may conclude. When the evidence you would need sits **outside ' +
+          'the diff** — the replacement for a deleted export, the call sites of a changed ' +
+          'signature, the read sites of a new field — you cannot check it, and you must not ' +
+          'assert it is missing. Report the candidate at `Confidence: low` and say plainly that ' +
+          'the check could not be made. A false Critical blocks a merge.',
+      );
+    }
+  }
+
   // Agent 0 has a second source besides the diff, and a bare `gh pr view` would
   // fall back to the current branch's PR and judge this diff against an unrelated
   // issue. So the PR it is reviewing is welded in, not left to it to find.
@@ -617,6 +695,27 @@ export function buildRoleBrief(
           'and move on.',
       );
     }
+  }
+
+  // The checklists that attach to a path rather than to a dimension. A whole-diff
+  // agent sees every file, so it gets every rule the diff triggers — but only the
+  // agents that review *code* get them at all: Build & Test runs commands and Issue
+  // Fidelity reads an issue, and a workflow-security syllabus is not their exam.
+  //
+  // Scoped, on purpose. A rule that fires on every review is a rule that gets
+  // skimmed, and the whole point of this one is that it has to be read.
+  if (brief.reviewsCode) {
+    const paths = (
+      (Array.isArray(report.files) ? report.files : []) as Array<{
+        path?: unknown;
+      }>
+    )
+      .map((f) => f?.path)
+      .filter((p): p is string => typeof p === 'string');
+    // An invariant agent owns one file, and nothing else in the diff is its problem.
+    const scoped = opts.file ? paths.filter((p) => p === opts.file) : paths;
+    const pathRules = pathRulesFor(scoped);
+    if (pathRules) parts.push('', pathRules);
   }
 
   parts.push(...tail(opts.rules));

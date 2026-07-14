@@ -55,6 +55,16 @@ export interface Brief {
   /** How the role is named to a human reading a coverage failure. */
   label: string;
   /**
+   * Does a path rule belong in this agent's brief?
+   *
+   * The path-scoped checklists (see `path-rules.ts`) name defects in the *code*.
+   * The agents that do not review code do not get them: Build & Test runs commands,
+   * Issue Fidelity reads an issue, and the test matrix maps behaviours to tests.
+   * Giving them a workflow-security checklist would be handing a syllabus to
+   * somebody sitting a different exam.
+   */
+  reviewsCode?: boolean;
+  /**
    * Does this agent read the diff?
    *
    * Two do not, and they are not defects: Build & Test runs commands, and its
@@ -88,6 +98,7 @@ If \`gh\` fails (auth, rate limit, network), **retry that fetch once**. If it fa
   },
 
   '1a': {
+    reviewsCode: true,
     label: 'Agent 1a: Line-by-line correctness',
     readsDiff: true,
     brief: `You are **Agent 1a: the line-by-line scan**. Your dimension is defined by *how you walk*, not by a topic — a topical "find correctness bugs" brief makes every agent converge on the same visibly-suspicious hunks, which is redundancy, not coverage.
@@ -104,6 +115,7 @@ Scope guard: reading the enclosing function is for **context**. A defect entirel
   },
 
   '1b': {
+    reviewsCode: true,
     label: 'Agent 1b: Removed-behavior audit',
     readsDiff: true,
     brief: `You are **Agent 1b: the removed-behavior audit**. You own the diff's **deleted side**, and you are the only agent who can see it: the \`-\` lines exist *only* in the diff. The post-change tree carries no trace of what was removed — the line is simply not there, and nothing marks where it was — so no agent reading the new code alone can find this class of defect.
@@ -120,6 +132,7 @@ Each failure scenario must name what input or state now slips past the removed b
   },
 
   '1c': {
+    reviewsCode: true,
     label: 'Agent 1c: Cross-file tracer',
     readsDiff: true,
     brief: `You are **Agent 1c: the cross-file tracer**. You own the *whole* cross-file walk, end to end. It used to be a duty shared by six agents, and a duty shared by six agents is a duty nobody finishes while the same symbols get grepped six times.
@@ -145,6 +158,7 @@ Expect the three ends to be far apart. The declaration, the pass-through, and th
   },
 
   '2': {
+    reviewsCode: true,
     label: 'Agent 2: Security',
     readsDiff: true,
     brief: `You are **Agent 2: Security**. Review the diff for:
@@ -160,6 +174,7 @@ Expect the three ends to be far apart. The declaration, the pass-through, and th
   },
 
   '3': {
+    reviewsCode: true,
     label: 'Agent 3: Code quality',
     readsDiff: true,
     brief: `You are **Agent 3: Code Quality**. Review the diff for:
@@ -172,6 +187,7 @@ Expect the three ends to be far apart. The declaration, the pass-through, and th
   },
 
   '4': {
+    reviewsCode: true,
     label: 'Agent 4: Performance & efficiency',
     readsDiff: true,
     brief: `You are **Agent 4: Performance & Efficiency**. Review the diff for:
@@ -185,6 +201,7 @@ Expect the three ends to be far apart. The declaration, the pass-through, and th
   },
 
   '5': {
+    reviewsCode: true,
     label: 'Agent 5: Test coverage',
     readsDiff: true,
     brief: `You are **Agent 5: Test Coverage**. Review the diff for:
@@ -200,6 +217,7 @@ Expect the three ends to be far apart. The declaration, the pass-through, and th
   },
 
   '6a': {
+    reviewsCode: true,
     label: 'Agent 6a: Undirected audit — attacker mindset',
     readsDiff: true,
     brief: `You are **Agent 6a: the undirected audit, attacker mindset.**
@@ -218,6 +236,7 @@ You are undirected on purpose. Do not restrict yourself to the list.`,
   },
 
   '6b': {
+    reviewsCode: true,
     label: 'Agent 6b: Undirected audit — 3 AM oncall mindset',
     readsDiff: true,
     brief: `You are **Agent 6b: the undirected audit, 3 AM oncall mindset.**
@@ -236,6 +255,7 @@ You are undirected on purpose. Do not restrict yourself to the list.`,
   },
 
   '6c': {
+    reviewsCode: true,
     label: 'Agent 6c: Undirected audit — six-months-later maintainer',
     readsDiff: true,
     brief: `You are **Agent 6c: the undirected audit, six-months-later maintainer mindset.**
@@ -298,6 +318,7 @@ Use \`Source: [build]\` or \`Source: [test]\`, never \`[review]\`.`,
   },
 
   'invariant-a': {
+    reviewsCode: true,
     label: 'Invariant agent A: state, timers, collections',
     readsDiff: true,
     brief: `You are **invariant agent A: state, timers, and collections.**
@@ -314,6 +335,7 @@ Report a **Critical** for each violation, and give **both** locations that toget
   },
 
   'invariant-b': {
+    reviewsCode: true,
     label: 'Invariant agent B: counters, return values, error taxonomies',
     readsDiff: true,
     brief: `You are **invariant agent B: counters, return values, and error taxonomies.**
@@ -330,6 +352,7 @@ Report a **Critical** for each violation, and give **both** locations that toget
   },
 
   'invariant-c': {
+    reviewsCode: true,
     label: 'Invariant agent C: config fields, early returns',
     readsDiff: true,
     brief: `You are **invariant agent C: config fields and early returns.**
