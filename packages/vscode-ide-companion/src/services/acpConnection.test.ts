@@ -65,6 +65,7 @@ describe('AcpConnection process spawning', () => {
       env?: NodeJS.ProcessEnv;
     };
     expect(options.env?.ELECTRON_RUN_AS_NODE).toBe('1');
+    expect(options.env?.QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE).toBe('1');
   });
 });
 

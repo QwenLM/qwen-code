@@ -390,6 +390,45 @@ describe('gemini.tsx main function', () => {
     processExitSpy.mockRestore();
   });
 
+  it('scrubs Electron node bootstrap env before ACP startup', async () => {
+    const originalElectronRunAsNode = process.env['ELECTRON_RUN_AS_NODE'];
+    const originalScrubMarker =
+      process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'];
+    process.env['ELECTRON_RUN_AS_NODE'] = '1';
+    process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] = '1';
+
+    const { parseArguments } = await import('./config/config.js');
+    const { loadSettings } = await import('./config/settings.js');
+
+    vi.mocked(parseArguments).mockResolvedValue({
+      acp: true,
+      experimentalAcp: undefined,
+    } as unknown as CliArgs);
+    vi.mocked(loadSettings).mockImplementation(() => {
+      expect(process.env['ELECTRON_RUN_AS_NODE']).toBeUndefined();
+      expect(
+        process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'],
+      ).toBeUndefined();
+      throw new Error('stop after scrub');
+    });
+
+    try {
+      await expect(main()).rejects.toThrow('stop after scrub');
+    } finally {
+      if (originalElectronRunAsNode === undefined) {
+        delete process.env['ELECTRON_RUN_AS_NODE'];
+      } else {
+        process.env['ELECTRON_RUN_AS_NODE'] = originalElectronRunAsNode;
+      }
+      if (originalScrubMarker === undefined) {
+        delete process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'];
+      } else {
+        process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] =
+          originalScrubMarker;
+      }
+    }
+  });
+
   it('should skip full settings discovery in bare mode', async () => {
     const originalArgv = process.argv;
     process.argv = ['node', 'script.js', '--bare'];
