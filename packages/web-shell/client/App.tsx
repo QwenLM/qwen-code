@@ -1802,6 +1802,10 @@ export function App({
   // dialogOpen prop.
   const approvalOverlayActive =
     pendingToolApproval !== null || pendingAskUserApproval !== null;
+  const approvalOverlayActiveRef = useRef(approvalOverlayActive);
+  approvalOverlayActiveRef.current =
+    approvalOverlayActive ||
+    (canActOnPendingApproval && extractPendingPermission(blocks) !== null);
   const floatingTodosState = useMemo(
     () => getFloatingTodos(messages),
     [messages],
@@ -3543,6 +3547,22 @@ export function App({
     branchCurrentSession();
   }, [branchCurrentSession]);
 
+  const composerFocusRequestRef = useRef(0);
+  const scheduleComposerFocus = useCallback((sessionId?: string) => {
+    const request = ++composerFocusRequestRef.current;
+    window.setTimeout(() => {
+      if (
+        request !== composerFocusRequestRef.current ||
+        approvalOverlayActiveRef.current ||
+        (sessionId !== undefined &&
+          connectionRef.current.sessionId !== sessionId)
+      ) {
+        return;
+      }
+      editorRef.current?.focus();
+    }, 0);
+    return request;
+  }, []);
   const createNewSession = useCallback(
     async (workspaceCwd?: string) => {
       selectedWorkspaceCwdRef.current = workspaceCwd;
@@ -3553,18 +3573,29 @@ export function App({
       // Starting a new chat means the user wants to see it — leave any open
       // Settings/Status panel so the fresh chat is visible (no-op when closed).
       closePanel();
+      let focusRequest: number | undefined;
       try {
-        await (
+        const clearPromise = (
           sessionActions as typeof sessionActions & SessionActionsWithCreate
         ).clearSession();
-        window.setTimeout(() => editorRef.current?.focus(), 0);
+        focusRequest = scheduleComposerFocus();
+        await clearPromise;
         return true;
       } catch (error) {
+        if (composerFocusRequestRef.current === focusRequest) {
+          composerFocusRequestRef.current += 1;
+        }
         reportError(error, 'Failed to start a new chat');
         return false;
       }
     },
-    [closeMobileDrawer, closePanel, reportError, sessionActions],
+    [
+      closeMobileDrawer,
+      closePanel,
+      reportError,
+      scheduleComposerFocus,
+      sessionActions,
+    ],
   );
   const handleMissingSessionNewSession = useCallback(async () => {
     if (creatingMissingSessionRef.current) return;
@@ -3584,6 +3615,7 @@ export function App({
 
   const loadSidebarSession = useCallback(
     async (sessionId: string, workspaceCwd?: string) => {
+      composerFocusRequestRef.current += 1;
       setSidebarSwitchingSessionId(sessionId);
       // Close the drawer before awaiting the load; the transcript clears
       // immediately and shows its loading skeleton for the selected session.
@@ -3637,15 +3669,13 @@ export function App({
       !connection.catchingUp
     ) {
       setSidebarSwitchingSessionId(null);
-      if (!approvalOverlayActive) {
-        window.setTimeout(() => editorRef.current?.focus(), 0);
-      }
+      scheduleComposerFocus(sidebarSwitchingSessionId);
     }
   }, [
-    approvalOverlayActive,
     connection.catchingUp,
     connection.loadingTranscript,
     connection.sessionId,
+    scheduleComposerFocus,
     sidebarSwitchingSessionId,
   ]);
 

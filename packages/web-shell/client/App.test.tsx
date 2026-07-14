@@ -924,6 +924,26 @@ describe('App session callbacks', () => {
     expect(editorFocus).toHaveBeenCalledOnce();
   });
 
+  it('focuses a cleared new session without waiting for detach', async () => {
+    const clear = deferred<void>();
+    mockSessionActions.clearSession.mockReturnValueOnce(clear.promise);
+    const { container } = renderApp();
+    await flush();
+    editorFocus.mockClear();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')
+        ?.click();
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(editorFocus).toHaveBeenCalledOnce();
+    await act(async () => clear.resolve());
+  });
+
   it('focuses the composer after loading an existing session', async () => {
     const { container, rerender } = renderApp();
     await flush();
@@ -945,6 +965,35 @@ describe('App session callbacks', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(editorFocus).toHaveBeenCalledOnce();
+  });
+
+  it('does not steal focus when an approval appears before deferred session focus', async () => {
+    vi.useFakeTimers();
+    const { container, rerender } = renderApp();
+    await flush();
+    editorFocus.mockClear();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="load-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    mockConnection.sessionId = 'session-2';
+    rerender();
+
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+    editorFocus.mockClear();
+    act(() => vi.runOnlyPendingTimers());
+
+    expect(editorFocus).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(
+      document.querySelector('[data-testid="approval-overlay"]'),
+    );
   });
 
   it('does not show missing-session state for non-404/410 errors', async () => {

@@ -662,10 +662,13 @@ describe('useAtMentionMenu', () => {
     act(() => latest!.refreshForView(makeView('@config')));
     await runDebounce();
 
-    expect(globWorkspace).toHaveBeenCalledWith('**/*config*', {
-      maxResults: 50,
-      signal: expect.any(AbortSignal),
-    });
+    expect(globWorkspace).toHaveBeenCalledWith(
+      '**/*[cC][oO][nN][fF][iI][gG]*',
+      {
+        maxResults: 50,
+        signal: expect.any(AbortSignal),
+      },
+    );
     expect(listDirectory).not.toHaveBeenCalled();
     expect(latest!.state?.items.map((item) => item.label)).toEqual([
       'packages/cli/src/config.ts',
@@ -1450,10 +1453,29 @@ describe('useAtMentionMenu', () => {
     act(() => latest!.updateSearch('foo*bar?'));
     await runDebounce();
 
-    expect(globWorkspace).toHaveBeenCalledWith('**/*foo\\*bar\\?*', {
-      maxResults: 50,
-      signal: expect.any(AbortSignal),
-    });
+    expect(globWorkspace).toHaveBeenCalledWith(
+      '**/*[fF][oO][oO]\\*[bB][aA][rR]\\?*',
+      {
+        maxResults: 50,
+        signal: expect.any(AbortSignal),
+      },
+    );
+  });
+
+  it('normalizes escaped paths and literalizes extglob operators', async () => {
+    vi.useFakeTimers();
+    const globWorkspace = vi.fn().mockResolvedValue({ matches: [] });
+    mount({ actions: { globWorkspace } });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(0));
+    act(() => latest!.updateSearch('./foo\\ bar+(test)'));
+    await runDebounce();
+
+    expect(globWorkspace).toHaveBeenCalledWith(
+      '**/*[fF][oO][oO] [bB][aA][rR]\\+\\([tT][eE][sS][tT]\\)*',
+      { maxResults: 50, signal: expect.any(AbortSignal) },
+    );
   });
 
   it('recovers from file provider list failures', async () => {

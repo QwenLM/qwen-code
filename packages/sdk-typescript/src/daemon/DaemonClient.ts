@@ -669,6 +669,7 @@ export class DaemonClient {
       clientId?: string;
       timeoutMs?: number;
       mode?: 'transport' | 'rest';
+      signal?: AbortSignal;
     } = {},
   ): Promise<T> {
     const hasBody = opts.body !== undefined;
@@ -681,6 +682,7 @@ export class DaemonClient {
           opts.clientId,
         ),
         ...(hasBody ? { body: JSON.stringify(opts.body) } : {}),
+        ...(opts.signal ? { signal: opts.signal } : {}),
       },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, label);
@@ -702,6 +704,7 @@ export class DaemonClient {
       clientId?: string;
       timeoutMs?: number;
       mode?: 'transport' | 'rest';
+      signal?: AbortSignal;
     } = {},
   ): Promise<T> {
     return await this.jsonRequest<T>(
@@ -3935,11 +3938,19 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  glob(pattern: string): Promise<unknown> {
+  glob(
+    pattern: string,
+    opts: { maxResults?: number; signal?: AbortSignal } = {},
+  ): Promise<unknown> {
     const query = new URLSearchParams({ pattern });
-    return this.get(
+    if (opts.maxResults !== undefined) {
+      query.set('maxResults', String(opts.maxResults));
+    }
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
       `/glob?${query.toString()}`,
       'GET /workspaces/:workspace/glob',
+      { signal: opts.signal },
     );
   }
 

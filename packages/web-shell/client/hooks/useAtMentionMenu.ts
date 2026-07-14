@@ -270,11 +270,17 @@ function normalizeDirectoryPath(path: string): string {
 }
 
 function escapeGlobQuery(query: string): string {
-  return query.replace(/[\\*?[{\]}]/g, '\\$&');
+  return Array.from(query, (char) => {
+    if (/[a-z]/i.test(char)) {
+      return `[${char.toLowerCase()}${char.toUpperCase()}]`;
+    }
+    return /[\\*?[{\]}()!@+|]/.test(char) ? `\\${char}` : char;
+  }).join('');
 }
 
 function fileSearchGlobPattern(query: string): string {
-  return query ? `**/*${escapeGlobQuery(query)}*` : '**/*';
+  const normalizedQuery = unescapeAtReferenceText(query).replace(/^\.\//, '');
+  return normalizedQuery ? `**/*${escapeGlobQuery(normalizedQuery)}*` : '**/*';
 }
 
 function matchesQuery(query: string, ...values: Array<string | undefined>) {
