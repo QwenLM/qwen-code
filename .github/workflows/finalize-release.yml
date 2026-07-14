@@ -23,8 +23,7 @@ jobs:
     environment:
       name: 'production-release'
     permissions:
-      contents: 'write'
-      pull-requests: 'write'
+      contents: 'read'
     env:
       RELEASE_TAG: '${{ github.event.release.tag_name || inputs.tag }}'
 
