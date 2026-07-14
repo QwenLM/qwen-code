@@ -176,8 +176,13 @@ export async function recordFlow(
   }
   const video = page?.video();
   if (video) {
-    await video.saveAs(join(VIDEO_DIR, `${name}.webm`));
-    await video.delete(); // drop the hash-named raw copy; keep only the named one
+    try {
+      await video.saveAs(join(VIDEO_DIR, `${name}.webm`));
+      await video.delete(); // drop the hash-named raw copy; keep only the named one
+    } catch {
+      // Best-effort video capture; if `drive` failed the video may never have
+      // finalized — don't let that I/O error mask the real drive failure below.
+    }
   }
   if (driveError) throw driveError;
 }

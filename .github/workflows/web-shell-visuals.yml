@@ -113,13 +113,14 @@ jobs:
         env:
           OUT_DIR: '${{ runner.temp }}/web-shell-visuals'
           PR_NUMBER: '${{ github.event.pull_request.number }}'
-          HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
         run: |-
           set -euo pipefail
           mkdir -p "${OUT_DIR}"
-          # Consumed by the workflow_run publish job (which validates them).
+          # PR number for the workflow_run publish job (which validates it).
+          # The head SHA is intentionally NOT shipped in the artifact: the
+          # publish job binds to the authenticated github.event.workflow_run
+          # .head_sha, and an artifact-sourced SHA would be untrusted.
           printf '%s\n' "${PR_NUMBER}" > "${OUT_DIR}/pr.txt"
-          printf '%s\n' "${HEAD_SHA}" > "${OUT_DIR}/head_sha.txt"
           echo "Screenshots: $(find "${OUT_DIR}/screenshots" -name '*.png' 2>/dev/null | wc -l | tr -d ' ')"
           echo "GIFs: $(find "${OUT_DIR}/gifs" -name '*.gif' 2>/dev/null | wc -l | tr -d ' ')"
 
@@ -132,6 +133,5 @@ jobs:
             ${{ runner.temp }}/web-shell-visuals/gifs
             ${{ runner.temp }}/web-shell-visuals/video
             ${{ runner.temp }}/web-shell-visuals/pr.txt
-            ${{ runner.temp }}/web-shell-visuals/head_sha.txt
           if-no-files-found: 'warn'
           retention-days: 7
