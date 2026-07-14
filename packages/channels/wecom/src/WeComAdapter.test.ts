@@ -377,7 +377,9 @@ function channelFileDirs(): string[] {
   return readdirSync(parent).map((entry) => join(parent, entry));
 }
 
-const suiteTmpDir = mkdtempSync(join(tmpdir(), 'qwen-wecom-test-'));
+// Capture before tests stub TMPDIR; one assertion checks the host temp root.
+const realTmpDir = tmpdir();
+const suiteTmpDir = mkdtempSync(join(realTmpDir, 'qwen-wecom-test-'));
 
 describe('WeComChannel', () => {
   beforeAll(() => {
@@ -4411,7 +4413,7 @@ describe('WeComChannel', () => {
   });
 
   it('does not allow a hardcoded /tmp channel-files fallback', async () => {
-    if (tmpdir() === '/tmp') return;
+    if (realTmpDir === '/tmp') return;
 
     const stderr = vi
       .spyOn(process.stderr, 'write')
