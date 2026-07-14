@@ -375,6 +375,60 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('flags a kind-less in_progress frame WITHOUT shellProgress as malformed', async () => {
+    // The heartbeat drop is scoped to frames carrying _meta.shellProgress, so
+    // a genuinely malformed kind-less tool_call still reaches emitProtocolError
+    // instead of being silently swallowed.
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockImplementation(async () => {
+      events.push({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'call-1',
+            status: 'in_progress',
+            _meta: { toolName: 'run_shell_command' },
+          },
+        },
+      });
+      events.push({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Done.' },
+          },
+        },
+      });
+      events.push(turnCompleteEvent());
+      return { stopReason: 'end_turn' };
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    const errors: Error[] = [];
+    bridge.on('error', (err) => errors.push(err));
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    await expect(bridge.prompt('session-1', 'run it')).resolves.toBe('Done.');
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors[0].message).toContain('Malformed');
+
+    events.close();
+    bridge.stop();
+  });
+
   it('excludes nested subagent text from the daemon response', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
