@@ -5,13 +5,30 @@
  */
 
 import { spawn } from 'node:child_process';
-import { RELAUNCH_EXIT_CODE } from './processUtils.js';
+import {
+  RELAUNCH_EXIT_CODE,
+  UPDATE_ON_EXIT_MESSAGE,
+  UPDATE_RELAUNCH_EXIT_CODE,
+} from './processUtils.js';
 import { writeStderrLine } from './stdioHelpers.js';
 
-export async function relaunchOnExitCode(runner: () => Promise<number>) {
+interface RelaunchOptions {
+  afterSpawn?: () => void;
+  onUpdateRelaunch?: () => Promise<number> | number;
+}
+
+export async function relaunchOnExitCode(
+  runner: () => Promise<number>,
+  options?: Pick<RelaunchOptions, 'onUpdateRelaunch'>,
+) {
   while (true) {
     try {
       const exitCode = await runner();
+
+      if (exitCode === UPDATE_RELAUNCH_EXIT_CODE && options?.onUpdateRelaunch) {
+        const updatedExitCode = await options.onUpdateRelaunch();
+        process.exit(updatedExitCode);
+      }
 
       if (exitCode !== RELAUNCH_EXIT_CODE) {
         process.exit(exitCode);
@@ -28,11 +45,13 @@ export async function relaunchOnExitCode(runner: () => Promise<number>) {
 export async function relaunchAppInChildProcess(
   additionalNodeArgs: string[],
   additionalScriptArgs: string[],
-  options?: { afterSpawn?: () => void },
+  options?: RelaunchOptions,
 ) {
   if (process.env['QWEN_CODE_NO_RELAUNCH']) {
     return;
   }
+
+  let updateOnExitRequested = false;
 
   const runner = () => {
     // process.argv is [node, script, ...args]
@@ -53,8 +72,19 @@ export async function relaunchAppInChildProcess(
     process.stdin.pause();
 
     const child = spawn(process.execPath, nodeArgs, {
-      stdio: 'inherit',
+      stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
       env: newEnv,
+    });
+
+    child.on('message', (message) => {
+      if (
+        typeof message === 'object' &&
+        message !== null &&
+        'type' in message &&
+        message.type === UPDATE_ON_EXIT_MESSAGE
+      ) {
+        updateOnExitRequested = true;
+      }
     });
 
     // Allow the parent to clean up process.env after spawn copies it
@@ -71,10 +101,23 @@ export async function relaunchAppInChildProcess(
       child.on('close', (code) => {
         // Resume stdin before the parent process exits.
         process.stdin.resume();
-        resolve(code ?? 1);
+        const exitCode = code ?? 1;
+        if (
+          exitCode === 0 &&
+          updateOnExitRequested &&
+          options?.onUpdateRelaunch
+        ) {
+          updateOnExitRequested = false;
+          void Promise.resolve(options.onUpdateRelaunch()).then(
+            () => resolve(exitCode),
+            reject,
+          );
+          return;
+        }
+        resolve(exitCode);
       });
     });
   };
 
-  await relaunchOnExitCode(runner);
+  await relaunchOnExitCode(runner, options);
 }
