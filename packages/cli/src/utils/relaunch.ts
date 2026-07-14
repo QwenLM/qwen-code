@@ -51,9 +51,9 @@ export async function relaunchAppInChildProcess(
     return;
   }
 
-  let updateOnExitRequested = false;
-
   const runner = () => {
+    let updateOnExitRequested = false;
+
     // process.argv is [node, script, ...args]
     // We want to construct [ ...nodeArgs, script, ...scriptArgs]
     const script = process.argv[1];
