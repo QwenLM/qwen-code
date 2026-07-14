@@ -151,6 +151,56 @@ describe('<MarkdownDisplay />', () => {
       expect(lastFrame() ?? '').toContain('line 60');
     });
 
+    it('clips a non-pending message when enforceHeightBudget is set (#6867)', () => {
+      // Regression for #6867: the `exit_plan_mode` confirmation dialog renders
+      // a non-pending plan body inside MainContent's `maxHeight` +
+      // `overflow="hidden"` wrapper. Ink clips the BOTTOM (newest content) so
+      // without a height-aware pre-slice, a long plan silently loses its tail
+      // (including the option buttons rendered after it). `enforceHeightBudget`
+      // lets bounded-container callers opt into the same slice the streaming
+      // path uses.
+      const text = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join(
+        eol,
+      );
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={false}
+          availableTerminalHeight={10}
+          enforceHeightBudget
+        />,
+      );
+      const output = lastFrame() ?? '';
+      const lineCount = output.split('\n').length;
+      // Budget = availableTerminalHeight - 2 headroom = 8; slice must respect
+      // it. Without the fix this would render all 60 lines.
+      expect(lineCount).toBeLessThanOrEqual(10);
+      // Head of the plan is preserved.
+      expect(output).toContain('line 1');
+      // Tail is dropped.
+      expect(output).not.toContain('line 60');
+    });
+
+    it('leaves a non-pending message full when enforceHeightBudget is false', () => {
+      // Committed non-pending renders (transcript, tool result markdown) must
+      // stay uncapped. Guards against enforceHeightBudget defaulting to true
+      // or the isPending gate being accidentally dropped.
+      const text = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join(
+        eol,
+      );
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={false}
+          availableTerminalHeight={10}
+          enforceHeightBudget={false}
+        />,
+      );
+      expect(lastFrame() ?? '').toContain('line 60');
+    });
+
     it('handles a code fence spanning the clip boundary', () => {
       // The head-slice can cut between an opening fence and its close; the
       // parser's EOF inCodeBlock flush then renders the (unclosed) block. The
