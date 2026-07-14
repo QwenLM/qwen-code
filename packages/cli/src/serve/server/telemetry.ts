@@ -15,6 +15,7 @@ import type { NextFunction, Request, Response } from 'express';
 import {
   CLIENT_ID_HEADER,
   CLIENT_ID_RE,
+  getDeferredRuntimeRequestTiming,
   MAX_CLIENT_ID_LENGTH,
 } from './request-helpers.js';
 
@@ -359,7 +360,8 @@ export function daemonTelemetryMiddleware(
       CLIENT_ID_RE.test(rawClientId)
         ? rawClientId
         : undefined;
-    const startMs = Date.now();
+    const deferredRuntime = getDeferredRuntimeRequestTiming(req);
+    const startMs = deferredRuntime?.startedAt.getTime() ?? Date.now();
     void withDaemonRequestSpan(
       {
         method: req.method,
@@ -370,6 +372,13 @@ export function daemonTelemetryMiddleware(
           ? { permissionRequestId: route.permissionRequestId }
           : {}),
         ...(clientId ? { clientId } : {}),
+        ...(deferredRuntime?.waitMs !== undefined
+          ? {
+              startTime: deferredRuntime.startedAt,
+              deferredRuntimeWaitMs: deferredRuntime.waitMs,
+              deferredRuntimePath: deferredRuntime.path,
+            }
+          : {}),
       },
       async (span) =>
         await new Promise<void>((resolve, reject) => {

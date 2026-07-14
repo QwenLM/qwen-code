@@ -26,6 +26,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
 }));
 
 import { daemonTelemetryMiddleware } from './telemetry.js';
+import { setDeferredRuntimeRequestTiming } from './request-helpers.js';
 
 function mockReq(method: string, path: string): Request {
   return { method, path, get: () => undefined } as unknown as Request;
@@ -69,6 +70,33 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     );
     res.emit('finish');
     expect(recordRequest).toHaveBeenCalledWith(expect.any(Number), 503);
+  });
+
+  it('includes deferred runtime wait in the request span', () => {
+    const req = mockReq('POST', '/session');
+    const startedAt = new Date(Date.now() - 25);
+    setDeferredRuntimeRequestTiming(req, {
+      startedAt,
+      path: 'joined',
+      waitMs: 24.5,
+    });
+    const res = mockRes(200);
+
+    daemonTelemetryMiddleware(() => '/ws')(
+      req,
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+    res.emit('finish');
+
+    expect(coreMocks.withDaemonRequestSpan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        startTime: startedAt,
+        deferredRuntimeWaitMs: 24.5,
+        deferredRuntimePath: 'joined',
+      }),
+      expect.any(Function),
+    );
   });
 
   it('fires exactly once even if both finish and close emit', () => {

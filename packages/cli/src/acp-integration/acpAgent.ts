@@ -77,6 +77,8 @@ import {
   normalizeSnapshotPayload,
   startEventLoopLagMonitor,
   refreshMemoryInstruction,
+  extractDaemonTraceContext,
+  withDaemonSpan,
   type AgentParams,
   type ApprovalMode,
   type Config,
@@ -98,6 +100,7 @@ import {
   type WorkspaceRememberContextMode,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import {
   AgentSideConnection,
@@ -290,6 +293,76 @@ const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
+
+type AcpSessionStartStage =
+  | 'settings_load'
+  | 'config_setup'
+  | 'auth'
+  | 'file_system_setup'
+  | 'session_register'
+  | 'response_build';
+
+interface AcpSessionStartSpan {
+  setAttribute(name: string, value: string | number | boolean): unknown;
+}
+
+function createAcpSessionStartProfiler(span: AcpSessionStartSpan | undefined) {
+  let failedStage: AcpSessionStartStage | undefined;
+  const setAttribute = (
+    name: string,
+    value: string | number | boolean,
+  ): void => {
+    try {
+      span?.setAttribute(name, value);
+    } catch {
+      // Telemetry must not affect session creation.
+    }
+  };
+  const recordStage = (stage: AcpSessionStartStage, start: number): void => {
+    const durationMs = Math.round((performance.now() - start) * 100) / 100;
+    if (Number.isFinite(durationMs) && durationMs >= 0) {
+      setAttribute(`qwen-code.daemon.session_start.${stage}_ms`, durationMs);
+    }
+  };
+  const recordFailure = (stage: AcpSessionStartStage): void => {
+    if (failedStage !== undefined) return;
+    failedStage = stage;
+    setAttribute('qwen-code.daemon.session_start.failed_stage', stage);
+  };
+
+  return {
+    async time<T>(
+      stage: AcpSessionStartStage,
+      fn: () => T | Promise<T>,
+    ): Promise<T> {
+      if (!span) return await fn();
+      const start = performance.now();
+      try {
+        return await fn();
+      } catch (error) {
+        recordFailure(stage);
+        throw error;
+      } finally {
+        recordStage(stage, start);
+      }
+    },
+    timeSync<T>(stage: AcpSessionStartStage, fn: () => T): T {
+      if (!span) return fn();
+      const start = performance.now();
+      try {
+        return fn();
+      } catch (error) {
+        recordFailure(stage);
+        throw error;
+      } finally {
+        recordStage(stage, start);
+      }
+    },
+    setSessionId(sessionId: string): void {
+      setAttribute('session.id', sessionId);
+    },
+  };
+}
 
 function workspaceMemoryErrorData(
   code: string,
@@ -3091,33 +3164,45 @@ class QwenAgent implements Agent {
     }
   }
 
-  async newSession({
-    cwd,
-    mcpServers,
-  }: NewSessionRequest): Promise<NewSessionResponse> {
-    // Per-request settings: session handlers run concurrently, and
-    // `this.settings` is only a "latest loaded" cache for agent-level
-    // readers. Threading the instance explicitly keeps a slow session
-    // creation from picking up whichever workspace loaded last — Session
-    // persists model changes through this instance, so a mix-up writes to
-    // another workspace's settings.json.
-    const settings = loadSettingsCached(cwd);
-    this.settings = settings;
-    const config = await this.newSessionConfig(cwd, mcpServers, settings);
-    await this.ensureAuthenticated(config);
-    this.setupFileSystem(config);
+  async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
+    const { cwd, mcpServers } = params;
+    const parentContext = extractDaemonTraceContext(params);
+    return await withDaemonSpan(
+      'qwen-code.daemon.session_start',
+      { 'qwen-code.daemon.operation': 'acp_session_new' },
+      async (span) => {
+        const profiler = createAcpSessionStartProfiler(span);
+        // Per-request settings: session handlers run concurrently, and
+        // `this.settings` is only a "latest loaded" cache for agent-level
+        // readers. Threading the instance explicitly keeps a slow session
+        // creation from picking up whichever workspace loaded last — Session
+        // persists model changes through this instance, so a mix-up writes to
+        // another workspace's settings.json.
+        const settings = profiler.timeSync('settings_load', () =>
+          loadSettingsCached(cwd),
+        );
+        this.settings = settings;
+        const config = await profiler.time('config_setup', () =>
+          this.newSessionConfig(cwd, mcpServers, settings),
+        );
+        await profiler.time('auth', () => this.ensureAuthenticated(config));
+        profiler.timeSync('file_system_setup', () =>
+          this.setupFileSystem(config),
+        );
 
-    const session = await this.createAndStoreSession(config, settings);
-    const availableModels = this.buildAvailableModels(config);
-    const modesData = this.buildModesData(config);
-    const configOptions = this.buildConfigOptions(config);
-
-    return {
-      sessionId: session.getId(),
-      models: availableModels,
-      modes: modesData,
-      configOptions,
-    };
+        const session = await profiler.time('session_register', () =>
+          this.createAndStoreSession(config, settings),
+        );
+        profiler.setSessionId(session.getId());
+        return profiler.timeSync('response_build', () => ({
+          sessionId: session.getId(),
+          models: this.buildAvailableModels(config),
+          modes: this.buildModesData(config),
+          configOptions: this.buildConfigOptions(config),
+        }));
+      },
+      parentContext ? { parentContext } : {},
+    );
   }
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {

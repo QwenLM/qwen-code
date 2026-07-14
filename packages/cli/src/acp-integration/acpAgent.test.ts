@@ -63,6 +63,25 @@ const { mockDebugLogger } = vi.hoisted(() => ({
   },
 }));
 
+const {
+  mockExtractDaemonTraceContext,
+  mockSessionStartSpan,
+  mockWithDaemonSpan,
+} = vi.hoisted(() => {
+  const mockSessionStartSpan = { setAttribute: vi.fn() };
+  return {
+    mockExtractDaemonTraceContext: vi.fn(),
+    mockSessionStartSpan,
+    mockWithDaemonSpan: vi.fn(
+      async (
+        _name: string,
+        _attributes: Record<string, unknown>,
+        fn: (span: typeof mockSessionStartSpan) => Promise<unknown>,
+      ) => await fn(mockSessionStartSpan),
+    ),
+  };
+});
+
 vi.mock('@agentclientprotocol/sdk', () => ({
   AgentSideConnection: vi.fn().mockImplementation(() => ({
     get closed() {
@@ -146,6 +165,8 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
       : undefined,
   ),
   createDebugLogger: () => mockDebugLogger,
+  extractDaemonTraceContext: mockExtractDaemonTraceContext,
+  withDaemonSpan: mockWithDaemonSpan,
   registerAcpEventLoopLagGauge: vi.fn(),
   startEventLoopLagMonitor: vi.fn(() => ({
     snapshot: vi.fn(() => ({
@@ -1316,6 +1337,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockExtractDaemonTraceContext.mockReturnValue(undefined);
     mockConnectionState.reset();
     mockRunExitCleanup.mockResolvedValue(undefined);
     mockExtensionManagerState.extensions = [];
@@ -1524,6 +1546,99 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     // with the instance session B loaded in the meantime.
     expect(sessionCalls[1]![0]).toBe('session-a');
     expect(sessionCalls[1]![3]).toBe(settingsA);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('profiles newSession stages under the daemon trace context', async () => {
+    const parentContext = { trace: 'parent' };
+    mockExtractDaemonTraceContext.mockReturnValue(parentContext);
+    const innerConfig = makeInnerConfig();
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+    vi.mocked(Session).mockImplementation(
+      (sessionId: string) =>
+        ({
+          getId: vi.fn().mockReturnValue(sessionId),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          replayHistory: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    const request = {
+      cwd: '/tmp',
+      mcpServers: [],
+      _meta: { 'qwen.telemetry.traceparent': 'daemon-parent' },
+    };
+
+    await agent.newSession(request);
+
+    expect(mockExtractDaemonTraceContext).toHaveBeenCalledWith(request);
+    expect(mockWithDaemonSpan).toHaveBeenCalledWith(
+      'qwen-code.daemon.session_start',
+      { 'qwen-code.daemon.operation': 'acp_session_new' },
+      expect.any(Function),
+      { parentContext },
+    );
+    const attributes = Object.fromEntries(
+      mockSessionStartSpan.setAttribute.mock.calls,
+    );
+    for (const stage of [
+      'settings_load',
+      'config_setup',
+      'auth',
+      'file_system_setup',
+      'session_register',
+      'response_build',
+    ]) {
+      expect(attributes[`qwen-code.daemon.session_start.${stage}_ms`]).toEqual(
+        expect.any(Number),
+      );
+    }
+    expect(attributes['session.id']).toBe('test-session-id');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('records the failed newSession stage without changing the error', async () => {
+    const configError = new Error('config failed');
+    vi.mocked(loadCliConfig).mockRejectedValue(configError);
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.newSession({ cwd: '/tmp', mcpServers: [] }),
+    ).rejects.toBe(configError);
+    expect(mockSessionStartSpan.setAttribute).toHaveBeenCalledWith(
+      'qwen-code.daemon.session_start.failed_stage',
+      'config_setup',
+    );
 
     mockConnectionState.resolve();
     await agentPromise;

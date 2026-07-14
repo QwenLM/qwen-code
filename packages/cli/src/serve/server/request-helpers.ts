@@ -72,6 +72,33 @@ export const CLIENT_ID_RE = /^[A-Za-z0-9._:-]+$/;
 const INVALID_PERMISSION_OUTCOME_ERROR =
   '`outcome` must be `{ outcome: "cancelled" }` or `{ outcome: "selected", optionId: string }`';
 
+export interface DeferredRuntimeRequestTiming {
+  startedAt: Date;
+  path: 'started_on_request' | 'joined';
+  waitMs?: number;
+}
+
+const deferredRuntimeTimingKey: unique symbol = Symbol(
+  'deferredRuntimeRequestTiming',
+);
+
+type DeferredRuntimeTimedRequest = Request & {
+  [deferredRuntimeTimingKey]?: DeferredRuntimeRequestTiming;
+};
+
+export function setDeferredRuntimeRequestTiming(
+  req: Request,
+  timing: DeferredRuntimeRequestTiming,
+): void {
+  (req as DeferredRuntimeTimedRequest)[deferredRuntimeTimingKey] = timing;
+}
+
+export function getDeferredRuntimeRequestTiming(
+  req: Request,
+): DeferredRuntimeRequestTiming | undefined {
+  return (req as DeferredRuntimeTimedRequest)[deferredRuntimeTimingKey];
+}
+
 type PermissionVoteResponse = Parameters<
   AcpSessionBridge['respondToPermission']
 >[1];
