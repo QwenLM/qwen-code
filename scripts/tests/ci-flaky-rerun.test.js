@@ -10,6 +10,7 @@ import {
   alreadyHandled,
   argsMap,
   currentActionCount,
+  eligibleAttemptJob,
   fileSha256,
   fingerprint,
   GhClient,
@@ -203,6 +204,33 @@ describe('ci flaky rerun patrol', () => {
     ]);
   });
 
+  it('binds job evidence to the exact live run attempt', () => {
+    const t = target();
+    const job = {
+      id: t.jobId,
+      run_id: t.runId,
+      run_attempt: t.runAttempt,
+      head_sha: t.headSha,
+      name: t.checkName,
+      status: 'completed',
+      conclusion: 'failure',
+      completed_at: '2026-07-12T07:20:00.000Z',
+    };
+
+    expect(eligibleAttemptJob(job, t, 2, { now: NOW })).toBe(true);
+    expect(
+      eligibleAttemptJob({ ...job, run_attempt: 1 }, t, 2, { now: NOW }),
+    ).toBe(false);
+    expect(
+      eligibleAttemptJob(
+        { ...job, completed_at: '2026-07-12T07:45:00.000Z' },
+        t,
+        2,
+        { now: NOW },
+      ),
+    ).toBe(false);
+  });
+
   it('rejects a command-line flag without a value', () => {
     expect(() => argsMap(['--repo'])).toThrow('missing value for --repo');
   });
@@ -264,6 +292,22 @@ describe('ci flaky rerun patrol', () => {
         'patrol-bot',
       ),
     ).toBe(0);
+    expect(
+      currentActionCount(
+        pr({
+          statusCheckRollup: [
+            run({
+              conclusion: 'SUCCESS',
+              completedAt: '2026-07-12T07:30:00.000Z',
+              detailsUrl:
+                'https://github.com/QwenLM/qwen-code/actions/runs/124/job/2',
+            }),
+          ],
+        }),
+        comments,
+        'patrol-bot',
+      ),
+    ).toBe(2);
     expect(
       currentActionCount(
         pr({ headRefOid: 'new-head' }),
@@ -581,6 +625,22 @@ describe('ci flaky rerun patrol', () => {
         'Cleaning up orphan processes',
       ].join('\n'),
     );
+    expect(evidence).toContain("expected ['deferred_tool_call']");
+  });
+
+  it('keeps the primary failure when later summary lines fill the limit', () => {
+    const evidence = skillLog(
+      [
+        'Failed Tests 1',
+        'FAIL toolFormatting.test.ts > translates every tool',
+        "AssertionError: expected ['deferred_tool_call'] to deeply equal []",
+        ...Array.from(
+          { length: 200 },
+          (_, index) => `npm error cleanup noise ${index}`,
+        ),
+      ].join('\n'),
+    );
+    expect(evidence.split('\n')).toHaveLength(120);
     expect(evidence).toContain("expected ['deferred_tool_call']");
   });
 });

@@ -175,6 +175,7 @@ function succeededAfter(pr, state) {
     (check) =>
       check.workflowName === state.workflowName &&
       check.name === state.checkName &&
+      runIdFromUrl(check.detailsUrl) === state.runId &&
       check.status === 'COMPLETED' &&
       check.conclusion === 'SUCCESS' &&
       timeMs(check.completedAt) > timeMs(state.createdAt),
@@ -220,6 +221,7 @@ function redactLog(log) {
 export function skillLog(log) {
   const lines = redactLog(log).split('\n');
   const selected = new Set();
+  const primary = new Set();
   const summary =
     /##\[error\]|failed tests|\sFAIL\s|AssertionError|error TS\d{4}|❌|npm error|lifecycle script .* failed/i;
   let matches = lines.flatMap((line, index) =>
@@ -231,10 +233,12 @@ export function skillLog(log) {
       fallback.test(line) ? [index] : [],
     );
   }
-  for (const index of matches) {
+  for (const [matchIndex, index] of matches.entries()) {
     const before = lines[index].includes('##[error]') ? 20 : 3;
     for (let context = index - before; context <= index + 3; context += 1) {
-      if (context >= 0 && context < lines.length) selected.add(context);
+      if (context < 0 || context >= lines.length) continue;
+      selected.add(context);
+      if (matchIndex === 0) primary.add(context);
     }
   }
   for (
@@ -244,9 +248,12 @@ export function skillLog(log) {
   ) {
     selected.add(index);
   }
-  return [...selected]
+  const remaining = [...selected]
+    .filter((index) => !primary.has(index))
     .sort((a, b) => a - b)
-    .slice(-120)
+    .slice(-(120 - primary.size));
+  return [...primary, ...remaining]
+    .sort((a, b) => a - b)
     .map((index) => lines[index].slice(0, 300))
     .join('\n');
 }
@@ -308,6 +315,30 @@ function currentFailure(run, target) {
   );
 }
 
+export function eligibleAttemptJob(job, target, runAttempt, options = {}) {
+  const now = options.now ?? new Date();
+  const staleMinutes = options.staleMinutes ?? DEFAULT_STALE_MINUTES;
+  const activeDays = options.activeDays ?? DEFAULT_ACTIVE_DAYS;
+  return (
+    Number(job?.id) === target.jobId &&
+    Number(job?.run_id) === target.runId &&
+    Number(job?.run_attempt) === runAttempt &&
+    job?.head_sha === target.headSha &&
+    job?.name === target.checkName &&
+    isEligibleFailure(
+      {
+        workflowName: target.workflowName,
+        status: String(job?.status ?? '').toUpperCase(),
+        conclusion: String(job?.conclusion ?? '').toUpperCase(),
+        completedAt: job?.completed_at,
+      },
+      now,
+      staleMinutes,
+      activeDays,
+    )
+  );
+}
+
 function safeReason(reason) {
   return reason
     .trim()
@@ -320,29 +351,38 @@ function safeReason(reason) {
 export async function actOnDecision(client, target, decision) {
   if (!target || !validDecision(target, decision)) return;
 
-  const pr = await client.currentPr(target.prNumber);
-  const current = latestMatchingTarget(pr, target);
-  if (
-    pr.state !== 'OPEN' ||
-    pr.isDraft ||
-    pr.baseRefName !== 'main' ||
-    pr.headRefOid !== target.headSha ||
-    current?.runId !== target.runId ||
-    current?.jobId !== target.jobId
-  ) {
-    return;
-  }
+  const isCurrentTarget = async () => {
+    const pr = await client.currentPr(target.prNumber);
+    const current = latestMatchingTarget(pr, target);
+    return {
+      current:
+        pr.state === 'OPEN' &&
+        !pr.isDraft &&
+        pr.baseRefName === 'main' &&
+        pr.headRefOid === target.headSha &&
+        current?.runId === target.runId &&
+        current?.jobId === target.jobId,
+      pr,
+    };
+  };
+
+  let state = await isCurrentTarget();
+  if (!state.current) return;
 
   const comments = await client.comments(target.prNumber);
   if (
     alreadyHandled(comments, target, client.trustedMarkerLogin) ||
-    currentActionCount(pr, comments, client.trustedMarkerLogin) >= MAX_ACTIONS
+    currentActionCount(state.pr, comments, client.trustedMarkerLogin) >=
+      MAX_ACTIONS
   ) {
     return;
   }
+  state = await isCurrentTarget();
+  if (!state.current) return;
   if (!currentFailure(await client.run(target.runId), target)) return;
 
-  const count = currentActionCount(pr, comments, client.trustedMarkerLogin) + 1;
+  const count =
+    currentActionCount(state.pr, comments, client.trustedMarkerLogin) + 1;
   const marker = markerFor(target, decision.action, count);
   if (decision.action === 'rerun') {
     await client.rerunFailedJobs(target.runId);
@@ -504,6 +544,12 @@ export class GhClient {
     );
   }
 
+  async job(jobId) {
+    return JSON.parse(
+      await this.gh(['api', `repos/${this.repo}/actions/jobs/${jobId}`]),
+    );
+  }
+
   async rerunFailedJobs(runId) {
     await this.gh([
       'api',
@@ -528,7 +574,6 @@ export class GhClient {
   async jobLog(jobId) {
     return this.gh(['api', `repos/${this.repo}/actions/jobs/${jobId}/logs`]);
   }
-
 }
 
 export function argsMap(argv) {
@@ -579,6 +624,7 @@ async function scan(args) {
   const workdir = requiredArg(args, 'workdir');
   const repo = requiredArg(args, 'repo');
   const activeDays = numberArg(args, 'active-days', DEFAULT_ACTIVE_DAYS);
+  const staleMinutes = numberArg(args, 'stale-minutes', DEFAULT_STALE_MINUTES);
   const maxCandidates = numberArg(
     args,
     'max-candidates',
@@ -590,7 +636,7 @@ async function scan(args) {
   client.trustedMarkerLogin = trustedLogin;
   const targets = selectCandidateTargets(await client.prs(activeDays), {
     activeDays,
-    staleMinutes: numberArg(args, 'stale-minutes', DEFAULT_STALE_MINUTES),
+    staleMinutes,
   });
   const candidates = [];
   const selectedPrs = new Set();
@@ -602,9 +648,19 @@ async function scan(args) {
       if (target.jobId === null) continue;
       const before = await client.run(target.runId);
       if (!runStillCurrent(before, target, before.run_attempt)) continue;
+      const job = await client.job(target.jobId);
+      if (
+        !eligibleAttemptJob(job, target, before.run_attempt, {
+          activeDays,
+          staleMinutes,
+        })
+      ) {
+        continue;
+      }
       const log = skillLog(await client.jobLog(target.jobId));
       const candidate = {
         ...target,
+        completedAt: job.completed_at,
         runAttempt: before.run_attempt,
         failureKey: fingerprint(target, log),
       };

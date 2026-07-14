@@ -49,6 +49,16 @@ describe('ci failure patrol workflow', () => {
     expect(reset.env.GH_TOKEN).toContain('CI_BOT_PAT');
   });
 
+  it('runs scan and act with the same trusted event commit', () => {
+    for (const job of [yml.jobs.classify, yml.jobs.act]) {
+      const checkout = job.steps.find((step) =>
+        step.uses?.includes('actions/checkout'),
+      );
+      expect(checkout.with.ref).toBe('${{ github.sha }}');
+      expect(checkout.with['persist-credentials']).toBe(false);
+    }
+  });
+
   it('keeps judgment in the skill and GitHub writes in the driver', () => {
     for (const action of ['rerun', 'comment', 'no_action']) {
       expect(skill).toContain(action);
