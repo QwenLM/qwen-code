@@ -1139,6 +1139,17 @@ describe('loadCliConfig', () => {
     expect(config.getAgentsSettings().maxParallelAgents).toBe(2);
   });
 
+  it('passes tools.shell.defaultTimeoutMs from settings to core config', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { tools: { shell: { defaultTimeoutMs: 300000 } } },
+      argv,
+    );
+
+    expect(config.getShellDefaultTimeoutMs()).toBe(300000);
+  });
+
   it('should ignore blank settings fallback models', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();

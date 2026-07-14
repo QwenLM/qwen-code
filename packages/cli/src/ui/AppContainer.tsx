@@ -215,6 +215,7 @@ import {
 } from './contexts/BackgroundTaskViewContext.js';
 import { getLiveAgentPanelLayoutKey } from './components/background-view/liveAgentPanelVisibility.js';
 import { t } from '../i18n/index.js';
+import { TUI_CHAT_RECORDING_FAILURE_MESSAGE } from '../utils/chat-recording-failure.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
 import { useInitializationAuthError } from './hooks/useInitializationAuthError.js';
@@ -1308,16 +1309,34 @@ export const AppContainer = (props: AppContainerProps) => {
 
     // Chain with existing callback (e.g., Session's ACP notification)
     const existingCallback = chatRecordingService.getTitleRecordedCallback();
-    chatRecordingService.setTitleRecordedCallback((customTitle, source) => {
-      existingCallback?.(customTitle, source);
-      setSessionName(customTitle);
-    });
+    chatRecordingService.setTitleRecordedCallback(
+      (customTitle, source, sessionId) => {
+        existingCallback?.(customTitle, source, sessionId);
+        if (sessionId === config.getSessionId()) {
+          setSessionName(customTitle);
+        }
+      },
+    );
 
     return () => {
       // Restore original callback on unmount
       chatRecordingService.setTitleRecordedCallback(existingCallback);
     };
   }, [config]);
+
+  const addHistoryItem = historyManager.addItem;
+  useEffect(() => {
+    if (typeof config.onChatRecordingFailure !== 'function') return;
+    return config.onChatRecordingFailure(() => {
+      addHistoryItem(
+        {
+          type: MessageType.WARNING,
+          text: t(TUI_CHAT_RECORDING_FAILURE_MESSAGE),
+        },
+        Date.now(),
+      );
+    });
+  }, [addHistoryItem, config]);
 
   const {
     isResumeDialogOpen,

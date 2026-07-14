@@ -8,6 +8,7 @@ import {
   MCP_RESTART_SERVER_DEADLINE_MS,
   MCP_RESTART_CLIENT_HEADROOM_MS,
 } from '@qwen-code/acp-bridge/mcpTimeouts';
+import { CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS } from '@qwen-code/acp-bridge/channelControlTimeouts';
 import { DaemonAuthFlow } from './DaemonAuthFlow.js';
 import { DaemonHttpError } from './DaemonHttpError.js';
 import type { DaemonTransport } from './DaemonTransport.js';
@@ -66,6 +67,7 @@ import type {
   DaemonWorkspaceAgentDetail,
   DaemonWorkspaceAgentsStatus,
   DaemonWorkspaceEnvStatus,
+  DaemonWorkspaceGitStatus,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMcpResourcesStatus,
@@ -99,6 +101,10 @@ import type {
   DaemonMcpRestartResult,
   DaemonReloadResponse,
   DaemonChannelReloadResult,
+  DaemonChannelControlState,
+  DaemonChannelSelection,
+  DaemonChannelSetResult,
+  DaemonChannelStopResult,
   DaemonMcpManageAction,
   DaemonMcpManageResult,
   DaemonSessionBtwResult,
@@ -687,6 +693,7 @@ export class DaemonClient {
       body?: unknown;
       clientId?: string;
       timeoutMs?: number;
+      mode?: 'transport' | 'rest';
     } = {},
   ): Promise<T> {
     return await this.jsonRequest<T>(
@@ -812,6 +819,14 @@ export class DaemonClient {
         if (!res.ok) throw await this.failOnError(res, 'GET /workspace/mcp');
         return (await res.json()) as DaemonWorkspaceMcpStatus;
       },
+    );
+  }
+
+  async workspaceGit(): Promise<DaemonWorkspaceGitStatus> {
+    return await this.jsonRequest<DaemonWorkspaceGitStatus>(
+      '/workspace/git',
+      'GET /workspace/git',
+      { mode: 'rest' },
     );
   }
 
@@ -2569,8 +2584,8 @@ export class DaemonClient {
   /**
    * Reload the daemon-managed channel worker: the daemon stops and relaunches
    * it so it re-reads settings.json (channels / proxy / per-channel model).
-   * Requires the daemon to have been started with `--channel`; otherwise the
-   * route responds 409. Pre-flight the `channel_reload` capability.
+   * Requires an enabled runtime selection; otherwise the route responds 409.
+   * Pre-flight the dynamic `channel_reload` capability.
    */
   async reloadChannelWorker(opts?: {
     clientId?: string;
@@ -2592,7 +2607,71 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonChannelReloadResult;
       },
+      opts?.timeoutMs ?? CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS,
+    );
+  }
+
+  async getChannelWorkerControl(opts?: {
+    clientId?: string;
+    timeoutMs?: number;
+  }): Promise<DaemonChannelControlState> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/channel`,
+      {
+        method: 'GET',
+        headers: this.headers({}, opts?.clientId),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/channel');
+        }
+        return (await res.json()) as DaemonChannelControlState;
+      },
       opts?.timeoutMs,
+    );
+  }
+
+  async setChannelWorkerSelection(
+    selection: DaemonChannelSelection,
+    opts?: { clientId?: string; timeoutMs?: number },
+  ): Promise<DaemonChannelSetResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/channel`,
+      {
+        method: 'PUT',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({ selection }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'PUT /workspace/channel');
+        }
+        return (await res.json()) as DaemonChannelSetResult;
+      },
+      opts?.timeoutMs ?? CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS,
+    );
+  }
+
+  async stopChannelWorker(opts?: {
+    clientId?: string;
+    timeoutMs?: number;
+  }): Promise<DaemonChannelStopResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/channel`,
+      {
+        method: 'DELETE',
+        headers: this.headers({}, opts?.clientId),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'DELETE /workspace/channel');
+        }
+        return (await res.json()) as DaemonChannelStopResult;
+      },
+      opts?.timeoutMs ?? CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS,
     );
   }
 
@@ -3486,6 +3565,15 @@ export class WorkspaceDaemonClient {
     return this.get('/mcp', 'GET /workspaces/:workspace/mcp');
   }
 
+  workspaceGit(): Promise<DaemonWorkspaceGitStatus> {
+    return this.client.workspaceJsonRequest<DaemonWorkspaceGitStatus>(
+      this.workspaceSelector,
+      '/git',
+      'GET /workspaces/:workspace/git',
+      { mode: 'rest' },
+    );
+  }
+
   workspaceSkills(): Promise<DaemonWorkspaceSkillsStatus> {
     return this.get('/skills', 'GET /workspaces/:workspace/skills');
   }
@@ -3619,6 +3707,28 @@ export class WorkspaceDaemonClient {
   ): Promise<DaemonSessionSummary[]> {
     const page = await this.listWorkspaceSessionsPage(options);
     return page.sessions;
+  }
+
+  /**
+   * Read one page from an active persisted session transcript in this
+   * workspace.
+   * The daemon performs replay locally without attaching to the session or
+   * starting ACP. This method always uses native REST transport.
+   */
+  getSessionTranscriptPage(
+    sessionId: string,
+    opts: DaemonSessionTranscriptPageOptions = {},
+  ): Promise<DaemonSessionTranscriptPage> {
+    const query = new URLSearchParams();
+    if (opts.cursor !== undefined) query.set('cursor', opts.cursor);
+    if (opts.limit !== undefined) query.set('limit', String(opts.limit));
+    const suffix = query.size > 0 ? `?${query.toString()}` : '';
+    return this.client.workspaceJsonRequest<DaemonSessionTranscriptPage>(
+      this.workspaceSelector,
+      `/session/${urlEncode(sessionId)}/transcript${suffix}`,
+      'GET /workspaces/:workspace/session/:id/transcript',
+      { clientId: opts.clientId, mode: 'rest' },
+    );
   }
 
   listSessionGroups(): Promise<DaemonSessionGroupCatalog> {

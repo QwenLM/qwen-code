@@ -59,6 +59,8 @@ export interface DaemonConnectionState {
    */
   clientId?: string;
   workspaceCwd?: string;
+  /** Current Git branch, short detached-HEAD hash, or undefined outside Git. */
+  gitBranch?: string;
   commands?: DaemonCommandInfo[];
   skills?: string[];
   models?: DaemonModelInfo[];
@@ -180,6 +182,7 @@ export type DaemonNoticeOperation =
   | 'btw_session'
   | 'branch_session'
   | 'fork_session'
+  | 'record_session'
   | 'stream'
   | 'normalize_event';
 
@@ -326,8 +329,14 @@ export interface DaemonSessionActions {
   listSessions(options?: {
     pageSize?: number;
   }): Promise<DaemonSessionSummary[]>;
-  loadSession(sessionId: string): Promise<void>;
-  resumeSession(sessionId: string): Promise<void>;
+  loadSession(
+    sessionId: string,
+    options?: { workspaceCwd?: string },
+  ): Promise<void>;
+  resumeSession(
+    sessionId: string,
+    options?: { workspaceCwd?: string },
+  ): Promise<void>;
   /**
    * Create a daemon session and update local session state. Callers that need
    * transcript/event streaming must follow with `attachSession()`.

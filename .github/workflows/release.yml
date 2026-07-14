@@ -460,6 +460,28 @@ jobs:
         run: |-
           npm run verify:installation-release -- --dir dist/standalone
 
+      - name: 'Generate AI-assisted stable release notes'
+        if: |-
+          ${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+          RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
+          RELEASE_NOTES_FILE: '${{ runner.temp }}/release-notes.md'
+          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
+          PREVIOUS_RELEASE_TAG: '${{ needs.prepare.outputs.previous_release_tag }}'
+        run: |-
+          node scripts/generate-release-notes.js \
+            --repo="${GITHUB_REPOSITORY}" \
+            --tag="${RELEASE_TAG}" \
+            --previous-tag="${PREVIOUS_RELEASE_TAG}" \
+            --target="${RELEASE_BRANCH}" \
+            --output="${RELEASE_NOTES_FILE}"
+
       - name: 'Create GitHub Release and Tag'
         if: |-
           ${{ needs.prepare.outputs.is_dry_run == 'false' }}
@@ -471,10 +493,16 @@ jobs:
           PREVIOUS_RELEASE_TAG: '${{ needs.prepare.outputs.previous_release_tag }}'
           IS_NIGHTLY: '${{ needs.prepare.outputs.is_nightly }}'
           IS_PREVIEW: '${{ needs.prepare.outputs.is_preview }}'
+          RELEASE_NOTES_FILE: '${{ runner.temp }}/release-notes.md'
         run: |-
           PRERELEASE_FLAG=""
           if [[ "${IS_NIGHTLY}" == "true" || "${IS_PREVIEW}" == "true" ]]; then
             PRERELEASE_FLAG="--prerelease"
+          fi
+
+          NOTES_ARGS=(--notes-start-tag "${PREVIOUS_RELEASE_TAG}" --generate-notes)
+          if [[ "${IS_NIGHTLY}" == "false" && "${IS_PREVIEW}" == "false" && -s "${RELEASE_NOTES_FILE}" ]]; then
+            NOTES_ARGS=(--notes-file "${RELEASE_NOTES_FILE}")
           fi
 
           gh release create "${RELEASE_TAG}" \
@@ -483,8 +511,7 @@ jobs:
             dist/standalone/SHA256SUMS \
             --target "${RELEASE_BRANCH}" \
             --title "Release ${RELEASE_TAG}" \
-            --notes-start-tag "${PREVIOUS_RELEASE_TAG}" \
-            --generate-notes \
+            "${NOTES_ARGS[@]}" \
             ${PRERELEASE_FLAG}
 
       - name: 'Regenerate CHANGELOG.md'

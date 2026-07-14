@@ -43,6 +43,18 @@ interface ChannelWorkersStatus {
   };
 }
 
+interface ChannelControlState {
+  enabled: boolean;
+  selection: { mode: 'all' } | { mode: 'names'; names: string[] } | null;
+  transition: string;
+  workers: Array<{
+    workspaceCwd: string;
+    state: string;
+    channels: string[];
+    pid?: number;
+  }>;
+}
+
 function writeJson(file: string, value: unknown): void {
   mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(file, JSON.stringify(value, null, 2));
@@ -145,6 +157,32 @@ async function waitForRunningWorkers(
   );
 }
 
+async function waitForRunningControl(
+  baseUrl: string,
+): Promise<ChannelControlState> {
+  const deadline = Date.now() + 15_000;
+  let lastState: ChannelControlState | undefined;
+  while (Date.now() < deadline) {
+    const response = await fetch(`${baseUrl}/workspace/channel`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(response.status).toBe(200);
+    lastState = (await response.json()) as ChannelControlState;
+    if (
+      lastState.enabled &&
+      lastState.transition === 'idle' &&
+      lastState.workers.length === 1 &&
+      lastState.workers[0]?.state === 'running'
+    ) {
+      return lastState;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(
+    `runtime channel did not reach running state: ${JSON.stringify(lastState)}`,
+  );
+}
+
 afterEach(async () => {
   await stopDaemon(daemon);
   await Promise.allSettled([
@@ -159,6 +197,144 @@ afterEach(async () => {
 });
 
 describe('qwen serve multi-workspace channel workers', () => {
+  it('controls a real mock-plugin worker after a channel-less boot', async () => {
+    testRoot = realpathSync(
+      mkdtempSync(path.join(tmpdir(), 'qwen-serve-channel-runtime-')),
+    );
+    const qwenHome = path.join(testRoot, 'qwen-home');
+    const runtimeDir = path.join(testRoot, 'runtime');
+    const workspace = path.join(testRoot, 'workspace');
+    mkdirSync(workspace);
+    mkdirSync(runtimeDir);
+    primaryServer = await createMockServer({ httpPort: 0, wsPort: 0 });
+
+    const extensionDir = path.join(qwenHome, 'extensions');
+    mkdirSync(extensionDir, { recursive: true });
+    symlinkSync(
+      path.join(REPO_ROOT, 'packages', 'channels', 'plugin-example'),
+      path.join(extensionDir, 'qwen-channel-plugin-example'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    writeJson(path.join(qwenHome, 'settings.json'), {
+      security: { folderTrust: { enabled: true } },
+    });
+    const trustedFoldersPath = path.join(qwenHome, 'trustedFolders.json');
+    writeJson(trustedFoldersPath, { [workspace]: 'TRUST_FOLDER' });
+    writeJson(path.join(workspace, '.qwen', 'settings.json'), {
+      channels: {
+        runtime: {
+          type: 'plugin-example',
+          serverWsUrl: primaryServer.wsUrl,
+          senderPolicy: 'open',
+          sessionScope: 'user',
+          cwd: workspace,
+        },
+      },
+    });
+    const env = {
+      ...process.env,
+      QWEN_HOME: qwenHome,
+      QWEN_RUNTIME_DIR: runtimeDir,
+      QWEN_CODE_TRUSTED_FOLDERS_PATH: trustedFoldersPath,
+      OPENAI_API_KEY: 'fake-key',
+      OPENAI_BASE_URL: 'http://127.0.0.1:9/v1',
+      OPENAI_MODEL: 'fake-model',
+      QWEN_MODEL: 'fake-model',
+    };
+    const spawnDaemon = () =>
+      spawn(
+        process.execPath,
+        [
+          CLI_BIN,
+          'serve',
+          '--hostname',
+          '127.0.0.1',
+          '--port',
+          '0',
+          '--no-web',
+          '--token',
+          TOKEN,
+          '--workspace',
+          workspace,
+        ],
+        { stdio: ['ignore', 'pipe', 'pipe'], env },
+      );
+
+    daemon = spawnDaemon();
+    let port = await waitForListening(daemon);
+    let baseUrl = `http://127.0.0.1:${port}`;
+    const authHeaders = {
+      Authorization: `Bearer ${TOKEN}`,
+      'Content-Type': 'application/json',
+    };
+    const before = await fetch(`${baseUrl}/workspace/channel`, {
+      headers: authHeaders,
+    });
+    expect(await before.json()).toMatchObject({
+      enabled: false,
+      selection: null,
+      workers: [],
+    });
+
+    const enable = await fetch(`${baseUrl}/workspace/channel`, {
+      method: 'PUT',
+      headers: authHeaders,
+      body: JSON.stringify({
+        selection: { mode: 'names', names: ['runtime'] },
+      }),
+    });
+    expect(enable.status).toBe(201);
+    await primaryServer.waitForConnection(15_000);
+    const running = await waitForRunningControl(baseUrl);
+    const firstPid = running.workers[0]?.pid;
+    expect(running).toMatchObject({
+      selection: { mode: 'names', names: ['runtime'] },
+      workers: [
+        expect.objectContaining({
+          workspaceCwd: workspace,
+          channels: ['runtime'],
+          state: 'running',
+        }),
+      ],
+    });
+
+    const same = await fetch(`${baseUrl}/workspace/channel`, {
+      method: 'PUT',
+      headers: authHeaders,
+      body: JSON.stringify({
+        selection: { mode: 'names', names: ['runtime'] },
+      }),
+    });
+    expect(same.status).toBe(200);
+    expect(await same.json()).toMatchObject({
+      changed: false,
+      state: { workers: [expect.objectContaining({ pid: firstPid })] },
+    });
+
+    const stop = await fetch(`${baseUrl}/workspace/channel`, {
+      method: 'DELETE',
+      headers: authHeaders,
+    });
+    expect(stop.status).toBe(200);
+    expect(await stop.json()).toMatchObject({
+      changed: true,
+      state: { enabled: false, selection: null, workers: [] },
+    });
+
+    await stopDaemon(daemon);
+    daemon = spawnDaemon();
+    port = await waitForListening(daemon);
+    baseUrl = `http://127.0.0.1:${port}`;
+    const afterRestart = await fetch(`${baseUrl}/workspace/channel`, {
+      headers: authHeaders,
+    });
+    expect(await afterRestart.json()).toMatchObject({
+      enabled: false,
+      selection: null,
+      workers: [],
+    });
+  }, 60_000);
+
   it('starts real workers for primary and secondary workspaces', async () => {
     testRoot = realpathSync(
       mkdtempSync(path.join(tmpdir(), 'qwen-serve-channel-workers-')),

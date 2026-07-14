@@ -288,6 +288,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const [restoreSessionId, setRestoreSessionId] = useState<string | undefined>(
     initialRestoreSessionId,
   );
+  const [restoreWorkspaceCwd, setRestoreWorkspaceCwd] = useState<
+    string | undefined
+  >(undefined);
   const [restoreMode, setRestoreMode] = useState<'load' | 'resume'>('load');
   const [restoreSessionNonce, setRestoreSessionNonce] = useState(0);
   const [attachSessionNonce, setAttachSessionNonce] = useState(0);
@@ -306,7 +309,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       id: input.id ?? `daemon-notice-${Date.now()}-${++noticeIdRef.current}`,
       createdAt: input.createdAt ?? Date.now(),
     };
-    setNotices((current) => [...current.slice(-49), notice]);
+    setNotices((current) =>
+      current.some((existing) => existing.id === notice.id)
+        ? current
+        : [...current.slice(-49), notice],
+    );
     return notice;
   }, []);
   const dismissNotice = useCallback((id: string) => {
@@ -439,7 +446,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               Array.isArray(caps.features) &&
               caps.features.includes('client_heartbeat');
             const effectWorkspaceCwd =
-              resolvedWorkspaceCwdRef.current ?? caps.workspaceCwd;
+              restoreWorkspaceCwd ??
+              resolvedWorkspaceCwdRef.current ??
+              caps.workspaceCwd;
             activeWorkspaceCwdRef.current = effectWorkspaceCwd;
             if (
               (shouldDeferInitialSessionCreation ||
@@ -454,11 +463,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               // session-scoped supported-commands snapshot (which also carries
               // custom/MCP/workflow commands) still lands once the first prompt
               // creates a session.
-              const [providerResult, skillsResult, acpStatusResult] =
+              const [providerResult, skillsResult, acpStatusResult, gitResult] =
                 await Promise.allSettled([
                   client.workspaceProviders(),
                   client.workspaceSkills(),
                   client.workspaceAcpStatus(),
+                  effectWorkspaceCwd
+                    ? client.workspaceByCwd(effectWorkspaceCwd).workspaceGit()
+                    : client.workspaceGit(),
                 ]);
               if (providerResult.status === 'rejected') {
                 console.warn(
@@ -499,6 +511,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 ...current,
                 status: 'connected',
                 workspaceCwd: effectWorkspaceCwd,
+                gitBranch:
+                  gitResult.status === 'fulfilled'
+                    ? (gitResult.value.branch ?? undefined)
+                    : undefined,
                 models: providerModelStatus.models,
                 currentModel: providerModelStatus.currentModel,
                 currentMode: providerModelStatus.currentMode,
@@ -753,6 +769,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     replayEvent,
                     replayUiEvents,
                     addNotice,
+                    dismissNotice,
                   ),
                 );
                 if (replayEvent.type === 'turn_complete') {
@@ -856,14 +873,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             connectionRef.current.skills !== undefined &&
             connectionRef.current.supportedCommands !== undefined &&
             connectionRef.current.context !== undefined;
-          const [providerResult, commandResult, contextResult] =
-            canReuseSessionMetadata
-              ? [undefined, undefined, undefined]
-              : await Promise.allSettled([
-                  client.workspaceProviders(),
-                  activeSession.supportedCommands(),
-                  activeSession.context(),
-                ]);
+          const gitPromise = activeSession.workspaceCwd
+            ? client.workspaceByCwd(activeSession.workspaceCwd).workspaceGit()
+            : client.workspaceGit();
+          const [providerResult, commandResult, contextResult, gitResult] =
+            await Promise.allSettled([
+              canReuseSessionMetadata
+                ? Promise.resolve(undefined)
+                : client.workspaceProviders(),
+              canReuseSessionMetadata
+                ? Promise.resolve(undefined)
+                : activeSession.supportedCommands(),
+              canReuseSessionMetadata
+                ? Promise.resolve(undefined)
+                : activeSession.context(),
+              gitPromise,
+            ]);
           const providers =
             providerResult?.status === 'fulfilled'
               ? providerResult.value
@@ -875,6 +900,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const context =
             contextResult?.status === 'fulfilled'
               ? contextResult.value
+              : undefined;
+          const gitBranch =
+            gitResult?.status === 'fulfilled'
+              ? (gitResult.value.branch ?? undefined)
               : undefined;
           const loadWarningTexts = [
             providerResult?.status === 'rejected'
@@ -943,6 +972,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               providers: providers ?? current.providers,
               supportedCommands: supportedCommands ?? current.supportedCommands,
               context: context ?? current.context,
+              gitBranch:
+                gitResult.status === 'fulfilled'
+                  ? gitBranch
+                  : current.gitBranch,
               capabilities: capabilities ?? current.capabilities,
               loadingTranscript: undefined,
               catchingUp:
@@ -1038,6 +1071,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 event,
                 normalizedUiEvents,
                 addNotice,
+                dismissNotice,
               );
               if (event.type === 'state_resync_required') {
                 const reason =
@@ -1514,6 +1548,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     maxQueued,
     store,
     restoreSessionId,
+    restoreWorkspaceCwd,
     restoreMode,
     restoreSessionNonce,
     attachSessionNonce,
@@ -1522,6 +1557,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     shouldDeferInitialSessionCreation,
     clearNotices,
     addNotice,
+    dismissNotice,
   ]);
 
   useEffect(() => {
@@ -1717,6 +1753,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         setConnection,
         setPromptStatus,
         setRestoreSessionId,
+        setRestoreWorkspaceCwd,
         setRestoreMode,
         setRestoreSessionNonce,
         setAttachSessionNonce,
@@ -1906,7 +1943,18 @@ function filterDaemonUiEventsForTranscript(
   sourceEvent: DaemonEvent,
   events: DaemonUiEvent[],
   addNotice: AddDaemonSessionNotice,
+  dismissNotice: (id: string) => void,
 ): DaemonUiEvent[] {
+  if (
+    sourceEvent.type === 'session_snapshot' &&
+    isRecord(sourceEvent.data) &&
+    sourceEvent.data['recordingDegraded'] === false
+  ) {
+    const sessionId = getString(sourceEvent.data, 'sessionId');
+    if (sessionId) {
+      dismissNotice(`daemon.session_recording_degraded:${sessionId}`);
+    }
+  }
   const filtered: DaemonUiEvent[] = [];
   for (const event of events) {
     if (event.type !== 'error') {
@@ -1940,6 +1988,22 @@ function daemonErrorEventToNotice(
   };
 
   switch (sourceEvent.type) {
+    case 'session_recording_degraded':
+    case 'session_snapshot': {
+      const sessionId = isRecord(sourceEvent.data)
+        ? getString(sourceEvent.data, 'sessionId')
+        : undefined;
+      return {
+        ...base,
+        ...(sessionId
+          ? { id: `daemon.session_recording_degraded:${sessionId}` }
+          : {}),
+        severity: 'warning',
+        category: 'system',
+        operation: 'record_session',
+        code: 'daemon.session_recording_degraded',
+      };
+    }
     case 'model_switch_failed':
       return {
         ...base,

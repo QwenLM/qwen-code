@@ -4,6 +4,10 @@
   margin: 0 0 14px;
 }
 
+.editorShellDropdownOpen {
+  z-index: 7;
+}
+
 .container {
   position: relative;
   container-type: inline-size;
@@ -885,6 +889,7 @@
 
 .toolbarLeading {
   margin-left: -5px;
+  min-width: 0;
 }
 
 .toolbarStart {
@@ -897,7 +902,77 @@
 
 .toolbarLeft {
   min-width: 0;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+}
+
+.gitBranchChip {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 180px;
+  height: 28px;
+  padding: 0 8px;
+  align-items: center;
+  gap: 5px;
+  border-radius: 6px;
+  color: var(--agent-gray-500);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.gitBranchIcon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+}
+
+.gitBranchIcon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.gitBranchText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Which workspace a split-view pane's session lives in — parallel to the git
+   branch chip, shown only on a multi-workspace daemon. */
+.workspaceChip {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 160px;
+  height: 28px;
+  padding: 0 8px;
+  align-items: center;
+  gap: 5px;
+  border-radius: 6px;
+  color: var(--agent-gray-500);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.workspaceChipIcon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+}
+
+.workspaceChipIcon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.workspaceChipText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .toolbarRight {
@@ -911,14 +986,61 @@
   align-items: center;
 }
 
+.toolbarMeasurements {
+  position: fixed;
+  top: -10000px;
+  left: -10000px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  visibility: hidden;
+  pointer-events: none;
+}
+
 @container (max-width: 699px) {
-  .toolbarLeft .toolBtn {
-    width: auto;
-    padding: 0 6px;
-    justify-content: center;
+  .toolbarLeft {
+    flex-wrap: nowrap;
+    gap: 2px;
   }
 
-  .toolbarLeft .toolBtnText {
+  .toolbarLeft .dropdownWrapper {
+    width: 28px;
+    flex: 0 0 28px;
+  }
+
+  .gitBranchChip {
+    width: 28px;
+    max-width: 28px;
+    flex: 0 0 28px;
+    gap: 0;
+    padding: 0 6px;
+  }
+
+  .gitBranchText,
+  .workspaceChipText,
+  .modeToolBtn .toolBtnText,
+  .modelToolBtn .toolBtnText,
+  .modeToolBtn .toolBtnArrow,
+  .modelToolBtn .toolBtnArrow {
+    display: none;
+  }
+
+  .toolbarLeft .workspaceChip,
+  .workspaceSelectTooltipTrigger,
+  .workspaceSelectTrigger,
+  .modeToolBtn,
+  .modelToolBtn {
+    width: 28px;
+    max-width: 28px;
+    flex: 0 0 28px;
+    gap: 0;
+    padding: 0 6px;
+    justify-content: center;
+    box-sizing: border-box;
+  }
+
+  .toolbarLeft .workspaceSelectTrigger [data-slot='select-value'],
+  .workspaceSelectTrigger > svg:last-child {
     display: none;
   }
 }
@@ -928,33 +1050,65 @@
 }
 
 .dropdown {
-  position: absolute;
-  bottom: calc(100% + 4px);
-  left: 0;
-  min-width: 160px;
+  position: fixed;
+  z-index: 100;
+  display: flex;
+  min-width: 0;
   padding: 4px;
+  overflow: hidden;
   background: var(--background);
   border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow:
     0 2px 4px -2px rgba(0, 0, 0, 0.1),
     0 4px 6px -1px rgba(0, 0, 0, 0.1);
-  z-index: 100;
-  display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
 .dropdownRich {
-  min-width: min(360px, calc(100vw - 32px));
   padding: 6px;
   gap: 2px;
 }
 
 .dropdownCheck {
-  min-width: min(300px, calc(100vw - 32px));
   padding: 6px;
   gap: 2px;
+}
+
+.dropdownSearch {
+  width: 100%;
+  min-height: 30px;
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  outline: none;
+  background: var(--chat-editor-bg-tertiary);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 13px;
+}
+
+.dropdownSearch:focus-visible {
+  border-color: var(--agent-blue-500);
+}
+
+.dropdownList {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.dropdownEmpty {
+  padding: 8px 9px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 18px;
 }
 
 .dropdownItem {
@@ -1067,9 +1221,49 @@
   white-space: nowrap;
 }
 
+.modeToolBtn,
+.modelToolBtn {
+  min-width: 0;
+}
+
 .toolBtn:hover {
   background: var(--chat-editor-bg-tertiary);
   color: var(--chat-editor-text-primary);
+}
+
+.workspaceSelectTrigger {
+  min-width: 0;
+  max-width: 176px;
+  align-items: center;
+  box-shadow: none;
+}
+
+.workspaceSelectTrigger[data-disabled] {
+  cursor: default;
+  opacity: 1;
+}
+
+.workspaceSelectTrigger > svg {
+  display: block;
+  flex-shrink: 0;
+  align-self: center;
+}
+
+.workspaceSelectTooltipTrigger {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 176px;
+}
+
+.workspaceSelectTrigger [data-slot='select-value'] {
+  display: block;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-self: center;
+  line-height: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .toolBtn[data-tooltip]:hover::after,
@@ -1149,10 +1343,14 @@
 }
 
 .toolBtnText {
+  min-width: 0;
+  overflow: hidden;
   display: inline-flex;
   align-items: center;
   color: var(--agent-gray-500);
   line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .toolBtnArrow {

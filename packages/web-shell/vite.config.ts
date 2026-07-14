@@ -2,6 +2,7 @@ import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
 import type { ProxyOptions } from 'vite';
 import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
 import pkg from './package.json' with { type: 'json' };
 
 const daemonProxy: ProxyOptions = {
@@ -31,10 +32,11 @@ const daemonProxy: ProxyOptions = {
 
 export default defineConfig(({ command }) => ({
   root: 'client',
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   resolve: {
-    alias:
-      command === 'serve'
+    alias: {
+      '@': resolve(__dirname, './client'),
+      ...(command === 'serve'
         ? {
             '@qwen-code/webui/daemon-react-sdk': resolve(
               __dirname,
@@ -50,7 +52,8 @@ export default defineConfig(({ command }) => ({
               '../sdk-typescript/src/index.ts',
             ),
           }
-        : {},
+        : {}),
+    },
     dedupe: ['react', 'react-dom', '@qwen-code/webui', '@qwen-code/sdk'],
   },
   build: {

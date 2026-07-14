@@ -274,10 +274,6 @@
   scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
 }
 
-:where(.app button) {
-  padding: 0;
-}
-
 .app *::-webkit-scrollbar {
   width: 8px;
   height: 8px;

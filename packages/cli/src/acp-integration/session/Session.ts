@@ -207,8 +207,8 @@ import type {
   SessionContext,
   ToolCallStartParams,
 } from './types.js';
-import { HistoryReplayer } from './HistoryReplayer.js';
-import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
+import { HistoryReplayer } from './history-replayer.js';
+import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
@@ -990,6 +990,7 @@ export class Session implements SessionContext {
   // or session reload), which would otherwise execute orphaned cron prompts
   // on a session whose registries are already unregistered.
   private disposed = false;
+  private unsubscribeChatRecordingFailure?: () => void;
 
   // Modular components
   private readonly historyReplayer: HistoryReplayer;
@@ -1152,6 +1153,8 @@ export class Session implements SessionContext {
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
     this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);
     this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
+    this.unsubscribeChatRecordingFailure?.();
+    this.unsubscribeChatRecordingFailure = undefined;
     this.config.setSubSessionSpawner(undefined);
     clearGoalTerminalObserver(this.sessionId);
   }
@@ -3462,11 +3465,11 @@ export class Session implements SessionContext {
     // new title on their next poll.
     this.config
       .getChatRecordingService()
-      ?.setTitleRecordedCallback((customTitle, titleSource) => {
+      ?.setTitleRecordedCallback((customTitle, titleSource, sessionId) => {
         void this.client
           .extNotification('qwen/notify/session/title-update', {
             v: 1,
-            sessionId: this.sessionId,
+            sessionId,
             title: customTitle,
             titleSource,
           })
@@ -3475,6 +3478,20 @@ export class Session implements SessionContext {
             // until the client's next session-list refresh.
           });
       });
+
+    if (typeof this.config.onChatRecordingFailure === 'function') {
+      this.unsubscribeChatRecordingFailure = this.config.onChatRecordingFailure(
+        (event) =>
+          this.client.extNotification(
+            'qwen/notify/session/recording-degraded',
+            {
+              v: 1,
+              sessionId: event.sessionId,
+              reason: 'write_failed',
+            },
+          ),
+      );
+    }
   }
 
   #enqueueBackgroundNotification(item: BackgroundNotificationQueueItem): void {
