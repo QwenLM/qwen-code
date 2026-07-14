@@ -346,6 +346,8 @@ On reconnect the daemon replays events with `id > lastSeenEventId` from its boun
 
 When `workspace_persisted_transcript` is advertised, `client.workspaceById(workspaceId).getSessionTranscriptPage(sessionId, { cursor, limit })` reads the selected registered workspace without attaching to ACP. The workspace-qualified method always uses native REST even if the client has a replaceable transport; its cursor expires when the daemon restarts.
 
+When `workspace_session_export` is advertised, `client.workspaceById(workspaceId).exportSession(sessionId, { format })` or `client.workspaceByCwd(workspaceCwd).exportSession(...)` exports the selected trusted workspace's active persisted transcript. It returns the existing `DaemonSessionExportResult`, preserves optional client identity and client-wide fetch timeout behavior, and always uses native REST even if the client has a replaceable transport. Do not infer this method's server support from `session_export` or `workspace_qualified_rest_core`; older daemons keep primary-only export.
+
 ### Seeding `lastEventId` at Construction
 
 Callers that persist the cursor across process restarts can seed it:

@@ -712,6 +712,42 @@ export class DaemonClient {
   }
 
   /** @internal */
+  async sessionExportRequest(
+    path: string,
+    label: string,
+    opts: {
+      format?: DaemonSessionExportFormat;
+      clientId?: string;
+    } = {},
+  ): Promise<DaemonSessionExportResult> {
+    const format = opts.format ?? 'html';
+    const query = opts.format ? `?format=${urlEncode(opts.format)}` : '';
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}${path}${query}`,
+      { headers: this.headers({}, opts.clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, label);
+        }
+        const content = await res.text();
+        const mimeType = res.headers.get('content-type') ?? '';
+        const filename =
+          /filename="([^"]+)"/i.exec(
+            res.headers.get('content-disposition') ?? '',
+          )?.[1] ?? `export.${format}`;
+        return {
+          content,
+          filename,
+          mimeType,
+          format,
+        };
+      },
+      undefined,
+      'rest',
+    );
+  }
+
+  /** @internal */
   async workspaceNoContentRequest(
     workspaceSelector: string,
     path: string,
@@ -1694,30 +1730,10 @@ export class DaemonClient {
       clientId?: string;
     } = {},
   ): Promise<DaemonSessionExportResult> {
-    const format = opts.format ?? 'html';
-    const query = opts.format ? `?format=${urlEncode(opts.format)}` : '';
-    return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${urlEncode(sessionId)}/export${query}`,
-      { headers: this.headers({}, opts.clientId) },
-      async (res) => {
-        if (!res.ok) {
-          throw await this.failOnError(res, 'GET /session/:id/export');
-        }
-        const content = await res.text();
-        const mimeType = res.headers.get('content-type') ?? '';
-        const filename =
-          /filename="([^"]+)"/i.exec(
-            res.headers.get('content-disposition') ?? '',
-          )?.[1] ?? `export.${format}`;
-        return {
-          content,
-          filename,
-          mimeType,
-          format,
-        };
-      },
-      undefined,
-      'rest',
+    return await this.sessionExportRequest(
+      `/session/${urlEncode(sessionId)}/export`,
+      'GET /session/:id/export',
+      opts,
     );
   }
 
@@ -3788,6 +3804,21 @@ export class WorkspaceDaemonClient {
       `/session/${urlEncode(sessionId)}/transcript${suffix}`,
       'GET /workspaces/:workspace/session/:id/transcript',
       { clientId: opts.clientId, mode: 'rest' },
+    );
+  }
+
+  /** Export an active persisted session from this registered workspace. */
+  exportSession(
+    sessionId: string,
+    opts: {
+      format?: DaemonSessionExportFormat;
+      clientId?: string;
+    } = {},
+  ): Promise<DaemonSessionExportResult> {
+    return this.client.sessionExportRequest(
+      `/workspaces/${this.workspaceSelector}/session/${urlEncode(sessionId)}/export`,
+      'GET /workspaces/:workspace/session/:id/export',
+      opts,
     );
   }
 

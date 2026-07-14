@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import { describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import {
+  SessionService,
   Storage,
   createDebugLogger,
   resetDebugLoggingState,
@@ -776,6 +777,7 @@ describe('multi-workspace session dispatch', () => {
     expect(res.body.features).toContain('multi_workspace_session_rewind');
     expect(res.body.features).not.toContain('multi_workspace_session_shell');
     expect(res.body.features).toContain('workspace_persisted_transcript');
+    expect(res.body.features).toContain('workspace_session_export');
     expect(res.body.workspaces).toEqual([
       { id: 'primary-id', cwd: PRIMARY_CWD, primary: true, trusted: true },
       {
@@ -3340,6 +3342,235 @@ describe('multi-workspace session dispatch', () => {
       ).toEqual([sessionIds[0]]);
       expect(second.body.nextCursor).toBeUndefined();
       expect(secondaryBridge.listCalls).toEqual([]);
+    });
+  });
+
+  it('exports the selected trusted workspace without falling back or starting ACP', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440280';
+      await writeStoredSession({
+        sessionId,
+        cwd: PRIMARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'primary export marker',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:01:00.000Z',
+        prompt: 'secondary export marker',
+        mtime: new Date('2026-07-08T00:01:00.000Z'),
+      });
+      const { app, primaryBridge, secondaryBridge } = makeHarness();
+
+      const secondary = await request(app)
+        .get(`/workspaces/secondary-id/session/${sessionId}/export`)
+        .set('Host', host())
+        .expect(200);
+      expect(secondary.headers['content-type']).toContain('text/html');
+      expect(secondary.headers['cache-control']).toBe('no-store');
+      expect(secondary.headers['x-content-type-options']).toBe('nosniff');
+      expect(secondary.headers['content-disposition']).toMatch(
+        /^attachment; filename="qwen-code-export-.+\.html"$/,
+      );
+      expect(secondary.text).toContain('secondary export marker');
+      expect(secondary.text).not.toContain('primary export marker');
+
+      const primary = await request(app)
+        .get(`/session/${sessionId}/export?format=md`)
+        .set('Host', host())
+        .expect(200);
+      expect(primary.text).toContain('primary export marker');
+      expect(primary.text).not.toContain('secondary export marker');
+
+      expect(primaryBridge.spawnCalls).toEqual([]);
+      expect(primaryBridge.restoreCalls).toEqual([]);
+      expect(primaryBridge.summaryCalls).toEqual([]);
+      expect(secondaryBridge.spawnCalls).toEqual([]);
+      expect(secondaryBridge.restoreCalls).toEqual([]);
+      expect(secondaryBridge.summaryCalls).toEqual([]);
+    });
+  });
+
+  it.each([
+    ['md', 'text/markdown', 'secondary md export'],
+    ['json', 'application/json', 'secondary json export'],
+    ['jsonl', 'application/jsonl', 'secondary jsonl export'],
+  ])(
+    'exports secondary sessions as %s through an encoded cwd selector',
+    async (format, mimeType, marker) => {
+      await withRuntimeDir(async () => {
+        const sessionId = `550e8400-e29b-41d4-a716-${format.padEnd(12, '0')}`;
+        await writeStoredSession({
+          sessionId,
+          cwd: SECONDARY_CWD,
+          timestamp: '2026-07-08T00:00:00.000Z',
+          prompt: marker,
+          mtime: new Date('2026-07-08T00:00:00.000Z'),
+        });
+        const { app } = makeHarness();
+
+        const response = await request(app)
+          .get(
+            `/workspaces/${encodeURIComponent(SECONDARY_CWD)}/session/${sessionId}/export?format=${format}`,
+          )
+          .set('Host', host())
+          .expect(200);
+
+        expect(response.headers['content-type']).toContain(mimeType);
+        expect(response.headers['content-disposition']).toContain(
+          `.${format}"`,
+        );
+        const content =
+          format === 'json' ? JSON.stringify(response.body) : response.text;
+        expect(content).toContain(marker);
+      });
+    },
+  );
+
+  it('enforces workspace, trust, format, and active-session export boundaries', async () => {
+    await withRuntimeDir(async () => {
+      const primaryOnlyId = '550e8400-e29b-41d4-a716-446655440281';
+      const archivedId = '550e8400-e29b-41d4-a716-446655440282';
+      await writeStoredSession({
+        sessionId: primaryOnlyId,
+        cwd: PRIMARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'primary only',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: archivedId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:01:00.000Z',
+        prompt: 'archived secondary',
+        mtime: new Date('2026-07-08T00:01:00.000Z'),
+      });
+      await archiveStoredSession(SECONDARY_CWD, archivedId);
+      const trusted = makeHarness();
+
+      const missing = await request(trusted.app)
+        .get(`/workspaces/secondary-id/session/${primaryOnlyId}/export`)
+        .set('Host', host());
+      expect(missing.status).toBe(404);
+      expect(missing.body.code).toBe('session_not_found');
+
+      const archived = await request(trusted.app)
+        .get(`/workspaces/secondary-id/session/${archivedId}/export`)
+        .set('Host', host());
+      expect(archived.status).toBe(409);
+      expect(archived.body.code).toBe('session_archived');
+
+      const invalidFormat = await request(trusted.app)
+        .get(
+          `/workspaces/secondary-id/session/${primaryOnlyId}/export?format=pdf`,
+        )
+        .set('Host', host());
+      expect(invalidFormat.status).toBe(400);
+      expect(invalidFormat.body).toMatchObject({
+        code: 'invalid_export_format',
+        format: 'pdf',
+        allowedFormats: ['html', 'md', 'json', 'jsonl'],
+      });
+
+      const unknown = await request(trusted.app)
+        .get(
+          `/workspaces/missing-id/session/${primaryOnlyId}/export?format=pdf`,
+        )
+        .set('Host', host());
+      expect(unknown.status).toBe(400);
+      expect(unknown.body.code).toBe('workspace_mismatch');
+
+      const untrustedSecondary = makeHarness({ secondaryTrusted: false });
+      const forbiddenSecondary = await request(untrustedSecondary.app)
+        .get(
+          `/workspaces/secondary-id/session/${primaryOnlyId}/export?format=pdf`,
+        )
+        .set('Host', host());
+      expect(forbiddenSecondary.status).toBe(403);
+      expect(forbiddenSecondary.body.code).toBe('untrusted_workspace');
+
+      const untrustedPrimary = makeHarness({ primaryTrusted: false });
+      const forbiddenPrimary = await request(untrustedPrimary.app)
+        .get(
+          `/workspaces/primary-id/session/${primaryOnlyId}/export?format=pdf`,
+        )
+        .set('Host', host());
+      expect(forbiddenPrimary.status).toBe(403);
+      expect(forbiddenPrimary.body.code).toBe('untrusted_workspace');
+    });
+  });
+
+  it('keeps archive and delete blocked while a workspace export is in flight', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440283';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'secondary export lock marker',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      let loadStarted!: () => void;
+      let releaseLoad!: () => void;
+      const loadStartedPromise = new Promise<void>((resolve) => {
+        loadStarted = resolve;
+      });
+      const loadReleasedPromise = new Promise<void>((resolve) => {
+        releaseLoad = resolve;
+      });
+      const originalLoadSession = SessionService.prototype.loadSession;
+      const loadSpy = vi
+        .spyOn(SessionService.prototype, 'loadSession')
+        .mockImplementation(async function (this: SessionService, id) {
+          const result = await originalLoadSession.call(this, id);
+          if (id === sessionId) {
+            loadStarted();
+            await loadReleasedPromise;
+          }
+          return result;
+        });
+      const { app } = makeHarness({ secondarySummaries: [] });
+      const exportPromise = request(app)
+        .get(`/workspaces/secondary-id/session/${sessionId}/export`)
+        .set('Host', host())
+        .then((response) => response);
+
+      try {
+        await loadStartedPromise;
+        const archive = await request(app)
+          .post('/workspaces/secondary-id/sessions/archive')
+          .set('Host', host())
+          .send({ sessionIds: [sessionId] });
+        expect(archive.status).toBe(409);
+        expect(archive.body).toMatchObject({
+          code: 'session_archiving',
+          sessionId,
+        });
+
+        const remove = await request(app)
+          .post('/workspaces/secondary-id/sessions/delete')
+          .set('Host', host())
+          .send({ sessionIds: [sessionId] });
+        expect(remove.status).toBe(200);
+        expect(remove.body.removed).toEqual([]);
+        expect(remove.body.errors).toEqual([
+          {
+            sessionId,
+            error: expect.stringContaining('is being archived or unarchived'),
+          },
+        ]);
+
+        releaseLoad();
+        const exported = await exportPromise;
+        expect(exported.status).toBe(200);
+        expect(exported.text).toContain('secondary export lock marker');
+      } finally {
+        releaseLoad();
+        loadSpy.mockRestore();
+        await Promise.allSettled([exportPromise]);
+      }
     });
   });
 
