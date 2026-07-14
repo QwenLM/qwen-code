@@ -12,6 +12,7 @@ import {
   parseInstallSource,
   redactUrlCredentials,
   SettingScope,
+  type CredentialStore,
   type Extension,
   type ExtensionInstallMetadata,
   type ExtensionSetting,
@@ -46,6 +47,7 @@ interface RegisterWorkspaceExtensionRoutesDeps {
   safeBody: SafeBody;
   sendBridgeError: SendBridgeError;
   maxExtensionOperationHistory?: number;
+  credentialStore?: CredentialStore;
 }
 
 export function registerWorkspaceExtensionRoutes(
@@ -59,6 +61,7 @@ export function registerWorkspaceExtensionRoutes(
     mutate,
     safeBody,
     sendBridgeError,
+    credentialStore,
   } = deps;
   const maxExtensionOperationHistory = deps.maxExtensionOperationHistory ?? 100;
   const buildWorkspaceCtx = createBuildWorkspaceCtx(boundWorkspace);
@@ -112,7 +115,7 @@ export function registerWorkspaceExtensionRoutes(
       workspaceDir: boundWorkspace,
       isWorkspaceTrusted:
         getWorkspaceTrustStatus(
-          loadSettings(boundWorkspace).merged,
+          loadSettings(boundWorkspace, { credentialStore }).merged,
           boundWorkspace,
         ).effective.state === 'trusted',
       requestConsent: () => Promise.resolve(),

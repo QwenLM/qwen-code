@@ -3053,7 +3053,7 @@ export async function runQwenServe(
         credentialProvider,
       });
     const workspaceSkillsStatusProvider =
-      runtime.createWorkspaceSkillsStatusProvider();
+      runtime.createWorkspaceSkillsStatusProvider(credentialStore);
     // Reverse tool channel (issue #5626, Phase 2). ONE sender registry shared
     // between the bridge (which answers the ACP child's `client_mcp/message`
     // ext-method via `clientMcpSender`) and the WS provider in `createServeApp`
@@ -3232,6 +3232,7 @@ export async function runQwenServe(
       statusProvider,
       workspaceProvidersStatusProvider,
       workspaceSkillsStatusProvider,
+      credentialStore,
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools: persistDisabledToolsFn,
       persistSetting: persistSettingFn,
@@ -3547,7 +3548,8 @@ export async function runQwenServe(
             credentialProvider,
           }),
         workspaceSkillsStatusProvider:
-          runtime.createWorkspaceSkillsStatusProvider(),
+          runtime.createWorkspaceSkillsStatusProvider(credentialStore),
+        credentialStore,
         isChannelLive: () => secondaryBridge.isChannelLive(),
         preheatAcpChild: () => secondaryBridge.preheat(),
         persistDisabledTools: persistDisabledToolsFn,
@@ -3893,7 +3895,6 @@ export async function runQwenServe(
           permissionAudit: permissionAuditPublisher,
           statusProvider: runtime.createDaemonStatusProvider({
             env: wsEnv.effectiveEnv,
-            credentialProvider,
           }),
           fileSystem: createBridgeFileSystemAdapter(wsFsFactory),
           persistApprovalMode: (workspace, mode) =>
@@ -3925,9 +3926,11 @@ export async function runQwenServe(
           workspaceProvidersStatusProvider:
             runtime.createWorkspaceProvidersStatusProvider({
               env: wsEnv.effectiveEnv,
+              credentialProvider,
             }),
           workspaceSkillsStatusProvider:
-            runtime.createWorkspaceSkillsStatusProvider(),
+            runtime.createWorkspaceSkillsStatusProvider(credentialStore),
+          credentialStore,
           isChannelLive: () => wsBridge.isChannelLive(),
           preheatAcpChild: () => wsBridge.preheat(),
           persistDisabledTools: persistDisabledToolsFn,
@@ -4413,6 +4416,7 @@ export async function runQwenServe(
       const workspace = workspaceInputs[0]!;
       const settings = channelValidationSettingsRuntime.settings.loadSettings(
         workspace.cwd,
+        { consumeCorruptionEnvVars: true, credentialStore },
       );
       channelWebhookEnvByWorkspace.set(
         workspace.cwd,
@@ -4427,6 +4431,7 @@ export async function runQwenServe(
     const workspaces = workspaceInputs.map((workspace, index) => {
       const settings = channelValidationSettingsRuntime.settings.loadSettings(
         workspace.cwd,
+        { consumeCorruptionEnvVars: true, credentialStore },
       );
       settingsByWorkspace.set(workspace.cwd, settings);
       channelWebhookEnvByWorkspace.set(
@@ -4754,6 +4759,7 @@ export async function runQwenServe(
           workspaces: runtimes.map((runtime) => {
             const settings = settingsRuntime.settings.loadSettings(
               runtime.workspaceCwd,
+              { consumeCorruptionEnvVars: true, credentialStore },
             );
             settingsByWorkspace.set(runtime.workspaceCwd, settings);
             return {

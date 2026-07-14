@@ -10,7 +10,10 @@ import type { Duplex } from 'node:stream';
 import type { Application, Request, Response } from 'express';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
-import { RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG } from '@qwen-code/qwen-code-core';
+import {
+  RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG,
+  type CredentialStore,
+} from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import type { WorkspaceFileSystemFactory } from '../fs/index.js';
@@ -379,6 +382,7 @@ export interface MountAcpHttpOptions {
   /** Effective direct session shell policy for ACP initialize/dispatch. */
   sessionShellCommandEnabled?: boolean;
   archiveCoordinator?: SessionArchiveCoordinator;
+  credentialStore?: CredentialStore;
   /** Shared lane for sessionless workspace remember tasks. */
   workspaceRememberLane: WorkspaceRememberTaskLane;
   /** Rate limit checker for WS messages (WS bypasses Express middleware). */
@@ -747,6 +751,7 @@ export function mountAcpHttp(
     opts.sessionShellCommandEnabled === true,
     registry,
     opts.archiveCoordinator ?? new SessionArchiveCoordinator(),
+    opts.credentialStore,
   );
   dispatcherRef.current = dispatcher;
 
@@ -1206,6 +1211,7 @@ export function mountAcpHttp(
       opts.sessionShellCommandEnabled === true,
       secondaryRegistry,
       opts.archiveCoordinator ?? new SessionArchiveCoordinator(),
+      opts.credentialStore,
     );
     secondaryDispatcherRef.current = secondaryDispatcher;
     return {

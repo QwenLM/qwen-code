@@ -11,6 +11,7 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { resolveAcpHttpEnabled } from '../acp-http-enabled.js';
 import { getAdvertisedServeFeatures } from '../capabilities.js';
 import { isBrowserAutomationMcpAvailable } from '../cdp-mcp-command.js';
+import type { CredentialStore } from '@qwen-code/qwen-code-core';
 import type { ServeOptions } from '../types.js';
 
 // Keep in sync with acp-bridge bridge.ts and SDK DaemonClient.ts.
@@ -51,6 +52,7 @@ interface CreateServeFeaturesDeps {
   persistentWorkspaceRegistrationAvailable: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
   env?: Readonly<Record<string, string | undefined>>;
+  credentialStore?: CredentialStore;
 }
 
 export interface ServeFeaturesRuntime {
@@ -75,6 +77,7 @@ export function createServeFeatures(
     persistentWorkspaceRegistrationAvailable,
     workspaceRuntimeRemovalAvailable,
   } = deps;
+  const credentialStore = deps.credentialStore;
   const env = deps.env ?? process.env;
   let cachedVoiceTranscriptionAvailable: boolean | undefined;
   const invalidateServeFeaturesCache = () => {
@@ -82,7 +85,7 @@ export function createServeFeatures(
   };
   const getCachedVoiceTranscriptionAvailable = () => {
     cachedVoiceTranscriptionAvailable ??=
-      isWorkspaceVoiceTranscriptionAvailable(boundWorkspace);
+      isWorkspaceVoiceTranscriptionAvailable(boundWorkspace, credentialStore);
     return cachedVoiceTranscriptionAvailable;
   };
 
@@ -130,10 +133,11 @@ export function createServeFeatures(
 
 function isWorkspaceVoiceTranscriptionAvailable(
   boundWorkspace: string,
+  credentialStore?: CredentialStore,
 ): boolean {
   try {
     return hasConfiguredBatchVoiceTranscriptionModel(
-      loadSettings(boundWorkspace),
+      loadSettings(boundWorkspace, { credentialStore }),
     );
   } catch (err) {
     writeStderrLine(

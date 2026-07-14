@@ -31,7 +31,7 @@
  */
 
 import { SkillManager, isSafeModeEnv } from '@qwen-code/qwen-code-core';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type { Config, CredentialStore } from '@qwen-code/qwen-code-core';
 import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
 import { loadSettings } from '../config/settings.js';
@@ -56,7 +56,9 @@ type SkillManagerConfigShim = Pick<
   'isSafeMode' | 'getBareMode' | 'getProjectRoot' | 'getActiveExtensions'
 >;
 
-export function createWorkspaceSkillsStatusProvider(): WorkspaceSkillsStatusProvider {
+export function createWorkspaceSkillsStatusProvider(
+  credentialStore?: CredentialStore,
+): WorkspaceSkillsStatusProvider {
   // Reuse one SkillManager per workspace so repeat queries hit its in-memory
   // skills cache instead of re-scanning (and re-parsing frontmatter / compiling
   // globs for) every level on each call. This is a best-effort pre-child
@@ -64,12 +66,14 @@ export function createWorkspaceSkillsStatusProvider(): WorkspaceSkillsStatusProv
   // picked up until the daemon restarts — is acceptable: the live child
   // re-lists authoritatively once a session exists.
   const managers = new Map<string, SkillManager>();
-  return (workspaceCwd) => buildWorkspaceSkillsStatus(workspaceCwd, managers);
+  return (workspaceCwd) =>
+    buildWorkspaceSkillsStatus(workspaceCwd, managers, credentialStore);
 }
 
 async function buildWorkspaceSkillsStatus(
   workspaceCwd: string,
   managers: Map<string, SkillManager>,
+  credentialStore?: CredentialStore,
 ): Promise<ServeWorkspaceSkillsStatus> {
   try {
     let skillManager = managers.get(workspaceCwd);
@@ -90,7 +94,7 @@ async function buildWorkspaceSkillsStatus(
       skillManager = new SkillManager(shim as Config);
       managers.set(workspaceCwd, skillManager);
     }
-    const disabled = readDisabledSkillNames(workspaceCwd);
+    const disabled = readDisabledSkillNames(workspaceCwd, credentialStore);
     const skills = await skillManager.listSkills();
     return {
       v: STATUS_SCHEMA_VERSION,
@@ -119,8 +123,14 @@ async function buildWorkspaceSkillsStatus(
   }
 }
 
-function readDisabledSkillNames(workspaceCwd: string): ReadonlySet<string> {
-  const raw = loadSettings(workspaceCwd, false).merged.skills?.disabled;
+function readDisabledSkillNames(
+  workspaceCwd: string,
+  credentialStore?: CredentialStore,
+): ReadonlySet<string> {
+  const raw = loadSettings(workspaceCwd, {
+    consumeCorruptionEnvVars: false,
+    credentialStore,
+  }).merged.skills?.disabled;
   if (!Array.isArray(raw)) return new Set();
   return new Set(
     raw

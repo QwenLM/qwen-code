@@ -24,6 +24,7 @@ import type {
   ServeWorkspacePreflightStatus,
   DaemonStatusProvider,
 } from '@qwen-code/acp-bridge';
+import type { CredentialStore } from '@qwen-code/qwen-code-core';
 import type { WorkspaceTrustStatus } from '../../config/trustedFolders.js';
 import type {
   PermissionRuleType,
@@ -336,6 +337,8 @@ export interface DaemonWorkspaceServiceDeps {
 
   /** Context filename (e.g. 'QWEN.md') from workspace settings. */
   contextFilename: string;
+
+  credentialStore?: CredentialStore;
 
   /**
    * Daemon-host status provider for env + preflight cells.

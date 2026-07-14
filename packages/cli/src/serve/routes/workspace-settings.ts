@@ -5,6 +5,7 @@
  */
 
 import type { Application, Request, Response } from 'express';
+import type { CredentialStore } from '@qwen-code/qwen-code-core';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import type {
   SettingEnumOption,
@@ -92,8 +93,9 @@ function getAllowedKeys(): Set<string> {
 function buildSettingsResponse(
   boundWorkspace: string,
   keys: ReadonlySet<string>,
+  credentialStore?: CredentialStore,
 ): SettingsResponse {
-  const loaded = loadSettings(boundWorkspace);
+  const loaded = loadSettings(boundWorkspace, { credentialStore });
 
   const settings: SettingDescriptor[] = [];
   for (const key of keys) {
@@ -172,6 +174,7 @@ export interface WorkspaceSettingsRouteDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
+  credentialStore?: CredentialStore;
 }
 
 export function registerWorkspaceSettingsRoutes(
@@ -185,13 +188,18 @@ export function registerWorkspaceSettingsRoutes(
     persistSetting,
     broadcastSettingsChanged,
     parseAndValidateClientId,
+    credentialStore,
   } = deps;
 
   const allowedKeys = getAllowedKeys();
 
   app.get('/workspace/settings', (_req: Request, res: Response) => {
     try {
-      const response = buildSettingsResponse(boundWorkspace, allowedKeys);
+      const response = buildSettingsResponse(
+        boundWorkspace,
+        allowedKeys,
+        credentialStore,
+      );
       res.status(200).json(response);
     } catch (err) {
       writeStderrLine(
@@ -315,7 +323,7 @@ export function registerWorkspaceQualifiedSettingsRoutes(
   app: Application,
   deps: Pick<
     WorkspaceSettingsRouteDeps,
-    'mutate' | 'safeBody' | 'persistSetting'
+    'mutate' | 'safeBody' | 'persistSetting' | 'credentialStore'
   > & {
     workspaceRegistry: WorkspaceRegistry;
     invalidateServeFeaturesCache: () => void;
@@ -334,7 +342,11 @@ export function registerWorkspaceQualifiedSettingsRoutes(
     // the Phase 3 core-route trust gate.
     if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
     try {
-      const response = buildSettingsResponse(runtime.workspaceCwd, allowedKeys);
+      const response = buildSettingsResponse(
+        runtime.workspaceCwd,
+        allowedKeys,
+        deps.credentialStore,
+      );
       res.status(200).json(response);
     } catch (err) {
       writeStderrLine(

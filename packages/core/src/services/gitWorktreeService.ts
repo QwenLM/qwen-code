@@ -23,6 +23,7 @@ import {
   collectSensitiveShellEnvKeys,
   scrubChildEnv,
 } from '../utils/child-env-scrub.js';
+import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 
 const debugLogger = createDebugLogger('GIT_WORKTREE_SERVICE');
 
@@ -1389,7 +1390,7 @@ export class GitWorktreeService {
           cwd: this.sourceRepoPath,
           timeout: timeoutMs,
           env: scrubChildEnv(
-            process.env,
+            normalizePathEnvForWindows(process.env),
             collectSensitiveShellEnvKeys(process.env),
             { LANG: 'C', LC_ALL: 'C' },
           ),

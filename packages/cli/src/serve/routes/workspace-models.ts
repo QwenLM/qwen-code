@@ -5,6 +5,7 @@
  */
 
 import type { Application, Request, Response } from 'express';
+import type { CredentialStore } from '@qwen-code/qwen-code-core';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import {
   getModelProvidersOwnerScope,
@@ -53,6 +54,7 @@ export interface WorkspaceModelsRouteDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
+  credentialStore?: CredentialStore;
 }
 
 function parseTarget(
@@ -109,6 +111,7 @@ export function registerWorkspaceModelsRoutes(
     persistSettings,
     broadcastSettingsChanged,
     parseAndValidateClientId,
+    credentialStore,
   } = deps;
 
   app.delete(
@@ -143,7 +146,7 @@ export function registerWorkspaceModelsRoutes(
 
       let writes: WorkspaceSettingsWrite[];
       try {
-        const loaded = loadSettings(boundWorkspace);
+        const loaded = loadSettings(boundWorkspace, { credentialStore });
         const scope = getModelProvidersOwnerScope(loaded) ?? SettingScope.User;
         const modelProviders =
           loaded.forScope(scope).settings.modelProviders ?? {};

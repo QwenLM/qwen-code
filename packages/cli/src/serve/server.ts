@@ -715,6 +715,7 @@ export function createServeApp(
       workspaceRuntimeRemovalAvailable:
         deps.workspaceRuntimeRemoval !== undefined,
       ...(primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {}),
+      credentialStore: deps.credentialStore,
     });
   const statusProvider =
     deps.statusProvider ??
@@ -1201,6 +1202,7 @@ export function createServeApp(
     mutate,
     safeBody,
     sendBridgeError,
+    credentialStore: deps.credentialStore,
     ...(deps.maxExtensionOperationHistory === undefined
       ? {}
       : { maxExtensionOperationHistory: deps.maxExtensionOperationHistory }),
@@ -1293,6 +1295,7 @@ export function createServeApp(
       broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+      credentialStore: deps.credentialStore,
     });
     registerWorkspaceQualifiedSettingsRoutes(app, {
       workspaceRegistry,
@@ -1302,6 +1305,7 @@ export function createServeApp(
         await persistSetting(...args);
       },
       invalidateServeFeaturesCache,
+      credentialStore: deps.credentialStore,
     });
   }
   registerWorkspacePermissionsRoutes(app, {
@@ -1311,11 +1315,13 @@ export function createServeApp(
     workspace: primaryWorkspace,
     parseAndValidateClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+    credentialStore: deps.credentialStore,
   });
   registerWorkspaceQualifiedPermissionsRoutes(app, {
     workspaceRegistry,
     mutate,
     safeBody,
+    credentialStore: deps.credentialStore,
   });
   registerWorkspaceVoiceRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
@@ -1331,6 +1337,7 @@ export function createServeApp(
       getRuntimeEffectiveEnv(primaryRuntime.env),
       deps.credentialStore,
     ),
+    credentialStore: deps.credentialStore,
   });
   if (deps.persistSettings) {
     registerWorkspaceModelsRoutes(app, {
@@ -1341,6 +1348,7 @@ export function createServeApp(
       broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+      credentialStore: deps.credentialStore,
     });
   }
 
@@ -1652,6 +1660,7 @@ export function createServeApp(
     hostname: opts.hostname,
     sessionShellCommandEnabled,
     workspaceRememberLane,
+    credentialStore: deps.credentialStore,
     checkRate: rateLimiter?.checkRate,
     clientMcpOverWs: opts.clientMcpOverWs === true,
     // Reverse tool channel (issue #5626, Phase 2). Per-connection provider:

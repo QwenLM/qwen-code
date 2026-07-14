@@ -9,6 +9,7 @@ import express, {
   type Request,
   type Response,
 } from 'express';
+import type { CredentialStore } from '@qwen-code/qwen-code-core';
 import {
   loadSettings,
   type SettingScope,
@@ -77,6 +78,7 @@ export interface WorkspaceVoiceRouteDeps {
     res: Response,
   ) => string | undefined | null;
   transcribe?: WorkspaceVoiceTranscriber;
+  credentialStore?: CredentialStore;
   /**
    * Env for voice credential resolution. The daemon passes a store-merged env
    * so QWEN_CUSTOM_API_KEY_* (scrubbed from process.env) reach the transcriber.
@@ -280,14 +282,14 @@ export function registerWorkspaceVoiceRoutes(
 
   app.get('/workspace/voice', (_req: Request, res: Response) => {
     try {
-      res
-        .status(200)
-        .json(
-          buildWorkspaceVoiceStatus(
-            deps.boundWorkspace,
-            loadSettings(deps.boundWorkspace),
-          ),
-        );
+      res.status(200).json(
+        buildWorkspaceVoiceStatus(
+          deps.boundWorkspace,
+          loadSettings(deps.boundWorkspace, {
+            credentialStore: deps.credentialStore,
+          }),
+        ),
+      );
     } catch (err) {
       writeStderrLine(
         `qwen serve: GET /workspace/voice error: ${
@@ -319,7 +321,9 @@ export function registerWorkspaceVoiceRoutes(
         return;
       }
 
-      const settings = loadSettings(deps.boundWorkspace);
+      const settings = loadSettings(deps.boundWorkspace, {
+        credentialStore: deps.credentialStore,
+      });
       try {
         validateWorkspaceVoiceState(settings, parsed);
       } catch (err) {
@@ -354,14 +358,14 @@ export function registerWorkspaceVoiceRoutes(
         return;
       }
 
-      res
-        .status(200)
-        .json(
-          buildWorkspaceVoiceStatus(
-            deps.boundWorkspace,
-            loadSettings(deps.boundWorkspace),
-          ),
-        );
+      res.status(200).json(
+        buildWorkspaceVoiceStatus(
+          deps.boundWorkspace,
+          loadSettings(deps.boundWorkspace, {
+            credentialStore: deps.credentialStore,
+          }),
+        ),
+      );
     },
   );
 
@@ -399,7 +403,9 @@ export function registerWorkspaceVoiceRoutes(
         return;
       }
 
-      const settings = loadSettings(deps.boundWorkspace);
+      const settings = loadSettings(deps.boundWorkspace, {
+        credentialStore: deps.credentialStore,
+      });
       if (!isVoiceEnabled(settings)) {
         res.status(403).json({
           error: 'Voice transcription is disabled for this workspace',

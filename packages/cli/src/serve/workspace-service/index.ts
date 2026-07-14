@@ -188,6 +188,7 @@ export function createDaemonWorkspaceService(
   const {
     boundWorkspace,
     contextFilename,
+    credentialStore,
     statusProvider,
     workspaceProvidersStatusProvider,
     workspaceSkillsStatusProvider,
@@ -457,19 +458,21 @@ export function createDaemonWorkspaceService(
 
     async getWorkspaceTrustStatus(_ctx: WorkspaceRequestContext) {
       return getWorkspaceTrustStatus(
-        loadSettings(boundWorkspace).merged,
+        loadSettings(boundWorkspace, { credentialStore }).merged,
         boundWorkspace,
       );
     },
 
     async getWorkspacePermissionsStatus(_ctx: WorkspaceRequestContext) {
-      return buildPermissionSettings(loadSettings(boundWorkspace));
+      return buildPermissionSettings(
+        loadSettings(boundWorkspace, { credentialStore }),
+      );
     },
 
     async getWorkspaceVoiceStatus(_ctx: WorkspaceRequestContext) {
       return buildWorkspaceVoiceStatus(
         boundWorkspace,
-        loadSettings(boundWorkspace),
+        loadSettings(boundWorkspace, { credentialStore }),
       );
     },
 
@@ -536,7 +539,7 @@ export function createDaemonWorkspaceService(
         );
       }
 
-      const settings = loadSettings(boundWorkspace);
+      const settings = loadSettings(boundWorkspace, { credentialStore });
       validateWorkspaceVoiceState(settings, request);
       const workspaceTrusted =
         getWorkspaceTrustStatus(settings.merged, boundWorkspace).effective
@@ -602,7 +605,7 @@ export function createDaemonWorkspaceService(
 
       return buildWorkspaceVoiceStatus(
         boundWorkspace,
-        loadSettings(boundWorkspace),
+        loadSettings(boundWorkspace, { credentialStore }),
       );
     },
 
