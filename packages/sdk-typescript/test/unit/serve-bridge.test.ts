@@ -840,6 +840,45 @@ describe('serve-bridge', () => {
       expect(collector.interrupted).toBe(true);
     });
 
+    it('should drain prompt_cancel before disposal releases its binding', async () => {
+      let resolveCancel!: (response: Response) => void;
+      const { state, calls } = makeMockState({
+        defaultSessionId: 'test-session',
+        fetchReply: (req) => {
+          if (req.url.endsWith('/cancel')) {
+            return new Promise<Response>((resolve) => {
+              resolveCancel = resolve;
+            });
+          }
+          return new Response(null, { status: 204 });
+        },
+      });
+      bindSession(state, 'test-session', 'client-test');
+      const { agentTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/agent.js'
+      );
+      const cancelTool = agentTools(state).find(
+        (t: { name: string }) => t.name === 'prompt_cancel',
+      );
+
+      const cancelling = cancelTool.handler({}, {});
+      await vi.waitFor(() => expect(resolveCancel).toBeTypeOf('function'));
+      let disposalSettled = false;
+      const disposing = disposeBindings(state).finally(() => {
+        disposalSettled = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(disposalSettled).toBe(false);
+      expect(calls.some((call) => call.url.endsWith('/detach'))).toBe(false);
+
+      resolveCancel(new Response(null, { status: 204 }));
+      await Promise.all([cancelling, disposing]);
+      expect(calls.filter((call) => call.url.endsWith('/detach'))).toHaveLength(
+        1,
+      );
+    });
+
     it('should keep legacy anonymous bindings usable', async () => {
       const { state, calls } = makeMockState({
         defaultSessionId: 'legacy-session',

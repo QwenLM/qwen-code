@@ -194,23 +194,25 @@ export function agentTools(state: BridgeState): any[] {
           .optional()
           .describe('Session ID. Uses default session if omitted.'),
       },
-      handler(async (args) => {
-        const sessionId = resolveSessionId(state, args.session_id);
-        const binding = resolveBinding(state, sessionId);
-        const { stream } = binding;
-        try {
-          await state.client.cancel(sessionId, binding.clientId);
-        } catch (err) {
-          await rethrowBindingError(state, binding, err);
-        } finally {
-          // Resolve active collector even when the daemon rejects cancellation.
-          if (stream.activeCollector) {
-            stream.activeCollector.interrupted = true;
-            stream.activeCollector.resolve();
+      handler((args) =>
+        trackLifecycle(state, async () => {
+          const sessionId = resolveSessionId(state, args.session_id);
+          const binding = resolveBinding(state, sessionId);
+          const { stream } = binding;
+          try {
+            await state.client.cancel(sessionId, binding.clientId);
+          } catch (err) {
+            await rethrowBindingError(state, binding, err);
+          } finally {
+            // Resolve active collector even when the daemon rejects cancellation.
+            if (stream.activeCollector) {
+              stream.activeCollector.interrupted = true;
+              stream.activeCollector.resolve();
+            }
           }
-        }
-        return formatJsonResult({ ok: true, sessionId });
-      }),
+          return formatJsonResult({ ok: true, sessionId });
+        }),
+      ),
     ),
   ];
 }
