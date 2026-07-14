@@ -1090,7 +1090,14 @@ export class DingtalkChannel extends ChannelBase {
     mediaType: 'image' | 'file' | 'audio' | 'video',
     fileName?: string,
   ): Promise<void> {
-    const token = this.getAccessToken();
+    let token: string | undefined;
+    try {
+      token = this.config.clientSecret
+        ? await this.getProactiveToken()
+        : this.getAccessToken();
+    } catch {
+      return;
+    }
     const robotCode = this.config.clientId;
     if (!token || !robotCode) {
       process.stderr.write(
