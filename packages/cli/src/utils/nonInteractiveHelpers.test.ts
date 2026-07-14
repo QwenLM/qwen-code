@@ -588,6 +588,28 @@ describe('createToolProgressHandler', () => {
     expect(mockAdapter.emitToolProgress).not.toHaveBeenCalled();
   });
 
+  it('should forward shell heartbeats as tool progress', () => {
+    const mockAdapter = {
+      emitToolProgress: vi.fn(),
+    } as unknown as JsonOutputAdapterInterface;
+
+    const shellRequest = { ...mockRequest, name: 'run_shell_command' };
+    const { handler } = createToolProgressHandler(shellRequest, mockAdapter);
+
+    const heartbeat = {
+      type: 'shell_progress' as const,
+      elapsedMs: 10_000,
+      lastOutputAgeMs: 4_000,
+      timeoutMs: 120_000,
+    };
+    handler('tool-call-1', heartbeat);
+
+    expect(mockAdapter.emitToolProgress).toHaveBeenCalledWith(
+      shellRequest,
+      heartbeat,
+    );
+  });
+
   it('should forward multiple progress updates', () => {
     const mockAdapter = {
       emitToolProgress: vi.fn(),

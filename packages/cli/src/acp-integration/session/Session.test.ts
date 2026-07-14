@@ -4095,6 +4095,118 @@ describe('Session', () => {
       });
     });
 
+    describe('shell heartbeat forwarding', () => {
+      const runShellToolCall = async (
+        execute: ReturnType<typeof vi.fn>,
+      ): Promise<void> => {
+        const tool = {
+          name: 'run_shell_command',
+          kind: core.Kind.Execute,
+          build: vi.fn().mockReturnValue({
+            params: { command: 'quiet-soak-test' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('quiet-soak-test'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute,
+          }),
+        };
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+
+        await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: FunctionCall[],
+              loopState: {
+                totalToolCalls: number;
+                invalidToolParamErrors: Map<string, number>;
+                loopDetected: boolean;
+              },
+            ) => Promise<unknown>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-heartbeat',
+          [{ id: 'shell_hb_1', name: 'run_shell_command', args: {} }],
+          {
+            totalToolCalls: 0,
+            invalidToolParamErrors: new Map(),
+            loopDetected: false,
+          },
+        );
+      };
+
+      const heartbeatUpdates = () =>
+        vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.map(([params]) => params.update)
+          .filter(
+            (update) =>
+              update.sessionUpdate === 'tool_call_update' &&
+              update.status === 'in_progress' &&
+              (update._meta as { shellProgress?: unknown } | undefined)
+                ?.shellProgress !== undefined,
+          );
+
+      it('forwards shell heartbeats as meta-only in_progress updates', async () => {
+        const heartbeat = {
+          type: 'shell_progress' as const,
+          elapsedMs: 10_000,
+          lastOutputAgeMs: 4_000,
+          timeoutMs: 120_000,
+        };
+        const execute = vi.fn(
+          async (
+            _signal: AbortSignal,
+            updateOutput?: (chunk: unknown) => void,
+          ) => {
+            updateOutput?.('plain live output');
+            updateOutput?.(heartbeat);
+            return { llmContent: 'done', returnDisplay: 'done' };
+          },
+        );
+
+        await runShellToolCall(execute);
+
+        const updates = heartbeatUpdates();
+        expect(updates).toHaveLength(1);
+        expect(updates[0]).toMatchObject({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'shell_hb_1',
+          status: 'in_progress',
+          _meta: {
+            toolName: 'run_shell_command',
+            shellProgress: heartbeat,
+          },
+        });
+        // Meta-only: no content payload on heartbeat frames.
+        expect(updates[0]).not.toHaveProperty('content');
+      });
+
+      it('drops heartbeats that land after the tool has settled', async () => {
+        let lateEmit: ((chunk: unknown) => void) | undefined;
+        const execute = vi.fn(
+          async (
+            _signal: AbortSignal,
+            updateOutput?: (chunk: unknown) => void,
+          ) => {
+            lateEmit = updateOutput;
+            return { llmContent: 'done', returnDisplay: 'done' };
+          },
+        );
+
+        await runShellToolCall(execute);
+        expect(heartbeatUpdates()).toHaveLength(0);
+
+        // A heartbeat tick racing the settle path must not regress the
+        // client-visible status back to in_progress.
+        lateEmit?.({ type: 'shell_progress', elapsedMs: 99_000 });
+        expect(heartbeatUpdates()).toHaveLength(0);
+      });
+    });
+
     describe('tool outcome telemetry (#4602 review)', () => {
       it('records a soft tool failure (toolResult.error) as error, not success', async () => {
         const logToolCallSpy = vi

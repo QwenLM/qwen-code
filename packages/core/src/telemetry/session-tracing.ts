@@ -954,6 +954,8 @@ export function endToolExecutionSpan(
      * user cancels.
      */
     cancelled?: boolean;
+    /** Extra span attributes recorded verbatim alongside the standard set. */
+    attributes?: Attributes;
   },
 ): void {
   const spanId = getSpanId(span);
@@ -977,6 +979,9 @@ export function endToolExecutionSpan(
         endAttributes['success'] = metadata.success;
       if (metadata.error !== undefined)
         endAttributes['error'] = truncateSpanError(metadata.error);
+      if (metadata.attributes) {
+        Object.assign(endAttributes, metadata.attributes);
+      }
     }
 
     spanCtx.span.setAttributes(endAttributes);
