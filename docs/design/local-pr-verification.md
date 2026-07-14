@@ -77,11 +77,11 @@ The full profile runs these categories in fail-fast order:
 - i18n validation, read-only settings-schema freshness plus a check that the
   build left the committed schema unchanged, type checking, and the serve
   fast-path bundle-closure check;
-- all workspace unit tests plus script tests, with workspaces scheduled
-  serially and each Vitest process limited to four workers to avoid multiplying
-  repository-wide concurrency; the test contents and coverage settings stay
-  unchanged, and the tests use an isolated temporary home, CI settings, and
-  have the known model credentials and default auth selection removed;
+- all workspace unit tests plus script tests, with workspaces and test files
+  scheduled serially to keep the repository-wide run stable under local load;
+  the test contents and coverage settings stay unchanged, and the tests use an
+  isolated temporary home, CI settings, and have the known model credentials
+  and default auth selection removed;
 - no-AK integration tests and the web-shell Playwright smoke test on a
   dynamically allocated localhost port.
 

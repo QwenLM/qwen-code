@@ -18,7 +18,6 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
-import { resolveConfig as resolveVitestConfig } from 'vitest/node';
 
 import {
   assertNode22,
@@ -339,8 +338,8 @@ describe('validation profiles', () => {
       'git diff --exit-code -- packages/vscode-ide-companion/schemas/settings.schema.json',
       'npm run typecheck',
       'npm run check:serve-fast-path-bundle',
-      'npx cross-env NODE_OPTIONS=--max-old-space-size=3072 npm run test:ci --workspaces --if-present -- --minWorkers=1 --maxWorkers=4',
-      'npm run test:scripts -- --minWorkers=1 --maxWorkers=4',
+      'npx cross-env NODE_OPTIONS=--max-old-space-size=3072 npm run test:ci --workspaces --if-present -- --no-file-parallelism',
+      'npm run test:scripts -- --no-file-parallelism',
       'npm run test:integration:no-ak:sandbox:none',
       'npm run test:e2e:smoke --workspace=packages/web-shell',
     ]);
@@ -361,11 +360,6 @@ describe('validation profiles', () => {
       expect(steps.find((candidate) => candidate.name === name)).toMatchObject({
         isolatedHome: true,
         testEnvironment: true,
-      });
-    }
-    for (const name of ['Run unit tests', 'Run script tests']) {
-      expect(steps.find((candidate) => candidate.name === name)).toMatchObject({
-        boundedVitest: true,
       });
     }
     expect(
@@ -481,42 +475,7 @@ describe('step execution', () => {
       ]) {
         expect(env).not.toHaveProperty(key);
       }
-      expect(env.VITEST_MIN_THREADS).toBe(step.boundedVitest ? '1' : undefined);
-      expect(env.VITEST_MAX_THREADS).toBe(step.boundedVitest ? '4' : undefined);
       expect(env.PLAYWRIGHT_PORT).toBe(step.playwright ? '43123' : undefined);
-    }
-  });
-
-  it('overrides fixed Vitest pool thread counts for bounded test steps', async () => {
-    const unitStep = createValidationSteps({ profile: 'full' }).find(
-      ({ name }) => name === 'Run unit tests',
-    );
-    const env = createStepEnvironment({
-      baseEnv: {},
-      home: '/temporary-home',
-      step: unitStep,
-    });
-    const previousMin = process.env.VITEST_MIN_THREADS;
-    const previousMax = process.env.VITEST_MAX_THREADS;
-
-    process.env.VITEST_MIN_THREADS = env.VITEST_MIN_THREADS;
-    process.env.VITEST_MAX_THREADS = env.VITEST_MAX_THREADS;
-    try {
-      const { vitestConfig } = await resolveVitestConfig({
-        config: false,
-        poolOptions: {
-          threads: { minThreads: 8, maxThreads: 16 },
-        },
-      });
-      expect(vitestConfig.poolOptions?.threads).toMatchObject({
-        minThreads: 1,
-        maxThreads: 4,
-      });
-    } finally {
-      if (previousMin === undefined) delete process.env.VITEST_MIN_THREADS;
-      else process.env.VITEST_MIN_THREADS = previousMin;
-      if (previousMax === undefined) delete process.env.VITEST_MAX_THREADS;
-      else process.env.VITEST_MAX_THREADS = previousMax;
     }
   });
 

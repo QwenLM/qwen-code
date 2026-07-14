@@ -277,8 +277,7 @@ export function createValidationSteps({ prettierFiles = [], profile }) {
             '--workspaces',
             '--if-present',
             '--',
-            '--minWorkers=1',
-            '--maxWorkers=4',
+            '--no-file-parallelism',
           ],
           [
             'Run script tests',
@@ -286,8 +285,7 @@ export function createValidationSteps({ prettierFiles = [], profile }) {
             'run',
             'test:scripts',
             '--',
-            '--minWorkers=1',
-            '--maxWorkers=4',
+            '--no-file-parallelism',
           ],
           [
             'Run no-AK integration tests',
@@ -322,9 +320,6 @@ export function createValidationSteps({ prettierFiles = [], profile }) {
       'Run no-AK integration tests',
     ]) {
       steps.find((candidate) => candidate.name === name).isolatedHome = true;
-    }
-    for (const name of ['Run unit tests', 'Run script tests']) {
-      steps.find((candidate) => candidate.name === name).boundedVitest = true;
     }
     steps.find(({ name }) => name === 'Run web shell smoke tests').playwright =
       true;
@@ -445,11 +440,6 @@ export function createStepEnvironment({ baseEnv, home, playwrightPort, step }) {
     for (const key of Object.keys(env)) {
       if (key.startsWith('QWEN_CUSTOM_API_KEY_')) delete env[key];
     }
-  }
-
-  if (step.boundedVitest) {
-    env.VITEST_MIN_THREADS = '1';
-    env.VITEST_MAX_THREADS = '4';
   }
 
   if (step.isolatedHome) {
