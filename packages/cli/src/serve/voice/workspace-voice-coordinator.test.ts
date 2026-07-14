@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
 import {
   MAX_CONCURRENT_VOICE_SESSIONS,
+  VoiceLeaseAbortError,
   WorkspaceVoiceCoordinator,
 } from './workspace-voice-coordinator.js';
 
@@ -49,6 +50,10 @@ describe('WorkspaceVoiceCoordinator', () => {
     });
     const dispose = coordinator.disposeRuntime(target, 'workspace_removed');
     expect(admitted.lease.signal.aborted).toBe(true);
+    expect(admitted.lease.signal.reason).toMatchObject({
+      name: 'VoiceLeaseAbortError',
+      kind: 'workspace_removed',
+    });
     admitted.lease.release();
     await dispose;
   });
@@ -101,6 +106,7 @@ describe('WorkspaceVoiceCoordinator', () => {
     });
 
     coordinator.cancelWorkspaceDrain(target);
+    expect(coordinator['states'].has(target)).toBe(false);
     const admitted = coordinator.acquire(target);
     if (admitted.kind !== 'admitted') throw new Error('expected lease');
 
@@ -147,5 +153,21 @@ describe('WorkspaceVoiceCoordinator', () => {
       kind: 'rejected',
       reason: 'draining',
     });
+  });
+
+  it('tags daemon shutdown aborts independently of their message', async () => {
+    const coordinator = new WorkspaceVoiceCoordinator();
+    const target = runtime('target');
+    const admitted = coordinator.acquire(target);
+    if (admitted.kind !== 'admitted') throw new Error('expected lease');
+
+    const disposal = coordinator.disposeRuntime(target, 'daemon_shutdown');
+
+    expect(admitted.lease.signal.reason).toBeInstanceOf(VoiceLeaseAbortError);
+    expect(admitted.lease.signal.reason).toMatchObject({
+      kind: 'daemon_shutdown',
+    });
+    admitted.lease.release();
+    await disposal;
   });
 });

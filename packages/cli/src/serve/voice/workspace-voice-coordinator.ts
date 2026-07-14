@@ -4,13 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
-
 import type { WorkspaceRuntime } from '../workspace-registry.js';
 
 export const MAX_CONCURRENT_VOICE_SESSIONS = 8;
 const DISPOSE_WAIT_MS = 5_000;
-const debugLogger = createDebugLogger('WORKSPACE_VOICE_COORDINATOR');
+
+export class VoiceLeaseAbortError extends Error {
+  constructor(
+    readonly kind: 'daemon_shutdown' | 'workspace_removed',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'VoiceLeaseAbortError';
+  }
+}
 
 export interface VoiceAdmissionLease {
   readonly signal: AbortSignal;
@@ -73,7 +80,9 @@ export class WorkspaceVoiceCoordinator {
 
   cancelWorkspaceDrain(runtime: WorkspaceRuntime): void {
     const state = this.states.get(runtime);
-    if (state && !state.completed) state.draining = false;
+    if (!state || state.completed) return;
+    state.draining = false;
+    if (state.leases.size === 0) this.states.delete(runtime);
   }
 
   completeWorkspaceDrain(runtime: WorkspaceRuntime): void {
@@ -82,7 +91,10 @@ export class WorkspaceVoiceCoordinator {
     if (!state) return;
     state.draining = true;
     state.completed = true;
-    const abortReason = new Error('Workspace drain completed');
+    const abortReason = new VoiceLeaseAbortError(
+      'workspace_removed',
+      'Workspace drain completed',
+    );
     for (const lease of state.leases) lease.abort(abortReason);
     this.deleteIfIdle(runtime, state);
   }
@@ -100,7 +112,8 @@ export class WorkspaceVoiceCoordinator {
     if (!state) return;
     state.draining = true;
     state.completed = true;
-    const abortReason = new Error(
+    const abortReason = new VoiceLeaseAbortError(
+      reason,
       reason === 'workspace_removed'
         ? 'Workspace runtime was removed'
         : 'Daemon is shutting down',
@@ -133,8 +146,8 @@ export class WorkspaceVoiceCoordinator {
       if (resolveIdle) state.idleWaiters.delete(resolveIdle);
     }
     if (timedOut && state.leases.size > 0) {
-      debugLogger.warn(
-        `Voice runtime disposal timed out with ${state.leases.size} active lease(s).`,
+      process.stderr.write(
+        `qwen serve: Voice runtime disposal timed out with ${state.leases.size} active lease(s).\n`,
       );
     }
   }

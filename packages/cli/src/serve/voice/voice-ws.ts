@@ -28,6 +28,7 @@ import {
   MAX_CONCURRENT_VOICE_SESSIONS,
   type VoiceAdmissionLease,
   type VoiceAdmissionResult,
+  VoiceLeaseAbortError,
 } from './workspace-voice-coordinator.js';
 
 const debugLogger = createDebugLogger('VOICE_WS');
@@ -136,8 +137,8 @@ function errMessage(error: unknown): string {
 }
 
 function voiceLeaseCloseReason(signal: AbortSignal): string {
-  return signal.reason instanceof Error &&
-    signal.reason.message === 'Daemon is shutting down'
+  return signal.reason instanceof VoiceLeaseAbortError &&
+    signal.reason.kind === 'daemon_shutdown'
     ? 'Server shutting down'
     : 'Workspace removed';
 }

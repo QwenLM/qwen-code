@@ -493,7 +493,9 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     'workspace_qualified_voice',
     // Like qualified ACP, the plural Voice surface is mounted ahead of time
     // but only becomes useful once the daemon has a secondary runtime.
-    (toggles) => toggles.multiWorkspaceSessionsEnabled === true,
+    (toggles) =>
+      toggles.acpHttpEnabled === true &&
+      toggles.multiWorkspaceSessionsEnabled === true,
   ],
   ['client_mcp_over_ws', (toggles) => toggles.clientMcpOverWsEnabled === true],
   ['cdp_tunnel_over_ws', (toggles) => toggles.cdpTunnelOverWsEnabled === true],

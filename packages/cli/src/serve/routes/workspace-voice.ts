@@ -618,7 +618,10 @@ function voiceAudioBodyParser(): import('express').RequestHandler {
         if (!req.destroyed) req.destroy();
       };
       if (res.writableFinished) destroyRequest();
-      else res.once('finish', destroyRequest);
+      else {
+        res.once('finish', destroyRequest);
+        res.once('close', destroyRequest);
+      }
     };
     if (aborted) {
       onAbort();
@@ -647,8 +650,9 @@ export function registerWorkspaceVoiceRoutes(
   app.post(
     '/workspace/voice',
     deps.mutate({ strict: true }),
-    (req: Request, res: Response) =>
-      handleVoiceUpdate(req, res, deps, 'POST /workspace/voice'),
+    async (req: Request, res: Response) => {
+      await handleVoiceUpdate(req, res, deps, 'POST /workspace/voice');
+    },
   );
 
   app.post(
@@ -658,13 +662,14 @@ export function registerWorkspaceVoiceRoutes(
       if (admitVoiceTranscription(req, res, deps)) next();
     },
     voiceAudioBodyParser(),
-    (req: Request, res: Response) =>
-      handleVoiceTranscription(
+    async (req: Request, res: Response) => {
+      await handleVoiceTranscription(
         req,
         res,
         deps,
         'POST /workspace/voice/transcribe',
-      ),
+      );
+    },
   );
 }
 
