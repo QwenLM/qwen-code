@@ -4,6 +4,10 @@
   margin: 0 0 14px;
 }
 
+.editorShellDropdownOpen {
+  z-index: 7;
+}
+
 .container {
   position: relative;
   container-type: inline-size;
@@ -381,7 +385,7 @@
   --at-anchor-width: 620px;
   display: flex;
   width: min(360px, calc(var(--at-anchor-width) - 32px), calc(100vw - 24px));
-  max-height: min(300px, 42vh);
+  max-height: min(var(--at-panel-max-height, 300px), 42vh);
   box-sizing: border-box;
   flex-direction: column;
   padding: 6px;
@@ -443,6 +447,73 @@
   font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.atTabsWrap {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 22px minmax(0, 1fr) 22px;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  margin-bottom: 0;
+}
+
+.atTabs {
+  display: flex;
+  min-width: 0;
+  gap: 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.atTabs::-webkit-scrollbar {
+  display: none;
+}
+
+.atTab,
+.atTabScrollButton {
+  display: inline-flex;
+  min-width: 0;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.atTab {
+  flex: 0 0 auto;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.atTabScrollButton {
+  width: 22px;
+  padding: 0;
+  font-size: 16px;
+}
+
+.atTab:hover,
+.atTabActive,
+.atTabScrollButton:hover {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.atTab:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .atSearchInput {
@@ -524,15 +595,76 @@
   padding-bottom: 5px;
 }
 
-.atItemLabel {
+.atItemMain {
   grid-area: label;
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: var(--at-item-main-template, minmax(0, 1fr));
+  column-gap: 8px;
+  align-items: end;
+  justify-self: stretch;
+}
+
+.atItemLeading {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: end;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.atItemIcon {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  background: currentColor;
+  color: var(--muted-foreground);
+  mask: var(--at-item-icon-url) center / contain no-repeat;
+  -webkit-mask: var(--at-item-icon-url) center / contain no-repeat;
+}
+
+.atItemImageIcon {
+  display: block;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  object-fit: contain;
+}
+
+.atItemIconSpin {
+  animation: at-item-icon-spin 1.2s linear infinite;
+}
+
+.atItemLabel,
+.atItemSubtitle {
   min-width: 0;
   overflow: hidden;
-  color: var(--foreground);
   font-size: 13px;
   line-height: 18px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.atItemLabel {
+  display: block;
+  width: 100%;
+  color: var(--foreground);
+}
+
+.atItemSubtitle {
+  color: var(--muted-foreground);
+  justify-self: end;
+  text-align: right;
+}
+
+@keyframes at-item-icon-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .atItemDescription {
@@ -585,6 +717,7 @@
 }
 
 .tag {
+  position: relative;
   display: inline-flex;
   align-items: center;
   max-width: 100%;
@@ -596,6 +729,31 @@
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.2;
+}
+
+.tagTooltip {
+  position: absolute;
+  z-index: calc(var(--web-shell-tooltip-z-index, 1000) + 1);
+  top: calc(100% + 6px);
+  left: 0;
+  display: none;
+  min-width: 160px;
+  max-width: min(320px, 80vw);
+  padding: 8px 10px;
+  border: 1px solid var(--chat-editor-border-color);
+  border-radius: 6px;
+  background: var(--background);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  color: var(--foreground);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: normal;
+}
+
+.tag:hover .tagTooltip,
+.tag:focus-within .tagTooltip {
+  display: block;
 }
 
 .tagLabel,
@@ -731,6 +889,7 @@
 
 .toolbarLeading {
   margin-left: -5px;
+  min-width: 0;
 }
 
 .toolbarStart {
@@ -743,7 +902,77 @@
 
 .toolbarLeft {
   min-width: 0;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+}
+
+.gitBranchChip {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 180px;
+  height: 28px;
+  padding: 0 8px;
+  align-items: center;
+  gap: 5px;
+  border-radius: 6px;
+  color: var(--agent-gray-500);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.gitBranchIcon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+}
+
+.gitBranchIcon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.gitBranchText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Which workspace a split-view pane's session lives in — parallel to the git
+   branch chip, shown only on a multi-workspace daemon. */
+.workspaceChip {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 160px;
+  height: 28px;
+  padding: 0 8px;
+  align-items: center;
+  gap: 5px;
+  border-radius: 6px;
+  color: var(--agent-gray-500);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.workspaceChipIcon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+}
+
+.workspaceChipIcon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.workspaceChipText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .toolbarRight {
@@ -757,14 +986,61 @@
   align-items: center;
 }
 
+.toolbarMeasurements {
+  position: fixed;
+  top: -10000px;
+  left: -10000px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  visibility: hidden;
+  pointer-events: none;
+}
+
 @container (max-width: 699px) {
-  .toolbarLeft .toolBtn {
-    width: auto;
-    padding: 0 6px;
-    justify-content: center;
+  .toolbarLeft {
+    flex-wrap: nowrap;
+    gap: 2px;
   }
 
-  .toolbarLeft .toolBtnText {
+  .toolbarLeft .dropdownWrapper {
+    width: 28px;
+    flex: 0 0 28px;
+  }
+
+  .gitBranchChip {
+    width: 28px;
+    max-width: 28px;
+    flex: 0 0 28px;
+    gap: 0;
+    padding: 0 6px;
+  }
+
+  .gitBranchText,
+  .workspaceChipText,
+  .modeToolBtn .toolBtnText,
+  .modelToolBtn .toolBtnText,
+  .modeToolBtn .toolBtnArrow,
+  .modelToolBtn .toolBtnArrow {
+    display: none;
+  }
+
+  .toolbarLeft .workspaceChip,
+  .workspaceSelectTooltipTrigger,
+  .workspaceSelectTrigger,
+  .modeToolBtn,
+  .modelToolBtn {
+    width: 28px;
+    max-width: 28px;
+    flex: 0 0 28px;
+    gap: 0;
+    padding: 0 6px;
+    justify-content: center;
+    box-sizing: border-box;
+  }
+
+  .toolbarLeft .workspaceSelectTrigger [data-slot='select-value'],
+  .workspaceSelectTrigger > svg:last-child {
     display: none;
   }
 }
@@ -774,33 +1050,65 @@
 }
 
 .dropdown {
-  position: absolute;
-  bottom: calc(100% + 4px);
-  left: 0;
-  min-width: 160px;
+  position: fixed;
+  z-index: 100;
+  display: flex;
+  min-width: 0;
   padding: 4px;
+  overflow: hidden;
   background: var(--background);
   border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow:
     0 2px 4px -2px rgba(0, 0, 0, 0.1),
     0 4px 6px -1px rgba(0, 0, 0, 0.1);
-  z-index: 100;
-  display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
 .dropdownRich {
-  min-width: min(360px, calc(100vw - 32px));
   padding: 6px;
   gap: 2px;
 }
 
 .dropdownCheck {
-  min-width: min(300px, calc(100vw - 32px));
   padding: 6px;
   gap: 2px;
+}
+
+.dropdownSearch {
+  width: 100%;
+  min-height: 30px;
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  outline: none;
+  background: var(--chat-editor-bg-tertiary);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 13px;
+}
+
+.dropdownSearch:focus-visible {
+  border-color: var(--agent-blue-500);
+}
+
+.dropdownList {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.dropdownEmpty {
+  padding: 8px 9px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 18px;
 }
 
 .dropdownItem {
@@ -913,9 +1221,49 @@
   white-space: nowrap;
 }
 
+.modeToolBtn,
+.modelToolBtn {
+  min-width: 0;
+}
+
 .toolBtn:hover {
   background: var(--chat-editor-bg-tertiary);
   color: var(--chat-editor-text-primary);
+}
+
+.workspaceSelectTrigger {
+  min-width: 0;
+  max-width: 176px;
+  align-items: center;
+  box-shadow: none;
+}
+
+.workspaceSelectTrigger[data-disabled] {
+  cursor: default;
+  opacity: 1;
+}
+
+.workspaceSelectTrigger > svg {
+  display: block;
+  flex-shrink: 0;
+  align-self: center;
+}
+
+.workspaceSelectTooltipTrigger {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 176px;
+}
+
+.workspaceSelectTrigger [data-slot='select-value'] {
+  display: block;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-self: center;
+  line-height: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .toolBtn[data-tooltip]:hover::after,
@@ -995,10 +1343,14 @@
 }
 
 .toolBtnText {
+  min-width: 0;
+  overflow: hidden;
   display: inline-flex;
   align-items: center;
   color: var(--agent-gray-500);
   line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .toolBtnArrow {

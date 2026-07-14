@@ -25,6 +25,8 @@ export default {
   'Shell mode': 'Режим терминала',
   'YOLO mode': 'Режим YOLO',
   'Auto mode': 'Автоматический режим',
+  'auto_mode.entry_notice':
+    'Автоматический режим включен.\n   LLM-классификатор оценивает каждый вызов инструмента — безопасные действия утверждаются автоматически,\n   рискованные блокируются. Выход: Shift+Tab или /approval-mode default.',
   'plan mode': 'Режим планирования',
   'auto-accept edits': 'Режим принятия правок',
   'Accepting edits': 'Принятие правок',
@@ -86,7 +88,7 @@ export default {
   'to search history': 'поиск в истории',
   'to paste images': 'вставить изображения',
   'for external editor': 'внешний редактор',
-  'to toggle compact mode': 'переключить компактный режим',
+  'to view transcript': 'показать транскрипт',
 
   // ============================================================================
   // Поля системной информации
@@ -251,6 +253,42 @@ export default {
   'Delete {{name}}': 'Удалить {{name}}',
   'Unknown Step': 'Неизвестный шаг',
   'Esc to close': 'Esc для закрытия',
+  Transcript: 'Транскрипт',
+  'to close': 'закрыть',
+  'to scroll': 'прокрутить',
+  'Failed to render transcript.': 'Не удалось отобразить транскрипт.',
+  'Read {{count}} file': 'Прочитано файлов: {{count}}',
+  'Read {{count}} files': 'Прочитано файлов: {{count}}',
+  'Reading {{count}} file': 'Чтение файлов: {{count}}',
+  'Reading {{count}} files': 'Чтение файлов: {{count}}',
+  'Edited {{count}} file': 'Изменено файлов: {{count}}',
+  'Edited {{count}} files': 'Изменено файлов: {{count}}',
+  'Editing {{count}} file': 'Изменение файлов: {{count}}',
+  'Editing {{count}} files': 'Изменение файлов: {{count}}',
+  'Wrote {{count}} file': 'Записано файлов: {{count}}',
+  'Wrote {{count}} files': 'Записано файлов: {{count}}',
+  'Writing {{count}} file': 'Запись файлов: {{count}}',
+  'Writing {{count}} files': 'Запись файлов: {{count}}',
+  'Searched {{count}} pattern': 'Найдено шаблонов: {{count}}',
+  'Searched {{count}} patterns': 'Найдено шаблонов: {{count}}',
+  'Searching {{count}} pattern': 'Поиск шаблонов: {{count}}',
+  'Searching {{count}} patterns': 'Поиск шаблонов: {{count}}',
+  'Listed {{count}} directory': 'Показано каталогов: {{count}}',
+  'Listed {{count}} directories': 'Показано каталогов: {{count}}',
+  'Listing {{count}} directory': 'Просмотр каталогов: {{count}}',
+  'Listing {{count}} directories': 'Просмотр каталогов: {{count}}',
+  'Ran {{count}} command': 'Выполнено команд: {{count}}',
+  'Ran {{count}} commands': 'Выполнено команд: {{count}}',
+  'Running {{count}} command': 'Выполнение команд: {{count}}',
+  'Running {{count}} commands': 'Выполнение команд: {{count}}',
+  'Ran {{count}} agent': 'Запущено агентов: {{count}}',
+  'Ran {{count}} agents': 'Запущено агентов: {{count}}',
+  'Running {{count}} agent': 'Запуск агентов: {{count}}',
+  'Running {{count}} agents': 'Запуск агентов: {{count}}',
+  'Used {{count}} tool': 'Использовано инструментов: {{count}}',
+  'Used {{count}} tools': 'Использовано инструментов: {{count}}',
+  'Using {{count}} tool': 'Использование инструментов: {{count}}',
+  'Using {{count}} tools': 'Использование инструментов: {{count}}',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter для выбора, ↑↓ для навигации, Esc для закрытия',
   'Esc to go back': 'Esc для возврата',
@@ -1659,8 +1697,6 @@ export default {
     'Вы можете быстро переключать режим разрешений с помощью Tab или /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Попробуйте /insight, чтобы получить персонализированные выводы из истории чатов.',
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    'Нажмите Ctrl+O для переключения компактного режима — скрыть вывод инструментов и рассуждения.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     'Добавьте файл QWEN.md, чтобы предоставить Qwen Code постоянный контекст проекта.',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -1871,10 +1907,6 @@ export default {
     'Raw-режим недоступен. Пожалуйста, запустите в интерактивном терминале.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ стрелки для навигации, Enter для выбора, Ctrl+C для выхода)\n',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    'Скрывать вывод инструментов и процесс рассуждений для более чистого вида (переключить с помощью Ctrl+O).',
-  'Press Ctrl+O to show full tool output':
-    'Нажмите Ctrl+O для показа полного вывода инструментов',
   'Switch to plan mode or exit plan mode':
     'Переключиться в режим плана или выйти из режима плана',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
@@ -2079,6 +2111,53 @@ export default {
   in: 'вх.',
   out: 'вых.',
   'In/Out': 'Вх/Вых',
+  // Update command
+  'Check for Qwen Code updates and install if available':
+    'Проверить обновления Qwen Code и установить при наличии',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Доступно обновление Qwen Code! {{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'Доступна новая версия Qwen Code! {{current}} → {{latest}}',
+  'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} актуален!',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    'Не удалось проверить обновления. Проверьте сеть или настройки registry.',
+  'Unable to check for updates: {{reason}}':
+    'Невозможно проверить обновления: {{reason}}',
+  'Update successful! The new version will be used on your next run.':
+    'Обновление успешно! Новая версия будет использована при следующем запуске.',
+  'Update downloaded. It will be applied after you exit this session.':
+    'Обновление загружено. Оно будет применено после выхода из этого сеанса.',
+  'Update failed: {{error}}': 'Ошибка обновления: {{error}}',
+  'Downloading update...': 'Загрузка обновления...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    'Обновление успешно! Перезапустите Qwen Code, чтобы использовать новую версию. Переключение поставщиков моделей до перезапуска может работать некорректно.',
+  'Automatic update failed. Please try updating manually.':
+    'Автоматическое обновление не удалось. Попробуйте обновить вручную.',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    'Автоматическое обновление не удалось: {{error}}. Повторно запустите установщик, чтобы обновить вручную.',
+  'Running from a local git clone. Please update with "git pull".':
+    'Запущено из локального клона Git. Обновите с помощью "git pull".',
+  'Running via npx, update not applicable.':
+    'Запущено через npx, обновление неприменимо.',
+  'Running via pnpx, update not applicable.':
+    'Запущено через pnpx, обновление неприменимо.',
+  'Running via bunx, update not applicable.':
+    'Запущено через bunx, обновление неприменимо.',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    'Установлено через Homebrew. Обновите с помощью "brew upgrade".',
+  "Locally installed. Please update via your project's package.json.":
+    'Установлено локально. Обновите через package.json вашего проекта.',
+  'Update requires sudo. Please run:':
+    'Для обновления требуется sudo. Выполните:',
+  'Standalone install detected. Attempting to automatically update now...':
+    'Обнаружена автономная установка. Выполняется попытка автоматического обновления...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    'Обнаружена автономная установка. Повторно запустите автономный установщик для обновления:',
+  'Run the following to update:': 'Выполните следующую команду для обновления:',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    'Невозможно автоматически обновить эту автономную установку. Переустановите с:',
+  'Manual update required. Please reinstall Qwen Code.':
+    'Требуется ручное обновление. Переустановите Qwen Code.',
 
   // ============================================================================
   // reload-plugins command
@@ -2109,4 +2188,8 @@ export default {
     'Failed to refresh extension content. Run /reload-plugins to apply updates.',
   'Extension reload did not complete. Run /reload-plugins to try again.':
     'Extension reload did not complete. Run /reload-plugins to try again.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.':
+    'Запись сеанса остановлена после ошибки записи. Новые сообщения затронутого сеанса не будут сохранены. Проверьте свободное место и разрешения, затем начните новый сеанс, чтобы возобновить запись. Подробности см. в журнале отладки.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
+    'Запись сеанса остановлена после ошибки записи. Новые сообщения затронутого сеанса не будут сохранены. Проверьте свободное место и разрешения, затем выполните `/clear`, чтобы начать новый записываемый сеанс. Подробности см. в журнале отладки.',
 };

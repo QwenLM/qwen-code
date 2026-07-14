@@ -149,6 +149,17 @@ export interface DaemonWorkspaceService {
     ctx: WorkspaceRequestContext,
   ): Promise<QwenPermissionSettings>;
 
+  /** Start the ACP child/channel without creating a user-visible session. */
+  preheatAcpChild(
+    ctx: WorkspaceRequestContext,
+    opts?: { timeoutMs?: number },
+  ): Promise<WorkspaceAcpPreheatResult>;
+
+  /** Current ACP child/channel liveness for the bound workspace. */
+  getWorkspaceAcpStatus(
+    ctx: WorkspaceRequestContext,
+  ): Promise<WorkspaceAcpStatusResult>;
+
   /** Voice settings and selectable transcription models for the workspace. */
   getWorkspaceVoiceStatus(
     ctx: WorkspaceRequestContext,
@@ -181,6 +192,13 @@ export interface DaemonWorkspaceService {
     enabled: boolean,
   ): Promise<{ toolName: string; enabled: boolean }>;
 
+  /** Toggle a skill in the workspace's skills.disabled settings list. */
+  setWorkspaceSkillEnabled(
+    ctx: WorkspaceRequestContext,
+    skillName: string,
+    enabled: boolean,
+  ): Promise<WorkspaceSkillToggleResult>;
+
   /** Scaffold (init) a QWEN.md file in the workspace. */
   initWorkspace(
     ctx: WorkspaceRequestContext,
@@ -196,6 +214,9 @@ export interface DaemonWorkspaceService {
 
   /** Reload all settings (env + model + permissions + tools + memory). */
   reload(ctx: WorkspaceRequestContext): Promise<ReloadResponse>;
+
+  /** Drop cached skill status so extension skill changes are re-enumerated. */
+  invalidateWorkspaceSkillsStatus(): void;
 
   /** Broadcast extension refresh to all active sessions (fire-and-forget). */
   refreshExtensionsForAllSessions(): Promise<{
@@ -215,6 +236,18 @@ export interface ReloadResponse {
   sessionsSkipped?: string[];
   childReloaded: boolean;
   childError?: string;
+}
+
+export interface WorkspaceAcpPreheatResult {
+  ready: boolean;
+  channelLive: boolean;
+  durationMs: number;
+  reason?: 'timeout' | 'error';
+  error?: string;
+}
+
+export interface WorkspaceAcpStatusResult {
+  channelLive: boolean;
 }
 
 export type WorkspaceTrustDesiredState = 'trusted' | 'untrusted';
@@ -272,6 +305,49 @@ export interface WorkspaceVoiceSettingsUpdate {
   mode?: VoiceMode;
   language?: string;
   voiceModel?: string;
+}
+
+export type WorkspaceSkillToggleActivation = 'applied' | 'deferred' | 'partial';
+
+export interface WorkspaceSkillToggleResult {
+  skillName: string;
+  enabled: boolean;
+  changed: boolean;
+  activation: WorkspaceSkillToggleActivation;
+  sessionsRefreshed: number;
+  sessionsFailed: number;
+}
+
+export interface PersistDisabledSkillResult {
+  changed: boolean;
+  disabled: string[];
+}
+
+export type WorkspaceSkillNotToggleableReason =
+  | 'not_user_invocable'
+  | 'inactive_extension'
+  | 'locked';
+
+export class WorkspaceSkillNotFoundError extends Error {
+  constructor(readonly skillName: string) {
+    super(`Skill not found: ${skillName}`);
+    this.name = 'WorkspaceSkillNotFoundError';
+  }
+}
+
+export class WorkspaceSkillNotToggleableError extends Error {
+  constructor(
+    readonly skillName: string,
+    readonly reason: WorkspaceSkillNotToggleableReason,
+    readonly lockedScope?: 'system' | 'user' | 'systemDefaults',
+  ) {
+    super(
+      lockedScope
+        ? `Skill ${skillName} is locked by ${lockedScope} settings`
+        : `Skill ${skillName} is not toggleable: ${reason}`,
+    );
+    this.name = 'WorkspaceSkillNotToggleableError';
+  }
 }
 
 /** Discriminated union for MCP server restart outcomes. */
@@ -348,6 +424,13 @@ export interface DaemonWorkspaceServiceDeps {
     enabled: boolean,
   ) => Promise<void>;
 
+  /** Persist a skill enable/disable change to workspace settings. */
+  persistDisabledSkills: (
+    workspace: string,
+    skillName: string,
+    enabled: boolean,
+  ) => Promise<PersistDisabledSkillResult>;
+
   persistSetting?: (
     workspace: string,
     scope: SettingScope,
@@ -362,6 +445,9 @@ export interface DaemonWorkspaceServiceDeps {
 
   /** Reload daemon-side process.env from .env / settings.env. */
   reloadDaemonEnv?: (workspace: string) => Promise<EnvReloadResult>;
+
+  /** Eagerly start the ACP child/channel without creating a session. */
+  preheatAcpChild?: () => Promise<void>;
 
   /**
    * Query workspace status from the ACP child. The bridge owns the

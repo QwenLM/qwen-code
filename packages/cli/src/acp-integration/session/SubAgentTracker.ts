@@ -22,7 +22,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { z } from 'zod';
 import type { SessionContext } from './types.js';
-import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
+import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import type {
   AgentSideConnection,
@@ -30,6 +30,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   buildPermissionRequestContent,
+  interactionMetaFields,
   toPermissionOptions,
 } from './permissionUtils.js';
 
@@ -214,7 +215,10 @@ export class SubAgentTracker {
           // `kind` ACP can't carry. This is the second producer path (nested
           // sub-agent tool calls); Session.ts adds the same _meta on the primary
           // path.
-          _meta: { toolName: event.name },
+          _meta: {
+            toolName: event.name,
+            ...interactionMetaFields(fullConfirmationDetails),
+          },
         },
       };
 

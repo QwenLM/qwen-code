@@ -219,10 +219,22 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     const conn = this.ensureConnection();
 
     const chunks: string[] = [];
+    let slashCommandOutput = '';
     const onChunk = (sid: string, chunk: string) => {
       if (sid === sessionId) chunks.push(chunk);
     };
+    const onSlashCommandOutput = (sid: string, chunk: string) => {
+      if (sid === sessionId) slashCommandOutput = chunk;
+    };
+    const clearChunks = (sid: string) => {
+      if (sid === sessionId) {
+        chunks.length = 0;
+        slashCommandOutput = '';
+      }
+    };
     this.on('textChunk', onChunk);
+    this.on('slashCommandOutput', onSlashCommandOutput);
+    this.on('responseBoundary', clearChunks);
 
     const prompt: Array<Record<string, unknown>> = [];
     if (options?.imageBase64 && options.imageMimeType) {
@@ -241,9 +253,11 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       });
     } finally {
       this.off('textChunk', onChunk);
+      this.off('slashCommandOutput', onSlashCommandOutput);
+      this.off('responseBoundary', clearChunks);
     }
 
-    return chunks.join('');
+    return chunks.join('') || slashCommandOutput;
   }
 
   async cancelSession(sessionId: string): Promise<void> {
@@ -299,11 +313,21 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
 
     switch (type) {
       case 'agent_message_chunk': {
+        const meta = update['_meta'] as Record<string, unknown> | undefined;
+        if (typeof meta?.['parentToolCallId'] === 'string') {
+          break;
+        }
         const content = update['content'] as
           | { type?: string; text?: string }
           | undefined;
         if (content?.type === 'text' && content.text) {
-          this.emit('textChunk', sessionId, content.text);
+          this.emit(
+            meta?.['source'] === 'slash_command'
+              ? 'slashCommandOutput'
+              : 'textChunk',
+            sessionId,
+            content.text,
+          );
         }
         break;
       }
@@ -316,7 +340,14 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
           status: (update['status'] as string) || 'pending',
           rawInput: update['rawInput'] as Record<string, unknown> | undefined,
         };
+        if (event.status === 'pending' || event.status === 'in_progress') {
+          this.emitResponseBoundary(sessionId);
+        }
         this.emit('toolCall', event);
+        break;
+      }
+      case 'plan': {
+        this.emitResponseBoundary(sessionId);
         break;
       }
       case 'available_commands_update': {
@@ -375,12 +406,17 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       }, ACP_PERMISSION_RESPONSE_TIMEOUT_MS);
       timeout.unref?.();
       this.pendingPermissions.set(requestId, { sessionId, resolve, timeout });
+      this.emitResponseBoundary(sessionId);
       this.emit('permissionRequest', {
         requestId,
         sessionId,
         request,
       });
     });
+  }
+
+  private emitResponseBoundary(sessionId: string): void {
+    this.emit('responseBoundary', sessionId);
   }
 
   private resolvePendingPermissions(sessionId?: string): void {

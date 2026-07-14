@@ -101,7 +101,10 @@ import {
   recordFallbackApprove,
   shouldFallback,
 } from '../permissions/denialTracking.js';
-import { getResponseTextFromParts } from '../utils/generateContentResponseUtilities.js';
+import {
+  getResponseTextFromParts,
+  TOOL_SUCCEEDED_OUTPUT,
+} from '../utils/generateContentResponseUtilities.js';
 import type { ModifyContext } from '../tools/modifiable-tool.js';
 import {
   isModifiableDeclarativeTool,
@@ -109,7 +112,6 @@ import {
 } from '../tools/modifiable-tool.js';
 import * as Diff from 'diff';
 import levenshtein from 'fast-levenshtein';
-import { getPlanModeSystemReminder } from './prompts.js';
 import { ShellToolInvocation } from '../tools/shell.js';
 import { IdeClient } from '../ide/ide-client.js';
 import {
@@ -741,7 +743,7 @@ export function convertToFunctionResponse(
     }
 
     const output =
-      textParts.length > 0 ? textParts.join('\n') : 'Tool execution succeeded.';
+      textParts.length > 0 ? textParts.join('\n') : TOOL_SUCCEEDED_OUTPUT;
     return [createFunctionResponsePart(callId, toolName, output, mediaParts)];
   }
 
@@ -783,9 +785,7 @@ export function convertToFunctionResponse(
   }
 
   // Default case for other kinds of parts.
-  return [
-    createFunctionResponsePart(callId, toolName, 'Tool execution succeeded.'),
-  ];
+  return [createFunctionResponsePart(callId, toolName, TOOL_SUCCEEDED_OUTPUT)];
 }
 
 function toParts(input: PartListUnion): Part[] {
@@ -2457,22 +2457,28 @@ export class CoreToolScheduler {
                 isEnterPlanModeTool,
               )
             ) {
+              // SDK and ordinary subagent-like callers should return plans
+              // directly; they do not have exit_plan_mode available. Plan-required
+              // teammates have a dedicated exit_plan_mode approval path.
+              const isPlanRequiredTeammate =
+                !shouldUsePlanOnlyReminderInSubagentContext() &&
+                !this.config.getSdkMode();
+              const planModeError = new Error(
+                `Tool blocked by plan mode: "${reqInfo.name}" is not a read-only tool. ` +
+                  `Only read-only tools (read_file, grep_search, glob, list_directory, ` +
+                  `web_fetch, etc.) are allowed in plan mode.` +
+                  ` Do NOT retry this tool. ` +
+                  (isPlanRequiredTeammate
+                    ? `Pivot to read-only alternatives to gather the information you need, then call exit_plan_mode with a plan that covers this tool's purpose.`
+                    : `Pivot to read-only alternatives to gather equivalent information, then present your plan directly to the caller.`),
+              );
               this.setStatusInternal(reqInfo.callId, 'error', {
-                callId: reqInfo.callId,
-                responseParts: convertToFunctionResponse(
-                  reqInfo.name,
-                  reqInfo.callId,
-                  // SDK callers and ordinary subagent-like callers should
-                  // return plans directly. Plan-required teammates have a
-                  // dedicated exit_plan_mode approval path instead.
-                  getPlanModeSystemReminder(
-                    shouldUsePlanOnlyReminderInSubagentContext() ||
-                      this.config.getSdkMode(),
-                  ),
+                ...createErrorResponse(
+                  reqInfo,
+                  planModeError,
+                  ToolErrorType.EXECUTION_DENIED,
                 ),
                 resultDisplay: 'Plan mode blocked a non-read-only tool call.',
-                error: undefined,
-                errorType: undefined,
               });
               setToolSpanFailure(
                 toolSpan,

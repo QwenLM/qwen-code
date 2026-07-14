@@ -42,11 +42,13 @@ export function AskUserQuestion({
     {},
   );
   const [customFocused, setCustomFocused] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
   const submittedRef = useRef(false);
 
   useEffect(() => {
     const firstQuestion = questions[0];
     submittedRef.current = false;
+    setCollapsed(false);
     setCurrentIdx(0);
     setSelectedIdx(firstQuestion?.options.length ? 0 : null);
     setAnswers(
@@ -215,7 +217,7 @@ export function AskUserQuestion({
     <div
       className={`${styles.question} ${
         variant === 'floating' ? styles.floating : ''
-      }`}
+      } ${collapsed ? styles.collapsed : ''}`}
     >
       {/* Header line like CLI */}
       <div className={styles.titleLine}>
@@ -229,173 +231,210 @@ export function AskUserQuestion({
             total: questions.length,
           })}
         </span>
-      </div>
 
-      {/* Progress indicator */}
-      <div className={styles.tabs}>
-        {questions.map((_, i) => (
-          <span
-            key={i}
-            className={`${styles.tab} ${
-              i === currentIdx ? styles.tabActive : ''
-            }`}
-            aria-hidden="true"
-          />
-        ))}
-      </div>
-
-      {current ? (
-        /* Question content */
-        <>
-          {/* Question text */}
-          <p className={styles.text}>
-            {current.question}
-            {isMulti && (
-              <span className={styles.multiHint}>
-                {' '}
-                ({t('askUser.multiHint')})
-              </span>
-            )}
-          </p>
-          <p className={styles.description}>{t('askUser.selectAnswer')}</p>
-
-          {/* Options list */}
-          <div
-            className={styles.options}
-            onMouseLeave={() => setSelectedIdx(null)}
+        {/* Progress indicator + collapse toggle */}
+        <div className={styles.topRight}>
+          <div className={styles.tabs}>
+            {questions.map((_, i) => (
+              <span
+                key={i}
+                className={`${styles.tab} ${
+                  i === currentIdx ? styles.tabActive : ''
+                }`}
+                aria-hidden="true"
+              />
+            ))}
+          </div>
+          <button
+            type="button"
+            className={styles.collapseButton}
+            onClick={() => setCollapsed((c) => !c)}
+            aria-expanded={!collapsed}
+            aria-label={collapsed ? t('common.expand') : t('common.collapse')}
+            title={collapsed ? t('common.expand') : t('common.collapse')}
           >
-            {current.options.map((opt, i) => {
-              const isActive = i === selectedIdx;
-              const isSelected = isMulti
-                ? (selectedMulti[currentIdx] || []).includes(opt.label)
-                : answers[currentIdx] === opt.label;
+            <svg
+              viewBox="0 0 16 16"
+              className={`${styles.collapseIcon} ${
+                collapsed ? styles.collapseIconCollapsed : ''
+              }`}
+            >
+              <path
+                d="M4 6l4 4 4-4"
+                fill="none"
+                stroke="currentColor"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="1.5"
+              />
+            </svg>
+          </button>
+        </div>
+      </div>
 
-              return (
-                <div
-                  key={opt.label}
-                  className={`${styles.option} ${
-                    isActive ? styles.optionActive : ''
-                  } ${isSelected ? styles.optionSelected : ''}`}
-                  onClick={() => {
-                    setSelectedIdx(i);
-                    if (isMulti) {
-                      handleToggle(i);
-                    } else {
-                      handleSelectOption(i);
-                    }
-                  }}
-                  onMouseEnter={() => setSelectedIdx(i)}
-                >
-                  <span className={styles.pointer}>{isActive ? '›' : ' '}</span>
-                  <span className={styles.optionNum}>{i + 1}</span>
-                  <span className={styles.optionContent}>
-                    <span className={styles.optionLabel}>{opt.label}</span>
-                    {opt.description && (
-                      <span className={styles.optionDesc}>
-                        {opt.description}
-                      </span>
-                    )}
+      {!collapsed && (
+        <>
+          {current ? (
+            /* Question content */
+            <>
+              {/* Question text */}
+              <p className={styles.text}>
+                {current.question}
+                {isMulti && (
+                  <span className={styles.multiHint}>
+                    {' '}
+                    ({t('askUser.multiHint')})
                   </span>
-                </div>
-              );
-            })}
+                )}
+              </p>
+              <p className={styles.description}>{t('askUser.selectAnswer')}</p>
 
-            {/* Other / custom input option */}
-            {(() => {
-              const isCustomActive = selectedIdx === current.options.length;
-              const hasCustomValue = !!customInputs[currentIdx];
-              return (
-                <div
-                  className={`${styles.option} ${
-                    isCustomActive ? styles.optionActive : ''
-                  } ${hasCustomValue ? styles.optionSelected : ''}`}
-                  onClick={() => {
-                    setSelectedIdx(current.options.length);
-                    focusCustomInput();
-                  }}
-                  onMouseEnter={() => setSelectedIdx(current.options.length)}
-                >
-                  <span className={styles.pointer}>
-                    {isCustomActive ? '›' : ' '}
-                  </span>
-                  <span className={styles.editIcon} aria-hidden="true">
-                    <svg viewBox="0 0 16 16">
-                      <path
-                        d="M3.2 10.9 4 7.8 10.8 1l3.2 3.2-6.8 6.8-3 .8zM10 1.8l3.2 3.2M3 14h10"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    </svg>
-                  </span>
-                  {customFocused ? (
-                    <input
-                      type="text"
-                      className={styles.customInput}
-                      placeholder={t('askUser.typePlaceholder')}
-                      value={customInputs[currentIdx] || ''}
-                      onChange={(e) =>
-                        setCustomInputs({
-                          ...customInputs,
-                          [currentIdx]: e.target.value,
-                        })
-                      }
-                      onBlur={() => setCustomFocused(false)}
-                      autoFocus
-                    />
-                  ) : (
-                    <span
-                      className={`${styles.optionLabel} ${
-                        customInputs[currentIdx] ? '' : styles.optionPlaceholder
-                      }`}
+              {/* Options list */}
+              <div
+                className={styles.options}
+                onMouseLeave={() => setSelectedIdx(null)}
+              >
+                {current.options.map((opt, i) => {
+                  const isActive = i === selectedIdx;
+                  const isSelected = isMulti
+                    ? (selectedMulti[currentIdx] || []).includes(opt.label)
+                    : answers[currentIdx] === opt.label;
+
+                  return (
+                    <div
+                      key={opt.label}
+                      className={`${styles.option} ${
+                        isActive ? styles.optionActive : ''
+                      } ${isSelected ? styles.optionSelected : ''}`}
+                      onClick={() => {
+                        setSelectedIdx(i);
+                        if (isMulti) {
+                          handleToggle(i);
+                        } else {
+                          handleSelectOption(i);
+                        }
+                      }}
+                      onMouseEnter={() => setSelectedIdx(i)}
                     >
-                      {customInputs[currentIdx] || t('askUser.typePlaceholder')}
-                    </span>
-                  )}
-                </div>
-              );
-            })()}
+                      <span className={styles.pointer}>
+                        {isActive ? '›' : ' '}
+                      </span>
+                      <span className={styles.optionNum}>{i + 1}</span>
+                      <span className={styles.optionContent}>
+                        <span className={styles.optionLabel}>{opt.label}</span>
+                        {opt.description && (
+                          <span className={styles.optionDesc}>
+                            {opt.description}
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                  );
+                })}
+
+                {/* Other / custom input option */}
+                {(() => {
+                  const isCustomActive = selectedIdx === current.options.length;
+                  const hasCustomValue = !!customInputs[currentIdx];
+                  return (
+                    <div
+                      className={`${styles.option} ${
+                        isCustomActive ? styles.optionActive : ''
+                      } ${hasCustomValue ? styles.optionSelected : ''}`}
+                      onClick={() => {
+                        setSelectedIdx(current.options.length);
+                        focusCustomInput();
+                      }}
+                      onMouseEnter={() =>
+                        setSelectedIdx(current.options.length)
+                      }
+                    >
+                      <span className={styles.pointer}>
+                        {isCustomActive ? '›' : ' '}
+                      </span>
+                      <span className={styles.editIcon} aria-hidden="true">
+                        <svg viewBox="0 0 16 16">
+                          <path
+                            d="M3.2 10.9 4 7.8 10.8 1l3.2 3.2-6.8 6.8-3 .8zM10 1.8l3.2 3.2M3 14h10"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
+                      </span>
+                      {customFocused ? (
+                        <input
+                          type="text"
+                          className={styles.customInput}
+                          placeholder={t('askUser.typePlaceholder')}
+                          value={customInputs[currentIdx] || ''}
+                          onChange={(e) =>
+                            setCustomInputs({
+                              ...customInputs,
+                              [currentIdx]: e.target.value,
+                            })
+                          }
+                          onBlur={() => setCustomFocused(false)}
+                          autoFocus
+                        />
+                      ) : (
+                        <span
+                          className={`${styles.optionLabel} ${
+                            customInputs[currentIdx]
+                              ? ''
+                              : styles.optionPlaceholder
+                          }`}
+                        >
+                          {customInputs[currentIdx] ||
+                            t('askUser.typePlaceholder')}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })()}
+              </div>
+            </>
+          ) : null}
+          <div className={styles.actions}>
+            <button
+              type="button"
+              className={styles.ignoreButton}
+              onClick={handleCancel}
+            >
+              {t('askUser.ignore')}
+            </button>
+            {questions.length > 1 && (
+              <>
+                <button
+                  type="button"
+                  className={styles.button}
+                  disabled={currentIdx <= 0}
+                  onClick={handlePrevious}
+                >
+                  {t('common.previous')}
+                </button>
+                <button
+                  type="button"
+                  className={styles.button}
+                  disabled={currentIdx >= questions.length - 1}
+                  onClick={handleNext}
+                >
+                  {t('common.next')}
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              className={`${styles.button} ${styles.submitButton}`}
+              disabled={!canSubmit}
+              onClick={handleSubmit}
+            >
+              {t('askUser.submit')}
+            </button>
           </div>
         </>
-      ) : null}
-      <div className={styles.actions}>
-        <button
-          type="button"
-          className={styles.ignoreButton}
-          onClick={handleCancel}
-        >
-          {t('askUser.ignore')}
-        </button>
-        {questions.length > 1 && (
-          <>
-            <button
-              type="button"
-              className={styles.button}
-              disabled={currentIdx <= 0}
-              onClick={handlePrevious}
-            >
-              {t('common.previous')}
-            </button>
-            <button
-              type="button"
-              className={styles.button}
-              disabled={currentIdx >= questions.length - 1}
-              onClick={handleNext}
-            >
-              {t('common.next')}
-            </button>
-          </>
-        )}
-        <button
-          type="button"
-          className={`${styles.button} ${styles.submitButton}`}
-          disabled={!canSubmit}
-          onClick={handleSubmit}
-        >
-          {t('askUser.submit')}
-        </button>
-      </div>
+      )}
     </div>
   );
 }

@@ -110,6 +110,7 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionTasks: 'qwen/status/session/tasks',
   sessionStats: 'qwen/status/session/stats',
   sessionLspStatus: 'qwen/status/session/lsp',
+  sessionTranscript: 'qwen/status/session/transcript',
   sessionRewindSnapshots: 'qwen/status/session/rewind_snapshots',
   workspaceHooks: 'qwen/status/workspace/hooks',
   sessionHooks: 'qwen/status/session/hooks',
@@ -138,6 +139,8 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionRewind: 'qwen/control/session/rewind',
   sessionContinue: 'qwen/control/session/continue',
   sessionTitle: 'qwen/control/session/title',
+  sessionParent: 'qwen/control/session/parent',
+  sessionArtifactsPersist: 'qwen/control/session/artifacts/persist',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',
   workspaceAgentGenerate: 'qwen/control/workspace/agents/generate',
@@ -152,6 +155,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
   workspaceReload: 'qwen/control/workspace/reload',
+  workspaceSkillsRefresh: 'qwen/control/workspace/skills/refresh',
   workspaceExtensionsRefresh: 'qwen/control/workspace/extensions/refresh',
   /**
    * Reverse tool channel (issue #5626, Phase 2). Unlike every other entry
@@ -165,6 +169,15 @@ export const SERVE_CONTROL_EXT_METHODS = {
    */
   clientMcpMessage: 'qwen/control/client_mcp/message',
   sessionCd: 'qwen/control/session/cd',
+  /**
+   * Also called by the CHILD UP into the parent (like `clientMcpMessage`): the
+   * `create_sub_session` tool, running inside a child's agent turn, asks the
+   * daemon to spawn a fresh top-level sub-session and run a prompt in it. Params:
+   * `{ prompt, completion:'sent'|'first-turn', model?, name?, callerSessionId? }`;
+   * result: `{ sessionId, result?, stopReason? }` (result present only for the
+   * `first-turn` mode, which waits for the sub-session's first turn to finish).
+   */
+  createSubSession: 'qwen/control/create-sub-session',
 } as const;
 
 export type ServeStatus =
@@ -404,9 +417,16 @@ export interface ServeWorkspaceSkillStatus extends ServeStatusCell {
   description: string;
   level: ServeSkillLevel;
   modelInvocable: boolean;
+  userInvocable?: false;
+  installedPath?: string;
   argumentHint?: string;
   model?: string;
   extensionName?: string;
+}
+
+export interface ServeWorkspaceSkillsRefreshResult {
+  sessionsRefreshed: number;
+  sessionsFailed: number;
 }
 
 export interface ServeWorkspaceSkillsStatus {
@@ -935,6 +955,9 @@ export const IDLE_HOOK_EVENTS: Record<HookEventName, ServeHookEventMeta> = {
   SessionStart: {
     description: 'When a new session is started',
     matcherKind: 'sessionTrigger',
+  },
+  MessageDisplay: {
+    description: 'Repeatedly, as the assistant reply streams',
   },
   Stop: { description: 'Right before Qwen Code concludes its response' },
   SubagentStart: {

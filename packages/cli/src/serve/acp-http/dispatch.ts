@@ -14,6 +14,7 @@ import {
   SessionService,
   SessionOrganizationError,
   type SessionGroupColor,
+  type SessionGroupPresetColor,
   BuiltinAgentRegistry,
   SubagentError,
   WorkspaceMemoryFileTooLargeError,
@@ -46,7 +47,10 @@ import {
   SessionShellDisabledError,
   WorkspaceMismatchError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
-import { SessionArtifactValidationError } from '@qwen-code/acp-bridge/sessionArtifacts';
+import {
+  SessionArtifactAuthorizationError,
+  SessionArtifactValidationError,
+} from '@qwen-code/acp-bridge/sessionArtifacts';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from '../fs/paths.js';
@@ -411,6 +415,8 @@ function pickSessionArtifactInput(
     mimeType,
     sizeBytes,
     metadata,
+    retention,
+    clientRetained,
   } = params;
 
   return {
@@ -424,6 +430,8 @@ function pickSessionArtifactInput(
     mimeType,
     sizeBytes,
     metadata,
+    retention,
+    clientRetained,
   } as AddSessionArtifactInput;
 }
 
@@ -531,6 +539,17 @@ function toRpcError(err: unknown): {
       code: RPC.INVALID_PARAMS,
       message: errMsg(err),
       data: { errorKind: 'client_id_required' },
+    };
+  }
+  if (err instanceof SessionArtifactAuthorizationError) {
+    return {
+      code: RPC.INVALID_REQUEST,
+      message: err.message,
+      data: {
+        errorKind: 'artifact_forbidden',
+        sessionId: err.sessionId,
+        artifactId: err.artifactId,
+      },
     };
   }
   if (err instanceof SessionArtifactValidationError) {
@@ -1130,17 +1149,29 @@ export class AcpDispatcher {
             [sessionId],
             async () => {
               await assertSessionLoadable(cwd, sessionId);
+              // Re-seed the persisted parent lineage so a restored sub-session
+              // still reports its parent over the ACP transport (parity with the
+              // REST restore handler); the bridge creates the entry without it.
+              const parentSessionId = await new SessionService(
+                cwd,
+              ).readParentSessionId(sessionId);
               return method === 'session/load'
                 ? await this.bridge.loadSession({
                     sessionId,
                     workspaceCwd: cwd,
                     clientId: conn.clientId,
                     historyReplay: 'response',
+                    ...(parentSessionId !== undefined
+                      ? { parentSessionId }
+                      : {}),
                   })
                 : await this.bridge.resumeSession({
                     sessionId,
                     workspaceCwd: cwd,
                     clientId: conn.clientId,
+                    ...(parentSessionId !== undefined
+                      ? { parentSessionId }
+                      : {}),
                   });
             },
           );
@@ -1268,10 +1299,33 @@ export class AcpDispatcher {
             }
             archiveState = rawArchiveState;
           }
+          const parentSessionId =
+            typeof params['parentSessionId'] === 'string'
+              ? params['parentSessionId']
+              : undefined;
+          if (parentSessionId !== undefined) {
+            if (parentSessionId.length === 0) {
+              throw new AcpParamError(
+                '`parentSessionId` must be a non-empty string',
+              );
+            }
+            if (view === 'organized') {
+              throw new AcpParamError(
+                '`parentSessionId` is not supported with `view` "organized"',
+              );
+            }
+          }
           const result = await listWorkspaceSessionsForResponse(
             this.bridge,
             workspaceCwd,
-            { cursor, size: metaSize, archiveState, view, group },
+            {
+              cursor,
+              size: metaSize,
+              archiveState,
+              view,
+              group,
+              parentSessionId,
+            },
           );
           this.replyConn(conn, id, {
             sessions: result.sessions.map((s) => ({
@@ -1282,6 +1336,9 @@ export class AcpDispatcher {
               updatedAt: s.updatedAt,
               displayName: s.displayName,
               title: s.displayName,
+              ...(s.parentSessionId !== undefined
+                ? { parentSessionId: s.parentSessionId }
+                : {}),
               clientCount: s.clientCount,
               hasActivePrompt: s.hasActivePrompt,
               isArchived: s.isArchived === true,
@@ -1959,7 +2016,7 @@ export class AcpDispatcher {
             params['color'] !== null &&
             (typeof params['color'] !== 'string' ||
               !GROUP_COLOR_OPTIONS.includes(
-                params['color'] as SessionGroupColor,
+                params['color'] as SessionGroupPresetColor,
               ))
           ) {
             throw new AcpParamError(
@@ -1991,7 +2048,7 @@ export class AcpDispatcher {
                 ? { groupId: params['groupId'] as string | null }
                 : {}),
               ...('color' in params
-                ? { color: params['color'] as SessionGroupColor | null }
+                ? { color: params['color'] as SessionGroupPresetColor | null }
                 : {}),
             });
             this.replyConn(conn, id, { sessionId, ...organization });
@@ -2556,7 +2613,10 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}session/artifacts`: {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
-          const result = await this.bridge.getSessionArtifacts(sessionId);
+          const result = await this.bridge.getSessionArtifacts(
+            sessionId,
+            this.sessionCtx(conn, sessionId, loopback),
+          );
           this.replyConn(conn, id, result as unknown);
           return;
         }

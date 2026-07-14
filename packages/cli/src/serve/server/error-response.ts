@@ -6,8 +6,12 @@
 
 import {
   emitDaemonLog,
+  InvalidSessionTranscriptCursorError,
   recordDaemonBridgeError,
   recordDaemonError,
+  SessionTranscriptPageTooLargeError,
+  SessionTranscriptSnapshotUnavailableError,
+  SessionTranscriptTooLargeError,
   TrustGateError,
 } from '@qwen-code/qwen-code-core';
 import type { Response } from 'express';
@@ -27,6 +31,7 @@ import {
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
   RestoreInProgressError,
+  SessionArtifactAuthorizationError,
   SessionArchivedError,
   SessionArchivingError,
   SessionBusyError,
@@ -40,9 +45,14 @@ import {
   WorkspaceInitRaceError,
   WorkspaceInitSymlinkError,
   WorkspaceMismatchError,
+  WorkspaceDrainingError,
   TotalSessionLimitExceededError,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
+import {
+  WorkspaceSkillNotFoundError,
+  WorkspaceSkillNotToggleableError,
+} from '../workspace-service/types.js';
 
 export type BridgeErrorContext = {
   route?: string;
@@ -147,6 +157,69 @@ export function sendBridgeError(
   ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
+  if (err instanceof WorkspaceSkillNotFoundError) {
+    res.status(404).json({
+      error: err.message,
+      code: 'skill_not_found',
+      skillName: err.skillName,
+    });
+    return;
+  }
+  if (err instanceof WorkspaceSkillNotToggleableError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'skill_not_toggleable',
+      skillName: err.skillName,
+      reason: err.reason,
+      ...(err.lockedScope ? { lockedScope: err.lockedScope } : {}),
+    });
+    return;
+  }
+  if (err instanceof InvalidSessionTranscriptCursorError) {
+    res.status(400).json({
+      error: err.message,
+      code: 'invalid_transcript_cursor',
+      ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+    });
+    return;
+  }
+  if (err instanceof SessionTranscriptSnapshotUnavailableError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'transcript_snapshot_unavailable',
+      ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+    });
+    return;
+  }
+  if (err instanceof SessionTranscriptPageTooLargeError) {
+    res.status(413).json({
+      error: err.message,
+      code: 'transcript_page_too_large',
+      sessionId: err.sessionId,
+      pageBytes: err.pageBytes,
+      maxBytes: err.maxBytes,
+    });
+    return;
+  }
+  if (err instanceof SessionTranscriptTooLargeError) {
+    res.status(413).json({
+      error: err.message,
+      code: 'transcript_too_large',
+      sessionId: err.sessionId,
+      snapshotSize: err.snapshotSize,
+      maxBytes: err.maxBytes,
+    });
+    return;
+  }
+  if (err instanceof WorkspaceDrainingError) {
+    res.set('Retry-After', '5');
+    res.status(503).json({
+      error: err.message,
+      code: 'workspace_draining',
+      workspaceCwd: err.workspaceCwd,
+    });
+    return;
+  }
   if (err instanceof WorkspaceInitConflictError) {
     // The target file already exists with non-
     // whitespace content and the caller did not pass `force: true`.
@@ -276,6 +349,15 @@ export function sendBridgeError(
       code: 'invalid_client_id',
       sessionId: err.sessionId,
       clientId: err.clientId,
+    });
+    return;
+  }
+  if (err instanceof SessionArtifactAuthorizationError) {
+    res.status(403).json({
+      error: err.message,
+      code: 'session_artifact_forbidden',
+      sessionId: err.sessionId,
+      artifactId: err.artifactId,
     });
     return;
   }
@@ -518,6 +600,46 @@ export function sendBridgeError(
           error: errorMessage(err),
           code: 'directory_not_trusted',
           path: d.path,
+        });
+        return;
+      }
+      if (kind === 'invalid_transcript_cursor') {
+        res.status(400).json({
+          error: errorMessage(err),
+          code: 'invalid_transcript_cursor',
+        });
+        return;
+      }
+      if (kind === 'invalid_transcript_limit') {
+        res.status(400).json({
+          error: errorMessage(err),
+          code: 'invalid_transcript_limit',
+        });
+        return;
+      }
+      if (kind === 'transcript_snapshot_unavailable') {
+        const d = data as { sessionId?: string };
+        res.status(409).json({
+          error: errorMessage(err),
+          code: 'transcript_snapshot_unavailable',
+          ...(d.sessionId ? { sessionId: d.sessionId } : {}),
+        });
+        return;
+      }
+      if (kind === 'transcript_too_large') {
+        const d = data as {
+          sessionId?: string;
+          snapshotSize?: number;
+          maxBytes?: number;
+        };
+        res.status(413).json({
+          error: errorMessage(err),
+          code: 'transcript_too_large',
+          ...(d.sessionId ? { sessionId: d.sessionId } : {}),
+          ...(typeof d.snapshotSize === 'number'
+            ? { snapshotSize: d.snapshotSize }
+            : {}),
+          ...(typeof d.maxBytes === 'number' ? { maxBytes: d.maxBytes } : {}),
         });
         return;
       }

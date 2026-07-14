@@ -25,6 +25,8 @@ const sdkMocks = vi.hoisted(() => {
   const workspaceMcpResources = vi.fn();
   const restartMcpServer = vi.fn();
   const workspaceSkills = vi.fn();
+  const workspaceAcpStatus = vi.fn();
+  const workspaceAcpPreheat = vi.fn();
   const workspaceTools = vi.fn();
   const setWorkspaceToolEnabled = vi.fn();
   const workspaceMemory = vi.fn();
@@ -49,6 +51,8 @@ const sdkMocks = vi.hoisted(() => {
     workspaceMcpResources = workspaceMcpResources;
     restartMcpServer = restartMcpServer;
     workspaceSkills = workspaceSkills;
+    workspaceAcpStatus = workspaceAcpStatus;
+    workspaceAcpPreheat = workspaceAcpPreheat;
     workspaceTools = workspaceTools;
     setWorkspaceToolEnabled = setWorkspaceToolEnabled;
     workspaceMemory = workspaceMemory;
@@ -74,6 +78,8 @@ const sdkMocks = vi.hoisted(() => {
     workspaceMcpResources,
     restartMcpServer,
     workspaceSkills,
+    workspaceAcpStatus,
+    workspaceAcpPreheat,
     workspaceTools,
     setWorkspaceToolEnabled,
     workspaceMemory,
@@ -121,6 +127,14 @@ const sdkMocks = vi.hoisted(() => {
         workspaceCwd: '/mock-workspace',
         initialized: true,
         skills: [],
+      });
+      workspaceAcpStatus.mockReset();
+      workspaceAcpStatus.mockResolvedValue({ channelLive: true });
+      workspaceAcpPreheat.mockReset();
+      workspaceAcpPreheat.mockResolvedValue({
+        ready: true,
+        channelLive: true,
+        durationMs: 1,
       });
       workspaceTools.mockReset();
       workspaceTools.mockResolvedValue({
@@ -253,6 +267,46 @@ describe('DaemonWorkspaceProvider', () => {
     expect(context).toBeDefined();
     expect(context?.baseUrl).toBe('http://127.0.0.1:4170');
     expect(context?.workspaceCwd).toBe('/mock-workspace');
+  });
+
+  it('refreshCapabilities re-fetches and updates capabilities state', async () => {
+    let context: DaemonWorkspaceContextValue | undefined;
+
+    function Harness() {
+      context = useOptionalDaemonWorkspace();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // Initial mount fetched capabilities once; no workspaces registered yet.
+    expect(sdkMocks.capabilities).toHaveBeenCalledTimes(1);
+    expect(context?.capabilities?.workspaces).toBeUndefined();
+
+    // A workspace was registered out of band (e.g. POST /workspaces); the
+    // next capabilities fetch reflects it.
+    sdkMocks.capabilities.mockResolvedValueOnce({
+      workspaceCwd: '/mock-workspace',
+      features: [],
+      workspaces: [
+        { id: 'a', cwd: '/mock-workspace', primary: true, trusted: true },
+        { id: 'b', cwd: '/other', primary: false, trusted: true },
+      ],
+    });
+
+    await act(async () => {
+      await context?.refreshCapabilities?.();
+    });
+
+    // A fresh request was issued (the getCapabilities promise cache is
+    // bypassed) and state updated so the new workspace shows without a
+    // full page reload.
+    expect(sdkMocks.capabilities).toHaveBeenCalledTimes(2);
+    expect(context?.capabilities?.workspaces).toHaveLength(2);
+    expect(context?.capabilities?.workspaces?.[1]?.cwd).toBe('/other');
   });
 
   it('throws when useDaemonWorkspace is used without provider', async () => {

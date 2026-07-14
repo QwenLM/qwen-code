@@ -65,6 +65,7 @@ import { authCommand } from '../commands/auth.js';
 import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
+import { updateCommand } from '../commands/update.js';
 
 // UUID v4 regex pattern for validation
 const SESSION_ID_REGEX =
@@ -1080,7 +1081,9 @@ export async function parseArguments(): Promise<CliArgs> {
     // Register `qwen serve` (Stage 1 daemon)
     .command(serveCommand)
     // Register sessions subcommands
-    .command(sessionsCommand);
+    .command(sessionsCommand)
+    // Register update command
+    .command(updateCommand);
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
@@ -1105,7 +1108,8 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'hooks' ||
       result._[0] === 'channel' ||
       result._[0] === 'review' ||
-      result._[0] === 'sessions')
+      result._[0] === 'sessions' ||
+      result._[0] === 'update')
   ) {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
     // forever (after the listener is up); SIGINT/SIGTERM in runQwenServe
@@ -1114,7 +1118,7 @@ export async function parseArguments(): Promise<CliArgs> {
     // execution and exit. Returning here would let the main interactive
     // flow run, which would prompt for stdin input despite the user
     // having already invoked a subcommand.
-    process.exit(0);
+    process.exit(process.exitCode ?? 0);
   }
 
   // Normalize query args: handle both quoted "@path file" and unquoted @path file
@@ -1486,6 +1490,9 @@ export async function loadCliConfig(
   settingsWatcher?: { stopWatching(): void },
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
+  if (debugMode && process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
+    process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+  }
   const bareMode = isBareMode(argv.bare);
   const safeMode =
     argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv();
@@ -2157,6 +2164,7 @@ export async function loadCliConfig(
     useRipgrep: settings.tools?.useRipgrep,
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
+    shellDefaultTimeoutMs: settings.tools?.shell?.defaultTimeoutMs,
     preventSystemSleep: settings.general?.preventSystemSleep ?? true,
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
     skipWorkflowUsageWarning: settings.model?.skipWorkflowUsageWarning ?? false,
@@ -2232,6 +2240,11 @@ export async function loadCliConfig(
     },
     agents: settings.agents
       ? {
+          builtin: settings.agents.builtin
+            ? {
+                exploreModel: settings.agents.builtin.exploreModel,
+              }
+            : undefined,
           maxParallelAgents: settings.agents.maxParallelAgents,
           displayMode: settings.agents.displayMode,
           arena: settings.agents.arena

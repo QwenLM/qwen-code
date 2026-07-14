@@ -33,7 +33,10 @@ import {
   type DaemonSessionNotice,
   type DaemonWorkspaceEventSignals,
 } from './DaemonSessionProvider.js';
-import { DaemonWorkspaceProvider } from '../workspace/DaemonWorkspaceProvider.js';
+import {
+  DaemonWorkspaceProvider,
+  useOptionalDaemonWorkspace,
+} from '../workspace/DaemonWorkspaceProvider.js';
 import {
   clearSidechannelMidTurnInjected,
   getSidechannelMidTurnInjected,
@@ -100,6 +103,10 @@ interface MockClient {
   workspaceMcpTools: () => Promise<unknown>;
   restartMcpServer: () => Promise<unknown>;
   workspaceSkills: () => Promise<unknown>;
+  workspaceAcpStatus: () => Promise<unknown>;
+  workspaceAcpPreheat: () => Promise<unknown>;
+  workspaceGit: () => Promise<unknown>;
+  workspaceByCwd: (workspaceCwd: string) => Pick<MockClient, 'workspaceGit'>;
   workspaceTools: () => Promise<unknown>;
   setWorkspaceToolEnabled: () => Promise<unknown>;
   workspaceMemory: () => Promise<unknown>;
@@ -140,6 +147,10 @@ const sdkMocks = vi.hoisted(() => {
   const workspaceMcpTools = vi.fn();
   const restartMcpServer = vi.fn();
   const workspaceSkills = vi.fn();
+  const workspaceAcpStatus = vi.fn();
+  const workspaceAcpPreheat = vi.fn();
+  const workspaceGit = vi.fn();
+  const workspaceByCwd = vi.fn((_workspaceCwd: string) => ({ workspaceGit }));
   const workspaceTools = vi.fn();
   const setWorkspaceToolEnabled = vi.fn();
   const workspaceMemory = vi.fn();
@@ -168,6 +179,10 @@ const sdkMocks = vi.hoisted(() => {
     workspaceMcpTools = workspaceMcpTools;
     restartMcpServer = restartMcpServer;
     workspaceSkills = workspaceSkills;
+    workspaceAcpStatus = workspaceAcpStatus;
+    workspaceAcpPreheat = workspaceAcpPreheat;
+    workspaceGit = workspaceGit;
+    workspaceByCwd = workspaceByCwd;
     workspaceTools = workspaceTools;
     setWorkspaceToolEnabled = setWorkspaceToolEnabled;
     workspaceMemory = workspaceMemory;
@@ -210,6 +225,10 @@ const sdkMocks = vi.hoisted(() => {
     capabilities,
     workspaceProviders,
     workspaceSkills,
+    workspaceAcpStatus,
+    workspaceAcpPreheat,
+    workspaceGit,
+    workspaceByCwd,
     MockDaemonClient,
     MockDaemonSessionClient,
     workspaceMcpTools,
@@ -258,6 +277,24 @@ const sdkMocks = vi.hoisted(() => {
         initialized: true,
         skills: [],
       });
+      workspaceAcpStatus.mockReset();
+      workspaceAcpStatus.mockResolvedValue({ channelLive: true });
+      workspaceAcpPreheat.mockReset();
+      workspaceAcpPreheat.mockResolvedValue({
+        ready: true,
+        channelLive: true,
+        durationMs: 1,
+      });
+      workspaceGit.mockReset();
+      workspaceGit.mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/mock-workspace',
+        branch: 'main',
+      });
+      workspaceByCwd.mockReset();
+      workspaceByCwd.mockImplementation((_workspaceCwd: string) => ({
+        workspaceGit,
+      }));
       workspaceTools.mockReset();
       workspaceTools.mockResolvedValue({
         v: 1,
@@ -420,8 +457,35 @@ describe('DaemonSessionProvider', () => {
       status: 'connected',
       workspaceCwd: '/mock-workspace',
       currentMode: 'yolo',
+      gitBranch: 'main',
     });
     expect(connection).not.toHaveProperty('sessionId');
+  });
+
+  it('populates git branch from the active session workspace', async () => {
+    sdkMocks.sessions.push(createMockSession());
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'session-1',
+      workspaceCwd: '/mock-workspace',
+      gitBranch: 'main',
+    });
+    expect(sdkMocks.workspaceByCwd).toHaveBeenCalledWith('/mock-workspace');
   });
 
   it('populates skill slash commands during deferred connect (before first prompt)', async () => {
@@ -472,6 +536,112 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it('preheats ACP and refreshes deferred skills when ACP is not running', async () => {
+    sdkMocks.workspaceAcpStatus.mockResolvedValue({ channelLive: false });
+    sdkMocks.workspaceSkills
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: '/mock-workspace',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'review',
+            description: 'Review code',
+            level: 'bundled',
+            modelInvocable: true,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: '/mock-workspace',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'review',
+            description: 'Review code',
+            level: 'bundled',
+            modelInvocable: true,
+          },
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'pdf',
+            description: 'Work with PDFs',
+            level: 'extension',
+            modelInvocable: true,
+          },
+        ],
+      });
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+    await act(async () => {
+      await flushPromises();
+      await flushPromises();
+    });
+
+    expect(sdkMocks.workspaceAcpPreheat).toHaveBeenCalledWith(5000);
+    expect(sdkMocks.workspaceSkills).toHaveBeenCalledTimes(2);
+    expect(connection?.skills).toEqual(['review', 'pdf']);
+  });
+
+  it('clears deferred skills when ACP refresh returns an empty list', async () => {
+    sdkMocks.workspaceAcpStatus.mockResolvedValue({ channelLive: false });
+    sdkMocks.workspaceSkills
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: '/mock-workspace',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'review',
+            description: 'Review code',
+            level: 'bundled',
+            modelInvocable: true,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: '/mock-workspace',
+        initialized: true,
+        skills: [],
+      });
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+    await act(async () => {
+      await flushPromises();
+      await flushPromises();
+    });
+
+    expect(connection?.skills).toEqual([]);
+    expect(connection?.commands).toEqual([]);
+  });
+
   it('warns when deferred workspace providers fail', async () => {
     const error = new Error('providers unavailable');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -516,12 +686,14 @@ describe('DaemonSessionProvider', () => {
     });
 
     // Skills failing must not block the deferred connect: providers still
-    // resolve and the connection reports connected, just without skill commands.
+    // resolve and the connection reports connected, without clearing any
+    // previous skill commands.
     expect(connection).toMatchObject({
       status: 'connected',
       workspaceCwd: '/mock-workspace',
     });
-    expect(connection).not.toHaveProperty('commands');
+    expect(connection?.commands).toBeUndefined();
+    expect(connection?.skills).toBeUndefined();
     expect(warn).toHaveBeenCalledWith(
       '[DaemonSessionProvider] workspaceSkills failed in deferred connect:',
       error,
@@ -708,6 +880,46 @@ describe('DaemonSessionProvider', () => {
 
     expect(connection?.status).toBe('connected');
     expect(sdkMocks.capabilities).toHaveBeenCalledTimes(1);
+  });
+
+  it('updates session connection capabilities after a workspace refresh', async () => {
+    sdkMocks.sessions.push(createMockSession());
+    let connection: DaemonConnectionState | undefined;
+    let refreshCapabilities: (() => Promise<unknown>) | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      refreshCapabilities = useOptionalDaemonWorkspace()?.refreshCapabilities;
+      return null;
+    }
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root?.render(
+        <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:4170">
+          <DaemonSessionProvider suppressOwnUserEcho>
+            <Harness />
+          </DaemonSessionProvider>
+        </DaemonWorkspaceProvider>,
+      );
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    sdkMocks.capabilities.mockResolvedValueOnce({
+      workspaceCwd: '/mock-workspace',
+      features: ['workspace_runtime_removal'],
+    });
+
+    await act(async () => {
+      await refreshCapabilities?.();
+    });
+
+    expect(connection?.capabilities?.features).toContain(
+      'workspace_runtime_removal',
+    );
   });
 
   it('uses session context models over workspace provider defaults', async () => {
@@ -2038,6 +2250,29 @@ describe('DaemonSessionProvider', () => {
             durationMs: 42,
           },
         };
+        yield {
+          id: 26,
+          v: 1,
+          type: 'artifact_changed',
+          data: {
+            sessionId: 'session-1',
+            change: {
+              action: 'created',
+              artifactId: 'artifact-1',
+              artifact: {
+                id: 'artifact-1',
+                kind: 'html',
+                storage: 'workspace',
+                source: 'tool',
+                status: 'available',
+                title: 'Report',
+                workspacePath: 'report.html',
+                createdAt: '2026-07-09T00:00:00.000Z',
+                updatedAt: '2026-07-09T00:00:00.000Z',
+              },
+            },
+          },
+        };
       },
     });
     sdkMocks.sessions.push(session);
@@ -2059,6 +2294,7 @@ describe('DaemonSessionProvider', () => {
       toolsVersion: 1,
       settingsVersion: 1,
       mcpVersion: 1,
+      artifactsVersion: 1,
       initVersion: 0,
       authVersion: 0,
     });
@@ -2893,7 +3129,7 @@ describe('DaemonSessionProvider', () => {
               truncatedEvents: 4,
               retainedEvents: 2,
               maxBytes: 512,
-              fullTranscriptAvailable: false,
+              fullTranscriptAvailable: true,
             },
           },
           {
@@ -5181,12 +5417,12 @@ describe('DaemonSessionProvider', () => {
       heartbeatFailureThreshold: 2,
     });
 
+    await vi.waitFor(() =>
+      expect(heartbeat.mock.calls.length).toBeGreaterThanOrEqual(2),
+    );
     await act(async () => {
-      await wait(10);
       await flushPromises();
     });
-
-    expect(heartbeat.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(connection).toMatchObject({
       status: 'disconnected',
       error: 'session gone',
@@ -5231,12 +5467,13 @@ describe('DaemonSessionProvider', () => {
       heartbeatFailureThreshold: 2,
     });
 
+    await vi.waitFor(() =>
+      expect(heartbeat.mock.calls.length).toBeGreaterThanOrEqual(2),
+    );
     await act(async () => {
-      await wait(10);
       await flushPromises();
     });
 
-    expect(heartbeat.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(connection).toMatchObject({
       status: 'disconnected',
       error: 'session gone',
@@ -5254,21 +5491,22 @@ describe('DaemonSessionProvider', () => {
       modelServices: [],
       workspaceCwd: '/mock-workspace',
     });
+    const releaseHeartbeatFailure = createDeferred<void>();
     const heartbeat = vi.fn(async () => {
+      await releaseHeartbeatFailure.promise;
       throw Object.assign(new Error('session gone'), { status: 410 });
     });
+    const submitStarted = createDeferred<void>();
     const session = createMockSession({
       heartbeat,
-      submitPrompt: vi.fn(
-        (_req: unknown, signal?: AbortSignal) =>
-          new Promise<NonBlockingPromptAccepted>((_resolve, reject) => {
-            signal?.addEventListener(
-              'abort',
-              () => reject(createAbortError()),
-              { once: true },
-            );
-          }),
-      ),
+      submitPrompt: vi.fn((_req: unknown, signal?: AbortSignal) => {
+        submitStarted.resolve();
+        return new Promise<NonBlockingPromptAccepted>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(createAbortError()), {
+            once: true,
+          });
+        });
+      }),
       events: createIdleEvents(),
     });
     sdkMocks.sessions.push(session);
@@ -5291,10 +5529,12 @@ describe('DaemonSessionProvider', () => {
     let promptResult: Promise<unknown> | undefined;
     await act(async () => {
       promptResult = providerActions.sendPrompt('still running');
+      await submitStarted.promise;
       await flushPromises();
     });
 
     await act(async () => {
+      releaseHeartbeatFailure.resolve();
       await wait(50);
       await flushPromises();
     });
@@ -7365,6 +7605,154 @@ describe('DaemonSessionProvider', () => {
         code: 'daemon.session_died',
       },
     ]);
+  });
+
+  it('deduplicates live and snapshot recording degradation notices', async () => {
+    const session = createMockSession({
+      events: async function* recordingDegradedEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        yield {
+          id: 12,
+          v: 1,
+          type: 'session_recording_degraded',
+          data: { sessionId: 'recording-session', reason: 'write_failed' },
+        };
+        yield {
+          id: 13,
+          v: 1,
+          type: 'session_snapshot',
+          data: {
+            sessionId: 'recording-session',
+            recordingDegraded: true,
+          },
+        };
+        if (opts.signal?.aborted) return;
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let notices: readonly DaemonSessionNotice[] = [];
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      notices = useDaemonSessionNotices().notices;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(blocks.some((block) => block.kind === 'error')).toBe(false);
+    expect(notices).toEqual([
+      expect.objectContaining({
+        id: 'daemon.session_recording_degraded:recording-session',
+        severity: 'warning',
+        category: 'system',
+        operation: 'record_session',
+        code: 'daemon.session_recording_degraded',
+        recoverable: true,
+      }),
+    ]);
+  });
+
+  it('clears a degraded notice after an authoritative healthy snapshot', async () => {
+    const session = createMockSession({
+      events: async function* recordingRecoveredEvents() {
+        yield {
+          id: 14,
+          v: 1,
+          type: 'session_recording_degraded',
+          data: { sessionId: 'recording-session', reason: 'write_failed' },
+        };
+        yield {
+          id: 15,
+          v: 1,
+          type: 'session_snapshot',
+          data: {
+            sessionId: 'recording-session',
+            recordingDegraded: false,
+          },
+        };
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let notices: readonly DaemonSessionNotice[] = [];
+
+    function Harness() {
+      notices = useDaemonSessionNotices().notices;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(notices).toEqual([]);
+  });
+
+  it('allows a later degraded snapshot to restore a dismissed notice', async () => {
+    const releaseSnapshot = createDeferred<void>();
+    const session = createMockSession({
+      events: async function* recordingDegradedThenSnapshot() {
+        yield {
+          id: 14,
+          v: 1,
+          type: 'session_recording_degraded',
+          data: { sessionId: 'recording-session', reason: 'write_failed' },
+        };
+        await releaseSnapshot.promise;
+        yield {
+          id: 15,
+          v: 1,
+          type: 'session_snapshot',
+          data: {
+            sessionId: 'recording-session',
+            recordingDegraded: true,
+          },
+        };
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let notices: readonly DaemonSessionNotice[] = [];
+    let dismissNotice: ((id: string) => void) | undefined;
+
+    function Harness() {
+      const noticeState = useDaemonSessionNotices();
+      notices = noticeState.notices;
+      dismissNotice = noticeState.dismissNotice;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await vi.waitFor(() => expect(notices).toHaveLength(1));
+
+    act(() => {
+      dismissNotice?.('daemon.session_recording_degraded:recording-session');
+    });
+    expect(notices).toHaveLength(0);
+
+    await act(async () => {
+      releaseSnapshot.resolve();
+      await flushPromises();
+    });
+    await vi.waitFor(() => expect(notices).toHaveLength(1));
+    expect(notices[0]).toMatchObject({
+      id: 'daemon.session_recording_degraded:recording-session',
+      code: 'daemon.session_recording_degraded',
+    });
   });
 
   it('stops reconnect loop on session_closed (user deleted session) even when autoReconnect is true', async () => {

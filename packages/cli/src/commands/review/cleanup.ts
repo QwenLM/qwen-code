@@ -16,7 +16,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { refExists } from './lib/git.js';
+import { refExists, releaseWorktree } from './lib/git.js';
 import {
   worktreePath,
   reviewBranch,
@@ -37,18 +37,20 @@ function runCleanup(target: string): void {
     const prNumber = prMatch[1];
 
     const wt = worktreePath(prNumber);
-    if (existsSync(wt)) {
-      try {
-        execFileSync('git', ['worktree', 'remove', wt, '--force'], {
-          stdio: 'pipe',
-        });
-        writeStdoutLine(`Removed worktree: ${wt}`);
-        removedAny = true;
-      } catch (err) {
-        writeStderrLine(
-          `Failed to remove worktree ${wt}: ${(err as Error).message}`,
-        );
-      }
+    // Prunes a registration left behind by a hand-deleted directory, which is
+    // also what unblocks the `git branch -D` below.
+    if (releaseWorktree(wt)) {
+      writeStdoutLine(`Removed worktree: ${wt}`);
+      removedAny = true;
+    }
+
+    // The test-efficacy probe runs in a disposable sibling worktree and removes
+    // it itself; sweep one a crashed probe left behind so it does not block the
+    // next run's `git worktree add` (see #6832 / test-efficacy.ts).
+    const probeWt = `${wt}-probe`;
+    if (releaseWorktree(probeWt)) {
+      writeStdoutLine(`Removed probe worktree: ${probeWt}`);
+      removedAny = true;
     }
 
     const branch = reviewBranch(prNumber);

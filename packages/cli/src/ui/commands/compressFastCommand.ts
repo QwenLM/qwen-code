@@ -35,6 +35,14 @@ export const compressFastCommand: SlashCommand = {
       return;
     }
 
+    if (context.invocation?.args?.trim()) {
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t('The /compress-fast command does not accept arguments.'),
+      };
+    }
+
     const pendingMessage: HistoryItemCompression = {
       type: MessageType.COMPRESSION,
       compression: {

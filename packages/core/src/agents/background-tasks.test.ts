@@ -1200,7 +1200,7 @@ describe('BackgroundTaskRegistry', () => {
     expect(cb).not.toHaveBeenCalled();
   });
 
-  it('appendActivity builds a rolling buffer capped at 5', () => {
+  it('appendActivity builds a rolling buffer capped at 10', () => {
     registry.register({
       agentId: 'a',
       description: 'agent a',
@@ -1211,7 +1211,7 @@ describe('BackgroundTaskRegistry', () => {
       outputFile: '/tmp/test.jsonl',
     });
 
-    for (let i = 0; i < 7; i++) {
+    for (let i = 0; i < 12; i++) {
       registry.appendActivity('a', {
         name: `Tool${i}`,
         description: `call ${i}`,
@@ -1226,6 +1226,11 @@ describe('BackgroundTaskRegistry', () => {
       'Tool4',
       'Tool5',
       'Tool6',
+      'Tool7',
+      'Tool8',
+      'Tool9',
+      'Tool10',
+      'Tool11',
     ]);
   });
 

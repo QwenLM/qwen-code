@@ -1,19 +1,43 @@
-import type { ChannelConfig } from '@qwen-code/channel-base';
-import { resolvePath } from '@qwen-code/channel-base';
+import type {
+  ChannelConfig,
+  ChannelWebhookConfig,
+  ChannelWebhookSourceConfig,
+  ChannelWebhookTargetConfig,
+} from '@qwen-code/channel-base';
+import { resolveChannelCwd } from './channel-cwd.js';
 import { getPlugin, supportedTypes } from './channel-registry.js';
+
+const ENV_VAR_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
+const CHANNEL_APPROVAL_MODES = new Set([
+  'plan',
+  'default',
+  'auto-edit',
+  'auto',
+  'yolo',
+]);
 
 export { findCliEntryPath } from './cli-entry-path.js';
 
-export function resolveEnvVars(value: string): string {
+type WebhookEnvironment = Readonly<Record<string, string | undefined>>;
+
+export function resolveEnvVars(
+  value: string,
+  env: WebhookEnvironment = process.env,
+): string {
   if (value.startsWith('$$')) {
     return value.substring(1);
   }
   if (value.startsWith('$')) {
     const envName = value.substring(1);
-    const envValue = process.env[envName];
-    if (!envValue) {
+    const envValue = env[envName];
+    if (envValue === undefined) {
       throw new Error(
         `Environment variable ${envName} is not set (referenced as ${value})`,
+      );
+    }
+    if (envValue === '') {
+      throw new Error(
+        `Environment variable ${envName} is empty (referenced as ${value})`,
       );
     }
     return envValue;
@@ -124,6 +148,250 @@ function parseMemoryScopeConfig(
   return parsed as ChannelConfig['memoryScope'];
 }
 
+function requireStringField(
+  channelName: string,
+  path: string,
+  value: unknown,
+): string {
+  if (typeof value !== 'string' || value === '') {
+    throw new Error(
+      `Channel "${channelName}" field "${path}" must be a string.`,
+    );
+  }
+  return value;
+}
+
+function optionalBooleanField(
+  channelName: string,
+  path: string,
+  value: unknown,
+): boolean | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'boolean') {
+    throw new Error(
+      `Channel "${channelName}" field "${path}" must be a boolean.`,
+    );
+  }
+  return value;
+}
+
+function requireObjectField(
+  channelName: string,
+  path: string,
+  value: unknown,
+): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(
+      `Channel "${channelName}" field "${path}" must be an object.`,
+    );
+  }
+  return value as Record<string, unknown>;
+}
+
+function parseWebhookTarget(
+  channelName: string,
+  path: string,
+  raw: unknown,
+): ChannelWebhookTargetConfig {
+  const record = requireObjectField(channelName, path, raw);
+  const target: ChannelWebhookTargetConfig = {
+    chatId: requireStringField(channelName, `${path}.chatId`, record['chatId']),
+    senderId: requireStringField(
+      channelName,
+      `${path}.senderId`,
+      record['senderId'],
+    ),
+  };
+  if (record['threadId'] !== undefined) {
+    target.threadId = requireStringField(
+      channelName,
+      `${path}.threadId`,
+      record['threadId'],
+    );
+  }
+  const isGroup = optionalBooleanField(
+    channelName,
+    `${path}.isGroup`,
+    record['isGroup'],
+  );
+  if (isGroup !== undefined) {
+    target.isGroup = isGroup;
+  }
+  return target;
+}
+
+function parseWebhookSource(
+  channelName: string,
+  path: string,
+  raw: unknown,
+  env: WebhookEnvironment,
+): ChannelWebhookSourceConfig {
+  const record = requireObjectField(channelName, path, raw);
+  const rawTargets = requireObjectField(
+    channelName,
+    `${path}.targets`,
+    record['targets'],
+  );
+  const targets: Record<string, ChannelWebhookTargetConfig> = {};
+  for (const [targetRef, targetConfig] of Object.entries(rawTargets)) {
+    targets[targetRef] = parseWebhookTarget(
+      channelName,
+      `${path}.targets.${targetRef}`,
+      targetConfig,
+    );
+  }
+
+  const hasSecret = record['secret'] !== undefined && record['secret'] !== null;
+  const hasSecretEnv =
+    record['secretEnv'] !== undefined && record['secretEnv'] !== null;
+  if (hasSecret === hasSecretEnv) {
+    throw new Error(
+      `Channel "${channelName}" field "${path}" must define exactly one of "secret" or "secretEnv".`,
+    );
+  }
+
+  const secret = hasSecret
+    ? resolveEnvVars(
+        requireStringField(channelName, `${path}.secret`, record['secret']),
+        env,
+      )
+    : resolveWebhookSecretEnv(
+        channelName,
+        path,
+        requireStringField(
+          channelName,
+          `${path}.secretEnv`,
+          record['secretEnv'],
+        ),
+        env,
+      );
+  if (secret.length === 0) {
+    throw new Error(
+      `Channel "${channelName}" field "${path}" webhook secret must be non-empty.`,
+    );
+  }
+
+  return { secret, targets };
+}
+
+function resolveWebhookSecretEnv(
+  channelName: string,
+  path: string,
+  secretEnv: string,
+  env: WebhookEnvironment,
+): string {
+  const envName = secretEnv.startsWith('$')
+    ? secretEnv.substring(1)
+    : secretEnv;
+  if (!ENV_VAR_NAME_PATTERN.test(envName)) {
+    throw new Error(
+      `Channel "${channelName}" field "${path}.secretEnv" must be an environment variable name or $-prefixed reference.`,
+    );
+  }
+  const envValue = env[envName];
+  if (envValue === undefined) {
+    throw new Error(
+      `Channel "${channelName}" field "${path}.secretEnv" references an unset environment variable.`,
+    );
+  }
+  if (envValue === '') {
+    throw new Error(
+      `Channel "${channelName}" field "${path}.secretEnv" references an empty environment variable.`,
+    );
+  }
+  return envValue;
+}
+
+function parseWebhookConfig(
+  channelName: string,
+  rawConfig: Record<string, unknown>,
+  env: WebhookEnvironment = process.env,
+): ChannelWebhookConfig | undefined {
+  const raw = rawConfig['webhooks'];
+  if (raw === undefined || raw === null) {
+    return undefined;
+  }
+  const record = requireObjectField(channelName, 'webhooks', raw);
+  const rawSources = requireObjectField(
+    channelName,
+    'webhooks.sources',
+    record['sources'],
+  );
+  const sources: Record<string, ChannelWebhookSourceConfig> = {};
+  for (const [source, sourceConfig] of Object.entries(rawSources)) {
+    sources[source] = parseWebhookSource(
+      channelName,
+      `webhooks.sources.${source}`,
+      sourceConfig,
+      env,
+    );
+  }
+  return { sources };
+}
+
+function parseApprovalModeConfig(
+  channelName: string,
+  rawConfig: Record<string, unknown>,
+): string | undefined {
+  const approvalMode = rawConfig['approvalMode'];
+  if (approvalMode === undefined || approvalMode === null) {
+    return undefined;
+  }
+  if (
+    typeof approvalMode !== 'string' ||
+    !CHANNEL_APPROVAL_MODES.has(approvalMode)
+  ) {
+    throw new Error(
+      `Channel "${channelName}" field "approvalMode" must be one of: ${[
+        ...CHANNEL_APPROVAL_MODES,
+      ].join(', ')}.`,
+    );
+  }
+  return approvalMode;
+}
+
+export function parseChannelWebhookConfig(
+  channelName: string,
+  rawConfig: Record<string, unknown>,
+  env: WebhookEnvironment = process.env,
+): ChannelWebhookConfig | undefined {
+  return parseWebhookConfig(channelName, rawConfig, env);
+}
+
+export function parseChannelWebhookConfigLenient(
+  channelName: string,
+  rawConfig: Record<string, unknown>,
+  onSourceError?: (source: string, error: unknown) => void,
+  env: WebhookEnvironment = process.env,
+): ChannelWebhookConfig | undefined {
+  const raw = rawConfig['webhooks'];
+  if (raw === undefined || raw === null) {
+    return undefined;
+  }
+  const record = requireObjectField(channelName, 'webhooks', raw);
+  const rawSources = requireObjectField(
+    channelName,
+    'webhooks.sources',
+    record['sources'],
+  );
+  const sources: Record<string, ChannelWebhookSourceConfig> = {};
+  for (const [source, sourceConfig] of Object.entries(rawSources)) {
+    try {
+      sources[source] = parseWebhookSource(
+        channelName,
+        `webhooks.sources.${source}`,
+        sourceConfig,
+        env,
+      );
+    } catch (error) {
+      onSourceError?.(source, error);
+    }
+  }
+  return { sources };
+}
+
 export async function parseChannelConfig(
   name: string,
   rawConfig: Record<string, unknown>,
@@ -196,8 +464,8 @@ export async function parseChannelConfig(
     allowedUsers: (rawConfig['allowedUsers'] as string[]) || [],
     sessionScope:
       (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) || 'user',
-    cwd: resolvePath((rawConfig['cwd'] as string) || defaultCwd),
-    approvalMode: rawConfig['approvalMode'] as string | undefined,
+    cwd: resolveChannelCwd(rawConfig['cwd'] as string | undefined, defaultCwd),
+    approvalMode: parseApprovalModeConfig(name, rawConfig),
     instructions: rawConfig['instructions'] as string | undefined,
     identity: parseObjectStringFields(name, rawConfig, 'identity', [
       'id',
@@ -210,5 +478,6 @@ export async function parseChannelConfig(
       (rawConfig['groupPolicy'] as ChannelConfig['groupPolicy']) || 'disabled',
     dmPolicy: (rawConfig['dmPolicy'] as ChannelConfig['dmPolicy']) || 'open',
     groups: (rawConfig['groups'] as ChannelConfig['groups']) || {},
+    webhooks: parseWebhookConfig(name, rawConfig),
   };
 }

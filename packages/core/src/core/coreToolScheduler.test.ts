@@ -6233,9 +6233,20 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
       expect(completedCalls[0].response.resultDisplay).toBe(
         'Plan mode blocked a non-read-only tool call.',
       );
-      expect(
-        JSON.stringify(completedCalls[0].response.responseParts),
-      ).toContain('exit_plan_mode tool');
+      // Response must use error key (not output) so LLM recognizes it as a failure
+      const responseParts = completedCalls[0].response.responseParts;
+      const responseJson = JSON.stringify(responseParts);
+      expect(responseJson).toContain('"error"');
+      expect(responseJson).toContain('Tool blocked by plan mode');
+      expect(responseJson).toContain('write_file');
+      // Plan-required teammates get pivot-to-read-only then exit_plan_mode hint
+      expect(responseJson).toContain('Do NOT retry');
+      expect(responseJson).toContain('Pivot to read-only');
+      expect(responseJson).toContain('exit_plan_mode');
+      expect(completedCalls[0].response.error).toBeInstanceOf(Error);
+      expect(completedCalls[0].response.errorType).toBe(
+        ToolErrorType.EXECUTION_DENIED,
+      );
     }
   });
 
@@ -6302,11 +6313,20 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
         .calls[0][0] as ToolCall[];
       expect(completedCalls[0].status).toBe('error');
       if (completedCalls[0].status === 'error') {
-        const responseText = JSON.stringify(
-          completedCalls[0].response.responseParts,
+        // SDK, subagent, and teammate paths all get the same error format
+        // but different guidance: SDK/subagents get "present your plan directly"
+        const responseParts = completedCalls[0].response.responseParts;
+        const responseJson = JSON.stringify(responseParts);
+        expect(responseJson).toContain('"error"');
+        expect(responseJson).toContain('Tool blocked by plan mode');
+        expect(responseJson).toContain('Do NOT retry');
+        expect(responseJson).toContain('Pivot to read-only');
+        expect(responseJson).toContain('present your plan directly');
+        expect(responseJson).not.toContain('exit_plan_mode');
+        expect(completedCalls[0].response.error).toBeInstanceOf(Error);
+        expect(completedCalls[0].response.errorType).toBe(
+          ToolErrorType.EXECUTION_DENIED,
         );
-        expect(responseText).toContain('Present your plan directly');
-        expect(responseText).not.toContain('exit_plan_mode tool');
       }
     },
   );
@@ -13244,7 +13264,9 @@ describe('CoreToolScheduler shell-tool promote integration (#3831 PR-2)', () => 
       }
     }
 
-    const tool = new TestShellTool({} as Config);
+    const tool = new TestShellTool({
+      getShellDefaultTimeoutMs: () => undefined,
+    } as unknown as Config);
     const mockToolRegistry = {
       getTool: () => tool,
       ensureTool: async () => tool,

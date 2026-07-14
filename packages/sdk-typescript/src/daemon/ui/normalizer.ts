@@ -9,6 +9,7 @@ import type {
   DaemonAuthProviderId,
   DaemonErrorKind,
   DaemonEvent,
+  DaemonSessionArtifactChange,
 } from '../types.js';
 import { DAEMON_ERROR_KINDS } from '../types.js';
 import type {
@@ -51,6 +52,8 @@ const MCP_RESTART_REFUSED_REASONS = new Set<string>([
 
 const MALFORMED_MEMORY_CHANGED = 'malformed memory_changed payload';
 const MAX_DETAILS_LENGTH = 4096;
+const SESSION_RECORDING_DEGRADED_MESSAGE =
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording.';
 
 export function normalizeDaemonEvent(
   event: DaemonEvent,
@@ -124,6 +127,45 @@ export function normalizeDaemonEvent(
           text: `Session closed: ${getString(event.data, 'reason') ?? 'closed'}`,
         },
       ];
+    case 'session_recording_degraded': {
+      const sessionId = getString(event.data, 'sessionId');
+      if (!sessionId || getString(event.data, 'reason') !== 'write_failed') {
+        return fallbackDebug(event, base, 'malformed recording state');
+      }
+      return [
+        {
+          ...base,
+          type: 'error',
+          recoverable: true,
+          code: 'session_recording_degraded',
+          text: SESSION_RECORDING_DEGRADED_MESSAGE,
+        },
+      ];
+    }
+    case 'session_snapshot': {
+      if (!isRecord(event.data) || !getString(event.data, 'sessionId')) {
+        return fallbackDebug(event, base, 'malformed recording snapshot');
+      }
+      const recordingDegraded = event.data['recordingDegraded'];
+      if (
+        recordingDegraded !== undefined &&
+        typeof recordingDegraded !== 'boolean'
+      ) {
+        return fallbackDebug(event, base, 'malformed recording snapshot');
+      }
+      if (recordingDegraded === true) {
+        return [
+          {
+            ...base,
+            type: 'error',
+            recoverable: true,
+            code: 'session_recording_degraded',
+            text: SESSION_RECORDING_DEGRADED_MESSAGE,
+          },
+        ];
+      }
+      return [];
+    }
     case 'client_evicted':
       return [
         {
@@ -260,6 +302,9 @@ export function normalizeDaemonEvent(
       return normalizeApprovalModeChanged(event, base);
 
     // ── Workspace events ──────────────────────────────────────
+    case 'git_branch_changed':
+      return [];
+
     case 'memory_changed':
       return normalizeMemoryChanged(event, base);
 
@@ -299,6 +344,9 @@ export function normalizeDaemonEvent(
     case 'extensions_changed':
       return normalizeExtensionsChanged(event, base);
 
+    case 'artifact_changed':
+      return normalizeArtifactChanged(event, base);
+
     // ── Auth device-flow events (RFC 8628) ─────────────────
     case 'auth_device_flow_started':
       return normalizeAuthDeviceFlowStarted(event, base);
@@ -324,14 +372,21 @@ export function normalizeDaemonEvent(
       // status block was redundant. Adapters that want a user-visible
       // banner can pattern-match on `event.type === 'debug'` and the
       // text prefix.
-      return [
-        {
-          ...base,
-          type: 'debug',
-          text: `${event.type} (unrecognized daemon event): ${stringifyRedactedJson(event.data)}`,
-        },
-      ];
+      return normalizeUnrecognizedEvent(event, base);
   }
+}
+
+function normalizeUnrecognizedEvent(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  return [
+    {
+      ...base,
+      type: 'debug',
+      text: `${event.type} (unrecognized daemon event): ${stringifyRedactedJson(event.data)}`,
+    },
+  ];
 }
 
 function normalizeStateResyncRequired(
@@ -376,7 +431,8 @@ function normalizeHistoryTruncated(
     truncatedEvents === undefined ||
     retainedEvents === undefined ||
     maxBytes === undefined ||
-    (isRecord(event.data) && event.data['fullTranscriptAvailable'] !== false)
+    !isRecord(event.data) ||
+    typeof event.data['fullTranscriptAvailable'] !== 'boolean'
   ) {
     return fallbackDebug(event, base, 'malformed history_truncated payload');
   }
@@ -1121,6 +1177,30 @@ function normalizeSessionMetadataUpdated(
       type: 'session.metadata.changed',
       sessionId,
       ...(displayName !== undefined ? { displayName } : {}),
+    },
+  ];
+}
+
+function normalizeArtifactChanged(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const sessionId = getString(event.data, 'sessionId');
+  const change = isRecord(event.data) ? event.data['change'] : undefined;
+  if (!sessionId || !isRecord(change)) {
+    return fallbackDebug(event, base, 'malformed artifact_changed payload');
+  }
+  const action = getString(change, 'action');
+  const artifactId = getString(change, 'artifactId');
+  if (!action || !artifactId) {
+    return fallbackDebug(event, base, 'missing action or artifactId');
+  }
+  return [
+    {
+      ...base,
+      type: 'session.artifact.changed',
+      sessionId,
+      change: change as unknown as DaemonSessionArtifactChange,
     },
   ];
 }

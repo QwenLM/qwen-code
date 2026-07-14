@@ -18,7 +18,10 @@ import {
   type RefObject,
   type TouchEvent as ReactTouchEvent,
 } from 'react';
+import { createPortal } from 'react-dom';
 import { useI18n } from '../../i18n';
+import { useInteractionBlocker } from '../../interactionBlockContext';
+import { useTheme, WebShellThemeId } from '../../themeContext';
 import styles from './EnhancedMarkdownTable.module.css';
 
 type TableElement = ReactElement<{
@@ -32,11 +35,13 @@ type TextFilterOperator =
   | 'startsWith'
   | 'endsWith';
 type NumberFilterOperator = 'gt' | 'gte' | 'lt' | 'lte' | 'between';
+type TableDensity = 'standard' | 'compact' | 'comfortable';
 
 export interface EnhancedTableCell {
   key: string;
   content: ReactNode;
   text: string;
+  rawText?: string;
   isHeader: boolean;
   textAlign?: CSSProperties['textAlign'];
 }
@@ -83,10 +88,20 @@ interface OpenFilterMenu {
   top: number;
 }
 
+interface ColumnContextMenu {
+  left: number;
+  top: number;
+}
+
 interface ColumnResizeState {
   columnIndex: number;
   startX: number;
   startWidth: number;
+}
+
+interface CellDialogState {
+  rowKey: string;
+  columnIndex: number;
 }
 
 interface FilterOption {
@@ -118,10 +133,16 @@ const MIN_COLUMN_WIDTH = 80;
 const MAX_COLUMN_WIDTH = 640;
 const KEYBOARD_COLUMN_RESIZE_STEP = 16;
 const COLUMN_DRAG_MIME = 'application/x-qwen-web-shell-table-column';
+const LONG_CELL_TEXT_LENGTH = 60;
+const LONG_CELL_LINE_COUNT = 3;
+const DENSITY_ORDER: TableDensity[] = ['standard', 'compact', 'comfortable'];
 const DEFAULT_COLUMN_STYLE: CSSProperties = {
   width: DEFAULT_COLUMN_WIDTH,
   minWidth: DEFAULT_COLUMN_WIDTH,
   maxWidth: DEFAULT_COLUMN_WIDTH,
+};
+const COMPACT_AUTO_COLUMN_STYLE: CSSProperties = {
+  width: 'auto',
 };
 
 function clampColumnWidth(width: number): number {
@@ -130,11 +151,22 @@ function clampColumnWidth(width: number): number {
 
 const FOCUSABLE_FILTER_MENU_SELECTOR =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+const FOCUSABLE_CELL_DIALOG_SELECTOR =
+  'a[href]:not([hidden]), button:not([disabled]):not([hidden]), input:not([disabled]):not([hidden]), select:not([disabled]):not([hidden]), textarea:not([disabled]):not([hidden]), [tabindex]:not([tabindex="-1"]):not([hidden])';
 
 function getFocusableFilterMenuElements(container: HTMLElement): HTMLElement[] {
   return Array.from(
     container.querySelectorAll<HTMLElement>(FOCUSABLE_FILTER_MENU_SELECTOR),
   ).filter((element) => !element.hasAttribute('hidden'));
+}
+
+function getFocusableCellDialogElements(
+  container: HTMLElement | null,
+): HTMLElement[] {
+  if (!container) return [];
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(FOCUSABLE_CELL_DIALOG_SELECTOR),
+  );
 }
 
 function isInteractiveSelectionTarget(target: EventTarget | null): boolean {
@@ -161,6 +193,30 @@ function normalizeText(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
 
+function isLongCellText(value: string): boolean {
+  return (
+    value.length > LONG_CELL_TEXT_LENGTH ||
+    value.split(/\r\n|\r|\n/).length > LONG_CELL_LINE_COUNT
+  );
+}
+
+function nextDensity(current: TableDensity): TableDensity {
+  const index = DENSITY_ORDER.indexOf(current);
+  return DENSITY_ORDER[(index + 1) % DENSITY_ORDER.length] ?? 'standard';
+}
+
+function densityClassName(density: TableDensity): string {
+  switch (density) {
+    case 'compact':
+      return styles.densityCompact;
+    case 'comfortable':
+      return styles.densityComfortable;
+    case 'standard':
+    default:
+      return styles.densityStandard;
+  }
+}
+
 function getTextContent(node: ReactNode): string {
   if (node === null || node === undefined || typeof node === 'boolean') {
     return '';
@@ -183,6 +239,7 @@ function emptyCell(rowKey: string, columnIndex: number): EnhancedTableCell {
     key: `${rowKey}-empty-${columnIndex}`,
     content: '',
     text: '',
+    rawText: '',
     isHeader: false,
   };
 }
@@ -193,13 +250,17 @@ function parseRow(rowNode: TableElement, rowKey: string): EnhancedTableRow {
   );
   return {
     key: rowKey,
-    cells: cellNodes.map((cellNode, cellIndex) => ({
-      key: `${rowKey}-${cellIndex}`,
-      content: cellNode.props.children,
-      text: normalizeText(getTextContent(cellNode.props.children)),
-      isHeader: cellNode.type === 'th',
-      textAlign: cellNode.props.style?.textAlign,
-    })),
+    cells: cellNodes.map((cellNode, cellIndex) => {
+      const rawText = getTextContent(cellNode.props.children);
+      return {
+        key: `${rowKey}-${cellIndex}`,
+        content: cellNode.props.children,
+        text: normalizeText(rawText),
+        rawText,
+        isHeader: cellNode.type === 'th',
+        textAlign: cellNode.props.style?.textAlign,
+      };
+    }),
   };
 }
 
@@ -268,6 +329,7 @@ function parseTable(
       key: `header-${columnIndex}`,
       content: label,
       text: label,
+      rawText: label,
       isHeader: true,
     };
   });
@@ -322,11 +384,18 @@ function getSelectedColumnIndexes(
 }
 
 function sanitizeForClipboard(value: string): string {
-  const inspectedValue = value.replace(
-    /[\u200B-\u200D\u2060\u00AD\uFEFF]/g,
-    '',
-  );
+  const inspectedValue = value
+    .replace(/[\u200B-\u200D\u2060\u00AD\uFEFF]/g, '')
+    .trimStart();
   return /^[=+\-@]/.test(inspectedValue) ? `'${value}` : value;
+}
+
+function cellClipboardText(cell: EnhancedTableCell | undefined): string {
+  return (cell?.rawText ?? cell?.text ?? '').replace(/[\r\n\t]+/g, ' ');
+}
+
+function cellReadableText(cell: EnhancedTableCell): string {
+  return cell.rawText || cell.text;
 }
 
 function applyColumnWidth(
@@ -364,7 +433,7 @@ function getSelectionText(
     lines.push(
       selectedColumns
         .map((columnIndex) =>
-          sanitizeForClipboard(row.cells[columnIndex]?.text ?? ''),
+          sanitizeForClipboard(cellClipboardText(row.cells[columnIndex])),
         )
         .join('\t'),
     );
@@ -381,13 +450,13 @@ function getVisibleTableText(
   const lines = [
     visibleColumnIndexes
       .map((columnIndex) =>
-        sanitizeForClipboard(headers[columnIndex]?.text ?? ''),
+        sanitizeForClipboard(cellClipboardText(headers[columnIndex])),
       )
       .join('\t'),
     ...rows.map((row) =>
       visibleColumnIndexes
         .map((columnIndex) =>
-          sanitizeForClipboard(row.cells[columnIndex]?.text ?? ''),
+          sanitizeForClipboard(cellClipboardText(row.cells[columnIndex])),
         )
         .join('\t'),
     ),
@@ -1153,6 +1222,8 @@ export function EnhancedTable({
   toolbarExtra?: ReactNode;
 }) {
   const { t } = useI18n();
+  const theme = useTheme();
+  const registerInteractionBlocker = useInteractionBlocker();
   const tableId = useId();
   const [sort, setSort] = useState<SortState | null>(null);
   const [filters, setFilters] = useState<Record<number, ColumnFilter>>({});
@@ -1160,6 +1231,8 @@ export function EnhancedTable({
   const [openFilterMenu, setOpenFilterMenu] = useState<OpenFilterMenu | null>(
     null,
   );
+  const [columnContextMenu, setColumnContextMenu] =
+    useState<ColumnContextMenu | null>(null);
   const [hiddenColumns, setHiddenColumns] = useState<Set<number>>(
     () => new Set(),
   );
@@ -1172,9 +1245,13 @@ export function EnhancedTable({
   const [resizingColumn, setResizingColumn] =
     useState<ColumnResizeState | null>(null);
   const [detailRowKey, setDetailRowKey] = useState<string | null>(null);
+  const [cellDialog, setCellDialog] = useState<CellDialogState | null>(null);
+  const [longTextExpanded, setLongTextExpanded] = useState(false);
+  const [density, setDensity] = useState<TableDensity>('standard');
   const [isDragging, setIsDragging] = useState(false);
   const [copiedVisible, setCopiedVisible] = useState(false);
   const [copiedSelection, setCopiedSelection] = useState(false);
+  const [copiedCellDialog, setCopiedCellDialog] = useState(false);
   const draggingRef = useRef(false);
   const copiedVisibleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
@@ -1182,13 +1259,20 @@ export function EnhancedTable({
   const copiedSelectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+  const copiedCellDialogTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   const copiedVisibleGenRef = useRef(0);
   const copiedSelectionGenRef = useRef(0);
+  const copiedCellDialogGenRef = useRef(0);
   const mountedRef = useRef(true);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const filterMenuRef = useRef<HTMLDivElement | null>(null);
+  const columnContextMenuRef = useRef<HTMLDivElement | null>(null);
   const filterTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const cellDialogRef = useRef<HTMLDivElement | null>(null);
+  const cellDialogFocusReturnRef = useRef<HTMLElement | null>(null);
   const focusReturnFrameRef = useRef(0);
   const pendingSelectionRef = useRef<{
     rowIndex: number;
@@ -1237,6 +1321,15 @@ export function EnhancedTable({
       copiedSelectionTimerRef.current = null;
     }
     setCopiedSelection(false);
+  }, []);
+
+  const resetCopiedCellDialog = useCallback(() => {
+    copiedCellDialogGenRef.current += 1;
+    if (copiedCellDialogTimerRef.current) {
+      clearTimeout(copiedCellDialogTimerRef.current);
+      copiedCellDialogTimerRef.current = null;
+    }
+    setCopiedCellDialog(false);
   }, []);
 
   const flushPendingSelection = useCallback(() => {
@@ -1291,6 +1384,7 @@ export function EnhancedTable({
     setFilters({});
     setSelection(null);
     setOpenFilterMenu(null);
+    setColumnContextMenu(null);
     setHiddenColumns(new Set());
     setColumnWidths({});
     setColumnOrder(initialColumnOrder(table.columnCount));
@@ -1298,13 +1392,18 @@ export function EnhancedTable({
     setFreezeFirstColumn(false);
     setResizingColumn(null);
     setDetailRowKey(null);
+    setCellDialog(null);
+    setLongTextExpanded(false);
+    setDensity('standard');
     resetCopiedVisible();
     resetCopiedSelection();
+    resetCopiedCellDialog();
     draggingRef.current = false;
     draggingColumnRef.current = null;
     setIsDragging(false);
   }, [
     resetCopiedSelection,
+    resetCopiedCellDialog,
     resetCopiedVisible,
     table.columnCount,
     tableStructureKey,
@@ -1327,6 +1426,10 @@ export function EnhancedTable({
       if (copiedSelectionTimerRef.current) {
         clearTimeout(copiedSelectionTimerRef.current);
         copiedSelectionTimerRef.current = null;
+      }
+      if (copiedCellDialogTimerRef.current) {
+        clearTimeout(copiedCellDialogTimerRef.current);
+        copiedCellDialogTimerRef.current = null;
       }
     };
   }, []);
@@ -1395,14 +1498,45 @@ export function EnhancedTable({
   }, [closeFilterMenu, openFilterMenu]);
 
   useEffect(() => {
+    if (!columnContextMenu) return;
+    const closeMenu = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (!columnContextMenuRef.current?.contains(target)) {
+        setColumnContextMenu(null);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setColumnContextMenu(null);
+      }
+    };
+    const closeOnScrollOrResize = () => setColumnContextMenu(null);
+    document.addEventListener('mousedown', closeMenu);
+    document.addEventListener('keydown', closeOnEscape);
+    document.addEventListener('scroll', closeOnScrollOrResize, true);
+    window.addEventListener('resize', closeOnScrollOrResize);
+    return () => {
+      document.removeEventListener('mousedown', closeMenu);
+      document.removeEventListener('keydown', closeOnEscape);
+      document.removeEventListener('scroll', closeOnScrollOrResize, true);
+      window.removeEventListener('resize', closeOnScrollOrResize);
+    };
+  }, [columnContextMenu]);
+
+  useEffect(() => {
     const clearActiveColumnOnOutsideMouseDown = (event: MouseEvent) => {
       const target = event.target;
-      if (target instanceof Node && !shellRef.current?.contains(target)) {
+      if (
+        target instanceof Node &&
+        !shellRef.current?.contains(target) &&
+        !columnContextMenuRef.current?.contains(target)
+      ) {
         setActiveColumn(null);
       }
     };
     const clearActiveColumnOnEscape = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || openFilterMenu) return;
+      if (event.defaultPrevented || openFilterMenu || cellDialog || columnContextMenu) return;
       if (event.key === 'Escape') setActiveColumn(null);
     };
     document.addEventListener('mousedown', clearActiveColumnOnOutsideMouseDown);
@@ -1414,7 +1548,7 @@ export function EnhancedTable({
       );
       document.removeEventListener('keydown', clearActiveColumnOnEscape);
     };
-  }, [openFilterMenu]);
+  }, [cellDialog, columnContextMenu, openFilterMenu]);
 
   const filteredRows = useMemo(
     () => applyFilters(table.rows, filters),
@@ -1450,6 +1584,14 @@ export function EnhancedTable({
   const frozenColumnIndex = freezeFirstColumn
     ? orderedVisibleColumnIndexes[0]
     : undefined;
+  const currentCellDialogCell = useMemo(() => {
+    if (!cellDialog) return null;
+    const row = visibleRows.find((item) => item.key === cellDialog.rowKey);
+    return row?.cells[cellDialog.columnIndex] ?? null;
+  }, [cellDialog, visibleRows]);
+  const currentCellDialogText = currentCellDialogCell?.text;
+  const cellDialogThemeClass =
+    theme === WebShellThemeId.Light ? styles.themeLight : styles.themeDark;
 
   useEffect(() => {
     resetCopiedVisible();
@@ -1504,7 +1646,78 @@ export function EnhancedTable({
     if (detailRowKey && !visibleRows.some((row) => row.key === detailRowKey)) {
       setDetailRowKey(null);
     }
-  }, [detailRowKey, visibleRows]);
+    if (
+      cellDialog &&
+      !visibleRows.some(
+        (row) =>
+          row.key === cellDialog.rowKey && row.cells[cellDialog.columnIndex],
+      )
+    ) {
+      setCellDialog(null);
+    }
+  }, [cellDialog, detailRowKey, visibleRows]);
+
+  useEffect(() => {
+    if (!cellDialog) return;
+    return registerInteractionBlocker();
+  }, [cellDialog, registerInteractionBlocker]);
+
+  useEffect(() => {
+    if (!cellDialog) return;
+    resetCopiedCellDialog();
+  }, [cellDialog, currentCellDialogText, resetCopiedCellDialog]);
+
+  useEffect(() => {
+    if (!cellDialog) return;
+    const dialog = cellDialogRef.current;
+    const focusableElements = getFocusableCellDialogElements(dialog);
+    (focusableElements[0] ?? dialog)?.focus();
+
+    const handleDialogKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      if (event.isComposing || event.keyCode === 229) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        setCellDialog(null);
+        resetCopiedCellDialog();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const nextFocusableElements = getFocusableCellDialogElements(
+        cellDialogRef.current,
+      );
+      if (nextFocusableElements.length === 0) {
+        event.preventDefault();
+        cellDialogRef.current?.focus();
+        return;
+      }
+      const first = nextFocusableElements[0];
+      const last = nextFocusableElements[nextFocusableElements.length - 1];
+      const activeElement = document.activeElement;
+      const currentIndex =
+        activeElement instanceof HTMLElement
+          ? nextFocusableElements.indexOf(activeElement)
+          : -1;
+      if (event.shiftKey && (activeElement === first || currentIndex === -1)) {
+        event.preventDefault();
+        last?.focus();
+      } else if (
+        !event.shiftKey &&
+        (activeElement === last || currentIndex === -1)
+      ) {
+        event.preventDefault();
+        first?.focus();
+      }
+    };
+    document.addEventListener('keydown', handleDialogKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleDialogKeyDown);
+      const focusReturn = cellDialogFocusReturnRef.current;
+      cellDialogFocusReturnRef.current = null;
+      if (focusReturn?.isConnected) focusReturn.focus();
+    };
+  }, [cellDialog, resetCopiedCellDialog]);
 
   const setColumnFilter = (
     columnIndex: number,
@@ -1552,6 +1765,7 @@ export function EnhancedTable({
   ) => {
     setSelection(null);
     setActiveColumn(columnIndex);
+    setColumnContextMenu(null);
     filterTriggerRef.current = event.currentTarget;
     const buttonRect = event.currentTarget.getBoundingClientRect();
     const menuWidth = 300;
@@ -1601,13 +1815,87 @@ export function EnhancedTable({
     setHiddenColumns(new Set());
   };
 
-  const toggleFreezeFirstColumn = () => {
+  const toggleFreezeFirstColumnFromMenu = () => {
     setFreezeFirstColumn((current) => !current);
+    setColumnContextMenu(null);
+  };
+
+  const openColumnContextMenu = (
+    event: ReactMouseEvent<HTMLElement>,
+    columnIndex: number,
+  ) => {
+    if (columnIndex !== orderedVisibleColumnIndexes[0]) {
+      return;
+    }
+    event.preventDefault();
+    setSelection(null);
+    setActiveColumn(columnIndex);
+    setOpenFilterMenu(null);
+    const menuWidth = 220;
+    const menuHeight = 72;
+    setColumnContextMenu({
+      left: Math.max(
+        6,
+        Math.min(event.clientX, window.innerWidth - menuWidth - 6),
+      ),
+      top: Math.max(
+        6,
+        Math.min(event.clientY, window.innerHeight - menuHeight - 6),
+      ),
+    });
+  };
+
+  const toggleDensity = () => {
+    setDensity((current) => nextDensity(current));
   };
 
   const toggleRowDetail = (rowKey: string) => {
     setSelection(null);
+    setCellDialog(null);
+    resetCopiedCellDialog();
     setDetailRowKey((current) => (current === rowKey ? null : rowKey));
+  };
+
+  const openCellDialog = (rowKey: string, columnIndex: number) => {
+    cellDialogFocusReturnRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    setSelection(null);
+    setOpenFilterMenu(null);
+    setDetailRowKey(null);
+    resetCopiedCellDialog();
+    setCellDialog({
+      rowKey,
+      columnIndex,
+    });
+  };
+
+  const closeCellDialog = () => {
+    setCellDialog(null);
+    resetCopiedCellDialog();
+  };
+
+  const copyCellDialogValue = () => {
+    if (currentCellDialogText == null || !navigator.clipboard) return;
+    const copyGeneration = copiedCellDialogGenRef.current;
+    void navigator.clipboard
+      .writeText(sanitizeForClipboard(currentCellDialogText))
+      .then(() => {
+        if (!mountedRef.current) return;
+        if (copiedCellDialogGenRef.current !== copyGeneration) return;
+        if (copiedCellDialogTimerRef.current) {
+          clearTimeout(copiedCellDialogTimerRef.current);
+        }
+        setCopiedCellDialog(true);
+        copiedCellDialogTimerRef.current = setTimeout(
+          () => setCopiedCellDialog(false),
+          2000,
+        );
+      })
+      .catch((error: unknown) =>
+        console.warn('[web-shell] clipboard write failed:', error),
+      );
   };
 
   const selectionRowBounds = useMemo(
@@ -1636,9 +1924,11 @@ export function EnhancedTable({
   ): CSSProperties => {
     const width = columnWidths[columnIndex];
     if (width === undefined) {
-      return extra
-        ? { ...DEFAULT_COLUMN_STYLE, ...extra }
-        : DEFAULT_COLUMN_STYLE;
+      const defaultStyle =
+        density === 'compact'
+          ? COMPACT_AUTO_COLUMN_STYLE
+          : DEFAULT_COLUMN_STYLE;
+      return extra ? { ...defaultStyle, ...extra } : defaultStyle;
     }
     return {
       width,
@@ -1654,10 +1944,14 @@ export function EnhancedTable({
   ) => {
     event.preventDefault();
     event.stopPropagation();
+    const headerCell = event.currentTarget.closest('th');
+    const renderedWidth = headerCell?.getBoundingClientRect().width;
     setResizingColumn({
       columnIndex,
       startX: event.clientX,
-      startWidth: columnWidths[columnIndex] ?? DEFAULT_COLUMN_WIDTH,
+      startWidth:
+        columnWidths[columnIndex] ??
+        (renderedWidth ? Math.round(renderedWidth) : DEFAULT_COLUMN_WIDTH),
     });
   };
 
@@ -1679,8 +1973,12 @@ export function EnhancedTable({
 
     event.preventDefault();
     event.stopPropagation();
+    const headerCell = event.currentTarget.closest('th');
+    const renderedWidth = headerCell?.getBoundingClientRect().width;
     setColumnWidths((current) => {
-      const width = current[columnIndex] ?? DEFAULT_COLUMN_WIDTH;
+      const width =
+        current[columnIndex] ??
+        (renderedWidth ? Math.round(renderedWidth) : DEFAULT_COLUMN_WIDTH);
       const nextWidth = clampColumnWidth(width + delta);
       return applyColumnWidth(current, columnIndex, nextWidth);
     });
@@ -1894,6 +2192,17 @@ export function EnhancedTable({
   const selectedCount = selectionSize(selection, orderedVisibleColumnIndexes);
   const activeFilterCount =
     Object.values(filters).filter(isFilterActive).length;
+  const densityLabel = t(`markdownTable.density.${density}`);
+  const hasLongText = useMemo(
+    () =>
+      visibleRows.some((row) =>
+        orderedVisibleColumnIndexes.some((columnIndex) => {
+          const cell = row.cells[columnIndex];
+          return cell ? isLongCellText(cellReadableText(cell)) : false;
+        }),
+      ),
+    [orderedVisibleColumnIndexes, visibleRows],
+  );
   const rowSummary =
     visibleRows.length === table.rows.length
       ? t('markdownTable.rows', { count: table.rows.length })
@@ -1911,10 +2220,45 @@ export function EnhancedTable({
         t('markdownTable.column', { index: openFilterMenu.columnIndex + 1 })
       : '';
 
+  const renderCellContent = (cell: EnhancedTableCell, expanded: boolean) => {
+    const displayText = cellReadableText(cell);
+    const isLong = isLongCellText(displayText);
+    return (
+      <div
+        className={`${styles.cellContent} ${
+          isLong && !expanded ? styles.cellContentCollapsed : ''
+        }`}
+        title={isLong && !expanded ? displayText : undefined}
+      >
+        <div className={styles.cellText}>{cell.content}</div>
+      </div>
+    );
+  };
+
+  const renderDetailValue = (cell: EnhancedTableCell, expanded: boolean) => {
+    const isEmpty = cell.text.length === 0;
+    const displayText = cellReadableText(cell);
+    const isLong = isLongCellText(displayText);
+    return (
+      <div
+        className={`${styles.detailValueContent} ${
+          isLong && !expanded ? styles.detailValueCollapsed : ''
+        } ${isEmpty ? styles.emptyValue : ''}`}
+        title={isLong && !expanded ? displayText : undefined}
+      >
+        <div className={styles.detailValueText}>
+          {isEmpty ? t('markdownTable.emptyValue') : cell.content}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div
       ref={shellRef}
-      className={`${styles.tableShell} ${isDragging ? styles.dragging : ''}`}
+      className={`${styles.tableShell} ${densityClassName(density)} ${
+        freezeFirstColumn ? styles.hasFrozenColumn : ''
+      } ${isDragging ? styles.dragging : ''}`}
     >
       <div className={styles.toolbar}>
         <span className={styles.summary}>{rowSummary}</span>
@@ -1944,15 +2288,22 @@ export function EnhancedTable({
             })}
           </button>
         )}
-        {orderedVisibleColumnIndexes.length > 0 && (
+        <button
+          className={styles.copyButton}
+          type="button"
+          onClick={toggleDensity}
+        >
+          {t('markdownTable.density', { density: densityLabel })}
+        </button>
+        {hasLongText && (
           <button
             className={styles.copyButton}
             type="button"
-            onClick={toggleFreezeFirstColumn}
+            onClick={() => setLongTextExpanded((current) => !current)}
           >
-            {freezeFirstColumn
-              ? t('markdownTable.unfreezeFirstColumn')
-              : t('markdownTable.freezeFirstColumn')}
+            {longTextExpanded
+              ? t('markdownTable.collapseLongText')
+              : t('markdownTable.expandLongText')}
           </button>
         )}
         {activeFilterCount > 0 && (
@@ -2039,9 +2390,13 @@ export function EnhancedTable({
                       isFrozenColumn ? styles.frozenHeaderCell : ''
                     } ${isActiveColumn ? styles.activeHeaderCell : ''}`}
                     aria-sort={ariaSort}
+                    onContextMenu={(event) =>
+                      openColumnContextMenu(event, columnIndex)
+                    }
                     onDragOver={dragOverColumn}
                     onDrop={(event) => dropColumn(event, columnIndex)}
                     style={columnStyle(columnIndex, headerAlignStyle)}
+                    title={columnName}
                   >
                     <div className={styles.headerControls}>
                       <button
@@ -2180,8 +2535,14 @@ export function EnhancedTable({
                           onTouchMove={extendTouchSelection}
                           onTouchEnd={stopDragging}
                           onTouchCancel={stopDragging}
+                          onDoubleClick={(event) => {
+                            if (isInteractiveSelectionTarget(event.target)) {
+                              return;
+                            }
+                            openCellDialog(row.key, columnIndex);
+                          }}
                         >
-                          {cell.content}
+                          {renderCellContent(cell, longTextExpanded)}
                         </td>
                       );
                     })}
@@ -2200,12 +2561,6 @@ export function EnhancedTable({
                             const header = table.headers[columnIndex];
                             const cell = row.cells[columnIndex];
                             if (!header || !cell) return null;
-                            const headerAlignStyle = header.textAlign
-                              ? { textAlign: header.textAlign }
-                              : undefined;
-                            const cellAlignStyle = cell.textAlign
-                              ? { textAlign: cell.textAlign }
-                              : undefined;
                             return (
                               <div
                                 key={`${row.key}-detail-${columnIndex}`}
@@ -2213,15 +2568,12 @@ export function EnhancedTable({
                               >
                                 <div
                                   className={styles.detailLabel}
-                                  style={headerAlignStyle}
+                                  title={header.text}
                                 >
                                   {header.content}
                                 </div>
-                                <div
-                                  className={styles.detailValue}
-                                  style={cellAlignStyle}
-                                >
-                                  {cell.content}
+                                <div className={styles.detailValue}>
+                                  {renderDetailValue(cell, longTextExpanded)}
                                 </div>
                               </div>
                             );
@@ -2243,6 +2595,28 @@ export function EnhancedTable({
           </div>
         )}
       </div>
+      {columnContextMenu && orderedVisibleColumnIndexes.length > 0 && (
+        <div
+          ref={columnContextMenuRef}
+          className={styles.columnContextMenu}
+          style={{
+            left: columnContextMenu.left,
+            top: columnContextMenu.top,
+          }}
+          role="menu"
+        >
+          <button
+            className={styles.columnContextMenuAction}
+            type="button"
+            role="menuitem"
+            onClick={toggleFreezeFirstColumnFromMenu}
+          >
+            {freezeFirstColumn
+              ? t('markdownTable.unfreezeFirstColumn')
+              : t('markdownTable.freezeFirstColumn')}
+          </button>
+        </div>
+      )}
       {openFilterMenu && openFilterHeader && (
         <ColumnFilterMenu
           key={openFilterMenu.columnIndex}
@@ -2262,6 +2636,65 @@ export function EnhancedTable({
           onSort={setColumnSort}
         />
       )}
+      {cellDialog &&
+        currentCellDialogCell &&
+        createPortal(
+          <div
+            className={`${styles.cellDialogBackdrop} ${cellDialogThemeClass}`}
+            onMouseDown={closeCellDialog}
+          >
+            <div
+              ref={cellDialogRef}
+              className={styles.cellDialog}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby={`${tableId}-cell-dialog-title`}
+              tabIndex={-1}
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <button
+                className={styles.cellDialogCloseIcon}
+                type="button"
+                onClick={closeCellDialog}
+                aria-label={t('markdownTable.close')}
+              >
+                ×
+              </button>
+              <div
+                id={`${tableId}-cell-dialog-title`}
+                className={styles.cellDialogTitle}
+              >
+                {t('markdownTable.cellDialogTitle')}
+              </div>
+              <div className={styles.cellDialogValue}>
+                {currentCellDialogCell.content}
+              </div>
+              <div className={styles.cellDialogFooter}>
+                <div className={styles.cellDialogActions}>
+                  <button
+                    className={styles.cellDialogButton}
+                    type="button"
+                    onClick={copyCellDialogValue}
+                  >
+                    {copiedCellDialog
+                      ? t('code.copied')
+                      : t('markdownTable.copyCell')}
+                  </button>
+                  <button
+                    className={`${styles.cellDialogButton} ${
+                      styles.cellDialogPrimaryButton
+                    }`}
+                    type="button"
+                    onClick={closeCellDialog}
+                  >
+                    {t('markdownTable.close')}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

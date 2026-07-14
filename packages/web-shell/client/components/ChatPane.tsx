@@ -4,22 +4,35 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   useActions,
   useConnection,
+  useDaemonFollowupSuggestion,
   useStreamingState,
   useTranscriptBlocks,
+  useTranscriptStore,
+  useWorkspace,
+  useWorkspaceActions,
+  type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../i18n';
 import { useMessages } from '../hooks/useMessages';
+import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
 import type { PromptImage } from '../adapters/promptTypes';
-import type { ComposerSubmitCommit } from '../hooks/useComposerCore';
+import type {
+  ComposerSubmitCommit,
+  ComposerSubmitMetadata,
+  EditorHandle,
+} from '../hooks/useComposerCore';
+import { useQueuedPrompts } from '../hooks/useQueuedPrompts';
 import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
 import { getModelDisplayName } from '../utils/modelDisplay';
+import { hasMultipleWorkspaces, workspaceBasename } from '../utils/workspace';
 import {
   getLocalCommands,
   localizeBuiltinDescriptions,
@@ -29,8 +42,19 @@ import { mergeCommands } from '../hooks/daemonSessionMappers';
 import { MessageList } from './MessageList';
 import { StreamingStatus } from './StreamingStatus';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
+import { QueuedPromptDisplay } from './QueuedPromptDisplay';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
+import type {
+  TurnOutputKind,
+  TurnOutputOpenRequest,
+} from './artifacts/TurnOutputs';
+import { TURN_OUTPUT_KINDS } from './artifacts/TurnOutputs';
+import {
+  getArtifactsByTurn,
+  getFileChangesByTurn,
+  getScheduledTasksByTurn,
+} from './artifacts/turnOutputSelectors';
 import styles from './ChatPane.module.css';
 
 // Split-view panes get the same interactive composer controls as the main chat,
@@ -46,8 +70,21 @@ const PANE_TOOLBAR_ACTIONS: readonly ComposerToolbarAction[] = [
 export interface ChatPaneProps {
   /** Header label; falls back to the session's own display name / id. */
   title?: string;
+  /**
+   * The workspace this pane's session lives in. Passed explicitly by the split
+   * view (which knows it per session) and shown as a composer-toolbar chip on a
+   * multi-workspace daemon; falls back to the connection's own workspace.
+   */
+  workspaceCwd?: string;
   onClose?: () => void;
   onError?: (error: unknown, fallback: string) => void;
+  onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
+  onPaneArtifactsChange?: (
+    sessionId: string,
+    artifacts: readonly DaemonSessionArtifact[],
+    workspaceActions: DaemonWorkspaceActions,
+  ) => void;
+  messageTurnOutputs?: readonly TurnOutputKind[];
 }
 
 /**
@@ -57,13 +94,51 @@ export interface ChatPaneProps {
  * state, approvals, and composer, and the browser scopes keyboard focus to the
  * pane the user clicks into — so there is no cross-pane approval arbitration.
  */
-export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
+export function ChatPane({
+  title,
+  workspaceCwd,
+  onClose,
+  onError,
+  onRightPanelOpen,
+  onPaneArtifactsChange,
+  messageTurnOutputs,
+}: ChatPaneProps) {
   const { t } = useI18n();
   const connection = useConnection();
   const actions = useActions();
+  const workspaceActions = useWorkspaceActions();
+  const workspace = useWorkspace();
   const messages = useMessages(t);
   const blocks = useTranscriptBlocks();
+  const store = useTranscriptStore();
   const streamingState = useStreamingState();
+  const { artifacts } = useSessionArtifacts();
+  useEffect(() => {
+    const sessionId = connection.sessionId;
+    if (!sessionId) return;
+    onPaneArtifactsChange?.(sessionId, artifacts, workspaceActions);
+    return () => {
+      onPaneArtifactsChange?.(sessionId, [], workspaceActions);
+    };
+  }, [
+    artifacts,
+    connection.sessionId,
+    onPaneArtifactsChange,
+    workspaceActions,
+  ]);
+  const streamingStateRef = useRef(streamingState);
+  streamingStateRef.current = streamingState;
+  const editorRef = useRef<EditorHandle | null>(null);
+  const {
+    followupState,
+    onAcceptFollowup,
+    onDismissFollowup,
+    clear: clearFollowup,
+  } = useDaemonFollowupSuggestion({
+    onAccept: (suggestion) => {
+      editorRef.current?.insertText(suggestion);
+    },
+  });
 
   const reportError = useCallback(
     (error: unknown, fallback: string) => {
@@ -71,6 +146,10 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
       else console.error(fallback, error);
     },
     [onError],
+  );
+  const notifySuccess = useCallback(
+    (message: string) => store.dispatch([{ type: 'status', text: message }]),
+    [store],
   );
 
   const pendingApproval = useMemo(
@@ -90,6 +169,49 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
   const approvalActive =
     pendingToolApproval !== null || pendingAskUserApproval !== null;
   const isResponding = streamingState !== 'idle';
+  const artifactsByTurn = useMemo(
+    () =>
+      getArtifactsByTurn(messages, artifacts, connection.workspaceCwd || ''),
+    [messages, artifacts, connection.workspaceCwd],
+  );
+  const fileChangesByTurn = useMemo(
+    () =>
+      getFileChangesByTurn(
+        messages,
+        artifactsByTurn,
+        connection.workspaceCwd || '',
+      ),
+    [messages, artifactsByTurn, connection.workspaceCwd],
+  );
+  const scheduledTasksByTurn = useMemo(
+    () => getScheduledTasksByTurn(messages),
+    [messages],
+  );
+  const visibleTurnOutputKinds = useMemo(
+    () => new Set<TurnOutputKind>(messageTurnOutputs ?? TURN_OUTPUT_KINDS),
+    [messageTurnOutputs],
+  );
+  const {
+    queuedPrompts,
+    queuedTexts,
+    enqueuePrompt,
+    removeQueuedPrompt,
+    insertQueuedPrompt,
+    editQueuedPrompt,
+    editLastQueuedPrompt,
+    clearQueuedPrompts,
+  } = useQueuedPrompts({
+    connected: connection.status === 'connected',
+    sessionId: connection.sessionId,
+    clientId: connection.clientId,
+    streamingState,
+    sessionActions: actions,
+    store,
+    editorRef,
+    reportError,
+    notifySuccess,
+    t,
+  });
 
   // Anchor the streaming timer to the turn's own start (the last user message's
   // timestamp) rather than letting StreamingStatus fall back to "now" — so a
@@ -108,26 +230,32 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
       text: string,
       images?: PromptImage[],
       commitAccepted?: ComposerSubmitCommit,
+      metadata?: ComposerSubmitMetadata,
     ): boolean => {
       const trimmed = text.trim();
       if (!trimmed) return false;
-      // Keep the draft (return false) and clear it only once the daemon ADMITS
-      // the prompt. `onAdmitted` fires at acceptance; the sendPrompt promise
-      // itself resolves only when the whole (possibly long) turn finishes, so
-      // committing on resolution would strand the sent text in the composer for
-      // the entire response. If the prompt is rejected before admission
-      // (transcript still loading, session disconnected, or a turn already
-      // active) onAdmitted never fires, so the draft is preserved and the error
-      // is surfaced.
-      actions
-        .sendPrompt(trimmed, {
-          ...(images && images.length ? { images } : {}),
-          onAdmitted: commitAccepted,
-        })
-        .catch((error: unknown) => reportError(error, 'Failed to send prompt'));
-      return false;
+      if (connection.status !== 'connected') return false;
+      const inputAnnotations = metadata?.inputAnnotations;
+      if (streamingStateRef.current === 'idle') {
+        actions
+          .sendPrompt(trimmed, {
+            ...(images && images.length ? { images } : {}),
+            ...(inputAnnotations ? { inputAnnotations } : {}),
+            onAdmitted: () => {
+              clearFollowup();
+              commitAccepted?.();
+            },
+          })
+          .catch((error: unknown) =>
+            reportError(error, 'Failed to send prompt'),
+          );
+        return false;
+      }
+      return inputAnnotations
+        ? enqueuePrompt(trimmed, images, undefined, inputAnnotations)
+        : enqueuePrompt(trimmed, images);
     },
-    [actions, reportError],
+    [actions, clearFollowup, connection.status, enqueuePrompt, reportError],
   );
 
   const handleConfirm = useCallback(
@@ -148,6 +276,18 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
         reportError(error, 'Failed to cancel request'),
       );
   }, [actions, reportError]);
+
+  const handleRightPanelOpen = useCallback(
+    (request: TurnOutputOpenRequest) => {
+      if (!onRightPanelOpen) return;
+      if (request.kind === 'artifact' || request.kind === 'scheduled_task') {
+        onRightPanelOpen({ ...request, workspaceActions });
+        return;
+      }
+      onRightPanelOpen(request);
+    },
+    [onRightPanelOpen, workspaceActions],
+  );
 
   // Composer wiring, all scoped to THIS pane's own DaemonSession context. The
   // slash menu lists the session's daemon commands — they run server-side when
@@ -230,6 +370,23 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
   const headerLabel =
     title || connection.displayName || connection.sessionId?.slice(0, 8) || '';
 
+  // On a multi-workspace daemon, surface this pane's workspace as a composer-
+  // toolbar chip (next to where the git-branch chip sits), so it's clear which
+  // workspace a message goes to. Multi-workspace-ness comes from the shared
+  // workspace provider (the pane's own session connection may not carry it).
+  const paneWorkspaceCwd = workspaceCwd ?? connection.workspaceCwd;
+  const showWorkspaceChip =
+    hasMultipleWorkspaces(workspace.capabilities) && !!paneWorkspaceCwd;
+  // Memoized so the array identity is stable across renders — `ChatEditor` is
+  // `React.memo`, and a fresh `[...]` each render would defeat it.
+  const paneToolbarActions = useMemo(
+    () =>
+      showWorkspaceChip
+        ? [...PANE_TOOLBAR_ACTIONS, 'workspace' as const]
+        : PANE_TOOLBAR_ACTIONS,
+    [showWorkspaceChip],
+  );
+
   return (
     <section
       className={styles.pane}
@@ -278,6 +435,18 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
           isResponding={isResponding}
           workspaceCwd={connection.workspaceCwd || ''}
           hideSessionTimeline
+          turnFileChanges={
+            visibleTurnOutputKinds.has('file') ? fileChangesByTurn : undefined
+          }
+          turnArtifacts={
+            visibleTurnOutputKinds.has('artifact') ? artifactsByTurn : undefined
+          }
+          turnScheduledTasks={
+            visibleTurnOutputKinds.has('scheduled_task')
+              ? scheduledTasksByTurn
+              : undefined
+          }
+          onTurnOutputOpen={handleRightPanelOpen}
         />
       </div>
 
@@ -307,18 +476,38 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
         {/* Panes keep the composer status compact: spinner + elapsed time +
             token count + cancel hint, but no rotating "witty" loading phrase. */}
         <StreamingStatus startedAt={activeTurnStartedAt} showPhrase={false} />
+        <QueuedPromptDisplay
+          prompts={queuedPrompts}
+          t={t}
+          onDelete={removeQueuedPrompt}
+          onInsert={insertQueuedPrompt}
+          onEdit={editQueuedPrompt}
+        />
         <ChatEditor
+          ref={editorRef}
           onSubmit={handleSubmit}
           onCancel={handleCancel}
           isRunning={isResponding}
           commands={commands}
-          visibleToolbarActions={PANE_TOOLBAR_ACTIONS}
+          queuedMessages={queuedTexts}
+          onPopQueuedMessages={editLastQueuedPrompt}
+          onClearQueuedMessages={clearQueuedPrompts}
+          visibleToolbarActions={paneToolbarActions}
+          workspaceName={
+            showWorkspaceChip && paneWorkspaceCwd
+              ? workspaceBasename(paneWorkspaceCwd)
+              : undefined
+          }
+          workspaceTitle={paneWorkspaceCwd}
           currentMode={connection.currentMode ?? 'default'}
           currentModel={connection.currentModel ?? ''}
           availableModels={availableModels}
           onSelectMode={handleSelectMode}
           onSelectModel={handleSelectModel}
           dialogOpen={approvalActive}
+          followupState={followupState}
+          onAcceptFollowup={onAcceptFollowup}
+          onDismissFollowup={onDismissFollowup}
           placeholderText={t('splitView.composerPlaceholder')}
         />
       </div>

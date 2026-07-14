@@ -66,6 +66,7 @@ export interface PermissionResolvedEvent {
 interface ChannelAgentBridgeEventMap {
   sessionDied: [SessionDiedEvent];
   textChunk: [sessionId: string, chunk: string];
+  responseBoundary: [sessionId: string];
   toolCall: [ToolCallEvent];
   permissionRequest: [PermissionRequestEvent];
   permissionResolved: [PermissionResolvedEvent];
@@ -75,6 +76,10 @@ export interface BridgeSessionInfo {
   sessionId: string;
   workspaceCwd: string;
   hasActivePrompt: boolean;
+}
+
+export interface ChannelAgentBridgeSessionOptions {
+  approvalMode?: string;
 }
 
 export interface ChannelAgentBridge {
@@ -88,14 +93,28 @@ export interface ChannelAgentBridge {
     eventName: K,
     listener: (...args: ChannelAgentBridgeEventMap[K]) => void,
   ): unknown;
-  newSession(cwd: string): Promise<string>;
-  loadSession(sessionId: string, cwd: string): Promise<string>;
+  newSession(
+    cwd: string,
+    options?: ChannelAgentBridgeSessionOptions,
+    bindingToken?: object,
+  ): Promise<string>;
+  loadSession(
+    sessionId: string,
+    cwd: string,
+    options?: ChannelAgentBridgeSessionOptions,
+    bindingToken?: object,
+  ): Promise<string>;
   prompt(
     sessionId: string,
     text: string,
     options?: { imageBase64?: string; imageMimeType?: string },
   ): Promise<string>;
   cancelSession(sessionId: string): Promise<void>;
+  /** Release a bridge-owned session that will not be routed to a caller. */
+  discardSession?(
+    sessionId: string,
+    expectedBindingToken?: object,
+  ): Promise<void>;
   respondToPermission?(
     requestId: string,
     response: RequestPermissionResponse,

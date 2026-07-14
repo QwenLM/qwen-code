@@ -5,6 +5,7 @@
  */
 
 import type {
+  DaemonTextDeltaMeta,
   DaemonTranscriptState,
   DaemonTranscriptStore,
   DaemonUiEvent,
@@ -60,8 +61,9 @@ export function createDaemonTranscriptStore(
     appendLocalUserMessage(
       text: string,
       images?: Array<{ data: string; mimeType: string }>,
+      meta?: DaemonTextDeltaMeta,
     ) {
-      state = appendLocalUserTranscriptMessage(state, text, { images });
+      state = appendLocalUserTranscriptMessage(state, text, { images, meta });
       scheduleNotify();
     },
     reset(nextSeed: Partial<DaemonTranscriptState> = {}) {

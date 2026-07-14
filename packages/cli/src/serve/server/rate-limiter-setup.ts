@@ -13,6 +13,7 @@ export function installRateLimiter(
   app: Application,
   opts: ServeOptions,
   daemonLog: DaemonLogger | undefined,
+  options: { mount?: boolean; workspaceQualifiedAcpEnabled?: boolean } = {},
 ): RateLimiterInstance | undefined {
   if (!opts.rateLimit) return undefined;
 
@@ -24,6 +25,7 @@ export function installRateLimiter(
       read: { windowMs, max: opts.rateLimitRead ?? 120 },
     },
     hostname: opts.hostname,
+    workspaceQualifiedAcpEnabled: options.workspaceQualifiedAcpEnabled === true,
     onLimitReached: daemonLog
       ? (tier, key, suppressed) => {
           daemonLog.warn(
@@ -41,6 +43,8 @@ export function installRateLimiter(
         }
       : undefined,
   });
-  app.use(rateLimiter.middleware);
+  if (options.mount !== false) {
+    app.use(rateLimiter.middleware);
+  }
   return rateLimiter;
 }

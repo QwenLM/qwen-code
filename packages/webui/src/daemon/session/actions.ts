@@ -6,6 +6,7 @@
 
 import type { Dispatch, SetStateAction } from 'react';
 import type {
+  DaemonApprovalMode,
   DaemonSessionContextStatus,
   DaemonSessionClient,
   DaemonSessionBtwResult,
@@ -17,6 +18,7 @@ import type {
   DaemonSessionRecapResult,
   DaemonRewindSnapshotInfo,
   DaemonSessionTaskStatus,
+  DaemonSessionArtifactsEnvelope,
   DaemonTranscriptStore,
   PermissionResponse,
 } from '@qwen-code/sdk/daemon';
@@ -56,7 +58,10 @@ export interface CreateDaemonSessionActionsArgs {
   skipNextCleanupDetachSessionIdRef: RefBox<string | undefined>;
   passiveAssistantDoneTimerRef: TimerRef;
   getCreateSessionRequest: () => CreateSessionRequest;
-  createDetachedSession: () => Promise<DaemonSessionClient>;
+  createDetachedSession: (
+    workspaceCwd?: string,
+    overrides?: Pick<CreateSessionRequest, 'approvalMode'>,
+  ) => Promise<DaemonSessionClient>;
   getConnection: () => DaemonConnectionState;
   hasSessionActivePrompt: () => boolean;
   resetCurrentSessionActivePrompt: () => void;
@@ -64,6 +69,7 @@ export interface CreateDaemonSessionActionsArgs {
   setConnection: Dispatch<SetStateAction<DaemonConnectionState>>;
   setPromptStatus: Dispatch<SetStateAction<DaemonPromptStatus>>;
   setRestoreSessionId: Dispatch<SetStateAction<string | undefined>>;
+  setRestoreWorkspaceCwd: Dispatch<SetStateAction<string | undefined>>;
   setRestoreMode: Dispatch<SetStateAction<'load' | 'resume'>>;
   setRestoreSessionNonce: Dispatch<SetStateAction<number>>;
   setAttachSessionNonce: Dispatch<SetStateAction<number>>;
@@ -126,6 +132,7 @@ export function createDaemonSessionActions({
   setConnection,
   setPromptStatus,
   setRestoreSessionId,
+  setRestoreWorkspaceCwd,
   setRestoreMode,
   setRestoreSessionNonce,
   setAttachSessionNonce,
@@ -154,6 +161,7 @@ export function createDaemonSessionActions({
     }
     store.reset();
     setRestoreSessionId(undefined);
+    setRestoreWorkspaceCwd(undefined);
   }
 
   function startPendingSessionLoad(
@@ -200,6 +208,7 @@ export function createDaemonSessionActions({
   function startSessionSwitch(
     sessionId: string,
     mode: 'load' | 'resume',
+    workspaceCwd?: string,
   ): Promise<void> {
     manualSessionClearRef.current = false;
     const loadPromise = startPendingSessionLoad(sessionId, mode);
@@ -242,6 +251,7 @@ export function createDaemonSessionActions({
     store.reset();
     setRestoreMode(mode);
     setRestoreSessionId(sessionId);
+    setRestoreWorkspaceCwd(workspaceCwd ?? getConnection().workspaceCwd);
     setRestoreSessionNonce((nonce) => nonce + 1);
     return loadPromise.catch((error: unknown) => {
       if (!isAbortError(error)) {
@@ -285,12 +295,23 @@ export function createDaemonSessionActions({
           mimeType:
             img.mimeType || img.mediaType || img.media_type || 'image/*',
         }));
+        const inputAnnotations =
+          options?.inputAnnotations && options.inputAnnotations.length > 0
+            ? options.inputAnnotations
+            : undefined;
         if (options?.optimisticUserMessage !== false) {
-          store.appendLocalUserMessage(text, normalizedImages);
+          store.appendLocalUserMessage(
+            text,
+            normalizedImages,
+            inputAnnotations ? { inputAnnotations } : undefined,
+          );
         }
         const promptRequest: Record<string, unknown> = {
           prompt: toDaemonPromptContent(text, normalizedImages),
         };
+        if (inputAnnotations) {
+          promptRequest['_meta'] = { inputAnnotations };
+        }
         if (options?.retry) {
           promptRequest['retry'] = true;
         }
@@ -357,12 +378,23 @@ export function createDaemonSessionActions({
         data: img.data,
         mimeType: img.mimeType || img.mediaType || img.media_type || 'image/*',
       }));
+      const inputAnnotations =
+        options?.inputAnnotations && options.inputAnnotations.length > 0
+          ? options.inputAnnotations
+          : undefined;
       if (options?.optimisticUserMessage !== false) {
-        store.appendLocalUserMessage(text, normalizedImages);
+        store.appendLocalUserMessage(
+          text,
+          normalizedImages,
+          inputAnnotations ? { inputAnnotations } : undefined,
+        );
       }
       const promptRequest: Record<string, unknown> = {
         prompt: toDaemonPromptContent(text, normalizedImages),
       };
+      if (inputAnnotations) {
+        promptRequest['_meta'] = { inputAnnotations };
+      }
       if (options?.retry) {
         promptRequest['retry'] = true;
       }
@@ -569,17 +601,30 @@ export function createDaemonSessionActions({
       }
     },
 
-    async loadSession(sessionId) {
-      return startSessionSwitch(sessionId, 'load');
+    async loadSession(sessionId, options) {
+      return startSessionSwitch(sessionId, 'load', options?.workspaceCwd);
     },
 
-    async resumeSession(sessionId) {
-      return startSessionSwitch(sessionId, 'resume');
+    async resumeSession(sessionId, options) {
+      return startSessionSwitch(sessionId, 'resume', options?.workspaceCwd);
     },
 
-    async createSession() {
+    async createSession(options?: {
+      workspaceCwd?: string;
+      approvalMode?: DaemonApprovalMode;
+    }) {
       try {
         manualSessionClearRef.current = false;
+        // Fold the initial approval mode into the create request so the daemon
+        // applies it atomically at spawn (`POST /session` →
+        // `spawnOrAttach({ approvalMode })`), avoiding a follow-up
+        // `setApprovalMode` round-trip. Approval mode is fail-closed at spawn:
+        // an application failure aborts creation (this call rejects) rather than
+        // leaving the session in a different mode than the caller requested.
+        const approvalOverride =
+          options?.approvalMode !== undefined
+            ? { approvalMode: options.approvalMode }
+            : {};
         const session = sessionRef.current;
         const activeSession =
           session && getConnection().sessionId === session.sessionId
@@ -587,9 +632,13 @@ export function createDaemonSessionActions({
             : undefined;
         if (activeSession) {
           const nextSession = await withActionTimeout(
-            activeSession.client.createOrAttachSession(
-              getCreateSessionRequest(),
-            ),
+            activeSession.client.createOrAttachSession({
+              ...getCreateSessionRequest(),
+              ...(options?.workspaceCwd !== undefined
+                ? { workspaceCwd: options.workspaceCwd }
+                : {}),
+              ...approvalOverride,
+            }),
             'Create session timed out',
           );
           persistStableClientId(nextSession.clientId, nextSession.sessionId);
@@ -597,7 +646,7 @@ export function createDaemonSessionActions({
         }
 
         const nextSession = await withActionTimeout(
-          createDetachedSession(),
+          createDetachedSession(options?.workspaceCwd, approvalOverride),
           'Create session timed out',
         );
         if (manualSessionClearRef.current) {
@@ -631,7 +680,9 @@ export function createDaemonSessionActions({
       } catch (error) {
         throw dispatchActionError(
           addNotice,
-          'Create session failed',
+          `Create session failed${
+            options?.workspaceCwd ? ` (workspace: ${options.workspaceCwd})` : ''
+          }`,
           error,
           'create_session',
         );
@@ -1086,6 +1137,28 @@ export function createDaemonSessionActions({
           'Load stats failed',
           error,
           'load_stats',
+        );
+      }
+    },
+
+    async loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope> {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Load artifacts failed',
+        'load_artifacts',
+      );
+      try {
+        return await withActionTimeout(
+          session.artifacts(),
+          'Load artifacts timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Load artifacts failed',
+          error,
+          'load_artifacts',
         );
       }
     },

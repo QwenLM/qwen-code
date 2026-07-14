@@ -67,8 +67,10 @@ export * from './core/geminiRequest.js';
 export * from './core/inlineMediaLimit.js';
 export * from './core/insightProtocol.js';
 export * from './core/logger.js';
+export * from './core/message-display-dispatcher.js';
 export * from './core/nonInteractiveToolExecutor.js';
 export * from './core/prompts.js';
+export * from './core/session-recovery.js';
 export * from './core/tokenLimits.js';
 export * from './core/toolCallIdUtils.js';
 export * from './core/turn.js';
@@ -215,6 +217,7 @@ export {
   getCronFilePath,
   generateCronTaskId,
   appendCronRun,
+  taskHasLegacyCondition,
   MAX_TASK_RUNS,
 } from './services/cronTasksFile.js';
 export * from './services/fileDiscoveryService.js';
@@ -228,7 +231,27 @@ export * from './services/visionBridge/vision-bridge-service.js';
 export * from './services/visionBridge/image-part-utils.js';
 export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
+export * from './services/session-artifact-persistence.js';
 export * from './services/sessionService.js';
+export {
+  decodeSessionTranscriptCursor,
+  encodeSessionTranscriptCursor,
+  InvalidSessionTranscriptCursorError,
+  SESSION_TRANSCRIPT_CURSOR_VERSION,
+  SESSION_TRANSCRIPT_DEFAULT_LIMIT,
+  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+  SESSION_TRANSCRIPT_MAX_LIMIT,
+  SessionTranscriptCursorCodec,
+  SessionTranscriptReader,
+  SessionTranscriptPageTooLargeError,
+  SessionTranscriptSnapshotUnavailableError,
+  SessionTranscriptTooLargeError,
+} from './services/session-transcript-reader.js';
+export type {
+  SessionTranscriptCursorState,
+  SessionTranscriptReadPageOptions,
+  SessionTranscriptRecordPage,
+} from './services/session-transcript-reader.js';
 export * from './utils/conversation-chain.js';
 export * from './services/sessionTitle.js';
 export * from './services/sleepInhibitor.js';
@@ -301,6 +324,7 @@ export * from './memory/store.js';
 export * from './memory/const.js';
 export * from './memory/channel-memory.js';
 export * from './memory/remember.js';
+export * from './memory/refresh.js';
 export * from './memory/dream.js';
 // Issue : write helper for hierarchical context files,
 // re-exported so the `qwen serve` daemon can mutate workspace memory

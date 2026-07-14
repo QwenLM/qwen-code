@@ -15,29 +15,58 @@ import { reviewCommand } from './review.js';
 // can't silently re-add `deterministic`, drop one of the others, or let the
 // `describe` / demand text drift.
 describe('reviewCommand', () => {
-  function registeredSubcommands(): string[] {
+  function inspectBuilder(): { names: string[]; demandMessage: string } {
     const names: string[] = [];
+    let demandMessage = '';
     const stub = {
       command: (m: CommandModule) => {
         names.push(String(m.command).split(' ')[0]);
         return stub;
       },
-      demandCommand: () => stub,
+      demandCommand: (_min: number, msg: string) => {
+        demandMessage = msg;
+        return stub;
+      },
       version: () => stub,
     } as unknown as Argv;
     (reviewCommand.builder as (y: Argv) => Argv)(stub);
-    return names;
+    return { names, demandMessage };
+  }
+
+  function registeredSubcommands(): string[] {
+    return inspectBuilder().names;
   }
 
   it('registers exactly the expected internal helper subcommands', () => {
     expect(registeredSubcommands()).toEqual([
+      'parse-args',
       'fetch-pr',
+      'capture-local',
+      'plan-diff',
       'pr-context',
       'load-rules',
+      'agent-prompt',
+      'resolve-anchors',
+      'check-coverage',
       'presubmit',
-      'post-suggestions',
+      'test-efficacy',
+      'compose-review',
+      'submit',
       'cleanup',
     ]);
+  });
+
+  it('the demandCommand message names every registered subcommand', () => {
+    // The error message is the one place that enumerates the interface for
+    // a user who typed `qwen review` bare; it once omitted plan-diff.
+    const { names, demandMessage } = inspectBuilder();
+    for (const name of names) {
+      expect(demandMessage).toContain(name);
+    }
+  });
+
+  it('does not register the removed `post-suggestions` subcommand', () => {
+    expect(registeredSubcommands()).not.toContain('post-suggestions');
   });
 
   it('does not register the removed `deterministic` subcommand', () => {

@@ -18,6 +18,14 @@ import {
   MAX_CLIENT_ID_LENGTH,
 } from './request-helpers.js';
 
+function decodePathSegment(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 // Route handlers are split across `routes/*.ts`; any added or renamed route
 // that needs daemon telemetry must keep these patterns in sync.
 export function resolveDaemonTelemetryRoute(
@@ -34,6 +42,13 @@ export function resolveDaemonTelemetryRoute(
   }
   if (req.method === 'GET' && path === '/daemon/status') {
     return { route: 'GET /daemon/status' };
+  }
+  const rewindSnapshots = path.match(/^\/session\/([^/]+)\/rewind\/snapshots$/);
+  if (rewindSnapshots?.[1] && req.method === 'GET') {
+    return {
+      route: 'GET /session/:id/rewind/snapshots',
+      sessionId: rewindSnapshots[1],
+    };
   }
   const sessionAction = path.match(
     /^\/session\/([^/]+)\/(load|resume|prompt|cancel|recap|btw|mid-turn-message|model|shell|detach|rewind|approval-mode|language|a2ui-action)$/,
@@ -117,6 +132,118 @@ export function resolveDaemonTelemetryRoute(
   if (req.method === 'GET' && /^\/workspaces\/[^/]+\/sessions$/.test(path)) {
     return { route: 'GET /workspace/:id/sessions' };
   }
+  const workspaceTranscript = path.match(
+    /^\/workspaces\/[^/]+\/session\/([^/]+)\/transcript$/,
+  );
+  if (workspaceTranscript?.[1] && req.method === 'GET') {
+    return {
+      route: 'GET /workspaces/:workspace/session/:id/transcript',
+      sessionId: workspaceTranscript[1],
+    };
+  }
+  const pluralWorkspacePrefix = /^\/workspaces\/[^/]+/;
+  if (pluralWorkspacePrefix.test(path)) {
+    const suffix = path.replace(pluralWorkspacePrefix, '/workspace');
+    if (req.method === 'GET') {
+      if (
+        suffix === '/workspace/mcp' ||
+        suffix === '/workspace/skills' ||
+        suffix === '/workspace/tools' ||
+        suffix === '/workspace/providers' ||
+        suffix === '/workspace/env' ||
+        suffix === '/workspace/preflight' ||
+        suffix === '/workspace/hooks' ||
+        suffix === '/workspace/settings' ||
+        suffix === '/workspace/permissions' ||
+        suffix === '/workspace/trust' ||
+        suffix === '/workspace/memory' ||
+        suffix === '/workspace/agents'
+      ) {
+        return { route: `GET ${suffix}` };
+      }
+      if (/^\/workspace\/agents\/[^/]+$/.test(suffix)) {
+        return { route: 'GET /workspace/agents/:agentType' };
+      }
+      if (suffix === '/workspace/file') return { route: 'GET /file' };
+      if (suffix === '/workspace/file/bytes') {
+        return { route: 'GET /file/bytes' };
+      }
+      if (suffix === '/workspace/stat') return { route: 'GET /stat' };
+      if (suffix === '/workspace/list') return { route: 'GET /list' };
+      if (suffix === '/workspace/glob') return { route: 'GET /glob' };
+      if (/^\/workspace\/mcp\/[^/]+\/tools$/.test(suffix)) {
+        return { route: 'GET /workspace/mcp/:server/tools' };
+      }
+      if (/^\/workspace\/mcp\/[^/]+\/resources$/.test(suffix)) {
+        return { route: 'GET /workspace/mcp/:server/resources' };
+      }
+    }
+    if (req.method === 'POST') {
+      if (
+        suffix === '/workspace/settings' ||
+        suffix === '/workspace/permissions' ||
+        suffix === '/workspace/trust/request' ||
+        suffix === '/workspace/init' ||
+        suffix === '/workspace/reload' ||
+        suffix === '/workspace/file/write' ||
+        suffix === '/workspace/file/edit' ||
+        suffix === '/workspace/mcp/servers' ||
+        suffix === '/workspace/memory' ||
+        suffix === '/workspace/agents' ||
+        suffix === '/workspace/sessions/delete' ||
+        suffix === '/workspace/sessions/archive' ||
+        suffix === '/workspace/sessions/unarchive' ||
+        suffix === '/workspace/session-groups'
+      ) {
+        return { route: `POST ${suffix}` };
+      }
+      if (/^\/workspace\/tools\/[^/]+\/enable$/.test(suffix)) {
+        return { route: 'POST /workspace/tools/:name/enable' };
+      }
+      if (/^\/workspace\/mcp\/[^/]+\/restart$/.test(suffix)) {
+        return { route: 'POST /workspace/mcp/:server/restart' };
+      }
+      if (/^\/workspace\/agents\/[^/]+$/.test(suffix)) {
+        return { route: 'POST /workspace/agents/:agentType' };
+      }
+      if (
+        /^\/workspace\/mcp\/[^/]+\/(enable|disable|authenticate|clear-auth)$/.test(
+          suffix,
+        )
+      ) {
+        return {
+          route: `POST /workspace/mcp/:server/${suffix.split('/').at(-1)}`,
+        };
+      }
+    }
+    if (
+      req.method === 'DELETE' &&
+      /^\/workspace\/mcp\/servers\/[^/]+$/.test(suffix)
+    ) {
+      return { route: 'DELETE /workspace/mcp/servers/:name' };
+    }
+    if (
+      req.method === 'DELETE' &&
+      /^\/workspace\/agents\/[^/]+$/.test(suffix)
+    ) {
+      return { route: 'DELETE /workspace/agents/:agentType' };
+    }
+    if (suffix === '/workspace/session-groups' && req.method === 'GET') {
+      return { route: 'GET /workspace/session-groups' };
+    }
+    if (
+      /^\/workspace\/session-groups\/[^/]+$/.test(suffix) &&
+      req.method === 'PATCH'
+    ) {
+      return { route: 'PATCH /workspace/session-groups/:groupId' };
+    }
+    if (
+      /^\/workspace\/session-groups\/[^/]+$/.test(suffix) &&
+      req.method === 'DELETE'
+    ) {
+      return { route: 'DELETE /workspace/session-groups/:groupId' };
+    }
+  }
   if (req.method === 'POST' && path === '/workspace/init') {
     return { route: 'POST /workspace/init' };
   }
@@ -183,6 +310,7 @@ export function daemonTelemetryMiddleware(
   // the OTel counter's scope, so the "requests" line reflects daemon API
   // traffic rather than static-asset or unrouted noise.
   recordRequest?: (durationMs: number, statusCode: number) => void,
+  resolveSessionWorkspaceCwd?: (sessionId: string) => string | undefined,
 ): (req: Request, res: Response, next: NextFunction) => void {
   const workspaceHashByCwd = new Map<string, string>();
   const resolveWorkspaceHash = (workspaceCwd: string): string => {
@@ -199,7 +327,18 @@ export function daemonTelemetryMiddleware(
       next();
       return;
     }
-    const workspaceHash = resolveWorkspaceHash(resolveWorkspaceCwd(req));
+    const resolveOwnerWorkspace =
+      route.route === 'GET /session/:id/rewind/snapshots' ||
+      route.route === 'POST /session/:id/rewind' ||
+      route.route === 'POST /session/:id/shell';
+    const sessionId = route.sessionId
+      ? decodePathSegment(route.sessionId)
+      : undefined;
+    const workspaceCwd =
+      (resolveOwnerWorkspace && sessionId
+        ? resolveSessionWorkspaceCwd?.(sessionId)
+        : undefined) ?? resolveWorkspaceCwd(req);
+    const workspaceHash = resolveWorkspaceHash(workspaceCwd);
     const rawClientId = req.get(CLIENT_ID_HEADER);
     const clientId =
       rawClientId !== undefined &&
@@ -214,7 +353,7 @@ export function daemonTelemetryMiddleware(
         method: req.method,
         route: route.route,
         workspaceHash,
-        ...(route.sessionId ? { sessionId: route.sessionId } : {}),
+        ...(sessionId ? { sessionId } : {}),
         ...(route.permissionRequestId
           ? { permissionRequestId: route.permissionRequestId }
           : {}),

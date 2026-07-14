@@ -39,6 +39,12 @@ import {
   readLastJsonStringFieldsSync,
 } from '../utils/sessionStorageUtils.js';
 import { getUsageOutputTokenCountForPromptEstimate } from './tokenEstimation.js';
+import {
+  isSessionArtifactRecord,
+  rebuildSessionArtifactSnapshot,
+  remapSessionArtifactPayloadForFork,
+  type RebuiltSessionArtifactSnapshot,
+} from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
 
 const debugLogger = createDebugLogger('SESSION');
@@ -80,6 +86,10 @@ export interface SessionListItem {
    * chose.
    */
   titleSource?: TitleSource;
+  /** Id of the session that spawned this one (via `create_sub_session`), if
+   * any. Read from the transcript's `parent_session` record. Absent for a
+   * top-level session. */
+  parentSessionId?: string;
   /** True when the item was read from the archive directory. */
   isArchived?: boolean;
 }
@@ -183,6 +193,8 @@ export interface ResumedSessionData {
   lastCompletedUuid: string | null;
   /** Deserialized file history snapshots for resume (enables /rewind across sessions) */
   fileHistorySnapshots?: FileHistorySnapshot[];
+  /** Persisted session artifact metadata reconstructed from JSONL records. */
+  artifactSnapshot?: RebuiltSessionArtifactSnapshot;
   /**
    * Breaks in the persisted parentUuid chain that were detected during
    * reconstruction (an earlier segment of history was physically lost and could
@@ -388,6 +400,40 @@ export class SessionService {
     }
   }
 
+  /**
+   * Reads the persisted `parentSessionId` for a single session (active or
+   * archived), or undefined when it has no parent. Used to re-seed a live entry
+   * on restore/resume so a restored sub-session's status still reports its
+   * lineage after a daemon restart. Best-effort: a read failure returns
+   * undefined rather than throwing — a missing link must never fail a restore.
+   */
+  async readParentSessionId(sessionId: string): Promise<string | undefined> {
+    for (const state of ['active', 'archived'] as const) {
+      const filePath = this.getSessionFilePath(sessionId, state);
+      try {
+        const records = await jsonl.readLines<ChatRecord>(
+          filePath,
+          MAX_PROMPT_SCAN_LINES,
+        );
+        if (records.length === 0) continue;
+        if (
+          !(await this.sessionBelongsToCurrentProject(
+            records[0].sessionId,
+            records[0].cwd,
+          ))
+        ) {
+          continue;
+        }
+        const parent = this.extractParentSessionIdFromRecords(records);
+        if (parent) return parent;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        this.warn(`readParentSessionId: failed to read ${sessionId}: ${error}`);
+      }
+    }
+    return undefined;
+  }
+
   async getSessionLocation(sessionId: string): Promise<SessionLocation> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
       return undefined;
@@ -427,6 +473,13 @@ export class SessionService {
         this.removeFileIfExists(sidecar);
       }
     }
+  }
+
+  private removeFileHistoryBackups(sessionId: string): void {
+    fs.rmSync(
+      path.join(Storage.getGlobalQwenDir(), FILE_HISTORY_DIR, sessionId),
+      { recursive: true, force: true },
+    );
   }
 
   private async removeSessionOrganization(sessionId: string): Promise<void> {
@@ -536,6 +589,30 @@ export class SessionService {
     const source =
       rawSource === 'auto' || rawSource === 'manual' ? rawSource : undefined;
     return { title, source };
+  }
+
+  /**
+   * Extracts the `parent_session` record's `parentSessionId` from records
+   * ALREADY read for the listing (the first {@link MAX_PROMPT_SCAN_LINES}), or
+   * undefined when the session has no parent. The record is written once right
+   * after the sub-session is created — before any prompt — so it is reliably
+   * within that window. No extra file open, unlike the title (which re-anchors
+   * at EOF and needs its own tail-then-head scan).
+   */
+  private extractParentSessionIdFromRecords(
+    records: ChatRecord[],
+  ): string | undefined {
+    for (const record of records) {
+      if (record.type === 'system' && record.subtype === 'parent_session') {
+        const payload = record.systemPayload as
+          | { parentSessionId?: unknown }
+          | undefined;
+        if (typeof payload?.parentSessionId === 'string') {
+          return payload.parentSessionId;
+        }
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -843,6 +920,7 @@ export class SessionService {
       const prompt = this.extractFirstPromptFromRecords(records);
 
       const titleInfo = this.readSessionTitleInfoFromFile(filePath, tailBuffer);
+      const parentSessionId = this.extractParentSessionIdFromRecords(records);
       items.push({
         sessionId: firstRecord.sessionId,
         cwd: firstRecord.cwd,
@@ -855,6 +933,7 @@ export class SessionService {
         // and `countSessionMessages` for the rationale.
         customTitle: titleInfo.title,
         titleSource: titleInfo.source,
+        ...(parentSessionId ? { parentSessionId } : {}),
         isArchived,
       });
     }
@@ -976,6 +1055,16 @@ export class SessionService {
     return { messages, gaps };
   }
 
+  private lastConversationRecordUuid(records: ChatRecord[]): string | null {
+    for (let index = records.length - 1; index >= 0; index--) {
+      const record = records[index];
+      if (record && !isSessionArtifactRecord(record)) {
+        return record.uuid;
+      }
+    }
+    return null;
+  }
+
   /**
    * Loads a session by its session ID.
    * Reconstructs the full conversation from tree-structured records.
@@ -1007,7 +1096,13 @@ export class SessionService {
     }
 
     // Reconstruct linear history
+    const leafUuid = this.lastConversationRecordUuid(records);
+    if (!leafUuid) {
+      return;
+    }
+
     const { messages, gaps } = this.reconstructHistory(records, {
+      leafUuid,
       detectGaps: true,
     });
     if (messages.length === 0) {
@@ -1073,6 +1168,14 @@ export class SessionService {
       fileHistorySnapshots.length > MAX_SNAPSHOTS
         ? fileHistorySnapshots.slice(-MAX_SNAPSHOTS)
         : fileHistorySnapshots;
+    const activeBranchRecords = includeActiveSideArtifactRecords(
+      records,
+      messages,
+    );
+    const artifactSnapshot = rebuildSessionArtifactSnapshot(
+      activeBranchRecords,
+      firstRecord.sessionId,
+    );
 
     return {
       conversation,
@@ -1080,6 +1183,7 @@ export class SessionService {
       lastCompletedUuid: lastMessage.uuid,
       fileHistorySnapshots:
         cappedSnapshots.length > 0 ? cappedSnapshots : undefined,
+      ...(artifactSnapshot ? { artifactSnapshot } : {}),
       historyGaps: gaps.length > 0 ? gaps : undefined,
     };
   }
@@ -1113,6 +1217,7 @@ export class SessionService {
           this.removeFileIfExists(archivedPath);
         }
         this.removeWorktreeSidecars(sessionId);
+        this.removeFileHistoryBackups(sessionId);
         return true;
       }
       const archivedPath = this.getSessionFilePath(sessionId, 'archived');
@@ -1125,6 +1230,7 @@ export class SessionService {
       }
       this.removeFileIfExists(archivedPath);
       this.removeWorktreeSidecars(sessionId);
+      this.removeFileHistoryBackups(sessionId);
       return true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -1433,8 +1539,24 @@ export class SessionService {
 
     // Copy only the active branch. Rewind leaves old records in the JSONL as
     // abandoned parentUuid branches; copying raw records would resurrect them.
-    // detectGaps stays off here so a fork copies exactly the active branch.
-    const { messages: sourceRecords } = this.reconstructHistory(records);
+    const leafUuid = this.lastConversationRecordUuid(records);
+    if (!leafUuid) {
+      throw new Error(`Source session not found or empty: ${sourceSessionId}`);
+    }
+    const { messages: activeMessages } = this.reconstructHistory(records, {
+      leafUuid,
+    });
+    const sourceRecords = includeActiveSideArtifactRecords(
+      records,
+      activeMessages,
+    ).filter(
+      // A fork is a fresh top-level session, NOT a `create_sub_session` child.
+      // Copying the source's `parent_session` record would make the fork report
+      // the original's parent as its own, so `?parentSessionId=` lists the fork
+      // as a direct child of a session that never spawned it. Drop the lineage.
+      (record) =>
+        !(record.type === 'system' && record.subtype === 'parent_session'),
+    );
     if (sourceRecords.length === 0) {
       throw new Error(`Source session not found or empty: ${sourceSessionId}`);
     }
@@ -1443,27 +1565,29 @@ export class SessionService {
     // clean linear descendant. `forkedFrom` captures the origin of each
     // message.
     let prevUuid: string | null = null;
+    const remappedArtifactIds = new Map<string, string>();
     const forked: ChatRecord[] = sourceRecords.map((record) => {
-      const systemPayload =
-        record.type === 'system' && record.subtype === 'file_history_snapshot'
-          ? remapFileHistorySnapshotPayload(
-              record.systemPayload,
-              sourceSessionId,
-              newSessionId,
-            )
-          : record.systemPayload;
+      const isArtifactRecord = isSessionArtifactRecord(record);
+      const systemPayload = remapSystemPayloadForFork(
+        record,
+        sourceSessionId,
+        newSessionId,
+        remappedArtifactIds,
+      );
       const next: ChatRecord = {
         ...record,
         sessionId: newSessionId,
         cwd: this.projectRoot,
         systemPayload,
-        parentUuid: prevUuid,
+        parentUuid: isArtifactRecord ? record.parentUuid : prevUuid,
         forkedFrom: {
           sessionId: sourceSessionId,
           messageUuid: record.uuid,
         },
       };
-      prevUuid = record.uuid;
+      if (!isArtifactRecord) {
+        prevUuid = record.uuid;
+      }
       return next;
     });
 
@@ -1513,13 +1637,34 @@ export class SessionService {
       }
       throw err;
     }
+    let targetComplete = false;
     try {
-      fs.writeFileSync(fd, body, { encoding: 'utf8' });
-    } finally {
-      fs.closeSync(fd);
-    }
+      try {
+        fs.writeFileSync(fd, body, { encoding: 'utf8' });
+      } finally {
+        fs.closeSync(fd);
+      }
 
-    await copyFileHistoryBackups(sourceSessionId, newSessionId);
+      await copyFileHistoryBackups(sourceSessionId, newSessionId);
+      targetComplete = true;
+    } finally {
+      if (!targetComplete) {
+        try {
+          this.removeFileIfExists(targetPath);
+        } catch (cleanupError) {
+          this.warn(
+            `forkSession: failed to clean up incomplete target ${newSessionId}: ${cleanupError}`,
+          );
+        }
+        try {
+          this.removeFileHistoryBackups(newSessionId);
+        } catch (cleanupError) {
+          this.warn(
+            `forkSession: failed to clean up file history for incomplete target ${newSessionId}: ${cleanupError}`,
+          );
+        }
+      }
+    }
 
     return { filePath: targetPath, copiedCount: forked.length };
   }
@@ -1935,6 +2080,118 @@ function remapFileHistorySnapshotPayload(
   } catch {
     return payload;
   }
+}
+
+function remapSystemPayloadForFork(
+  record: ChatRecord,
+  sourceSessionId: string,
+  newSessionId: string,
+  remappedArtifactIds: Map<string, string>,
+): ChatRecord['systemPayload'] {
+  if (record.type !== 'system') return record.systemPayload;
+  if (record.subtype === 'file_history_snapshot') {
+    return remapFileHistorySnapshotPayload(
+      record.systemPayload,
+      sourceSessionId,
+      newSessionId,
+    );
+  }
+  if (
+    record.subtype === 'session_artifact_event' ||
+    record.subtype === 'session_artifact_snapshot'
+  ) {
+    return remapSessionArtifactPayloadForFork(
+      record.systemPayload,
+      sourceSessionId,
+      newSessionId,
+      remappedArtifactIds,
+    ) as ChatRecord['systemPayload'];
+  }
+  return record.systemPayload;
+}
+
+function includeActiveSideArtifactRecords(
+  records: ChatRecord[],
+  activeRecords: ChatRecord[],
+): ChatRecord[] {
+  const activeByUuid = new Map(
+    activeRecords.map((record) => [record.uuid, record]),
+  );
+  const activeUuids = new Set(activeByUuid.keys());
+  const firstActiveUuid = activeRecords[0]?.uuid;
+  const firstActiveIndex =
+    firstActiveUuid === undefined
+      ? -1
+      : records.findIndex((record) => record.uuid === firstActiveUuid);
+  const nextActiveUuidByIndex = new Map<number, string>();
+  const nextBlockingUuidByIndex = new Map<number, string>();
+  let nextActiveUuid: string | undefined;
+  let nextBlockingUuid: string | undefined;
+  for (let index = records.length - 1; index >= 0; index--) {
+    if (nextActiveUuid !== undefined) {
+      nextActiveUuidByIndex.set(index, nextActiveUuid);
+    }
+    if (nextBlockingUuid !== undefined) {
+      nextBlockingUuidByIndex.set(index, nextBlockingUuid);
+    }
+    if (activeUuids.has(records[index]!.uuid)) {
+      nextActiveUuid = records[index]!.uuid;
+      nextBlockingUuid = undefined;
+    } else if (
+      !isSessionArtifactRecord(records[index]!) &&
+      !isTailNeutralSideRecord(records[index]!)
+    ) {
+      nextBlockingUuid = records[index]!.uuid;
+    }
+  }
+  const selected: ChatRecord[] = [];
+  const includedSideArtifactUuids = new Set<string>();
+  let previousActiveUuid: string | undefined;
+  for (let index = 0; index < records.length; index++) {
+    const record = records[index]!;
+    const activeRecord = activeByUuid.get(record.uuid);
+    if (activeRecord) {
+      selected.push(activeRecord);
+      activeByUuid.delete(record.uuid);
+      previousActiveUuid = record.uuid;
+      continue;
+    }
+    if (!isSessionArtifactRecord(record)) {
+      continue;
+    }
+    const nextUuid = nextActiveUuidByIndex.get(index);
+    const hasBlockingRecordBeforeNextActive =
+      nextBlockingUuidByIndex.has(index);
+    const isInActiveSegment =
+      !hasBlockingRecordBeforeNextActive &&
+      (nextUuid !== undefined
+        ? activeUuids.has(nextUuid)
+        : previousActiveUuid !== undefined &&
+          activeUuids.has(previousActiveUuid));
+    if (
+      record.parentUuid !== null &&
+      (activeUuids.has(record.parentUuid) ||
+        includedSideArtifactUuids.has(record.parentUuid)) &&
+      isInActiveSegment &&
+      (record.parentUuid === previousActiveUuid ||
+        includedSideArtifactUuids.has(record.parentUuid))
+    ) {
+      selected.push(record);
+      includedSideArtifactUuids.add(record.uuid);
+    } else if (
+      record.parentUuid === null &&
+      index < firstActiveIndex &&
+      isInActiveSegment
+    ) {
+      selected.push(record);
+      includedSideArtifactUuids.add(record.uuid);
+    }
+  }
+  return selected;
+}
+
+function isTailNeutralSideRecord(record: ChatRecord): boolean {
+  return record.type === 'system' && record.subtype === 'custom_title';
 }
 
 function collectFileHistorySnapshotPromptIds(

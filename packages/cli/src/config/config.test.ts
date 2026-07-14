@@ -22,6 +22,7 @@ import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+const mockUpdateHandler = vi.hoisted(() => vi.fn());
 const mockSessionServiceInstance = vi.hoisted(() => ({
   loadLastSession: vi.fn(),
   loadSession: vi.fn(),
@@ -37,6 +38,14 @@ vi.mock('../utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
   writeStdoutLine: mockWriteStdoutLine,
   clearScreen: vi.fn(),
+}));
+
+vi.mock('../commands/update.js', () => ({
+  updateCommand: {
+    command: 'update',
+    describe: 'mock update command',
+    handler: mockUpdateHandler,
+  },
 }));
 
 const createNativeLspServiceInstance = () => ({
@@ -268,6 +277,41 @@ describe('parseArguments', () => {
     const argv = await parseArguments();
     expect(argv.prompt).toBe('test prompt');
     expect(argv.promptInteractive).toBeUndefined();
+  });
+
+  it('registers update as an exiting subcommand', async () => {
+    process.argv = ['node', 'script.js', 'update'];
+    mockUpdateHandler.mockResolvedValue(undefined);
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockUpdateHandler).toHaveBeenCalled();
+    expect(mockExit).toHaveBeenCalledWith(0);
+    mockExit.mockRestore();
+  });
+
+  it('propagates non-zero exitCode from the update handler', async () => {
+    process.argv = ['node', 'script.js', 'update'];
+    mockUpdateHandler.mockImplementation(() => {
+      process.exitCode = 1;
+    });
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+      expect(mockUpdateHandler).toHaveBeenCalled();
+      expect(mockExit).toHaveBeenCalledWith(1);
+    } finally {
+      mockExit.mockRestore();
+      mockUpdateHandler.mockReset();
+      process.exitCode = undefined;
+    }
   });
 
   it('should allow --prompt-interactive without --prompt', async () => {
@@ -997,6 +1041,36 @@ describe('loadCliConfig', () => {
     ]);
   });
 
+  it('enables debug file logging for --debug when QWEN_DEBUG_LOG_FILE is unset', async () => {
+    delete process.env['QWEN_DEBUG_LOG_FILE'];
+    process.argv = ['node', 'script.js', '--debug'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(process.env['QWEN_DEBUG_LOG_FILE']).toBe('1');
+  });
+
+  it('preserves explicit opt-out when --debug is used', async () => {
+    process.env['QWEN_DEBUG_LOG_FILE'] = '0';
+    process.argv = ['node', 'script.js', '--debug'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(process.env['QWEN_DEBUG_LOG_FILE']).toBe('0');
+  });
+
+  it('leaves debug file logging unset outside --debug mode', async () => {
+    delete process.env['QWEN_DEBUG_LOG_FILE'];
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(process.env['QWEN_DEBUG_LOG_FILE']).toBeUndefined();
+  });
+
   it('should use configured context file name when settings.context.fileName is set', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -1063,6 +1137,28 @@ describe('loadCliConfig', () => {
     );
 
     expect(config.getAgentsSettings().maxParallelAgents).toBe(2);
+  });
+
+  it('passes tools.shell.defaultTimeoutMs from settings to core config', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { tools: { shell: { defaultTimeoutMs: 300000 } } },
+      argv,
+    );
+
+    expect(config.getShellDefaultTimeoutMs()).toBe(300000);
+  });
+
+  it('passes agents.builtin.exploreModel from settings to core config', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { agents: { builtin: { exploreModel: 'fast' } } },
+      argv,
+    );
+
+    expect(config.getAgentsSettings().builtin?.exploreModel).toBe('fast');
   });
 
   it('should ignore blank settings fallback models', async () => {

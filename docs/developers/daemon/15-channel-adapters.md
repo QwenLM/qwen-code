@@ -11,6 +11,12 @@ There are two current host modes:
 
 In daemon-managed mode, each channel maps inbound chat traffic to daemon sessions under a configurable `SessionScope` (`user`, `thread`, or `single`). The adapter delegates to `DaemonChannelBridge`, which delegates to the SDK's `DaemonSessionClient` (see [`13-sdk-daemon-client.md`](./13-sdk-daemon-client.md)). Channel workers remain primary-workspace only in Phase 2a, so every selected channel's `cwd` must resolve to the daemon primary workspace.
 
+### Webhook-triggered channel tasks
+
+Webhook-triggered tasks are hosted by `qwen serve` and executed inside the daemon-managed channel worker. The HTTP route validates the source and forwards a `ChannelWebhookTask` to the worker over IPC. The worker calls `ChannelBase.runWebhookTask()`, so adapters do not implement webhook parsing.
+
+Adapters still participate through proactive send support: `supportsProactiveSend()` tells the host whether a channel can send without an inbound message, `supportsProactiveTarget()` handles delivery limits for specific target shapes, and `pushProactive()` carries the outbound content.
+
 ## Responsibilities
 
 - Receive inbound messages from the channel's native transport (DingTalk WebSocket stream, WeChat HTTP long-poll, Telegram Bot long-poll, Feishu WebSocket or HTTP webhook).
@@ -162,6 +168,14 @@ sequenceDiagram
 - `shutdown()` closes every active session and the underlying transport (the channel's WebSocket / long-poll).
 - DingTalk's WebSocket stream supports server-push; WeChat's long-poll requires a backoff strategy on idle responses; Telegram's long-poll has a built-in `timeout` parameter.
 
+### Runtime selection and settings reload
+
+The long-lived `ChannelWorkerManager` owns the committed daemon selection and workspace-grouped supervisors. A daemon may boot without `--channel`; the first strict-gated `PUT /workspace/channel` dynamically loads the channel runtime, reserves the service pidfile, resolves workspace ownership, and starts the selected workers. `GET /workspace/channel` reads the manager snapshot and `DELETE /workspace/channel` stops it idempotently. SDK helpers are `getChannelWorkerControl()`, `setChannelWorkerSelection()`, and `stopChannelWorker()`; the CLI entry is `qwen channel set` plus remote `status` and `stop` variants.
+
+The daemon reads channel settings from `settings.json` when each worker starts (`packages/cli/src/commands/channel/daemon-worker.ts` → `loadSettings` → `loadChannelsConfig`). `POST /workspace/channel/reload` re-reads those settings and force-reconciles the committed selection. All lifecycle mutations share one FIFO lane. Unchanged workspace groups survive ordinary selection replacement; changed groups stop and start sequentially while the serve-owned PID lease remains held.
+
+If a replacement fails, newly started workers are stopped and old workers are restored before the request returns. A supervisor that cannot observe exit after SIGTERM and SIGKILL retains its child reference and fails stop; the manager keeps the PID lease and never starts a second worker. Webhook configuration and routing change only when selection commit succeeds. Runtime selections are process-local and disappear on daemon restart.
+
 ## Dependencies
 
 - `packages/channels/base/` — `ChannelBase`, `DaemonChannelBridge`, `types.ts` (`ChannelConfig`, `Envelope`, `SessionScope`, `ChannelPlugin`).
@@ -196,6 +210,10 @@ Channel-specific keys layer on top (DingTalk: `streamCredentials`; WeChat: `ilin
 - `packages/channels/base/src/DaemonChannelBridge.ts`
 - `packages/channels/base/src/ChannelBase.ts`
 - `packages/channels/base/src/types.ts`
+- `packages/cli/src/serve/channel-worker-manager.ts` (selection lifecycle + serialization)
+- `packages/cli/src/serve/channel-worker-group.ts` (workspace-differential reconcile)
+- `packages/cli/src/serve/channel-worker-supervisor.ts` (child supervision)
+- `packages/cli/src/serve/routes/workspace-channel-control.ts` (GET/PUT/DELETE/reload resource)
 - `packages/channels/dingtalk/src/DingtalkAdapter.ts`
 - `packages/channels/weixin/src/WeixinAdapter.ts`
 - `packages/channels/telegram/src/TelegramAdapter.ts`

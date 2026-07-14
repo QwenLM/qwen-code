@@ -3,6 +3,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, createRef, type RefObject } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { Message } from '../adapters/types';
+import {
+  WebShellCustomizationProvider,
+  type WebShellAssistantTurnFooterRenderInfo,
+  type WebShellCustomization,
+} from '../customization';
 import { I18nProvider } from '../i18n';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
@@ -15,17 +20,24 @@ vi.mock('../App', async () => {
 });
 vi.mock('./MessageItem', async () => {
   const React = await import('react');
+  const { useWebShellCustomization } = await import('../customization');
   return {
     MessageItem: ({
       message,
       showAssistantActions,
       isLocateFlashing,
+      assistantTurnFooterInfo,
     }: {
       message: Message;
       showAssistantActions?: boolean;
       isLocateFlashing?: boolean;
-    }) =>
-      React.createElement(
+      assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
+    }) => {
+      const { renderAssistantTurnFooter } = useWebShellCustomization();
+      const assistantTurnFooter = assistantTurnFooterInfo
+        ? renderAssistantTurnFooter?.(assistantTurnFooterInfo)
+        : undefined;
+      return React.createElement(
         'div',
         {
           'data-testid': `msg-${message.id}`,
@@ -38,7 +50,9 @@ vi.mock('./MessageItem', async () => {
               'data-testid': `disclosure-${message.id}`,
             })
           : null,
-      ),
+        assistantTurnFooter,
+      );
+    },
   };
 });
 vi.mock('./messages/tools/ParallelAgentsGroup', async () => {
@@ -121,6 +135,7 @@ afterEach(() => {
 type UserMessage = Extract<Message, { role: 'user' }>;
 type ToolGroupMessage = Extract<Message, { role: 'tool_group' }>;
 type AssistantMessage = Extract<Message, { role: 'assistant' }>;
+type SystemMessage = Extract<Message, { role: 'system' }>;
 type ThinkingMessage = Extract<Message, { role: 'thinking' }>;
 type PlanMessage = Extract<Message, { role: 'plan' }>;
 
@@ -159,6 +174,13 @@ const asstMsg = (id: string): AssistantMessage => ({
   role: 'assistant',
   content: 'answer',
 });
+const systemMsg = (id: string): SystemMessage => ({
+  id,
+  role: 'system',
+  content: 'cancelled',
+  variant: 'warning',
+  source: 'prompt_cancelled',
+});
 const thinkingMsg = (id: string): ThinkingMessage => ({
   id,
   role: 'thinking',
@@ -179,6 +201,7 @@ function mount(
     catchingUp?: boolean;
     isResponding?: boolean;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
+    customization?: WebShellCustomization;
   } = {},
 ): HTMLElement {
   const container = document.createElement('div');
@@ -187,16 +210,18 @@ function mount(
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <MessageList
-          ref={ref}
-          messages={messages}
-          pendingApproval={null}
-          hideSessionTimeline={opts.hideSessionTimeline}
-          loadingTranscript={opts.loadingTranscript}
-          catchingUp={opts.catchingUp}
-          isResponding={opts.isResponding}
-          onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
-        />
+        <WebShellCustomizationProvider value={opts.customization ?? {}}>
+          <MessageList
+            ref={ref}
+            messages={messages}
+            pendingApproval={null}
+            hideSessionTimeline={opts.hideSessionTimeline}
+            loadingTranscript={opts.loadingTranscript}
+            catchingUp={opts.catchingUp}
+            isResponding={opts.isResponding}
+            onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
+          />
+        </WebShellCustomizationProvider>
       </I18nProvider>,
     );
   });
@@ -252,6 +277,10 @@ const toggleRow = (c: HTMLElement, turnId: string) =>
   toggle(c, turnId).closest('[role="button"]') as HTMLElement;
 const click = (el: Element) =>
   act(() => el.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+const focusIn = (el: Element) =>
+  act(() => el.dispatchEvent(new FocusEvent('focusin', { bubbles: true })));
+const focusOut = (el: Element) =>
+  act(() => el.dispatchEvent(new FocusEvent('focusout', { bubbles: true })));
 const nextFrame = () =>
   act(
     () =>
@@ -337,6 +366,106 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(text).not.toContain('13s');
   });
 
+  it('renders custom footer on the completed turn final assistant message', () => {
+    const renderAssistantTurnFooter = vi.fn(({ turnId, message }) => (
+      <span data-testid="assistant-turn-footer">
+        {turnId}:{message.id}:{message.content}
+      </span>
+    ));
+
+    const c = mount([userMsg('u1'), toolMsg('g1'), asstMsg('a1')], undefined, {
+      customization: { renderAssistantTurnFooter },
+    });
+
+    expect(renderAssistantTurnFooter).toHaveBeenCalledWith({
+      turnId: 'u1',
+      message: {
+        id: 'a1',
+        content: 'answer',
+        isStreaming: undefined,
+        timestamp: undefined,
+      },
+    });
+    expect(
+      c.querySelector('[data-testid="assistant-turn-footer"]')?.textContent,
+    ).toBe('u1:a1:answer');
+  });
+
+  it('maps each completed turn footer to its own turn id', () => {
+    const renderAssistantTurnFooter = vi.fn(({ turnId, message }) => (
+      <span data-testid={`assistant-turn-footer-${message.id}`}>
+        {turnId}:{message.id}
+      </span>
+    ));
+
+    const c = mount(
+      [userMsg('u1'), asstMsg('a1'), userMsg('u2'), asstMsg('a2')],
+      undefined,
+      {
+        customization: { renderAssistantTurnFooter },
+      },
+    );
+
+    expect(renderAssistantTurnFooter).toHaveBeenCalledTimes(2);
+    expect(renderAssistantTurnFooter.mock.calls.map(([info]) => info)).toEqual([
+      {
+        turnId: 'u1',
+        message: {
+          id: 'a1',
+          content: 'answer',
+          isStreaming: undefined,
+          timestamp: undefined,
+        },
+      },
+      {
+        turnId: 'u2',
+        message: {
+          id: 'a2',
+          content: 'answer',
+          isStreaming: undefined,
+          timestamp: undefined,
+        },
+      },
+    ]);
+    expect(
+      c.querySelector('[data-testid="assistant-turn-footer-a1"]')?.textContent,
+    ).toBe('u1:a1');
+    expect(
+      c.querySelector('[data-testid="assistant-turn-footer-a2"]')?.textContent,
+    ).toBe('u2:a2');
+  });
+
+  it('does not render the custom assistant footer for the active streaming turn', () => {
+    const renderAssistantTurnFooter = vi.fn(() => (
+      <span data-testid="assistant-turn-footer">footer</span>
+    ));
+
+    const c = mount(
+      [userMsg('u1'), { ...asstMsg('a1'), isStreaming: true }],
+      undefined,
+      {
+        isResponding: true,
+        customization: { renderAssistantTurnFooter },
+      },
+    );
+
+    expect(renderAssistantTurnFooter).not.toHaveBeenCalled();
+    expect(c.querySelector('[data-testid="assistant-turn-footer"]')).toBeNull();
+  });
+
+  it('does not render the custom assistant footer when a turn has no final assistant message', () => {
+    const renderAssistantTurnFooter = vi.fn(() => (
+      <span data-testid="assistant-turn-footer">footer</span>
+    ));
+
+    const c = mount([userMsg('u1'), systemMsg('s1')], undefined, {
+      customization: { renderAssistantTurnFooter },
+    });
+
+    expect(renderAssistantTurnFooter).not.toHaveBeenCalled();
+    expect(c.querySelector('[data-testid="assistant-turn-footer"]')).toBeNull();
+  });
+
   it('shows live elapsed time for a running step-less turn', () => {
     vi.useFakeTimers();
     vi.setSystemTime(10_000);
@@ -398,11 +527,9 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(entries[0]?.getAttribute('data-node-kinds')).toBe(
       'thought,commentary,tool,plan',
     );
-    const details = Array.from(
-      c.querySelectorAll('[data-testid="session-timeline-detail"]'),
-    );
-    expect(details).toHaveLength(4);
-    expect(details[0]?.getAttribute('data-detail')).toBe('answer');
+    expect(
+      document.querySelectorAll('[data-testid="session-timeline-detail"]'),
+    ).toHaveLength(0);
     const buttons = Array.from(
       c.querySelectorAll<HTMLButtonElement>(
         '[data-testid="session-timeline-entry"] button',
@@ -422,6 +549,367 @@ describe('MessageList — turn collapse (DOM)', () => {
     rectSpy.mockRestore();
   });
 
+  it('keeps a long session timeline scrollable and preserves first-entry selection', async () => {
+    const rectSpy = mockMessageListWidth(1200);
+    const offsetTopSpy = vi
+      .spyOn(HTMLElement.prototype, 'offsetTop', 'get')
+      .mockImplementation(function (this: HTMLElement) {
+        const index = this.getAttribute('data-timeline-index');
+        return index === null ? 0 : 240 + Number(index) * 60;
+      });
+    const offsetHeightSpy = vi
+      .spyOn(HTMLElement.prototype, 'offsetHeight', 'get')
+      .mockImplementation(function (this: HTMLElement) {
+        return this.hasAttribute('data-timeline-index') ? 3 : 0;
+      });
+    const clientHeightSpy = vi
+      .spyOn(HTMLElement.prototype, 'clientHeight', 'get')
+      .mockImplementation(function (this: HTMLElement) {
+        return this.getAttribute('data-testid') === 'session-timeline-viewport'
+          ? 220
+          : 0;
+      });
+    const scrollHeightSpy = vi
+      .spyOn(HTMLElement.prototype, 'scrollHeight', 'get')
+      .mockImplementation(function (this: HTMLElement) {
+        return this.getAttribute('data-testid') === 'session-timeline-viewport'
+          ? 5200
+          : 0;
+      });
+    const scrollIntoView = vi
+      .spyOn(Element.prototype, 'scrollIntoView')
+      .mockImplementation(() => {});
+
+    try {
+      const c = mount(simpleTurns(80));
+      await nextFrame();
+
+      const viewport = c.querySelector<HTMLElement>(
+        '[data-testid="session-timeline-viewport"]',
+      );
+      expect(viewport).not.toBeNull();
+      expect(viewport!.scrollTop).toBeGreaterThan(0);
+      const entries = Array.from(
+        c.querySelectorAll('[data-testid="session-timeline-entry"]'),
+      );
+      expect(entries).toHaveLength(80);
+      expect(entries[0]?.getAttribute('data-turn-id')).toBe('u1');
+      expect(entries[0]?.getAttribute('data-timeline-index')).toBe('0');
+      expect(entries[79]?.getAttribute('data-turn-id')).toBe('u80');
+      expect(entries[79]?.getAttribute('data-timeline-index')).toBe('79');
+      expect(
+        entries[0]?.closest('[data-testid="session-timeline-viewport"]'),
+      ).toBe(viewport);
+
+      click(entries[0]!.querySelector('button')!);
+
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center' });
+    } finally {
+      scrollIntoView.mockRestore();
+      scrollHeightSpy.mockRestore();
+      clientHeightSpy.mockRestore();
+      offsetHeightSpy.mockRestore();
+      offsetTopSpy.mockRestore();
+      rectSpy.mockRestore();
+    }
+  });
+
+  it('renders timeline details as one body-level tooltip outside the timeline stack', async () => {
+    const rectSpy = mockMessageListWidth(1200);
+    const c = mount(simpleTurns(4));
+    await nextFrame();
+
+    const firstEntryButton = c.querySelector<HTMLButtonElement>(
+      '[data-turn-id="u1"] button',
+    );
+    expect(firstEntryButton).not.toBeNull();
+    focusIn(firstEntryButton!);
+
+    const detail = document.querySelector(
+      '[data-testid="session-timeline-detail"]',
+    );
+    expect(detail).not.toBeNull();
+    expect(detail?.getAttribute('data-detail')).toBe('answer');
+    expect(
+      detail?.closest('[data-testid="session-timeline-viewport"]'),
+    ).toBeNull();
+    expect(detail?.closest('[data-testid="session-timeline"]')).toBeNull();
+    expect(detail?.parentElement).toBe(document.body);
+    expect(c.contains(detail!)).toBe(false);
+    expect(detail?.id).toBe('session-timeline-detail-tooltip');
+    expect(firstEntryButton?.getAttribute('aria-describedby')).toBe(
+      'session-timeline-detail-tooltip',
+    );
+
+    focusOut(firstEntryButton!);
+
+    expect(
+      document.querySelector('[data-testid="session-timeline-detail"]'),
+    ).toBeNull();
+    expect(firstEntryButton?.hasAttribute('aria-describedby')).toBe(false);
+    rectSpy.mockRestore();
+  });
+
+  it('clamps timeline details to the viewport edge', async () => {
+    const originalInnerHeight = window.innerHeight;
+    const rect = (
+      width: number,
+      height: number,
+      top: number,
+      left = 0,
+    ): DOMRect => ({
+      width,
+      height,
+      top,
+      right: left + width,
+      bottom: top + height,
+      left,
+      x: left,
+      y: top,
+      toJSON: () => ({}),
+    });
+    let detailRect = rect(240, 50, -5, 80);
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        if (this.getAttribute('data-testid') === 'session-timeline-detail') {
+          return detailRect;
+        }
+        const item = this.closest('[data-testid="session-timeline-entry"]');
+        if (item) return rect(58, 16, 20, 12);
+        return rect(1200, 600, 0);
+      });
+    Object.defineProperty(window, 'innerHeight', {
+      configurable: true,
+      value: 100,
+    });
+    const c = mount(simpleTurns(4));
+    await nextFrame();
+
+    try {
+      const firstEntryButton = c.querySelector<HTMLButtonElement>(
+        '[data-turn-id="u1"] button',
+      );
+      expect(firstEntryButton).not.toBeNull();
+      focusIn(firstEntryButton!);
+
+      let detail = document.querySelector<HTMLElement>(
+        '[data-testid="session-timeline-detail"]',
+      );
+      expect(detail?.style.top).toBe('45px');
+
+      focusOut(firstEntryButton!);
+      detailRect = rect(240, 100, 30, 80);
+      focusIn(firstEntryButton!);
+
+      detail = document.querySelector<HTMLElement>(
+        '[data-testid="session-timeline-detail"]',
+      );
+      expect(detail?.style.top).toBe('-14px');
+    } finally {
+      Object.defineProperty(window, 'innerHeight', {
+        configurable: true,
+        value: originalInnerHeight,
+      });
+      rectSpy.mockRestore();
+    }
+  });
+
+  it('keeps timeline details during current-turn centering but hides them on user scroll', async () => {
+    const rectSpy = mockMessageListWidth(1200);
+    const offsetTopSpy = vi
+      .spyOn(HTMLElement.prototype, 'offsetTop', 'get')
+      .mockImplementation(function (this: HTMLElement) {
+        const index = this.getAttribute('data-timeline-index');
+        return index === null ? 0 : 240 + Number(index) * 60;
+      });
+    const offsetHeightSpy = vi
+      .spyOn(HTMLElement.prototype, 'offsetHeight', 'get')
+      .mockImplementation(function (this: HTMLElement) {
+        return this.hasAttribute('data-timeline-index') ? 3 : 0;
+      });
+    const clientHeightSpy = vi
+      .spyOn(HTMLElement.prototype, 'clientHeight', 'get')
+      .mockImplementation(function (this: HTMLElement) {
+        return this.getAttribute('data-testid') === 'session-timeline-viewport'
+          ? 220
+          : 0;
+      });
+    const scrollHeightSpy = vi
+      .spyOn(HTMLElement.prototype, 'scrollHeight', 'get')
+      .mockImplementation(function (this: HTMLElement) {
+        return this.getAttribute('data-testid') === 'session-timeline-viewport'
+          ? 1200
+          : 0;
+      });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    try {
+      renderInto(root, simpleTurns(3));
+      await nextFrame();
+
+      renderInto(root, simpleTurns(80));
+      const viewport = container.querySelector<HTMLElement>(
+        '[data-testid="session-timeline-viewport"]',
+      );
+      expect(viewport).not.toBeNull();
+      expect(viewport!.scrollTop).toBeGreaterThan(0);
+
+      const currentButton = container.querySelector<HTMLButtonElement>(
+        '[data-turn-id="u80"] button',
+      );
+      expect(currentButton).not.toBeNull();
+      focusIn(currentButton!);
+      expect(
+        document.querySelector('[data-testid="session-timeline-detail"]'),
+      ).not.toBeNull();
+
+      act(() =>
+        viewport!.dispatchEvent(new Event('scroll', { bubbles: true })),
+      );
+      expect(
+        document.querySelector('[data-testid="session-timeline-detail"]'),
+      ).not.toBeNull();
+
+      await nextFrame();
+      act(() =>
+        viewport!.dispatchEvent(new Event('scroll', { bubbles: true })),
+      );
+      expect(
+        document.querySelector('[data-testid="session-timeline-detail"]'),
+      ).toBeNull();
+    } finally {
+      scrollHeightSpy.mockRestore();
+      clientHeightSpy.mockRestore();
+      offsetHeightSpy.mockRestore();
+      offsetTopSpy.mockRestore();
+      rectSpy.mockRestore();
+    }
+  });
+
+  it('hides timeline details when the focused marker moves out of view', async () => {
+    let markerOffset = 0;
+    const rect = (
+      width: number,
+      height: number,
+      top: number,
+      left = 0,
+    ): DOMRect => ({
+      width,
+      height,
+      top,
+      right: left + width,
+      bottom: top + height,
+      left,
+      x: left,
+      y: top,
+      toJSON: () => ({}),
+    });
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        if (this.getAttribute('data-testid') === 'session-timeline-viewport') {
+          return rect(70, 220, 0);
+        }
+        const item = this.closest('[data-testid="session-timeline-entry"]');
+        if (item) {
+          const index = Number(item.getAttribute('data-timeline-index'));
+          return rect(58, 16, 40 + index * 60 - markerOffset);
+        }
+        return rect(1200, 600, 0);
+      });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    try {
+      renderInto(root, simpleTurns(4));
+      await nextFrame();
+
+      const focusedButton = container.querySelector<HTMLButtonElement>(
+        '[data-turn-id="u2"] button',
+      );
+      expect(focusedButton).not.toBeNull();
+      focusIn(focusedButton!);
+      expect(
+        document.querySelector('[data-testid="session-timeline-detail"]'),
+      ).not.toBeNull();
+
+      markerOffset = 700;
+      act(() => window.dispatchEvent(new Event('resize')));
+
+      expect(
+        document.querySelector('[data-testid="session-timeline-detail"]'),
+      ).toBeNull();
+      expect(
+        container
+          .querySelector<HTMLButtonElement>('[data-turn-id="u2"] button')
+          ?.hasAttribute('aria-describedby'),
+      ).toBe(false);
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
+  it('keeps timeline details when focus scrolls the timeline viewport', async () => {
+    const rectSpy = mockMessageListWidth(1200);
+    const c = mount(simpleTurns(4));
+    await nextFrame();
+
+    const firstEntryButton = c.querySelector<HTMLButtonElement>(
+      '[data-turn-id="u1"] button',
+    );
+    const viewport = c.querySelector<HTMLElement>(
+      '[data-testid="session-timeline-viewport"]',
+    );
+    expect(firstEntryButton).not.toBeNull();
+    expect(viewport).not.toBeNull();
+    focusIn(firstEntryButton!);
+    expect(
+      document.querySelector('[data-testid="session-timeline-detail"]'),
+    ).not.toBeNull();
+
+    act(() => viewport!.dispatchEvent(new Event('scroll', { bubbles: true })));
+
+    expect(
+      document.querySelector('[data-testid="session-timeline-detail"]'),
+    ).not.toBeNull();
+    expect(firstEntryButton?.hasAttribute('aria-describedby')).toBe(true);
+    rectSpy.mockRestore();
+  });
+
+  it('hides timeline details when the user scrolls the timeline viewport', async () => {
+    const rectSpy = mockMessageListWidth(1200);
+    const c = mount(simpleTurns(4));
+    await nextFrame();
+
+    const firstEntryButton = c.querySelector<HTMLButtonElement>(
+      '[data-turn-id="u1"] button',
+    );
+    const viewport = c.querySelector<HTMLElement>(
+      '[data-testid="session-timeline-viewport"]',
+    );
+    expect(firstEntryButton).not.toBeNull();
+    expect(viewport).not.toBeNull();
+    focusIn(firstEntryButton!);
+    expect(
+      document.querySelector('[data-testid="session-timeline-detail"]'),
+    ).not.toBeNull();
+
+    await nextFrame();
+    act(() => viewport!.dispatchEvent(new Event('scroll', { bubbles: true })));
+
+    expect(
+      document.querySelector('[data-testid="session-timeline-detail"]'),
+    ).toBeNull();
+    expect(firstEntryButton?.hasAttribute('aria-describedby')).toBe(false);
+    rectSpy.mockRestore();
+  });
+
   it('renders scheduled task marker when source is present', async () => {
     const rectSpy = mockMessageListWidth(1200);
     const c = mount([
@@ -438,8 +926,14 @@ describe('MessageList — turn collapse (DOM)', () => {
     ]);
     await nextFrame();
 
-    const scheduledDetail = c.querySelector(
-      '[data-turn-id="u1"] [data-testid="session-timeline-detail"]',
+    const scheduledButton = c.querySelector<HTMLButtonElement>(
+      '[data-turn-id="u1"] button',
+    );
+    expect(scheduledButton).not.toBeNull();
+    focusIn(scheduledButton!);
+
+    const scheduledDetail = document.querySelector(
+      '[data-testid="session-timeline-detail"]',
     );
     expect(scheduledDetail?.getAttribute('data-scheduled-task')).toBe('true');
     expect(

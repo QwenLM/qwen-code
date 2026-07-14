@@ -15,6 +15,10 @@ if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
 
+if (!document.execCommand) {
+  document.execCommand = () => true;
+}
+
 interface MockTask {
   id: string;
   name: string | null;
@@ -26,7 +30,11 @@ interface MockTask {
   lastFiredAt: number | null;
   nextRunAt: number | null;
   sessionId: string | null;
-  runs: Array<{ at: number; kind?: 'scheduled' | 'catch-up' }>;
+  runs: Array<{
+    at: number;
+    kind?: 'scheduled' | 'catch-up';
+    sessionId?: string;
+  }>;
 }
 
 const { actions } = vi.hoisted(() => ({
@@ -36,6 +44,9 @@ const { actions } = vi.hoisted(() => ({
     updateScheduledTask: vi.fn(),
     runScheduledTask: vi.fn(),
     deleteScheduledTask: vi.fn(),
+    loadExtensionsStatus: vi.fn(),
+    loadSkillsStatus: vi.fn(),
+    loadMcpStatus: vi.fn(),
   },
 }));
 
@@ -63,6 +74,15 @@ async function mount(
   actions.listScheduledTasks.mockResolvedValue(tasks);
   actions.updateScheduledTask.mockResolvedValue(tasks[0]);
   actions.runScheduledTask.mockResolvedValue(tasks[0]);
+  actions.loadExtensionsStatus.mockResolvedValue({
+    extensions: [],
+  });
+  actions.loadSkillsStatus.mockResolvedValue({
+    skills: [],
+  });
+  actions.loadMcpStatus.mockResolvedValue({
+    servers: [],
+  });
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -104,6 +124,39 @@ function findButton(label: string): HTMLButtonElement | undefined {
   );
 }
 
+function findButtonContaining(label: string): HTMLButtonElement | undefined {
+  return Array.from(document.querySelectorAll('button')).find((b) =>
+    b.textContent?.includes(label),
+  );
+}
+
+// The frequency picker is the (only) <select> with a weekdays option.
+function findFrequencySelect(): HTMLSelectElement | undefined {
+  return Array.from(document.querySelectorAll('select')).find(
+    (s) => !!s.querySelector('option[value="weekdays"]'),
+  );
+}
+
+function deferred<T = unknown>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+function dispatchClipboardEvent(
+  target: Element,
+  type: 'copy' | 'cut',
+  clipboardData: { setData: ReturnType<typeof vi.fn> },
+) {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(event, 'clipboardData', { value: clipboardData });
+  act(() => {
+    target.dispatchEvent(event);
+  });
+}
+
 afterEach(() => {
   act(() => root?.unmount());
   container?.remove();
@@ -128,6 +181,19 @@ const baseTask = (over: Partial<MockTask>): MockTask => ({
 });
 
 describe('ScheduledTasksDialog editing', () => {
+  it('keeps the prompt placeholder outside the editable textbox', async () => {
+    await mount([]);
+
+    click(findButton('New scheduled task'));
+
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]');
+    expect(prompt?.textContent).toBe('');
+    expect(prompt?.getAttribute('aria-placeholder')).toBe(
+      'What should this task do?',
+    );
+    expect(document.body.textContent).toContain('What should this task do?');
+  });
+
   it('prefills the form from the task and saves via updateScheduledTask', async () => {
     await mount([baseTask({})]);
 
@@ -137,11 +203,11 @@ describe('ScheduledTasksDialog editing', () => {
     // The cron reverses onto the structured pickers (weekdays @ 12:30) and the
     // name/prompt are prefilled — not left blank as they would be for create.
     const name = document.querySelector<HTMLInputElement>('input[type="text"]');
-    const prompt = document.querySelector<HTMLTextAreaElement>('textarea');
-    const frequency = document.querySelector<HTMLSelectElement>('select');
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]');
+    const frequency = findFrequencySelect();
     const time = document.querySelector<HTMLInputElement>('input[type="time"]');
     expect(name?.value).toBe('Digest');
-    expect(prompt?.value).toBe('summarize the day');
+    expect(prompt?.textContent).toBe('summarize the day');
     expect(frequency?.value).toBe('weekdays');
     expect(time?.value).toBe('12:30');
 
@@ -150,19 +216,372 @@ describe('ScheduledTasksDialog editing', () => {
     click(findButton('Save'));
     await flush();
 
-    expect(actions.updateScheduledTask).toHaveBeenCalledWith('t1', {
-      cron: '30 12 * * 1-5',
-      prompt: 'summarize the day',
-      name: 'Digest',
-    });
+    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+      't1',
+      {
+        cron: '30 12 * * 1-5',
+        prompt: 'summarize the day',
+        name: 'Digest',
+      },
+      undefined,
+    );
     expect(actions.createScheduledTask).not.toHaveBeenCalled();
+  });
+
+  it('renders saved prompt references as inline tags when editing', async () => {
+    const promptText = '@mcp:amap-maps3 /agent-reproduce-align @ext:clickhouse';
+    await mount([baseTask({ prompt: promptText })]);
+
+    click(document.querySelector('[aria-label="Edit"]'));
+
+    const tags = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-prompt-tag-serialized]'),
+    );
+    expect(tags.map((tag) => tag.dataset.promptTagSerialized)).toEqual([
+      '@mcp:amap-maps3',
+      '/agent-reproduce-align',
+      '@ext:clickhouse',
+    ]);
+    expect(tags.map((tag) => tag.textContent)).toEqual([
+      'amap-maps3',
+      'agent-reproduce-align',
+      'clickhouse',
+    ]);
+
+    click(findButton('Save'));
+    await flush();
+
+    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+      't1',
+      expect.objectContaining({
+        prompt: promptText,
+      }),
+      undefined,
+    );
+  });
+
+  it('copies and cuts prompt references as serialized tokens', async () => {
+    const promptText = '@ext:clickhouse /review @mcp:repo-tools';
+    await mount([baseTask({ prompt: promptText })]);
+
+    click(document.querySelector('[aria-label="Edit"]'));
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]');
+    if (!prompt) throw new Error('prompt editor not found');
+    const range = document.createRange();
+    range.selectNodeContents(prompt);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+
+    const copyClipboard = { setData: vi.fn() };
+    dispatchClipboardEvent(prompt, 'copy', copyClipboard);
+    expect(copyClipboard.setData).toHaveBeenCalledWith(
+      'text/plain',
+      promptText,
+    );
+
+    const cutClipboard = { setData: vi.fn() };
+    dispatchClipboardEvent(prompt, 'cut', cutClipboard);
+    await flush();
+    expect(cutClipboard.setData).toHaveBeenCalledWith('text/plain', promptText);
+    expect(prompt.textContent).toBe('');
+  });
+
+  it('does not render filesystem paths as skill tags', async () => {
+    await mount([
+      baseTask({ prompt: 'check /var/log and then /agent-reproduce-align' }),
+    ]);
+
+    click(document.querySelector('[aria-label="Edit"]'));
+
+    const tags = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-prompt-tag-serialized]'),
+    );
+    expect(tags.map((tag) => tag.dataset.promptTagSerialized)).toEqual([
+      '/agent-reproduce-align',
+    ]);
+    expect(document.querySelector('[role="textbox"]')?.textContent).toContain(
+      '/var/log',
+    );
+  });
+
+  it('does not hang on escaped slash-reference near-misses', async () => {
+    const promptText = `check /${'\\a'.repeat(30)}/ after`;
+    await mount([baseTask({ prompt: promptText })]);
+
+    click(document.querySelector('[aria-label="Edit"]'));
+
+    expect(document.querySelector('[role="textbox"]')?.textContent).toContain(
+      promptText,
+    );
+  });
+
+  it('inserts extension, skill, and MCP references into the created prompt', async () => {
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+
+    await mount([]);
+
+    actions.loadExtensionsStatus.mockResolvedValue({
+      extensions: [
+        {
+          id: 'ext-1',
+          name: 'alibabacloud-compute-suite',
+          displayName: 'Alibaba Cloud',
+          description: '',
+          version: '1.0.0',
+          isActive: true,
+          path: '/ext',
+          capabilities: {},
+        },
+      ],
+    });
+    actions.loadSkillsStatus.mockResolvedValue({
+      skills: [
+        {
+          kind: 'skill',
+          name: 'review',
+          description: 'Review code',
+          level: 'project',
+          modelInvocable: true,
+        },
+      ],
+    });
+    actions.loadMcpStatus.mockResolvedValue({
+      servers: [
+        {
+          kind: 'mcp_server',
+          name: 'repo-tools',
+          transport: 'stdio',
+          disabled: false,
+          mcpStatus: 'connected',
+        },
+      ],
+    });
+    click(findButton('New scheduled task'));
+
+    click(findButtonContaining('Extensions'));
+    await flush();
+    click(findButtonContaining('alibabacloud-compute-suite'));
+    await flush();
+
+    click(findButtonContaining('Skills'));
+    await flush();
+    click(findButtonContaining('review'));
+    await flush();
+
+    click(findButtonContaining('MCP'));
+    await flush();
+    click(findButtonContaining('repo-tools'));
+    await flush();
+
+    expect(document.querySelector('[role="textbox"]')?.textContent).toContain(
+      'alibabacloud-compute-suite',
+    );
+
+    click(findButton('Create'));
+    await flush();
+
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: '@ext:alibabacloud-compute-suite /review @mcp:repo-tools',
+      }),
+      undefined,
+    );
+  });
+
+  it('escapes skill names when inserting references', async () => {
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+    await mount([]);
+    actions.loadSkillsStatus.mockResolvedValue({
+      skills: [
+        {
+          kind: 'skill',
+          name: 'review task',
+          description: 'Review code',
+          level: 'project',
+          modelInvocable: true,
+        },
+      ],
+    });
+
+    click(findButton('New scheduled task'));
+    click(findButtonContaining('Skills'));
+    await flush();
+    click(findButtonContaining('review task'));
+    await flush();
+
+    click(findButton('Create'));
+    await flush();
+
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: '/review\\ task',
+      }),
+      undefined,
+    );
+  });
+
+  it('keeps the latest reference picker results when loads resolve out of order', async () => {
+    await mount([]);
+    const extensions = deferred();
+    const skills = deferred();
+    actions.loadExtensionsStatus.mockReturnValueOnce(extensions.promise);
+    actions.loadSkillsStatus.mockReturnValueOnce(skills.promise);
+
+    click(findButton('New scheduled task'));
+    click(findButtonContaining('Extensions'));
+    click(findButtonContaining('Skills'));
+
+    skills.resolve({
+      skills: [
+        {
+          kind: 'skill',
+          name: 'review',
+          description: 'Review code',
+          level: 'project',
+          modelInvocable: true,
+        },
+      ],
+    });
+    await flush();
+    expect(findButtonContaining('review')).toBeTruthy();
+
+    extensions.resolve({
+      extensions: [
+        {
+          id: 'ext-1',
+          name: 'alibabacloud-compute-suite',
+          displayName: 'Alibaba Cloud',
+          description: '',
+          version: '1.0.0',
+          isActive: true,
+          path: '/ext',
+          capabilities: {},
+        },
+      ],
+    });
+    await flush();
+    expect(findButtonContaining('review')).toBeTruthy();
+    expect(findButtonContaining('alibabacloud-compute-suite')).toBeUndefined();
+  });
+
+  it('drops plain text only into the prompt editor', async () => {
+    await mount([]);
+    click(findButton('New scheduled task'));
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]');
+    if (!prompt) throw new Error('prompt editor not found');
+    const execCommand = vi.spyOn(document, 'execCommand').mockReturnValue(true);
+    const drop = new Event('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, 'dataTransfer', {
+      value: {
+        getData: (type: string) =>
+          type === 'text/plain' ? 'plain text' : '<b>html</b>',
+      },
+    });
+
+    act(() => {
+      prompt.dispatchEvent(drop);
+    });
+
+    expect(execCommand).toHaveBeenCalledWith('insertText', false, 'plain text');
+    execCommand.mockRestore();
+  });
+
+  it('pastes plain text only into the prompt editor', async () => {
+    await mount([]);
+    click(findButton('New scheduled task'));
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]');
+    if (!prompt) throw new Error('prompt editor not found');
+    const execCommand = vi.spyOn(document, 'execCommand').mockReturnValue(true);
+    const paste = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, 'clipboardData', {
+      value: {
+        getData: (type: string) =>
+          type === 'text/plain' ? 'plain text' : '<b>html</b>',
+      },
+    });
+
+    act(() => {
+      prompt.dispatchEvent(paste);
+    });
+
+    expect(execCommand).toHaveBeenCalledWith('insertText', false, 'plain text');
+    execCommand.mockRestore();
+  });
+
+  it('caps contenteditable input at the scheduled-task prompt limit', async () => {
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+    await mount([]);
+    click(findButton('New scheduled task'));
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]');
+    if (!prompt) throw new Error('prompt editor not found');
+
+    act(() => {
+      prompt.textContent = 'x'.repeat(100_001);
+      prompt.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    });
+    await flush();
+    click(findButton('Create'));
+    await flush();
+
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: 'x'.repeat(100_000),
+      }),
+      undefined,
+    );
+  });
+
+  it('does not preserve empty contenteditable leftovers before an inserted reference', async () => {
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+
+    await mount([]);
+
+    actions.loadExtensionsStatus.mockResolvedValue({
+      extensions: [
+        {
+          id: 'ext-1',
+          name: 'alibabacloud-compute-suite',
+          displayName: 'Alibaba Cloud',
+          description: '',
+          version: '1.0.0',
+          isActive: true,
+          path: '/ext',
+          capabilities: {},
+        },
+      ],
+    });
+    click(findButton('New scheduled task'));
+
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]');
+    if (!prompt) throw new Error('prompt editor not found');
+    act(() => {
+      prompt.innerHTML = '<br>';
+      prompt.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    });
+    await flush();
+
+    click(findButtonContaining('Extensions'));
+    await flush();
+    click(findButtonContaining('alibabacloud-compute-suite'));
+    await flush();
+
+    click(findButton('Create'));
+    await flush();
+
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: '@ext:alibabacloud-compute-suite',
+      }),
+      undefined,
+    );
   });
 
   it('an unrepresentable cron lands in the custom field, losslessly', async () => {
     await mount([baseTask({ cron: '0 9 * * 1,3,5' })]); // day-of-week list
 
     click(document.querySelector('[aria-label="Edit"]'));
-    const frequency = document.querySelector<HTMLSelectElement>('select');
+    const frequency = findFrequencySelect();
     expect(frequency?.value).toBe('custom');
 
     click(findButton('Save'));
@@ -171,6 +590,7 @@ describe('ScheduledTasksDialog editing', () => {
     expect(actions.updateScheduledTask).toHaveBeenCalledWith(
       't1',
       expect.objectContaining({ cron: '0 9 * * 1,3,5' }),
+      undefined,
     );
   });
 });
@@ -216,7 +636,7 @@ describe('ScheduledTasksDialog run now', () => {
     click(document.querySelector('[aria-label="Run now"]'));
     await flush();
     // Server-side run record (updates last-run) + client run in the bound session.
-    expect(actions.runScheduledTask).toHaveBeenCalledWith('t1');
+    expect(actions.runScheduledTask).toHaveBeenCalledWith('t1', undefined);
     expect(onRunPrompt).toHaveBeenCalledWith('do it', 'sess-9');
   });
 
@@ -324,7 +744,7 @@ describe('ScheduledTasksDialog run now', () => {
     );
     click(document.querySelector('[aria-label="Run now"]'));
     await flush();
-    expect(actions.runScheduledTask).toHaveBeenCalledWith('t1'); // consumed
+    expect(actions.runScheduledTask).toHaveBeenCalledWith('t1', undefined); // consumed
     expect(onRunPrompt).toHaveBeenCalledWith('do it', 'sess-9');
     expect(onError).toHaveBeenCalledWith(
       expect.any(Error),
@@ -455,5 +875,195 @@ describe('ScheduledTasksDialog next-run countdown', () => {
     expect(
       document.querySelector('[data-testid="scheduled-task-next-run"]'),
     ).toBeNull();
+  });
+});
+
+describe('ScheduledTasksDialog multi-workspace', () => {
+  const WORKSPACES = [
+    { id: 'id-main', cwd: '/repo/main', primary: true, trusted: true },
+    { id: 'id-other', cwd: '/repo/other', primary: false, trusted: true },
+    { id: 'id-locked', cwd: '/repo/locked', primary: false, trusted: false },
+  ];
+
+  // Fan-out mount: `listScheduledTasks(wsId)` returns each workspace's own tasks
+  // (the primary is queried with undefined, secondaries with their id). The
+  // dialog tags each task with its workspace and merges them. `ws` overrides the
+  // registered workspaces (e.g. to make the primary untrusted).
+  async function mountMulti(
+    byWorkspace: Record<string, MockTask[]>,
+    ws: typeof WORKSPACES = WORKSPACES,
+  ) {
+    actions.listScheduledTasks.mockImplementation(async (wsId?: string) =>
+      wsId === undefined
+        ? (byWorkspace['primary'] ?? [])
+        : (byWorkspace[wsId] ?? []),
+    );
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+    actions.updateScheduledTask.mockResolvedValue(baseTask({}));
+    actions.deleteScheduledTask.mockResolvedValue(undefined);
+    actions.loadExtensionsStatus.mockResolvedValue({ extensions: [] });
+    actions.loadSkillsStatus.mockResolvedValue({ skills: [] });
+    actions.loadMcpStatus.mockResolvedValue({ servers: [] });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(
+        <I18nProvider language="en">
+          <ScheduledTasksDialog
+            onRunPrompt={vi.fn()}
+            onCreateViaChat={vi.fn()}
+            workspaces={ws}
+            onError={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+  }
+
+  const findWorkspaceSelect = () =>
+    Array.from(document.querySelectorAll('select')).find((s) =>
+      s.querySelector('option[value="id-other"]'),
+    );
+
+  it('aggregates trusted workspaces and badges each card by workspace', async () => {
+    await mountMulti({
+      primary: [baseTask({ id: 'p1', name: 'Primary task', createdAt: 1000 })],
+      'id-other': [
+        baseTask({ id: 's1', name: 'Second task', createdAt: 2000 }),
+      ],
+    });
+
+    // Both workspaces' tasks show up together.
+    expect(document.body.textContent).toContain('Primary task');
+    expect(document.body.textContent).toContain('Second task');
+
+    // The fan-out queried the primary (undefined) and the trusted secondary, but
+    // NOT the untrusted one.
+    expect(actions.listScheduledTasks).toHaveBeenCalledWith(undefined);
+    expect(actions.listScheduledTasks).toHaveBeenCalledWith('id-other');
+    expect(actions.listScheduledTasks).not.toHaveBeenCalledWith('id-locked');
+
+    // Each card carries a workspace badge (title = cwd), the primary marked.
+    const primaryBadge = document.querySelector('[title="/repo/main"]');
+    const secondaryBadge = document.querySelector('[title="/repo/other"]');
+    expect(primaryBadge?.textContent).toContain('main');
+    expect(primaryBadge?.textContent).toContain('(primary)');
+    expect(secondaryBadge?.textContent).toContain('other');
+  });
+
+  it('creates a task in the workspace chosen in the picker', async () => {
+    await mountMulti({ primary: [], 'id-other': [] });
+    click(findButton('New scheduled task'));
+
+    // The picker offers the two trusted workspaces (untrusted excluded).
+    const wsSelect = findWorkspaceSelect();
+    expect(wsSelect).toBeDefined();
+    expect(wsSelect!.querySelectorAll('option')).toHaveLength(2);
+
+    // Choose the secondary workspace.
+    act(() => {
+      wsSelect!.value = 'id-other';
+      wsSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]')!;
+    act(() => {
+      prompt.textContent = 'do secondary work';
+      prompt.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    });
+
+    click(findButton('Create'));
+    await flush();
+
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: 'do secondary work' }),
+      'id-other',
+    );
+  });
+
+  it('defaults a new task to the primary workspace', async () => {
+    await mountMulti({ primary: [], 'id-other': [] });
+    click(findButton('New scheduled task'));
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]')!;
+    act(() => {
+      prompt.textContent = 'primary work';
+      prompt.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    });
+    click(findButton('Create'));
+    await flush();
+    // Primary → undefined workspace id (its trust-free unqualified route).
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: 'primary work' }),
+      undefined,
+    );
+  });
+
+  it('threads the task’s own workspace through toggle and delete', async () => {
+    await mountMulti({
+      primary: [],
+      'id-other': [baseTask({ id: 's1', name: 'Second task', enabled: true })],
+    });
+
+    // The secondary's task is the only card → the only toggle switch.
+    click(document.querySelector('[role="switch"]'));
+    await flush();
+    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+      's1',
+      { enabled: false },
+      'id-other',
+    );
+
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    click(document.querySelector('[aria-label="Delete"]'));
+    await flush();
+    expect(actions.deleteScheduledTask).toHaveBeenCalledWith('s1', 'id-other');
+    confirmSpy.mockRestore();
+  });
+
+  it('pins the workspace picker read-only while editing', async () => {
+    await mountMulti({
+      primary: [],
+      'id-other': [baseTask({ id: 's1', name: 'Second task' })],
+    });
+    click(document.querySelector('[aria-label="Edit"]'));
+    const wsSelect = findWorkspaceSelect();
+    // The picker is shown (so the user sees the workspace) but disabled — a
+    // PATCH can't move a task between per-workspace files.
+    expect(wsSelect?.disabled).toBe(true);
+  });
+
+  it('keeps an untrusted primary in the aggregate and picker (trust-free route)', async () => {
+    // Rare: folder-trust on and the primary folder not trusted. The primary is
+    // still reachable via its trust-free unqualified route, so it must not drop
+    // out of the list, and it must stay the selectable default in the New form
+    // (otherwise the picker shows a secondary while a create still lands on the
+    // primary). Secondaries stay gated on trust.
+    const wsUntrustedPrimary = [
+      { id: 'id-main', cwd: '/repo/main', primary: true, trusted: false },
+      { id: 'id-other', cwd: '/repo/other', primary: false, trusted: true },
+    ];
+    await mountMulti(
+      {
+        primary: [baseTask({ id: 'p1', name: 'Primary task' })],
+        'id-other': [baseTask({ id: 's1', name: 'Second task' })],
+      },
+      wsUntrustedPrimary,
+    );
+
+    // The untrusted primary is queried (via its trust-free route) and shown.
+    expect(actions.listScheduledTasks).toHaveBeenCalledWith(undefined);
+    expect(document.body.textContent).toContain('Primary task');
+
+    // In the New form the primary is a selectable option and stays the default,
+    // so the shown selection matches where a create actually lands.
+    click(findButton('New scheduled task'));
+    const wsSelect = findWorkspaceSelect()!;
+    const values = Array.from(wsSelect.querySelectorAll('option')).map(
+      (o) => o.value,
+    );
+    expect(values).toContain(''); // '' = the primary (its undefined action id)
+    expect(wsSelect.value).toBe(''); // default targets the primary, no desync
   });
 });

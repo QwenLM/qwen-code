@@ -109,10 +109,16 @@ export class AcpWsTransport implements DaemonTransport {
 
   readonly type = 'acp-ws' as const;
   readonly supportsReplay = false;
+  readonly restFetch: typeof globalThis.fetch | undefined;
 
-  constructor(wsUrl: string, token?: string) {
+  constructor(
+    wsUrl: string,
+    token?: string,
+    restFetch?: typeof globalThis.fetch,
+  ) {
     this.wsUrl = wsUrl;
     this.token = token;
+    this.restFetch = restFetch;
   }
 
   get connected(): boolean {

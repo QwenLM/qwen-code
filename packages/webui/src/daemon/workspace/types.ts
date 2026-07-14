@@ -44,12 +44,15 @@ import type {
   DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryStatus,
+  DaemonWorkspaceRemovalResult,
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillsStatus,
   DaemonWorkspaceToolsStatus,
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
+  DaemonModelDeleteRequest,
+  DaemonModelDeleteResult,
   DaemonSessionGroup,
   DaemonSessionGroupCatalog,
   DaemonSessionGroupInput,
@@ -116,6 +119,16 @@ export interface DaemonWorkspaceContextValue {
   error?: Error;
   capabilities?: DaemonCapabilities;
   getCapabilities?: () => Promise<DaemonCapabilities>;
+  /**
+   * Force a fresh `/capabilities` fetch and push the result into the
+   * provider's `capabilities` state so consumers re-render. Unlike
+   * `getCapabilities` — which memoizes its first in-flight promise for the
+   * lifetime of the connection and never calls `setCapabilities` outside the
+   * initial mount — this bypasses that cache. Use it after a mutation that
+   * changes capabilities (e.g. registering a workspace) so the new state
+   * shows without a full page reload.
+   */
+  refreshCapabilities?: () => Promise<DaemonCapabilities>;
   actions: DaemonWorkspaceActions;
 }
 
@@ -171,6 +184,11 @@ export interface DaemonScheduledTaskRun {
    * daemon's `CronTaskRun.sessionId` so run-attribution isn't silently dropped
    * on the client (not surfaced in the UI yet). */
   sessionId?: string;
+  /** READ-ONLY legacy compat: a pre-removal version stamped this on a fire whose
+   * precondition withheld the prompt. Never written now, but kept so the UI can
+   * still mark such stored entries "skipped" instead of showing them as ordinary
+   * successful runs. Absent = a real dispatched run. */
+  withheld?: boolean;
 }
 
 export interface DaemonScheduledTask {
@@ -191,6 +209,13 @@ export interface DaemonScheduledTask {
   /** Bounded, newest-last history of recent fires. Empty for tasks that have
    * not fired (and, by nature, for one-shots — they are deleted on fire). */
   runs: DaemonScheduledTaskRun[];
+  /** The registered workspace this task belongs to, when the aggregated
+   * multi-workspace view tagged it client-side. Absent (single-workspace) means
+   * the primary workspace. `workspaceId` targets its workspace-qualified route;
+   * `workspaceCwd` labels the card. The daemon never sends these — they are
+   * attached by the client after a per-workspace fetch. */
+  workspaceId?: string;
+  workspaceCwd?: string;
 }
 
 export interface DaemonCreateScheduledTaskRequest {
@@ -212,6 +237,14 @@ export interface DaemonUpdateScheduledTaskRequest {
   name?: string | null;
   recurring?: boolean;
   enabled?: boolean;
+}
+
+export interface DaemonAddWorkspaceResult {
+  id: string;
+  cwd: string;
+  primary: boolean;
+  trusted: boolean;
+  persisted?: boolean;
 }
 
 export interface DaemonWorkspaceActions {
@@ -290,7 +323,7 @@ export interface DaemonWorkspaceActions {
   // Settings
   loadSettingsStatus(): Promise<DaemonWorkspaceSettingsStatus>;
   setWorkspaceSetting(
-    scope: 'workspace',
+    scope: 'workspace' | 'user',
     key: string,
     value: unknown,
   ): Promise<DaemonSettingUpdateResult>;
@@ -327,19 +360,29 @@ export interface DaemonWorkspaceActions {
   stat(filePath: string): Promise<DaemonFileStat>;
   listDirectory(dirPath: string): Promise<DaemonDirectoryListing>;
 
-  // Scheduled tasks (durable cron)
-  listScheduledTasks(): Promise<DaemonScheduledTask[]>;
+  // Scheduled tasks (durable cron). The optional `workspaceId` targets a
+  // registered non-primary workspace's own cron file via the workspace-qualified
+  // route; omit it (or pass the primary's) to hit the primary `/scheduled-tasks`
+  // surface. The aggregated Web Shell view fans `listScheduledTasks` out over
+  // every trusted workspace and threads each task's `workspaceId` back into the
+  // mutations.
+  listScheduledTasks(workspaceId?: string): Promise<DaemonScheduledTask[]>;
   createScheduledTask(
     req: DaemonCreateScheduledTaskRequest,
+    workspaceId?: string,
   ): Promise<DaemonScheduledTask>;
   updateScheduledTask(
     id: string,
     patch: DaemonUpdateScheduledTaskRequest,
+    workspaceId?: string,
   ): Promise<DaemonScheduledTask>;
   /** Record a manual run (updates lastFiredAt + appends a 'manual' run). The
    * prompt itself is executed by the caller in the task's bound session. */
-  runScheduledTask(id: string): Promise<DaemonScheduledTask>;
-  deleteScheduledTask(id: string): Promise<void>;
+  runScheduledTask(
+    id: string,
+    workspaceId?: string,
+  ): Promise<DaemonScheduledTask>;
+  deleteScheduledTask(id: string, workspaceId?: string): Promise<void>;
 
   // Providers / env (read-only diagnostics)
   loadProviders(): Promise<DaemonWorkspaceProvidersStatus>;
@@ -401,4 +444,17 @@ export interface DaemonWorkspaceActions {
   installAuthProvider(
     req: DaemonAuthProviderInstallRequest,
   ): Promise<DaemonAuthProviderInstallResult>;
+  deleteModel(
+    target: DaemonModelDeleteRequest,
+  ): Promise<DaemonModelDeleteResult>;
+
+  // Workspace management
+  addWorkspace(
+    cwd: string,
+    options?: { persist?: boolean },
+  ): Promise<DaemonAddWorkspaceResult>;
+  removeWorkspace(
+    workspaceId: string,
+    options?: { force?: boolean; timeoutMs?: number },
+  ): Promise<DaemonWorkspaceRemovalResult>;
 }

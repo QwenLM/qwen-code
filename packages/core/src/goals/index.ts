@@ -33,4 +33,4 @@ export {
   unregisterGoalHook,
 } from './goalHook.js';
 export { judgeGoal } from './goalJudge.js';
-export type { JudgeResult } from './goalJudge.js';
+export type { GoalJudgeOutcome, JudgeResult } from './goalJudge.js';

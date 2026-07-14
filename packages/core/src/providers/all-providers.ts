@@ -15,6 +15,7 @@ import { alibabaStandardProvider } from './presets/alibaba-standard.js';
 import { openRouterProvider } from './presets/openrouter.js';
 import { requestyProvider } from './presets/requesty.js';
 import { deepseekProvider } from './presets/deepseek.js';
+import { grokProvider } from './presets/grok.js';
 import { minimaxProvider } from './presets/minimax.js';
 import { zaiProvider } from './presets/zai.js';
 import { idealabProvider } from './presets/idealab.js';
@@ -29,6 +30,7 @@ export {
   openRouterProvider,
   requestyProvider,
   deepseekProvider,
+  grokProvider,
   minimaxProvider,
   zaiProvider,
   idealabProvider,
@@ -50,6 +52,7 @@ export const ALL_PROVIDERS: readonly ProviderConfig[] = [
   tokenPlanProvider,
   alibabaStandardProvider,
   deepseekProvider,
+  grokProvider,
   minimaxProvider,
   zaiProvider,
   idealabProvider,

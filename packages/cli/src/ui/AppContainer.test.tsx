@@ -68,6 +68,7 @@ import {
 import {
   type HistoryItem,
   type HistoryItemWithoutId,
+  MessageType,
   StreamingState,
   ToolCallStatus,
 } from './types.js';
@@ -553,6 +554,50 @@ describe('AppContainer State Management', () => {
   };
 
   describe('Basic Rendering', () => {
+    it('shows recording failures as warnings and unsubscribes on unmount', async () => {
+      const addItem = vi.fn();
+      mockedUseHistory.mockReturnValue({
+        history: [],
+        addItem,
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      let listener:
+        | ((event: { sessionId: string; error: Error }) => void)
+        | undefined;
+      const unsubscribe = vi.fn();
+      vi.spyOn(mockConfig, 'onChatRecordingFailure').mockImplementation(
+        (nextListener) => {
+          listener = nextListener;
+          return unsubscribe;
+        },
+      );
+
+      const { unmount } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      await act(async () => {
+        listener?.({ sessionId: 's-1', error: new Error('EACCES') });
+      });
+
+      expect(addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.WARNING,
+          text: expect.stringContaining('Session recording stopped'),
+        }),
+        expect.any(Number),
+      );
+      unmount();
+      expect(unsubscribe).toHaveBeenCalledOnce();
+    });
+
     it('renders without crashing with minimal props', () => {
       expect(() => {
         render(
@@ -2632,12 +2677,15 @@ describe('AppContainer State Management', () => {
         },
       } as unknown as LoadedSettings;
 
-      let titleRecordedCallback: ((customTitle: string) => void) | undefined;
-      let registeredTitleRecordedCallback:
-        | ((customTitle: string) => void)
-        | undefined;
+      type TitleRecordedCallback = (
+        customTitle: string,
+        source: string,
+        sessionId: string,
+      ) => void;
+      let titleRecordedCallback: TitleRecordedCallback | undefined;
+      let registeredTitleRecordedCallback: TitleRecordedCallback | undefined;
       const setTitleRecordedCallback = vi.fn(
-        (callback: ((customTitle: string) => void) | undefined) => {
+        (callback: TitleRecordedCallback | undefined) => {
           titleRecordedCallback = callback;
           if (callback) {
             registeredTitleRecordedCallback = callback;
@@ -2691,8 +2739,13 @@ describe('AppContainer State Management', () => {
       expect(registeredTitleRecordedCallback).toStrictEqual(
         expect.any(Function),
       );
+      const currentSessionId = mockConfig.getSessionId();
       await act(async () => {
-        registeredTitleRecordedCallback!('Fix terminal title');
+        registeredTitleRecordedCallback!(
+          'Fix terminal title',
+          'manual',
+          currentSessionId,
+        );
       });
       // The initial render wrote the default title; after the callback
       // the next writeTerminalTitle call (when effects flush) should
@@ -2727,13 +2780,14 @@ describe('AppContainer State Management', () => {
       } as unknown as LoadedSettings;
 
       const existingCallback = vi.fn();
-      let titleRecordedCallback:
-        | ((customTitle: string, source: string) => void)
-        | undefined;
+      type TitleRecordedCallback = (
+        customTitle: string,
+        source: string,
+        sessionId: string,
+      ) => void;
+      let titleRecordedCallback: TitleRecordedCallback | undefined;
       const setTitleRecordedCallback = vi.fn(
-        (
-          callback: ((customTitle: string, source: string) => void) | undefined,
-        ) => {
+        (callback: TitleRecordedCallback | undefined) => {
           titleRecordedCallback = callback;
         },
       );
@@ -2776,12 +2830,25 @@ describe('AppContainer State Management', () => {
 
       // Invoke the chained callback — it should call both the existing
       // ACP callback AND the new setSessionName setter
+      const currentSessionId = mockConfig.getSessionId();
       await act(async () => {
-        titleRecordedCallback!('Test title', 'rename');
+        titleRecordedCallback!('Test title', 'rename', currentSessionId);
       });
 
       // The existing ACP callback was called (preserved by chaining)
-      expect(existingCallback).toHaveBeenCalledWith('Test title', 'rename');
+      expect(existingCallback).toHaveBeenCalledWith(
+        'Test title',
+        'rename',
+        currentSessionId,
+      );
+      await act(async () => {
+        titleRecordedCallback!('Stale title', 'auto', 'old-session-id');
+      });
+      expect(existingCallback).toHaveBeenLastCalledWith(
+        'Stale title',
+        'auto',
+        'old-session-id',
+      );
 
       unmount();
       // After unmount, the callback should be restored to the original
@@ -3494,106 +3561,123 @@ describe('AppContainer State Management', () => {
       // structurally present.
       expect(abortSpy).not.toHaveBeenCalled();
     });
-    describe('Ctrl+O compact mode toggle (issue #3899)', () => {
-      const ctrlOKey: Key = {
-        name: 'o',
-        ctrl: true,
+  });
+
+  describe('Transcript (Ctrl+O) integration', () => {
+    // The frozen transcript (TranscriptView) renders its title row as the
+    // literal "Transcript"; the main view never does, so its presence in the
+    // rendered frame is a reliable open/closed signal.
+    const TRANSCRIPT_MARKER = 'Transcript';
+
+    const makeKey = (overrides: Partial<Key>): Key =>
+      ({
+        name: '',
+        ctrl: false,
         meta: false,
         shift: false,
         paste: false,
-        sequence: '',
-      };
+        sequence: '',
+        ...overrides,
+      }) as Key;
 
-      // The global handler is the one that calls compactToggleHasVisualEffect.
-      // Mirrors the discriminator pattern used by the renderMode test above.
-      const findGlobalKeypressHandler = () =>
-        mockedUseKeypress.mock.calls
-          .map((call) => call[0])
-          .reverse()
-          .find(
-            (handler): handler is (key: Key) => void =>
-              typeof handler === 'function' &&
-              handler.toString().includes('compactToggleHasVisualEffect'),
-          );
+    // The global keypress handler owns Ctrl+O / the transcript close keys; it is
+    // the registered useKeypress handler whose body references TOGGLE_TRANSCRIPT.
+    const getGlobalKeypress = () =>
+      mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .reverse()
+        .find(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function' &&
+            handler.toString().includes('TOGGLE_TRANSCRIPT'),
+        ) as ((key: Key) => void) | undefined;
 
-      it('skips refreshStatic on Ctrl+O when history has no tool_group/thought items', () => {
-        mockedUseHistory.mockReturnValue({
-          history: [
-            { type: 'user', id: 1, text: 'hi' },
-            { type: 'gemini', id: 2, text: 'hello' },
-          ],
-          addItem: vi.fn(),
-          updateItem: vi.fn(),
-          clearItems: vi.fn(),
-          loadHistory: vi.fn(),
-          truncateToItem: vi.fn(),
-        });
+    const ctrlO = makeKey({ name: 'o', ctrl: true, sequence: '\x0f' });
 
-        render(
-          <AppContainer
-            config={mockConfig}
-            settings={mockSettings}
-            version="1.0.0"
-            initializationResult={mockInitResult}
-          />,
-        );
-        mockStdout.write.mockClear();
+    const renderApp = () =>
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
 
-        const handler = findGlobalKeypressHandler();
-        expect(handler).toBeDefined();
-        handler!(ctrlOKey);
+    it('Ctrl+O installs the TranscriptView in the rendered tree', () => {
+      const { lastFrame } = renderApp();
+      const handleKeypress = getGlobalKeypress();
+      expect(handleKeypress).toBeDefined();
+      // Baseline: the marker also confirms the main view doesn't render it.
+      expect(lastFrame()).not.toContain(TRANSCRIPT_MARKER);
+      act(() => handleKeypress!(ctrlO));
+      expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
+    });
 
-        // refreshStatic writes ansiEscapes.clearTerminal — its absence
-        // proves we took the no-op short-circuit.
-        expect(mockStdout.write).not.toHaveBeenCalledWith(
-          ansiEscapes.clearTerminal,
-        );
+    it.each([
+      ['Esc', makeKey({ name: 'escape', sequence: '\x1b' })],
+      ['q', makeKey({ name: 'q', sequence: 'q' })],
+      ['Ctrl+C', makeKey({ name: 'c', ctrl: true, sequence: '\x03' })],
+      ['Ctrl+D', makeKey({ name: 'd', ctrl: true, sequence: '\x04' })],
+      // Ctrl+O is the toggle: pressing it again while open also closes.
+      ['Ctrl+O', ctrlO],
+    ])('%s while open removes the TranscriptView', (_label, closeKey) => {
+      const { lastFrame } = renderApp();
+      const handleKeypress = getGlobalKeypress()!;
+      act(() => handleKeypress(ctrlO));
+      expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
+      act(() => handleKeypress(closeKey));
+      expect(lastFrame()).not.toContain(TRANSCRIPT_MARKER);
+    });
+
+    it.each([
+      ['Ctrl+Q', makeKey({ name: 'q', ctrl: true, sequence: '\x11' })],
+      ['Alt+Q', makeKey({ name: 'q', meta: true, sequence: '\x1bq' })],
+      ['Shift+Q', makeKey({ name: 'q', shift: true, sequence: 'Q' })],
+    ])(
+      '%s does NOT close the transcript (bare-q modifier guard)',
+      (_l, modQ) => {
+        const { lastFrame } = renderApp();
+        const handleKeypress = getGlobalKeypress()!;
+        act(() => handleKeypress(ctrlO));
+        expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
+        act(() => handleKeypress(modQ));
+        // Only a bare `q` closes; modified variants stay swallowed but open.
+        expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
+      },
+    );
+
+    it('swallows arbitrary keys while open and keeps the transcript open', () => {
+      const { lastFrame } = renderApp();
+      const handleKeypress = getGlobalKeypress()!;
+      act(() => handleKeypress(ctrlO));
+      expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
+      expect(() =>
+        act(() => handleKeypress(makeKey({ name: 'x', sequence: 'x' }))),
+      ).not.toThrow();
+      expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
+    });
+
+    it('auto-closes when a blocking confirmation appears (anti-deadlock)', () => {
+      // A blocking prompt would be invisible behind the alt-screen transcript;
+      // the needsBlockingInput effect must close it on the same commit.
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'waiting_for_confirmation',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
-
-      it('skips refreshStatic on Ctrl+O when history contains only tool_group (no visual effect)', () => {
-        mockedUseHistory.mockReturnValue({
-          history: [
-            { type: 'user', id: 1, text: 'run ls' },
-            {
-              type: 'tool_group',
-              id: 2,
-              tools: [
-                {
-                  callId: 'c1',
-                  name: 'shell',
-                  description: 'shell description',
-                  status: ToolCallStatus.Success,
-                  resultDisplay: undefined,
-                  confirmationDetails: undefined,
-                },
-              ],
-            },
-          ],
-          addItem: vi.fn(),
-          updateItem: vi.fn(),
-          clearItems: vi.fn(),
-          loadHistory: vi.fn(),
-          truncateToItem: vi.fn(),
-        });
-
-        render(
-          <AppContainer
-            config={mockConfig}
-            settings={mockSettings}
-            version="1.0.0"
-            initializationResult={mockInitResult}
-          />,
-        );
-        mockStdout.write.mockClear();
-
-        const handler = findGlobalKeypressHandler();
-        expect(handler).toBeDefined();
-        handler!(ctrlOKey);
-
-        expect(mockStdout.write).not.toHaveBeenCalledWith(
-          ansiEscapes.clearTerminal,
-        );
-      });
+      const { lastFrame } = renderApp();
+      const handleKeypress = getGlobalKeypress()!;
+      act(() => handleKeypress(ctrlO));
+      // openTranscript sets the freeze, but the anti-deadlock effect tears it
+      // back down on the same commit, so it never stays visible.
+      expect(lastFrame()).not.toContain(TRANSCRIPT_MARKER);
     });
   });
 

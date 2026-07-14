@@ -55,6 +55,11 @@ import { ToolRegistry } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
+import {
+  MessageBusType,
+  type HookExecutionRequest,
+  type HookExecutionResponse,
+} from '../confirmation-bus/types.js';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
 import type { LoadServerHierarchicalMemoryOptions } from '../utils/memoryDiscovery.js';
 import { readAutoMemoryIndex } from '../memory/store.js';
@@ -69,6 +74,8 @@ import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { HookSystem } from '../hooks/index.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
+import type { ChatRecordingFailureEvent } from '../services/chatRecordingService.js';
+import * as jsonl from '../utils/jsonl-utils.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -612,6 +619,69 @@ describe('Server Config (config.ts)', () => {
           ...baseParams,
           visionBridgeTimeoutMs: 2_147_483_647,
         }).getVisionBridgeTimeoutMs(),
+      ).toBe(2_147_483_647);
+    });
+  });
+
+  describe('getShellDefaultTimeoutMs', () => {
+    it('returns undefined when unset', () => {
+      expect(new Config(baseParams).getShellDefaultTimeoutMs()).toBeUndefined();
+    });
+
+    it('passes through positive values', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          shellDefaultTimeoutMs: 300_000,
+        }).getShellDefaultTimeoutMs(),
+      ).toBe(300_000);
+    });
+
+    it('accepts 0 (disables the timeout — unlike the vision bridge)', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          shellDefaultTimeoutMs: 0,
+        }).getShellDefaultTimeoutMs(),
+      ).toBe(0);
+    });
+
+    it('treats negative values as unset (schema validation is bypassed on load)', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          shellDefaultTimeoutMs: -5000,
+        }).getShellDefaultTimeoutMs(),
+      ).toBeUndefined();
+    });
+
+    it('rejects values AbortSignal.timeout cannot take (fractional, over 2^31-1, non-finite)', () => {
+      // A hand-edited settings.json bypasses the schema and can reach
+      // AbortSignal.timeout, which would throw RangeError or degrade to a
+      // 1ms timer on these. Coerce to undefined → built-in default.
+      for (const bad of [
+        30_000.5,
+        2_147_483_648,
+        4_294_967_296,
+        1e300,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+      ]) {
+        expect(
+          new Config({
+            ...baseParams,
+            shellDefaultTimeoutMs: bad,
+          }).getShellDefaultTimeoutMs(),
+        ).toBeUndefined();
+      }
+    });
+
+    it('accepts the maximum supported integer timeout', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          shellDefaultTimeoutMs: 2_147_483_647,
+        }).getShellDefaultTimeoutMs(),
       ).toBe(2_147_483_647);
     });
   });
@@ -2018,6 +2088,116 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('chat recording failure listeners', () => {
+    const notify = (config: Config, event: ChatRecordingFailureEvent) => {
+      (
+        config as unknown as {
+          notifyChatRecordingFailure: (
+            failure: ChatRecordingFailureEvent,
+          ) => void;
+        }
+      ).notifyChatRecordingFailure(event);
+    };
+
+    it('notifies multiple listeners and disposes them independently', () => {
+      const config = new Config(baseParams);
+      const first = vi.fn();
+      const second = vi.fn();
+      const disposeFirst = config.onChatRecordingFailure(first);
+      config.onChatRecordingFailure(second);
+      const event = { sessionId: 's-1', error: new Error('write failed') };
+
+      notify(config, event);
+      disposeFirst();
+      notify(config, event);
+
+      expect(first).toHaveBeenCalledTimes(1);
+      expect(second).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps a subscription wired to a replacement session recorder', async () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const listener = vi.fn();
+      config.onChatRecordingFailure(listener);
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      config.startNewSession(sessionId);
+      const error = new Error('replacement write failed');
+      const writeLine = vi
+        .spyOn(jsonl, 'writeLine')
+        .mockRejectedValueOnce(error);
+
+      try {
+        const recorder = config.getChatRecordingService()!;
+        recorder.recordUserMessage([{ text: 'new session' }]);
+        await expect(recorder.flush()).rejects.toBe(error);
+
+        expect(listener).toHaveBeenCalledOnce();
+        expect(listener).toHaveBeenCalledWith({ sessionId, error });
+      } finally {
+        writeLine.mockRestore();
+      }
+    });
+
+    it('isolates synchronous throws and asynchronous listener rejections', async () => {
+      const config = new Config(baseParams);
+      const unhandled: unknown[] = [];
+      const onUnhandled = (error: unknown) => unhandled.push(error);
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        config.onChatRecordingFailure(() => {
+          throw new Error('listener threw');
+        });
+        config.onChatRecordingFailure(async () => {
+          throw new Error('listener rejected');
+        });
+
+        notify(config, {
+          sessionId: 's-1',
+          error: new Error('write failed'),
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+      }
+    });
+
+    it('keeps listeners through shutdown flush and clears them afterward', async () => {
+      const config = new Config(baseParams);
+      const listener = vi.fn();
+      config.onChatRecordingFailure(listener);
+      const event = { sessionId: 's-1', error: new Error('write failed') };
+      (
+        config as unknown as {
+          initialized: boolean;
+          chatRecordingService: {
+            finalize: () => void;
+            flush: () => Promise<void>;
+          };
+        }
+      ).initialized = true;
+      (
+        config as unknown as {
+          chatRecordingService: {
+            finalize: () => void;
+            flush: () => Promise<void>;
+          };
+        }
+      ).chatRecordingService = {
+        finalize: vi.fn(),
+        flush: async () => {
+          notify(config, event);
+        },
+      };
+
+      await config.shutdown();
+      notify(config, event);
+
+      expect(listener).toHaveBeenCalledOnce();
+    });
+  });
+
   it('should expose LSP status from the configured client', () => {
     const getStatusSnapshot = vi.fn().mockReturnValue({
       enabled: true,
@@ -2316,6 +2496,46 @@ describe('Server Config (config.ts)', () => {
         ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
       ]);
+    });
+
+    it('should skip hook, skill, and file checkpointing side effects when requested', async () => {
+      const config = new Config({
+        ...baseParams,
+        fileCheckpointingEnabled: true,
+      });
+
+      await expect(
+        config.initialize({
+          skipMcpDiscovery: true,
+          skipHooks: true,
+          skipSkillManager: true,
+          skipFileCheckpointing: true,
+        }),
+      ).resolves.toBeUndefined();
+
+      expect(HookSystem).not.toHaveBeenCalled();
+      expect(config.getHookSystem()).toBeUndefined();
+      expect(SkillManager).not.toHaveBeenCalled();
+      expect(config.getSkillManager()).toBeNull();
+      expect(config.getFileCheckpointingEnabled()).toBe(false);
+    });
+
+    it('warms tools strictly by default and leniently when lenientToolWarmup is set', async () => {
+      // Regression guard for the read-only transcript-replay path: a Config that
+      // skips the SkillManager must warm tools leniently, otherwise warmAll()
+      // aborts initialize() when SkillTool's constructor throws.
+      const warmAll = vi.mocked(ToolRegistry.prototype.warmAll);
+
+      warmAll.mockClear();
+      await new Config({ ...baseParams }).initialize();
+      expect(warmAll).toHaveBeenLastCalledWith({ strict: true });
+
+      warmAll.mockClear();
+      await new Config({ ...baseParams }).initialize({
+        skipSkillManager: true,
+        lenientToolWarmup: true,
+      });
+      expect(warmAll).toHaveBeenLastCalledWith({ strict: false });
     });
 
     it('registers loop_wakeup when cron is enabled', async () => {
@@ -3724,6 +3944,37 @@ describe('Server Config (config.ts)', () => {
     await config.relocateWorkingDirectory(newDir);
 
     expect(config.getFileService()).not.toBe(fileServiceBefore);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should continue after recording flush fails', async () => {
+    const config = new Config(baseParams);
+    const newDir = path.resolve('/path/to/other');
+    const finalize = vi.fn();
+    const flush = vi.fn().mockRejectedValue(new Error('recording failed'));
+    const resetStoragePaths = vi.fn();
+    (
+      config as unknown as {
+        chatRecordingService: {
+          finalize: () => void;
+          flush: () => Promise<void>;
+          resetStoragePaths: () => void;
+        };
+      }
+    ).chatRecordingService = { finalize, flush, resetStoragePaths };
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+
+    await expect(config.relocateWorkingDirectory(newDir)).resolves.toEqual({});
+
+    expect(finalize).toHaveBeenCalledOnce();
+    expect(flush).toHaveBeenCalledOnce();
+    expect(resetStoragePaths).toHaveBeenCalledOnce();
+    expect(config.getTargetDir()).toBe(newDir);
 
     chdirSpy.mockRestore();
     cwdSpy.mockRestore();
@@ -6327,6 +6578,7 @@ describe('Model Switching and Config Updates', () => {
       ['contextWindowSize']: 1_000_000,
       ['samplingParams']: { temperature: 0.7 },
       ['enableCacheControl']: true,
+      ['forceGlobalCacheScope']: true,
     };
 
     vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
@@ -6352,6 +6604,7 @@ describe('Model Switching and Config Updates', () => {
       ['contextWindowSize']: 128_000,
       ['samplingParams']: { temperature: 0.8 },
       ['enableCacheControl']: false,
+      ['forceGlobalCacheScope']: false,
       ['toolResultContentFormat']: 'string',
       ['modalities']: { image: true },
     };
@@ -6363,6 +6616,7 @@ describe('Model Switching and Config Updates', () => {
         contextWindowSize: { kind: 'computed', detail: 'auto' },
         samplingParams: { kind: 'settings' },
         enableCacheControl: { kind: 'settings' },
+        forceGlobalCacheScope: { kind: 'settings' },
         toolResultContentFormat: { kind: 'settings' },
         modalities: { kind: 'computed', detail: 'auto' },
       },
@@ -6384,6 +6638,7 @@ describe('Model Switching and Config Updates', () => {
     expect(updatedConfig['contextWindowSize']).toBe(128_000);
     expect(updatedConfig['samplingParams']?.temperature).toBe(0.8);
     expect(updatedConfig['enableCacheControl']).toBe(false);
+    expect(updatedConfig['forceGlobalCacheScope']).toBe(false);
     expect(updatedConfig['toolResultContentFormat']).toBe('string');
     // Modalities are model-derived; a hot switch must refresh them so the
     // vision-bridge gate reflects the new model (it reads getEffectiveInputModalities()).
@@ -6398,6 +6653,7 @@ describe('Model Switching and Config Updates', () => {
     expect(sources['contextWindowSize']?.detail).toBe('auto');
     expect(sources['samplingParams']?.kind).toBe('settings');
     expect(sources['enableCacheControl']?.kind).toBe('settings');
+    expect(sources['forceGlobalCacheScope']?.kind).toBe('settings');
     expect(sources['toolResultContentFormat']?.kind).toBe('settings');
     expect(sources['modalities']?.kind).toBe('computed');
   });
@@ -6831,6 +7087,78 @@ describe('Model Switching and Config Updates', () => {
 
       // Zero context_limit: returns undefined
       expect(buildContextUsage(0, 64000)).toBeUndefined();
+    });
+  });
+
+  describe('MessageDisplay dispatch through the hook execution bridge', () => {
+    it('extracts message_id/displayed_text/is_final from the request input and forwards them positionally', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+
+      const fireMessageDisplayEvent = vi
+        .fn()
+        .mockResolvedValue({ finalOutput: undefined, allOutputs: [] });
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = { fireMessageDisplayEvent };
+
+      const messageBus = config.getMessageBus();
+      expect(messageBus).toBeDefined();
+
+      const response = await messageBus!.request<
+        HookExecutionRequest,
+        HookExecutionResponse
+      >(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'MessageDisplay',
+          input: {
+            message_id: 'msg-123',
+            displayed_text: 'Hello, world',
+            is_final: true,
+          },
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+
+      expect(fireMessageDisplayEvent).toHaveBeenCalledWith(
+        'msg-123',
+        'Hello, world',
+        true,
+        undefined,
+      );
+      expect(response.success).toBe(true);
+    });
+
+    it('defaults missing fields (empty message_id/text, is_final false) rather than throwing', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+
+      const fireMessageDisplayEvent = vi
+        .fn()
+        .mockResolvedValue({ finalOutput: undefined, allOutputs: [] });
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = { fireMessageDisplayEvent };
+
+      const messageBus = config.getMessageBus();
+      const response = await messageBus!.request<
+        HookExecutionRequest,
+        HookExecutionResponse
+      >(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'MessageDisplay',
+          input: {},
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+
+      expect(fireMessageDisplayEvent).toHaveBeenCalledWith(
+        '',
+        '',
+        false,
+        undefined,
+      );
+      expect(response.success).toBe(true);
     });
   });
 });
