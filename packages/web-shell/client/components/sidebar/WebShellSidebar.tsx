@@ -2753,6 +2753,11 @@ export function WebShellSidebar({
                       count: workspaceRemovalActivity.channelWorkers,
                     })}
                   </li>
+                  <li>
+                    {t('sidebar.removeWorkspaceVoiceSessions', {
+                      count: workspaceRemovalActivity.voiceSessions ?? 0,
+                    })}
+                  </li>
                 </ul>
               )}
               {workspaceRemovalActivity &&

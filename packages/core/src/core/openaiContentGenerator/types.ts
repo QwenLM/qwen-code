@@ -81,6 +81,11 @@ export interface RequestContext {
   pendingContentParts?: Part[];
   /** Tool IDs whose preparing metadata has already been emitted in this stream. */
   preparedToolCallIds?: Set<string>;
+  pendingUntrustedResponseParts?: Part[];
+  hasStructuredReasoningContent?: boolean;
+  hasThinkingTagInReasoning?: boolean;
+  hasVisibleContent?: boolean;
+  atVisibleLineStart?: boolean;
 }
 
 export interface ErrorHandler {

@@ -1182,6 +1182,86 @@ You are weird.
   });
 
   describe('loadSubagent', () => {
+    it('applies the configured model only to the built-in Explore agent', async () => {
+      vi.mocked(fs.readdir).mockRejectedValue(new Error('Directory not found'));
+      const configuredManager = new SubagentManager(
+        makeFakeConfig({
+          agents: { builtin: { exploreModel: 'fast' } },
+        }),
+      );
+
+      expect((await configuredManager.loadSubagent('Explore'))?.model).toBe(
+        'fast',
+      );
+      expect(
+        (await configuredManager.loadSubagent('Explore', 'builtin'))?.model,
+      ).toBe('fast');
+
+      const builtins = await configuredManager.listSubagents({
+        level: 'builtin',
+        force: true,
+      });
+      expect(builtins.find((agent) => agent.name === 'Explore')?.model).toBe(
+        'fast',
+      );
+    });
+
+    it('does not apply the built-in Explore model to a same-name session agent', async () => {
+      const configuredManager = new SubagentManager(
+        makeFakeConfig({
+          agents: { builtin: { exploreModel: 'fast' } },
+        }),
+      );
+      configuredManager.loadSessionSubagents([
+        {
+          name: 'Explore',
+          description: 'Session Explore',
+          systemPrompt: 'Use the session agent.',
+          level: 'session',
+        },
+      ]);
+
+      const config = await configuredManager.loadSubagent('Explore');
+
+      expect(config?.level).toBe('session');
+      expect(config?.model).toBeUndefined();
+    });
+
+    it('ignores a non-string built-in Explore model setting', async () => {
+      const configuredManager = new SubagentManager(
+        makeFakeConfig({
+          agents: {
+            builtin: { exploreModel: 1 as unknown as string },
+          },
+        }),
+      );
+
+      const config = await configuredManager.loadSubagent('Explore', 'builtin');
+
+      expect(config?.model).toBeUndefined();
+    });
+
+    it.each([
+      { exploreModel: '   ', expectedModel: undefined },
+      { exploreModel: 'inherit', expectedModel: 'inherit' },
+    ])(
+      'resolves the built-in Explore model setting "$exploreModel"',
+      async ({ exploreModel, expectedModel }) => {
+        const configuredManager = new SubagentManager(
+          makeFakeConfig({
+            agents: { builtin: { exploreModel } },
+          }),
+        );
+
+        const config = await configuredManager.loadSubagent(
+          'Explore',
+          'builtin',
+        );
+
+        expect(config?.model).toBe(expectedModel);
+      },
+    );
+
     it('should load subagent from project level first', async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       vi.mocked(fs.readdir).mockResolvedValue(['test-agent.md'] as any);

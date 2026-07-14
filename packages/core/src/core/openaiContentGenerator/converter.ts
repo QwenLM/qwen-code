@@ -32,6 +32,7 @@ import {
   setToolCallPreparations,
   type ToolCallPreparation,
 } from '../tool-call-preparation.js';
+import { InvalidStreamError } from '../invalid-stream-error.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
 const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
@@ -1090,6 +1091,12 @@ function hasThoughtPart(parts: Part[]): boolean {
   return parts.some((part) => part.thought === true);
 }
 
+const THINKING_TAG_PATTERN = /<\/?think(?:ing)?\s*>/i;
+const CLOSING_THINKING_TAG_PATTERN = /\n[^\S\r\n]*<\/think(?:ing)?[^\S\r\n]*>/i;
+const LEADING_CLOSING_THINKING_TAG_PATTERN =
+  /^[^\S\r\n]*<\/think(?:ing)?[^\S\r\n]*>/i;
+const LEADING_THINKING_TAG_PATTERN = /^\s*<\/?think(?:ing)?\s*>/i;
+
 /**
  * Convert OpenAI response to Gemini format.
  */
@@ -1230,7 +1237,7 @@ export function convertOpenAIChunkToGemini(
   }
 
   if (choice) {
-    const parts: Part[] = [];
+    let parts: Part[] = [];
     let contentParts: Part[] = [];
 
     // Handle reasoning content (thoughts).
@@ -1290,6 +1297,12 @@ export function convertOpenAIChunkToGemini(
           cumulativeMode: false,
         }),
       );
+      if (normalizedReasoningText) {
+        requestContext.hasStructuredReasoningContent = true;
+        if (THINKING_TAG_PATTERN.test(normalizedReasoningText)) {
+          requestContext.hasThinkingTagInReasoning = true;
+        }
+      }
       if (
         normalizedReasoningText &&
         !requestContext.responseParsingOptions?.taggedThinkingTags
@@ -1379,6 +1392,66 @@ export function convertOpenAIChunkToGemini(
       }
     }
 
+    const visibleText = parts
+      .map((part) =>
+        part.thought !== true && typeof part.text === 'string' ? part.text : '',
+      )
+      .join('');
+    const leakedThinkingTag =
+      requestContext.hasStructuredReasoningContent === true &&
+      ((requestContext.hasVisibleContent !== true &&
+        LEADING_THINKING_TAG_PATTERN.test(visibleText)) ||
+        (requestContext.hasThinkingTagInReasoning === true &&
+          (CLOSING_THINKING_TAG_PATTERN.test(visibleText) ||
+            (requestContext.atVisibleLineStart === true &&
+              LEADING_CLOSING_THINKING_TAG_PATTERN.test(visibleText)))));
+    if (/\S/.test(visibleText)) {
+      requestContext.hasVisibleContent = true;
+    }
+    if (visibleText && requestContext.hasThinkingTagInReasoning === true) {
+      const lastLineBreak = visibleText.lastIndexOf('\n');
+      const lineSuffix = visibleText.slice(lastLineBreak + 1);
+      requestContext.atVisibleLineStart =
+        (lastLineBreak >= 0 || requestContext.atVisibleLineStart === true) &&
+        /^[^\S\r\n]*$/.test(lineSuffix);
+    }
+    if (leakedThinkingTag) {
+      requestContext.pendingUntrustedResponseParts = undefined;
+      throw new InvalidStreamError(
+        'Model response leaked thinking tags.',
+        'PROTOCOL_TAG_LEAK',
+      );
+    }
+
+    const toolCallWithoutName = toolCallParser.hasNamelessToolCall();
+    const completedToolCalls = choice.finish_reason
+      ? toolCallParser.getCompletedToolCalls()
+      : [];
+    if (
+      choice.finish_reason &&
+      (toolCallWithoutName ||
+        (choice.finish_reason === 'tool_calls' &&
+          completedToolCalls.length === 0))
+    ) {
+      requestContext.pendingUntrustedResponseParts = undefined;
+      throw new InvalidStreamError(
+        'Model response contained a malformed tool call.',
+        'MALFORMED_TOOL_CALL',
+      );
+    }
+
+    const shouldHoldParts =
+      !choice.finish_reason &&
+      (toolCallWithoutName ||
+        requestContext.hasThinkingTagInReasoning === true);
+    if (shouldHoldParts) {
+      (requestContext.pendingUntrustedResponseParts ??= []).push(...parts);
+      parts.length = 0;
+    } else if (requestContext.pendingUntrustedResponseParts) {
+      parts = requestContext.pendingUntrustedResponseParts.concat(parts);
+      requestContext.pendingUntrustedResponseParts = undefined;
+    }
+
     // Only emit function calls when streaming is complete (finish_reason is present)
     let toolCallsTruncated = false;
     if (choice.finish_reason) {
@@ -1386,8 +1459,6 @@ export function convertOpenAIChunkToGemini(
       // Some providers (e.g. DashScope/Qwen) send "stop" or "tool_calls"
       // even when output was cut off mid-JSON due to max_tokens.
       toolCallsTruncated = toolCallParser.hasIncompleteToolCalls();
-
-      const completedToolCalls = toolCallParser.getCompletedToolCalls();
 
       for (const toolCall of completedToolCalls) {
         if (toolCall.name) {
