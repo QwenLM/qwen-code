@@ -1254,20 +1254,18 @@ export function useComposerCore(
     workspaceActionsRef.current = {
       ...workspace.actions,
       async globWorkspace(pattern, options) {
-        if (options?.signal?.aborted) return { matches: [] };
-        const result = (await client.glob(pattern)) as { matches?: unknown[] };
-        if (options?.signal?.aborted) return { matches: [] };
+        options?.signal?.throwIfAborted();
+        const result = (await client.glob(pattern, {
+          maxResults: options?.maxResults,
+          signal: options?.signal,
+        })) as { matches?: unknown[] };
+        options?.signal?.throwIfAborted();
         const matches = Array.isArray(result.matches)
           ? result.matches.filter(
               (match): match is string => typeof match === 'string',
             )
           : [];
-        return {
-          matches:
-            options?.maxResults === undefined
-              ? matches
-              : matches.slice(0, options.maxResults),
-        };
+        return { matches };
       },
       async listDirectory(dirPath, options) {
         if (options?.signal?.aborted) {

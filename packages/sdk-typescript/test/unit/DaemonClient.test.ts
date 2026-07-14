@@ -5361,6 +5361,26 @@ describe('DaemonClient', () => {
       }
     });
 
+    it('passes glob limits and cancellation to workspace-qualified requests', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { matches: [] }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const controller = new AbortController();
+
+      await client.workspaceByCwd('/tmp/work space').glob('**/*readme*', {
+        maxResults: 50,
+        signal: controller.signal,
+      });
+
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/%2Ftmp%2Fwork%20space/glob?pattern=**%2F*readme*&maxResults=50',
+      );
+      expect(calls[0]?.signal?.aborted).toBe(false);
+      controller.abort();
+      expect(calls[0]?.signal?.aborted).toBe(true);
+    });
+
     it('workspaceById and workspaceByCwd call workspace-qualified agents routes', async () => {
       const list = {
         v: 1,
