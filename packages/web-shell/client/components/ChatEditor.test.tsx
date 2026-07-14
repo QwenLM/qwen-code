@@ -5,8 +5,20 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../i18n';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
+import type {
+  ComposerTagClickHandler,
+  ComposerTagRenderer,
+  WebShellComposerTag,
+} from '../customization';
+import { WebShellCustomizationProvider } from '../customization';
+import { WebShellPortalRootContext } from '../portalRoot';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+
+const mockComposerCoreState = vi.hoisted(() => ({
+  composerTags: [] as WebShellComposerTag[],
+  removeTopTag: vi.fn(),
+}));
 
 Object.defineProperty(window, 'matchMedia', {
   writable: true,
@@ -44,8 +56,8 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
       },
       pastedImages: [],
       removeImage: vi.fn(),
-      composerTags: [],
-      removeTopTag: vi.fn(),
+      composerTags: mockComposerCoreState.composerTags,
+      removeTopTag: mockComposerCoreState.removeTopTag,
       addTags: vi.fn(),
       removeInlineTags: vi.fn(),
       insertText: vi.fn(),
@@ -96,13 +108,20 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
   };
 });
 
-const mounted: Array<{ root: Root; container: HTMLDivElement }> = [];
+const mounted: Array<{
+  root: Root;
+  container: HTMLDivElement;
+  portalRoot: HTMLDivElement;
+}> = [];
 
 afterEach(() => {
-  for (const { root, container } of mounted.splice(0)) {
+  for (const { root, container, portalRoot } of mounted.splice(0)) {
     act(() => root.unmount());
     container.remove();
+    portalRoot.remove();
   }
+  mockComposerCoreState.composerTags = [];
+  mockComposerCoreState.removeTopTag.mockReset();
 });
 
 function renderChatEditor(props: {
@@ -110,24 +129,37 @@ function renderChatEditor(props: {
   workspaceName?: string;
   workspaceTitle?: string;
   visibleToolbarActions?: readonly ComposerToolbarAction[];
+  renderComposerTagTooltip?: ComposerTagRenderer;
+  onComposerTagClick?: ComposerTagClickHandler;
 }) {
+  const { renderComposerTagTooltip, onComposerTagClick, ...chatEditorProps } =
+    props;
   const container = document.createElement('div');
+  const portalRoot = document.createElement('div');
+  portalRoot.dataset.webShellPortalRoot = '';
   document.body.appendChild(container);
+  document.body.appendChild(portalRoot);
   const root = createRoot(container);
-  mounted.push({ root, container });
+  mounted.push({ root, container, portalRoot });
 
   act(() => {
     root.render(
-      <I18nProvider language="en">
-        <ChatEditor
-          onSubmit={() => undefined}
-          commands={[]}
-          showChatWidthToggle={false}
-          currentMode="default"
-          currentModel="qwen"
-          {...props}
-        />
-      </I18nProvider>,
+      <WebShellPortalRootContext.Provider value={portalRoot}>
+        <WebShellCustomizationProvider
+          value={{ renderComposerTagTooltip, onComposerTagClick }}
+        >
+          <I18nProvider language="en">
+            <ChatEditor
+              onSubmit={() => undefined}
+              commands={[]}
+              showChatWidthToggle={false}
+              currentMode="default"
+              currentModel="qwen"
+              {...chatEditorProps}
+            />
+          </I18nProvider>
+        </WebShellCustomizationProvider>
+      </WebShellPortalRootContext.Provider>,
     );
   });
 
@@ -220,5 +252,142 @@ describe('ChatEditor workspace toolbar integration', () => {
     expect(
       ws!.compareDocumentPosition(git!) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+  });
+});
+
+describe('ChatEditor top composer tag tooltip', () => {
+  it('activates the plain tag from click and keyboard with the outer tag rect', () => {
+    mockComposerCoreState.composerTags = [
+      { id: 'orders', label: 'Table', value: 'orders', removable: false },
+    ];
+    const onComposerTagClick = vi.fn();
+    const container = renderChatEditor({
+      onComposerTagClick,
+      visibleToolbarActions: [],
+    });
+    const tag = container.querySelector<HTMLElement>(
+      '[data-web-shell-composer-tag]',
+    )!;
+    const trigger = tag.querySelector<HTMLElement>(
+      '[data-web-shell-composer-tag-trigger]',
+    )!;
+    const outerRect = { width: 200 } as DOMRect;
+    const innerRect = { width: 120 } as DOMRect;
+    tag.getBoundingClientRect = vi.fn(() => outerRect);
+    trigger.getBoundingClientRect = vi.fn(() => innerRect);
+
+    act(() => {
+      trigger.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      trigger.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+      trigger.dispatchEvent(
+        new KeyboardEvent('keydown', { key: ' ', bubbles: true }),
+      );
+    });
+
+    expect(onComposerTagClick).toHaveBeenCalledTimes(3);
+    for (const [info] of onComposerTagClick.mock.calls) {
+      expect(info).toMatchObject({
+        tag: mockComposerCoreState.composerTags[0],
+        placement: 'composer',
+        readonly: false,
+        anchorRect: outerRect,
+      });
+    }
+    expect(container.querySelector('[role="tooltip"]')).toBeNull();
+  });
+
+  it('removes a tag without activating it', () => {
+    mockComposerCoreState.composerTags = [
+      { id: 'orders', label: 'Table', value: 'orders' },
+    ];
+    const onComposerTagClick = vi.fn();
+    const container = renderChatEditor({
+      onComposerTagClick,
+      visibleToolbarActions: [],
+    });
+    const remove = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Remove orders"]',
+    )!;
+
+    act(() => {
+      remove.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      remove.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }),
+      );
+      remove.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }),
+      );
+    });
+
+    expect(mockComposerCoreState.removeTopTag).toHaveBeenCalledTimes(3);
+    expect(mockComposerCoreState.removeTopTag).toHaveBeenCalledWith('orders');
+    expect(onComposerTagClick).not.toHaveBeenCalled();
+  });
+
+  it('falls back to a plain tag when custom tooltip rendering throws', () => {
+    mockComposerCoreState.composerTags = [
+      { id: 'orders', label: 'Table', value: 'orders' },
+    ];
+    const error = new Error('bad composer tooltip');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const container = renderChatEditor({
+      renderComposerTagTooltip: () => {
+        throw error;
+      },
+      visibleToolbarActions: [],
+    });
+
+    expect(container.textContent).toContain('Table');
+    expect(container.textContent).toContain('orders');
+    expect(container.querySelector('[role="tooltip"]')).toBeNull();
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] composer tag tooltip render failed',
+      error,
+    );
+    warn.mockRestore();
+  });
+
+  it('opens custom content from a top tag in the configured portal root', () => {
+    mockComposerCoreState.composerTags = [
+      { id: 'orders', label: 'Table', value: 'orders' },
+    ];
+    const container = renderChatEditor({
+      renderComposerTagTooltip: () => 'Table details',
+      visibleToolbarActions: [],
+    });
+    const portalRoot = document.body.querySelector<HTMLElement>(
+      '[data-web-shell-portal-root]',
+    );
+    const tag = container.querySelector<HTMLElement>(
+      '[data-web-shell-composer-tag]',
+    );
+    const trigger = tag?.querySelector<HTMLElement>(
+      '[data-web-shell-composer-tag-trigger]',
+    );
+    const removeButton = tag?.querySelector<HTMLButtonElement>('button');
+
+    expect(trigger).not.toBeNull();
+    expect(trigger?.getAttribute('role')).toBeNull();
+    expect(trigger?.tabIndex).toBe(0);
+    expect(removeButton).not.toBeNull();
+    expect(trigger?.contains(removeButton ?? null)).toBe(false);
+    act(() => trigger?.focus());
+
+    const content = portalRoot?.querySelector<HTMLElement>(
+      '[data-web-shell-composer-tag-tooltip]',
+    );
+    const accessibleTooltip =
+      portalRoot?.querySelector<HTMLElement>('[role="tooltip"]');
+    expect(content).not.toBeNull();
+    expect(content?.textContent).toContain('Table details');
+    expect(container.contains(content ?? null)).toBe(false);
+    expect(portalRoot?.contains(content ?? null)).toBe(true);
+    expect(accessibleTooltip).not.toBeNull();
+    expect(trigger?.getAttribute('aria-describedby')).toBe(
+      accessibleTooltip?.id,
+    );
+    expect(tag?.hasAttribute('aria-describedby')).toBe(false);
   });
 });
