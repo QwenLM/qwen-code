@@ -1,51 +1,43 @@
-# DingTalk Webhook Direct-Message Delivery
+# 钉钉 Webhook 单聊投递设计
 
-## Status
+## 状态
 
-Approved for implementation. Tracks
-[QwenLM/qwen-code#6883](https://github.com/QwenLM/qwen-code/issues/6883).
+方案已确认，可以进入实现阶段。对应 Issue：
+[QwenLM/qwen-code#6883](https://github.com/QwenLM/qwen-code/issues/6883)。
 
-## Context
+## 背景
 
-Daemon-managed channels can accept authenticated external webhook events, run
-them as unattended agent tasks, and proactively deliver the final response to a
-configured chat target. DingTalk currently supports this delivery only for
-groups: a target must set `isGroup: true`, and the adapter sends Markdown
-through the group-message API.
+由 daemon 托管的 channel 可以接收经过鉴权的外部 Webhook 事件，以无人值守任务的方式运行 agent，并将最终结果主动投递到预先配置的聊天目标。目前钉钉只支持投递到群聊：目标必须设置 `isGroup: true`，adapter 通过群消息 API 发送 Markdown。
 
-This prevents webhook sources such as CI systems and operational monitors from
-notifying one responsible DingTalk user without involving a group.
+这使得 CI 系统、监控告警等 Webhook 来源无法直接通知某个负责的钉钉用户，只能投递到群聊。
 
-## Goals
+## 目标
 
-- Deliver daemon webhook task results to DingTalk direct-message targets.
-- Preserve existing DingTalk group webhook delivery behavior.
-- Reuse the existing target schema, token cache, Markdown formatting, chunking,
-  retry, and delivery-error behavior.
-- Keep the implementation inside the existing DingTalk adapter.
+- 将 daemon Webhook 任务结果投递到钉钉单聊目标。
+- 保持现有钉钉群聊 Webhook 投递行为不变。
+- 复用现有的目标配置结构、Token 缓存、Markdown 格式化、消息分片、重试和投递错误处理。
+- 实现范围限定在现有钉钉 adapter 内，不新增 channel。
 
-## Non-goals
+## 非目标
 
-- Native DingTalk cards or card callbacks.
-- Streaming card updates, buttons, feedback, or task cancellation from DingTalk.
-- Multiple recipients in one target.
-- Threaded DingTalk targets.
-- A new channel type or daemon webhook protocol.
+- 钉钉原生 Card 或 Card 回调。
+- Card 流式更新、按钮、反馈或从钉钉取消任务。
+- 单个目标配置多个接收人。
+- 钉钉话题投递。
+- 新增 channel 类型或修改 daemon Webhook 协议。
 
-## Target configuration
+## 目标配置
 
-No new configuration fields are required. The existing webhook target fields
-have the following DingTalk-specific meaning:
+无需新增配置字段。现有 Webhook 目标字段在钉钉 channel 中的含义如下：
 
-| `isGroup` | `chatId` meaning                    | Delivery API                  |
-| --------- | ----------------------------------- | ----------------------------- |
-| `true`    | DingTalk group `openConversationId` | `robot/groupMessages/send`    |
-| `false`   | DingTalk user ID                    | `robot/oToMessages/batchSend` |
+| `isGroup` | `chatId` 含义                 | 投递 API                      |
+| --------- | ----------------------------- | ----------------------------- |
+| `true`    | 钉钉群聊 `openConversationId` | `robot/groupMessages/send`    |
+| `false`   | 钉钉用户 ID                   | `robot/oToMessages/batchSend` |
 
-`senderId` remains the synthetic identity used to route the webhook task to an
-agent session. It is not the DingTalk recipient ID.
+`senderId` 仍然是用于将 Webhook 任务路由到 agent session 的虚拟身份，不是钉钉接收人 ID。
 
-Example:
+配置示例：
 
 ```json
 {
@@ -71,24 +63,22 @@ Example:
 }
 ```
 
-Targets must explicitly set `isGroup`. The adapter continues to reject targets
-with an empty `chatId`, a `threadId`, a missing `isGroup`, or a webhook URL in
-place of a stable target ID.
+目标必须显式设置 `isGroup`。以下目标继续被 adapter 拒绝：`chatId` 为空、设置了 `threadId`、缺少 `isGroup`，或者使用 Webhook URL 代替稳定的目标 ID。
 
-## Delivery flow
+## 投递链路
 
-The daemon route, worker IPC, and shared channel runtime remain unchanged:
+daemon 路由、worker IPC 和共享 channel runtime 均保持不变：
 
 ```text
 POST /channels/:channelName/webhooks/:source
-  -> daemon authenticates and validates the event
-  -> channel worker runs the unattended agent task
-  -> ChannelBase calls DingtalkChannel.pushProactive()
-  -> adapter selects the DingTalk API from target.isGroup
-  -> DingTalk receives Markdown
+  -> daemon 对事件进行鉴权和校验
+  -> channel worker 运行无人值守 agent 任务
+  -> ChannelBase 调用 DingtalkChannel.pushProactive()
+  -> adapter 根据 target.isGroup 选择钉钉 API
+  -> 钉钉接收 Markdown
 ```
 
-For group targets, the adapter keeps the current request body:
+群聊目标继续使用现有请求体：
 
 ```json
 {
@@ -99,8 +89,7 @@ For group targets, the adapter keeps the current request body:
 }
 ```
 
-For direct-message targets, it sends the same Markdown template through the
-one-to-one API:
+单聊目标通过一对一消息 API 发送相同的 Markdown 模板：
 
 ```json
 {
@@ -111,59 +100,47 @@ one-to-one API:
 }
 ```
 
-Both paths use the existing access-token cache, refresh one minute before token
-expiry, retry once after HTTP 401, and apply the same Markdown normalization and
-chunking limits. A multi-chunk delivery stops at the first failed chunk.
+两条路径共用现有的 access token 缓存，在 Token 到期前一分钟刷新；遇到 HTTP 401 时重试一次；同时使用相同的 Markdown 规范化和分片限制。多分片投递在首个分片失败后停止。
 
-## Error handling
+## 错误处理
 
-- Invalid targets fail webhook-task validation before the agent runs.
-- Token acquisition failures remain delivery failures and are logged without
-  exposing credentials.
-- HTTP 401 clears the cached token and retries the current chunk once.
-- Other unsuccessful HTTP responses stop delivery and surface a sanitized API
-  detail in the channel-worker log.
-- A daemon response of `202 {"accepted": true}` continues to mean only that the
-  worker accepted the task, not that DingTalk delivery succeeded.
+- 无效目标在 agent 运行前即无法通过 Webhook 任务校验。
+- 获取 Token 失败仍作为投递失败处理，并在不暴露凭据的前提下记录日志。
+- HTTP 401 会清除缓存的 Token，并对当前分片重试一次。
+- 其他非成功 HTTP 响应会中止投递，并在 channel worker 日志中输出脱敏后的 API 错误详情。
+- daemon 返回 `202 {"accepted": true}` 仍然只表示 worker 已接收任务，不代表钉钉投递成功。
 
-No Markdown fallback is necessary because Markdown is the only delivery format
-in this scope.
+本期范围内仅支持 Markdown，因此无需设计 Markdown 降级策略。
 
-## Testing
+## 测试
 
-### Unit tests
+### 单元测试
 
-- Accept explicit group and direct-message proactive targets.
-- Reject missing `isGroup`, empty IDs, webhook URLs, and threaded targets.
-- Preserve the existing group endpoint and `openConversationId` request body.
-- Use the one-to-one endpoint and `userIds` request body for direct messages.
-- Reuse a cached token across group and direct-message sends.
-- Refresh the token and retry once after HTTP 401.
-- Apply chunking and first-failure termination to direct-message delivery.
+- 接受显式配置的群聊和单聊主动投递目标。
+- 拒绝缺少 `isGroup`、ID 为空、使用 Webhook URL 和设置 `threadId` 的目标。
+- 保持现有群聊 endpoint 和包含 `openConversationId` 的请求体不变。
+- 单聊使用一对一消息 endpoint 和包含 `userIds` 的请求体。
+- 群聊和单聊发送共用缓存的 Token。
+- HTTP 401 后刷新 Token，并仅重试一次。
+- 单聊投递同样遵循消息分片和首个失败即中止的规则。
 
-### Local end-to-end verification
+### 本地端到端验证
 
-Create a plan under `.qwen/e2e-tests/` and first run the globally installed
-`qwen` CLI to capture the current rejection of a direct-message webhook target.
-After implementation:
+在 `.qwen/e2e-tests/` 下编写测试计划，并先使用全局安装的 `qwen` CLI，记录当前单聊 Webhook 目标被拒绝的基线行为。实现完成后：
 
-1. Configure one direct-message target and one group target.
-2. Start `qwen serve` with the DingTalk channel enabled.
-3. Use `curl` to post one event for each `targetRef`.
-4. Confirm both requests return `202`.
-5. Confirm the channel worker completes both tasks.
-6. Confirm the expected Markdown reaches the selected DingTalk user and group.
+1. 分别配置一个单聊目标和一个群聊目标。
+2. 启用钉钉 channel 并启动 `qwen serve`。
+3. 使用 `curl` 分别向两个 `targetRef` 提交一条事件。
+4. 确认两个请求均返回 `202`。
+5. 确认 channel worker 完成两个任务。
+6. 确认目标钉钉用户和群聊都收到预期的 Markdown 消息。
 
-If live credentials or recipients are unavailable, the unit tests remain the
-automated delivery proof and the missing live step is reported explicitly.
+如果本地没有可用的钉钉凭据或接收目标，则以单元测试作为自动化投递验证，并明确说明缺少的在线验证步骤。
 
-## Documentation
+## 文档
 
-Update the channel webhook documentation to show both DingTalk target forms and
-state that direct-message `chatId` values are DingTalk user IDs.
+更新 channel Webhook 文档，展示钉钉单聊和群聊两种目标配置，并说明单聊目标的 `chatId` 填写钉钉用户 ID。
 
-## Compatibility
+## 兼容性
 
-The change is additive. Existing group targets keep the same configuration,
-validation, endpoint, payload, formatting, and retry behavior. No configuration
-migration is required.
+本次为增量变更。现有群聊目标的配置、校验、endpoint、请求体、格式化和重试行为均不变，无需迁移配置。
