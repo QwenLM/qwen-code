@@ -2716,7 +2716,6 @@ export abstract class ChannelBase {
   private async handleChannelMemoryIntent(
     envelope: Envelope,
     intent: ChannelMemoryIntent,
-    options: { skipPendingClear?: boolean } = {},
   ): Promise<void> {
     if (intent.kind === 'clear_request') {
       this.setPendingClear(this.clearPendingKey(envelope));
@@ -2800,10 +2799,6 @@ export abstract class ChannelBase {
         );
         return;
       }
-      if (entries.length === 0) {
-        await this.sendMessage(envelope.chatId, 'No channel memory saved.');
-        return;
-      }
       const totalPages = Math.max(
         1,
         Math.ceil(entries.length / CHANNEL_MEMORY_PAGE_SIZE),
@@ -2813,6 +2808,10 @@ export abstract class ChannelBase {
           envelope.chatId,
           `Channel memory page ${intent.page} does not exist.`,
         );
+        return;
+      }
+      if (entries.length === 0) {
+        await this.sendMessage(envelope.chatId, 'No channel memory saved.');
         return;
       }
       const pageStart = (intent.page - 1) * CHANNEL_MEMORY_PAGE_SIZE;
@@ -2879,17 +2878,15 @@ export abstract class ChannelBase {
     }
 
     if (intent.kind === 'clear_confirm') {
-      if (!options.skipPendingClear) {
-        const pendingKey = this.clearPendingKey(envelope);
-        const expiresAt = this.pendingClears.get(pendingKey);
-        this.pendingClears.delete(pendingKey);
-        if (expiresAt === undefined || expiresAt < Date.now()) {
-          await this.sendMessage(
-            envelope.chatId,
-            'No pending clear request. Say "清空记忆" first.',
-          );
-          return;
-        }
+      const pendingKey = this.clearPendingKey(envelope);
+      const expiresAt = this.pendingClears.get(pendingKey);
+      this.pendingClears.delete(pendingKey);
+      if (expiresAt === undefined || expiresAt < Date.now()) {
+        await this.sendMessage(
+          envelope.chatId,
+          'No pending clear request. Say "清空记忆" first.',
+        );
+        return;
       }
 
       let result: { changed: boolean };
