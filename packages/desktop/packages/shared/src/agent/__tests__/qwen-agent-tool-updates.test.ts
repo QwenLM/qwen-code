@@ -69,8 +69,13 @@ describe('QwenAgent tool_call_update handling', () => {
     await iterator.return?.(undefined);
 
     // The first (and only) queued event is the terminal result — the
-    // heartbeat produced nothing.
+    // heartbeat produced nothing. Pin `result` to the completed frame's
+    // payload ('done'): a dropped guard would instead enqueue the heartbeat
+    // as the first tool_result with result 'Tool completed' (and isError
+    // false), so asserting only type + isError would stay green through the
+    // regression — the result assertion is what actually gates the guard.
     expect(first.value?.type).toBe('tool_result');
     expect(first.value?.isError).toBe(false);
+    expect(first.value?.result).toBe('done');
   });
 });

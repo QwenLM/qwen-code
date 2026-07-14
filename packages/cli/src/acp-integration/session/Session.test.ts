@@ -4205,6 +4205,44 @@ describe('Session', () => {
         lateEmit?.({ type: 'shell_progress', elapsedMs: 99_000 });
         expect(heartbeatUpdates()).toHaveLength(0);
       });
+
+      it('records heartbeat counts on the tool-execution span', async () => {
+        const endSpanSpy = vi.spyOn(core, 'endToolExecutionSpan');
+        const execute = vi.fn(
+          async (
+            _signal: AbortSignal,
+            updateOutput?: (chunk: unknown) => void,
+          ) => {
+            updateOutput?.({
+              type: 'shell_progress',
+              elapsedMs: 10_000,
+              lastOutputAgeMs: 10_000,
+            });
+            updateOutput?.({
+              type: 'shell_progress',
+              elapsedMs: 20_000,
+              lastOutputAgeMs: 20_000,
+            });
+            return { llmContent: 'done', returnDisplay: 'done' };
+          },
+        );
+
+        await runShellToolCall(execute);
+
+        const spanCall = endSpanSpy.mock.calls.find(
+          ([, meta]) =>
+            (meta as { attributes?: Record<string, unknown> } | undefined)
+              ?.attributes?.['shell.heartbeat_count'] !== undefined,
+        );
+        expect(spanCall).toBeDefined();
+        expect(
+          (spanCall![1] as { attributes: Record<string, unknown> }).attributes,
+        ).toMatchObject({
+          'shell.heartbeat_count': 2,
+          'shell.last_output_age_ms': 20_000,
+        });
+        endSpanSpy.mockRestore();
+      });
     });
 
     describe('tool outcome telemetry (#4602 review)', () => {

@@ -4625,16 +4625,22 @@ export class QwenAgent extends BaseAgent {
   }
 
   private handleToolCallUpdate(update: JsonRecord): void {
-    // Liveness/progress frames (e.g. silent-shell heartbeats carrying
-    // _meta.shellProgress) arrive with status in_progress while the tool is
-    // still running; converting one into a tool_result would prematurely
-    // complete the call with an empty result.
-    if (asString(update.status) === 'in_progress') {
+    // Silent-shell liveness heartbeats arrive as in_progress frames carrying
+    // _meta.shellProgress while the tool is still running; converting one
+    // into a tool_result would prematurely complete the call with an empty
+    // result. Gate on shellProgress (not status alone) so a future non-
+    // heartbeat in_progress frame still flows through normally, and to match
+    // the same shellProgress-scoped guards in the daemon channel bridge and
+    // web-shell normalizer.
+    const meta = toRecord(update._meta);
+    if (
+      asString(update.status) === 'in_progress' &&
+      meta.shellProgress !== undefined
+    ) {
       return;
     }
     const toolUseId =
       asString(update.toolCallId) || `qwen-tool-${++this.toolIdCounter}`;
-    const meta = toRecord(update._meta);
     const toolName =
       this.toolNames.get(toolUseId) ||
       normalizeToolName(asString(meta.toolName), asString(update.kind));

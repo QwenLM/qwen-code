@@ -2464,22 +2464,24 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // difference matters here.
     const executionStartTime = performance.now();
 
-    // Liveness heartbeat for silent commands: while no display update has
-    // fired for a full interval, emit a small structured ShellProgressData
-    // through the same updateOutput channel so headless consumers (ACP,
-    // stream-json) can distinguish "still running" from a dead execution
-    // chain. Display consumers ignore it. The idle check reuses
-    // `lastUpdateTime` (Date.now-based, like the output throttle) while the
-    // reported durations use the monotonic clock — the two clocks never mix
-    // in one calculation. Started only post-spawn so PTY init can't produce
-    // a heartbeat for a process that doesn't exist yet.
+    // Liveness heartbeat for silent commands: while no output has arrived
+    // for a full interval, emit a small structured ShellProgressData through
+    // the same updateOutput channel so headless consumers (ACP, stream-json)
+    // can distinguish "still running" from a dead execution chain. Display
+    // consumers ignore it. Both the idle gate and the reported durations use
+    // the monotonic `performance.now()` clock (via `lastOutputPerfTime`,
+    // falling back to spawn time before any output), so an NTP step can
+    // neither skew the payload nor misfire the heartbeat. Started only
+    // post-spawn so PTY init can't produce a heartbeat for a process that
+    // doesn't exist yet.
     const heartbeatIntervalMs =
       this.config.getShellHeartbeatIntervalMs() ??
       DEFAULT_SHELL_HEARTBEAT_INTERVAL_MS;
     if (updateOutput && heartbeatIntervalMs > 0 && !combinedSignal.aborted) {
       heartbeatTimer = setInterval(() => {
-        if (Date.now() - lastUpdateTime < heartbeatIntervalMs) return;
         const now = performance.now();
+        const idleSince = lastOutputPerfTime ?? executionStartTime;
+        if (now - idleSince < heartbeatIntervalMs) return;
         updateOutput({
           type: 'shell_progress',
           elapsedMs: Math.round(now - executionStartTime),
