@@ -11,6 +11,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import type { CSSProperties, ReactNode, RefObject } from 'react';
+import { Tooltip as TooltipPrimitive } from 'radix-ui';
 import { DAEMON_APPROVAL_MODES } from '@qwen-code/webui/daemon-react-sdk';
 import type { CommandInfo } from '../adapters/types';
 import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/webui/daemon-react-sdk';
@@ -228,6 +229,105 @@ const SLASH_PANEL_THEME_VARS = [
   '--chat-editor-text-primary',
   '--chat-editor-text-secondary',
 ] as const;
+
+function TopComposerTag({
+  tag,
+  content,
+  tooltip,
+  onActivate,
+  onRemove,
+}: {
+  tag: WebShellComposerTag;
+  content: ReactNode;
+  tooltip: ReactNode | null | undefined;
+  onActivate?: (anchorRect: DOMRectReadOnly) => void;
+  onRemove?: () => void;
+}) {
+  const anchorRef = useRef<HTMLSpanElement>(null);
+  const portalRoot = useWebShellPortalRoot();
+  const hasTooltip = tooltip !== undefined && tooltip !== null;
+  const tagContent = (
+    <span
+      className={styles.tagContent}
+      data-web-shell-composer-tag-trigger
+      role={onActivate ? 'button' : undefined}
+      tabIndex={onActivate || hasTooltip ? 0 : undefined}
+      onClick={(event) => {
+        if (!onActivate) return;
+        event.stopPropagation();
+        onActivate(
+          anchorRef.current?.getBoundingClientRect() ??
+            event.currentTarget.getBoundingClientRect(),
+        );
+      }}
+      onKeyDown={(event) => {
+        if (!onActivate) return;
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        onActivate(
+          anchorRef.current?.getBoundingClientRect() ??
+            event.currentTarget.getBoundingClientRect(),
+        );
+      }}
+    >
+      {content}
+    </span>
+  );
+  const tagElement = (
+    <span ref={anchorRef} className={styles.tag} data-web-shell-composer-tag>
+      {hasTooltip ? (
+        <TooltipPrimitive.Trigger asChild>
+          {tagContent}
+        </TooltipPrimitive.Trigger>
+      ) : (
+        tagContent
+      )}
+      {onRemove && (
+        <button
+          type="button"
+          className={styles.tagRemove}
+          aria-label={`Remove ${getComposerTagDisplay(tag)}`}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={(event) => {
+            event.stopPropagation();
+            onRemove();
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.stopPropagation();
+              return;
+            }
+            if (event.key !== 'Backspace' && event.key !== 'Delete') return;
+            event.preventDefault();
+            event.stopPropagation();
+            onRemove();
+          }}
+        >
+          ×
+        </button>
+      )}
+    </span>
+  );
+
+  if (!hasTooltip) return tagElement;
+
+  return (
+    <TooltipPrimitive.Root disableHoverableContent={false}>
+      {tagElement}
+      <TooltipPrimitive.Portal container={portalRoot ?? undefined}>
+        <TooltipPrimitive.Content
+          className={styles.tagTooltip}
+          data-web-shell-composer-tag-tooltip
+          sideOffset={6}
+          collisionPadding={8}
+          avoidCollisions
+        >
+          {tooltip}
+        </TooltipPrimitive.Content>
+      </TooltipPrimitive.Portal>
+    </TooltipPrimitive.Root>
+  );
+}
 
 function SendIcon() {
   return (
@@ -1679,102 +1779,82 @@ export const ChatEditor = memo(
             </div>
           )}
           <div className={styles.content}>
-            {core.composerTags.length > 0 && (
-              <div className={styles.tags}>
-                {core.composerTags.map((tag) => {
-                  const tagInfo = {
-                    tag,
-                    placement: 'composer' as const,
-                    readonly: false,
-                  };
-                  const tooltip = renderComposerTagTooltip?.(tagInfo);
-                  return (
-                    <span
-                      key={tag.id}
-                      className={styles.tag}
-                      role={onComposerTagClick ? 'button' : undefined}
-                      tabIndex={onComposerTagClick ? 0 : undefined}
-                      onClick={(event) => {
-                        if (!onComposerTagClick) return;
-                        event.stopPropagation();
-                        onComposerTagClick({
-                          ...tagInfo,
-                          anchorRect:
-                            event.currentTarget.getBoundingClientRect(),
-                        });
-                      }}
-                      onKeyDown={(event) => {
-                        if (!onComposerTagClick) return;
-                        if (event.key !== 'Enter' && event.key !== ' ') return;
-                        event.preventDefault();
-                        onComposerTagClick({
-                          ...tagInfo,
-                          anchorRect:
-                            event.currentTarget.getBoundingClientRect(),
-                        });
-                      }}
-                    >
-                      {renderComposerTagContent(tag)}
-                      {tag.removable !== false && (
+            {(core.composerTags.length > 0 || core.pastedImages.length > 0) && (
+              <div
+                className={styles.attachments}
+                data-web-shell-composer-attachments
+              >
+                {core.composerTags.length > 0 && (
+                  <TooltipPrimitive.Provider
+                    delayDuration={0}
+                    disableHoverableContent={false}
+                  >
+                    <div className={styles.tags}>
+                      {core.composerTags.map((tag) => {
+                        const tagInfo = {
+                          tag,
+                          placement: 'composer' as const,
+                          readonly: false,
+                        };
+                        let tooltip: ReactNode | null | undefined;
+                        try {
+                          tooltip = renderComposerTagTooltip?.(tagInfo);
+                        } catch (error) {
+                          console.warn(
+                            '[WebShell] composer tag tooltip render failed',
+                            error,
+                          );
+                        }
+                        return (
+                          <TopComposerTag
+                            key={tag.id}
+                            tag={tag}
+                            content={renderComposerTagContent(tag)}
+                            tooltip={tooltip}
+                            onActivate={
+                              onComposerTagClick
+                                ? (anchorRect) =>
+                                    onComposerTagClick({
+                                      ...tagInfo,
+                                      anchorRect,
+                                    })
+                                : undefined
+                            }
+                            onRemove={
+                              tag.removable !== false
+                                ? () => {
+                                    core.removeTopTag(tag.id);
+                                    core.viewRef.current?.focus();
+                                  }
+                                : undefined
+                            }
+                          />
+                        );
+                      })}
+                    </div>
+                  </TooltipPrimitive.Provider>
+                )}
+                {core.pastedImages.length > 0 && (
+                  <div className={styles.images}>
+                    {core.pastedImages.map((img, i) => (
+                      <div key={i} className={styles.imageThumb}>
+                        <img
+                          src={`data:${img.media_type};base64,${img.data}`}
+                          alt=""
+                        />
                         <button
-                          type="button"
-                          className={styles.tagRemove}
-                          aria-label={`Remove ${getComposerTagDisplay(tag)}`}
-                          onMouseDown={(event) => event.preventDefault()}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            core.removeTopTag(tag.id);
-                            core.viewRef.current?.focus();
-                          }}
-                          onKeyDown={(event) => {
-                            if (event.key === 'Enter' || event.key === ' ') {
-                              event.stopPropagation();
-                              return;
-                            }
-                            if (
-                              event.key !== 'Backspace' &&
-                              event.key !== 'Delete'
-                            ) {
-                              return;
-                            }
-                            event.preventDefault();
-                            event.stopPropagation();
-                            core.removeTopTag(tag.id);
-                            core.viewRef.current?.focus();
+                          className={styles.imageRemove}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            core.removeImage(i);
                           }}
                         >
                           ×
                         </button>
-                      )}
-                      {tooltip !== undefined && tooltip !== null && (
-                        <span className={styles.tagTooltip} role="tooltip">
-                          {tooltip}
-                        </span>
-                      )}
-                    </span>
-                  );
-                })}
-              </div>
-            )}
-            {core.pastedImages.length > 0 && (
-              <div className={styles.images}>
-                {core.pastedImages.map((img, i) => (
-                  <div key={i} className={styles.imageThumb}>
-                    <img
-                      src={`data:${img.media_type};base64,${img.data}`}
-                      alt=""
-                    />
-                    <button
-                      className={styles.imageRemove}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        core.removeImage(i);
-                      }}
-                    >
-                      ×
-                    </button>
+                      </div>
+                    ))}
                   </div>
-                ))}
+                )}
               </div>
             )}
             {core.slashMenu && (

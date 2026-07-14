@@ -1378,7 +1378,6 @@ export const ToolGroup = memo(function ToolGroup({
   const compactMode = useContext(CompactModeContext);
   const [chatExpanded, setChatExpanded] = useState(false);
   const hasRunningTool = hasActiveTool(tools);
-  const hasFailedTool = tools.some((tool) => tool.status === 'failed');
   const activeTool = tools.length > 0 ? getActiveTool(tools) : undefined;
   const singleTool = tools.length === 1 ? tools[0] : undefined;
   const summaryIconTool = tools[0] ?? activeTool;
@@ -1424,7 +1423,6 @@ export const ToolGroup = memo(function ToolGroup({
               <ToolGroupIcon />
             )}
           </span>
-          {hasFailedTool && <StatusIcon status="failed" />}
           <span
             className={
               hasRunningTool
