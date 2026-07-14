@@ -1409,9 +1409,13 @@ export function convertOpenAIChunkToGemini(
     let visibleText = parts.map(getVisibleText).join('');
 
     const pendingTagCandidate = requestContext.pendingThinkingTagCandidate;
+    const replayedClosingTag =
+      STANDALONE_CLOSING_THINKING_TAG_PATTERN.exec(
+        visibleText,
+      )?.[1]?.toLowerCase();
     if (
       pendingTagCandidate?.closingTagName &&
-      visibleText.trim() === pendingTagCandidate.text
+      pendingTagCandidate.closingTagName === replayedClosingTag
     ) {
       parts = parts.filter((part) => !getVisibleText(part));
       visibleText = '';
@@ -1511,6 +1515,7 @@ export function convertOpenAIChunkToGemini(
         choice.finish_reason !== 'tool_calls' ||
         completedToolCalls.length === 0 ||
         toolCallWithoutName ||
+        toolCallParser.hasConflictingToolCallIdentity() ||
         toolCallsTruncated ||
         toolCallParser.hasInvalidToolCallArguments()
       ) {

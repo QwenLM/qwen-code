@@ -595,40 +595,46 @@ describe('OpenAIContentConverter', () => {
       });
     });
 
-    it('rejects a protocol-tag recovery when a new id relabels nameless arguments', () => {
-      const stream = withStreamParser();
-      emitReasoning(stream);
-      converter.convertOpenAIChunkToGemini(
-        streamChunk('old-arguments', {
-          content: '</think>',
-          tool_calls: [
-            {
-              index: 0,
-              id: 'call_old',
-              function: { arguments: '{"path":"old.txt"}' },
-            },
-          ],
-        }),
-        stream,
-      );
-      converter.convertOpenAIChunkToGemini(
-        streamChunk('new-name', {
-          tool_calls: [
-            {
-              index: 0,
-              id: 'call_new',
-              function: { name: 'read_file' },
-            },
-          ],
-        }),
-        stream,
-      );
+    it.each([
+      ['complete', '{"path":"old.txt"}', ''],
+      ['incomplete', '{"path":"old.txt"', '}'],
+    ] as const)(
+      'rejects a protocol-tag recovery when a new id relabels %s nameless arguments',
+      (_state, oldArguments, newArguments) => {
+        const stream = withStreamParser();
+        emitReasoning(stream);
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('old-arguments', {
+            content: '</think>',
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_old',
+                function: { arguments: oldArguments },
+              },
+            ],
+          }),
+          stream,
+        );
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('new-name', {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_new',
+                function: { name: 'read_file', arguments: newArguments },
+              },
+            ],
+          }),
+          stream,
+        );
 
-      expect(() => finishStream(stream)).toThrowError(
-        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
-      );
-      expect(stream.protocolTagSanitized).toBeUndefined();
-    });
+        expect(() => finishStream(stream)).toThrowError(
+          expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+        );
+        expect(stream.protocolTagSanitized).toBeUndefined();
+      },
+    );
 
     it('buffers leading whitespace before a split standalone closing tag', () => {
       const stream = withStreamParser();
@@ -656,14 +662,28 @@ describe('OpenAIContentConverter', () => {
     it('ignores an exact cumulative replay of a deferred closing tag', () => {
       const stream = withStreamParser();
       emitReasoning(stream);
-      emitToolCall(stream, '</think>');
-      const replay = converter.convertOpenAIChunkToGemini(
-        streamChunk('replay', { content: '</think>' }),
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('tag', { content: '</THINK>' }),
         stream,
       );
-      const finish = finishStream(stream);
+      const finish = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'finish',
+          {
+            content: '</THINK>',
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_read',
+                function: { name: 'read_file', arguments: '{}' },
+              },
+            ],
+          },
+          'tool_calls',
+        ),
+        stream,
+      );
 
-      expect(replay.candidates?.[0]?.content?.parts).toEqual([]);
       expect(finish.candidates?.[0]?.content?.parts).toEqual([
         {
           functionCall: { id: 'call_read', name: 'read_file', args: {} },

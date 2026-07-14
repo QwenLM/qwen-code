@@ -49,6 +49,7 @@ export class StreamingToolCallParser {
   private idToIndexMap: Map<string, number> = new Map();
   /** Counter for generating new indices when collisions occur */
   private nextAvailableIndex: number = 0;
+  private conflictingToolCallIdentity = false;
 
   /**
    * Processes a new chunk of tool call data and attempts to parse complete JSON objects
@@ -98,6 +99,10 @@ export class StreamingToolCallParser {
           const existingBuffer = this.buffers.get(index)!;
           const existingDepth = this.depths.get(index)!;
           const existingMeta = this.toolCallMeta.get(index);
+
+          if (existingMeta?.id && existingMeta.id !== id) {
+            this.conflictingToolCallIdentity = true;
+          }
 
           // Check if we have a complete tool call at this index. Occupancy
           // is signaled by the name metadata, not the buffer: an empty
@@ -276,6 +281,10 @@ export class StreamingToolCallParser {
 
   hasNamelessToolCall(): boolean {
     return this.namelessToolCallIndices.size > 0;
+  }
+
+  hasConflictingToolCallIdentity(): boolean {
+    return this.conflictingToolCallIdentity;
   }
 
   hasInvalidToolCallArguments(): boolean {
@@ -496,6 +505,7 @@ export class StreamingToolCallParser {
     this.namelessToolCallIndices.clear();
     this.idToIndexMap.clear();
     this.nextAvailableIndex = 0;
+    this.conflictingToolCallIdentity = false;
   }
 
   /**

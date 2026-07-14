@@ -529,7 +529,7 @@ export class ContentGenerationPipeline {
 
         const sanitization = context.protocolTagSanitized;
         if (sanitization) {
-          pendingProtocolTagSanitized = sanitization;
+          pendingProtocolTagSanitized ??= sanitization;
           context.protocolTagSanitized = undefined;
         }
 
@@ -539,7 +539,6 @@ export class ContentGenerationPipeline {
           !response.candidates?.[0]?.finishReason &&
           !response.usageMetadata
         ) {
-          pendingProtocolTagSanitized = undefined;
           continue;
         }
 
@@ -605,6 +604,18 @@ export class ContentGenerationPipeline {
     } catch (error) {
       if (error instanceof InvalidStreamError) {
         throw error;
+      }
+
+      if (
+        context.pendingThinkingTagCandidate?.closingTagName &&
+        request.config?.abortSignal?.aborted !== true
+      ) {
+        context.pendingThinkingTagCandidate = undefined;
+        context.pendingUntrustedResponseParts = undefined;
+        throw new InvalidStreamError(
+          'Model response leaked thinking tags.',
+          'PROTOCOL_TAG_LEAK',
+        );
       }
 
       // Re-throw StreamContentError directly so it can be handled by
