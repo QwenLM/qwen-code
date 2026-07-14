@@ -201,6 +201,142 @@ describe('createExtensionsController', () => {
     );
   });
 
+  it('reports an operation as preparing while any parallel preparation is active', async () => {
+    let releaseBlocker!: () => void;
+    const blocker = new Promise<void>((resolve) => {
+      releaseBlocker = resolve;
+    });
+    let releaseFirst!: () => void;
+    const first = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let firstStarted!: () => void;
+    const firstActive = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const controller = createExtensionsController({
+      boundWorkspace: '/work/bound',
+      bridge: {} as AcpSessionBridge,
+      workspace: {} as DaemonWorkspaceService,
+    });
+    const manager = {
+      refreshCache: vi.fn(async () => undefined),
+    } as unknown as ExtensionManager;
+    const responseBody = vi.fn();
+    const response = {
+      status: vi.fn().mockReturnThis(),
+      location: vi.fn().mockReturnThis(),
+      set: vi.fn().mockReturnThis(),
+      json: responseBody,
+    } as unknown as Response;
+    const held = controller.preparationQueue.run(async () => await blocker);
+
+    controller.runQueuedExtensionMutation(
+      'install',
+      { name: 'demo' },
+      response,
+      async (_extensionManager, _signal, context) => {
+        await Promise.all([
+          context!.prepare(async () => {
+            firstStarted();
+            await first;
+          }),
+          context!.prepare(async () => undefined),
+        ]);
+        return { status: 'installed', name: 'demo', updated: false };
+      },
+      { manager, skipRefresh: true },
+    );
+    const operationId = responseBody.mock.calls[0]?.[0].operationId as string;
+
+    await firstActive;
+    expect(controller.getOperation(operationId)).toMatchObject({
+      status: 'running',
+      phase: 'preparing',
+    });
+
+    releaseFirst();
+    releaseBlocker();
+    await held;
+    await vi.waitFor(() =>
+      expect(controller.getOperation(operationId)).toMatchObject({
+        status: 'succeeded',
+        phase: undefined,
+      }),
+    );
+  });
+
+  it('clears phase from every terminal operation state', async () => {
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const controller = createExtensionsController({
+      boundWorkspace: '/work/bound',
+      bridge: {
+        broadcastExtensionsChanged: vi.fn(),
+      } as unknown as AcpSessionBridge,
+      workspace: {} as DaemonWorkspaceService,
+    });
+    const manager = {
+      refreshCache: vi.fn(async () => undefined),
+    } as unknown as ExtensionManager;
+    const response = () => {
+      const responseBody = vi.fn();
+      return {
+        responseBody,
+        value: {
+          status: vi.fn().mockReturnThis(),
+          location: vi.fn().mockReturnThis(),
+          set: vi.fn().mockReturnThis(),
+          json: responseBody,
+        } as unknown as Response,
+      };
+    };
+    const run = async (
+      operation: Parameters<typeof controller.runQueuedExtensionMutation>[3],
+    ) => {
+      const res = response();
+      controller.runQueuedExtensionMutation(
+        'install',
+        { name: 'demo' },
+        res.value,
+        operation,
+        { manager, skipRefresh: true },
+      );
+      const operationId = res.responseBody.mock.calls[0]?.[0]
+        .operationId as string;
+      await vi.waitFor(() =>
+        expect(controller.getOperation(operationId)?.status).toMatch(
+          /^(succeeded|succeeded_with_warnings|failed)$/,
+        ),
+      );
+      return controller.getOperation(operationId);
+    };
+
+    await expect(
+      run(async () => ({
+        status: 'installed',
+        name: 'demo',
+        updated: false,
+      })),
+    ).resolves.toMatchObject({ status: 'succeeded', phase: undefined });
+    await expect(
+      run(async (_extensionManager, _signal, context) => {
+        await context!.commit(async () => ({
+          generation: 1,
+          warnings: [{ code: 'cleanup_failed', error: 'cleanup failed' }],
+        }));
+        return { status: 'installed', name: 'demo', updated: false };
+      }),
+    ).resolves.toMatchObject({
+      status: 'succeeded_with_warnings',
+      phase: undefined,
+    });
+    await expect(
+      run(async () => {
+        throw new Error('prepare failed');
+      }),
+    ).resolves.toMatchObject({ status: 'failed', phase: undefined });
+  });
+
   it('aborts timed-out preparation without committing and releases its slot', async () => {
     vi.useFakeTimers();
     vi.spyOn(process.stderr, 'write').mockReturnValue(true);

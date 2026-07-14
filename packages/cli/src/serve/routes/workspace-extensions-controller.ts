@@ -416,10 +416,6 @@ export function createExtensionsController(
         const deadlineController = new AbortController();
         let deadlineStarted = false;
         const startDeadline = () => {
-          updateExtensionOperation(operationId, {
-            status: 'running',
-            phase: 'preparing',
-          });
           if (deadlineStarted) return;
           deadlineStarted = true;
           if (options.deadlineMs) {
@@ -433,25 +429,56 @@ export function createExtensionsController(
             deadline.unref?.();
           }
         };
-        const context: ExtensionOperationContext = {
-          prepare: async <T>(
-            task: (signal: AbortSignal) => Promise<T>,
-          ): Promise<T> => {
+        let pendingPreparations = 0;
+        let activePreparations = 0;
+        const updatePreparationState = () => {
+          if (activePreparations > 0) {
+            updateExtensionOperation(operationId, {
+              status: 'running',
+              phase: 'preparing',
+            });
+          } else if (pendingPreparations > 0) {
             updateExtensionOperation(operationId, {
               status: 'queued',
               phase: undefined,
             });
+          }
+        };
+        const context: ExtensionOperationContext = {
+          prepare: async <T>(
+            task: (signal: AbortSignal) => Promise<T>,
+          ): Promise<T> => {
+            pendingPreparations += 1;
+            let started = false;
+            updatePreparationState();
             try {
               const prepared = await preparationQueue.run(
-                async () => await task(deadlineController.signal),
+                async () => {
+                  try {
+                    return await task(deadlineController.signal);
+                  } finally {
+                    activePreparations -= 1;
+                    updatePreparationState();
+                  }
+                },
                 {
                   signal: deadlineController.signal,
-                  onStart: startDeadline,
+                  onStart: () => {
+                    startDeadline();
+                    started = true;
+                    pendingPreparations -= 1;
+                    activePreparations += 1;
+                    updatePreparationState();
+                  },
                 },
               );
               deadlineController.signal.throwIfAborted();
               return prepared;
             } catch (error) {
+              if (!started) {
+                pendingPreparations -= 1;
+                updatePreparationState();
+              }
               if (deadlineController.signal.aborted) {
                 throw deadlineController.signal.reason;
               }
@@ -511,6 +538,7 @@ export function createExtensionsController(
               commitWarnings.length > 0
                 ? 'succeeded_with_warnings'
                 : 'succeeded',
+            phase: undefined,
             result: redactExtensionOperationResult(event),
             ...(commitWarnings.length > 0 ? { warnings: commitWarnings } : {}),
           });
@@ -614,6 +642,7 @@ export function createExtensionsController(
           updateExtensionOperation(operationId, {
             status:
               warnings.length > 0 ? 'succeeded_with_warnings' : 'succeeded',
+            phase: undefined,
             result: {
               ...redactExtensionOperationResult(event),
               refreshed,
@@ -649,6 +678,7 @@ export function createExtensionsController(
             updateExtensionOperation(operationId, {
               status:
                 warnings.length > 0 ? 'succeeded_with_warnings' : 'succeeded',
+              phase: undefined,
               result: {
                 ...redactExtensionOperationResult(event),
                 refreshed: result.refreshed,
@@ -667,6 +697,7 @@ export function createExtensionsController(
             );
             updateExtensionOperation(operationId, {
               status: 'succeeded_with_warnings',
+              phase: undefined,
               result: {
                 ...redactExtensionOperationResult(event),
                 refreshed: 0,
@@ -742,6 +773,7 @@ export function createExtensionsController(
           }
           updateExtensionOperation(operationId, {
             status: 'succeeded_with_warnings',
+            phase: undefined,
             ...(mutationEvent
               ? { result: redactExtensionOperationResult(mutationEvent) }
               : {}),
@@ -779,6 +811,7 @@ export function createExtensionsController(
         }
         updateExtensionOperation(operationId, {
           status: 'failed',
+          phase: undefined,
           error: message.slice(0, 500),
           ...(code ? { code } : {}),
         });
