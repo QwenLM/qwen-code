@@ -1409,12 +1409,19 @@ export function convertOpenAIChunkToGemini(
     let visibleText = parts.map(getVisibleText).join('');
 
     const pendingTagCandidate = requestContext.pendingThinkingTagCandidate;
+    if (
+      pendingTagCandidate?.closingTagName &&
+      visibleText.trim() === pendingTagCandidate.text
+    ) {
+      parts = parts.filter((part) => !getVisibleText(part));
+      visibleText = '';
+    }
     const combinedCandidateText =
       (pendingTagCandidate?.text ?? '') + visibleText;
     const canStartTagCandidate =
       requestContext.hasStructuredReasoningContent === true &&
       requestContext.hasVisibleContent !== true &&
-      /\S/.test(visibleText) &&
+      visibleText.length > 0 &&
       canBeStandaloneThinkingTagPrefix(combinedCandidateText);
 
     if (pendingTagCandidate || canStartTagCandidate) {

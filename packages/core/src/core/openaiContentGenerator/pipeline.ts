@@ -483,6 +483,30 @@ export class ContentGenerationPipeline {
     // function-call parts from the finish chunk).
     let pendingFinishResponse: GenerateContentResponse | null = null;
     let finishYielded = false;
+    let pendingProtocolTagSanitized:
+      | NonNullable<RequestContext['protocolTagSanitized']>
+      | undefined;
+    const logPendingProtocolTagSanitized = (
+      response: GenerateContentResponse,
+    ) => {
+      if (!pendingProtocolTagSanitized) return;
+      const event = new ProtocolTagSanitizedEvent({
+        model: context.model,
+        promptId: userPromptId,
+        responseId: response.responseId,
+        tagName: pendingProtocolTagSanitized.tagName,
+        toolCallCount: pendingProtocolTagSanitized.toolCallCount,
+      });
+      pendingProtocolTagSanitized = undefined;
+      debugLogger.warn('Sanitized a model protocol tag', {
+        model: event.model,
+        promptId: event.prompt_id,
+        responseId: event.response_id,
+        tagName: event.tag_name,
+        toolCallCount: event.tool_call_count,
+      });
+      logProtocolTagSanitized(this.config.cliConfig, event);
+    };
 
     try {
       // Stage 2a: Convert and yield each chunk while preserving original
@@ -505,22 +529,8 @@ export class ContentGenerationPipeline {
 
         const sanitization = context.protocolTagSanitized;
         if (sanitization) {
+          pendingProtocolTagSanitized = sanitization;
           context.protocolTagSanitized = undefined;
-          const event = new ProtocolTagSanitizedEvent({
-            model: context.model,
-            promptId: userPromptId,
-            responseId: response.responseId,
-            tagName: sanitization.tagName,
-            toolCallCount: sanitization.toolCallCount,
-          });
-          debugLogger.warn('Sanitized a model protocol tag', {
-            model: event.model,
-            promptId: event.prompt_id,
-            responseId: event.response_id,
-            tagName: event.tag_name,
-            toolCallCount: event.tool_call_count,
-          });
-          logProtocolTagSanitized(this.config.cliConfig, event);
         }
 
         // Stage 2b: Filter empty responses to avoid downstream issues
@@ -529,6 +539,7 @@ export class ContentGenerationPipeline {
           !response.candidates?.[0]?.finishReason &&
           !response.usageMetadata
         ) {
+          pendingProtocolTagSanitized = undefined;
           continue;
         }
 
@@ -566,11 +577,13 @@ export class ContentGenerationPipeline {
         if (shouldYield) {
           // If we have a pending finish response, yield it instead
           if (pendingFinishResponse) {
+            logPendingProtocolTagSanitized(pendingFinishResponse);
             yield pendingFinishResponse;
             finishYielded = true;
             // Keep pendingFinishResponse alive so late-arriving usage
             // metadata can still be merged (see finishYielded block above).
           } else {
+            logPendingProtocolTagSanitized(response);
             yield response;
           }
         }
@@ -586,6 +599,7 @@ export class ContentGenerationPipeline {
       // Stage 2d: If there's still a pending finish response at the end
       // (e.g. no usage chunk arrived after the finish chunk), yield it.
       if (pendingFinishResponse && !finishYielded) {
+        logPendingProtocolTagSanitized(pendingFinishResponse);
         yield pendingFinishResponse;
       }
     } catch (error) {

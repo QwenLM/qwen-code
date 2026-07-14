@@ -72,7 +72,8 @@ export class StreamingToolCallParser {
     id?: string,
     name?: string,
   ): ToolCallParseResult {
-    if (!id && !name && !chunk.trim()) {
+    const validName = name?.trim() ? name : undefined;
+    if (!id && !validName && !chunk.trim()) {
       const depth = this.depths.get(index) ?? 0;
       const inString = this.inStrings.get(index) ?? false;
       if (!this.buffers.has(index) || (depth === 0 && !inString)) {
@@ -82,7 +83,7 @@ export class StreamingToolCallParser {
 
     let actualIndex = index;
     const isKnownId = Boolean(id && this.idToIndexMap.has(id));
-    const isNameOnlyDelta = Boolean(name && chunk.length === 0);
+    const isNameOnlyDelta = Boolean(validName && chunk.length === 0);
 
     // Handle tool call ID mapping for collision detection
     if (id) {
@@ -102,10 +103,9 @@ export class StreamingToolCallParser {
           // is signaled by the name metadata, not the buffer: an empty
           // buffer with a name is a complete no-argument call.
           if (
-            existingMeta?.name &&
-            existingDepth === 0 &&
             existingMeta?.id &&
-            existingMeta.id !== id
+            existingMeta.id !== id &&
+            (!existingMeta.name || existingDepth === 0)
           ) {
             let existingComplete = true;
             if (existingBuffer.trim()) {
@@ -119,7 +119,9 @@ export class StreamingToolCallParser {
             if (existingComplete) {
               // We have a complete tool call with a different ID at this index
               // Find a new index for this tool call
-              actualIndex = this.findNextAvailableIndex();
+              while (this.buffers.has(actualIndex)) {
+                actualIndex++;
+              }
             }
           }
         }
@@ -165,9 +167,9 @@ export class StreamingToolCallParser {
     const currentBuffer = this.buffers.get(actualIndex)!;
     const currentDepth = this.depths.get(actualIndex)!;
     const meta = this.toolCallMeta.get(actualIndex)!;
-    if (chunk.length === 0 && (id || name)) {
+    if (chunk.length === 0 && (id || validName)) {
       if (id) meta.id = id;
-      if (name && !meta.name) meta.name = name;
+      if (validName && !meta.name) meta.name = validName;
       if (!meta.name && meta.id) {
         this.namelessToolCallIndices.add(actualIndex);
       } else {
@@ -192,7 +194,7 @@ export class StreamingToolCallParser {
 
     // Update metadata
     if (id) meta.id = id;
-    if (name) meta.name = name;
+    if (validName) meta.name = validName;
 
     // Get current state for the actual index
     const currentInString = this.inStrings.get(actualIndex)!;

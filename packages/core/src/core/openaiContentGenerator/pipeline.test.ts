@@ -1701,6 +1701,58 @@ describe('ContentGenerationPipeline', () => {
       expect(logProtocolTagSanitized).not.toHaveBeenCalled();
     });
 
+    it('does not log protocol-tag sanitization before a held finish is yielded', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const streamError = new Error('stream failed after finish');
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'finish-chunk',
+            choices: [{ delta: {}, finish_reason: 'tool_calls' }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          throw streamError;
+        },
+      };
+      const finishResponse = new GenerateContentResponse();
+      finishResponse.responseId = 'finish-response';
+      finishResponse.candidates = [
+        {
+          content: { parts: [{ functionCall: { name: 'read_file' } }] },
+          finishReason: FinishReason.STOP,
+          index: 0,
+        },
+      ];
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+        (_chunk, context) => {
+          context.protocolTagSanitized = {
+            tagName: 'think',
+            toolCallCount: 1,
+          };
+          return finishResponse;
+        },
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+
+      await expect(async () => {
+        for await (const _ of resultGenerator) {
+          // Consume until the stream error after the held finish.
+        }
+      }).rejects.toThrow(streamError);
+      expect(logProtocolTagSanitized).not.toHaveBeenCalled();
+    });
+
     it('should handle streaming errors and reset tool calls', async () => {
       // Arrange
       const request: GenerateContentParameters = {

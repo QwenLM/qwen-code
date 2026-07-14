@@ -467,6 +467,29 @@ describe('OpenAIContentConverter', () => {
       ).toThrowError(expect.objectContaining({ type: 'MALFORMED_TOOL_CALL' }));
     });
 
+    it('rejects a protocol-tag recovery with a whitespace-only function name', () => {
+      const stream = withStreamParser();
+      emitReasoning(stream);
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('tool-call', {
+          content: '</think>',
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_blank',
+              function: { name: '   ', arguments: '{}' },
+            },
+          ],
+        }),
+        stream,
+      );
+
+      expect(() => finishStream(stream)).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+      expect(stream.protocolTagSanitized).toBeUndefined();
+    });
+
     it('rejects the recorded cross-channel thinking-tag leak', () => {
       const stream = withStreamParser();
       const reasoning = converter.convertOpenAIChunkToGemini(
@@ -524,6 +547,123 @@ describe('OpenAIContentConverter', () => {
 
       expect(firstHalf.candidates?.[0]?.content?.parts).toEqual([]);
       expect(secondHalf.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
+        {
+          functionCall: { id: 'call_read', name: 'read_file', args: {} },
+        },
+      ]);
+      expect(stream.protocolTagSanitized).toEqual({
+        tagName: 'think',
+        toolCallCount: 1,
+      });
+    });
+
+    it('sanitizes a standalone closing thinking tag with multiple tool calls', () => {
+      const stream = withStreamParser();
+      emitReasoning(stream);
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('tool-calls', {
+          content: '</think>',
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_read',
+              function: { name: 'read_file', arguments: '{}' },
+            },
+            {
+              index: 1,
+              id: 'call_list',
+              function: { name: 'list_directory', arguments: '{}' },
+            },
+          ],
+        }),
+        stream,
+      );
+      const finish = finishStream(stream);
+
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
+        {
+          functionCall: { id: 'call_read', name: 'read_file', args: {} },
+        },
+        {
+          functionCall: { id: 'call_list', name: 'list_directory', args: {} },
+        },
+      ]);
+      expect(stream.protocolTagSanitized).toEqual({
+        tagName: 'think',
+        toolCallCount: 2,
+      });
+    });
+
+    it('rejects a protocol-tag recovery when a new id relabels nameless arguments', () => {
+      const stream = withStreamParser();
+      emitReasoning(stream);
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('old-arguments', {
+          content: '</think>',
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_old',
+              function: { arguments: '{"path":"old.txt"}' },
+            },
+          ],
+        }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('new-name', {
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_new',
+              function: { name: 'read_file' },
+            },
+          ],
+        }),
+        stream,
+      );
+
+      expect(() => finishStream(stream)).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+      expect(stream.protocolTagSanitized).toBeUndefined();
+    });
+
+    it('buffers leading whitespace before a split standalone closing tag', () => {
+      const stream = withStreamParser();
+      emitReasoning(stream);
+      const whitespace = converter.convertOpenAIChunkToGemini(
+        streamChunk('whitespace', { content: '\n' }),
+        stream,
+      );
+      const tag = emitToolCall(stream, '</think>');
+      const finish = finishStream(stream);
+
+      expect(whitespace.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(tag.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
+        {
+          functionCall: { id: 'call_read', name: 'read_file', args: {} },
+        },
+      ]);
+      expect(stream.protocolTagSanitized).toEqual({
+        tagName: 'think',
+        toolCallCount: 1,
+      });
+    });
+
+    it('ignores an exact cumulative replay of a deferred closing tag', () => {
+      const stream = withStreamParser();
+      emitReasoning(stream);
+      emitToolCall(stream, '</think>');
+      const replay = converter.convertOpenAIChunkToGemini(
+        streamChunk('replay', { content: '</think>' }),
+        stream,
+      );
+      const finish = finishStream(stream);
+
+      expect(replay.candidates?.[0]?.content?.parts).toEqual([]);
       expect(finish.candidates?.[0]?.content?.parts).toEqual([
         {
           functionCall: { id: 'call_read', name: 'read_file', args: {} },
