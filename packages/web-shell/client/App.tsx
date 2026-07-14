@@ -435,6 +435,10 @@ export interface WebShellApi {
   openSplitView: () => void;
   /** Open the Session Overview panel, matching the built-in sidebar button. */
   openSessionOverview: () => void;
+  /** Open the compact session drawer, matching the hamburger control. */
+  openSessionDrawer: () => void;
+  /** Start a new session using the same lifecycle as the built-in New Chat action. */
+  createNewSession: () => Promise<boolean>;
 }
 
 export type WebShellComposerPlaceholderState = ComposerPlaceholderState;
@@ -1052,8 +1056,10 @@ export function App({
     string | null
   >(null);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
+  const [forceMobileDrawer, setForceMobileDrawer] = useState(false);
   const closeMobileDrawer = useCallback(() => {
     setMobileDrawerOpen(false);
+    setForceMobileDrawer(false);
   }, []);
   // The Session Overview panel (mission control for managing many sessions at
   // once) is only offered on large screens; below that there is no room for it
@@ -1068,11 +1074,11 @@ export function App({
   useEffect(() => {
     const mql = window.matchMedia('(max-width: 760px)');
     const handler = (e: MediaQueryListEvent) => {
-      if (!e.matches) setMobileDrawerOpen(false);
+      if (!e.matches) closeMobileDrawer();
     };
     mql.addEventListener('change', handler);
     return () => mql.removeEventListener('change', handler);
-  }, []);
+  }, [closeMobileDrawer]);
 
   useEffect(() => {
     if (!mobileDrawerOpen) return;
@@ -2116,6 +2122,12 @@ export function App({
     setActivePanel(null);
     setMainView('scheduledTasks');
   }, []);
+  const openSessionDrawer = useCallback(() => {
+    setActivePanel(null);
+    setMainView('chat');
+    setForceMobileDrawer(true);
+    setMobileDrawerOpen(true);
+  }, []);
   // Open the in-window split view showing 2+ sessions side by side. `splitSessionIds`
   // is the live pane set — SplitView mirrors add/remove back into it via
   // onPanesChange — so it must be preserved across entries, not blindly reset.
@@ -2166,22 +2178,6 @@ export function App({
     openSplitView,
     splitSessionIds,
   ]);
-  const shellApi = useMemo<WebShellApi>(
-    () => ({
-      openSplitView: () => requestOpenSplitView(),
-      openSessionOverview: () => openPanel('sessions'),
-    }),
-    [openPanel, requestOpenSplitView],
-  );
-  useEffect(() => {
-    assignShellRef(shellRef, shellApi);
-  }, [shellApi, shellRef]);
-  useEffect(
-    () => () => {
-      assignShellRef(shellRef, null);
-    },
-    [shellRef],
-  );
   useEffect(() => {
     if (!externalSplitControlled) return;
     const requested = externalSplitSignature
@@ -3621,6 +3617,7 @@ export function App({
       // Starting a new chat means the user wants to see it — leave any open
       // Settings/Status panel so the fresh chat is visible (no-op when closed).
       closePanel();
+      setMainView('chat');
       let focusRequest: number | undefined;
       try {
         const clearPromise = (
@@ -3645,6 +3642,24 @@ export function App({
       scheduleComposerFocus,
       sessionActions,
     ],
+  );
+  const shellApi = useMemo<WebShellApi>(
+    () => ({
+      openSplitView: () => requestOpenSplitView(),
+      openSessionOverview: () => openPanel('sessions'),
+      openSessionDrawer,
+      createNewSession: () => createNewSession(),
+    }),
+    [createNewSession, openPanel, openSessionDrawer, requestOpenSplitView],
+  );
+  useEffect(() => {
+    assignShellRef(shellRef, shellApi);
+  }, [shellApi, shellRef]);
+  useEffect(
+    () => () => {
+      assignShellRef(shellRef, null);
+    },
+    [shellRef],
   );
   const handleMissingSessionNewSession = useCallback(async () => {
     if (creatingMissingSessionRef.current) return;
@@ -5921,6 +5936,7 @@ export function App({
                 className={[
                   styles.mobileDrawer,
                   mobileDrawerOpen ? styles.mobileDrawerOpen : undefined,
+                  forceMobileDrawer ? styles.mobileDrawerForced : undefined,
                 ]
                   .filter(Boolean)
                   .join(' ')}
@@ -6016,6 +6032,7 @@ export function App({
                       .filter(Boolean)
                       .join(' ')}
                     onClick={() => {
+                      setForceMobileDrawer(false);
                       setMobileDrawerOpen((open) => !open);
                     }}
                     aria-label={t('sidebar.toggleMenu')}
