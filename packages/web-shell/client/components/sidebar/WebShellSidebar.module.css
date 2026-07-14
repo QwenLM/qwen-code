@@ -636,22 +636,10 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding-left: 26px;
+  padding: 2px 0 2px 26px;
   border-radius: 8px;
   color: color-mix(in srgb, var(--sidebar-foreground) 68%, transparent);
   cursor: pointer;
-}
-
-.groupedSessionRow {
-  min-height: 42px;
-  margin-left: 12px;
-  padding: 8px;
-  color: var(--muted-foreground);
-}
-
-.groupedSessionRow:not(.currentSession):hover,
-.groupedSessionRow:not(.currentSession):focus-visible {
-  color: var(--sidebar-accent-foreground);
 }
 
 .currentSession {

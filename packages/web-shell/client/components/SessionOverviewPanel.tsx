@@ -7,7 +7,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   useConnection,
-  useSessions,
   useStatusReport,
 } from '@qwen-code/webui/daemon-react-sdk';
 import type {
@@ -25,6 +24,7 @@ import {
   workspaceBasename,
 } from '../utils/workspace';
 import { useOtherWorkspaceSessions } from '../hooks/useOtherWorkspaceSessions';
+import { useScopedSessions } from '../hooks/useScopedSessions';
 import { getDaemonToken } from '../config/daemon';
 import {
   SESSION_LIST_PAGE_SIZE,
@@ -154,9 +154,13 @@ function statusClass(status: SessionCardStatus): string {
 function SessionOverviewPanelInner({
   onOpenSession,
   onOpenSplit,
+  includeOtherWorkspaces,
+  workspaceCwd,
 }: {
   onOpenSession: (sessionId: string) => void;
   onOpenSplit?: (sessionIds: string[]) => void;
+  includeOtherWorkspaces: boolean;
+  workspaceCwd?: string;
 }) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -165,7 +169,7 @@ function SessionOverviewPanelInner({
     connection.capabilities?.features?.includes(SESSION_ORGANIZATION_FEATURE) ??
     false;
 
-  const { sessions, loading, error, reload } = useSessions({
+  const { sessions, loading, error, reload } = useScopedSessions(workspaceCwd, {
     autoLoad: true,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
@@ -177,12 +181,15 @@ function SessionOverviewPanelInner({
   // single-workspace daemon), so the overview is mission control for every
   // workspace, not just the primary one.
   const { sessions: otherSessions, reload: reloadOther } =
-    useOtherWorkspaceSessions();
+    useOtherWorkspaceSessions(includeOtherWorkspaces && !workspaceCwd);
   const mergedSessions = useMemo(
     () => mergeSessionsById(sessions, otherSessions),
     [sessions, otherSessions],
   );
-  const multiWorkspace = hasMultipleWorkspaces(connection.capabilities);
+  const multiWorkspace =
+    !workspaceCwd &&
+    includeOtherWorkspaces &&
+    hasMultipleWorkspaces(connection.capabilities);
   const status = useStatusReport({ autoLoad: true, detail: 'full' });
   const statusReload = status.reload;
   const statusReport = status.report;
@@ -473,9 +480,13 @@ function SessionOverviewPanelInner({
 export function SessionOverviewPanel({
   onOpenSession,
   onOpenSplit,
+  includeOtherWorkspaces = true,
+  workspaceCwd,
 }: {
   onOpenSession: (sessionId: string) => void;
   onOpenSplit?: (sessionIds: string[]) => void;
+  includeOtherWorkspaces?: boolean;
+  workspaceCwd?: string;
 }) {
   const { t } = useI18n();
   return (
@@ -492,6 +503,8 @@ export function SessionOverviewPanel({
       <SessionOverviewPanelInner
         onOpenSession={onOpenSession}
         onOpenSplit={onOpenSplit}
+        includeOtherWorkspaces={includeOtherWorkspaces}
+        workspaceCwd={workspaceCwd}
       />
     </ErrorBoundary>
   );
