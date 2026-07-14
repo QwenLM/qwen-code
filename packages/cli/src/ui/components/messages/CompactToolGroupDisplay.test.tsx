@@ -341,6 +341,25 @@ describe('estimateCompactToolGroupHeight', () => {
     );
   });
 
+  it('reserves timeout label width for active shell summaries', () => {
+    const description =
+      'npm test -- --filter packages/cli/src/ui/components/messages';
+    const activeShell = shellTool({ description });
+    const activeShellWithTimeout = shellTool({
+      description,
+      resultDisplay: {
+        ansiOutput: [],
+        totalLines: 0,
+        totalBytes: 0,
+        timeoutMs: 30_000,
+      },
+    });
+
+    expect(
+      estimateCompactToolGroupHeight([activeShellWithTimeout], 55),
+    ).toBeGreaterThan(estimateCompactToolGroupHeight([activeShell], 55));
+  });
+
   it('uses terminal display width for wide characters', () => {
     const tool = toolCall({
       name: 'ReadFile',

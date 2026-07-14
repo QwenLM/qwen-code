@@ -87,10 +87,13 @@ function getElapsedTimeReservedWidth(
   if (status !== ToolCallStatus.Executing) return 0;
 
   const timeoutMs = getShellTimeoutMs(tool);
-  const label =
-    timeoutMs != null && timeoutMs > 0
-      ? `(0s · timeout ${formatDuration(timeoutMs, { hideTrailingZeros: true })})`
-      : EXECUTING_ELAPSED_TIME_RESERVED_LABEL;
+  let label = EXECUTING_ELAPSED_TIME_RESERVED_LABEL;
+  if (timeoutMs != null && timeoutMs > 0) {
+    const maxElapsedStr = formatDuration(timeoutMs, {
+      hideTrailingZeros: true,
+    });
+    label = `(${maxElapsedStr} · timeout ${maxElapsedStr})`;
+  }
 
   return ELAPSED_TIME_MARGIN_LEFT + stringWidth(label);
 }
