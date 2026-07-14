@@ -189,7 +189,8 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'session_branch', 'rate_limit', 'workspace_reload',
  'multi_workspace_sessions', 'multi_workspace_session_rewind',
  'multi_workspace_session_shell', 'persistent_workspace_registration',
- 'workspace_qualified_rest_core', 'workspace_persisted_transcript',
+ 'workspace_qualified_rest_core', 'extension_management_v2',
+ 'workspace_persisted_transcript',
  'client_mcp_over_ws', 'cdp_tunnel_over_ws', 'browser_automation_mcp']
 ```
 
@@ -219,7 +220,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 
 `session_archive` advertises the v1 directory-state archive API: `POST /sessions/archive`, `POST /sessions/unarchive`, and `GET /workspace/:id/sessions?archiveState=active|archived`. Archived sessions cannot be loaded or resumed until they are unarchived.
 
-`workspace_qualified_rest_core` advertises plural core REST routes under `/workspaces/:workspace/...`. The selector resolves as exact workspace id first, then as a URL-encoded absolute cwd after canonicalization. On single-workspace daemons, `workspaces[]` is absent unless `multi_workspace_sessions` is also advertised, so clients use `capabilities.workspaceCwd` as the cwd selector. Trust status and trust request routes are available for registered untrusted workspaces; file read routes follow the existing filesystem read policy. Registered untrusted secondary workspaces also expose persisted-only session and session-group catalogs: these reads do not attach to a session, start ACP, or merge live bridge state. File writes, catalog mutations, and other plural core routes require a trusted workspace unless a separate capability explicitly defines a narrower read-only policy, such as `workspace_persisted_transcript`. An untrusted primary continues to receive `403 { code: "untrusted_workspace" }` from the plural catalog and transcript routes; legacy singular primary routes keep their existing compatibility behavior. This tag covers the core file, status, settings, permissions, trust, lifecycle, MCP control, tool and skill toggles, memory, workspace agent CRUD, and session storage surfaces. It does not cover auth, voice, extensions, ACP/WebSocket transport, or channel-worker routing. Workspace trust is not an ACL: a client holding the daemon token can read every registered workspace surface allowed by this policy.
+`workspace_qualified_rest_core` advertises plural core REST routes under `/workspaces/:workspace/...`. The selector resolves as exact workspace id first, then as a URL-encoded absolute cwd after canonicalization. Newer single-workspace daemons include the primary runtime in `workspaces[]` even when `multi_workspace_sessions` is absent, allowing clients to discover the id required by workspace-qualified routes; clients should fall back to `capabilities.workspaceCwd` for older daemons that omit the array. Trust status and trust request routes are available for registered untrusted workspaces; file read routes follow the existing filesystem read policy. Registered untrusted secondary workspaces also expose persisted-only session and session-group catalogs: these reads do not attach to a session, start ACP, or merge live bridge state. File writes, catalog mutations, and other plural core routes require a trusted workspace unless a separate capability explicitly defines a narrower read-only policy, such as `workspace_persisted_transcript`. An untrusted primary continues to receive `403 { code: "untrusted_workspace" }` from the plural catalog and transcript routes; legacy singular primary routes keep their existing compatibility behavior. This tag covers the core file, status, settings, permissions, trust, lifecycle, MCP control, tool and skill toggles, memory, workspace agent CRUD, and session storage surfaces. It does not cover auth, voice, extensions, ACP/WebSocket transport, or channel-worker routing. Workspace trust is not an ACL: a client holding the daemon token can read every registered workspace surface allowed by this policy.
 
 `session_lsp` advertises `GET /session/:id/lsp`, the read-only structured LSP status snapshot for daemon clients. Older daemons return `404`; pre-flight this tag before exposing remote LSP status.
 
@@ -243,6 +244,159 @@ routes and require a configured bearer token even on loopback.
 When `workspace_qualified_rest_core` is advertised, the same file surface is also available at `/workspaces/:workspace/file`, `/workspaces/:workspace/file/bytes`, `/workspaces/:workspace/stat`, `/workspaces/:workspace/list`, `/workspaces/:workspace/glob`, `/workspaces/:workspace/file/write`, and `/workspaces/:workspace/file/edit`.
 
 The same tag also exposes workspace-qualified project-agent CRUD at `/workspaces/:workspace/agents` and `/workspaces/:workspace/agents/:agentType`. These plural routes only read or mutate project-level agents for the selected workspace; `global` and `user` scope requests return `400 { code: "global_scope_not_supported_for_workspace_route" }`. Workspace-less `/workspace/agents` routes retain their existing primary-workspace behavior and remain the only REST surface for user-level agent scope.
+
+`extension_management_v2` advertises a user-level extension catalog and mutation surface at `/extensions/*`, plus workspace activation projections at `/workspaces/:workspace/extensions/*`. Artifacts are global; workspace routes expose only projection reads, exact activation overrides, and runtime refresh. Reads may target an untrusted registered workspace, while activation, refresh, and workspace-scoped install require a trusted target. Slow mutations use daemon-local operations at `/extensions/operations/:operationId`; store generation, not operation history, is authoritative across restart and across daemons. The published `workspace_extensions` capability and `/workspace/extensions/*` routes remain a primary-workspace compatibility adapter. Clients must preflight `extension_management_v2` and must not infer it from daemon mode or `workspace_qualified_rest_core`.
+
+### Extension Management V2 wire contract
+
+All routes use the daemon bearer authentication rules above. `X-Qwen-Client-Id` is optional for the V2 mutation routes; when supplied, it must identify a client registered with one of the mutation's target workspace runtimes. `:extensionId` is the lowercase 64-hex extension identity. `:workspace` resolves as an exact workspace id first and otherwise as a URL-encoded absolute cwd after canonicalization.
+
+| Method and path                                                    | Success                                                                     |
+| ------------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| `GET /extensions`                                                  | `200` global artifact catalog                                               |
+| `PUT /extensions/:extensionId/activation`                          | `202` global default-activation operation                                   |
+| `POST /extensions/install`                                         | `202` install operation                                                     |
+| `POST /extensions/check-updates`                                   | `202` update-check operation                                                |
+| `POST /extensions/:extensionId/update`                             | `202` update operation                                                      |
+| `DELETE /extensions/:extensionId`                                  | `202` uninstall operation, or idempotent `204` when the extension is absent |
+| `GET /extensions/operations/:operationId`                          | `200` operation snapshot                                                    |
+| `GET /workspaces/:workspace/extensions`                            | `200` workspace activation projection                                       |
+| `PUT /workspaces/:workspace/extensions/:extensionId/activation`    | `202` exact workspace-activation operation                                  |
+| `DELETE /workspaces/:workspace/extensions/:extensionId/activation` | `202` clear-override operation                                              |
+| `POST /workspaces/:workspace/extensions/refresh`                   | `202` runtime-refresh operation                                             |
+
+The global catalog response is:
+
+```json
+{
+  "v": 1,
+  "generation": 12,
+  "extensions": [
+    {
+      "id": "<64 lowercase hex characters>",
+      "name": "demo",
+      "version": "1.2.3",
+      "installType": "npm",
+      "defaultActivation": "enabled",
+      "workspaceOverrideCount": 1
+    }
+  ]
+}
+```
+
+`installType` is omitted when no install metadata is available. `defaultActivation` is `enabled` or `disabled`. `workspaceOverrideCount` excludes stored `inherit` entries.
+
+The workspace projection response is:
+
+```json
+{
+  "v": 1,
+  "workspaceId": "workspace-id",
+  "workspaceCwd": "/absolute/workspace",
+  "trusted": true,
+  "desiredGeneration": 12,
+  "appliedGeneration": 11,
+  "extensions": [
+    {
+      "extensionId": "<64 lowercase hex characters>",
+      "name": "demo",
+      "version": "1.2.3",
+      "defaultActivation": "enabled",
+      "workspaceActivation": "disabled",
+      "effectiveActivation": "disabled",
+      "activationSource": "workspace_override"
+    }
+  ]
+}
+```
+
+`workspaceActivation` is `enabled`, `disabled`, or `null` for inheritance. `activationSource` is `default`, `workspace_override`, `legacy_path_rule`, or `cli_override`. `desiredGeneration` is the durable store generation; `appliedGeneration` is the latest generation the controller recorded as applied to that workspace runtime and can temporarily lag.
+
+Install requires explicit consent and an initial activation:
+
+```json
+{
+  "source": "@scope/demo",
+  "consent": true,
+  "activation": { "scope": "user" },
+  "ref": "optional-git-ref",
+  "autoUpdate": true,
+  "allowPreRelease": false,
+  "registry": "https://registry.npmjs.org"
+}
+```
+
+For workspace-only initial activation use `{ "scope": "workspace", "workspaceId": "target-workspace-id" }`; the target must exist and be trusted. Daemon installs accept GitHub, Git, and npm sources. `ref` does not apply to npm, and `registry` applies only to npm. `ref`, `autoUpdate`, `allowPreRelease`, and `registry` are optional.
+
+Global and workspace activation `PUT` requests use the same body:
+
+```json
+{ "state": "enabled" }
+```
+
+`state` is `enabled` or `disabled`. Update, uninstall, check-updates, clear-activation, and refresh requests have no required body.
+
+Every accepted asynchronous mutation returns:
+
+```http
+HTTP/1.1 202 Accepted
+Location: /extensions/operations/<operation-id>
+Retry-After: 1
+Content-Type: application/json
+
+{"accepted":true,"operationId":"<operation-id>"}
+```
+
+Workspace-qualified mutations use the same global `/extensions/operations/:operationId` polling path. Operation history is process-local, keeps only a bounded number of terminal entries, and is lost on daemon restart; clients must re-read the catalog or workspace projection and compare generations when an operation id disappears.
+
+An operation snapshot has this shape:
+
+```json
+{
+  "v": 1,
+  "operationId": "<operation-id>",
+  "operation": "install",
+  "status": "running",
+  "phase": "preparing",
+  "createdAt": 1750000000000,
+  "updatedAt": 1750000000100,
+  "source": "owner/repository",
+  "name": "demo"
+}
+```
+
+`status` transitions from `queued` to `running`, then to `succeeded`, `succeeded_with_warnings`, or `failed`. While running, `phase` is `preparing`, `committing`, or `reconciling`. Terminal success may include `result` with `status` equal to `installed`, `enabled`, `disabled`, `updated`, `uninstalled`, `checked`, or `refreshed`; reconciliation results can additionally contain `refreshed`, `failed`, and `error`. Update checks return `result.states`, keyed by extension name, with values such as `checking for updates`, `update available`, `up to date`, `not updatable`, or `error`.
+
+A durable commit followed by incomplete cleanup or runtime reconciliation is not reported as a failed mutation. It returns `succeeded_with_warnings` and preserves the committed result:
+
+```json
+{
+  "v": 1,
+  "operationId": "<operation-id>",
+  "operation": "activation",
+  "status": "succeeded_with_warnings",
+  "createdAt": 1750000000000,
+  "updatedAt": 1750000000200,
+  "result": {
+    "status": "disabled",
+    "name": "demo",
+    "refreshed": 1,
+    "failed": 1
+  },
+  "warnings": [
+    {
+      "workspaceId": "workspace-id",
+      "workspaceCwd": "/absolute/workspace",
+      "code": "reconcile_slow",
+      "error": "Runtime reconciliation took 31000ms."
+    }
+  ]
+}
+```
+
+Warning `workspaceId` and `code` are optional; `workspaceCwd` and `error` are always present. Clients should display warnings, refresh their catalog/projection, and must not retry the durable mutation blindly.
+
+Validation and authorization failures are synchronous HTTP errors using `{ "error": "...", "code": "..." }` when a stable code exists. Important cases are `400 invalid_extension_id`, `400 invalid_extension_activation`, `400 workspace_mismatch`, `403 untrusted_workspace`, `404 extension_operation_not_found`, and `429 extension_queue_full`. Install validation also returns `400` for invalid source/ref/registry options, missing consent, or missing/invalid initial activation. A mutation that fails after `202` is represented, while retained in operation history, with `status: "failed"`, `error`, and an optional stable `code`; common codes include `extension_prepare_timeout` and `extension_conflict`. HTTP `404` for an operation does not imply rollback because operation history is not durable.
 
 `daemon_status` advertises `GET /daemon/status`, the consolidated read-only
 operator diagnostic snapshot documented below.
@@ -586,7 +740,7 @@ Stable contract: when `v` increments the frame layout has changed in a backwards
 
 > **`workspaceCwd`** is the canonical absolute path for the daemon's primary workspace. Use it to omit `cwd` on `POST /session` (the route falls back to this primary path) and to keep old single-workspace clients compatible. Additive to v=1: pre-§02 v=1 daemons omit the field — clients that target older builds should null-check before consuming it.
 
-> **`workspaces[]`** is present only when `features` contains `multi_workspace_sessions`. Each entry is `{ id, cwd, primary, trusted, removable? }`. The first/primary workspace remains mirrored by `workspaceCwd`; new clients choose a non-primary runtime by passing that entry's `cwd` to `POST /session`. Untrusted workspaces are advertised for diagnostics but reject fresh session creation with `403 untrusted_workspace` until trust changes. `removable` is present on daemons that support runtime removal and is true only for process-dynamic or persistence-restored secondary runtimes.
+> **`workspaces[]`** lists every registered runtime. Newer single-workspace daemons include the primary runtime even when `multi_workspace_sessions` is absent so clients can discover the stable id required by workspace-qualified routes; older daemons may omit the array. Each entry is `{ id, cwd, primary, trusted, removable? }`. The first/primary workspace remains mirrored by `workspaceCwd`; new clients choose a non-primary runtime by passing that entry's `cwd` to `POST /session`. Untrusted workspaces are advertised for diagnostics but reject fresh session creation with `403 untrusted_workspace` until trust changes. `removable` is present on daemons that support runtime removal and is true only for process-dynamic or persistence-restored secondary runtimes.
 
 The workspace feature tags and `workspaces[]` are dynamic. Clients that add a workspace must fetch `/capabilities` again after the mutation completes; the daemon does not broadcast capability changes to clients that cached an earlier response. Forgetting persistence does not unload an active runtime, so that runtime remains advertised until restart.
 
