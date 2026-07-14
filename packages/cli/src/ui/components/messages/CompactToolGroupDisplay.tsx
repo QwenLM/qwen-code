@@ -12,13 +12,19 @@ import type { AnsiOutputDisplay } from '@qwen-code/qwen-code-core';
 import { ToolDisplayNames } from '@qwen-code/qwen-code-core';
 import { t } from '../../../i18n/index.js';
 import { SHELL_COMMAND_NAME } from '../../constants.js';
-import { ToolStatusIndicator } from '../shared/ToolStatusIndicator.js';
+import {
+  STATUS_INDICATOR_WIDTH,
+  ToolStatusIndicator,
+} from '../shared/ToolStatusIndicator.js';
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
 
 interface CompactToolGroupDisplayProps {
   toolCalls: IndividualToolCallDisplay[];
   contentWidth: number;
 }
+
+const COMPACT_GROUP_HORIZONTAL_PADDING = 2;
+const ACTIVE_ELAPSED_TIME_RESERVED_WIDTH = 4;
 
 // Priority: Confirming > Executing > Error > Canceled > Pending > Success
 export function getOverallStatus(
@@ -310,6 +316,29 @@ export function buildToolSummary(
   }
 
   return parts.join(', ');
+}
+
+export function estimateCompactToolGroupHeight(
+  toolCalls: IndividualToolCallDisplay[],
+  contentWidth: number,
+): number {
+  if (toolCalls.length === 0) return 0;
+
+  const overallStatus = getOverallStatus(toolCalls);
+  const isActive =
+    overallStatus === ToolCallStatus.Executing ||
+    overallStatus === ToolCallStatus.Pending ||
+    overallStatus === ToolCallStatus.Confirming;
+  const summary = `${buildToolSummary(toolCalls, isActive)}${isActive ? '…' : ''}`;
+  const summaryWidth = Math.max(
+    1,
+    contentWidth -
+      COMPACT_GROUP_HORIZONTAL_PADDING -
+      STATUS_INDICATOR_WIDTH -
+      (isActive ? ACTIVE_ELAPSED_TIME_RESERVED_WIDTH : 0),
+  );
+
+  return Math.max(1, Math.ceil(Array.from(summary).length / summaryWidth));
 }
 
 export const CompactToolGroupDisplay: React.FC<

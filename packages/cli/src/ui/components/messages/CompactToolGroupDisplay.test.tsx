@@ -10,6 +10,7 @@ import { Text } from 'ink';
 import {
   CompactToolGroupDisplay,
   buildToolSummary,
+  estimateCompactToolGroupHeight,
   isCollapsibleTool,
 } from './CompactToolGroupDisplay.js';
 import { ToolCallStatus } from '../../types.js';
@@ -305,6 +306,24 @@ describe('buildToolSummary', () => {
     expect(buildToolSummary(tools, false)).toBe(
       'Searched pattern, listed /src',
     );
+  });
+});
+
+describe('estimateCompactToolGroupHeight', () => {
+  it('returns 0 when there are no tool calls', () => {
+    expect(estimateCompactToolGroupHeight([], 80)).toBe(0);
+  });
+
+  it('returns 1 for summaries that fit on one line', () => {
+    expect(estimateCompactToolGroupHeight([toolCall()], 80)).toBe(1);
+  });
+
+  it('accounts for wrapped long summaries', () => {
+    const description =
+      'packages/cli/src/ui/components/messages/CompactToolGroupDisplay.tsx';
+    const tool = toolCall({ name: 'ReadFile', description });
+
+    expect(estimateCompactToolGroupHeight([tool], 30)).toBeGreaterThan(1);
   });
 });
 
