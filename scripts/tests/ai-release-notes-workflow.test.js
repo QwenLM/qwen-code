@@ -40,6 +40,7 @@ describe('stable release notes workflow', () => {
   });
 
   it('finalizes stable releases asynchronously', () => {
+    const validate = getStep(finalizeWorkflow, 'Validate stable release tag');
     const generate = getStep(
       finalizeWorkflow,
       'Generate AI-assisted release notes',
@@ -55,6 +56,8 @@ describe('stable release notes workflow', () => {
     expect(finalizeWorkflow).toContain(
       'if [[ "${TAG}" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]',
     );
+    expect(validate).toContain('is not a stable release tag');
+    expect(validate).toContain('exit 1');
     expect(generate).toContain('timeout-minutes: 15');
     expect(generate).toContain('continue-on-error: true');
     expect(generate).toContain('GitHub-generated notes');

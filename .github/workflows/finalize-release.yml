@@ -40,6 +40,10 @@ jobs:
           fi
           echo "is_stable=${is_stable}" >> "${GITHUB_OUTPUT}"
           echo "release_branch=release/${TAG}" >> "${GITHUB_OUTPUT}"
+          if [[ "${is_stable}" != "true" ]]; then
+            echo "::error::${TAG} is not a stable release tag; finalize handles stable tags only."
+            exit 1
+          fi
 
       - name: 'Checkout release branch'
         if: |-
