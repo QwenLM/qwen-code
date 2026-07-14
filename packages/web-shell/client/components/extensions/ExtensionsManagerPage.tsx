@@ -1350,36 +1350,38 @@ export function ExtensionsManagerPage({
                   }}
                 >
                   <CardHeader className="block">
-                    <div className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3 gap-y-1">
-                      <div className="row-span-3 flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted">
+                    <div className="flex items-start gap-3">
+                      <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted">
                         <PackageIcon className="size-5" />
                       </div>
-                      <div className="col-start-2 flex min-w-0 items-start justify-between gap-2">
-                        <CardTitle className="min-w-0 truncate">
-                          {extensionTitle(extension)}
-                        </CardTitle>
-                        <div className="flex shrink-0 justify-end">
-                          <Badge
-                            variant="secondary"
-                            className={
-                              extension.isActive
-                                ? 'bg-[var(--success-bg)] text-[var(--success-color)]'
-                                : undefined
-                            }
-                          >
-                            {statusLabel(extension, t)}
-                          </Badge>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex min-w-0 items-start justify-between gap-2">
+                          <CardTitle className="min-w-0 truncate">
+                            {extensionTitle(extension)}
+                          </CardTitle>
+                          <div className="flex shrink-0 justify-end">
+                            <Badge
+                              variant="secondary"
+                              className={
+                                extension.isActive
+                                  ? 'bg-[var(--success-bg)] text-[var(--success-color)]'
+                                  : undefined
+                              }
+                            >
+                              {statusLabel(extension, t)}
+                            </Badge>
+                          </div>
                         </div>
+                        {state === UPDATE_AVAILABLE ? (
+                          <div className="mt-1">
+                            <Badge>{updateLabel(state, t)}</Badge>
+                          </div>
+                        ) : null}
+                        <CardDescription className="mt-0.5 truncate">
+                          {extension.description ||
+                            t('extensions.manage.noDescription')}
+                        </CardDescription>
                       </div>
-                      {state === UPDATE_AVAILABLE ? (
-                        <div className="col-start-2">
-                          <Badge>{updateLabel(state, t)}</Badge>
-                        </div>
-                      ) : null}
-                      <CardDescription className="col-start-2 truncate">
-                        {extension.description ||
-                          t('extensions.manage.noDescription')}
-                      </CardDescription>
                     </div>
                   </CardHeader>
                 </Card>

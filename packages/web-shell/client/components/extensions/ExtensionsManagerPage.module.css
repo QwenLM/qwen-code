@@ -1,5 +1,6 @@
 .extensionGrid {
   display: grid;
+  align-items: start;
   gap: 12px;
 }
 
