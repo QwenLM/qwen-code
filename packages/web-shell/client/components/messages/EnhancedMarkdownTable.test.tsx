@@ -460,6 +460,14 @@ describe('EnhancedMarkdownTable', () => {
 
     expect(rowTexts(container)).toEqual(['Alpha|10', 'Gamma|30']);
     expect(container.textContent).toContain('2/3 rows');
+
+    dragCells(dataCell(container, 0, 1), dataCell(container, 1, 1));
+    expect(container.textContent).toContain('Selected 2');
+    expect(container.textContent).toContain('Numeric 2');
+    expect(container.textContent).toContain('Sum 40');
+    expect(container.textContent).toContain('Average 20');
+    expect(container.textContent).toContain('Min 10');
+    expect(container.textContent).toContain('Max 30');
   });
 
   it('applies a custom number filter', () => {
@@ -1528,6 +1536,15 @@ describe('EnhancedMarkdownTable', () => {
     click(button(container, 'Filter Region'));
     click(textButton(container, 'Hide column'));
     dragCells(dataCell(container, 0, 0), dataCell(container, 1, 1));
+
+    expect(container.textContent).toContain('Selected 4');
+    expect(container.textContent).toContain('Non-empty 4');
+    expect(container.textContent).toContain('Numeric 2');
+    expect(container.textContent).toContain('Sum 12');
+    expect(container.textContent).toContain('Average 6');
+    expect(container.textContent).toContain('Min 2');
+    expect(container.textContent).toContain('Max 10');
+
     click(textButton(container, 'Copy TSV'));
 
     expect(writeText).toHaveBeenCalledWith(['10\tAlpha', '2\tBeta'].join('\n'));
@@ -2118,6 +2135,32 @@ describe('EnhancedMarkdownTable', () => {
     expect(container.textContent).toContain('Average $15');
     expect(container.textContent).toContain('Min $10');
     expect(container.textContent).toContain('Max $20');
+  });
+
+  it('formats negative currency statistics with one leading sign', () => {
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Amount</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>-$10</td>
+        </tr>
+        <tr>
+          <td>-$20</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    dragCells(dataCell(container, 0, 0), dataCell(container, 1, 0));
+
+    expect(container.textContent).toContain('Sum -$30');
+    expect(container.textContent).toContain('Average -$15');
+    expect(container.textContent).toContain('Min -$20');
+    expect(container.textContent).toContain('Max -$10');
+    expect(container.textContent).not.toContain('--$');
   });
 
   it('uses plain number formatting for mixed currencies', () => {

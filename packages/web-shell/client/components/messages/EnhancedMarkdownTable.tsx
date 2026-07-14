@@ -554,7 +554,7 @@ function formatSelectionStatistic(
   language: string,
 ): string {
   const normalizedValue = Object.is(value, -0) ? 0 : value;
-  const locale = language === 'zh-CN' ? 'zh-CN' : 'en-US';
+  const locale = language === 'en' ? 'en-US' : language;
   if (statistics.format === 'percent') {
     return new Intl.NumberFormat(locale, {
       style: 'percent',
