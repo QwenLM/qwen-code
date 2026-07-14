@@ -6,6 +6,8 @@ import {
   type DaemonEvent,
   type DaemonRestoredSession,
   type DaemonSession,
+  type DaemonSessionGroup,
+  type DaemonSessionGroupCatalog,
   type DaemonSessionState,
   type DaemonSessionSummary,
   type DaemonWorkspaceExtensionsStatus,
@@ -41,6 +43,7 @@ export interface WebShellDaemonScenario {
   skills: DaemonWorkspaceSkillsStatus;
   settings: DaemonWorkspaceSettingsStatus;
   sessions: DaemonSessionSummary[];
+  sessionGroups: DaemonSessionGroup[];
   events: DaemonEvent[];
   state: DaemonSessionState;
 }
@@ -59,7 +62,13 @@ export interface MockDaemonController {
 type ScenarioOverrides = Partial<
   Omit<
     WebShellDaemonScenario,
-    'capabilities' | 'providers' | 'skills' | 'settings' | 'sessions' | 'state'
+    | 'capabilities'
+    | 'providers'
+    | 'skills'
+    | 'settings'
+    | 'sessions'
+    | 'sessionGroups'
+    | 'state'
   >
 > & {
   capabilities?: Partial<DaemonCapabilities>;
@@ -67,6 +76,7 @@ type ScenarioOverrides = Partial<
   skills?: Partial<DaemonWorkspaceSkillsStatus>;
   settings?: Partial<DaemonWorkspaceSettingsStatus>;
   sessions?: DaemonSessionSummary[];
+  sessionGroups?: DaemonSessionGroup[];
   state?: Partial<DaemonSessionState>;
 };
 
@@ -241,6 +251,7 @@ export function createWebShellDaemonScenario(
     skills,
     settings,
     sessions,
+    sessionGroups: overrides.sessionGroups ?? [],
     events: overrides.events ?? [],
     state,
   };
@@ -429,6 +440,7 @@ function isDaemonPath(path: string): boolean {
     /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/resources\/?$/.test(path) ||
     /^\/workspace\/.+\/sessions\/?$/.test(path) ||
+    /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
     path === '/session' ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
@@ -464,6 +476,9 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   }
   if (method === 'GET' && /^\/workspace\/.+\/sessions\/?$/.test(path)) {
+    return true;
+  }
+  if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
     return true;
   }
   if (method === 'POST' && path === '/session') return true;
@@ -562,6 +577,14 @@ async function handleDaemonRoute(
   }
   if (method === 'GET' && /^\/workspace\/.+\/sessions\/?$/.test(path)) {
     await json(route, { sessions: scenario.sessions });
+    return;
+  }
+  if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
+    const catalog: DaemonSessionGroupCatalog = {
+      groups: scenario.sessionGroups,
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    };
+    await json(route, catalog);
     return;
   }
   if (method === 'POST' && path === '/session') {

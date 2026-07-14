@@ -87,6 +87,10 @@ import {
 import styles from './WebShellSidebar.module.css';
 
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
+// Same `qwen-code-web-shell-*` prefix as sidebar width / chat width / theme.
+// App-wide JSON array of collapsed section ids (`group:<id>`, `recent`, `color:<name>`).
+const COLLAPSED_SESSION_SECTIONS_STORAGE_KEY =
+  'qwen-code-web-shell-collapsed-session-groups';
 const SIDEBAR_DEFAULT_WIDTH = 260;
 const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 420;
@@ -351,6 +355,37 @@ function writeSidebarWidth(width: number): void {
   }
 }
 
+function readCollapsedSessionSectionIds(): Set<string> {
+  if (typeof window === 'undefined') return new Set();
+  try {
+    const raw = window.localStorage.getItem(
+      COLLAPSED_SESSION_SECTIONS_STORAGE_KEY,
+    );
+    if (!raw) return new Set();
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(
+      parsed.filter(
+        (item): item is string =>
+          typeof item === 'string' && item.trim().length > 0,
+      ),
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function writeCollapsedSessionSectionIds(ids: ReadonlySet<string>): void {
+  try {
+    window.localStorage.setItem(
+      COLLAPSED_SESSION_SECTIONS_STORAGE_KEY,
+      JSON.stringify(Array.from(ids).sort()),
+    );
+  } catch {
+    // localStorage can be unavailable in private or embedded contexts.
+  }
+}
+
 function IconNewChat() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -524,7 +559,7 @@ export function WebShellSidebar({
   } | null>(null);
   const [collapsedSessionSectionIds, setCollapsedSessionSectionIds] = useState<
     Set<string>
-  >(() => new Set());
+  >(() => readCollapsedSessionSectionIds());
   const knownSessionSectionIdsRef = useRef<Set<string>>(new Set());
   const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
   const [projectExpanded, setProjectExpanded] = useState(false);
@@ -1937,13 +1972,23 @@ export function WebShellSidebar({
       .map((section) => section.id)
       .filter((id) => !knownSessionSectionIdsRef.current.has(id));
     if (unseenIds.length === 0) return;
+    // First catalog sync: register ids only. Restored localStorage (or the
+    // empty default) owns expand/collapse; auto-collapse would otherwise wipe
+    // expanded sections on every remount because the known set resets.
+    const isInitialCatalog = knownSessionSectionIdsRef.current.size === 0;
     for (const id of unseenIds) knownSessionSectionIdsRef.current.add(id);
+    if (isInitialCatalog) return;
+    // Brand-new sections that appear mid-session still start collapsed.
     setCollapsedSessionSectionIds((current) => {
       const next = new Set(current);
       for (const id of unseenIds) next.add(id);
       return next;
     });
   }, [sessionSections]);
+
+  useEffect(() => {
+    writeCollapsedSessionSectionIds(collapsedSessionSectionIds);
+  }, [collapsedSessionSectionIds]);
 
   const toggleSessionSection = useCallback((sectionId: string) => {
     setCollapsedSessionSectionIds((current) => {
