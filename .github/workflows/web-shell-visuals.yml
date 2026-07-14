@@ -22,6 +22,7 @@ on:
       - 'packages/web-shell/client/**'
       - 'packages/web-shell/package.json'
       - 'packages/web-shell/vite.config.ts'
+      - 'packages/web-shell/playwright.visuals.config.ts'
 
 permissions:
   contents: 'read'

@@ -83,3 +83,17 @@ test('flow: submit a prompt and watch the reply stream in', async ({
     await beat(page, 900);
   });
 });
+
+// Guards the error-handling path in recordFlow: a throwing `drive` must
+// surface its own error (not a masked video-save / context-close error), even
+// though the video is saved best-effort.
+test('flow: a drive error propagates instead of being masked', async ({
+  browser,
+}, testInfo) => {
+  const url = resolveBaseURL(testInfo);
+  await expect(
+    recordFlow(browser, url, 'drive-error', async () => {
+      throw new Error('drive-boom');
+    }),
+  ).rejects.toThrow('drive-boom');
+});

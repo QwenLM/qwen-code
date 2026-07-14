@@ -172,7 +172,12 @@ export async function recordFlow(
   } catch (error) {
     driveError = error;
   } finally {
-    await context.close();
+    try {
+      await context.close();
+    } catch {
+      // Best-effort close (the browser may have crashed mid-drive); preserve
+      // driveError for the re-throw below instead of masking it here.
+    }
   }
   const video = page?.video();
   if (video) {
