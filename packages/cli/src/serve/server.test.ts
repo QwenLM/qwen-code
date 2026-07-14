@@ -11901,6 +11901,12 @@ describe('createServeApp', () => {
       expect(empty.status).toBe(400);
       expect(empty.body.code).toBe('invalid_skill_name');
 
+      const tooLong = await auth(
+        request(app).post(`/workspace/skills/${'a'.repeat(257)}/enable`),
+      ).send({ enabled: false });
+      expect(tooLong.status).toBe(400);
+      expect(tooLong.body.code).toBe('invalid_skill_name');
+
       const badBody = await auth(
         request(app).post('/workspace/skills/review/enable'),
       ).send({ enabled: 'no' });

@@ -22,7 +22,10 @@ import {
   type WorkspaceRuntime,
 } from './workspace-registry.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
-import type { DaemonWorkspaceService } from './workspace-service/types.js';
+import {
+  WorkspaceSkillNotFoundError,
+  type DaemonWorkspaceService,
+} from './workspace-service/types.js';
 
 const baseOpts: ServeOptions = {
   hostname: '127.0.0.1',
@@ -209,6 +212,8 @@ async function makeHarness(opts?: {
     emit: () => {},
   });
 
+  const primaryWorkspaceService = makeWorkspaceService('primary');
+  const secondaryWorkspaceService = makeWorkspaceService('secondary');
   const primary: WorkspaceRuntime = {
     workspaceId: 'same-as-path',
     workspaceCwd: primaryCwd,
@@ -216,7 +221,7 @@ async function makeHarness(opts?: {
     trusted: true,
     env: { mode: 'parent-process', overlayKeys: [] },
     bridge: makeBridge(),
-    workspaceService: makeWorkspaceService('primary'),
+    workspaceService: primaryWorkspaceService,
     routeFileSystemFactory: primaryFsFactory,
     clientMcpSenderRegistry: new ClientMcpSenderRegistry(),
   };
@@ -227,7 +232,7 @@ async function makeHarness(opts?: {
     trusted: opts?.secondaryTrusted ?? true,
     env: { mode: 'parent-process', overlayKeys: [] },
     bridge: makeBridge(),
-    workspaceService: makeWorkspaceService('secondary'),
+    workspaceService: secondaryWorkspaceService,
     routeFileSystemFactory:
       opts?.secondaryTrusted === false
         ? untrustedFsFactory
@@ -251,6 +256,7 @@ async function makeHarness(opts?: {
     primaryCwd,
     secondaryCwd,
     secondaryId: secondary.workspaceId,
+    secondaryWorkspaceService,
     persistSetting,
   };
 }
@@ -903,6 +909,30 @@ describe('workspace-qualified core REST', () => {
         sessionsRefreshed: 0,
         sessionsFailed: 0,
       });
+
+      vi.mocked(
+        h.secondaryWorkspaceService.setWorkspaceSkillEnabled,
+      ).mockRejectedValueOnce(new WorkspaceSkillNotFoundError('missing'));
+      const missing = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/skills/missing/enable`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ enabled: false });
+      expect(missing.status).toBe(404);
+      expect(missing.body.code).toBe('skill_not_found');
+
+      const invalidClient = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/skills/review/enable`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'forged-client')
+        .set('Host', host())
+        .send({ enabled: false });
+      expect(invalidClient.status).toBe(400);
+      expect(invalidClient.body.code).toBe('invalid_client_id');
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
