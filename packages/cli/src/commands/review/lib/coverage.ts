@@ -203,6 +203,29 @@ function pointedAt(prompt: string, plan: Plan): Array<[number, number]> {
   return [];
 }
 
+/**
+ * Coalesce adjacent and overlapping ranges before asking whether one contains a chunk.
+ *
+ * Without this, an agent that **paged** its chunk — which the prompt tells it to do
+ * when a read comes back `isTruncated` — got no credit for it: reads of 1-200 and
+ * 201-400 are two ranges, and no single one of them contains a chunk spanning
+ * 1-400. The check would have contradicted the instruction the same review had just
+ * given, on exactly the oversized chunks where paging is not optional.
+ */
+function merge(ranges: Array<[number, number]>): Array<[number, number]> {
+  if (ranges.length < 2) return ranges;
+  const sorted = [...ranges].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const out: Array<[number, number]> = [sorted[0]];
+  for (const [s, e] of sorted.slice(1)) {
+    const last = out[out.length - 1];
+    // `s <= last[1] + 1` — abutting counts. Lines 1-200 then 201-400 is one walk of
+    // 1-400, not two walks with a hole between them.
+    if (s <= last[1] + 1) last[1] = Math.max(last[1], e);
+    else out.push([s, e]);
+  }
+  return out;
+}
+
 const UNCOVERABLE_RE = /^\s*Uncoverable:\s*chunk\s+(\d+)\b/im;
 
 /** A required agent, named the way a reader has to act on it. */
@@ -316,7 +339,7 @@ export function coverageFromTranscripts(
     // what lets an agent handed the bare diff path with no territory — a
     // reverse-audit pass, a verifier — be credited for exactly the lines it opened
     // and for no others.
-    const ranges = [...told, ...rec.diffReads];
+    const ranges = merge([...told, ...rec.diffReads]);
     if (ranges.length === 0) continue;
 
     const u = UNCOVERABLE_RE.exec(rec.finalText);

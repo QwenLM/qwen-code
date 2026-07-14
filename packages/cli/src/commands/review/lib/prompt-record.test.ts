@@ -109,4 +109,14 @@ describe('wasDeliveredVerbatim — you may add; you may not remove, alter or reo
   it('rejects an empty launch prompt', () => {
     expect(wasDeliveredVerbatim('', BUILT)).toBe(false);
   });
+
+  it('fails closed on an EMPTY built prompt — the loop would be vacuously true', () => {
+    // The one input that must not pass. `recordPrompt` swallows its write errors by
+    // design, so a partial write leaves a zero-byte record — and `readRecordedPrompts`
+    // stores that as `''`, not `undefined`, so the "no prompt was built" guard does
+    // not catch it. A vacuously-true check would then credit the role to whichever
+    // transcript the roster looked at first.
+    expect(wasDeliveredVerbatim('anything at all', '')).toBe(false);
+    expect(wasDeliveredVerbatim('anything at all', '   \n  \n ')).toBe(false);
+  });
 });

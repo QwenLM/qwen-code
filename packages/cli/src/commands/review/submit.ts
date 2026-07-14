@@ -308,7 +308,11 @@ function structuralProblems(payload: ReviewPayload): string[] {
         'Approve is exactly what this refuses.)',
     );
   }
-  if (payload.state === undefined) {
+  // `== null`, not `=== undefined`. A payload with `"state": null` cleared the
+  // strict check, and `compose`'s `?? {}` then collapsed it to an empty state —
+  // which composes into a review whose footer names no model and whose caps come
+  // from nowhere. The verdict would still have been posted.
+  if (payload.state == null) {
     problems.push(
       '`state` is missing — the verdict is computed from it. It is the same ' +
         'object `compose-review` takes: the body Criticals, the discarded ' +
@@ -496,7 +500,7 @@ export function runSubmit(args: SubmitArgs): void {
     );
     writeStdoutLine(
       JSON.stringify(
-        { posted: false, wouldPost: true, target, event },
+        { posted: false, wouldPost: true, target, event, cappedBy },
         null,
         2,
       ),

@@ -672,6 +672,13 @@ export function buildRoleBrief(
     const base = report.mergeBaseSha;
     const pr = report.prNumber;
     if (typeof base === 'string' && base && pr !== undefined && opts.planPath) {
+      // Absolute, both of them. `worktreePath` and the plan path are repo-relative
+      // in the report, and this agent's working directory IS the worktree — so a
+      // relative `.qwen/tmp/review-pr-6457` resolves to
+      // `<worktree>/.qwen/tmp/review-pr-6457`, which does not exist. Watched live:
+      // Agent 7 of a real 29-agent run spent its time running
+      // `find … -name "*6457*fetch*"`, hunting for a plan it had been handed a path
+      // to that could not resolve from where it was standing.
       parts.push(
         '',
         '**Then run the test-efficacy probe.** A green suite says the tests pass. It does ' +
@@ -679,10 +686,10 @@ export function buildRoleBrief(
           'different claims:',
         '',
         '```bash',
-        `qwen review test-efficacy ${opts.planPath} \\`,
-        `  --worktree ${typeof wt === 'string' ? wt : '<worktree>'} \\`,
+        `qwen review test-efficacy ${resolve(opts.planPath)} \\`,
+        `  --worktree ${typeof wt === 'string' ? resolve(wt) : '<worktree>'} \\`,
         `  --base ${base} \\`,
-        `  --out .qwen/tmp/qwen-review-pr-${pr}-efficacy.json`,
+        `  --out ${resolve(dirname(opts.planPath), `qwen-review-pr-${pr}-efficacy.json`)}`,
         '```',
         '',
         'Read its `findings[]`. `kind: "unreachable"` is a test the project\'s test command ' +

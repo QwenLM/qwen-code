@@ -27,13 +27,7 @@
 // agent's actual launch prompt. The two artifacts have different authors, and
 // neither is the orchestrator.
 
-import {
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  writeFileSync,
-  rmSync,
-} from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, basename, resolve } from 'node:path';
 
 /**
@@ -141,11 +135,6 @@ export function readRecordedPrompts(planPath: string): Map<string, string> {
   return out;
 }
 
-/** Drop the record. Called by `cleanup`, which owns the rest of the temp files. */
-export function removePromptRecord(planPath: string): void {
-  rmSync(promptRecordDir(planPath), { recursive: true, force: true });
-}
-
 /**
  * Was `built` delivered to the agent intact?
  *
@@ -175,6 +164,13 @@ export function wasDeliveredVerbatim(
   launchPrompt: string,
   built: string,
 ): boolean {
+  // A zero-byte record is not a prompt, and the loop below would be vacuously true
+  // for it — the check would pass every agent, and the roster would credit a role
+  // to whichever transcript it happened to look at first. `recordPrompt` swallows
+  // its write errors by design (a read-only tmp dir must not stop a review being
+  // *built*), so an empty file is exactly what a partial write leaves behind. It is
+  // the one input that must fail closed.
+  if (built.trim().length === 0) return false;
   const delivered = flatten(launchPrompt);
   let at = 0;
   for (const line of lines(built)) {

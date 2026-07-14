@@ -859,3 +859,75 @@ describe('the prompt the CLI built, against the prompt the agent got', () => {
     expect(r.ok).toBe(true);
   });
 });
+
+describe('an agent that paged its chunk still read it', () => {
+  it('merges paged reads before asking whether a chunk was covered', () => {
+    // The prompt tells an agent to page when a read comes back `isTruncated` — and
+    // an oversized chunk gives it no choice. Two reads of 1-100 and 101-200 are one
+    // walk of 1-200; requiring a single range to contain the chunk would have
+    // contradicted the instruction the same review had just given.
+    const p = plan3a();
+    const brief = briefPath(p, '2');
+    writeFileSync(brief, 'brief');
+    const launch =
+      `Security review.\n` + `read_file(file_path="${brief}")\n` + DIFF;
+    writeFileSync(join(promptRecordDir(p), '2.txt'), launch);
+    // No offsets in the prompt: this agent is credited only by what it READ.
+    const base = {
+      agentId: 'pg',
+      agentName: 'general-purpose',
+      sessionId: 'S1',
+    };
+    const call = (id: string, args: Record<string, unknown>) => [
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [{ functionCall: { id, name: 'read_file', args } }],
+        },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id,
+                name: 'read_file',
+                response: { output: 'bytes' },
+              },
+            },
+          ],
+        },
+      }),
+    ];
+    writeFileSync(
+      join(dir, 'subagents', 'S1', 'agent-pg.jsonl'),
+      [
+        JSON.stringify({
+          ...base,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: launch }] },
+        }),
+        ...call('c0', { file_path: brief }),
+        // chunk 1 is lines 1-100 — read in two pages, neither of which contains it.
+        ...call('c1', { file_path: DIFF, offset: 0, limit: 50 }),
+        ...call('c2', { file_path: DIFF, offset: 50, limit: 50 }),
+        // and chunk 2 (101-200) whole, so the run is complete.
+        ...call('c3', { file_path: DIFF, offset: 100, limit: 100 }),
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'Reviewed.' }] },
+        }),
+      ].join('\n') + '\n',
+    );
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.coveredChunks).toEqual([1, 2]);
+    expect(r.missingChunks).toEqual([]);
+  });
+});

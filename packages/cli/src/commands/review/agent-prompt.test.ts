@@ -460,6 +460,20 @@ describe('buildRolePrompt — every agent, not just the territory ones', () => {
     expect(p).toContain('--base abc123');
   });
 
+  it('gives Agent 7 ABSOLUTE paths — its cwd is the worktree, not the repo', () => {
+    // `worktreePath` and the plan path are repo-relative in the report, and this
+    // agent's working directory IS the worktree — so `--worktree
+    // .qwen/tmp/review-pr-6766` resolves to `<worktree>/.qwen/tmp/review-pr-6766`,
+    // which does not exist. Watched live: Agent 7 of a real 29-agent run spent its
+    // time running `find … -name "*6457*fetch*"`, hunting for a plan it had been
+    // handed a path to that could not resolve from where it was standing.
+    const p = buildRoleBrief(PR_PLAN, '7', { planPath: '/abs/tmp/plan.json' });
+    expect(p).toContain('qwen review test-efficacy /abs/tmp/plan.json');
+    expect(p).toMatch(/--worktree \/[^\s]*review-pr-6766/);
+    expect(p).not.toMatch(/--worktree \.qwen/);
+    expect(p).toContain('--out /abs/tmp/qwen-review-pr-6766-efficacy.json');
+  });
+
   it('welds the PR into Agent 0 — a bare `gh pr view` judges the wrong issue', () => {
     const p = buildRoleBrief(PR_PLAN, '0', {
       planPath: '/x/qwen-review-pr-6766-fetch.json',

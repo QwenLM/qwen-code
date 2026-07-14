@@ -23,6 +23,12 @@ vi.mock('./lib/gh.js', () => ({
   setGhHost: vi.fn(),
 }));
 
+const writeStdoutSpy = vi.hoisted(() => vi.fn((_line: string) => {}));
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: writeStdoutSpy,
+  writeStderrLine: vi.fn(),
+}));
+
 const { runSubmit } = await import('./submit.js');
 
 let dir: string;
@@ -68,6 +74,7 @@ function args(over: Record<string, unknown> = {}) {
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'review-submit-'));
   ghMock.mockClear();
+  writeStdoutSpy.mockClear();
   process.exitCode = undefined;
 });
 afterEach(() => {
@@ -519,5 +526,45 @@ describe('the verdict is computed, not carried', () => {
 
     expect(() => runSubmit(authorized({ review }))).toThrow(/not inputs/);
     expect(ghMock).not.toHaveBeenCalled();
+  });
+});
+
+// Six findings from the repo's own `/review` bot on this pull request. These are its.
+describe('what the reviewer caught in this change', () => {
+  const authorized = (over: Record<string, unknown> = {}) =>
+    args({ userAuthorized: true, ...over });
+
+  it('refuses `state: null`, which slipped past a `=== undefined` guard', () => {
+    // `null` is not `undefined`, so the structural check passed it; `compose`'s
+    // `?? {}` then collapsed it to an empty state and posted a review whose footer
+    // named no model and whose caps came from nowhere.
+    const review = file('null-state.json', {
+      commit_id: 'abc',
+      comments: [],
+      state: null,
+    });
+
+    expect(() => runSubmit(authorized({ review }))).toThrow(
+      /`state` is missing/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('shows `cappedBy` in the dry run, not only after the write', () => {
+    // The point of `--dry-run` is to see what would be posted. Reporting
+    // `"event": "COMMENT"` with no reason leaves the reader to guess why the Approve
+    // went away.
+    const review = file('capped.json', {
+      commit_id: 'abc',
+      comments: [],
+      state: { modelId: 'm', uncoverableChunks: ['chunk 5 (src/big.min.js)'] },
+    });
+
+    runSubmit(authorized({ review, dryRun: true }));
+    const out = JSON.parse(
+      (writeStdoutSpy.mock.calls.at(-1)?.[0] as string) ?? '{}',
+    );
+    expect(out.event).toBe('COMMENT');
+    expect(out.cappedBy).toContain('uncoverable-chunk');
   });
 });
