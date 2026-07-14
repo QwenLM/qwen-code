@@ -1072,6 +1072,10 @@ export function App({
   const splitSidebarHasRoom = useIsLargeScreen('(min-width: 1200px)');
 
   useEffect(() => {
+    if (!sidebarOptions.enabled) closeMobileDrawer();
+  }, [closeMobileDrawer, sidebarOptions.enabled]);
+
+  useEffect(() => {
     const mql = window.matchMedia('(max-width: 760px)');
     const handler = (e: MediaQueryListEvent) => {
       if (!e.matches) closeMobileDrawer();
@@ -2123,11 +2127,12 @@ export function App({
     setMainView('scheduledTasks');
   }, []);
   const openSessionDrawer = useCallback(() => {
+    if (!sidebarOptions.enabled) return;
     setActivePanel(null);
     setMainView('chat');
     setForceMobileDrawer(true);
     setMobileDrawerOpen(true);
-  }, []);
+  }, [sidebarOptions.enabled]);
   // Open the in-window split view showing 2+ sessions side by side. `splitSessionIds`
   // is the live pane set — SplitView mirrors add/remove back into it via
   // onPanesChange — so it must be preserved across entries, not blindly reset.
@@ -3645,12 +3650,24 @@ export function App({
   );
   const shellApi = useMemo<WebShellApi>(
     () => ({
-      openSplitView: () => requestOpenSplitView(),
-      openSessionOverview: () => openPanel('sessions'),
+      openSplitView: () => {
+        closeMobileDrawer();
+        requestOpenSplitView();
+      },
+      openSessionOverview: () => {
+        closeMobileDrawer();
+        openPanel('sessions');
+      },
       openSessionDrawer,
       createNewSession: () => createNewSession(),
     }),
-    [createNewSession, openPanel, openSessionDrawer, requestOpenSplitView],
+    [
+      closeMobileDrawer,
+      createNewSession,
+      openPanel,
+      openSessionDrawer,
+      requestOpenSplitView,
+    ],
   );
   useEffect(() => {
     assignShellRef(shellRef, shellApi);
@@ -3665,7 +3682,6 @@ export function App({
     if (creatingMissingSessionRef.current) return;
     creatingMissingSessionRef.current = true;
     setIsCreatingMissingSession(true);
-    setMainView('chat');
     try {
       const success = await createNewSession();
       if (success) {
@@ -5985,7 +6001,6 @@ export function App({
                     );
                   }}
                   onNewSession={(workspaceCwd) => {
-                    setMainView('chat');
                     return createNewSession(workspaceCwd);
                   }}
                   onLoadSession={(sessionId, workspaceCwd) => {
@@ -6235,7 +6250,6 @@ export function App({
                         // describe the task in natural language; the agent
                         // creates it via its cron_create tool. Focus is deferred
                         // so the new session's composer is mounted/visible first.
-                        setMainView('chat');
                         void createNewSession().then((created) => {
                           // If the new session couldn't be started,
                           // createNewSession already surfaced the error — do NOT
