@@ -355,7 +355,7 @@ describe('relaunchAppInChildProcess', () => {
       await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
 
       expect(onUpdateRelaunch).toHaveBeenCalledTimes(1);
-      expect(processExitSpy).toHaveBeenCalledWith(0);
+      expect(processExitSpy).toHaveBeenCalledWith(44);
     });
 
     it('should handle null exit code from child process', async () => {

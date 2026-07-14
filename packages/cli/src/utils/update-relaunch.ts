@@ -56,7 +56,7 @@ export async function updateBeforeRelaunch(
           installationInfo.updateMessage ??
             t('Manual update required. Please reinstall Qwen Code.'),
         );
-        return true;
+        return false;
       }
       const updateProcess = handleAutoUpdate(
         result.info,
@@ -76,11 +76,12 @@ export async function updateBeforeRelaunch(
             : UPDATE_FAILED_MESSAGE,
         ),
       );
+      return success;
     } else if (result.status === 'error') {
       writeStderrLine(t(UPDATE_CHECK_FAILED_MESSAGE));
     }
   } catch {
     writeStderrLine(translate(UPDATE_FAILED_MESSAGE));
   }
-  return true;
+  return false;
 }

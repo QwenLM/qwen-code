@@ -429,6 +429,19 @@ describe('bootstrap import boundaries', () => {
     }
   });
 
+  it('ignores malformed relaunch args in the npm bin wrapper', () => {
+    const output = execFileSync(
+      process.execPath,
+      ['../../scripts/cli-entry.js', '--version'],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, QWEN_CODE_RELAUNCH_ARGS: 'not-json' },
+      },
+    );
+
+    expect(output.trim()).toMatch(/^\d+\.\d+\.\d+/);
+  });
+
   it('prints CLI_VERSION from the npm bin wrapper version shortcut', () => {
     const output = execFileSync(
       process.execPath,

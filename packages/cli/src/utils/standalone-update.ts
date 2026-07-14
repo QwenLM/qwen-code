@@ -649,7 +649,11 @@ function atomicReplace(
       `tasklist /FI "PID eq ${process.pid}" 2>nul | find "${process.pid}" >nul && (timeout /t 1 >nul & goto wait)`,
       ...(process.env['QWEN_CODE_LAUNCHER_PID']?.match(/^\d+$/)
         ? [
-            `tasklist /FI "PID eq ${process.env['QWEN_CODE_LAUNCHER_PID']}" 2>nul | find "${process.env['QWEN_CODE_LAUNCHER_PID']}" >nul && (timeout /t 1 >nul & goto wait)`,
+            'set /a LAUNCHER_TRIES=0',
+            ':wait_launcher',
+            'set /a LAUNCHER_TRIES+=1',
+            'if %LAUNCHER_TRIES% GTR 30 goto proceed',
+            `tasklist /FI "PID eq ${process.env['QWEN_CODE_LAUNCHER_PID']}" 2>nul | find "${process.env['QWEN_CODE_LAUNCHER_PID']}" >nul && (timeout /t 1 >nul & goto wait_launcher)`,
           ]
         : []),
       ':proceed',

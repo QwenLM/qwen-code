@@ -109,7 +109,7 @@ export async function relaunchAppInChildProcess(
         ) {
           updateOnExitRequested = false;
           void Promise.resolve(options.onUpdateRelaunch()).then(
-            () => resolve(exitCode),
+            (updatedExitCode) => resolve(updatedExitCode),
             reject,
           );
           return;

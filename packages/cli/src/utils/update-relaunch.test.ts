@@ -68,10 +68,19 @@ describe('updateBeforeRelaunch', () => {
     const update = updateBeforeRelaunch(settings, '/repo');
     await vi.waitFor(() => expect(handleAutoUpdate).toHaveBeenCalledTimes(1));
     updateProcess.emit('close', 1);
-    await update;
+    await expect(update).resolves.toBe(false);
 
     expect(writeStderrLine).toHaveBeenCalledWith(
       'Automatic update failed. Please try updating manually.',
+    );
+  });
+
+  it('does not relaunch when the update check fails', async () => {
+    checkForUpdatesDetailed.mockResolvedValue({ status: 'error' });
+
+    await expect(updateBeforeRelaunch(settings, '/repo')).resolves.toBe(false);
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      'Failed to check for updates. Please check your network or registry configuration.',
     );
   });
 

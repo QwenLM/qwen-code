@@ -123,6 +123,17 @@ describe('standalone-update', () => {
   });
 
   describe('ensureBinWrapper', () => {
+    it('uses an independent launcher wait budget in the deferred Windows swap script', () => {
+      const source = fs.readFileSync(
+        new URL('./standalone-update.ts', import.meta.url),
+        'utf8',
+      );
+
+      expect(source).toContain('set /a TRIES=0');
+      expect(source).toContain('set /a LAUNCHER_TRIES=0');
+      expect(source).toContain('goto wait_launcher');
+    });
+
     // Unix wrapper test relies on POSIX file permissions (mode bits) and
     // the SHELL env var, neither of which behave consistently on Windows.
     it.skipIf(process.platform === 'win32')(

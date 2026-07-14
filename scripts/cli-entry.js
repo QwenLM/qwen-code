@@ -20,7 +20,12 @@
  */
 
 const relaunchArgs = process.env['QWEN_CODE_RELAUNCH_ARGS'];
-const cliArgs = relaunchArgs ? JSON.parse(relaunchArgs) : process.argv.slice(2);
+let cliArgs = process.argv.slice(2);
+try {
+  cliArgs = relaunchArgs ? JSON.parse(relaunchArgs) : cliArgs;
+} catch {
+  // Ignore stale or user-provided junk; normal argv is still usable.
+}
 delete process.env['QWEN_CODE_RELAUNCH_ARGS'];
 
 function hasFlag(flag, alias) {
@@ -102,6 +107,7 @@ if (isInProcessFastPath()) {
   const entryRootLength = parse(entryPath).root.length;
   const launcherFromEnv = process.env['QWEN_CODE_LAUNCHER_PATH'];
   delete process.env['QWEN_CODE_LAUNCHER_PATH'];
+  delete process.env['QWEN_CODE_LAUNCHER_PID'];
   const launcherCandidates = process.env['PATH']
     ?.split(delimiter)
     .flatMap((dir) => launcherNames.map((name) => join(dir, name)))
