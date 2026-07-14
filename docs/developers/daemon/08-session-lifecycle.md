@@ -194,7 +194,23 @@ cache path for a single-turn, no-tool LLM call and returns
 without routing through the LLM. It streams output on the session SSE bus via
 `user_shell_command` / `user_shell_result` events and injects the command plus
 result into the LLM conversation history. The response is
-`{ exitCode, output, aborted }`.
+`{ exitCode, output, aborted }`. For a live secondary-workspace session, the
+singular REST route resolves the session owner and executes on that runtime's
+bridge, so the command starts in the owning workspace cwd. The route does not
+provide a path sandbox. Workspace-qualified ACP clients may continue to use
+`_qwen/session/shell` on the owning workspace connection.
+
+### Session Rewind
+
+`GET /session/:id/rewind/snapshots` and `POST /session/:id/rewind` resolve the
+owning live workspace runtime. Persisted sessions must be loaded or resumed
+before rewind. Rewind truncates conversation history and optionally restores
+files tracked by `edit` and `write_file`; it does not undo shell commands, Git,
+scripts, or manual changes. File restoration is best-effort, so a response may
+report `rewound: false` and `filesFailed[]` after the conversation history has
+already moved. SDK rewind calls always use owner-aware REST, including when the
+client otherwise uses ACP transport, because the mutation must retain strict
+REST authentication.
 
 ### Session Detach
 

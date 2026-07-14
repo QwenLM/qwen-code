@@ -45,6 +45,7 @@ import {
   WorkspaceInitRaceError,
   WorkspaceInitSymlinkError,
   WorkspaceMismatchError,
+  WorkspaceDrainingError,
   TotalSessionLimitExceededError,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
@@ -185,6 +186,15 @@ export function sendBridgeError(
       sessionId: err.sessionId,
       snapshotSize: err.snapshotSize,
       maxBytes: err.maxBytes,
+    });
+    return;
+  }
+  if (err instanceof WorkspaceDrainingError) {
+    res.set('Retry-After', '5');
+    res.status(503).json({
+      error: err.message,
+      code: 'workspace_draining',
+      workspaceCwd: err.workspaceCwd,
     });
     return;
   }

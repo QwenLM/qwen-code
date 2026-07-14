@@ -54,6 +54,12 @@ function submit() {
 }
 
 describe('AddWorkspaceDialog', () => {
+  it('focuses the path input when opened', () => {
+    mount(<AddWorkspaceDialog onClose={vi.fn()} onAdd={vi.fn()} />);
+
+    expect(document.activeElement).toBe(input());
+  });
+
   it('describes the input with the hint and no error initially', () => {
     mount(<AddWorkspaceDialog onClose={vi.fn()} onAdd={vi.fn()} />);
     // Hint is always associated; error id is only added once an error exists so

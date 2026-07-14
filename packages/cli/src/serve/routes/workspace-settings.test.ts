@@ -81,6 +81,69 @@ describe('POST /workspace/settings', () => {
     );
   });
 
+  it('persists to the user scope (~/.qwen/settings.json)', async () => {
+    const { app, persistSetting, broadcastSettingsChanged } = makeApp();
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'general.cleanupPeriodDays',
+      value: 7,
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      key: 'general.cleanupPeriodDays',
+      scope: 'user',
+      value: 7,
+    });
+    // 'user' must map to SettingScope.User ('User') so the value lands in
+    // ~/.qwen/settings.json rather than the workspace file.
+    expect(persistSetting).toHaveBeenCalledWith(
+      '/workspace',
+      'User',
+      'general.cleanupPeriodDays',
+      7,
+    );
+    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+      'general.cleanupPeriodDays',
+      7,
+      'user',
+      undefined,
+    );
+  });
+
+  it('rejects scopes other than workspace/user', async () => {
+    const { app, persistSetting } = makeApp();
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'system',
+      key: 'general.cleanupPeriodDays',
+      value: 7,
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ code: 'invalid_scope' });
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
+
+  it('rejects a security-sensitive key even at user scope', async () => {
+    // Enabling user-scope writes must not expose SECURITY_SENSITIVE_SETTINGS
+    // (e.g. tools.approvalMode) — getAllowedKeys() filters them out regardless
+    // of scope. Guards against a future allowlist change leaking them.
+    const { app, persistSetting } = makeApp();
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'tools.approvalMode',
+      value: 'yolo',
+    });
+
+    expect(res.status).toBe(400);
+    // 'disallowed_key' (recognized but blocked), not 'invalid_key' (unknown).
+    expect(res.body).toMatchObject({ code: 'disallowed_key' });
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
+
   it('rejects non-positive general.sessionRecapAwayThresholdMinutes values', async () => {
     const { app, persistSetting, broadcastSettingsChanged } = makeApp();
 

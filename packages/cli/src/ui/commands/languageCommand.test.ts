@@ -407,6 +407,76 @@ describe('languageCommand', () => {
         'en',
       );
     });
+
+    it('persists to user scope with --global', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+
+      await languageCommand.action(mockContext, 'ui en --global');
+
+      expect(i18n.setLanguageAsync).toHaveBeenCalledWith('en');
+      expect(mockContext.services.settings.setValue).toHaveBeenCalledWith(
+        'user',
+        'general.language',
+        'en',
+      );
+    });
+
+    it('persists to workspace scope with --project when trusted', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+      (mockContext.services.settings as { isTrusted?: boolean }).isTrusted =
+        true;
+
+      await languageCommand.action(mockContext, 'ui zh --project');
+
+      expect(i18n.setLanguageAsync).toHaveBeenCalledWith('zh');
+      expect(mockContext.services.settings.setValue).toHaveBeenCalledWith(
+        'workspace',
+        'general.language',
+        'zh',
+      );
+    });
+
+    it('rejects --project in an untrusted workspace without persisting', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+      (mockContext.services.settings as { isTrusted?: boolean }).isTrusted =
+        false;
+
+      const result = await languageCommand.action(
+        mockContext,
+        'ui en --project',
+      );
+
+      expect(i18n.setLanguageAsync).not.toHaveBeenCalled();
+      expect(mockContext.services.settings.setValue).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        messageType: 'error',
+        content: expect.stringContaining('untrusted'),
+      });
+    });
+
+    it('rejects using both --project and --global together', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+
+      const result = await languageCommand.action(
+        mockContext,
+        'ui en --project --global',
+      );
+
+      expect(i18n.setLanguageAsync).not.toHaveBeenCalled();
+      expect(mockContext.services.settings.setValue).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        messageType: 'error',
+        content: expect.stringContaining('Cannot use both'),
+      });
+    });
   });
 
   describe('/language output subcommand', () => {

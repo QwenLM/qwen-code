@@ -80,6 +80,7 @@ import {
   SessionLimitExceededError,
   SessionNotFoundError,
   TotalSessionLimitExceededError,
+  WorkspaceDrainingError,
   WorkspaceMismatchError,
   type BridgeHeartbeatResult,
   type BridgeHeartbeatState,
@@ -394,7 +395,10 @@ const EXPECTED_REGISTERED_FEATURES = [
   'channel_reload',
   'channel_control',
   'multi_workspace_sessions',
+  'multi_workspace_session_rewind',
+  'multi_workspace_session_shell',
   'persistent_workspace_registration',
+  'workspace_runtime_removal',
   'workspace_qualified_rest_core',
   'workspace_persisted_transcript',
   'workspace_qualified_acp',
@@ -2238,6 +2242,53 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'multi_workspace_session_rewind') {
+          expect(predicate({ multiWorkspaceSessionsEnabled: true })).toBe(true);
+          expect(predicate({ multiWorkspaceSessionsEnabled: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              multiWorkspaceSessionsEnabled: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'multi_workspace_session_shell') {
+          expect(
+            predicate({
+              multiWorkspaceSessionsEnabled: true,
+              sessionShellCommandEnabled: true,
+            }),
+          ).toBe(true);
+          expect(
+            predicate({
+              multiWorkspaceSessionsEnabled: true,
+              sessionShellCommandEnabled: false,
+            }),
+          ).toBe(false);
+          expect(
+            predicate({
+              multiWorkspaceSessionsEnabled: false,
+              sessionShellCommandEnabled: true,
+            }),
+          ).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              multiWorkspaceSessionsEnabled: true,
+              sessionShellCommandEnabled: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'persistent_workspace_registration') {
           expect(
             predicate({ persistentWorkspaceRegistrationAvailable: true }),
@@ -2249,6 +2300,24 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, {
               persistentWorkspaceRegistrationAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'workspace_runtime_removal') {
+          expect(predicate({ workspaceRuntimeRemovalAvailable: true })).toBe(
+            true,
+          );
+          expect(predicate({ workspaceRuntimeRemovalAvailable: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              workspaceRuntimeRemovalAvailable: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
@@ -19468,6 +19537,27 @@ describe('T2.9 serve-side errorKind taxonomy (issue #4514)', () => {
 });
 
 describe('sendBridgeError daemonLog routing', () => {
+  it('maps workspace drain admission failures to 503', async () => {
+    const bridge = fakeBridge({
+      spawnImpl: async () => {
+        throw new WorkspaceDrainingError('/work/a');
+      },
+    });
+    const app = createServeApp(baseOpts, undefined, { bridge });
+
+    const res = await request(app)
+      .post('/session')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ cwd: '/work/a' });
+
+    expect(res.status).toBe(503);
+    expect(res.headers['retry-after']).toBe('5');
+    expect(res.body).toMatchObject({
+      code: 'workspace_draining',
+      workspaceCwd: '/work/a',
+    });
+  });
+
   it('routes 5xx errors through daemonLog when provided', async () => {
     const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'daemon-log-'));
     const stderrLines: string[] = [];

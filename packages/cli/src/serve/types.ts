@@ -314,6 +314,7 @@ export interface CapabilitiesEnvelope {
     cwd: string;
     primary: boolean;
     trusted: boolean;
+    removable?: boolean;
   }>;
   /**
    * Transport families this daemon supports. Always includes `'rest'`;
