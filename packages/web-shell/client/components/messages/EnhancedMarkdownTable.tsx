@@ -1536,7 +1536,13 @@ export function EnhancedTable({
       }
     };
     const clearActiveColumnOnEscape = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || openFilterMenu || cellDialog || columnContextMenu) return;
+      if (
+        event.defaultPrevented ||
+        openFilterMenu ||
+        cellDialog ||
+        columnContextMenu
+      )
+        return;
       if (event.key === 'Escape') setActiveColumn(null);
     };
     document.addEventListener('mousedown', clearActiveColumnOnOutsideMouseDown);

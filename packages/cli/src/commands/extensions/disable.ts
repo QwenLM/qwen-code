@@ -20,13 +20,16 @@ export async function handleDisable(args: DisableArgs) {
   const extensionManager = await getExtensionManager();
   try {
     const scope = resolveExtensionCommandScope(args.scope);
-    await extensionManager.disableExtension(args.name, scope);
+    const result = await extensionManager.disableExtension(args.name, scope);
     writeStdoutLine(
       t('Extension "{{name}}" successfully disabled for scope "{{scope}}".', {
         name: args.name,
         scope: args.scope || SettingScope.User,
       }),
     );
+    for (const warning of result.warnings ?? []) {
+      writeStderrLine(`${warning.code}: ${warning.error}`);
+    }
   } catch (error) {
     writeStderrLine(getErrorMessage(error));
     process.exit(1);

@@ -55,6 +55,35 @@ export interface ComposeReviewInput {
    * not be fetched"`) is rendered verbatim.
    */
   unreviewedDimensions?: string[];
+  /**
+   * The `check-coverage` report for this run.
+   *
+   * The cap lists above are numbers the caller supplies, and a caller that
+   * skipped Step 3's receipt check supplies empty ones — which is exactly what a
+   * clean review looks like. Dogfooding, an orchestrator launched 25 agents over
+   * an 18-chunk diff, 22 of them returned in under two seconds having made zero
+   * tool calls, and it passed `uncoverableChunks: []`, `unreviewedDimensions: []`
+   * and filed an **Approve** over 4 925 lines nobody had read.
+   *
+   * So the coverage is not asked for, it is **shown**: pass the report that
+   * `check-coverage` produced from the agents' verbatim returns. Its
+   * `missingChunks` and `whiffedAgents` are folded into the cap lists here, and
+   * they forbid an Approve exactly as a hand-supplied entry would. Omitting it is
+   * itself a cap — a run that cannot show what it covered has not shown that it
+   * covered anything.
+   */
+  coverage?: {
+    missingChunks?: number[];
+    whiffedAgents?: string[];
+    /**
+     * Chunks the diff itself made uncoverable (a line longer than one read).
+     * Read at runtime and folded into the uncoverable cap, but it was missing
+     * from this type — so it worked through JSON yet a TypeScript caller could
+     * not pass it, and no test exercised it.
+     */
+    uncoverableChunks?: number[];
+    ok?: boolean;
+  };
   /** Step 1's lightweight `pr-context` fetch failed. */
   contextUnavailable?: boolean;
   presubmit?: {
@@ -108,6 +137,26 @@ function toStringList(value: unknown, field: string): string[] {
   return value as string[];
 }
 
+/**
+ * A list of chunk ids. Same discipline as `toStringList`: refuse, don't coerce.
+ *
+ * `typeof v === 'number'` admits `NaN`, `Infinity`, `-1` and `2.5` — none of
+ * which is a chunk id, and each of which would be rendered into the review body
+ * as "chunk NaN". The sibling `toCount` has always checked this; this did not.
+ */
+function toNumberList(value: unknown, field: string): number[] {
+  if (value === undefined || value === null) return [];
+  if (
+    !Array.isArray(value) ||
+    value.some((v) => !Number.isSafeInteger(v) || (v as number) < 1)
+  ) {
+    throw new TypeError(
+      `compose-review: ${field} must be an array of positive whole numbers, got ${JSON.stringify(value)}`,
+    );
+  }
+  return value as number[];
+}
+
 // Booleans get the same boundary treatment as the counts: the JSON is
 // model-written, and a stringified `"false"` is truthy — it once stood to
 // fire the downgrade sentence on a review that was never downgraded, and to
@@ -145,6 +194,76 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     input.unreviewedDimensions,
     'unreviewedDimensions',
   );
+
+  // Coverage is shown, not asserted. Whatever the caller listed by hand, the
+  // report's own gaps are added to it — a run cannot approve past a chunk nobody
+  // receipted or an agent that returned nothing, and it cannot do so by leaving
+  // the lists empty.
+  // Separate from `uncoverable`. The uncoverable renderer explains the gap as
+  // "a line there exceeds the read limit", which is true of an uncoverable chunk
+  // and a fabrication about a chunk nobody receipted. The public body would give
+  // the author a false cause.
+  const missingReceipts: number[] = [];
+  const coverageRaw: unknown = input.coverage ?? {};
+  if (typeof coverageRaw !== 'object' || Array.isArray(coverageRaw)) {
+    throw new TypeError(
+      `compose-review: coverage must be an object, got ${JSON.stringify(coverageRaw)}`,
+    );
+  }
+  const cov = coverageRaw as Record<string, unknown>;
+
+  // Omitting the report is itself a cap: a run that cannot show what it covered
+  // has not shown it covered anything, and the whole dogfood failure was an
+  // orchestrator that skipped the coverage step and got a rubber stamp. So an
+  // **absent** `coverage` caps, full stop.
+  //
+  // There is no opt-out field, and there was one for exactly one round: a
+  // `coverageNotApplicable` boolean. But that boolean came from the same
+  // model-authored JSON whose omissions this gate exists to distrust — a review
+  // that wanted an approval could set it and walk straight through, which is the
+  // unread-PR failure with one more keystroke. The lesson this whole PR keeps
+  // relearning is that no model-written field can be its own authorisation. A
+  // caller with genuinely no territory (a non-review use of this subcommand)
+  // passes a coverage report that says so — `{ ok: true }` with empty lists —
+  // rather than asserting inapplicability.
+  const covProvided = input.coverage !== undefined && input.coverage !== null;
+  if (!covProvided) {
+    unreviewed.push(
+      'coverage — no `check-coverage` report was supplied, so this run cannot ' +
+        'show that any of the diff was read',
+    );
+  }
+  if (covProvided) {
+    // `ok !== true` caps — and an EMPTY report is the same statement made by
+    // saying nothing. `coverage: {}` used to fall between the two guards: it is
+    // "provided", so the absent-coverage cap above is skipped, and the
+    // `Object.keys(...) > 0` clause here excused it from the failed-coverage cap
+    // as well. Both gates open, and `{}` composed an APPROVE. A report with no
+    // `ok: true` in it has not shown coverage, however few keys it has.
+    if (cov['ok'] !== true) {
+      unreviewed.push(
+        'coverage — the `check-coverage` report says the diff was not covered',
+      );
+    }
+    for (const id of toNumberList(
+      cov['missingChunks'],
+      'coverage.missingChunks',
+    )) {
+      missingReceipts.push(id);
+    }
+    for (const id of toNumberList(
+      cov['uncoverableChunks'],
+      'coverage.uncoverableChunks',
+    )) {
+      uncoverable.push(`chunk ${id}`);
+    }
+    for (const label of toStringList(
+      cov['whiffedAgents'],
+      'coverage.whiffedAgents',
+    )) {
+      unreviewed.push(`${label} — the agent returned nothing substantive`);
+    }
+  }
   const contextUnavailable = toBool(
     input.contextUnavailable,
     'contextUnavailable',
@@ -191,6 +310,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // softened by them.
   const cappedBy: string[] = [];
   if (cannotTell.length > 0) cappedBy.push('cannot-tell-existing-critical');
+  if (missingReceipts.length > 0) cappedBy.push('chunk-nobody-read');
   if (uncoverable.length > 0) cappedBy.push('uncoverable-chunk');
   if (unreviewed.length > 0) cappedBy.push('unreviewed-dimension');
   if (contextUnavailable) cappedBy.push('context-unavailable');
@@ -220,6 +340,17 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // Criticals) on REQUEST_CHANGES: the blocker must not squeeze out the
   // disclosure of what was never read.
   const notReviewedParts: string[] = [];
+  if (missingReceipts.length > 0) {
+    // Its own sentence, because its own cause. The clause below explains a gap
+    // as a line too long to read, which is true of an *uncoverable* chunk and a
+    // fabrication about one nobody receipted — the author would be told the diff
+    // defeated the reader, when in fact no reader turned up.
+    notReviewedParts.push(
+      `Not reviewed: ${missingReceipts
+        .map((id) => `chunk ${id}`)
+        .join(', ')} — no agent reported covering these; nobody read them.`,
+    );
+  }
   if (uncoverable.length > 0) {
     notReviewedParts.push(
       `Not reviewed: ${uncoverable.join(', ')} — a line there exceeds the read limit.`,
@@ -316,7 +447,11 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       c === 0 &&
       cannotTell.length === 0 &&
       uncoverable.length === 0 &&
-      unreviewed.length === 0;
+      unreviewed.length === 0 &&
+      // A missing receipt caps the event but was left out of certification, so a
+      // body could open "Reviewed — no blockers." two lines above "nobody read
+      // them." Nothing nobody read can be certified blocker-free.
+      missingReceipts.length === 0;
     clauses.push(canCertify ? 'Reviewed — no blockers.' : 'Reviewed.');
   }
 

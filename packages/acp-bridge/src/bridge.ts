@@ -1519,6 +1519,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // daemon. Cleared in the `finally` of the creator.
   let inFlightChannelSpawn: Promise<ChannelInfo> | undefined;
   const byId = new Map<string, SessionEntry>();
+  const inFlightExtensionRefreshes = new Map<
+    string,
+    { connection: ClientSideConnection; promise: Promise<void> }
+  >();
   const toSessionSummary = (entry: SessionEntry): BridgeSessionSummary => {
     let isWaitingForPermission = false;
     let isWaitingForUserQuestion = false;
@@ -1818,11 +1822,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // at the session/update fan-in to the daemon host's metrics ring via
         // the telemetry seam. Optional-chained so non-daemon callers (tests,
         // Mode A) that wire no `tokenUsage` metric are a silent no-op.
-        (inputTokens, outputTokens, durationMs) =>
+        (inputTokens, outputTokens, durationMs, apiErrors, apiRetries) =>
           telemetry.metrics?.tokenUsage?.(
             inputTokens,
             outputTokens,
             durationMs,
+            apiErrors,
+            apiRetries,
           ),
         // `create_sub_session` tool: forward the request/response hook so a child
         // tool can ask the daemon to spawn a sub-session and (for 'first-turn')
@@ -5746,12 +5752,28 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             return { refreshed: 0, failed: 0 };
           }
           try {
-            await Promise.race([
-              withTimeout(
-                entry.connection.extMethod(
+            let inFlight = inFlightExtensionRefreshes.get(entry.sessionId);
+            if (!inFlight || inFlight.connection !== entry.connection) {
+              const promise = (async () => {
+                await entry.connection.extMethod(
                   SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
                   { sessionId: entry.sessionId },
-                ),
+                );
+              })();
+              inFlight = { connection: entry.connection, promise };
+              inFlightExtensionRefreshes.set(entry.sessionId, inFlight);
+              const clear = () => {
+                if (
+                  inFlightExtensionRefreshes.get(entry.sessionId) === inFlight
+                ) {
+                  inFlightExtensionRefreshes.delete(entry.sessionId);
+                }
+              };
+              void promise.then(clear, clear);
+            }
+            await Promise.race([
+              withTimeout(
+                inFlight.promise,
                 30_000,
                 SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
               ),

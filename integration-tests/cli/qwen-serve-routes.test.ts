@@ -352,6 +352,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_file_write',
       'session_approval_mode_control',
       'workspace_tool_toggle',
+      'workspace_skill_toggle',
       'workspace_settings',
       'workspace_permissions',
       'workspace_voice',
@@ -377,6 +378,7 @@ describe('qwen serve — capabilities envelope', () => {
       'persistent_workspace_registration',
       'workspace_runtime_removal',
       'workspace_qualified_rest_core',
+      'extension_management_v2',
       'workspace_persisted_transcript',
       'voice_transcribe',
     ]);
