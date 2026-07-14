@@ -87,6 +87,14 @@ async function releaseLock(release: () => Promise<void>): Promise<void> {
   }
 }
 
+async function cleanupLegacyAfterCommit(legacyPath: string): Promise<void> {
+  try {
+    await fs.unlink(legacyPath);
+  } catch {
+    // Canonical data is committed; a matching legacy file is safe to retry.
+  }
+}
+
 function safeChannelName(channelName: string): string {
   const slug = channelName.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 20) || '_';
   const hash = createHash('sha256')
@@ -184,10 +192,14 @@ function verifyDualFileState(
 async function loadChannelMemory(
   target: ChannelMemoryTarget,
 ): Promise<LoadedChannelMemory> {
-  const [jsonBytes, legacyBytes] = await Promise.all([
-    readFileIfExists(getChannelMemoryFilePath(target)),
+  const filePath = getChannelMemoryFilePath(target);
+  const [initialJsonBytes, legacyBytes] = await Promise.all([
+    readFileIfExists(filePath),
     readFileIfExists(getLegacyChannelMemoryFilePath(target)),
   ]);
+  const jsonBytes =
+    initialJsonBytes ??
+    (legacyBytes === undefined ? await readFileIfExists(filePath) : undefined);
 
   if (jsonBytes !== undefined) {
     if (jsonBytes.length > MAX_CHANNEL_MEMORY_BYTES) {
@@ -276,7 +288,7 @@ async function mutateChannelMemory<T>(
       }
       await writeChannelMemory(filePath, serialized);
       if (loaded.legacyBytes !== undefined) {
-        await fs.unlink(legacyPath);
+        await cleanupLegacyAfterCommit(legacyPath);
       }
       return mutation.result;
     } finally {
@@ -362,6 +374,9 @@ export async function updateChannelMemoryEntry(
       (candidate) => candidate.id === mutation.id,
     );
     if (entry === undefined) {
+      if (mutation.expectedText !== undefined) {
+        throw new Error('Channel memory entry changed');
+      }
       return { changed: false, result: { changed: false, filePath } };
     }
     if (
@@ -395,15 +410,21 @@ export async function removeChannelMemoryEntries(
   const filePath = getChannelMemoryFilePath(target);
   return mutateChannelMemory<RemoveChannelMemoryResult>(target, (document) => {
     const requestedIds = new Set(mutation.ids);
-    const removed = document.entries.filter((entry) =>
-      requestedIds.has(entry.id),
+    const entriesById = new Map(
+      document.entries.map((entry) => [entry.id, entry]),
     );
-    for (const entry of removed) {
-      const expectedText = mutation.expectedTextById?.[entry.id];
-      if (expectedText !== undefined && entry.text !== expectedText) {
+    for (const id of requestedIds) {
+      const expectedText = mutation.expectedTextById?.[id];
+      if (
+        expectedText !== undefined &&
+        entriesById.get(id)?.text !== expectedText
+      ) {
         throw new Error('Channel memory entry changed');
       }
     }
+    const removed = document.entries.filter((entry) =>
+      requestedIds.has(entry.id),
+    );
     if (removed.length === 0) {
       return { changed: false, result: { changed: false, filePath, removed } };
     }

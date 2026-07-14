@@ -29,23 +29,78 @@ import {
   serializeChannelMemoryDocument,
 } from './channel-memory-document.js';
 
-const fsFailure = vi.hoisted(() => ({ tempWrite: false, rename: false }));
+interface ReadRace {
+  jsonPath: string;
+  legacyPath: string;
+  jsonRead: () => void;
+  waitToReadLegacy: () => Promise<void>;
+  jsonIntercepted: boolean;
+  legacyIntercepted: boolean;
+}
+
+const fsFailure = vi.hoisted(() => ({
+  tempSync: false,
+  tempBytesAtSync: 0,
+  rename: false,
+  legacyUnlinkPath: undefined as string | undefined,
+  readRace: undefined as ReadRace | undefined,
+}));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
     ...actual,
     async open(...args: Parameters<typeof actual.open>) {
-      if (fsFailure.tempWrite && String(args[0]).includes('.tmp')) {
-        throw new Error('temp write failed');
+      const handle = await actual.open(...args);
+      if (fsFailure.tempSync && String(args[0]).endsWith('.tmp')) {
+        return new Proxy(handle, {
+          get(target, property) {
+            if (property === 'sync') {
+              return async () => {
+                fsFailure.tempBytesAtSync = (await target.stat()).size;
+                throw new Error('temp sync failed');
+              };
+            }
+            const value = Reflect.get(target, property, target) as unknown;
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        });
       }
-      return actual.open(...args);
+      return handle;
+    },
+    async readFile(...args: Parameters<typeof actual.readFile>) {
+      const race = fsFailure.readRace;
+      const filePath = String(args[0]);
+      if (
+        race !== undefined &&
+        filePath === race.jsonPath &&
+        !race.jsonIntercepted
+      ) {
+        race.jsonIntercepted = true;
+        race.jsonRead();
+        throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+      }
+      if (
+        race !== undefined &&
+        filePath === race.legacyPath &&
+        !race.legacyIntercepted
+      ) {
+        race.legacyIntercepted = true;
+        await race.waitToReadLegacy();
+      }
+      return actual.readFile(...args);
     },
     async rename(...args: Parameters<typeof actual.rename>) {
       if (fsFailure.rename) {
         throw new Error('rename failed');
       }
       return actual.rename(...args);
+    },
+    async unlink(...args: Parameters<typeof actual.unlink>) {
+      if (String(args[0]) === fsFailure.legacyUnlinkPath) {
+        throw new Error('legacy unlink failed');
+      }
+      return actual.unlink(...args);
     },
   };
 });
@@ -65,8 +120,11 @@ describe('channel memory', () => {
   });
 
   afterEach(() => {
-    fsFailure.tempWrite = false;
+    fsFailure.tempSync = false;
+    fsFailure.tempBytesAtSync = 0;
     fsFailure.rename = false;
+    fsFailure.legacyUnlinkPath = undefined;
+    fsFailure.readRace = undefined;
     vi.restoreAllMocks();
     if (originalQwenHome === undefined) {
       delete process.env['QWEN_HOME'];
@@ -88,6 +146,14 @@ describe('channel memory', () => {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, raw);
     return filePath;
+  }
+
+  function deferred(): { promise: Promise<void>; resolve: () => void } {
+    let resolve = () => {};
+    const promise = new Promise<void>((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
   }
 
   it('uses JSON for canonical storage and Markdown for legacy storage', () => {
@@ -282,6 +348,38 @@ describe('channel memory', () => {
     });
   });
 
+  it('rejects update CAS when the entry was deleted', async () => {
+    const [entry] = (await addChannelMemoryEntries(target, ['Use staging']))
+      .added;
+    await removeChannelMemoryEntries(target, { ids: [entry.id] });
+
+    await expect(
+      updateChannelMemoryEntry(target, {
+        id: entry.id,
+        text: 'Use production',
+        expectedText: 'Use staging',
+      }),
+    ).rejects.toThrow('Channel memory entry changed');
+  });
+
+  it('rejects remove CAS when any expected entry was deleted', async () => {
+    const [first, second] = (
+      await addChannelMemoryEntries(target, ['Use staging', 'Run tests'])
+    ).added;
+    await removeChannelMemoryEntries(target, { ids: [first.id] });
+
+    await expect(
+      removeChannelMemoryEntries(target, {
+        ids: [first.id, second.id],
+        expectedTextById: {
+          [first.id]: first.text,
+          [second.id]: second.text,
+        },
+      }),
+    ).rejects.toThrow('Channel memory entry changed');
+    await expect(listChannelMemoryEntries(target)).resolves.toEqual([second]);
+  });
+
   it('rejects stale update and remove compare-and-swap requests', async () => {
     const [entry] = (await addChannelMemoryEntries(target, ['Use staging']))
       .added;
@@ -419,6 +517,31 @@ describe('channel memory', () => {
     expect(fs.existsSync(legacyPath)).toBe(false);
   });
 
+  it('re-reads canonical JSON across the first-migration rename race', async () => {
+    const legacyPath = writeLegacy('Use staging\n');
+    const filePath = getChannelMemoryFilePath(target);
+    const jsonRead = deferred();
+    const releaseLegacyRead = deferred();
+    fsFailure.readRace = {
+      jsonPath: filePath,
+      legacyPath,
+      jsonRead: jsonRead.resolve,
+      waitToReadLegacy: () => releaseLegacyRead.promise,
+      jsonIntercepted: false,
+      legacyIntercepted: false,
+    };
+
+    const entriesPromise = listChannelMemoryEntries(target);
+    await jsonRead.promise;
+    await addChannelMemoryEntries(target, ['Run tests']);
+    releaseLegacyRead.resolve();
+
+    await expect(entriesPromise).resolves.toMatchObject([
+      { text: 'Use staging' },
+      { text: 'Run tests' },
+    ]);
+  });
+
   it('rejects divergent or unhashed dual files', async () => {
     const legacyPath = writeLegacy('Use staging\n');
     const legacy = fs.readFileSync(legacyPath);
@@ -441,15 +564,30 @@ describe('channel memory', () => {
     ).rejects.toThrow('Channel memory migration conflict');
   });
 
-  it('preserves legacy content when the temporary write fails', async () => {
+  it('cleans a written temp file and recovers lock and queue after sync failure', async () => {
     const legacyPath = writeLegacy('Use staging\n');
-    fsFailure.tempWrite = true;
+    const directory = path.dirname(legacyPath);
+    fsFailure.tempSync = true;
 
     await expect(
       addChannelMemoryEntries(target, ['Run tests']),
-    ).rejects.toThrow('temp write failed');
+    ).rejects.toThrow('temp sync failed');
+    expect(fsFailure.tempBytesAtSync).toBeGreaterThan(0);
+    expect(
+      fs.readdirSync(directory).filter((name) => name.endsWith('.tmp')),
+    ).toEqual([]);
     expect(fs.existsSync(getChannelMemoryFilePath(target))).toBe(false);
     expect(fs.readFileSync(legacyPath, 'utf8')).toBe('Use staging\n');
+
+    fsFailure.tempSync = false;
+    await expect(
+      addChannelMemoryEntries(target, ['after failure']),
+    ).resolves.toMatchObject({
+      changed: true,
+    });
+    await expect(readChannelMemory(target)).resolves.toBe(
+      'Use staging\nafter failure\n',
+    );
   });
 
   it('preserves the previous JSON when atomic rename fails', async () => {
@@ -462,6 +600,26 @@ describe('channel memory', () => {
       addChannelMemoryEntries(target, ['Run tests']),
     ).rejects.toThrow('rename failed');
     expect(fs.readFileSync(filePath, 'utf8')).toBe(previous);
+  });
+
+  it('reports a committed migration when legacy cleanup fails and retries later', async () => {
+    const legacyPath = writeLegacy('Use staging\n');
+    fsFailure.legacyUnlinkPath = legacyPath;
+
+    await expect(
+      addChannelMemoryEntries(target, ['Run tests']),
+    ).resolves.toMatchObject({
+      changed: true,
+      added: [{ text: 'Run tests' }],
+    });
+    expect(fs.existsSync(legacyPath)).toBe(true);
+    await expect(readChannelMemory(target)).resolves.toBe(
+      'Use staging\nRun tests\n',
+    );
+
+    fsFailure.legacyUnlinkPath = undefined;
+    await addChannelMemoryEntries(target, ['Review diff']);
+    expect(fs.existsSync(legacyPath)).toBe(false);
   });
 
   it('serializes concurrent additions without losing entries', async () => {
@@ -511,12 +669,37 @@ describe('channel memory', () => {
     ).toHaveLength(1);
   });
 
+  it('rejects an update CAS when a racing remove is queued first', async () => {
+    const [entry] = (await addChannelMemoryEntries(target, ['Use staging']))
+      .added;
+    const results = await Promise.allSettled([
+      removeChannelMemoryEntries(target, {
+        ids: [entry.id],
+        expectedTextById: { [entry.id]: 'Use staging' },
+      }),
+      updateChannelMemoryEntry(target, {
+        id: entry.id,
+        text: 'Use production',
+        expectedText: 'Use staging',
+      }),
+    ]);
+
+    expect(results[0].status).toBe('fulfilled');
+    expect(results[1]).toMatchObject({
+      status: 'rejected',
+      reason: new Error('Channel memory entry changed'),
+    });
+  });
+
   it('serializes clear racing additions and first migration racing another add', async () => {
     writeLegacy('Use staging\n');
     await Promise.all([
       addChannelMemoryEntries(target, ['Run tests']),
       addChannelMemoryEntries(target, ['Review diff']),
     ]);
+    await expect(readChannelMemory(target)).resolves.toBe(
+      'Use staging\nRun tests\nReview diff\n',
+    );
     await Promise.all([
       clearChannelMemory(target),
       ...Array.from({ length: 10 }, (_, index) =>
@@ -525,6 +708,9 @@ describe('channel memory', () => {
     ]);
 
     const entries = await listChannelMemoryEntries(target);
+    expect(entries.map((entry) => entry.text)).toEqual(
+      Array.from({ length: 10 }, (_, index) => `entry ${index}`),
+    );
     expect(new Set(entries.map((entry) => entry.id)).size).toBe(entries.length);
     expect(() =>
       parseChannelMemoryDocument(
