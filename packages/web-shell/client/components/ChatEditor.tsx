@@ -43,7 +43,6 @@ import { isSafeImageSrc } from './messages/Markdown';
 import { ModeIcon } from './ModeIcon';
 import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
-import { useWebShellPortalRoot } from '../portalRoot';
 import { VoiceButton } from '../voice/VoiceButton';
 import { GitBranchIndicator } from './GitBranchIndicator';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
