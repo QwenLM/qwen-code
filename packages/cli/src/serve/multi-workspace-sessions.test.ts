@@ -3433,6 +3433,7 @@ describe('multi-workspace session dispatch', () => {
     await withRuntimeDir(async () => {
       const primaryOnlyId = '550e8400-e29b-41d4-a716-446655440281';
       const archivedId = '550e8400-e29b-41d4-a716-446655440282';
+      const conflictId = '550e8400-e29b-41d4-a716-446655440284';
       await writeStoredSession({
         sessionId: primaryOnlyId,
         cwd: PRIMARY_CWD,
@@ -3448,6 +3449,24 @@ describe('multi-workspace session dispatch', () => {
         mtime: new Date('2026-07-08T00:01:00.000Z'),
       });
       await archiveStoredSession(SECONDARY_CWD, archivedId);
+      await writeStoredSession({
+        sessionId: conflictId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:02:00.000Z',
+        prompt: 'conflicting secondary',
+        mtime: new Date('2026-07-08T00:02:00.000Z'),
+      });
+      const secondaryChatsDir = path.join(
+        new Storage(SECONDARY_CWD).getProjectDir(),
+        'chats',
+      );
+      await fsp.mkdir(path.join(secondaryChatsDir, 'archive'), {
+        recursive: true,
+      });
+      await fsp.copyFile(
+        path.join(secondaryChatsDir, `${conflictId}.jsonl`),
+        path.join(secondaryChatsDir, 'archive', `${conflictId}.jsonl`),
+      );
       const trusted = makeHarness();
 
       const missing = await request(trusted.app)
@@ -3461,6 +3480,15 @@ describe('multi-workspace session dispatch', () => {
         .set('Host', host());
       expect(archived.status).toBe(409);
       expect(archived.body.code).toBe('session_archived');
+
+      const conflict = await request(trusted.app)
+        .get(`/workspaces/secondary-id/session/${conflictId}/export`)
+        .set('Host', host());
+      expect(conflict.status).toBe(409);
+      expect(conflict.body).toMatchObject({
+        code: 'session_conflict',
+        sessionId: conflictId,
+      });
 
       const invalidFormat = await request(trusted.app)
         .get(
