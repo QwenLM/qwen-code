@@ -77,6 +77,12 @@ jobs:
             exit 0
           fi
           pr_json="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" 2>/dev/null || true)"
+          # Guard empty responses (network error / rate limit): jq on empty
+          # stdin would error and `set -e` would kill the job.
+          if [ -z "${pr_json}" ]; then
+            echo "::warning::Empty response fetching PR #${PR} (network / rate limit); skipping."
+            exit 0
+          fi
           pr_state="$(jq -r '.state // empty' <<< "${pr_json}")"
           pr_head="$(jq -r '.head.sha // empty' <<< "${pr_json}")"
           if [ "${pr_state}" != "open" ]; then
