@@ -2042,6 +2042,40 @@ describe('DingtalkChannel proactive send', () => {
     expect(msgParamOf(sends[0]!).text).toContain('loop output');
   });
 
+  it('rejects direct messages when DingTalk reports an invalid recipient', async () => {
+    const channel = proactive(createChannel());
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    stubProactiveFetch(
+      () =>
+        new Response(
+          JSON.stringify({ invalidStaffIdList: [directTarget.chatId] }),
+          { status: 200 },
+        ),
+    );
+
+    await expect(channel.pushProactive(directTarget, 'hello')).rejects.toThrow(
+      'DingTalk proactive send failed: invalid direct recipient',
+    );
+  });
+
+  it('rejects direct messages when DingTalk reports a rate-limited recipient', async () => {
+    const channel = proactive(createChannel());
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    stubProactiveFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            flowControlledStaffIdList: [directTarget.chatId],
+          }),
+          { status: 200 },
+        ),
+    );
+
+    await expect(channel.pushProactive(directTarget, 'hello')).rejects.toThrow(
+      'DingTalk proactive send failed: direct recipient rate limited',
+    );
+  });
+
   it('reuses the cached token across group and direct-message sends', async () => {
     const channel = proactive(createChannel());
     const { tokenCalls } = stubProactiveFetch();
@@ -2095,7 +2129,26 @@ describe('DingtalkChannel proactive send', () => {
 
     const logged = writeSpy.mock.calls.map((c) => String(c[0])).join('');
     expect(logged).toContain(
-      'proactive send failed (chunk 1/1): HTTP 403 perm denied',
+      'proactive send failed (group, chunk 1/1): HTTP 403 perm denied',
+    );
+  });
+
+  it('includes the direct target kind in network-error logs', async () => {
+    const channel = proactive(createChannel());
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    stubProactiveFetch(() => {
+      throw new Error('connection reset');
+    });
+
+    await expect(channel.pushProactive(directTarget, 'hello')).rejects.toThrow(
+      'DingTalk proactive send failed: connection reset',
+    );
+
+    const logged = writeSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain(
+      'proactive send error (dm, chunk 1/1): Error: connection reset',
     );
   });
 
@@ -2110,6 +2163,20 @@ describe('DingtalkChannel proactive send', () => {
     await channel.pushProactive(directTarget, 'hello');
 
     expect(directSendCalls()).toHaveLength(2);
+    expect(tokenCalls()).toHaveLength(2);
+  });
+
+  it('refreshes the token and retries a group message once on 401', async () => {
+    const channel = proactive(createChannel());
+    const { sendCalls, tokenCalls } = stubProactiveFetch((sendCall) =>
+      sendCall === 0
+        ? new Response('expired', { status: 401 })
+        : new Response('{}', { status: 200 }),
+    );
+
+    await channel.pushProactive(groupTarget, 'hello');
+
+    expect(sendCalls()).toHaveLength(2);
     expect(tokenCalls()).toHaveLength(2);
   });
 

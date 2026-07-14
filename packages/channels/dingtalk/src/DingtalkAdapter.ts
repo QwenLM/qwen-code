@@ -107,6 +107,11 @@ interface DingTalkTokenResponse {
   expires_in?: number;
 }
 
+interface DingTalkDirectMessageResponse {
+  flowControlledStaffIdList?: string[];
+  invalidStaffIdList?: string[];
+}
+
 function splitTextChunks(text: string, firstChunkLimit: number): string[] {
   if (!text) return [text];
 
@@ -570,6 +575,7 @@ export class DingtalkChannel extends ChannelBase {
     text: string,
     chunkLabel: string,
   ): Promise<void> {
+    const targetKind = target.isGroup === true ? 'group' : 'dm';
     for (let attempt = 0; ; attempt++) {
       const token = await this.getProactiveToken();
       let resp: Response;
@@ -598,7 +604,7 @@ export class DingtalkChannel extends ChannelBase {
       } catch (err) {
         const cause = (err as { cause?: unknown }).cause;
         process.stderr.write(
-          `[DingTalk:${this.name}] proactive send error (${chunkLabel}): ${err}${cause ? ` (${cause})` : ''}\n`,
+          `[DingTalk:${this.name}] proactive send error (${targetKind}, ${chunkLabel}): ${err}${cause ? ` (${cause})` : ''}\n`,
         );
         throw new Error(
           `DingTalk proactive send failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -613,11 +619,33 @@ export class DingtalkChannel extends ChannelBase {
       if (!resp.ok) {
         const detail = sanitizeLogText(await resp.text().catch(() => ''), 300);
         process.stderr.write(
-          `[DingTalk:${this.name}] proactive send failed (${chunkLabel}): HTTP ${resp.status} ${detail}\n`,
+          `[DingTalk:${this.name}] proactive send failed (${targetKind}, ${chunkLabel}): HTTP ${resp.status} ${detail}\n`,
         );
         throw new Error(
           `DingTalk proactive send failed: HTTP ${resp.status}${detail ? ` ${detail}` : ''}`,
         );
+      }
+      if (target.isGroup === false) {
+        const data = (await resp.json().catch(() => undefined)) as
+          | DingTalkDirectMessageResponse
+          | undefined;
+        if (data?.invalidStaffIdList?.includes(target.chatId)) {
+          process.stderr.write(
+            `[DingTalk:${this.name}] proactive send failed (${targetKind}, ${chunkLabel}): invalid direct recipient\n`,
+          );
+          throw new Error(
+            'DingTalk proactive send failed: invalid direct recipient',
+          );
+        }
+        if (data?.flowControlledStaffIdList?.includes(target.chatId)) {
+          process.stderr.write(
+            `[DingTalk:${this.name}] proactive send failed (${targetKind}, ${chunkLabel}): direct recipient rate limited\n`,
+          );
+          throw new Error(
+            'DingTalk proactive send failed: direct recipient rate limited',
+          );
+        }
+        return;
       }
       await resp.body?.cancel();
       return;
