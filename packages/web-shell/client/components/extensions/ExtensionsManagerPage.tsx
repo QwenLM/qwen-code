@@ -405,6 +405,7 @@ export function ExtensionsManagerPage({
   const [checkingName, setCheckingName] = useState<string | null>(null);
   const [busyName, setBusyName] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
   const [actionsOpen, setActionsOpen] = useState(false);
   const [uninstallName, setUninstallName] = useState<string | null>(null);
   const [installOpen, setInstallOpen] = useState(false);
@@ -530,9 +531,13 @@ export function ExtensionsManagerPage({
           );
           setBusyName((current) => current ?? activeMutation.name ?? null);
         }
+        setRecoveryError(null);
         setOperationsRecovered(true);
-      } catch {
+      } catch (error) {
         if (!cancelled) {
+          setRecoveryError(
+            error instanceof Error ? error.message : String(error),
+          );
           timer = setTimeout(() => void recover(), retryDelay);
           retryDelay = Math.min(retryDelay * 2, 30_000);
         }
@@ -1108,11 +1113,11 @@ export function ExtensionsManagerPage({
             </DropdownMenu>
           </div>
 
-          {message ? (
+          {message || recoveryError ? (
             <Alert>
               <AlertCircleIcon />
               <AlertDescription className="break-words">
-                {message}
+                {message ?? recoveryError}
               </AlertDescription>
             </Alert>
           ) : null}
@@ -1315,11 +1320,11 @@ export function ExtensionsManagerPage({
           </div>
         </div>
 
-        {message ? (
+        {message || recoveryError ? (
           <Alert>
             <AlertCircleIcon />
             <AlertDescription className="break-words">
-              {message}
+              {message ?? recoveryError}
             </AlertDescription>
           </Alert>
         ) : null}

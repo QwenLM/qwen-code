@@ -171,6 +171,34 @@ afterEach(() => {
 });
 
 describe('ExtensionsManagerPage', () => {
+  it('reports recovery failures and clears the error after retry', async () => {
+    vi.useFakeTimers();
+    actions.activeExtensionOperations
+      .mockRejectedValueOnce(new Error('Could not recover operations'))
+      .mockResolvedValue({ v: 1, operations: [] });
+
+    try {
+      await mount();
+      expect(document.body.textContent).toContain(
+        'Could not recover operations',
+      );
+      expect(buttonIncluding('Add Extension')?.disabled).toBe(true);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      await flush();
+
+      expect(actions.activeExtensionOperations).toHaveBeenCalledTimes(2);
+      expect(document.body.textContent).not.toContain(
+        'Could not recover operations',
+      );
+      expect(buttonIncluding('Add Extension')?.disabled).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('recovers an active extension operation when reopened', async () => {
     actions.extensionOperationStatus.mockResolvedValue({
       v: 1,
