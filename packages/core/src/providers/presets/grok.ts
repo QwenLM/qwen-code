@@ -27,7 +27,7 @@ export const grokProvider: ProviderConfig = {
     { id: 'grok-4.20-0309-reasoning', contextWindowSize: 1000000 },
     { id: 'grok-4.20-0309-non-reasoning', contextWindowSize: 1000000 },
     { id: 'grok-4.20-multi-agent-0309', contextWindowSize: 1000000 },
-    { id: 'grok-build-0.1', contextWindowSize: 256000 },
+    { id: 'grok-build-0.1', contextWindowSize: 262144 },
   ],
   modelsEditable: true,
   modelNamePrefix: 'Grok',

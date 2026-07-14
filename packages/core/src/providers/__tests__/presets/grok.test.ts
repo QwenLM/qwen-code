@@ -36,7 +36,8 @@ describe('grokProvider', () => {
       { id: 'grok-4.20-0309-reasoning', contextWindowSize: 1000000 },
       { id: 'grok-4.20-0309-non-reasoning', contextWindowSize: 1000000 },
       { id: 'grok-4.20-multi-agent-0309', contextWindowSize: 1000000 },
-      { id: 'grok-build-0.1', contextWindowSize: 256000 },
+      // 256K bucket -> power-of-two, matching LIMITS['256k'] in tokenLimits.ts.
+      { id: 'grok-build-0.1', contextWindowSize: 262144 },
     ]);
   });
 
@@ -61,13 +62,13 @@ describe('grokProvider', () => {
     const plan = buildInstallPlan(grokProvider, {
       baseUrl: 'https://api.x.ai/v1',
       apiKey: 'xai-key',
-      modelIds: ['grok-4.5', 'grok-4.3'],
+      modelIds: ['grok-4.5', 'grok-4.3', 'grok-build-0.1'],
     });
 
     expect(plan.env).toEqual({ XAI_API_KEY: 'xai-key' });
 
     const models = plan.modelProviders?.[0]?.models;
-    expect(models).toHaveLength(2);
+    expect(models).toHaveLength(3);
     expect(models?.[0]).toMatchObject({
       id: 'grok-4.5',
       name: '[Grok] grok-4.5',
@@ -80,6 +81,13 @@ describe('grokProvider', () => {
     });
     expect(models?.[1]?.generationConfig).toEqual({
       contextWindowSize: 1000000,
+    });
+    expect(models?.[2]).toMatchObject({
+      id: 'grok-build-0.1',
+      name: '[Grok] grok-build-0.1',
+    });
+    expect(models?.[2]?.generationConfig).toEqual({
+      contextWindowSize: 262144,
     });
   });
 
