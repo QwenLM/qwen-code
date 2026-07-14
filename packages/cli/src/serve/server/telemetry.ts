@@ -154,6 +154,7 @@ export function resolveDaemonTelemetryRoute(
         suffix === '/workspace/preflight' ||
         suffix === '/workspace/hooks' ||
         suffix === '/workspace/settings' ||
+        suffix === '/workspace/voice' ||
         suffix === '/workspace/permissions' ||
         suffix === '/workspace/trust' ||
         suffix === '/workspace/memory' ||
@@ -181,6 +182,8 @@ export function resolveDaemonTelemetryRoute(
     if (req.method === 'POST') {
       if (
         suffix === '/workspace/settings' ||
+        suffix === '/workspace/voice' ||
+        suffix === '/workspace/voice/transcribe' ||
         suffix === '/workspace/permissions' ||
         suffix === '/workspace/trust/request' ||
         suffix === '/workspace/init' ||

@@ -50,6 +50,7 @@ export interface WorkspaceRemovalActivity {
   acpConnections: number;
   memoryTasks: number;
   channelWorkers: number;
+  voiceSessions: number;
 }
 
 export interface WorkspaceRuntimeRemovalController {
@@ -60,6 +61,7 @@ export interface WorkspaceRuntimeRemovalController {
   getActivity(runtime: WorkspaceRuntime): {
     pendingSessionStarts: number;
     channelWorkers: number;
+    voiceSessions: number;
   };
   disposeRuntime(
     runtime: WorkspaceRuntime,
@@ -492,6 +494,7 @@ export function registerWorkspaceManagementRoutes(
     const controllerActivity = runtimeRemoval?.getActivity(runtime) ?? {
       pendingSessionStarts: 0,
       channelWorkers: 0,
+      voiceSessions: 0,
     };
     const acpActivity = getAcpHandle?.()?.getWorkspaceActivity(
       runtime.workspaceId,
@@ -503,6 +506,7 @@ export function registerWorkspaceManagementRoutes(
       acpConnections: acpActivity.acpConnections,
       memoryTasks: acpActivity.memoryTasks,
       channelWorkers: controllerActivity.channelWorkers,
+      voiceSessions: controllerActivity.voiceSessions,
     };
   };
   const isBusy = (activity: WorkspaceRemovalActivity): boolean =>

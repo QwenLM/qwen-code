@@ -274,6 +274,43 @@ describe('createDaemonWorkspaceService', () => {
       });
     });
 
+    it('forces qualified ACP Voice writes into the workspace scope', async () => {
+      await withIsolatedQwenHome(async () => {
+        const persistSettings = vi.fn(async () => {});
+        const svc = createDaemonWorkspaceService(
+          makeDeps({
+            persistSettings,
+            voiceSettingsScope: SettingScope.Workspace,
+            voiceEnv: {},
+          }),
+        );
+
+        await svc.setWorkspaceVoiceSettings(makeCtx(), {
+          enabled: false,
+          mode: 'tap',
+          language: 'english',
+        });
+
+        expect(persistSettings).toHaveBeenCalledWith('/workspace', [
+          {
+            scope: SettingScope.Workspace,
+            key: 'general.voice.mode',
+            value: 'tap',
+          },
+          {
+            scope: SettingScope.Workspace,
+            key: 'general.voice.language',
+            value: 'english',
+          },
+          {
+            scope: SettingScope.Workspace,
+            key: 'general.voice.enabled',
+            value: false,
+          },
+        ]);
+      });
+    });
+
     it('rejects invalid voice settings before persisting', async () => {
       await withIsolatedQwenHome(async () => {
         const persistSettings = vi.fn(async () => {});
@@ -296,7 +333,7 @@ describe('createDaemonWorkspaceService', () => {
       });
     });
 
-    it('does not publish fallback voice writes when a later write fails', async () => {
+    it('publishes committed fallback voice writes when a later write fails', async () => {
       await withIsolatedQwenHome(async () => {
         const persistSetting = vi.fn(
           async (
@@ -332,7 +369,16 @@ describe('createDaemonWorkspaceService', () => {
           cause: expect.objectContaining({ message: 'disk full' }),
         });
 
-        expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+        expect(publishWorkspaceEvent).toHaveBeenCalledOnce();
+        expect(publishWorkspaceEvent).toHaveBeenCalledWith({
+          type: 'settings_changed',
+          data: {
+            key: 'general.voice.mode',
+            value: 'tap',
+            scope: 'user',
+          },
+          originatorClientId: 'voice-client',
+        });
         expect(mockWriteStderrLine).toHaveBeenCalledWith(
           expect.stringContaining('partial persist error'),
         );

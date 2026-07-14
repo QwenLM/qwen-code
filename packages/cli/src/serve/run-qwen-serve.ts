@@ -139,6 +139,7 @@ import type {
 } from '../commands/channel/pidfile.js';
 import { sanitizeLogText } from '@qwen-code/channel-base';
 import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
+import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
 
 // Reverse MCP channel; enabled only by explicit option or env opt-in.
 const QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV = 'QWEN_SERVE_CLIENT_MCP_OVER_WS';
@@ -3255,12 +3256,14 @@ export async function runQwenServe(
       internalRuntimeBridgesForCleanup.push(bridge);
     }
     runtimeBridges.push(bridge);
+    let invalidatePrimaryServeFeaturesCache = () => {};
     const workspaceService = runtime.createDaemonWorkspaceService({
       boundWorkspace,
       contextFilename: contextFilenameForInit ?? 'QWEN.md',
       statusProvider,
       workspaceProvidersStatusProvider,
       workspaceSkillsStatusProvider,
+      voiceEnv: runtimeEffectiveEnv,
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools: persistDisabledToolsFn,
       persistDisabledSkills: persistDisabledSkillsFn,
@@ -3337,7 +3340,15 @@ export async function runQwenServe(
         bridge.invokeWorkspaceCommand(method, params, invokeOpts),
       refreshExtensionsForAllSessions: () =>
         bridge.refreshExtensionsForAllSessions(),
-      publishWorkspaceEvent: (event) => bridge.publishWorkspaceEvent(event),
+      publishWorkspaceEvent: (event) => {
+        if (
+          event.type === 'settings_changed' ||
+          event.type === 'settings_reloaded'
+        ) {
+          invalidatePrimaryServeFeaturesCache();
+        }
+        bridge.publishWorkspaceEvent(event);
+      },
     });
 
     const workspaceRuntimes: WorkspaceRuntime[] = [
@@ -3568,6 +3579,8 @@ export async function runQwenServe(
           }),
         workspaceSkillsStatusProvider:
           runtime.createWorkspaceSkillsStatusProvider(),
+        voiceEnv: secondaryEnv.effectiveEnv,
+        voiceSettingsScope: WORKSPACE_SETTING_SCOPE,
         isChannelLive: () => secondaryBridge.isChannelLive(),
         preheatAcpChild: () => secondaryBridge.preheat(),
         persistDisabledTools: persistDisabledToolsFn,
@@ -3651,6 +3664,7 @@ export async function runQwenServe(
       runtime.createWorkspaceRegistry(workspaceRuntimes, {
         sessionOwnerIndex,
       });
+    const workspaceVoiceCoordinator = new WorkspaceVoiceCoordinator();
 
     core.registerDaemonGaugeCallbacks({
       sessionCount: () =>
@@ -3937,6 +3951,8 @@ export async function runQwenServe(
             }),
           workspaceSkillsStatusProvider:
             runtime.createWorkspaceSkillsStatusProvider(),
+          voiceEnv: wsEnv.effectiveEnv,
+          voiceSettingsScope: WORKSPACE_SETTING_SCOPE,
           isChannelLive: () => wsBridge.isChannelLive(),
           preheatAcpChild: () => wsBridge.preheat(),
           persistDisabledTools: persistDisabledToolsFn,
@@ -4062,15 +4078,18 @@ export async function runQwenServe(
       beginDrain(runtimeToDrain: WorkspaceRuntime): void {
         totalSessionAdmission.beginWorkspaceDrain(runtimeToDrain.workspaceCwd);
         channelWorkerManager?.beginWorkspaceDrain(runtimeToDrain.workspaceCwd);
+        workspaceVoiceCoordinator.beginWorkspaceDrain(runtimeToDrain);
       },
       cancelDrain(runtimeToDrain: WorkspaceRuntime): void {
         channelWorkerManager?.cancelWorkspaceDrain(runtimeToDrain.workspaceCwd);
         totalSessionAdmission.cancelWorkspaceDrain(runtimeToDrain.workspaceCwd);
+        workspaceVoiceCoordinator.cancelWorkspaceDrain(runtimeToDrain);
       },
       completeDrain(runtimeToDrain: WorkspaceRuntime): void {
         totalSessionAdmission.completeWorkspaceDrain(
           runtimeToDrain.workspaceCwd,
         );
+        workspaceVoiceCoordinator.completeWorkspaceDrain(runtimeToDrain);
       },
       getActivity(runtimeToDrain: WorkspaceRuntime) {
         return {
@@ -4081,6 +4100,8 @@ export async function runQwenServe(
             channelWorkerManager?.workspaceActivity(
               runtimeToDrain.workspaceCwd,
             ) ?? 0,
+          voiceSessions:
+            workspaceVoiceCoordinator.getWorkspaceActivity(runtimeToDrain),
         };
       },
       disposeRuntime(
@@ -4090,6 +4111,10 @@ export async function runQwenServe(
         const existing = runtimeCleanupPromises.get(runtimeToDrain);
         if (existing) return existing;
         const cleanup = (async () => {
+          await workspaceVoiceCoordinator.disposeRuntime(
+            runtimeToDrain,
+            reason,
+          );
           const stopSubSessions = subSessionStoppersByWorkspace.get(
             runtimeToDrain.workspaceCwd,
           );
@@ -4174,6 +4199,7 @@ export async function runQwenServe(
       createWorkspaceRuntime: createDynamicWorkspaceRuntime,
       workspaceRegistrationStore,
       workspaceRuntimeRemoval,
+      voiceCoordinator: workspaceVoiceCoordinator,
       bridge,
       webShellDir,
       boundWorkspace,
@@ -4287,6 +4313,12 @@ export async function runQwenServe(
           },
         ),
     });
+    invalidatePrimaryServeFeaturesCache =
+      (
+        app.locals as {
+          invalidateServeFeaturesCache?: () => void;
+        }
+      ).invalidateServeFeaturesCache ?? invalidatePrimaryServeFeaturesCache;
     // Park the sub-session launcher's stop on app.locals so the close handler
     // can flip it off before tearing down the bridge it spawns into (symmetric
     // with stopScheduledTaskKeepalive). Defensive: a launch during drain would
@@ -5222,22 +5254,26 @@ export async function runQwenServe(
                   const managedRuntimes = workspaceRegistry.listManaged();
                   for (const workspaceRuntime of managedRuntimes) {
                     managedRuntimeBridges.add(workspaceRuntime.bridge);
-                    await runtimeRemoval
-                      .disposeRuntime(workspaceRuntime, 'daemon_shutdown')
-                      .catch((err) => {
-                        daemonLog.error(
-                          'workspace runtime shutdown error',
-                          err instanceof Error ? err : null,
-                        );
-                        bridgeShutdownError =
-                          err instanceof Error ? err : new Error(String(err));
-                        try {
-                          workspaceRuntime.bridge.killAllSync();
-                        } catch {
-                          // Continue shutting down the remaining runtimes.
-                        }
-                      });
                   }
+                  await Promise.all(
+                    managedRuntimes.map((workspaceRuntime) =>
+                      runtimeRemoval
+                        .disposeRuntime(workspaceRuntime, 'daemon_shutdown')
+                        .catch((err) => {
+                          daemonLog.error(
+                            'workspace runtime shutdown error',
+                            err instanceof Error ? err : null,
+                          );
+                          bridgeShutdownError =
+                            err instanceof Error ? err : new Error(String(err));
+                          try {
+                            workspaceRuntime.bridge.killAllSync();
+                          } catch {
+                            // Continue shutting down the remaining runtimes.
+                          }
+                        }),
+                    ),
+                  );
                 }
                 for (const bridgeForShutdown of getRuntimeBridgesForCleanup()) {
                   if (managedRuntimeBridges.has(bridgeForShutdown)) continue;

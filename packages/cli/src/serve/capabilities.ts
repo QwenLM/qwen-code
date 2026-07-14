@@ -285,10 +285,15 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // workspace agent CRUD, and persisted session organization surfaces.
   // Workspace-qualified settings also require the existing
   // `workspace_settings` tag because that surface depends on settings
-  // persistence. ACP/WebSocket, auth, and voice stay on their existing
-  // primary-workspace routes in this phase; V2 extension management is
-  // advertised separately via `extension_management_v2`.
+  // persistence. ACP/WebSocket and auth stay outside this core tag;
+  // workspace-qualified Voice REST/WebSocket routes use their separate
+  // `workspace_qualified_voice` capability below. V2 extension management
+  // is advertised separately via `extension_management_v2`.
   workspace_qualified_rest_core: { since: 'v1' },
+  // Workspace-qualified Voice REST and WebSocket routes. This tag is enough
+  // to discover plural modalities because legacy Voice tags describe only
+  // the primary runtime and may be absent for a secondary-only setup.
+  workspace_qualified_voice: { since: 'v1' },
   // Global extension catalog/mutations plus workspace-qualified activation
   // projections. This is additive to the legacy primary-workspace
   // `workspace_extensions` contract.
@@ -486,6 +491,14 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     // creation, but the capability becomes meaningful only once a secondary
     // runtime exists. Until then the qualified primary route is only an alias
     // for the always-available legacy `/acp` surface.
+    (toggles) =>
+      toggles.acpHttpEnabled === true &&
+      toggles.multiWorkspaceSessionsEnabled === true,
+  ],
+  [
+    'workspace_qualified_voice',
+    // Like qualified ACP, the plural Voice surface is mounted ahead of time
+    // but only becomes useful once the daemon has a secondary runtime.
     (toggles) =>
       toggles.acpHttpEnabled === true &&
       toggles.multiWorkspaceSessionsEnabled === true,

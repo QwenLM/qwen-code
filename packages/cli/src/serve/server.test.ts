@@ -409,6 +409,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'persistent_workspace_registration',
   'workspace_runtime_removal',
   'workspace_qualified_rest_core',
+  'workspace_qualified_voice',
   'extension_management_v2',
   'workspace_persisted_transcript',
   'workspace_qualified_acp',
@@ -2365,6 +2366,34 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'workspace_qualified_voice') {
+          expect(
+            predicate({
+              multiWorkspaceSessionsEnabled: true,
+              acpHttpEnabled: true,
+            }),
+          ).toBe(true);
+          expect(
+            predicate({
+              multiWorkspaceSessionsEnabled: true,
+              acpHttpEnabled: false,
+            }),
+          ).toBe(false);
+          expect(predicate({ multiWorkspaceSessionsEnabled: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              multiWorkspaceSessionsEnabled: true,
+              acpHttpEnabled: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'client_mcp_over_ws') {
           expect(predicate({ clientMcpOverWsEnabled: true })).toBe(true);
           expect(predicate({ clientMcpOverWsEnabled: false })).toBe(false);
@@ -2887,6 +2916,53 @@ describe('createServeApp', () => {
       } finally {
         await fsp.rm(tempHome, { recursive: true, force: true });
         restoreEnv('QWEN_HOME', previousQwenHome);
+        resetHomeEnvBootstrapForTesting();
+      }
+    });
+
+    it('loads workspace environment for direct-embed Voice capability checks', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const previousWorkspaceAsrKey = process.env['WORKSPACE_ASR_KEY'];
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-voice-capability-env-'),
+      );
+      const workspace = path.join(tempHome, 'workspace');
+      try {
+        await fsp.mkdir(workspace);
+        await fsp.writeFile(
+          path.join(workspace, '.env'),
+          'WORKSPACE_ASR_KEY=workspace-secret\n',
+          'utf8',
+        );
+        process.env['QWEN_HOME'] = tempHome;
+        resetHomeEnvBootstrapForTesting();
+        await fsp.writeFile(
+          path.join(tempHome, 'settings.json'),
+          JSON.stringify({
+            modelProviders: {
+              openai: [
+                {
+                  id: 'qwen3-asr-flash',
+                  baseUrl: 'https://asr.example/v1',
+                  envKey: 'WORKSPACE_ASR_KEY',
+                },
+              ],
+            },
+          }),
+          'utf8',
+        );
+
+        const app = createServeApp({ ...baseOpts, workspace });
+        const res = await request(app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(res.status).toBe(200);
+        expect(res.body.features).toContain('workspace_voice_transcription');
+      } finally {
+        await fsp.rm(tempHome, { recursive: true, force: true });
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        restoreEnv('WORKSPACE_ASR_KEY', previousWorkspaceAsrKey);
         resetHomeEnvBootstrapForTesting();
       }
     });
@@ -18166,6 +18242,24 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
         } as Parameters<typeof createServeApp>[2],
       ),
     ).not.toThrow();
+  });
+
+  it('requires the Voice coordinator paired with runtime removal', async () => {
+    const { createServeApp } = await import('./server.js');
+
+    expect(() =>
+      createServeApp(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          workspace: '/work/bound',
+        } as Parameters<typeof createServeApp>[0],
+        () => 0,
+        {
+          workspaceRuntimeRemoval: {},
+        } as Parameters<typeof createServeApp>[2],
+      ),
+    ).toThrow(/workspaceRuntimeRemoval requires.*voiceCoordinator/);
   });
 
   it('uses the injected registry sender when client-MCP over WS is enabled', async () => {

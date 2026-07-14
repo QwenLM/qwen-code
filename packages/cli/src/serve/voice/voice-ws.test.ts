@@ -8,8 +8,10 @@
 
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { createVoiceWsConnectionHandler } from './voice-ws.js';
+import { WorkspaceVoiceCoordinator } from './workspace-voice-coordinator.js';
 import type { DaemonVoiceContext } from './resolve-voice-config.js';
 import type { VoiceStreamSession } from '../../ui/voice/voice-stream-session.js';
+import type { WorkspaceRuntime } from '../workspace-registry.js';
 
 /** Minimal stand-in for a `ws` WebSocket the handler attaches to. */
 class FakeWs {
@@ -17,6 +19,7 @@ class FakeWs {
   readyState = 1;
   readonly sent: Array<string | 'binary'> = [];
   closeCode: number | undefined;
+  closeReason: string | undefined;
   private handlers: Record<string, Array<(...args: unknown[]) => void>> = {};
 
   constructor(private readonly emitCloseOnClose = true) {}
@@ -28,8 +31,9 @@ class FakeWs {
   send(data: string | Uint8Array): void {
     this.sent.push(typeof data === 'string' ? data : 'binary');
   }
-  close(code?: number): void {
+  close(code?: number, reason?: string): void {
     this.closeCode = code;
+    this.closeReason = reason;
     this.readyState = 3;
     if (this.emitCloseOnClose) this.emit('close');
   }
@@ -335,6 +339,38 @@ describe('createVoiceWsConnectionHandler', () => {
     expect(session.abort).toHaveBeenCalledOnce();
   });
 
+  it('aborts an in-flight upstream open and releases the lease on disconnect', async () => {
+    const coordinator = new WorkspaceVoiceCoordinator();
+    const runtime = { workspaceId: 'secondary' } as WorkspaceRuntime;
+    let openSignal: AbortSignal | undefined;
+    const ws = new FakeWs();
+    const handler = createVoiceWsConnectionHandler('/ws', {
+      loadContext: () => streamingCtx(),
+      acquireVoiceLease: () => coordinator.acquire(runtime),
+      openStream: async (_ctx, _callbacks, abortSignal) => {
+        openSignal = abortSignal;
+        return await new Promise<VoiceStreamSession>((_resolve, reject) => {
+          abortSignal?.addEventListener(
+            'abort',
+            () => reject(new Error('aborted')),
+            { once: true },
+          );
+        });
+      },
+    });
+    handler(ws as never, {} as never);
+    ws.text({ type: 'start' });
+    await tick();
+    expect(coordinator.getWorkspaceActivity(runtime)).toBe(1);
+
+    ws.close();
+    await tick();
+    await tick();
+
+    expect(openSignal?.aborted).toBe(true);
+    expect(coordinator.getWorkspaceActivity(runtime)).toBe(0);
+  });
+
   it('aborts the streaming session if finalization times out', async () => {
     vi.useFakeTimers();
     const session: VoiceStreamSession = {
@@ -471,5 +507,81 @@ describe('createVoiceWsConnectionHandler', () => {
     const next = new FakeWs();
     handler(next as never, {} as never);
     expect(next.closeCode).not.toBe(1013);
+  });
+
+  it('releases a finalized session even when the socket never emits close', async () => {
+    const handler = createVoiceWsConnectionHandler('/ws', {
+      loadContext: () => streamingCtx(),
+      openStream: async () => ({
+        pushAudio: vi.fn(),
+        finish: vi.fn(async () => 'done'),
+        abort: vi.fn(),
+      }),
+    });
+    const finalized = new FakeWs(false);
+    handler(finalized as never, {} as never);
+    finalized.text({ type: 'stop' });
+    await tick();
+    await tick();
+    expect(finalized.closeCode).toBe(1000);
+
+    const next = Array.from({ length: 8 }, () => new FakeWs());
+    for (const ws of next) handler(ws as never, {} as never);
+    expect(next.every((ws) => ws.closeCode !== 1013)).toBe(true);
+  });
+
+  it('closes with restart semantics when the target runtime is draining', () => {
+    const ws = new FakeWs();
+    const handler = createVoiceWsConnectionHandler('/ws', {
+      acquireVoiceLease: () => ({ kind: 'rejected', reason: 'draining' }),
+    });
+
+    handler(ws as never, {} as never);
+
+    expect(ws.closeCode).toBe(1012);
+    expect(ws.frames()).toEqual([]);
+  });
+
+  it('closes with busy semantics when Voice capacity is exhausted', () => {
+    const ws = new FakeWs();
+    const handler = createVoiceWsConnectionHandler('/ws', {
+      acquireVoiceLease: () => ({ kind: 'rejected', reason: 'capacity' }),
+    });
+
+    handler(ws as never, {} as never);
+
+    expect(ws.closeCode).toBe(1013);
+    expect(ws.frames()).toEqual([expect.objectContaining({ type: 'error' })]);
+  });
+
+  it('closes only the disposed runtime session and releases its lease', async () => {
+    const coordinator = new WorkspaceVoiceCoordinator();
+    const runtime = { workspaceId: 'secondary' } as WorkspaceRuntime;
+    const ws = new FakeWs(false);
+    const handler = createVoiceWsConnectionHandler('/ws', {
+      acquireVoiceLease: () => coordinator.acquire(runtime),
+    });
+    handler(ws as never, {} as never);
+    expect(coordinator.getWorkspaceActivity(runtime)).toBe(1);
+
+    await coordinator.disposeRuntime(runtime, 'workspace_removed');
+
+    expect(ws.closeCode).toBe(1012);
+    expect(coordinator.getWorkspaceActivity(runtime)).toBe(0);
+  });
+
+  it('reports daemon shutdown when its runtime lease is aborted on shutdown', async () => {
+    const coordinator = new WorkspaceVoiceCoordinator();
+    const runtime = { workspaceId: 'primary' } as WorkspaceRuntime;
+    const ws = new FakeWs(false);
+    const handler = createVoiceWsConnectionHandler('/ws', {
+      acquireVoiceLease: () => coordinator.acquire(runtime),
+    });
+    handler(ws as never, {} as never);
+
+    await coordinator.disposeRuntime(runtime, 'daemon_shutdown');
+
+    expect(ws.closeCode).toBe(1012);
+    expect(ws.closeReason).toBe('Server shutting down');
   });
 });

@@ -2633,11 +2633,39 @@ export class DaemonClient {
     audio: DaemonVoiceAudioInput,
     opts: DaemonWorkspaceVoiceTranscribeOptions,
   ): Promise<DaemonWorkspaceVoiceTranscriptionResult> {
+    return await this.voiceTranscriptionRequest(
+      '/workspace/voice/transcribe',
+      'POST /workspace/voice/transcribe',
+      audio,
+      opts,
+    );
+  }
+
+  /** @internal */
+  async workspaceVoiceTranscriptionRequest(
+    workspaceSelector: string,
+    audio: DaemonVoiceAudioInput,
+    opts: DaemonWorkspaceVoiceTranscribeOptions,
+  ): Promise<DaemonWorkspaceVoiceTranscriptionResult> {
+    return await this.voiceTranscriptionRequest(
+      `/workspaces/${workspaceSelector}/voice/transcribe`,
+      'POST /workspaces/:workspace/voice/transcribe',
+      audio,
+      opts,
+    );
+  }
+
+  private async voiceTranscriptionRequest(
+    path: string,
+    label: string,
+    audio: DaemonVoiceAudioInput,
+    opts: DaemonWorkspaceVoiceTranscribeOptions,
+  ): Promise<DaemonWorkspaceVoiceTranscriptionResult> {
     const query = opts.voiceModel
       ? `?${new URLSearchParams({ voiceModel: opts.voiceModel }).toString()}`
       : '';
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/voice/transcribe${query}`,
+      `${this.baseUrl}${path}${query}`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': opts.mimeType }, opts.clientId),
@@ -2645,11 +2673,11 @@ export class DaemonClient {
       },
       async (res) => {
         if (!res.ok) {
-          throw await this.failOnError(res, 'POST /workspace/voice/transcribe');
+          throw await this.failOnError(res, label);
         }
         return (await res.json()) as DaemonWorkspaceVoiceTranscriptionResult;
       },
-      VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS,
+      opts.timeoutMs ?? VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS,
       'rest',
     );
   }
@@ -3828,6 +3856,38 @@ export class WorkspaceDaemonClient {
 
   workspaceMcp(): Promise<DaemonWorkspaceMcpStatus> {
     return this.get('/mcp', 'GET /workspaces/:workspace/mcp');
+  }
+
+  workspaceVoice(clientId?: string): Promise<DaemonWorkspaceVoiceStatus> {
+    return this.client.workspaceJsonRequest<DaemonWorkspaceVoiceStatus>(
+      this.workspaceSelector,
+      '/voice',
+      'GET /workspaces/:workspace/voice',
+      { clientId, mode: 'rest' },
+    );
+  }
+
+  setWorkspaceVoice(
+    update: DaemonWorkspaceVoiceUpdate,
+    clientId?: string,
+  ): Promise<DaemonWorkspaceVoiceStatus> {
+    return this.client.workspaceJsonRequest<DaemonWorkspaceVoiceStatus>(
+      this.workspaceSelector,
+      '/voice',
+      'POST /workspaces/:workspace/voice',
+      { method: 'POST', body: update, clientId, mode: 'rest' },
+    );
+  }
+
+  transcribeWorkspaceVoice(
+    audio: DaemonVoiceAudioInput,
+    opts: DaemonWorkspaceVoiceTranscribeOptions,
+  ): Promise<DaemonWorkspaceVoiceTranscriptionResult> {
+    return this.client.workspaceVoiceTranscriptionRequest(
+      this.workspaceSelector,
+      audio,
+      opts,
+    );
   }
 
   workspaceGit(): Promise<DaemonWorkspaceGitStatus> {

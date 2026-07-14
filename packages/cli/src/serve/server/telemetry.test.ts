@@ -258,6 +258,32 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     }
   });
 
+  it('attributes plural workspace voice requests to the selected workspace', () => {
+    const mw = daemonTelemetryMiddleware(() => '/workspace/secondary');
+    for (const [method, path, route] of [
+      ['GET', '/workspaces/ws-secondary/voice', 'GET /workspace/voice'],
+      ['POST', '/workspaces/ws-secondary/voice', 'POST /workspace/voice'],
+      [
+        'POST',
+        '/workspaces/ws-secondary/voice/transcribe',
+        'POST /workspace/voice/transcribe',
+      ],
+    ] as const) {
+      const res = mockRes(200);
+      mw(mockReq(method, path), res, vi.fn() as unknown as NextFunction);
+      res.emit('finish');
+
+      expect(coreMocks.withDaemonRequestSpan).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          method,
+          route,
+          workspaceHash: 'hash:/workspace/secondary',
+        }),
+        expect.any(Function),
+      );
+    }
+  });
+
   it('excludes the dashboard status poll (GET /daemon/status) from recordRequest', () => {
     const recordRequest = vi.fn();
     const mw = daemonTelemetryMiddleware(() => '/ws', recordRequest);
