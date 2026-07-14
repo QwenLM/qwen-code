@@ -44,6 +44,15 @@ function runCleanup(target: string): void {
       removedAny = true;
     }
 
+    // The test-efficacy probe runs in a disposable sibling worktree and removes
+    // it itself; sweep one a crashed probe left behind so it does not block the
+    // next run's `git worktree add` (see #6832 / test-efficacy.ts).
+    const probeWt = `${wt}-probe`;
+    if (releaseWorktree(probeWt)) {
+      writeStdoutLine(`Removed probe worktree: ${probeWt}`);
+      removedAny = true;
+    }
+
     const branch = reviewBranch(prNumber);
     if (refExists(branch)) {
       try {

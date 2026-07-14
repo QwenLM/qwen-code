@@ -40,11 +40,12 @@
 import type { CommandModule } from 'yargs';
 import { readFileSync } from 'node:fs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import type { DiffChunk } from './lib/diff-plan.js';
+import { READ_FILE_CHAR_CAP, type DiffChunk } from './lib/diff-plan.js';
 
 interface AgentPromptArgs {
   plan: string;
   chunk: number;
+  rules?: string;
 }
 
 /** The plan report, as far as this command needs it. */
@@ -136,14 +137,22 @@ export function buildChunkAgentPrompt(
   const offset = chunk.startLine - 1;
   const limit = chunk.endLine - chunk.startLine + 1;
 
-  const files = (chunk.files ?? [])
+  // The plan is parsed off disk with an unchecked cast, so guard the elements too,
+  // not just the array. A malformed entry would otherwise render as
+  // `- undefined (new-side lines undefined-undefined)` and send the agent looking
+  // for a file that does not exist.
+  const files = (Array.isArray(chunk.files) ? chunk.files : [])
+    .filter(
+      (f): f is DiffChunk['files'][number] =>
+        !!f && typeof f.path === 'string' && f.path.length > 0,
+    )
     .map((f) => `- ${f.path} (new-side lines ${f.newStart}-${f.newEnd})`)
     .join('\n');
 
   // The uncoverable case: a single line longer than one read returns. Paging
   // starts every page at a line boundary, so the tail of that line is
   // unreachable by any offset. Such a chunk must not be receipted as covered.
-  const unreachable = chunk.maxLineChars > 25_000;
+  const unreachable = chunk.maxLineChars > READ_FILE_CHAR_CAP;
 
   const parts = [
     `You are reviewing chunk ${chunk.id} of ${total} of a code diff.`,
@@ -225,16 +234,52 @@ export function buildChunkAgentPrompt(
       'and cases you walked, in your own words. Do not recite a stock sentence: a return that ' +
       'names nothing you read is indistinguishable from never having read anything, and will ' +
       'be treated as such.',
-    '',
-    `Then, on its own final line: \`Covered: chunk ${chunk.id} lines ${chunk.startLine}-${chunk.endLine}\``,
   );
+
+  // The receipt, but NOT for an unreachable chunk: that one has already been told
+  // to return `Uncoverable`, and asking for both hands the agent two instructions
+  // that contradict each other. Downstream, a chunk that reports itself both
+  // uncoverable and covered is neither, and the honest one loses.
+  if (!unreachable) {
+    parts.push(
+      '',
+      `Then, on its own final line: \`Covered: chunk ${chunk.id} lines ${chunk.startLine}-${chunk.endLine}\``,
+    );
+  }
 
   return parts.join('\n');
 }
 
 function runAgentPrompt(args: AgentPromptArgs): void {
-  const report = JSON.parse(readFileSync(args.plan, 'utf8')) as PlanReport;
-  writeStdoutLine(buildChunkAgentPrompt(report, args.chunk));
+  let report: PlanReport;
+  try {
+    report = JSON.parse(readFileSync(args.plan, 'utf8')) as PlanReport;
+  } catch (err) {
+    throw new Error(
+      `agent-prompt: cannot read the plan ${args.plan}: ${(err as Error).message}`,
+    );
+  }
+
+  // The project rules Step 2 loaded. They belong in the agent's prompt — the
+  // skill now says this command builds it and to pass what it prints verbatim, so
+  // there is no longer a later step in which the orchestrator would staple them
+  // on. Without this flag they were loaded, written to a file, and silently
+  // dropped: the review would enforce no project rule at all and say nothing.
+  let rules: string | undefined;
+  if (args.rules) {
+    try {
+      rules = readFileSync(args.rules, 'utf8');
+    } catch (err) {
+      throw new Error(
+        `agent-prompt: cannot read the rules ${args.rules}: ` +
+          `${(err as Error).message}. Omit --rules if this review has none; ` +
+          'passing a path that does not resolve would silently review without ' +
+          'the project rules it was told to enforce.',
+      );
+    }
+  }
+
+  writeStdoutLine(buildChunkAgentPrompt(report, args.chunk, rules));
 }
 
 export const agentPromptCommand: CommandModule = {
@@ -254,6 +299,12 @@ export const agentPromptCommand: CommandModule = {
         type: 'number',
         demandOption: true,
         describe: 'Which chunk id this agent owns',
+      })
+      .option('rules', {
+        type: 'string',
+        describe:
+          'Path to the project rules file from `load-rules` (omit when the ' +
+          'review has none)',
       }),
   handler: (argv) => {
     runAgentPrompt(argv as unknown as AgentPromptArgs);

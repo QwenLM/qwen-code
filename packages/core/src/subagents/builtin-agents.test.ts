@@ -36,6 +36,13 @@ describe('BuiltinAgentRegistry', () => {
       expect(generalAgent).toBeDefined();
       expect(generalAgent?.description).toContain('General-purpose agent');
     });
+
+    it('should let the Explore agent inherit the main model', () => {
+      const exploreAgent = BuiltinAgentRegistry.getBuiltinAgent('Explore');
+
+      expect(exploreAgent).toBeDefined();
+      expect(exploreAgent?.model).toBeUndefined();
+    });
   });
 
   describe('getBuiltinAgent', () => {

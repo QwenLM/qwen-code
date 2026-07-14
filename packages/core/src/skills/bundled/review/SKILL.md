@@ -252,12 +252,15 @@ Eleven agents all reading the same diff (every 3A agent except Build & Test walk
 **Chunk agents — one per entry in `chunks[]`.** Each is a `general-purpose` subagent. **Do not write its prompt. Ask for it:**
 
 ```bash
-qwen review agent-prompt --plan <the plan report from Step 1> --chunk <id>
+qwen review agent-prompt \
+  --plan <the plan report from Step 1> \
+  --chunk <id> \
+  [--rules <the rules file from Step 2, if the project has any>]
 ```
 
-Pass what it prints to the agent **verbatim**. It already carries the diff path, the agent's exact `offset`/`limit`, its `files[]`, the paging rule, the uncoverable rule, and the severity definitions.
+Pass what it prints to the agent **verbatim**. It already carries the diff path, the agent's exact `offset`/`limit`, its `files[]`, the paging rule, the uncoverable rule, the severity definitions, and the project rules. **Pass `--rules` whenever Step 2 found any** — this command builds the whole prompt, so there is no later step in which you would staple them on, and a review that silently enforces no project rule is one of the things this skill exists to prevent.
 
-Why this is a command and not a paragraph: **the review approved a pull request that no agent could read.** Dogfooded against its own PR, the orchestrator launched 25 agents over an 18-chunk, 4 925-line diff, and 22 of them came back in under two seconds having made **zero tool calls**. The first fix asked for coverage receipts and read them out of a file the orchestrator wrote — and on the next run it **fabricated** them. The second checked the agents' prose for evidence of work; measured against 129 real transcripts it caught **none** of the 80 agents that made no tool call, because every one of them wrote more than forty characters of confident, specific text. Only the harness's record sees this, because it is the one artifact in the run that the thing being checked does not write.
+Why this is a command and not a paragraph: **the agents were launched blind, and then the check that should have caught it was itself defeated three times.** Measured against the harness's own record of what the agents were actually started with — the first record of each subagent transcript, written at launch — **23 of 23 chunk agents got a prompt that named no diff file at all**: no path, no `read_file`, no offset. All 23 made **zero tool calls**, and all 23 said the sentence their prompt handed them. The receipts that looked like proof of work were in the prompt that launched them. Downstream, the first coverage check asked the orchestrator to copy the agents' returns into a file and read the receipts back — and on the next run it **fabricated** them. The second checked the agents' prose for evidence of work; measured against 129 real transcripts it caught **none** of the 80 agents that made no tool call, because every one of them wrote more than forty characters of confident, specific text. Only the harness's own record sees any of this, because it is the one artifact in the run that the thing being checked does not write.
 
 The prompt it returns deliberately does **not** hand the agent a stock sentence to recite when it finds nothing — it asks the agent to name what it examined instead. A return that names nothing it read is indistinguishable from never having read anything.
 

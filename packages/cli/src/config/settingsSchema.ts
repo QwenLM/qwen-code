@@ -2761,9 +2761,30 @@ const SETTINGS_SCHEMA = {
     requiresRestart: false,
     default: {},
     description:
-      'Settings for multi-agent collaboration features (Arena, Team, Swarm).',
+      'Settings for built-in agents and multi-agent collaboration features (Arena, Team, Swarm).',
     showInDialog: false,
     properties: {
+      builtin: {
+        type: 'object',
+        label: 'Built-in Agents',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: {},
+        description: 'Settings for built-in subagents.',
+        showInDialog: false,
+        properties: {
+          exploreModel: {
+            type: 'string',
+            label: 'Explore Model',
+            category: 'Model',
+            requiresRestart: true,
+            default: 'inherit' as string,
+            description:
+              'Model selector for the built-in Explore subagent. Use "inherit" for the main session model, "fast" for fastModel, a model ID, or an authType:model-id selector. Custom same-name agents are unaffected.',
+            showInDialog: false,
+          },
+        },
+      },
       maxParallelAgents: {
         type: 'number',
         label: 'Max Parallel Agents',
