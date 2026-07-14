@@ -722,6 +722,21 @@ export function buildRoleBrief(
   return parts.join('\n');
 }
 
+/** The one range an invariant agent reads: its own file's slice of the diff. */
+function invariantDiffRange(
+  report: PlanReport,
+  file?: string,
+): Array<{ offset: number; limit: number }> {
+  if (!file) return [];
+  const files = (
+    Array.isArray(report.files) ? report.files : []
+  ) as HeavyFile[];
+  const f = files.find((x) => x?.path === file);
+  const r = f?.diffRange;
+  if (!r) return [];
+  return [{ offset: r.startLine - 1, limit: r.endLine - r.startLine + 1 }];
+}
+
 /**
  * The launch prompt for a role: short, and it points at the brief.
  *
@@ -764,26 +779,36 @@ export function buildRoleLaunchPrompt(
 
   if (b.readsDiff) {
     const diffPath = requireDiffPath(report);
-    const chunks = (
-      Array.isArray(report.chunks) ? report.chunks : []
-    ) as DiffChunk[];
-    const reads = chunks
+    // An invariant agent owns ONE file, and the diff it needs is that file's own
+    // slice. Handing it the whole chunk plan — as this did — sends it to read six
+    // thousand lines it was not asked about, and worse: coverage is computed from
+    // the ranges in this prompt, so it would be credited with reading every chunk in
+    // the review. One agent could then mask twenty missing ones.
+    const ranges = role.startsWith('invariant-')
+      ? invariantDiffRange(report, opts.file)
+      : (
+          (Array.isArray(report.chunks) ? report.chunks : []) as DiffChunk[]
+        ).map((c) => ({
+          offset: c.startLine - 1,
+          limit: c.endLine - c.startLine + 1,
+        }));
+    const reads = ranges
       .map(
-        (c) =>
-          `read_file(file_path="${diffPath}", offset=${c.startLine - 1}, limit=${
-            c.endLine - c.startLine + 1
-          })`,
+        (r) =>
+          `read_file(file_path="${diffPath}", offset=${r.offset}, limit=${r.limit})`,
       )
       .join('\n');
-    parts.push(
-      '',
-      '**The code is a file too — the diff. Nothing in this message contains it.** Read your ' +
-        'ranges, and page with a larger `offset` if a read comes back `isTruncated`:',
-      '',
-      '```',
-      reads,
-      '```',
-    );
+    if (reads) {
+      parts.push(
+        '',
+        '**The code is a file too — the diff. Nothing in this message contains it.** Read your ' +
+          'ranges, and page with a larger `offset` if a read comes back `isTruncated`:',
+        '',
+        '```',
+        reads,
+        '```',
+      );
+    }
   }
 
   parts.push(

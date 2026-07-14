@@ -74,4 +74,15 @@ describe('pathRulesFor — scoped, or it is noise', () => {
     // The two taste-adjacent items are Suggestions, and say so.
     expect(out).toMatch(/\*\*Recommendations \(Suggestion\)/);
   });
+
+  it('does not make the blast radius of a blocker into a separate Suggestion', () => {
+    // Dogfooded against a planted vulnerability, the security agent read the flat
+    // rule ("`permissions:` is a Suggestion") and escalated anyway — "grants maximum
+    // token scope to a job that processes untrusted contributor code, amplifying the
+    // RCE above". It was right and the rule was too coarse. A broad token on a job
+    // that runs the contributor's code is not a recommendation; it is how far the
+    // blocker reaches.
+    const out = pathRulesFor(['.github/workflows/x.yml']);
+    expect(out).toContain('blast radius of the blocker above');
+  });
 });

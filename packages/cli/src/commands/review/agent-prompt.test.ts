@@ -752,3 +752,70 @@ describe('lightweight mode — the diff, and nothing else', () => {
     }
   });
 });
+
+describe('an invariant agent reads its file, not the whole review', () => {
+  const HEAVY = {
+    diffPathAbsolute: '/abs/d.txt',
+    files: [
+      {
+        path: 'src/big.ts',
+        heavy: true,
+        addedRanges: [{ start: 10, end: 40 }],
+        diffRange: { startLine: 100, endLine: 300 },
+      },
+    ],
+    chunks: [
+      {
+        id: 1,
+        startLine: 1,
+        endLine: 400,
+        lines: 400,
+        chars: 1,
+        maxLineChars: 1,
+        oversized: false,
+        files: [],
+      },
+      {
+        id: 2,
+        startLine: 401,
+        endLine: 800,
+        lines: 400,
+        chars: 1,
+        maxLineChars: 1,
+        oversized: false,
+        files: [],
+      },
+      {
+        id: 3,
+        startLine: 801,
+        endLine: 1200,
+        lines: 400,
+        chars: 1,
+        maxLineChars: 1,
+        oversized: false,
+        files: [],
+      },
+    ],
+  };
+
+  it("is pointed at its own file's diff slice, and at nothing else", () => {
+    // It used to be handed the whole chunk plan. That sends it to read every line of
+    // a six-thousand-line diff it was not asked about — and coverage is computed
+    // from the ranges in this prompt, so it would be credited with reading every
+    // chunk in the review. One agent could mask twenty missing ones.
+    const p = buildRoleLaunchPrompt(HEAVY, 'invariant-a', '/t/b.md', {
+      file: 'src/big.ts',
+    });
+    expect(p).toContain('offset=99, limit=201'); // diffRange 100-300
+    expect(p).not.toContain('offset=0, limit=400'); // chunk 1
+    expect(p).not.toContain('offset=400, limit=400'); // chunk 2
+    expect(p).not.toContain('offset=800, limit=400'); // chunk 3
+  });
+
+  it('still hands a whole-diff agent every chunk', () => {
+    const p = buildRoleLaunchPrompt(HEAVY, '2', '/t/b.md');
+    expect(p).toContain('offset=0, limit=400');
+    expect(p).toContain('offset=400, limit=400');
+    expect(p).toContain('offset=800, limit=400');
+  });
+});
