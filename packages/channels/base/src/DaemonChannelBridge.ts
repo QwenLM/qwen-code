@@ -671,6 +671,16 @@ export class DaemonChannelBridge
       case 'tool_call_update': {
         const toolCallId = getString(update['toolCallId']);
         const kind = getString(update['kind']);
+        if (
+          !kind &&
+          toolCallId &&
+          getString(update['status']) === 'in_progress'
+        ) {
+          // Liveness/progress frame (e.g. a silent-shell heartbeat): carries
+          // only the id, status, and _meta stats. Channels have no use for
+          // it — drop it without flagging the session as malformed.
+          break;
+        }
         if (!toolCallId || !kind) {
           this.emitProtocolError(`Malformed daemon ${type} event`, update);
           break;

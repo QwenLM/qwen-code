@@ -4625,6 +4625,13 @@ export class QwenAgent extends BaseAgent {
   }
 
   private handleToolCallUpdate(update: JsonRecord): void {
+    // Liveness/progress frames (e.g. silent-shell heartbeats carrying
+    // _meta.shellProgress) arrive with status in_progress while the tool is
+    // still running; converting one into a tool_result would prematurely
+    // complete the call with an empty result.
+    if (asString(update.status) === 'in_progress') {
+      return;
+    }
     const toolUseId =
       asString(update.toolCallId) || `qwen-tool-${++this.toolIdCounter}`;
     const meta = toRecord(update._meta);
