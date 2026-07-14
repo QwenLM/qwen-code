@@ -21,11 +21,19 @@ describe('TypeScript SDK release workflow', () => {
     expect(workflow).toContain(
       'echo "::notice::No version changes in sdk-typescript; skipping release branch push and PR creation."',
     );
-    const persistedSourceGuardCount = (
-      workflow.match(
-        /steps\.persist_source\.outputs\.HAS_PERSISTED_SOURCE == 'true'/g,
-      ) ?? []
-    ).length;
-    expect(persistedSourceGuardCount).toBe(2);
+    for (const stepName of [
+      'Create GitHub Release and Tag',
+      'Create PR to merge release branch into main',
+      'Enable auto-merge for release PR',
+    ]) {
+      const stepStart = workflow.indexOf(`name: '${stepName}'`);
+      const step = workflow.slice(
+        stepStart,
+        workflow.indexOf('\n      - name:', stepStart + 1),
+      );
+      expect(step).toContain(
+        "steps.persist_source.outputs.HAS_PERSISTED_SOURCE == 'true'",
+      );
+    }
   });
 });

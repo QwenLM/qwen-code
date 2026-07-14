@@ -332,7 +332,7 @@ jobs:
 
       - name: 'Create GitHub Release and Tag'
         if: |-
-          ${{ steps.vars.outputs.is_dry_run == 'false' }}
+          ${{ steps.vars.outputs.is_dry_run == 'false' && (steps.vars.outputs.is_nightly == 'true' || steps.vars.outputs.is_preview == 'true' || steps.persist_source.outputs.HAS_PERSISTED_SOURCE == 'true') }}
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
