@@ -221,7 +221,7 @@ describe('verify-pr CLI', () => {
       },
     });
 
-    expect(exitCode).toBe(1);
+    expect(exitCode).toBe(143);
     expect(events.at(-1)).toBe('signal:SIGTERM');
     expect(events.slice(0, -1).join('\n')).toMatch(
       /error:PR verification failed.*error:Error: terminated by signal SIGTERM/s,

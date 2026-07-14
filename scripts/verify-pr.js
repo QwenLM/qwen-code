@@ -965,7 +965,8 @@ export async function runCli(
     );
     if (typeof context.relaySignal === 'string') {
       relaySignal(context.relaySignal);
-      return 1;
+      const signalNumber = osConstants.signals[context.relaySignal];
+      return typeof signalNumber === 'number' ? 128 + signalNumber : 1;
     }
     return Number.isInteger(context.exitCode) && context.exitCode > 0
       ? context.exitCode
