@@ -22,18 +22,26 @@ export const FETCH_TIMEOUT_MS = 2000;
  * networks, DNS failures) would otherwise hang the check indefinitely or fall
  * through to a stale configstore cache. Race the call against a bounded timer
  * and surface a real error so `/update` can report "check failed" instead of
- * silently returning "up to date". Related: #6857.
+ * silently returning "up to date". The `distTag` is carried on the message so
+ * an oncall reading logs can tell which registry endpoint stalled — the
+ * nightly path fires two concurrent fetches, and only one of them may be
+ * blocked (e.g. a corporate proxy that lets `nightly` through but not
+ * `latest`). Related: #6857.
  */
 export class UpdateCheckTimeoutError extends Error {
-  constructor(timeoutMs: number) {
-    super(`update-notifier fetchInfo timed out after ${timeoutMs}ms`);
+  readonly distTag?: string;
+  constructor(timeoutMs: number, distTag?: string) {
+    const suffix = distTag ? ` for ${distTag}` : '';
+    super(`update-notifier fetchInfo timed out after ${timeoutMs}ms${suffix}`);
     this.name = 'UpdateCheckTimeoutError';
+    this.distTag = distTag;
   }
 }
 
 async function fetchInfoWithTimeout(
   notifier: { fetchInfo(): UpdateInfo | Promise<UpdateInfo> },
   timeoutMs: number,
+  distTag?: string,
 ): Promise<UpdateInfo> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -41,7 +49,7 @@ async function fetchInfoWithTimeout(
       Promise.resolve(notifier.fetchInfo()),
       new Promise<never>((_, reject) => {
         timer = setTimeout(
-          () => reject(new UpdateCheckTimeoutError(timeoutMs)),
+          () => reject(new UpdateCheckTimeoutError(timeoutMs, distTag)),
           timeoutMs,
         );
       }),
@@ -113,8 +121,16 @@ export async function checkForUpdatesDetailed(): Promise<UpdateCheckResult> {
 
     if (isNightly) {
       const [nightlyUpdateInfo, latestUpdateInfo] = await Promise.all([
-        fetchInfoWithTimeout(createNotifier('nightly'), FETCH_TIMEOUT_MS),
-        fetchInfoWithTimeout(createNotifier('latest'), FETCH_TIMEOUT_MS),
+        fetchInfoWithTimeout(
+          createNotifier('nightly'),
+          FETCH_TIMEOUT_MS,
+          'nightly',
+        ),
+        fetchInfoWithTimeout(
+          createNotifier('latest'),
+          FETCH_TIMEOUT_MS,
+          'latest',
+        ),
       ]);
 
       debugLogger.debug(
@@ -142,6 +158,7 @@ export async function checkForUpdatesDetailed(): Promise<UpdateCheckResult> {
       const updateInfo = await fetchInfoWithTimeout(
         createNotifier('latest'),
         FETCH_TIMEOUT_MS,
+        'latest',
       );
 
       debugLogger.debug(

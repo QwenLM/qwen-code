@@ -284,6 +284,9 @@ describe('checkForUpdates', () => {
       if (result.status === 'error') {
         expect(result.error).toBeInstanceOf(UpdateCheckTimeoutError);
         expect(result.error.message).toContain(`${FETCH_TIMEOUT_MS}ms`);
+        // Non-nightly path only queries the `latest` dist-tag; the message
+        // must name it so oncall can tell which registry endpoint stalled.
+        expect(result.error.message).toContain('for latest');
         expect(result.currentVersion).toBe('1.0.0');
       }
     });
@@ -306,6 +309,63 @@ describe('checkForUpdates', () => {
       expect(result.status).toBe('update');
       if (result.status === 'update') {
         expect(result.info.update.latest).toBe('1.1.0');
+      }
+    });
+
+    it('surfaces a timeout when only the nightly dist-tag stalls', async () => {
+      // The nightly path fires `latest` and `nightly` fetches concurrently via
+      // Promise.all — if the timer wiring is wrong (e.g. only the outer race
+      // has one, or the reject reaches Promise.all and Promise.all doesn't
+      // propagate), a single stalled fetch would let /update silently degrade.
+      // Assert Promise.all propagates the timeout AND names the exact dist-tag
+      // that stalled so oncall reading logs can point at the endpoint.
+      getPackageJson.mockResolvedValue({
+        name: 'test-package',
+        version: '1.0.0-nightly.1',
+      });
+      updateNotifier.mockImplementation(({ distTag }) => ({
+        fetchInfo: () =>
+          distTag === 'nightly'
+            ? new Promise(() => {}) // never resolves
+            : Promise.resolve({
+                current: '1.0.0-nightly.1',
+                latest: '1.0.0',
+              }),
+      }));
+
+      const resultPromise = checkForUpdatesDetailed();
+      await vi.advanceTimersByTimeAsync(FETCH_TIMEOUT_MS + 1);
+      const result = await resultPromise;
+
+      expect(result.status).toBe('error');
+      if (result.status === 'error') {
+        expect(result.error).toBeInstanceOf(UpdateCheckTimeoutError);
+        expect(result.error.message).toContain('for nightly');
+        expect(result.currentVersion).toBe('1.0.0-nightly.1');
+      }
+    });
+
+    it('surfaces a timeout when both nightly dist-tags stall', async () => {
+      // Full outage / offline network — both fetches hang, both timers fire.
+      // The first rejection Promise.all sees wins; assert only that we get a
+      // typed UpdateCheckTimeoutError for one of the two dist-tags (either is
+      // a valid symptom of the same failure).
+      getPackageJson.mockResolvedValue({
+        name: 'test-package',
+        version: '1.0.0-nightly.1',
+      });
+      updateNotifier.mockImplementation(() => ({
+        fetchInfo: () => new Promise(() => {}),
+      }));
+
+      const resultPromise = checkForUpdatesDetailed();
+      await vi.advanceTimersByTimeAsync(FETCH_TIMEOUT_MS + 1);
+      const result = await resultPromise;
+
+      expect(result.status).toBe('error');
+      if (result.status === 'error') {
+        expect(result.error).toBeInstanceOf(UpdateCheckTimeoutError);
+        expect(result.error.message).toMatch(/for (nightly|latest)/);
       }
     });
   });
