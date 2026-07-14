@@ -1,0 +1,299 @@
+name: 'Web-shell Visuals Publish'
+
+# Privileged companion to `web-shell-visuals.yml`. It runs AFTER that workflow
+# via workflow_run, so it executes in the base-repo context with a write token
+# but NEVER checks out or runs PR code — it only downloads the image artifact
+# (opaque bytes), hosts it on the `pr-assets` branch, and posts an inline
+# comment. This is the GitHub-recommended split for commenting on fork PRs with
+# the results of untrusted-code execution.
+on:
+  workflow_run:
+    workflows:
+      - 'Web-shell Visuals'
+    types:
+      - 'completed'
+
+# GITHUB_TOKEN only needs to read the triggering run's artifact; the branch push
+# and PR comment are done with CI_BOT_PAT, which carries its own scope.
+permissions:
+  actions: 'read'
+
+# All publishes push to the single `pr-assets` branch, so serialize them to
+# avoid racing on that push. Never cancel an in-flight publish.
+concurrency:
+  group: 'web-shell-visuals-publish-${{ github.event.workflow_run.head_branch }}'
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: 'bash'
+
+jobs:
+  publish:
+    name: 'Publish web-shell visuals to the PR'
+    if: >-
+      github.repository == 'QwenLM/qwen-code' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    steps:
+      - name: 'Download visuals artifact'
+        id: 'download'
+        continue-on-error: true
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v5.0.0
+        with:
+          name: 'web-shell-visuals'
+          run-id: '${{ github.event.workflow_run.id }}'
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          path: 'visuals'
+
+      - name: 'Publish visuals to the PR'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          RUN_ID: '${{ github.event.workflow_run.id }}'
+          RUN_URL: '${{ github.event.workflow_run.html_url }}'
+          # Authenticated (NOT artifact-sourced) head SHA of the run that
+          # triggered this publish — used to bind the artifact to its real PR.
+          RUN_HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
+        run: |-
+          set -euo pipefail
+
+          ART='visuals'
+          if [ ! -d "${ART}" ]; then
+            echo "::notice::No visuals artifact was downloaded; nothing to publish."
+            exit 0
+          fi
+
+          # --- Validate + bind the untrusted PR number ----------------------
+          # pr.txt is written by a job that ran PR code, so it is UNTRUSTED: a
+          # malicious PR could put a *victim* PR number here. Sanitize it, then
+          # BIND it to this run — require the PR's current head SHA to equal the
+          # authenticated head SHA of the run that produced the artifact. A
+          # victim PR's head won't match, so the misdirection is rejected.
+          PR="$(tr -dc '0-9' < "${ART}/pr.txt" 2>/dev/null | head -c 12 || true)"
+          if [ -z "${PR}" ]; then
+            echo "::warning::Artifact has no valid PR number; aborting."
+            exit 0
+          fi
+          pr_json="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" 2>/dev/null || true)"
+          pr_state="$(jq -r '.state // empty' <<< "${pr_json}")"
+          pr_head="$(jq -r '.head.sha // empty' <<< "${pr_json}")"
+          if [ "${pr_state}" != "open" ]; then
+            echo "::notice::PR #${PR} is not open (state='${pr_state:-unknown}'); skipping."
+            exit 0
+          fi
+          if [ -z "${RUN_HEAD_SHA}" ] || [ "${pr_head}" != "${RUN_HEAD_SHA}" ]; then
+            echo "::warning::PR #${PR} head (${pr_head:-none}) != this run's head (${RUN_HEAD_SHA:-none}); refusing to post (stale run or forged/mismatched PR number)."
+            exit 0
+          fi
+          SHORT_SHA="${RUN_HEAD_SHA:0:7}"
+
+          # --- Stage + validate the images ----------------------------------
+          # The images are produced by untrusted PR code. Validate magic bytes
+          # with coreutils `od` (no fragile `xxd` dependency), sanitize names,
+          # and CAP count + per-file size so a hostile PR can't blow past the
+          # comment size limit or bloat the pr-assets branch.
+          STAGE="${RUNNER_TEMP}/visuals-stage"
+          rm -rf "${STAGE}"
+          mkdir -p "${STAGE}"
+          shopt -s nullglob
+          MAX_IMAGES=30
+          MAX_BYTES=$((6 * 1024 * 1024))
+          count=0
+          for f in "${ART}"/screenshots/*.png "${ART}"/gifs/*.gif; do
+            [ -f "${f}" ] || continue
+            if [ "${count}" -ge "${MAX_IMAGES}" ]; then
+              echo "::warning::Reached the ${MAX_IMAGES}-image cap; skipping the rest."
+              break
+            fi
+            if [ "$(wc -c < "${f}")" -gt "${MAX_BYTES}" ]; then
+              echo "::warning::$(basename "${f}") exceeds ${MAX_BYTES} bytes; skipping."
+              continue
+            fi
+            sig="$(od -An -v -tx1 -N8 "${f}" | tr -d ' \n')"
+            case "${f}" in
+              *.png)
+                [ "${sig:0:16}" = "89504e470d0a1a0a" ] || {
+                  echo "::warning::${f} is not a PNG; skipping."
+                  continue
+                }
+                ;;
+              *.gif)
+                case "${sig:0:12}" in
+                  474946383961 | 474946383761) : ;; # GIF89a / GIF87a
+                  *)
+                    echo "::warning::${f} is not a GIF; skipping."
+                    continue
+                    ;;
+                esac
+                ;;
+            esac
+            safe="$(basename "${f}" | tr -c 'A-Za-z0-9._-' '_')"
+            cp "${f}" "${STAGE}/${safe}"
+            count=$((count + 1))
+          done
+          if [ "${count}" -eq 0 ]; then
+            echo "::notice::No valid images in the artifact; nothing to publish."
+            exit 0
+          fi
+          echo "Staged ${count} image(s) for PR #${PR}."
+
+          # --- Host the images on the pr-assets branch ----------------------
+          # Per-PR asset branch under the repo's existing `pr-assets/<slug>`
+          # convention. A bare `pr-assets` branch would D/F-conflict with the
+          # existing `pr-assets/*` refs, and per-PR branches also avoid cross-PR
+          # push contention. Reference images by immutable commit SHA so URLs
+          # never break as later runs append. Each run writes a unique <run>
+          # subdir, so a concurrent same-PR push only needs a fast-forward
+          # rebase, never a content merge.
+          BRANCH="pr-assets/web-shell-visuals-${PR}"
+          DEST="${RUN_ID}"
+          WORK="${RUNNER_TEMP}/pr-assets"
+          AUTH_URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          rm -rf "${WORK}"
+          mkdir -p "${WORK}"
+          cd "${WORK}"
+          git init -q
+          git config user.name 'qwen-code-bot'
+          git config user.email 'qwen-code-bot@users.noreply.github.com'
+          git remote add origin "${AUTH_URL}"
+          if git ls-remote --exit-code --heads origin "${BRANCH}" >/dev/null 2>&1; then
+            git fetch -q --depth 1 origin "${BRANCH}"
+            git checkout -q -B "${BRANCH}" FETCH_HEAD
+          else
+            echo "Branch ${BRANCH} does not exist yet; creating it."
+            git checkout -q --orphan "${BRANCH}"
+          fi
+          mkdir -p "${DEST}"
+          cp "${STAGE}"/* "${DEST}/"
+          git add "${DEST}"
+          if git diff --cached --quiet; then
+            echo "Images already present on ${BRANCH}; reusing the existing commit."
+          else
+            git commit -q -m "web-shell visuals: PR #${PR} (run ${RUN_ID})"
+            pushed=0
+            for attempt in 1 2 3 4 5; do
+              if git push -q origin "HEAD:${BRANCH}" 2>/dev/null; then
+                pushed=1
+                break
+              fi
+              echo "::notice::push attempt ${attempt} rejected; rebasing onto the latest ${BRANCH}."
+              git fetch -q --depth 1 origin "${BRANCH}" || true
+              git rebase -q FETCH_HEAD || git rebase --abort >/dev/null 2>&1 || true
+            done
+            if [ "${pushed}" -ne 1 ]; then
+              echo "::error::Failed to push web-shell visuals to ${BRANCH} after retries."
+              exit 1
+            fi
+          fi
+          ASSET_SHA="$(git rev-parse HEAD)"
+          cd "${GITHUB_WORKSPACE}"
+          echo "web-shell visuals hosted on ${BRANCH} at ${ASSET_SHA}."
+
+          # --- Build the comment body ---------------------------------------
+          BODY_FILE="${RUNNER_TEMP}/visuals-comment.md"
+          export STAGE
+          export BODY_FILE
+          export RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${ASSET_SHA}/${DEST}"
+          export SHORT_SHA RUN_URL
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const stage = process.env.STAGE;
+          const rawBase = process.env.RAW_BASE;
+          const shortSha = process.env.SHORT_SHA || '';
+          const runUrl = process.env.RUN_URL || '';
+          const files = fs.readdirSync(stage);
+
+          const url = (name) => `${rawBase}/${encodeURIComponent(name)}`;
+          const pretty = (s) =>
+            s.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+
+          // Screenshots: pair <view>-light.png with <view>-dark.png.
+          const shots = files.filter((f) => /\.png$/i.test(f));
+          const views = new Map();
+          for (const f of shots) {
+            const m = f.match(/^(.*)-(light|dark)\.png$/i);
+            if (!m) continue;
+            const [, view, theme] = m;
+            const entry = views.get(view) || {};
+            entry[theme.toLowerCase()] = f;
+            views.set(view, entry);
+          }
+
+          const gifs = files.filter((f) => /\.gif$/i.test(f)).sort();
+          const flowLabels = {
+            'model-switch': 'Open the slash menu and switch model',
+            'prompt-stream': 'Submit a prompt and watch the reply stream in',
+          };
+
+          const out = [];
+          out.push('<!-- qwen:web-shell-visuals -->');
+          out.push('### 🖼️ web-shell visual preview');
+          out.push(
+            `Auto-rendered from this PR head \`${shortSha}\` against a mock daemon (no real backend). Refreshes on every push.`,
+          );
+          out.push('');
+
+          if (views.size > 0) {
+            out.push('#### Screenshots · light / dark');
+            out.push('');
+            out.push('<table>');
+            out.push('<tr><th align="left">view</th><th>light</th><th>dark</th></tr>');
+            for (const [view, pair] of [...views.entries()].sort()) {
+              const light = pair.light
+                ? `<img src="${url(pair.light)}" width="360" alt="${view} light">`
+                : '—';
+              const dark = pair.dark
+                ? `<img src="${url(pair.dark)}" width="360" alt="${view} dark">`
+                : '—';
+              out.push(
+                `<tr><td valign="top"><sub>${pretty(view)}</sub></td><td>${light}</td><td>${dark}</td></tr>`,
+              );
+            }
+            out.push('</table>');
+            out.push('');
+          }
+
+          if (gifs.length > 0) {
+            out.push('#### Flows');
+            out.push('');
+            for (const g of gifs) {
+              const key = g.replace(/\.gif$/i, '');
+              out.push(`**${flowLabels[key] || pretty(key)}**`);
+              out.push('');
+              out.push(`<img src="${url(g)}" width="640" alt="${key} flow">`);
+              out.push('');
+            }
+          }
+
+          if (runUrl) {
+            out.push(
+              `<sub>Full-resolution recordings (.webm) are attached to the <a href="${runUrl}">workflow run</a>.</sub>`,
+            );
+          }
+          out.push('');
+          out.push('— _Qwen Code · web-shell visuals_');
+
+          fs.writeFileSync(process.env.BODY_FILE, out.join('\n') + '\n');
+          console.log(`Comment body: ${out.length} lines, ${shots.length} screenshots, ${gifs.length} gifs.`);
+          NODE
+
+          # --- Post or update the PR comment (dedup on the marker) ----------
+          MARKER='<!-- qwen:web-shell-visuals -->'
+          if ! EXISTING="$(
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" \
+              --method GET --paginate -F per_page=100 \
+              | jq -sr --arg m "${MARKER}" '[.[][] | select(.body | contains($m))] | last | .id // empty'
+          )"; then
+            echo "::warning::Failed to list existing comments; will create a new one."
+            EXISTING=''
+          fi
+          if [ -n "${EXISTING}" ]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING}" -F body=@"${BODY_FILE}" >/dev/null
+            echo "Updated existing web-shell visuals comment on PR #${PR}."
+          else
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" -F body=@"${BODY_FILE}" >/dev/null
+            echo "Posted web-shell visuals comment on PR #${PR}."
+          fi
