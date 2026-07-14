@@ -288,12 +288,12 @@ applicable.
 - **Line wrapping**: do not hard-wrap the PR body at a fixed column width.
   GitHub renders single newlines as `<br>`, so a wrapped description displays
   as a narrow column. Write each paragraph or list item as one long line.
-- **Don't let review rounds balloon the PR.** Every accepted suggestion widens
-  the diff and tends to trigger another round, so a PR can drift far past its
+- **Don't let review rounds balloon the PR.** Every accepted change widens the
+  diff and tends to trigger another round, so a PR can drift far past its
   original intent. Once a PR has been through roughly **5 review rounds**, land
   only Critical fixes — correctness, security, data loss, regressions — and
-  defer remaining Suggestions and nice-to-haves to a follow-up issue or PR.
-  Record each deferral in the PR thread so nothing is silently dropped.
+  defer remaining Suggestions to a follow-up issue or PR. Record each deferral
+  in the PR thread so nothing is silently dropped.
 
 ## Project Directories
 
