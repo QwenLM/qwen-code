@@ -355,6 +355,12 @@ If you are experiencing performance issues with file searching (e.g., with `@` c
 
 See [Memory](../features/memory) for details on how auto-memory works and how to use the `/memory`, `/remember`, and `/dream` commands.
 
+#### agents
+
+| Setting                       | Type   | Description                                                                                                                                                                                                                                               | Default   |
+| ----------------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------- |
+| `agents.builtin.exploreModel` | string | Model selector for the built-in Explore subagent. Use `inherit` for the main session model, `fast` for `fastModel`, a model ID, or an `authType:model-id` selector. A custom same-name Explore agent keeps its own model configuration. Requires restart. | `inherit` |
+
 #### permissions
 
 The permissions system provides fine-grained control over which tools can run, which require confirmation, and which are blocked.

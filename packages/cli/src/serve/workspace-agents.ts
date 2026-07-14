@@ -94,11 +94,10 @@ import {
  *
  * The daemon doesn't have a full `Config` instance, so we instantiate
  * `SubagentManager` against a CRUD-scoped `Config` stub that
- * implements only `getSdkMode / getProjectRoot / getActiveExtensions`
- * — the methods the manager's CRUD paths actually touch (verified
- * against `subagent-manager.ts:365,932,954,958`). A `Proxy` makes any
- * future use of an unimplemented method throw immediately so a
- * silent dependency creep can't ship as a 500.
+ * implements only `getSdkMode / getProjectRoot / getActiveExtensions /
+ * isSafeMode / getAgentsSettings` — the methods the manager's CRUD paths
+ * actually touch. A `Proxy` makes any future use of an unimplemented method
+ * throw immediately so a silent dependency creep can't ship as a 500.
  */
 
 export interface WorkspaceAgentsRouteDeps {
@@ -1788,11 +1787,12 @@ export function toDetail(config: SubagentConfig): ServeWorkspaceAgentDetail {
 
 /**
  * Build a CRUD-scoped `SubagentManager` for the daemon. The
- * underlying manager only touches four `Config` methods on its
+ * underlying manager only touches five `Config` methods on its
  * read/write paths (`getSdkMode`, `getProjectRoot`,
- * `getActiveExtensions`, `isSafeMode`); a `Proxy` makes any future expansion of
- * that surface throw immediately rather than silently produce
- * incorrect data.
+ * `getActiveExtensions`, `isSafeMode`, `getAgentsSettings`); a `Proxy` makes
+ * any future expansion of that surface throw immediately rather than silently
+ * produce incorrect data. The CRUD catalog has no session settings context,
+ * so built-in agents use their registry defaults here.
  */
 export function createDaemonSubagentManager(
   boundWorkspace: string,
@@ -1803,6 +1803,7 @@ export function createDaemonSubagentManager(
     getProjectRoot: () => boundWorkspace,
     getActiveExtensions: () => [],
     isSafeMode: () => safeMode,
+    getAgentsSettings: () => ({}),
   } as unknown as Record<string | symbol, unknown>;
   const guarded = new Proxy(stub, {
     get(target, prop) {

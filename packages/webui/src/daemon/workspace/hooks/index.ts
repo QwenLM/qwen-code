@@ -24,3 +24,4 @@ export {
 } from './useDaemonUsageDashboard.js';
 export { useDaemonTools } from './useDaemonTools.js';
 export { useDaemonSettings } from './useDaemonSettings.js';
+export { useDaemonProviders } from './useDaemonProviders.js';

@@ -31,6 +31,26 @@ export interface DaemonWorkspaceCapability {
   cwd: string;
   primary: boolean;
   trusted: boolean;
+  /** Whether this runtime can be removed without restarting the daemon. */
+  removable?: boolean;
+}
+
+export interface DaemonWorkspaceRemovalActivity {
+  sessions: number;
+  activePrompts: number;
+  pendingSessionStarts: number;
+  acpConnections: number;
+  memoryTasks: number;
+  channelWorkers: number;
+}
+
+export interface DaemonWorkspaceRemovalResult {
+  removed: true;
+  workspaceId: string;
+  workspaceCwd: string;
+  forced: boolean;
+  persistedRegistrationRemoved: boolean;
+  activity: DaemonWorkspaceRemovalActivity;
 }
 
 /** Current Git branch metadata returned from a workspace Git status route. */
@@ -203,8 +223,9 @@ export interface DaemonStatusReportSession {
  * One time-bucketed sample in the Daemon Status metrics series. **Manual mirror
  * of `packages/cli/src/serve/daemon-metrics-ring.ts` → `DaemonMetricsBucket`;
  * keep the two field lists in sync.** Each bucket covers a fixed window: the
- * request/token counters, the `*P50Ms`/`*P95Ms` percentiles, and
- * `promptsCompleted` aggregate what happened *during* the window, while
+ * request/token counters, the `*P50Ms`/`*P95Ms` percentiles, the
+ * `llmApiErrors`/`llmApiRetries` counters, and `promptsCompleted` aggregate
+ * what happened *during* the window, while
  * `activeSessions`/`activePrompts`/`queuedPrompts`/`rssBytes`/`heapUsedBytes`/
  * `eventLoopLagP99Ms` are gauges read at seal time `t`.
  */
@@ -236,6 +257,11 @@ export interface DaemonMetricsSeriesBucket {
   llmApiP50Ms: number;
   /** p95 per-round LLM API round-trip over the window (ms); 0 when none. */
   llmApiP95Ms: number;
+  /** Model API errors in the window (one per failed model API attempt);
+   *  provider-side failures, distinct from the client→daemon HTTP `errors`. */
+  llmApiErrors: number;
+  /** Automatic backoff retries in the window (one per retried attempt). */
+  llmApiRetries: number;
   /** Process CPU utilization over the window, percent of total capacity across
    *  all cores, clamped to [0,100]. */
   cpuPercent: number;
@@ -1073,6 +1099,7 @@ export interface DaemonWorkspaceSkillStatus extends DaemonStatusCell {
   description: string;
   level: DaemonSkillLevel;
   modelInvocable: boolean;
+  installedPath?: string;
   argumentHint?: string;
   model?: string;
   extensionName?: string;
@@ -1993,9 +2020,23 @@ export interface DaemonWorkspaceSettingsStatus {
 
 export interface DaemonSettingUpdateResult {
   key: string;
-  scope: 'workspace';
+  scope: 'workspace' | 'user';
   value: unknown;
   requiresRestart: boolean;
+}
+
+/** Identifies a configured model to remove from `modelProviders`. */
+export interface DaemonModelDeleteRequest {
+  authType: string;
+  modelId: string;
+  baseUrl?: string;
+}
+
+export interface DaemonModelDeleteResult {
+  removed: boolean;
+  clearedActiveModel: boolean;
+  /** True when a committed write targets a restart-required setting. */
+  requiresRestart?: boolean;
 }
 
 export type DaemonVoiceMode = 'hold' | 'tap';

@@ -1252,8 +1252,8 @@ export interface AcpSessionBridge {
    */
   killAllSync(): void;
 
-  /** Close all live child processes; called on daemon shutdown. */
-  shutdown(): Promise<void>;
+  /** Close all live child processes; called on daemon/workspace shutdown. */
+  shutdown(options?: BridgeShutdownOptions): Promise<void>;
 
   /**
    * Eagerly spawn the ACP child so the first session doesn't pay
@@ -1261,6 +1261,10 @@ export interface AcpSessionBridge {
    * first session falls back to lazy spawn.
    */
   preheat(): Promise<void>;
+}
+
+export interface BridgeShutdownOptions {
+  reason?: 'daemon_shutdown' | 'workspace_removed';
 }
 
 export interface ShellCommandResult {

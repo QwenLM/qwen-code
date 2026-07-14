@@ -49,6 +49,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   ApprovalMode,
+  BTW_MAX_INPUT_LENGTH,
   ExtensionManager,
   ExtensionUpdateState,
   SessionService,
@@ -79,6 +80,7 @@ import {
   SessionLimitExceededError,
   SessionNotFoundError,
   TotalSessionLimitExceededError,
+  WorkspaceDrainingError,
   WorkspaceMismatchError,
   type BridgeHeartbeatResult,
   type BridgeHeartbeatState,
@@ -393,7 +395,10 @@ const EXPECTED_REGISTERED_FEATURES = [
   'channel_reload',
   'channel_control',
   'multi_workspace_sessions',
+  'multi_workspace_session_rewind',
+  'multi_workspace_session_shell',
   'persistent_workspace_registration',
+  'workspace_runtime_removal',
   'workspace_qualified_rest_core',
   'workspace_persisted_transcript',
   'workspace_qualified_acp',
@@ -540,6 +545,12 @@ interface FakeBridgeOpts {
     sessionId: string,
     context?: BridgeClientRequestContext,
   ) => Promise<{ sessionId: string; recap: string | null }>;
+  generateSessionBtwImpl?: (
+    sessionId: string,
+    question: string,
+    signal?: AbortSignal,
+    context?: BridgeClientRequestContext,
+  ) => Promise<{ sessionId: string; answer: string | null }>;
   launchSessionForkAgentImpl?: (
     sessionId: string,
     directive: string,
@@ -769,6 +780,12 @@ interface FakeBridge extends AcpSessionBridge {
   }>;
   generateSessionRecapCalls: Array<{
     sessionId: string;
+    context?: BridgeClientRequestContext;
+  }>;
+  generateSessionBtwCalls: Array<{
+    sessionId: string;
+    question: string;
+    signal?: AbortSignal;
     context?: BridgeClientRequestContext;
   }>;
   forkCalls: Array<{
@@ -1243,6 +1260,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionId,
       recap: 'Default fake recap.',
     }));
+  const generateSessionBtwCalls: FakeBridge['generateSessionBtwCalls'] = [];
+  const generateSessionBtwImpl =
+    opts.generateSessionBtwImpl ??
+    (async (sessionId: string) => ({
+      sessionId,
+      answer: 'mock btw answer',
+    }));
   const forkCalls: FakeBridge['forkCalls'] = [];
   const launchSessionForkAgentImpl =
     opts.launchSessionForkAgentImpl ??
@@ -1384,6 +1408,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     setApprovalModeCalls,
     shellCalls,
     generateSessionRecapCalls,
+    generateSessionBtwCalls,
     forkCalls,
     workspaceMemoryRememberCalls,
     workspaceMemoryForgetCalls,
@@ -1661,8 +1686,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       });
       return generateSessionRecapImpl(sessionId, context);
     },
-    async generateSessionBtw(sessionId, _question, _signal, _context) {
-      return { sessionId, answer: 'mock btw answer' };
+    async generateSessionBtw(sessionId, question, signal, context) {
+      generateSessionBtwCalls.push({
+        sessionId,
+        question,
+        ...(signal ? { signal } : {}),
+        ...(context ? { context } : {}),
+      });
+      return generateSessionBtwImpl(sessionId, question, signal, context);
     },
     async launchSessionForkAgent(sessionId, directive, context) {
       forkCalls.push({
@@ -2211,6 +2242,53 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'multi_workspace_session_rewind') {
+          expect(predicate({ multiWorkspaceSessionsEnabled: true })).toBe(true);
+          expect(predicate({ multiWorkspaceSessionsEnabled: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              multiWorkspaceSessionsEnabled: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'multi_workspace_session_shell') {
+          expect(
+            predicate({
+              multiWorkspaceSessionsEnabled: true,
+              sessionShellCommandEnabled: true,
+            }),
+          ).toBe(true);
+          expect(
+            predicate({
+              multiWorkspaceSessionsEnabled: true,
+              sessionShellCommandEnabled: false,
+            }),
+          ).toBe(false);
+          expect(
+            predicate({
+              multiWorkspaceSessionsEnabled: false,
+              sessionShellCommandEnabled: true,
+            }),
+          ).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              multiWorkspaceSessionsEnabled: true,
+              sessionShellCommandEnabled: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'persistent_workspace_registration') {
           expect(
             predicate({ persistentWorkspaceRegistrationAvailable: true }),
@@ -2222,6 +2300,24 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, {
               persistentWorkspaceRegistrationAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'workspace_runtime_removal') {
+          expect(predicate({ workspaceRuntimeRemovalAvailable: true })).toBe(
+            true,
+          );
+          expect(predicate({ workspaceRuntimeRemovalAvailable: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              workspaceRuntimeRemovalAvailable: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
@@ -9389,6 +9485,85 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send();
       expect(res.status).toBe(200);
+    });
+  });
+
+  describe('POST /session/:id/btw', () => {
+    it('trims the question and forwards client identity plus an abort signal', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/btw')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ question: '  what now?  ' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        sessionId: 'session-A',
+        answer: 'mock btw answer',
+      });
+      expect(bridge.generateSessionBtwCalls).toEqual([
+        expect.objectContaining({
+          sessionId: 'session-A',
+          question: 'what now?',
+          signal: expect.any(AbortSignal),
+          context: { clientId: 'client-1' },
+        }),
+      ]);
+      expect(bridge.generateSessionBtwCalls[0]?.signal?.aborted).toBe(false);
+    });
+
+    it('rejects empty and oversized questions before bridge dispatch', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const empty = await request(app)
+        .post('/session/session-A/btw')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ question: '   ' });
+      const oversized = await request(app)
+        .post('/session/session-A/btw')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ question: 'x'.repeat(BTW_MAX_INPUT_LENGTH + 1) });
+
+      expect(empty.status).toBe(400);
+      expect(oversized.status).toBe(400);
+      expect(bridge.generateSessionBtwCalls).toEqual([]);
+    });
+
+    it('rejects a malformed client id before bridge dispatch', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/btw')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'bad client id')
+        .send({ question: 'what now?' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_client_id');
+      expect(bridge.generateSessionBtwCalls).toEqual([]);
+    });
+
+    it('maps bridge errors through the standard route error response', async () => {
+      const bridge = fakeBridge({
+        generateSessionBtwImpl: async () => {
+          throw new Error('btw failed');
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/btw')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ question: 'what now?' });
+
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ error: 'btw failed' });
+      expect(bridge.generateSessionBtwCalls).toHaveLength(1);
     });
   });
 
@@ -19362,6 +19537,27 @@ describe('T2.9 serve-side errorKind taxonomy (issue #4514)', () => {
 });
 
 describe('sendBridgeError daemonLog routing', () => {
+  it('maps workspace drain admission failures to 503', async () => {
+    const bridge = fakeBridge({
+      spawnImpl: async () => {
+        throw new WorkspaceDrainingError('/work/a');
+      },
+    });
+    const app = createServeApp(baseOpts, undefined, { bridge });
+
+    const res = await request(app)
+      .post('/session')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ cwd: '/work/a' });
+
+    expect(res.status).toBe(503);
+    expect(res.headers['retry-after']).toBe('5');
+    expect(res.body).toMatchObject({
+      code: 'workspace_draining',
+      workspaceCwd: '/work/a',
+    });
+  });
+
   it('routes 5xx errors through daemonLog when provided', async () => {
     const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'daemon-log-'));
     const stderrLines: string[] = [];

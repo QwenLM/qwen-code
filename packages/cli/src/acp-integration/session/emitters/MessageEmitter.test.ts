@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MessageEmitter } from './MessageEmitter.js';
 import type { SessionContext } from '../types.js';
-import type { Config } from '@qwen-code/qwen-code-core';
+import { apiActivityTracker, type Config } from '@qwen-code/qwen-code-core';
 
 describe('MessageEmitter', () => {
   let mockContext: SessionContext;
@@ -15,6 +15,10 @@ describe('MessageEmitter', () => {
   let emitter: MessageEmitter;
 
   beforeEach(() => {
+    // emitUsageMetadata drains the process-global API-activity tracker onto a
+    // live frame's `_meta`; zero it so a nonzero count from another test can't
+    // inject apiErrors/apiRetries keys into these exact-`_meta` assertions.
+    apiActivityTracker.drain();
     sendUpdateSpy = vi.fn().mockResolvedValue(undefined);
     mockContext = {
       sessionId: 'test-session-id',
@@ -94,6 +98,18 @@ describe('MessageEmitter', () => {
           parentToolCallId: 'agent-parent-1',
           subagentType: 'general-purpose',
         },
+      });
+    });
+  });
+
+  describe('emitSlashCommandOutput', () => {
+    it('should identify slash-command output in metadata', async () => {
+      await emitter.emitSlashCommandOutput('Compressing context...');
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Compressing context...' },
+        _meta: { source: 'slash_command' },
       });
     });
   });
@@ -292,6 +308,39 @@ describe('MessageEmitter', () => {
           durationMs: 1234,
         },
       });
+    });
+
+    it('drains model API errors/retries onto a live frame and stamps them', async () => {
+      apiActivityTracker.recordError();
+      apiActivityTracker.recordError();
+      apiActivityTracker.recordRetry();
+
+      // Live round (durationMs present) → the counts are drained and stamped.
+      await emitter.emitUsageMetadata({ totalTokenCount: 1 }, '', 500);
+      expect(sendUpdateSpy).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          _meta: expect.objectContaining({ apiErrors: 2, apiRetries: 1 }),
+        }),
+      );
+
+      // A second live round with nothing pending carries neither key (the first
+      // emit drained the tracker to zero).
+      await emitter.emitUsageMetadata({ totalTokenCount: 1 }, '', 500);
+      const secondMeta = sendUpdateSpy.mock.lastCall?.[0]._meta;
+      expect(secondMeta).not.toHaveProperty('apiErrors');
+      expect(secondMeta).not.toHaveProperty('apiRetries');
+    });
+
+    it('does not drain the tracker on a replay frame (no durationMs)', async () => {
+      apiActivityTracker.recordError();
+
+      // Replay path omits durationMs → must not consume the pending count nor
+      // stamp it onto a frame the daemon ignores for replay.
+      await emitter.emitUsageMetadata({ totalTokenCount: 1 });
+      const replayMeta = sendUpdateSpy.mock.lastCall?.[0]._meta;
+      expect(replayMeta).not.toHaveProperty('apiErrors');
+      // The count survived for the next live frame to report.
+      expect(apiActivityTracker.peek().errors).toBe(1);
     });
 
     it('accumulates token counts and API time into the context cumulative usage', async () => {

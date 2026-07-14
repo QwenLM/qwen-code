@@ -219,13 +219,21 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     const conn = this.ensureConnection();
 
     const chunks: string[] = [];
+    let slashCommandOutput = '';
     const onChunk = (sid: string, chunk: string) => {
       if (sid === sessionId) chunks.push(chunk);
     };
+    const onSlashCommandOutput = (sid: string, chunk: string) => {
+      if (sid === sessionId) slashCommandOutput = chunk;
+    };
     const clearChunks = (sid: string) => {
-      if (sid === sessionId) chunks.length = 0;
+      if (sid === sessionId) {
+        chunks.length = 0;
+        slashCommandOutput = '';
+      }
     };
     this.on('textChunk', onChunk);
+    this.on('slashCommandOutput', onSlashCommandOutput);
     this.on('responseBoundary', clearChunks);
 
     const prompt: Array<Record<string, unknown>> = [];
@@ -245,10 +253,11 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       });
     } finally {
       this.off('textChunk', onChunk);
+      this.off('slashCommandOutput', onSlashCommandOutput);
       this.off('responseBoundary', clearChunks);
     }
 
-    return chunks.join('');
+    return chunks.join('') || slashCommandOutput;
   }
 
   async cancelSession(sessionId: string): Promise<void> {
@@ -312,7 +321,13 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
           | { type?: string; text?: string }
           | undefined;
         if (content?.type === 'text' && content.text) {
-          this.emit('textChunk', sessionId, content.text);
+          this.emit(
+            meta?.['source'] === 'slash_command'
+              ? 'slashCommandOutput'
+              : 'textChunk',
+            sessionId,
+            content.text,
+          );
         }
         break;
       }

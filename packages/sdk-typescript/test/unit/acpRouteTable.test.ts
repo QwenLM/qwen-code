@@ -900,6 +900,11 @@ describe('acpRouteTable – matchRoute', () => {
     expect(matchRoute('/session/s12/approval-mode', 'POST')).toBeNull();
   });
 
+  it('keeps rewind routes off ACP so strict REST auth cannot be bypassed', () => {
+    expect(matchRoute('/session/s12/rewind/snapshots', 'GET')).toBeNull();
+    expect(matchRoute('/session/s12/rewind', 'POST')).toBeNull();
+  });
+
   // ---- Unknown/unmatched routes ---------------------------------------
 
   it('returns null for unknown path', () => {

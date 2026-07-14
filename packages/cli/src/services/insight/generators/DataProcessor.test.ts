@@ -1110,6 +1110,61 @@ describe('DataProcessor', () => {
       });
     });
 
+    it('reports the wall-clock time of the most recent user interaction', async () => {
+      const early = '2025-01-15T09:12:00Z';
+      const late = '2025-01-16T14:37:00Z';
+      const mockRecords: ChatRecord[] = [
+        {
+          sessionId: 'session1',
+          timestamp: late,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'later' }] },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+        {
+          sessionId: 'session1',
+          timestamp: early,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'earlier' }] },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+
+      mockedReadJsonlFile.mockResolvedValue(mockRecords);
+
+      const files = [{ path: '/test/chat.jsonl', mtime: 1234567890 }];
+      const result = (await (
+        dataProcessor as unknown as {
+          generateMetrics(
+            files: Array<{ path: string; mtime: number }>,
+          ): Promise<{ latestActiveTime: string | null }>;
+        }
+      ).generateMetrics(files)) as { latestActiveTime: string | null };
+
+      // Reflects the real latest timestamp's wall-clock time (in local tz),
+      // regardless of input order.
+      const expected = new Date(late).toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+      expect(result.latestActiveTime).toBe(expected);
+
+      // Regression: the old code derived the time from date-only heatmap keys,
+      // so `new Date(key)` was UTC midnight and the time was a constant — never
+      // the real activity time.
+      const buggyConstant = new Date('2025-01-16').toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+      expect(result.latestActiveTime).not.toBe(buggyConstant);
+    });
+
     it('should track tool usage correctly', async () => {
       const mockRecords: ChatRecord[] = [
         {

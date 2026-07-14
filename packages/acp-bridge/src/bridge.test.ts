@@ -164,6 +164,51 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('memoizes shutdown and keeps the first workspace-removal reason', async () => {
+    const lifecycle: Array<{ type: string; reason?: string }> = [];
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+      sessionLifecycle: (event) => lifecycle.push(event),
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const iterator = bridge
+      .subscribeEvents(session.sessionId)
+      [Symbol.asyncIterator]();
+    const terminalEvent = iterator.next();
+
+    const first = bridge.shutdown({ reason: 'workspace_removed' });
+    const second = bridge.shutdown({ reason: 'daemon_shutdown' });
+
+    expect(second).toBe(first);
+    await first;
+    await expect(terminalEvent).resolves.toMatchObject({
+      value: {
+        type: 'session_died',
+        data: { reason: 'workspace_removed' },
+      },
+    });
+    expect(lifecycle.at(-1)).toMatchObject({
+      type: 'removed',
+      reason: 'workspace_removed',
+    });
+  });
+
+  it('publishes the shutdown promise before lifecycle callbacks can re-enter', async () => {
+    let reentered: Promise<void> | undefined;
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+      sessionLifecycle: (event) => {
+        if (event.type === 'removed') reentered = bridge.shutdown();
+      },
+    });
+    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    const first = bridge.shutdown({ reason: 'workspace_removed' });
+
+    expect(reentered).toBe(first);
+    await first;
+  });
+
   it('accepts a valid BridgeOptions.eventRingSize at construction time', () => {
     // Smoke: positive finite integers are accepted; the underlying
     // EventBus ring-size threading is exercised end-to-end in
