@@ -201,9 +201,15 @@ export class MessageRewriteMiddleware {
    * Call this before session ends to ensure all rewrites are flushed.
    */
   async waitForPendingRewrites(): Promise<void> {
-    if (this.pendingRewrites.length > 0) {
-      await Promise.allSettled(this.pendingRewrites);
+    // Drain in a loop: a flushTurn that lands while we're awaiting appends to
+    // pendingRewrites, so snapshotting once and then reassigning to [] would
+    // silently drop those late arrivals. Take the current batch, clear the
+    // queue so concurrent pushes go into a fresh array, await it, then repeat
+    // until nothing new was enqueued.
+    while (this.pendingRewrites.length > 0) {
+      const inFlight = this.pendingRewrites;
       this.pendingRewrites = [];
+      await Promise.allSettled(inFlight);
     }
   }
 }
