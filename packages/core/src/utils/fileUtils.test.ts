@@ -2066,6 +2066,32 @@ describe('fileUtils', () => {
         expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
         expect(result.llmContent).toContain('too large to return safely');
       });
+
+      it('falls back to text guidance when rendering returns no page images', async () => {
+        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
+        mockMimeGetType.mockReturnValue('application/pdf');
+        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
+        mockExecResult({ stdout: 'x'.repeat(80_000), stderr: '', code: 0 });
+        mockRender.mockResolvedValue({
+          success: true,
+          images: [],
+          bytesTruncated: false,
+        });
+
+        const result = await processSingleFileContent(
+          testPdfFilePath,
+          visionConfig,
+          { pages: '1' },
+        );
+
+        expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
+        expect(result.llmContent).toContain('too large to return safely');
+        expect(Array.isArray(result.llmContent)).toBe(false);
+        expect(mockRender).toHaveBeenCalledWith(testPdfFilePath, {
+          firstPage: 1,
+          lastPage: 1,
+        });
+      });
     });
 
     describe('PDF vision-bridge rendering (text-only model)', () => {

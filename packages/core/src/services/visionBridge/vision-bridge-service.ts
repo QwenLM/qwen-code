@@ -438,6 +438,7 @@ export async function runVisionBridge(params: {
       omittedCount,
     );
   }
+  const modelEndpoint = hostOf(baseUrl);
   if (toConvert.length === 0) {
     return failure(
       validImages.length > 0
@@ -445,7 +446,7 @@ export async function runVisionBridge(params: {
         : 'no usable image could be read',
       parts,
       omittedCount,
-      { modelId },
+      { modelId, ...(modelEndpoint && { modelEndpoint }) },
     );
   }
 
@@ -462,7 +463,6 @@ export async function runVisionBridge(params: {
   ];
   // We are about to send the image(s); disclose egress conservatively from here
   // on (success and every failure/cancel after this point).
-  const modelEndpoint = hostOf(baseUrl);
   const egress = {
     egressOccurred: true,
     ...(modelEndpoint && { modelEndpoint }),

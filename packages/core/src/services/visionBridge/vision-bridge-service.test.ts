@@ -747,10 +747,16 @@ describe('runVisionBridge', () => {
     expect((result.parts as Part[]).some((p) => p.inlineData)).toBe(false);
   });
 
-  it('fails with "no usable image" when every image is invalid', async () => {
+  it('fails before egress with the selected endpoint when every image is invalid', async () => {
     const oversized = image('a'.repeat(10 * 1024 * 1024));
+    const configWithEndpoint = {
+      getDefaultVisionBridgeModel: () => ({
+        id: 'qwen3-vl-plus',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      }),
+    } as unknown as Config;
     const result = await runVisionBridge({
-      config,
+      config: configWithEndpoint,
       parts: ['describe this', oversized],
       signal: signal(),
     });
@@ -759,9 +765,15 @@ describe('runVisionBridge', () => {
     expect(result.error).toMatch(/no usable image/);
     expect(result.omittedCount).toBe(1);
     expect(result.egressOccurred).toBeUndefined();
+    expect(result.modelEndpoint).toBe('dashscope.aliyuncs.com');
     expect(mockSideQuery).not.toHaveBeenCalled();
     expect(textOf(result.parts)).toContain('describe this');
     expect((result.parts as Part[]).some((p) => p.inlineData)).toBe(false);
+    const notice = formatVisionBridgeNotice(result);
+    expect(notice).toContain(
+      'Vision bridge (qwen3-vl-plus (dashscope.aliyuncs.com)) failed',
+    );
+    expect(notice).not.toContain('were sent');
   });
 });
 
@@ -791,23 +803,6 @@ describe('formatVisionBridgeNotice', () => {
       egressOccurred: false,
     });
 
-    expect(notice).not.toContain('were sent');
-  });
-
-  it('identifies the selected endpoint when failure happens before egress', () => {
-    const notice = formatVisionBridgeNotice({
-      applied: false,
-      status: 'failed',
-      convertedCount: 0,
-      omittedCount: 0,
-      modelId: 'qwen3-vl-plus',
-      modelEndpoint: 'dashscope.aliyuncs.com',
-      egressOccurred: false,
-    });
-
-    expect(notice).toContain(
-      'Vision bridge (qwen3-vl-plus (dashscope.aliyuncs.com)) failed',
-    );
     expect(notice).not.toContain('were sent');
   });
 
