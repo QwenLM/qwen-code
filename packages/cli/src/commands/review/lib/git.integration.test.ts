@@ -9,13 +9,22 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import {
+  mkdtempSync,
+  rmSync,
+  existsSync,
+  writeFileSync,
+  mkdirSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { releaseWorktree } from './git.js';
+import { gitRawTolerateDiff, releaseWorktree } from './git.js';
+import { NULL_DEVICE } from './diff-flags.js';
 
 let repo: string;
+let home: string;
 let cwd: string;
+let savedEnv: NodeJS.ProcessEnv;
 
 function git(...args: string[]): string {
   return execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
@@ -23,18 +32,27 @@ function git(...args: string[]): string {
 
 beforeEach(() => {
   repo = mkdtempSync(join(tmpdir(), 'review-wt-'));
-  git('init', '-q', '.');
-  git(
-    '-c',
-    'user.email=a@b',
-    '-c',
-    'user.name=a',
-    'commit',
-    '-q',
-    '--allow-empty',
-    '-m',
-    'init',
-  );
+  home = mkdtempSync(join(tmpdir(), 'review-wt-home-'));
+  writeFileSync(join(home, '.gitconfig'), '');
+
+  // Isolate the fixture from the developer's git environment. Without this,
+  // `git init` loads their templates and the commit below runs their
+  // `core.hooksPath` hooks — a targeted run visibly executed configured
+  // pre-commit, prepare-commit-msg, commit-msg, post-commit and post-checkout
+  // hooks — and a global `commit.gpgsign=true` fails the suite for want of a key.
+  // The wrappers under test read `process.env` per call, so setting it here
+  // reaches them.
+  savedEnv = { ...process.env };
+  process.env['GIT_CONFIG_NOSYSTEM'] = '1';
+  process.env['GIT_CONFIG_GLOBAL'] = join(home, '.gitconfig');
+  process.env['HOME'] = home;
+
+  git('init', '-q', '--template=', '.');
+  git('config', 'user.email', 'a@b');
+  git('config', 'user.name', 'a');
+  git('config', 'commit.gpgsign', 'false');
+  git('config', 'core.hooksPath', join(repo, '.no-such-hooks'));
+  git('commit', '-q', '--allow-empty', '--no-verify', '-m', 'init');
   cwd = process.cwd();
   // `releaseWorktree` shells out to `git` with no cwd, so it acts on the
   // process's directory. Point that at the fixture.
@@ -43,7 +61,9 @@ beforeEach(() => {
 
 afterEach(() => {
   process.chdir(cwd);
+  process.env = savedEnv;
   rmSync(repo, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true });
 });
 
 describe('releaseWorktree', () => {
@@ -97,5 +117,46 @@ describe('releaseWorktree', () => {
     // mask the error that got us there.
     process.chdir(tmpdir()); // not a repo
     expect(() => releaseWorktree('/nonexistent/wt')).not.toThrow();
+  });
+});
+
+describe('gitRawTolerateDiff', () => {
+  it('returns the diff when git exits 1 because the inputs differ', () => {
+    writeFileSync(join(repo, 'new.ts'), 'export const a = 1;\n');
+    const out = gitRawTolerateDiff(
+      '-C',
+      repo,
+      'diff',
+      '--no-index',
+      '--',
+      NULL_DEVICE,
+      'new.ts',
+    );
+    expect(out.toString('utf8')).toContain('+++ b/new.ts');
+  });
+
+  it('throws when git exits 1 with NO output — that is a failure, not a diff', () => {
+    // The distinction this whole helper turns on. `git diff --no-index` against
+    // a **directory** — which is what an embedded git repo or a symlink to one
+    // looks like coming out of `ls-files --others` — also exits 1, but with
+    // empty stdout and an error on stderr.
+    //
+    // An empty `Buffer` is a truthy object. A guard of `e.status === 1 &&
+    // e.stdout` therefore accepted that as a successful diff of nothing, and the
+    // caller went on to record the path as reviewed. Exit 1 with no output must
+    // fail loudly so the caller can record the truth instead.
+    mkdirSync(join(repo, 'subdir'));
+    writeFileSync(join(repo, 'subdir', 'inner.ts'), 'export const b = 2;\n');
+    expect(() =>
+      gitRawTolerateDiff(
+        '-C',
+        repo,
+        'diff',
+        '--no-index',
+        '--',
+        NULL_DEVICE,
+        'subdir',
+      ),
+    ).toThrow();
   });
 });

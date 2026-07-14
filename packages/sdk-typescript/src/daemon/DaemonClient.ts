@@ -118,6 +118,7 @@ import type {
   DaemonRuntimeMcpAddResult,
   DaemonRuntimeMcpRemoveResult,
   DaemonToolToggleResult,
+  DaemonSkillToggleResult,
   DaemonSessionArtifactInput,
   DaemonSessionArtifactMutationResult,
   DaemonSessionArtifactsEnvelope,
@@ -2509,6 +2510,40 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Toggle a user-invocable skill in workspace `skills.disabled` settings.
+   * Active ACP sessions refresh their skill validation and command lists before
+   * the response returns; `activation` reports deferred or partial refreshes.
+   *
+   * Pre-flight `caps.features.includes('workspace_skill_toggle')` before calling.
+   */
+  async setWorkspaceSkillEnabled(
+    skillName: string,
+    enabled: boolean,
+    opts?: { clientId?: string },
+  ): Promise<DaemonSkillToggleResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/skills/${urlEncode(skillName)}/enable`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({ enabled }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /workspace/skills/:name/enable',
+          );
+        }
+        return (await res.json()) as DaemonSkillToggleResult;
+      },
+    );
+  }
+
   async workspaceSettings(opts?: {
     clientId?: string;
   }): Promise<DaemonWorkspaceSettingsStatus> {
@@ -4241,6 +4276,19 @@ export class WorkspaceDaemonClient {
     return this.post(
       `/tools/${urlEncode(toolName)}/enable`,
       'POST /workspaces/:workspace/tools/:name/enable',
+      { enabled },
+      opts?.clientId,
+    );
+  }
+
+  setWorkspaceSkillEnabled(
+    skillName: string,
+    enabled: boolean,
+    opts?: { clientId?: string },
+  ): Promise<DaemonSkillToggleResult> {
+    return this.post(
+      `/skills/${urlEncode(skillName)}/enable`,
+      'POST /workspaces/:workspace/skills/:name/enable',
       { enabled },
       opts?.clientId,
     );

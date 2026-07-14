@@ -26,6 +26,17 @@ function base(overrides: Partial<ComposeReviewInput>): ComposeReviewInput {
   return {
     criticalsInline: 0,
     suggestionsInline: 0,
+    // These cases exercise the C/S table, the body clauses and the downgrades —
+    // not coverage. Absent coverage caps now (a run must show what it read), so a
+    // table test meaning to reach a clean APPROVE supplies a real "covered"
+    // report — the same thing the PR path passes — not a model-settable opt-out
+    // (there is none: no model-written field can be its own authorisation).
+    coverage: {
+      ok: true,
+      missingChunks: [],
+      whiffedAgents: [],
+      uncoverableChunks: [],
+    },
     modelId: MODEL,
     ...overrides,
   };
@@ -484,5 +495,137 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     expect(written.event).toBe('COMMENT');
     expect(written.body).toContain('Suggestions are inline.');
     expect(written.body.endsWith(FOOTER)).toBe(true);
+  });
+});
+
+describe('coverage caps the verdict', () => {
+  const base = { criticalsInline: 0, suggestionsInline: 0, modelId: 'm' };
+
+  it('caps when coverage is omitted and not opted out — the JSDoc promise', () => {
+    // "Omitting it is itself a cap." A caller that supplies no coverage and does
+    // not declare it inapplicable cannot approve — that is the dogfood failure,
+    // an orchestrator that skipped check-coverage and got a rubber stamp.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      modelId: MODEL,
+    });
+    expect(r.event).not.toBe('APPROVE');
+    expect(r.body).toContain('no `check-coverage` report was supplied');
+  });
+
+  it('approves a clean run that supplies a covered report', () => {
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      coverage: { ok: true, missingChunks: [], whiffedAgents: [] },
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('APPROVE');
+  });
+
+  it('caps on an EMPTY coverage report — {} is not coverage', () => {
+    // `{}` fell between both guards: "provided", so the absent-coverage cap was
+    // skipped, and `Object.keys({}).length > 0` was false, so the failed-coverage
+    // cap was skipped too. Both gates open, and `{}` composed an APPROVE.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      coverage: {},
+      modelId: MODEL,
+    });
+    expect(r.event).not.toBe('APPROVE');
+  });
+
+  it('refuses a chunk id that is not one', () => {
+    // `typeof v === 'number'` admits NaN/Infinity/-1/2.5, each of which would be
+    // rendered into the body as "chunk NaN".
+    for (const bad of [Number.NaN, Infinity, -1, 2.5, 0]) {
+      expect(() =>
+        composeReview({
+          ...base,
+          coverage: { ok: true, missingChunks: [bad] },
+        }),
+      ).toThrow(/positive whole numbers/);
+    }
+  });
+
+  it('forbids an Approve on `ok: false` alone', () => {
+    // A report that says the coverage check failed is the strongest statement in
+    // this input; it must cap without needing an itemised list to be believed.
+    const r = composeReview({ ...base, coverage: { ok: false } });
+    expect(r.event).not.toBe('APPROVE');
+  });
+
+  it('never certifies "no blockers" over a chunk nobody read', () => {
+    // The event capped correctly but certification did not, so the body opened
+    // "Reviewed — no blockers." two lines above "nobody read them."
+    const r = composeReview({
+      ...base,
+      coverage: { ok: true, missingChunks: [1] },
+    });
+    expect(r.body).not.toContain('no blockers');
+    expect(r.body).toContain('nobody read them');
+  });
+
+  it('forbids an Approve on a missing receipt alone', () => {
+    // Independently of `ok`: a chunk nobody receipted caps on its own.
+    const r = composeReview({
+      ...base,
+      coverage: { ok: true, missingChunks: [1, 2, 3] },
+    });
+    expect(r.event).not.toBe('APPROVE');
+    expect(r.body).toContain('chunk 1');
+    // And with its true cause, not the uncoverable renderer's read-limit excuse.
+    expect(r.body).toContain('nobody read them');
+    expect(r.body).not.toContain('exceeds the read limit');
+  });
+
+  it('the dogfood failure: empty findings, unread diff, no Approve', () => {
+    const r = composeReview({
+      ...base,
+      coverage: { missingChunks: [1, 2, 3], whiffedAgents: [], ok: false },
+    });
+    expect(r.event).not.toBe('APPROVE');
+    expect(r.body).toContain('chunk 1');
+  });
+
+  it('forbids an Approve when an agent returned nothing', () => {
+    const r = composeReview({
+      ...base,
+      coverage: { missingChunks: [], whiffedAgents: ['security'], ok: false },
+    });
+
+    expect(r.event).not.toBe('APPROVE');
+    expect(r.body).toContain('security');
+  });
+
+  it('caps on a diff-induced uncoverable chunk from the coverage report', () => {
+    // The type declared missingChunks/whiffedAgents/ok but the code also reads
+    // coverage.uncoverableChunks — untyped and untested, so a regression there
+    // was invisible. An uncoverable chunk forbids an Approve.
+    const r = composeReview({
+      ...base,
+      coverage: { ok: true, uncoverableChunks: [5] },
+    });
+    expect(r.event).not.toBe('APPROVE');
+    expect(r.body).toContain('chunk 5');
+  });
+
+  it('still approves a clean, fully covered run', () => {
+    const r = composeReview({
+      ...base,
+      coverage: { missingChunks: [], whiffedAgents: [], ok: true },
+    });
+    expect(r.event).toBe('APPROVE');
+  });
+
+  it('refuses a coverage value that is not an object', () => {
+    expect(() => composeReview({ ...base, coverage: 'ok' } as never)).toThrow(
+      /coverage must be an object/,
+    );
+    expect(() =>
+      composeReview({ ...base, coverage: { missingChunks: ['1'] } } as never),
+    ).toThrow(/positive whole numbers/);
   });
 });

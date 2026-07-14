@@ -268,7 +268,10 @@ export function parseGitHubRepoForReleases(source: string): {
     );
   }
   const owner = parts[0];
-  const repo = parts[1].replace('.git', '');
+  // Strip a trailing `.git` suffix (from clone-style URLs like `owner/repo.git`)
+  // only. An unanchored replace would mangle repo names that merely contain
+  // `.git`, e.g. GitHub Pages repos named `<user>.github.io`.
+  const repo = parts[1].replace(/\.git$/, '');
 
   if (owner.startsWith('git@github.com')) {
     throw new Error(

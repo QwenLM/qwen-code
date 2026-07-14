@@ -1613,9 +1613,9 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/artifacts',
     mutate({ strict: true }),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/artifacts',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         if (!requireSessionArtifactClientId(clientId, res)) return;
@@ -1641,9 +1641,11 @@ export function registerSessionRoutes(
               'clientRetained'
             ] as SessionArtifactInput['clientRetained'],
           };
-          const result = await bridge.addSessionArtifact(sessionId, artifact, {
-            clientId,
-          });
+          const result = await runtime.bridge.addSessionArtifact(
+            sessionId,
+            artifact,
+            { clientId },
+          );
           res.status(200).json(result);
         } catch (err) {
           if (sendArtifactValidationError(res, err)) return;
@@ -1659,9 +1661,9 @@ export function registerSessionRoutes(
   app.delete(
     '/session/:id/artifacts/:artifactId',
     mutate({ strict: true }),
-    withMutableSession(
+    withOwnerMutableSession(
       'DELETE /session/:id/artifacts/:artifactId',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const artifactId = req.params['artifactId'];
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
@@ -1678,7 +1680,7 @@ export function registerSessionRoutes(
           return;
         }
         try {
-          const result = await bridge.removeSessionArtifact(
+          const result = await runtime.bridge.removeSessionArtifact(
             sessionId,
             artifactId,
             { clientId },
@@ -1739,9 +1741,9 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/continue',
     mutate({ strict: true }),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/continue',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         // Forward the originator and a generated promptId so the bridge can
         // attribute and correlate the continuation turn (it now runs through the
         // prompt-admission path, same as POST /session/:id/prompt). The accepted
@@ -1750,7 +1752,7 @@ export function registerSessionRoutes(
         if (clientId === null) return;
         const promptId = crypto.randomUUID();
         res.status(200).json(
-          await bridge.continueSession(sessionId, {
+          await runtime.bridge.continueSession(sessionId, {
             ...(clientId !== undefined ? { clientId } : {}),
             promptId,
           }),
@@ -3068,9 +3070,9 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/language',
     mutate(),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/language',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         const language = body['language'];
         const syncOutputLanguage = body['syncOutputLanguage'];
@@ -3103,7 +3105,7 @@ export function registerSessionRoutes(
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
 
-        const response = await bridge.setSessionLanguage(
+        const response = await runtime.bridge.setSessionLanguage(
           sessionId,
           {
             language,

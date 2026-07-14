@@ -1822,11 +1822,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // at the session/update fan-in to the daemon host's metrics ring via
         // the telemetry seam. Optional-chained so non-daemon callers (tests,
         // Mode A) that wire no `tokenUsage` metric are a silent no-op.
-        (inputTokens, outputTokens, durationMs) =>
+        (inputTokens, outputTokens, durationMs, apiErrors, apiRetries) =>
           telemetry.metrics?.tokenUsage?.(
             inputTokens,
             outputTokens,
             durationMs,
+            apiErrors,
+            apiRetries,
           ),
         // `create_sub_session` tool: forward the request/response hook so a child
         // tool can ask the daemon to spawn a sub-session and (for 'first-turn')

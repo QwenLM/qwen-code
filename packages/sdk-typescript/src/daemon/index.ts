@@ -355,6 +355,8 @@ export type {
   DaemonRuntimeMcpAddResult,
   DaemonRuntimeMcpRemoveResult,
   DaemonToolToggleResult,
+  DaemonSkillToggleActivation,
+  DaemonSkillToggleResult,
   DaemonSettingDescriptor,
   DaemonPermissionRuleSet,
   DaemonPermissionRuleType,

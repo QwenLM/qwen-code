@@ -124,7 +124,10 @@ import { CAPABILITIES_SCHEMA_VERSION, type ServeOptions } from './types.js';
 import type { DaemonLogger } from './daemon-logger.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
 import { getRateLimiter } from './rate-limit.js';
-import type { DaemonWorkspaceService } from './workspace-service/types.js';
+import {
+  WorkspaceSkillNotToggleableError,
+  type DaemonWorkspaceService,
+} from './workspace-service/types.js';
 import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
 import {
   createWorkspaceRegistry,
@@ -285,10 +288,11 @@ const EXPECTED_STAGE1_FEATURES = [
   // hash-aware text mutation routes behind the strict mutation gate.
   'workspace_file_bytes',
   'workspace_file_write',
-  // #4175 Wave 4 PR 17. Mutation control routes (approval mode toggle,
-  // workspace tool enable/disable, init scaffold, MCP server restart).
+  // Mutation control routes (approval mode, workspace tool/skill toggles,
+  // init scaffold, and MCP server restart).
   'session_approval_mode_control',
   'workspace_tool_toggle',
+  'workspace_skill_toggle',
   'workspace_permissions',
   'workspace_trust',
   'workspace_init',
@@ -12288,6 +12292,200 @@ describe('createServeApp', () => {
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('invalid_tool_name');
       expect(bridge.setToolEnabledCalls).toHaveLength(0);
+    });
+  });
+
+  describe('POST /workspace/skills/:name/enable', () => {
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+    const reviewSkill = {
+      kind: 'skill' as const,
+      status: 'ok' as const,
+      name: 'review',
+      description: 'Review changed code',
+      level: 'bundled' as const,
+      modelInvocable: true,
+    };
+
+    it('requires the strict bearer-auth mutation gate', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/workspace/skills/review/enable')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ enabled: false });
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+    });
+
+    it('validates skill names and the enabled body', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const empty = await auth(
+        request(app).post('/workspace/skills/%20%20/enable'),
+      ).send({ enabled: false });
+      expect(empty.status).toBe(400);
+      expect(empty.body.code).toBe('invalid_skill_name');
+
+      const tooLong = await auth(
+        request(app).post(`/workspace/skills/${'a'.repeat(257)}/enable`),
+      ).send({ enabled: false });
+      expect(tooLong.status).toBe(400);
+      expect(tooLong.body.code).toBe('invalid_skill_name');
+
+      const badBody = await auth(
+        request(app).post('/workspace/skills/review/enable'),
+      ).send({ enabled: 'no' });
+      expect(badBody.status).toBe(400);
+      expect(badBody.body.code).toBe('invalid_enabled_flag');
+    });
+
+    it('returns the canonical name and deferred activation without a child', async () => {
+      const bridge = fakeBridge({
+        workspaceSkillsImpl: async () => ({
+          v: 1,
+          workspaceCwd: WS_BOUND,
+          initialized: true,
+          skills: [reviewSkill],
+        }),
+      });
+      const persistDisabledSkills = vi.fn().mockResolvedValue({
+        changed: true,
+        disabled: ['review'],
+      });
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge,
+        boundWorkspace: WS_BOUND,
+        persistDisabledSkills,
+        primaryWorkspaceTrusted: true,
+      });
+      const res = await auth(
+        request(app).post('/workspace/skills/ReViEw/enable'),
+      ).send({ enabled: false });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        skillName: 'review',
+        enabled: false,
+        changed: true,
+        activation: 'deferred',
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+      });
+      expect(persistDisabledSkills).toHaveBeenCalledWith(
+        WS_BOUND,
+        'review',
+        false,
+      );
+    });
+
+    it('returns 404 for an unknown skill', async () => {
+      const persistDisabledSkills = vi.fn();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge({
+          workspaceSkillsImpl: async () => ({
+            v: 1,
+            workspaceCwd: WS_BOUND,
+            initialized: true,
+            skills: [reviewSkill],
+          }),
+        }),
+        persistDisabledSkills,
+        primaryWorkspaceTrusted: true,
+      });
+      const res = await auth(
+        request(app).post('/workspace/skills/missing/enable'),
+      ).send({ enabled: false });
+      expect(res.status).toBe(404);
+      expect(res.body.code).toBe('skill_not_found');
+      expect(persistDisabledSkills).not.toHaveBeenCalled();
+    });
+
+    it('rejects an unknown workspace client id before persistence', async () => {
+      const persistDisabledSkills = vi.fn();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        persistDisabledSkills,
+        primaryWorkspaceTrusted: true,
+      });
+      const res = await auth(
+        request(app).post('/workspace/skills/review/enable'),
+      )
+        .set('X-Qwen-Client-Id', 'forged-client')
+        .send({ enabled: false });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_client_id');
+      expect(persistDisabledSkills).not.toHaveBeenCalled();
+    });
+
+    it('returns 409 without persisting a non-user-invocable skill', async () => {
+      const persistDisabledSkills = vi.fn();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge({
+          workspaceSkillsImpl: async () => ({
+            v: 1,
+            workspaceCwd: WS_BOUND,
+            initialized: true,
+            skills: [{ ...reviewSkill, userInvocable: false }],
+          }),
+        }),
+        persistDisabledSkills,
+        primaryWorkspaceTrusted: true,
+      });
+      const res = await auth(
+        request(app).post('/workspace/skills/review/enable'),
+      ).send({ enabled: false });
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'skill_not_toggleable',
+        reason: 'not_user_invocable',
+      });
+      expect(persistDisabledSkills).not.toHaveBeenCalled();
+    });
+
+    it('returns the locked scope from persistence validation', async () => {
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge({
+          workspaceSkillsImpl: async () => ({
+            v: 1,
+            workspaceCwd: WS_BOUND,
+            initialized: true,
+            skills: [reviewSkill],
+          }),
+        }),
+        persistDisabledSkills: vi
+          .fn()
+          .mockRejectedValue(
+            new WorkspaceSkillNotToggleableError('review', 'locked', 'user'),
+          ),
+        primaryWorkspaceTrusted: true,
+      });
+      const res = await auth(
+        request(app).post('/workspace/skills/review/enable'),
+      ).send({ enabled: true });
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'skill_not_toggleable',
+        reason: 'locked',
+        lockedScope: 'user',
+      });
+    });
+
+    it('rejects writes to an untrusted primary workspace', async () => {
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+      });
+      const res = await auth(
+        request(app).post('/workspace/skills/review/enable'),
+      ).send({ enabled: false });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('untrusted_workspace');
     });
   });
 

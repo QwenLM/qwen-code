@@ -797,10 +797,6 @@ export interface SandboxConfig {
 }
 
 /**
- * Settings shared across multi-agent collaboration features
- * (Arena, Team, Swarm).
- */
-/**
  * General-purpose worktree settings (Phase D-2). Distinct from
  * {@link AgentsCollabSettings.arena.worktreeBaseDir}, which only governs
  * Arena multi-model worktrees.
@@ -821,7 +817,13 @@ export interface WorktreeSettings {
   symlinkDirectories?: readonly string[];
 }
 
+/** Settings shared across agents and multi-agent collaboration features. */
 export interface AgentsCollabSettings {
+  /** Built-in subagent settings */
+  builtin?: {
+    /** Model selector for the built-in Explore subagent (default: inherit). */
+    exploreModel?: string;
+  };
   /**
    * Global maximum number of background sub-agents running concurrently.
    * When the cap is reached, additional launches wait for a slot.
@@ -1125,7 +1127,7 @@ export interface ConfigParameters {
   modelProvidersConfig?: ModelProvidersConfig;
   /** Maps custom provider ids to their SDK protocol (AuthType) */
   providerProtocolConfig?: ProviderProtocolConfig;
-  /** Multi-agent collaboration settings (Arena, Team, Swarm) */
+  /** Agent and multi-agent collaboration settings */
   agents?: AgentsCollabSettings;
   /** General-purpose worktree settings (Phase D-2). */
   worktree?: WorktreeSettings;

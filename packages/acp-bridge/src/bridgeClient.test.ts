@@ -691,7 +691,13 @@ describe('BridgeClient — token usage accounting', () => {
 
   function makeClientWithTokenHook(
     sessionId: string,
-    onTokenUsage: (inputTokens: number, outputTokens: number) => void,
+    onTokenUsage: (
+      inputTokens: number,
+      outputTokens: number,
+      durationMs?: number,
+      apiErrors?: number,
+      apiRetries?: number,
+    ) => void,
   ) {
     const fakeEntry = {
       sessionId,
@@ -729,8 +735,30 @@ describe('BridgeClient — token usage accounting', () => {
     } as Parameters<BridgeClient['sessionUpdate']>[0]);
 
     expect(onTokenUsage).toHaveBeenCalledTimes(1);
-    // The sibling `_meta.durationMs` (LLM round-trip) rides through too.
-    expect(onTokenUsage).toHaveBeenCalledWith(1200, 340, 4200);
+    // The sibling `_meta.durationMs` (LLM round-trip) rides through too; a frame
+    // with no error/retry meta reports 0 for both API-health increments.
+    expect(onTokenUsage).toHaveBeenCalledWith(1200, 340, 4200, 0, 0);
+  });
+
+  it('forwards per-round model API error / retry increments from _meta', async () => {
+    const onTokenUsage = vi.fn();
+    const client = makeClientWithTokenHook('sess:apihealth', onTokenUsage);
+
+    await client.sessionUpdate({
+      sessionId: 'sess:apihealth',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          usage: { inputTokens: 10, outputTokens: 5 },
+          durationMs: 900,
+          apiErrors: 2,
+          apiRetries: 3,
+        },
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    expect(onTokenUsage).toHaveBeenCalledWith(10, 5, 900, 2, 3);
   });
 
   it('does not report when the update carries no usage meta', async () => {
@@ -761,8 +789,9 @@ describe('BridgeClient — token usage accounting', () => {
       },
     } as Parameters<BridgeClient['sessionUpdate']>[0]);
 
-    // No `_meta.durationMs` on this frame → the round-trip arg is undefined.
-    expect(onTokenUsage).toHaveBeenCalledWith(0, 50, undefined);
+    // No `_meta.durationMs` on this frame → the round-trip arg is undefined,
+    // and the API-health increments default to 0.
+    expect(onTokenUsage).toHaveBeenCalledWith(0, 50, undefined, 0, 0);
   });
 
   it('does NOT count tokens for replayed history frames (no live entry yet)', async () => {
