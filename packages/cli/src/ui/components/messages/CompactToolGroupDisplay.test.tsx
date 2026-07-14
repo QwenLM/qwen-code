@@ -325,6 +325,30 @@ describe('estimateCompactToolGroupHeight', () => {
 
     expect(estimateCompactToolGroupHeight([tool], 30)).toBeGreaterThan(1);
   });
+
+  it('reserves additional width for active summary status', () => {
+    const description =
+      'packages/cli/src/ui/components/messages/CompactToolGroupDisplay.tsx';
+    const completed = toolCall({ name: 'ReadFile', description });
+    const active = toolCall({
+      name: 'ReadFile',
+      description,
+      status: ToolCallStatus.Executing,
+    });
+
+    expect(estimateCompactToolGroupHeight([active], 30)).toBeGreaterThan(
+      estimateCompactToolGroupHeight([completed], 30),
+    );
+  });
+
+  it('uses terminal display width for wide characters', () => {
+    const tool = toolCall({
+      name: 'ReadFile',
+      description: '中文中文中文中文',
+    });
+
+    expect(estimateCompactToolGroupHeight([tool], 12)).toBe(3);
+  });
 });
 
 describe('isCollapsibleTool', () => {
