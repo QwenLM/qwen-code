@@ -92,6 +92,7 @@ export class AcpConnection {
     this.workingDir = workingDir;
 
     const env = { ...process.env };
+    env['ELECTRON_RUN_AS_NODE'] = '1';
 
     const proxyArg = extraArgs.find(
       (arg, i) => arg === '--proxy' && i + 1 < extraArgs.length,
