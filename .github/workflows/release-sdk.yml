@@ -312,6 +312,7 @@ jobs:
       - name: 'Commit and Push package version (stable only)'
         if: |-
           ${{ steps.vars.outputs.is_dry_run == 'false' && steps.vars.outputs.is_nightly == 'false' && steps.vars.outputs.is_preview == 'false' }}
+        id: 'persist_source'
         env:
           BRANCH_NAME: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
           RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
@@ -320,8 +321,10 @@ jobs:
           git add packages/sdk-typescript/package.json package-lock.json
           if git diff --staged --quiet; then
             echo "No version changes to commit"
+            echo "HAS_PERSISTED_SOURCE=false" >> "${GITHUB_OUTPUT}"
           else
             git commit -m "chore(release): sdk-typescript ${RELEASE_TAG}"
+            echo "HAS_PERSISTED_SOURCE=true" >> "${GITHUB_OUTPUT}"
           fi
           echo "Pushing release branch to remote..."
           git push --set-upstream origin "${BRANCH_NAME}" --follow-tags
@@ -385,7 +388,7 @@ jobs:
 
       - name: 'Create PR to merge release branch into main'
         if: |-
-          ${{ steps.vars.outputs.is_dry_run == 'false' && steps.vars.outputs.is_nightly == 'false' && steps.vars.outputs.is_preview == 'false' }}
+          ${{ steps.vars.outputs.is_dry_run == 'false' && steps.vars.outputs.is_nightly == 'false' && steps.vars.outputs.is_preview == 'false' && steps.persist_source.outputs.HAS_PERSISTED_SOURCE == 'true' }}
         id: 'pr'
         env:
           GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
@@ -408,7 +411,7 @@ jobs:
 
       - name: 'Enable auto-merge for release PR'
         if: |-
-          ${{ steps.vars.outputs.is_dry_run == 'false' && steps.vars.outputs.is_nightly == 'false' && steps.vars.outputs.is_preview == 'false' }}
+          ${{ steps.vars.outputs.is_dry_run == 'false' && steps.vars.outputs.is_nightly == 'false' && steps.vars.outputs.is_preview == 'false' && steps.persist_source.outputs.HAS_PERSISTED_SOURCE == 'true' }}
         env:
           GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PR_URL: '${{ steps.pr.outputs.PR_URL }}'
