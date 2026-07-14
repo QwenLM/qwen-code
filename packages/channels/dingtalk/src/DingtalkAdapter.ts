@@ -1092,10 +1092,11 @@ export class DingtalkChannel extends ChannelBase {
   ): Promise<void> {
     let token: string | undefined;
     try {
-      token = this.config.clientSecret
-        ? await this.getProactiveToken()
-        : this.getAccessToken();
+      token = await this.getProactiveToken();
     } catch {
+      process.stderr.write(
+        `[DingTalk:${this.name}] Cannot download media: access token refresh failed.\n`,
+      );
       return;
     }
     const robotCode = this.config.clientId;

@@ -925,11 +925,16 @@ describe('DingtalkChannel inbound media', () => {
   it('keeps media attachment best-effort when app token refresh fails', async () => {
     const channel = createChannel();
     vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('network down'));
-    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
 
     await expect(
       attachImage(channel, {} as Envelope, 'download-code'),
     ).resolves.toBeUndefined();
+    expect(stderrSpy).toHaveBeenCalledWith(
+      '[DingTalk:test-dingtalk] Cannot download media: access token refresh failed.\n',
+    );
   });
 });
 
