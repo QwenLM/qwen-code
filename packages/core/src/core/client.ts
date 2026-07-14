@@ -102,7 +102,10 @@ import {
   collectAvailableSkillEntries,
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
-import type { DeferredToolSummary } from '../tools/tool-registry.js';
+import {
+  getFunctionSchemaFingerprint,
+  type DeferredToolSummary,
+} from '../tools/tool-registry.js';
 import {
   buildApiHistoryFromConversation,
   replayUiTelemetryFromConversation,
@@ -1368,7 +1371,10 @@ export class GeminiClient {
                 ];
                 for (const schema of restoredSchemas) {
                   if (schema.name) {
-                    toolRegistry.markProxySchemaPresented(schema.name);
+                    toolRegistry.markProxySchemaPresented({
+                      name: schema.name,
+                      schemaFingerprint: getFunctionSchemaFingerprint(schema),
+                    });
                   }
                 }
               }

@@ -5,8 +5,10 @@
  */
 
 import type { FunctionDeclaration } from '@google/genai';
+import { createHash } from 'node:crypto';
 import type {
   AnyDeclarativeTool,
+  DeferredToolPresentation,
   ToolResult,
   ToolResultDisplay,
   ToolInvocation,
@@ -36,6 +38,13 @@ export interface DeferredToolSummary {
   name: string;
   description: string;
   serverName?: string;
+}
+
+/** Returns the schema identity used to reject stale deferred presentations. */
+export function getFunctionSchemaFingerprint(
+  schema: FunctionDeclaration,
+): string {
+  return createHash('sha256').update(JSON.stringify(schema)).digest('hex');
 }
 
 const debugLogger = createDebugLogger('TOOL_REGISTRY');
@@ -756,10 +765,6 @@ export class ToolRegistry {
     return this.revealedDeferred.has(name);
   }
 
-  private getSchemaFingerprint(tool: AnyDeclarativeTool): string {
-    return JSON.stringify(tool.schema);
-  }
-
   isProxyEligibleDeferredTool(name: string): boolean {
     const tool = this.tools.get(name);
     return !!(
@@ -770,12 +775,16 @@ export class ToolRegistry {
     );
   }
 
-  markProxySchemaPresented(name: string): boolean {
-    const tool = this.tools.get(name);
-    if (!tool || !this.isProxyEligibleDeferredTool(name)) {
+  markProxySchemaPresented(presentation: DeferredToolPresentation): boolean {
+    const tool = this.tools.get(presentation.name);
+    if (!tool || !this.isProxyEligibleDeferredTool(presentation.name)) {
       return false;
     }
-    this.proxySchemaPresentations.set(name, this.getSchemaFingerprint(tool));
+    const currentFingerprint = getFunctionSchemaFingerprint(tool.schema);
+    if (currentFingerprint !== presentation.schemaFingerprint) {
+      return false;
+    }
+    this.proxySchemaPresentations.set(presentation.name, currentFingerprint);
     return true;
   }
 
@@ -784,7 +793,7 @@ export class ToolRegistry {
     if (!tool) return false;
     return (
       this.proxySchemaPresentations.get(name) ===
-      this.getSchemaFingerprint(tool)
+      getFunctionSchemaFingerprint(tool.schema)
     );
   }
 

@@ -757,8 +757,15 @@ export function convertToFunctionResponse(
         ) || '';
       return [createFunctionResponsePart(callId, toolName, stringifiedOutput)];
     }
-    // It's a functionResponse that we should pass through as is.
-    return [contentToProcess];
+    return [
+      {
+        functionResponse: {
+          ...contentToProcess.functionResponse,
+          id: callId,
+          name: toolName,
+        },
+      },
+    ];
   }
 
   if (contentToProcess.inlineData || contentToProcess.fileData) {
@@ -3885,6 +3892,7 @@ export class CoreToolScheduler {
 
       if (toolResult.error === undefined) {
         let content = toolResult.llmContent;
+        let deferredToolPresentations = toolResult.deferredToolPresentations;
         let contentLength: number | undefined =
           typeof content === 'string' ? content.length : undefined;
 
@@ -3971,11 +3979,15 @@ export class CoreToolScheduler {
 
         // Universal post-execution truncation gate — persists oversized
         // tool results to disk before system-reminders are appended.
-        content = await this.maybePersistLargeToolResult(
+        const persistedContent = await this.maybePersistLargeToolResult(
           callId,
           toolName,
           content,
         );
+        if (persistedContent !== content) {
+          deferredToolPresentations = undefined;
+        }
+        content = persistedContent;
 
         // Collect filesystem paths the tool just touched. Different tools
         // use different parameter names: `file_path` (read/edit/write),
@@ -4118,6 +4130,9 @@ export class CoreToolScheduler {
             { threshold: perToolMax, lines: perToolLines, keep: perToolKeep },
             promptIdForTruncation,
           );
+          if (truncated.content !== content) {
+            deferredToolPresentations = undefined;
+          }
           content = truncated.content;
         } catch (truncErr) {
           // A truncation/IO failure must never demote a successful tool call
@@ -4173,6 +4188,9 @@ export class CoreToolScheduler {
                 },
                 promptIdForTruncation,
               );
+              if (recombined.content !== content) {
+                deferredToolPresentations = undefined;
+              }
               content = recombined.content;
             } catch (truncErr) {
               debugLogger.warn(
@@ -4228,9 +4246,9 @@ export class CoreToolScheduler {
             ? { modelOverride: toolResult.modelOverride }
             : {}),
           ...(artifacts.length > 0 ? { artifacts } : {}),
-          ...(toolResult.deferredToolPresentations
+          ...(deferredToolPresentations
             ? {
-                deferredToolPresentations: toolResult.deferredToolPresentations,
+                deferredToolPresentations,
               }
             : {}),
         };
@@ -4730,10 +4748,15 @@ export class CoreToolScheduler {
     }
     if (!truncated.outputFile) return null;
 
+    const {
+      deferredToolPresentations: _droppedDeferredToolPresentations,
+      ...responseWithoutDeferredToolPresentations
+    } = call.response;
+
     return {
       ...call,
       response: {
-        ...call.response,
+        ...responseWithoutDeferredToolPresentations,
         responseParts: [
           {
             functionResponse: {
@@ -4756,7 +4779,8 @@ export class CoreToolScheduler {
 
   /**
    * Commit deferred tool schemas that were actually delivered to the model in
-   * successful tool results. `tool_search` returns these names on its ToolResult;
+   * successful tool results. `tool_search` returns schema-bound presentation
+   * metadata on its ToolResult;
    * once the result has been accepted into the conversation flow, the registry
    * can allow later `deferred_tool_call` requests to route to those real tools.
    */
@@ -4765,8 +4789,9 @@ export class CoreToolScheduler {
   ): void {
     for (const call of completedCalls) {
       if (call.status !== 'success') continue;
-      for (const name of call.response.deferredToolPresentations ?? []) {
-        this.toolRegistry.markProxySchemaPresented(name);
+      for (const presentation of call.response.deferredToolPresentations ??
+        []) {
+        this.toolRegistry.markProxySchemaPresented(presentation);
       }
     }
   }

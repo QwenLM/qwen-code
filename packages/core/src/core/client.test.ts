@@ -1303,9 +1303,11 @@ describe('Gemini Client (client.ts)', () => {
         },
       ]);
 
-      expect(reg.markProxySchemaPresented).toHaveBeenCalledWith('cron_create');
+      expect(reg.markProxySchemaPresented).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'cron_create' }),
+      );
       expect(reg.markProxySchemaPresented).not.toHaveBeenCalledWith(
-        'cron_list',
+        expect.objectContaining({ name: 'cron_list' }),
       );
       const restoredSchemaText = client
         .getHistory()
@@ -1365,7 +1367,7 @@ describe('Gemini Client (client.ts)', () => {
       ]);
 
       expect(reg.markProxySchemaPresented).not.toHaveBeenCalledWith(
-        'cron_create',
+        expect.objectContaining({ name: 'cron_create' }),
       );
     });
 
@@ -1429,7 +1431,7 @@ describe('Gemini Client (client.ts)', () => {
       ]);
 
       expect(reg.markProxySchemaPresented).not.toHaveBeenCalledWith(
-        'cron_create',
+        expect.objectContaining({ name: 'cron_create' }),
       );
     });
 
@@ -1530,9 +1532,11 @@ describe('Gemini Client (client.ts)', () => {
       ]);
 
       expect(reg.markProxySchemaPresented).not.toHaveBeenCalledWith(
-        'cron_create',
+        expect.objectContaining({ name: 'cron_create' }),
       );
-      expect(reg.markProxySchemaPresented).toHaveBeenCalledWith('cron_list');
+      expect(reg.markProxySchemaPresented).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'cron_list' }),
+      );
     });
 
     it('gracefully ignores stale proxy presentations for removed deferred targets', async () => {
@@ -1576,7 +1580,7 @@ describe('Gemini Client (client.ts)', () => {
       ]);
 
       expect(reg.markProxySchemaPresented).not.toHaveBeenCalledWith(
-        'cron_create',
+        expect.objectContaining({ name: 'cron_create' }),
       );
     });
 

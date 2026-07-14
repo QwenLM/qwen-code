@@ -10828,6 +10828,7 @@ describe('Session', () => {
         stopAfterPermissionCancel: boolean;
         loopDetected?: boolean;
         repeatedDuplicateProviderToolCall?: boolean;
+        deferredToolPresentations?: core.DeferredToolPresentation[];
       }>;
     };
 
@@ -11013,7 +11014,12 @@ describe('Session', () => {
         execute: vi.fn().mockResolvedValue({
           llmContent: '<functions>cron_create</functions>',
           returnDisplay: 'Loaded cron_create',
-          deferredToolPresentations: [core.ToolNames.CRON_CREATE],
+          deferredToolPresentations: [
+            {
+              name: core.ToolNames.CRON_CREATE,
+              schemaFingerprint: 'schema',
+            },
+          ],
         }),
         getDefaultPermission: vi.fn().mockResolvedValue('allow'),
         getDescription: vi.fn().mockReturnValue(core.ToolNames.TOOL_SEARCH),
@@ -11055,22 +11061,30 @@ describe('Session', () => {
         (name: string) => presented.has(name),
       );
       mockToolRegistry.markProxySchemaPresented.mockImplementation(
-        (name: string) => {
-          presented.add(name);
+        (presentation: core.DeferredToolPresentation) => {
+          presented.add(presentation.name);
           return true;
         },
       );
 
-      await (session as unknown as ToolCallInternals).runToolCalls(
-        new AbortController().signal,
-        'prompt-search',
-        [
-          {
-            id: 'search_call',
-            name: core.ToolNames.TOOL_SEARCH,
-            args: { query: 'cron' },
-          },
-        ],
+      const searchResult = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-search', [
+        {
+          id: 'search_call',
+          name: core.ToolNames.TOOL_SEARCH,
+          args: { query: 'cron' },
+        },
+      ]);
+      expect(mockToolRegistry.markProxySchemaPresented).not.toHaveBeenCalled();
+      (
+        session as unknown as {
+          commitDeferredToolPresentations(
+            presentations: readonly core.DeferredToolPresentation[],
+          ): void;
+        }
+      ).commitDeferredToolPresentations(
+        searchResult.deferredToolPresentations ?? [],
       );
       const proxyResult = await (
         session as unknown as ToolCallInternals
@@ -11086,7 +11100,7 @@ describe('Session', () => {
       ]);
 
       expect(mockToolRegistry.markProxySchemaPresented).toHaveBeenCalledWith(
-        core.ToolNames.CRON_CREATE,
+        expect.objectContaining({ name: core.ToolNames.CRON_CREATE }),
       );
       expect(cronBuild).toHaveBeenCalledWith({ schedule: '0 9 * * *' });
       expect(proxyResult.parts[0]?.functionResponse?.name).toBe(
@@ -11107,7 +11121,12 @@ describe('Session', () => {
         execute: vi.fn().mockResolvedValue({
           llmContent: '<functions>cron_create</functions>',
           returnDisplay: 'Loaded cron_create',
-          deferredToolPresentations: [core.ToolNames.CRON_CREATE],
+          deferredToolPresentations: [
+            {
+              name: core.ToolNames.CRON_CREATE,
+              schemaFingerprint: 'schema',
+            },
+          ],
         }),
         getDefaultPermission: vi.fn().mockResolvedValue('allow'),
         getDescription: vi.fn().mockReturnValue(core.ToolNames.TOOL_SEARCH),
@@ -11149,8 +11168,8 @@ describe('Session', () => {
         (name: string) => presented.has(name),
       );
       mockToolRegistry.markProxySchemaPresented.mockImplementation(
-        (name: string) => {
-          presented.add(name);
+        (presentation: core.DeferredToolPresentation) => {
+          presented.add(presentation.name);
           return true;
         },
       );
@@ -11180,8 +11199,18 @@ describe('Session', () => {
       expect(sameBatchResult.parts[1]?.functionResponse?.response).toEqual({
         error: expect.stringContaining('has not been fetched'),
       });
+      expect(mockToolRegistry.markProxySchemaPresented).not.toHaveBeenCalled();
+      (
+        session as unknown as {
+          commitDeferredToolPresentations(
+            presentations: readonly core.DeferredToolPresentation[],
+          ): void;
+        }
+      ).commitDeferredToolPresentations(
+        sameBatchResult.deferredToolPresentations ?? [],
+      );
       expect(mockToolRegistry.markProxySchemaPresented).toHaveBeenCalledWith(
-        core.ToolNames.CRON_CREATE,
+        expect.objectContaining({ name: core.ToolNames.CRON_CREATE }),
       );
 
       const nextTurnResult = await (
@@ -11214,7 +11243,12 @@ describe('Session', () => {
             message: 'search failed',
             type: core.ToolErrorType.EXECUTION_FAILED,
           },
-          deferredToolPresentations: [core.ToolNames.CRON_CREATE],
+          deferredToolPresentations: [
+            {
+              name: core.ToolNames.CRON_CREATE,
+              schemaFingerprint: 'schema',
+            },
+          ],
         }),
         getDefaultPermission: vi.fn().mockResolvedValue('allow'),
         getDescription: vi.fn().mockReturnValue(core.ToolNames.TOOL_SEARCH),

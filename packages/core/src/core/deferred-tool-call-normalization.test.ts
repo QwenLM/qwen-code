@@ -9,7 +9,10 @@ import { ApprovalMode, Config } from '../config/config.js';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { ToolRegistry } from '../tools/tool-registry.js';
+import {
+  getFunctionSchemaFingerprint,
+  ToolRegistry,
+} from '../tools/tool-registry.js';
 import type { ToolCallRequestInfo } from './turn.js';
 import {
   normalizeDeferredToolCallRequest,
@@ -60,10 +63,15 @@ describe('normalizeDeferredToolCallRequest', () => {
 
   it('normalizes a valid proxy request to the deferred target', async () => {
     const registry = createRegistry();
-    registry.registerTool(
-      new MockTool({ name: ToolNames.CRON_CREATE, shouldDefer: true }),
-    );
-    registry.markProxySchemaPresented(ToolNames.CRON_CREATE);
+    const target = new MockTool({
+      name: ToolNames.CRON_CREATE,
+      shouldDefer: true,
+    });
+    registry.registerTool(target);
+    registry.markProxySchemaPresented({
+      name: ToolNames.CRON_CREATE,
+      schemaFingerprint: getFunctionSchemaFingerprint(target.schema),
+    });
 
     const result = await normalizeDeferredToolCallRequest(
       request(ToolNames.DEFERRED_TOOL_CALL, {

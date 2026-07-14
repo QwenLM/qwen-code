@@ -470,6 +470,12 @@ export interface ToolArtifact {
   metadata?: Record<string, string | number | boolean | null>;
 }
 
+/** Binds a model-visible deferred tool name to the exact schema it displayed. */
+export interface DeferredToolPresentation {
+  name: string;
+  schemaFingerprint: string;
+}
+
 export interface ToolResult {
   /**
    * Content meant to be included in LLM history.
@@ -504,7 +510,7 @@ export interface ToolResult {
    * committed for deferred_tool_call routing after the result is accepted into
    * the active conversation flow.
    */
-  deferredToolPresentations?: string[];
+  deferredToolPresentations?: DeferredToolPresentation[];
 
   /**
    * If this property is present, the tool call is considered a failure.

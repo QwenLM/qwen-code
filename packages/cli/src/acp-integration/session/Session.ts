@@ -34,6 +34,7 @@ import type {
   ToolCallResponseInfo,
   LoopTickResult,
   ToolArtifact,
+  DeferredToolPresentation,
   VisionBridgeResult,
   MemoryWriteCandidate,
 } from '@qwen-code/qwen-code-core';
@@ -246,7 +247,7 @@ type RunToolResult = {
   repeatedDuplicateProviderToolCall?: boolean;
   loopDetected?: boolean;
   memoryWriteCandidates?: MemoryWriteCandidate[];
-  deferredToolPresentations?: string[];
+  deferredToolPresentations?: DeferredToolPresentation[];
 };
 
 type DaemonToolLoopState = {
@@ -974,6 +975,10 @@ export class Session implements SessionContext {
   // background loops, so keep this with the session instead of a single
   // runToolCalls invocation.
   private readonly duplicateProviderToolCallResponseIds = new Set<string>();
+  private readonly pendingDeferredToolPresentationsByMessage = new WeakMap<
+    Content,
+    readonly DeferredToolPresentation[]
+  >();
   // Messages from a drain that the daemon answered but we timed out waiting for
   // (the daemon already spliced + SSE-published them). Re-injected on the next
   // batch so a transient stall can't silently lose them. See
@@ -1992,6 +1997,9 @@ export class Session implements SessionContext {
                     return { stopReason: sendResult.stopReason };
                   }
                   const responseStream = sendResult.responseStream;
+                  this.commitDeferredToolPresentationsForDeliveredMessage(
+                    nextMessage,
+                  );
                   nextMessage = null;
 
                   for await (const resp of responseStream) {
@@ -2328,6 +2336,9 @@ export class Session implements SessionContext {
               return { stopReason: continueSendResult.stopReason };
             }
             const continueResponseStream = continueSendResult.responseStream;
+            this.commitDeferredToolPresentationsForDeliveredMessage(
+              nextMessage,
+            );
             nextMessage = null;
 
             for await (const resp of continueResponseStream) {
@@ -2637,18 +2648,19 @@ export class Session implements SessionContext {
     toolRun: RunToolResult,
     abortSignal: AbortSignal,
   ): Promise<void> {
-    this.#preserveUnsentMessageHistory(
-      {
-        role: 'user',
-        parts: [
-          ...toolRun.parts,
-          ...(toolRun.loopDetected
-            ? [{ text: LOOP_DETECTED_CONTEXT_MESSAGE }]
-            : []),
-          ...(await this.#drainMidTurnUserMessages(abortSignal)),
-        ],
-      },
-      true,
+    const message: Content = {
+      role: 'user',
+      parts: [
+        ...toolRun.parts,
+        ...(toolRun.loopDetected
+          ? [{ text: LOOP_DETECTED_CONTEXT_MESSAGE }]
+          : []),
+        ...(await this.#drainMidTurnUserMessages(abortSignal)),
+      ],
+    };
+    this.#preserveUnsentMessageHistory(message, true);
+    this.commitDeferredToolPresentations(
+      toolRun.deferredToolPresentations ?? [],
     );
     await this.messageRewriter?.waitForPendingRewrites();
   }
@@ -2671,7 +2683,9 @@ export class Session implements SessionContext {
       ...toolRun.parts,
       ...(await this.#drainMidTurnUserMessages(abortSignal)),
     ];
-    return { role: 'user', parts };
+    const message: Content = { role: 'user', parts };
+    this.trackDeferredToolPresentationsForMessage(message, toolRun);
+    return message;
   }
 
   #recordCompressionTokenCount(info: ChatCompressionInfo): void {
@@ -3277,6 +3291,9 @@ export class Session implements SessionContext {
                   return;
                 }
                 const responseStream = sendResult.responseStream;
+                this.commitDeferredToolPresentationsForDeliveredMessage(
+                  nextMessage,
+                );
                 if (loopTick && turnCount === 1) {
                   // The block reached the model (the send started); commit it so
                   // the next tick can detect "unchanged". Deferring the commit
@@ -3615,6 +3632,9 @@ export class Session implements SessionContext {
             }
 
             const responseStream = sendResult.responseStream;
+            this.commitDeferredToolPresentationsForDeliveredMessage(
+              nextMessage,
+            );
             nextMessage = null;
             const messageDisplay = this.#createMessageDisplayDispatcher(
               ac.signal,
@@ -4250,7 +4270,7 @@ export class Session implements SessionContext {
       }
     };
     const memoryWriteCandidates: MemoryWriteCandidate[] = [];
-    const deferredToolPresentations: string[] = [];
+    const deferredToolPresentations: DeferredToolPresentation[] = [];
     const collectMemoryWriteCandidates = (result: RunToolResult): void => {
       if (result.memoryWriteCandidates) {
         memoryWriteCandidates.push(...result.memoryWriteCandidates);
@@ -4523,17 +4543,56 @@ export class Session implements SessionContext {
       throw error;
     }
     await refreshMemoryIfNeeded();
-    this.commitDeferredToolPresentations(
-      result.deferredToolPresentations ?? [],
-    );
     return result;
   }
 
-  private commitDeferredToolPresentations(names: readonly string[]): void {
+  private commitDeferredToolPresentations(
+    presentations: readonly DeferredToolPresentation[],
+  ): void {
     const toolRegistry = this.config.getToolRegistry();
-    for (const name of names) {
-      toolRegistry.markProxySchemaPresented(name);
+    for (const presentation of presentations) {
+      toolRegistry.markProxySchemaPresented(presentation);
     }
+  }
+
+  /**
+   * Stage proxy presentations on the exact user message that carries their
+   * function responses. A ToolSearch result only unlocks deferred_tool_call
+   * after that message is accepted into the active model history; keeping the
+   * metadata off the session-global registry until delivery prevents dropped
+   * or aborted responses from authorizing a schema the model never saw.
+   */
+  private trackDeferredToolPresentationsForMessage(
+    message: Content | null,
+    toolRun: RunToolResult,
+  ): void {
+    const presentations = toolRun.deferredToolPresentations;
+    if (!message || !presentations || presentations.length === 0) {
+      return;
+    }
+    this.pendingDeferredToolPresentationsByMessage.set(message, presentations);
+  }
+
+  /**
+   * Commit staged presentations after the associated message has crossed the
+   * active-history boundary. This preserves the same-batch rule: a batch that
+   * contains both tool_search and deferred_tool_call cannot self-authorize, but
+   * the next model turn can use the proxy once the ToolSearch response is part
+   * of history.
+   */
+  private commitDeferredToolPresentationsForDeliveredMessage(
+    message: Content | null,
+  ): void {
+    if (!message) {
+      return;
+    }
+    const presentations =
+      this.pendingDeferredToolPresentationsByMessage.get(message);
+    if (!presentations) {
+      return;
+    }
+    this.pendingDeferredToolPresentationsByMessage.delete(message);
+    this.commitDeferredToolPresentations(presentations);
   }
 
   /**

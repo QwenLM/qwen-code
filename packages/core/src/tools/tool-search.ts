@@ -23,9 +23,11 @@
 
 import type {
   AnyDeclarativeTool,
+  DeferredToolPresentation,
   ToolInvocation,
   ToolResult,
 } from './tools.js';
+import type { FunctionDeclaration } from '@google/genai';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
@@ -38,6 +40,7 @@ import {
   isPlanLifecycleToolUnavailableInSubagent,
 } from '../agents/runtime/subagent-plan-tool-policy.js';
 import { formatFunctionSchemaBlocks } from './function-schema-rendering.js';
+import { getFunctionSchemaFingerprint } from './tool-registry.js';
 
 const debugLogger = createDebugLogger('TOOL_SEARCH');
 
@@ -266,10 +269,10 @@ class ToolSearchInvocation extends BaseToolInvocation<
     }
 
     const registry = this.config.getToolRegistry();
-    const loaded: AnyDeclarativeTool[] = [];
+    const loadedSchemas: FunctionDeclaration[] = [];
     const missing: string[] = [];
     const blocked: string[] = [];
-    const deferredToolPresentations: string[] = [];
+    const deferredToolPresentations: DeferredToolPresentation[] = [];
 
     // Case-insensitive lookup across all known names (instance names + factory
     // names). Preserve the user-supplied casing in the error list so the
@@ -326,17 +329,19 @@ class ToolSearchInvocation extends BaseToolInvocation<
       // list) and pulling them through setTools() would risk a spurious
       // "GeminiClient not initialised" failure for what is just a
       // schema-inspection call.
+      const schema = tool.schema;
       if (registry.isProxyEligibleDeferredTool(canonical)) {
-        deferredToolPresentations.push(canonical);
+        deferredToolPresentations.push({
+          name: canonical,
+          schemaFingerprint: getFunctionSchemaFingerprint(schema),
+        });
       }
-      loaded.push(tool);
+      loadedSchemas.push(schema);
     }
 
     let llmContent = '';
-    if (loaded.length > 0) {
-      llmContent += formatFunctionSchemaBlocks(
-        loaded.map((tool) => tool.schema),
-      );
+    if (loadedSchemas.length > 0) {
+      llmContent += formatFunctionSchemaBlocks(loadedSchemas);
     }
     if (deferredToolPresentations.length > 0) {
       llmContent +=
@@ -367,7 +372,9 @@ class ToolSearchInvocation extends BaseToolInvocation<
     }
 
     const displayParts: string[] = [];
-    if (loaded.length > 0) displayParts.push(`Loaded ${loaded.length} tool(s)`);
+    if (loadedSchemas.length > 0) {
+      displayParts.push(`Loaded ${loadedSchemas.length} tool(s)`);
+    }
     if (missing.length > 0) displayParts.push(`${missing.length} missing`);
     if (blocked.length > 0) displayParts.push(`${blocked.length} unavailable`);
     if (truncated.length > 0)
@@ -381,7 +388,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
         ? { deferredToolPresentations }
         : {}),
     };
-    if (blockedErrorMessage && loaded.length === 0) {
+    if (blockedErrorMessage && loadedSchemas.length === 0) {
       result.error = { message: blockedErrorMessage };
     }
     return result;

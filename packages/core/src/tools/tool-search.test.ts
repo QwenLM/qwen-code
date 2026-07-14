@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { CallableTool } from '@google/genai';
 import type { ConfigParameters } from '../config/config.js';
 import { Config, ApprovalMode } from '../config/config.js';
-import { ToolRegistry } from './tool-registry.js';
+import { getFunctionSchemaFingerprint, ToolRegistry } from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { ToolSearchTool, scoreTool, tokenize } from './tool-search.js';
@@ -47,6 +47,10 @@ function makeConfigWithRegistry(): {
     setTools: vi.fn().mockResolvedValue(undefined),
   } as never);
   return { config, registry };
+}
+
+function presentationNames(result: ToolResult): string[] {
+  return result.deferredToolPresentations?.map(({ name }) => name) ?? [];
 }
 
 describe('tokenize', () => {
@@ -207,7 +211,12 @@ describe('ToolSearchTool', () => {
     expect(content).toContain(formatFunctionSchemaBlocks([hidden.schema]));
     expect(content).toContain('deferred_tool_call');
     expect(registry.isDeferredToolRevealed('cron_create')).toBe(false);
-    expect(result.deferredToolPresentations).toEqual(['cron_create']);
+    expect(result.deferredToolPresentations).toEqual([
+      {
+        name: 'cron_create',
+        schemaFingerprint: getFunctionSchemaFingerprint(hidden.schema),
+      },
+    ]);
     expect(registry.hasPresentedProxySchema('cron_create')).toBe(false);
     expect(registry.getFunctionDeclarations().map((d) => d.name)).not.toContain(
       'cron_create',
@@ -256,7 +265,7 @@ describe('ToolSearchTool', () => {
     expect(content).toContain('Not found: missing');
     expect(registry.isDeferredToolRevealed('alpha')).toBe(false);
     expect(registry.isDeferredToolRevealed('bravo')).toBe(false);
-    expect(result.deferredToolPresentations).toEqual(['alpha', 'bravo']);
+    expect(presentationNames(result)).toEqual(['alpha', 'bravo']);
     expect(registry.hasPresentedProxySchema('alpha')).toBe(false);
     expect(registry.hasPresentedProxySchema('bravo')).toBe(false);
   });
@@ -466,7 +475,7 @@ describe('ToolSearchTool', () => {
         .map((d) => d.name)
         .sort(),
     ).toEqual(['visible']);
-    expect(result.deferredToolPresentations).toEqual(['hidden']);
+    expect(presentationNames(result)).toEqual(['hidden']);
     expect(registry.hasPresentedProxySchema('hidden')).toBe(false);
   });
 
@@ -482,7 +491,7 @@ describe('ToolSearchTool', () => {
       .execute(new AbortController().signal);
 
     const after = JSON.stringify(registry.getFunctionDeclarations());
-    expect(result.deferredToolPresentations).toEqual(['hidden']);
+    expect(presentationNames(result)).toEqual(['hidden']);
     expect(after).toBe(before);
   });
 
@@ -870,7 +879,7 @@ describe('ToolSearchTool', () => {
       .execute(new AbortController().signal);
     expect(String(first.llmContent)).toContain('"name":"slack_send_message"');
     expect(registry.isDeferredToolRevealed('slack_send_message')).toBe(false);
-    expect(first.deferredToolPresentations).toEqual(['slack_send_message']);
+    expect(presentationNames(first)).toEqual(['slack_send_message']);
     expect(registry.hasPresentedProxySchema('slack_send_message')).toBe(false);
 
     // Second: same keyword search can still return the schema.
@@ -878,6 +887,60 @@ describe('ToolSearchTool', () => {
       .build({ query: 'slack' })
       .execute(new AbortController().signal);
     expect(String(second.llmContent)).toContain('"name":"slack_send_message"');
+  });
+
+  it('rejects a presentation when MCP refresh replaces the displayed schema', async () => {
+    const oldTool = new DiscoveredMCPTool(
+      {} as CallableTool,
+      'calendar',
+      'create_event',
+      'create an event',
+      {
+        type: 'object',
+        properties: { title: { type: 'string' } },
+      },
+    );
+    registry.registerTool(oldTool);
+    const toolSearch = new ToolSearchTool(config);
+
+    const oldResult = await toolSearch
+      .build({ query: `select:${oldTool.name}` })
+      .execute(new AbortController().signal);
+    const oldPresentation = oldResult.deferredToolPresentations?.[0];
+    expect(String(oldResult.llmContent)).toContain('"title"');
+    expect(oldPresentation).toEqual({
+      name: oldTool.name,
+      schemaFingerprint: getFunctionSchemaFingerprint(oldTool.schema),
+    });
+
+    registry.removeMcpToolsByServer('calendar');
+    const refreshedTool = new DiscoveredMCPTool(
+      {} as CallableTool,
+      'calendar',
+      'create_event',
+      'create an event',
+      {
+        type: 'object',
+        properties: { startTime: { type: 'string' } },
+      },
+    );
+    registry.registerTool(refreshedTool);
+
+    expect(oldPresentation).toBeDefined();
+    expect(registry.markProxySchemaPresented(oldPresentation!)).toBe(false);
+    expect(registry.hasPresentedProxySchema(refreshedTool.name)).toBe(false);
+
+    const refreshedResult = await toolSearch
+      .build({ query: `select:${refreshedTool.name}` })
+      .execute(new AbortController().signal);
+    const refreshedPresentation =
+      refreshedResult.deferredToolPresentations?.[0];
+    expect(String(refreshedResult.llmContent)).toContain('"startTime"');
+    expect(refreshedPresentation).toBeDefined();
+    expect(registry.markProxySchemaPresented(refreshedPresentation!)).toBe(
+      true,
+    );
+    expect(registry.hasPresentedProxySchema(refreshedTool.name)).toBe(true);
   });
 
   it('returns schemas even when setTools would throw because ToolSearch no longer mutates declarations', async () => {
@@ -899,7 +962,7 @@ describe('ToolSearchTool', () => {
     expect(result.error).toBeUndefined();
     expect(String(result.llmContent)).toContain('"name":"cron_create"');
     expect(String(result.llmContent)).toContain('deferred_tool_call');
-    expect(result.deferredToolPresentations).toEqual(['cron_create']);
+    expect(presentationNames(result)).toEqual(['cron_create']);
     expect(registry.hasPresentedProxySchema('cron_create')).toBe(false);
   });
 
@@ -924,10 +987,7 @@ describe('ToolSearchTool', () => {
     expect(setTools).not.toHaveBeenCalled();
     expect(registry.isDeferredToolRevealed('cron_create')).toBe(false);
     expect(registry.isDeferredToolRevealed('cron_list')).toBe(false);
-    expect(result.deferredToolPresentations).toEqual([
-      'cron_create',
-      'cron_list',
-    ]);
+    expect(presentationNames(result)).toEqual(['cron_create', 'cron_list']);
     expect(registry.hasPresentedProxySchema('cron_create')).toBe(false);
     expect(registry.hasPresentedProxySchema('cron_list')).toBe(false);
   });
@@ -960,7 +1020,7 @@ describe('ToolSearchTool', () => {
     expect(content).toContain('"name":"charlie"');
     expect(content).toContain('Not found: bravo');
     // alpha and charlie are pending proxy presentations; bravo not (the throw kept it out).
-    expect(result.deferredToolPresentations).toEqual(['alpha', 'charlie']);
+    expect(presentationNames(result)).toEqual(['alpha', 'charlie']);
     expect(registry.hasPresentedProxySchema('alpha')).toBe(false);
     expect(registry.hasPresentedProxySchema('charlie')).toBe(false);
     expect(registry.isDeferredToolRevealed('alpha')).toBe(false);
@@ -984,7 +1044,7 @@ describe('ToolSearchTool', () => {
     expect(result.error).toBeUndefined();
     expect(String(result.llmContent)).toContain('"name":"cron_create"');
     expect(registry.isDeferredToolRevealed('cron_create')).toBe(false);
-    expect(result.deferredToolPresentations).toEqual(['cron_create']);
+    expect(presentationNames(result)).toEqual(['cron_create']);
     expect(registry.hasPresentedProxySchema('cron_create')).toBe(false);
   });
 
@@ -1070,7 +1130,7 @@ describe('ToolSearchTool', () => {
       .execute(new AbortController().signal);
 
     expect(registry.isDeferredToolRevealed('cron_create')).toBe(false);
-    expect(result.deferredToolPresentations).toEqual(['cron_create']);
+    expect(presentationNames(result)).toEqual(['cron_create']);
     expect(registry.hasPresentedProxySchema('cron_create')).toBe(false);
   });
 
@@ -1107,7 +1167,7 @@ describe('ToolSearchTool', () => {
     // web_fetch NOT proxy-presented (already visible), cron_create presented.
     expect(visibleRegistry.isDeferredToolRevealed('web_fetch')).toBe(false);
     expect(visibleRegistry.isDeferredToolRevealed('cron_create')).toBe(false);
-    expect(result.deferredToolPresentations).toEqual(['cron_create']);
+    expect(presentationNames(result)).toEqual(['cron_create']);
     expect(visibleRegistry.hasPresentedProxySchema('web_fetch')).toBe(false);
     expect(visibleRegistry.hasPresentedProxySchema('cron_create')).toBe(false);
     expect(mockSetTools).not.toHaveBeenCalled();
@@ -1117,11 +1177,13 @@ describe('ToolSearchTool', () => {
 describe('ToolRegistry.clearRevealedDeferredTools', () => {
   it('empties revealed and proxy-presentation state so new sessions start clean', async () => {
     const { registry } = makeConfigWithRegistry();
-    registry.registerTool(
-      new MockTool({ name: 'cron_create', shouldDefer: true }),
-    );
+    const tool = new MockTool({ name: 'cron_create', shouldDefer: true });
+    registry.registerTool(tool);
 
-    registry.markProxySchemaPresented('cron_create');
+    registry.markProxySchemaPresented({
+      name: 'cron_create',
+      schemaFingerprint: getFunctionSchemaFingerprint(tool.schema),
+    });
     expect(registry.hasPresentedProxySchema('cron_create')).toBe(true);
 
     registry.clearRevealedDeferredTools();

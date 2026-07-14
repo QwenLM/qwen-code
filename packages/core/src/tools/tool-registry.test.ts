@@ -9,7 +9,11 @@ import type { Mocked } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ConfigParameters } from '../config/config.js';
 import { Config, ApprovalMode } from '../config/config.js';
-import { ToolRegistry, DiscoveredTool } from './tool-registry.js';
+import {
+  ToolRegistry,
+  DiscoveredTool,
+  getFunctionSchemaFingerprint,
+} from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { ExitPlanModeTool } from './exitPlanMode.js';
 import { DeferredToolCallTool } from './deferred-tool-call.js';
@@ -30,6 +34,15 @@ import {
 import { ToolErrorType } from './tool-error.js';
 
 vi.mock('node:fs');
+
+function presentationFor(registry: ToolRegistry, name: string) {
+  const tool = registry.getTool(name);
+  if (!tool) throw new Error(`Missing test tool: ${name}`);
+  return {
+    name,
+    schemaFingerprint: getFunctionSchemaFingerprint(tool.schema),
+  };
+}
 
 // Mock ./mcp-client.js to control its behavior within tool-registry tests
 vi.mock('./mcp-client.js', async () => {
@@ -198,7 +211,11 @@ describe('ToolRegistry', () => {
       });
       toolRegistry.registerTool(tool);
 
-      expect(toolRegistry.markProxySchemaPresented('deferred_tool')).toBe(true);
+      expect(
+        toolRegistry.markProxySchemaPresented(
+          presentationFor(toolRegistry, 'deferred_tool'),
+        ),
+      ).toBe(true);
       expect(toolRegistry.hasPresentedProxySchema('deferred_tool')).toBe(true);
 
       Object.defineProperty(tool, 'parameterSchema', {
@@ -208,6 +225,31 @@ describe('ToolRegistry', () => {
         },
       });
 
+      expect(toolRegistry.hasPresentedProxySchema('deferred_tool')).toBe(false);
+    });
+
+    it('rejects a stale proxy presentation after the schema changes', () => {
+      const tool = new MockTool({
+        name: 'deferred_tool',
+        shouldDefer: true,
+        params: {
+          type: 'object',
+          properties: { before: { type: 'string' } },
+        },
+      });
+      toolRegistry.registerTool(tool);
+      const stalePresentation = presentationFor(toolRegistry, 'deferred_tool');
+
+      Object.defineProperty(tool, 'parameterSchema', {
+        value: {
+          type: 'object',
+          properties: { after: { type: 'string' } },
+        },
+      });
+
+      expect(toolRegistry.markProxySchemaPresented(stalePresentation)).toBe(
+        false,
+      );
       expect(toolRegistry.hasPresentedProxySchema('deferred_tool')).toBe(false);
     });
 
@@ -224,7 +266,9 @@ describe('ToolRegistry', () => {
         toolRegistry.isProxyEligibleDeferredTool('always_loaded_deferred'),
       ).toBe(false);
       expect(
-        toolRegistry.markProxySchemaPresented('always_loaded_deferred'),
+        toolRegistry.markProxySchemaPresented(
+          presentationFor(toolRegistry, 'always_loaded_deferred'),
+        ),
       ).toBe(false);
     });
 
@@ -662,7 +706,11 @@ describe('ToolRegistry', () => {
       toolRegistry.registerTool(tool);
       const toolName = tool.name;
 
-      expect(toolRegistry.markProxySchemaPresented(toolName)).toBe(true);
+      expect(
+        toolRegistry.markProxySchemaPresented(
+          presentationFor(toolRegistry, toolName),
+        ),
+      ).toBe(true);
       expect(toolRegistry.hasPresentedProxySchema(toolName)).toBe(true);
 
       toolRegistry.removeMcpToolsByServer('slack');
@@ -781,7 +829,11 @@ describe('ToolRegistry', () => {
       );
 
       registry.revealDeferredTool('deferred_tool');
-      expect(registry.markProxySchemaPresented('deferred_tool')).toBe(true);
+      expect(
+        registry.markProxySchemaPresented(
+          presentationFor(registry, 'deferred_tool'),
+        ),
+      ).toBe(true);
       expect(registry.hasPresentedProxySchema('deferred_tool')).toBe(true);
 
       registry.clearProxySchemaPresentations();
