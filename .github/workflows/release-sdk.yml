@@ -340,16 +340,20 @@ jobs:
           PREVIOUS_RELEASE_TAG: '${{ steps.version.outputs.PREVIOUS_RELEASE_TAG }}'
           IS_NIGHTLY: '${{ steps.vars.outputs.is_nightly }}'
           IS_PREVIEW: '${{ steps.vars.outputs.is_preview }}'
+          HAS_PERSISTED_SOURCE: '${{ steps.persist_source.outputs.HAS_PERSISTED_SOURCE }}'
           REF: '${{ github.event.inputs.ref || github.sha }}'
           CLI_VERSION: "${{ steps.cli_source.outputs.mode == 'npm_latest' && steps.cli_version_npm.outputs.CLI_VERSION || steps.cli_build.outputs.CLI_VERSION }}"
           CLI_SOURCE_MODE: '${{ steps.cli_source.outputs.mode }}'
         run: |-
-          # For stable releases, use the release branch; for nightly/preview, use the current ref
+          # For stable releases, use the release branch when it was pushed.
           if [[ "${IS_NIGHTLY}" == "true" || "${IS_PREVIEW}" == "true" ]]; then
             TARGET="${REF}"
             PRERELEASE_FLAG="--prerelease"
-          else
+          elif [[ "${HAS_PERSISTED_SOURCE}" == "true" ]]; then
             TARGET="${RELEASE_BRANCH}"
+            PRERELEASE_FLAG=""
+          else
+            TARGET="${REF}"
             PRERELEASE_FLAG=""
           fi
 
