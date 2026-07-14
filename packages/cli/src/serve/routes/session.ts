@@ -513,6 +513,68 @@ export function registerSessionRoutes(
     return runtime;
   };
 
+  const handleSessionExport = async (
+    req: Request,
+    res: Response,
+    target: {
+      route: string;
+      workspaceCwd: string;
+      workspaceQualified?: boolean;
+    },
+  ): Promise<void> => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const rawFormat = req.query['format'];
+    const format = parseSessionExportFormat(rawFormat);
+    if (!format) {
+      res.status(400).json({
+        error: 'Invalid export format',
+        code: 'invalid_export_format',
+        format: typeof rawFormat === 'string' ? rawFormat : String(rawFormat),
+        allowedFormats: sessionExportFormatValues(),
+      });
+      return;
+    }
+    try {
+      const result = await archiveCoordinator.runSharedMany(
+        [sessionId],
+        async () => {
+          await assertSessionLoadable(target.workspaceCwd, sessionId);
+          return exportSessionTranscript({
+            workspaceCwd: target.workspaceCwd,
+            sessionId,
+            format,
+            config: { getChannel: () => 'daemon' },
+          });
+        },
+      );
+      const filename = result.filename.replace(/["\\\r\n]/g, '_');
+      res
+        .status(200)
+        .set('Cache-Control', 'no-store')
+        .set('X-Content-Type-Options', 'nosniff')
+        .set('Content-Type', result.mimeType)
+        .set('Content-Disposition', `attachment; filename="${filename}"`)
+        .send(result.content);
+    } catch (err) {
+      if (target.workspaceQualified && err instanceof SessionNotFoundError) {
+        res.status(404).json({
+          error: err.message,
+          code: 'session_not_found',
+          sessionId: err.sessionId,
+        });
+        return;
+      }
+      sendBridgeError(res, err, {
+        route: target.route,
+        sessionId,
+        ...(target.workspaceQualified
+          ? { workspaceCwd: target.workspaceCwd }
+          : {}),
+      });
+    }
+  };
+
   const sendAmbiguousSessionOwner = (
     res: Response,
     route: string,
@@ -1307,46 +1369,21 @@ export function registerSessionRoutes(
   });
 
   app.get('/session/:id/export', async (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    const rawFormat = req.query['format'];
-    const format = parseSessionExportFormat(rawFormat);
-    if (!format) {
-      res.status(400).json({
-        error: 'Invalid export format',
-        code: 'invalid_export_format',
-        format: typeof rawFormat === 'string' ? rawFormat : String(rawFormat),
-        allowedFormats: sessionExportFormatValues(),
-      });
-      return;
-    }
-    try {
-      const result = await archiveCoordinator.runSharedMany(
-        [sessionId],
-        async () => {
-          await assertSessionLoadable(boundWorkspace, sessionId);
-          return exportSessionTranscript({
-            workspaceCwd: boundWorkspace,
-            sessionId,
-            format,
-            config: { getChannel: () => 'daemon' },
-          });
-        },
-      );
-      const filename = result.filename.replace(/["\\\r\n]/g, '_');
-      res
-        .status(200)
-        .set('Cache-Control', 'no-store')
-        .set('X-Content-Type-Options', 'nosniff')
-        .set('Content-Type', result.mimeType)
-        .set('Content-Disposition', `attachment; filename="${filename}"`)
-        .send(result.content);
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'GET /session/:id/export',
-        sessionId,
-      });
-    }
+    await handleSessionExport(req, res, {
+      route: 'GET /session/:id/export',
+      workspaceCwd: boundWorkspace,
+    });
+  });
+
+  app.get('/workspaces/:workspace/session/:id/export', async (req, res) => {
+    const route = 'GET /workspaces/:workspace/session/:id/export';
+    const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+    if (!runtime) return;
+    await handleSessionExport(req, res, {
+      route,
+      workspaceCwd: runtime.workspaceCwd,
+      workspaceQualified: true,
+    });
   });
 
   app.get('/session/:id/transcript', async (req, res) => {

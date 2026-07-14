@@ -6267,67 +6267,67 @@ export function App({
                               .join(' ');
 
                             const messageList = (
-                            <MessageList
-                              ref={messageListRef}
-                              messages={displayMessages}
-                              pendingApproval={pendingToolApproval}
-                              onShowContextDetail={handleShowContextDetail}
-                              loadingTranscript={connection.loadingTranscript}
-                              catchingUp={connection.catchingUp}
-                              isResponding={streamingState !== 'idle'}
-                              activeTurnStartedAt={activeTurnStartedAt}
-                              workspaceCwd={connection.workspaceCwd || ''}
-                              hideSessionTimeline={
-                                effectiveChatWidthMode === 'wide'
-                              }
-                              showRetryHint={showRetryHint}
-                              onRetryClick={handleRetry}
-                              onBranchSession={handleBranchCurrentSession}
-                              bottomOverlayInset={bottomPanelInset}
-                              welcomeHeader={
-                                isChatEmptyState ? welcomeHeader : undefined
-                              }
-                              centerWelcomeHeader={
-                                showMobileWelcomeFooterMiddle || undefined
-                              }
-                              tailContent={undefined}
-                              tailKey={undefined}
-                              onCanScrollToBottomChange={
-                                handleCanScrollToBottomChange
-                              }
-                              virtualScrollThreshold={virtualScrollThreshold}
-                              turnFileChanges={
-                                visibleTurnOutputKinds.has('file')
-                                  ? fileChangesByTurn
-                                  : undefined
-                              }
-                              turnArtifacts={
-                                visibleTurnOutputKinds.has('artifact')
-                                  ? artifactsByTurn
-                                  : undefined
-                              }
-                              turnScheduledTasks={
-                                visibleTurnOutputKinds.has('scheduled_task')
-                                  ? scheduledTasksByTurn
-                                  : undefined
-                              }
-                              onTurnOutputOpen={handleTurnOutputOpen}
-                              onReviewChanges={openReviewPanel}
-                              onOpenArtifact={openArtifactPanel}
-                              onOpenScheduledTask={openScheduledTaskPanel}
-                            />
+                              <MessageList
+                                ref={messageListRef}
+                                messages={displayMessages}
+                                pendingApproval={pendingToolApproval}
+                                onShowContextDetail={handleShowContextDetail}
+                                loadingTranscript={connection.loadingTranscript}
+                                catchingUp={connection.catchingUp}
+                                isResponding={streamingState !== 'idle'}
+                                activeTurnStartedAt={activeTurnStartedAt}
+                                workspaceCwd={connection.workspaceCwd || ''}
+                                hideSessionTimeline={
+                                  effectiveChatWidthMode === 'wide'
+                                }
+                                showRetryHint={showRetryHint}
+                                onRetryClick={handleRetry}
+                                onBranchSession={handleBranchCurrentSession}
+                                bottomOverlayInset={bottomPanelInset}
+                                welcomeHeader={
+                                  isChatEmptyState ? welcomeHeader : undefined
+                                }
+                                centerWelcomeHeader={
+                                  showMobileWelcomeFooterMiddle || undefined
+                                }
+                                tailContent={undefined}
+                                tailKey={undefined}
+                                onCanScrollToBottomChange={
+                                  handleCanScrollToBottomChange
+                                }
+                                virtualScrollThreshold={virtualScrollThreshold}
+                                turnFileChanges={
+                                  visibleTurnOutputKinds.has('file')
+                                    ? fileChangesByTurn
+                                    : undefined
+                                }
+                                turnArtifacts={
+                                  visibleTurnOutputKinds.has('artifact')
+                                    ? artifactsByTurn
+                                    : undefined
+                                }
+                                turnScheduledTasks={
+                                  visibleTurnOutputKinds.has('scheduled_task')
+                                    ? scheduledTasksByTurn
+                                    : undefined
+                                }
+                                onTurnOutputOpen={handleTurnOutputOpen}
+                                onReviewChanges={openReviewPanel}
+                                onOpenArtifact={openArtifactPanel}
+                                onOpenScheduledTask={openScheduledTaskPanel}
+                              />
                             );
 
                             const btwPanel =
                               !showMobileWelcomeFooterMiddle &&
                               btwMessage?.role === 'btw' ? (
-                              <div className={styles.btwPanel}>
-                                <BtwMessage
-                                  question={btwMessage.question}
-                                  answer={btwMessage.answer}
-                                  isPending={btwMessage.isPending}
-                                />
-                              </div>
+                                <div className={styles.btwPanel}>
+                                  <BtwMessage
+                                    question={btwMessage.question}
+                                    answer={btwMessage.answer}
+                                    isPending={btwMessage.isPending}
+                                  />
+                                </div>
                               ) : null;
 
                             if (showMobileWelcomeFooterMiddle) {

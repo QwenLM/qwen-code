@@ -1028,6 +1028,7 @@ export interface ServeExtensionCapabilities {
 export type ServeExtensionUpdateState =
   | 'checking for updates'
   | 'updated, needs restart'
+  | 'updated with warnings'
   | 'updating'
   | 'updated'
   | 'update available'
