@@ -34,6 +34,7 @@ import type {
   DaemonTranscriptBlock,
   DaemonSessionTaskStatus,
   DaemonSessionArtifact,
+  DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList, type MessageListHandle } from './components/MessageList';
@@ -107,6 +108,7 @@ import {
   WebShellSidebar,
   type WebShellSidebarBranding,
   type WebShellSidebarFooterOptions,
+  type WebShellSidebarLockedWorkspace,
 } from './components/sidebar/WebShellSidebar';
 import {
   getLocalCommands,
@@ -419,6 +421,8 @@ export interface WebShellSidebarOptions {
   branding?: false | WebShellSidebarBranding;
   /** Hide the footer completely or select the built-in entries it exposes. */
   footer?: false | WebShellSidebarFooterOptions;
+  /** Customize the workspace row shown when lockWorkspaceCwd is active. */
+  lockedWorkspace?: WebShellSidebarLockedWorkspace;
 }
 
 export type SessionChangeEvent =
@@ -440,10 +444,11 @@ export type WebShellComposerPlaceholders = Readonly<
 >;
 
 export interface WebShellProps {
-  /** Called whenever the attached daemon session id changes. */
+  /** Called whenever the attached daemon session or workspace changes. */
   onSessionIdChange?: (
     sessionId: string | undefined,
     workspaceId?: string,
+    workspaceCwd?: string,
   ) => void;
   /** Called after a new session is created. Session setup waits up to 30 seconds. */
   onSessionCreated?: (sessionId: string) => Promise<void> | void;
@@ -585,6 +590,11 @@ export interface WebShellProps {
   }) => Promise<void>;
 }
 
+interface AppProps extends WebShellProps {
+  lockedWorkspaceCwd?: string;
+  lockedWorkspaceCapability?: DaemonWorkspaceCapability;
+}
+
 type SessionActionsWithCreate = {
   createSession: (options?: {
     workspaceCwd?: string;
@@ -620,6 +630,7 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
   showCompactToggle: boolean;
   branding?: false | WebShellSidebarBranding;
   footer?: false | WebShellSidebarFooterOptions;
+  lockedWorkspace?: WebShellSidebarLockedWorkspace;
 } {
   if (sidebar === true) {
     return { enabled: true, defaultCollapsed: false, showCompactToggle: true };
@@ -633,6 +644,7 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
     showCompactToggle: sidebar.showCompactToggle ?? true,
     branding: sidebar.branding,
     footer: sidebar.footer,
+    lockedWorkspace: sidebar.lockedWorkspace,
   };
 }
 
@@ -1017,7 +1029,9 @@ export function App({
   composerInputVersion,
   onSessionChange,
   onSubmitBefore,
-}: WebShellProps = {}) {
+  lockedWorkspaceCwd,
+  lockedWorkspaceCapability,
+}: AppProps = {}) {
   const [chatWidthMode, setChatWidthMode] =
     useState<ChatWidthMode>(readChatWidthMode);
   const [selectedLanguage, setSelectedLanguage] = useState<WebShellLanguage>(
@@ -1161,9 +1175,24 @@ export function App({
   const blocks = useTranscriptBlocks();
   const connection = useConnection();
   const workspace = useWorkspace();
-  const workspaces = useMemo(
-    () => workspace.capabilities?.workspaces ?? [],
-    [workspace.capabilities?.workspaces],
+  const workspaces = useMemo(() => {
+    const capabilityWorkspaces = workspace.capabilities?.workspaces ?? [];
+    if (
+      lockedWorkspaceCapability &&
+      !capabilityWorkspaces.some(
+        (entry) => entry.cwd === lockedWorkspaceCapability.cwd,
+      )
+    ) {
+      return [...capabilityWorkspaces, lockedWorkspaceCapability];
+    }
+    return capabilityWorkspaces;
+  }, [lockedWorkspaceCapability, workspace.capabilities?.workspaces]);
+  const visibleWorkspaces = useMemo(
+    () =>
+      lockedWorkspaceCwd
+        ? workspaces.filter((entry) => entry.cwd === lockedWorkspaceCwd)
+        : workspaces,
+    [lockedWorkspaceCwd, workspaces],
   );
   const sessionActions = useActions();
   const { notices, dismissNotice } = useSessionNotices();
@@ -1185,7 +1214,8 @@ export function App({
       return;
     }
     const primaryWorkspaceCwd = workspaces.find((entry) => entry.primary)?.cwd;
-    const workspaceCwd = selectedWorkspaceCwd ?? primaryWorkspaceCwd;
+    const workspaceCwd =
+      lockedWorkspaceCwd ?? selectedWorkspaceCwd ?? primaryWorkspaceCwd;
     if (!workspaceCwd) {
       setSelectedWorkspaceGitBranch(undefined);
       return;
@@ -1208,6 +1238,7 @@ export function App({
     };
   }, [
     connection.sessionId,
+    lockedWorkspaceCwd,
     selectedWorkspaceCwd,
     workspaces,
     workspace.client,
@@ -1251,6 +1282,7 @@ export function App({
   const currentSessionIdRef = useRef(connection.sessionId);
   const lastNotifiedSessionIdRef = useRef<string | undefined>(undefined);
   const lastNotifiedWorkspaceIdRef = useRef<string | undefined>(undefined);
+  const lastNotifiedWorkspaceCwdRef = useRef<string | undefined>(undefined);
   const lastGoalSessionIdRef = useRef(connection.sessionId);
   const displayMessages = useMemo(() => {
     const localMessages = [recapMessage].filter(
@@ -2491,7 +2523,10 @@ export function App({
           SessionActionsWithCreate,
         modelId,
         modeId,
-        workspaceCwd: selectedWorkspaceCwdRef.current ?? primaryWorkspaceCwd,
+        workspaceCwd:
+          lockedWorkspaceCwd ??
+          selectedWorkspaceCwdRef.current ??
+          primaryWorkspaceCwd,
         onSessionCreated: onSessionCreatedRef.current,
         onSessionAllocated: (sessionId) => {
           preparingSessionIdRef.current = sessionId;
@@ -2512,7 +2547,7 @@ export function App({
     };
     void promise.then(clearPreparation, clearPreparation);
     return promise;
-  }, [sessionActions, workspaces]);
+  }, [lockedWorkspaceCwd, sessionActions, workspaces]);
   const onSubmitBeforeRef = useRef(onSubmitBefore);
   onSubmitBeforeRef.current = onSubmitBefore;
   const [sessionListReloadToken, setSessionListReloadToken] = useState(0);
@@ -3330,6 +3365,7 @@ export function App({
       // new chat; clearing it here would immediately hide the recovery state.
       lastNotifiedSessionIdRef.current = connection.sessionId;
       lastNotifiedWorkspaceIdRef.current = undefined;
+      lastNotifiedWorkspaceCwdRef.current = undefined;
       return;
     }
     const activeWorkspace = workspaces.find(
@@ -3342,13 +3378,19 @@ export function App({
         : undefined;
     if (
       lastNotifiedSessionIdRef.current === connection.sessionId &&
-      lastNotifiedWorkspaceIdRef.current === workspaceId
+      lastNotifiedWorkspaceIdRef.current === workspaceId &&
+      lastNotifiedWorkspaceCwdRef.current === connection.workspaceCwd
     ) {
       return;
     }
     lastNotifiedSessionIdRef.current = connection.sessionId;
     lastNotifiedWorkspaceIdRef.current = workspaceId;
-    onSessionIdChange?.(connection.sessionId, workspaceId);
+    lastNotifiedWorkspaceCwdRef.current = connection.workspaceCwd;
+    onSessionIdChange?.(
+      connection.sessionId,
+      workspaceId,
+      connection.workspaceCwd,
+    );
   }, [
     connection.missingSession,
     connection.sessionId,
@@ -3545,8 +3587,9 @@ export function App({
 
   const createNewSession = useCallback(
     async (workspaceCwd?: string) => {
-      selectedWorkspaceCwdRef.current = workspaceCwd;
-      setSelectedWorkspaceCwd(workspaceCwd);
+      const targetWorkspaceCwd = lockedWorkspaceCwd ?? workspaceCwd;
+      selectedWorkspaceCwdRef.current = targetWorkspaceCwd;
+      setSelectedWorkspaceCwd(targetWorkspaceCwd);
       // Close the drawer before awaiting so a failed createSession() doesn't leave
       // it stuck open with the page scroll still locked, matching loadSidebarSession.
       closeMobileDrawer();
@@ -3563,7 +3606,13 @@ export function App({
         return false;
       }
     },
-    [closeMobileDrawer, closePanel, reportError, sessionActions],
+    [
+      closeMobileDrawer,
+      closePanel,
+      lockedWorkspaceCwd,
+      reportError,
+      sessionActions,
+    ],
   );
   const handleMissingSessionNewSession = useCallback(async () => {
     if (creatingMissingSessionRef.current) return;
@@ -5570,6 +5619,7 @@ export function App({
               onClose={() => setShowResumeDialog(false)}
             >
               <ResumeDialog
+                workspaceCwd={lockedWorkspaceCwd}
                 onSelect={(sessionId) => {
                   closeMobileDrawer();
                   closePanel();
@@ -5767,6 +5817,7 @@ export function App({
               onClose={() => setShowDeleteDialog(false)}
             >
               <DeleteSessionDialog
+                workspaceCwd={lockedWorkspaceCwd}
                 onDeleted={(sessionIds) => {
                   store.dispatch([
                     {
@@ -5797,6 +5848,7 @@ export function App({
               onClose={() => setShowReleaseDialog(false)}
             >
               <ReleaseSessionDialog
+                workspaceCwd={lockedWorkspaceCwd}
                 onReleased={(sessionId) => {
                   store.dispatch([
                     {
@@ -5903,6 +5955,9 @@ export function App({
                   sessionListReloadToken={sessionListReloadToken}
                   selectedWorkspaceCwd={selectedWorkspaceCwd}
                   onSelectWorkspace={setSelectedWorkspaceCwd}
+                  workspaces={workspaces}
+                  lockedWorkspaceCwd={lockedWorkspaceCwd}
+                  lockedWorkspace={sidebarOptions.lockedWorkspace}
                   branding={sidebarOptions.branding}
                   footer={sidebarOptions.footer}
                 />
@@ -6071,6 +6126,8 @@ export function App({
                       <SessionOverviewPanel
                         onOpenSession={handleOpenSessionFromOverview}
                         onOpenSplit={openSplitView}
+                        includeOtherWorkspaces={!lockedWorkspaceCwd}
+                        workspaceCwd={lockedWorkspaceCwd}
                       />
                     )}
                   </div>
@@ -6113,7 +6170,12 @@ export function App({
                       // Registered workspaces (multi-workspace daemons only) so
                       // the page aggregates every project's schedule and the New
                       // form can target one; absent/single → primary-only view.
-                      workspaces={connection.capabilities?.workspaces}
+                      workspaces={
+                        lockedWorkspaceCwd
+                          ? visibleWorkspaces
+                          : workspaces
+                      }
+                      lockedWorkspace={lockedWorkspaceCapability}
                       onCreateViaChat={() => {
                         // Start a FRESH session and jump to it so the task-
                         // creation chat doesn't pile onto the current
@@ -6187,6 +6249,8 @@ export function App({
                         // Refresh the "add pane" picker when the session list
                         // changes elsewhere, matching the sidebar.
                         sessionListReloadToken={sessionListReloadToken}
+                        includeOtherWorkspaces={!lockedWorkspaceCwd}
+                        workspaceCwd={lockedWorkspaceCwd}
                         // Back returns to the Session Overview (the hub the split
                         // is launched from), not the single-session chat.
                         onExit={handleSplitExit}
@@ -6505,7 +6569,7 @@ export function App({
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
                           workspaces={
-                            workspaces.length > 1
+                            !lockedWorkspaceCwd && workspaces.length > 1
                               ? workspaces.map((entry) => ({
                                     id: entry.id,
                                     cwd: entry.cwd,
@@ -6532,10 +6596,11 @@ export function App({
                             connection.sessionId,
                           )}
                           atWorkspaceCwd={
-                            connection.sessionId
+                            lockedWorkspaceCwd ??
+                            (connection.sessionId
                               ? connection.workspaceCwd
                               : (selectedWorkspaceCwd ??
-                                workspaces.find((entry) => entry.primary)?.cwd)
+                                workspaces.find((entry) => entry.primary)?.cwd))
                           }
                           onSelectWorkspace={(cwd) => {
                             selectedWorkspaceCwdRef.current = cwd;
