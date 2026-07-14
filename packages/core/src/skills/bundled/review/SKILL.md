@@ -756,7 +756,7 @@ Read `.qwen/tmp/qwen-review-{target}-presubmit.json`. Schema:
 
 **Apply the report:**
 
-- `blockOnExistingComments=true` → **an overlap is a duplicate; the disposal is deterministic — do not ask the user.** Drop each finding whose `(path, line)` appears in `existingComments.overlap` from your `comments` array (adjusting the counts you hand to `compose-review`: a dropped Critical was already reported on the PR, so it is neither `criticalsInline` nor `bodyCriticals`; a dropped Suggestion joins neither count), list the dropped findings in the terminal summary as "already reported at <path>:<line>", and submit the remainder without pausing. Dogfooding measured this exact decision point improvised as an interactive question in 2 of 6 runs — which stalls a headless run forever — while the other 4 runs proceeded; the Exclusion Criteria already forbid re-reporting discussed issues, so there is nothing to ask. (If dropping overlaps leaves zero findings, that is still not a question: run `compose-review` with the remaining counts like any other submission.)
+- `blockOnExistingComments=true` → **an overlap is a duplicate; the disposal is deterministic — do not ask the user.** Drop each finding whose `(path, line)` appears in `existingComments.overlap` from your `comments` array — the inline counts follow automatically, because `submit` counts the comments you actually attach, so a dropped Critical is simply no longer there to count (and a dropped Critical that was already on the PR does not belong in `state.bodyCriticals` either). List the dropped findings in the terminal summary as "already reported at <path>:<line>", and submit the remainder without pausing. Dogfooding measured this exact decision point improvised as an interactive question in 2 of 6 runs — which stalls a headless run forever — while the other 4 runs proceeded; the Exclusion Criteria already forbid re-reporting discussed issues, so there is nothing to ask. (If dropping overlaps leaves zero findings, that is still not a question: submit with an empty `comments` array like any other run.)
 - `downgradeApprove` / `downgradeRequestChanges` / `downgradeReasons` → **do not apply these by hand.** Copy them into the `presubmit` field of the `compose-review` input (below); the subcommand owns the semantics its tests pin — a downgrade fires only when the verdict it names is the one on the table (a Suggestion-only review is already Comment, so nothing is downgraded and no "Downgraded" sentence is emitted), the downgrade sentence carries the reasons, and a downgraded Request changes keeps its body Criticals after the sentence so the self-PR downgrade never erases the only copy of a blocker.
 - `ciStatus.skippedCheckNames` → **a green CI is not evidence about a check that never ran.** These are checks that reached `completed` with `skipped`, `neutral`, `stale`, or **no conclusion at all** at this commit — GitHub reports them alongside the passing ones, and this classifier used to score them as passes. Most are routing jobs and are noise; a docs-only PR legitimately skips the test matrix. But **presubmit cannot know which of them would have exercised _this_ diff, and you can** — you have `files[]`. So rule on the list: for each skipped check, ask whether it is the one that would have run the code this PR changes (a test job whose suite covers the changed package; the integration/E2E job for a feature whose only new test lives there). If one is, then **CI verified nothing about this change**, and the review must say so rather than resting on the green:
   - Name the skipped check in the terminal output, always.
@@ -780,13 +780,11 @@ Rationale: an inline comment is the only place GitHub renders a ` ```suggestion 
 
 ⚠️ **Suggestion text must never appear in the review `body`.** `.github/workflows/qwen-autofix.yml` keeps Suggestions out of the autofix loop by filtering the inline-comment channel on the `**[Suggestion]**` prefix. It does not filter review bodies, so a Suggestion smuggled into `body` would be handed to the autofix bot as actionable work.
 
-**Build the review JSON** with `write_file` to create `.qwen/tmp/qwen-review-{target}-review.json`. Every high-confidence Critical or Suggestion finding that can be mapped to a diff line MUST be an entry in the `comments` array:
+**Build the review JSON** with `write_file` to create `.qwen/tmp/qwen-review-{target}-review.json`. It carries three things and **no verdict** — `submit` computes the event and body itself, from the `state` you hand it and the comments you attach, and **refuses a payload that carries `event` or `body`** (a run that skipped the computation and typed its own Approve is exactly what that refusal stops). Every high-confidence Critical or Suggestion finding that maps to a diff line is an entry in `comments`:
 
 ````json
 {
-  "commit_id": "{commit_sha}",
-  "event": "REQUEST_CHANGES",
-  "body": "",
+  "commit_id": "{the fetchedSha from Step 1}",
   "comments": [
     {
       "path": "src/file.ts",
@@ -798,53 +796,26 @@ Rationale: an inline comment is the only place GitHub renders a ` ```suggestion 
       "line": 88,
       "body": "**[Suggestion]** recommended improvement — Concrete cost: <what is duplicated/wasted/fragile>\n\n```suggestion\nimproved code\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review_"
     }
-  ]
+  ],
+  "state": {
+    /* the compose-review state below */
+  }
 }
 ````
 
-For a Suggestion-only review (no Critical findings), the event is `COMMENT`, which must carry a one-line `body`:
+**The `state` object is the run's states — the same fields `compose-review` printed the verdict from in Step 6.** You do not compute the event or the body from them; `submit` does, so the verdict it posts and the one Step 6 showed the user are the same computation on the same input, not a transcription. Omit what does not apply:
 
-````json
-{
-  "commit_id": "{commit_sha}",
-  "event": "COMMENT",
-  "body": "Reviewed — no blockers. Suggestions are inline.",
-  "comments": [
-    {
-      "path": "src/other.ts",
-      "line": 88,
-      "body": "**[Suggestion]** recommended improvement — Concrete cost: <what is duplicated/wasted/fragile>\n\n```suggestion\nimproved code\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review_"
-    }
-  ]
-}
-````
+- **Not `criticalsInline` / `suggestionsInline`.** `submit` counts those off the `**[Critical]**` / `**[Suggestion]**` prefixes of the comments you attached — a number beside a list is a number that can disagree with the list, and one did. A `state` that supplies either is refused.
+- `bodyCriticals` — descriptions of unmappable or 422-relocated Criticals (their only copy lives in the body; they count toward `C` like anchored ones).
+- `suggestionsDiscarded` — Suggestions whose anchors failed offline validation or the 422 recovery. They still count toward `S`: dropping every anchor must never upgrade the verdict.
+- `cannotTellCriticals` — one line per existing PR Critical whose Step 6 re-check landed on `cannot tell` (location + what could not be determined).
+- `planPath` — the plan report from Step 1. **Coverage is not an input.** `submit` recomputes it from the harness's transcripts, because a `coverage` object you typed is a document you write — and the last time this skill trusted one, it was fabricated.
+- `uncoverableChunks` / `unreviewedDimensions` — any _additional_ not-reviewed scope from Step 3 (e.g. `"chunk 5 (src/big.min.js)"`, `"security"`). A bare dimension name gets the standard whiffed-agent explanation; an entry carrying its own reason after an em-dash (`"issue-fidelity — linked issue #123 could not be fetched"`) is rendered verbatim.
+- `contextUnavailable` — the Step 1 state.
+- `presubmit` — `downgradeApprove` / `downgradeRequestChanges` / `downgradeReasons` from the presubmit report. Do not apply a downgrade by hand; hand it over and let `submit` own the semantics (a Suggestion-only review is already `COMMENT`, so nothing is downgraded and no "downgraded from Approve" sentence is emitted).
+- `modelId` — for the footer.
 
-Rules:
-
-- `event` and `body` come from `compose-review` (next bullet) — **never derived here**. What the subcommand guarantees, so you can recognize its output as correct instead of "fixing" it: `REQUEST_CHANGES` whenever any Critical is confirmed (inline or body-only); `COMMENT` for Suggestion-only runs and for every capped or downgraded outcome; `APPROVE` only for a clean, uncapped, undowngraded zero-finding run. Its `REQUEST_CHANGES` body is empty **except** when a disclosure state holds (cannot-tell existing Criticals, unread scope, the diff-only warning, body-relocated blockers) — a non-empty RC body is those disclosures, not extra prose to trim. Its `COMMENT` bodies are composed from a closed clause inventory (downgrade sentence, diff-only warning, opener, suggestions clauses, unresolved-blocker block, not-reviewed lines, body Criticals). Two GitHub-API facts it already accounts for, kept here so nobody "simplifies" them away: an empty `body` is only known to be accepted alongside inline comments on `REQUEST_CHANGES` (never send an empty-body `COMMENT`), and `body` never carries section headers, "Review Summary", or analysis — an unmappable **Critical** is the only finding text that belongs there, and a Suggestion never does.
-
-- **The `event`/`body` decision is computed, not reasoned about.** At submit time a model reasons about what it wants to say rather than what it counted — live reviews proved it five times, so the entire machine (the C/S table, the event-capping overrides, the seven-clause body composition, the downgrade carve-outs) is now a tested subcommand. **Do not hand-derive the event or compose the body.** Gather the run's states into a JSON object and call:
-
-  ```bash
-  qwen review compose-review --input .qwen/tmp/qwen-review-{target}-compose.json
-  ```
-
-  Input fields (omit what does not apply; every count is of **confirmed** findings):
-  - `criticalsInline` / `suggestionsInline` — findings anchored in `comments`.
-  - `bodyCriticals` — the descriptions of unmappable or 422-relocated Criticals (their only copy lives in the body; they count toward `C` like anchored ones).
-  - `suggestionsDiscarded` — Suggestions whose anchors failed offline validation or the 422 recovery. They still count toward `S`: dropping every anchor must never upgrade the verdict.
-  - `cannotTellCriticals` — one line per existing PR Critical whose Step 6 re-check landed on `cannot tell` (location + what could not be determined).
-  - `planPath` — the plan report from Step 1. **Coverage is not an input.** `compose-review` recomputes it from the harness's transcripts, because a `coverage` object you typed is a document you write — and the last time this skill trusted one, it was fabricated. You supply the plan; the subcommand finds out for itself what the agents did.
-  - `uncoverableChunks` / `unreviewedDimensions` — any _additional_ not-reviewed scope from Step 3 (e.g. `"chunk 5 (src/big.min.js)"`, `"security"`). A bare dimension name gets the standard whiffed-agent explanation in the body; an entry carrying its own reason after an em-dash (`"issue-fidelity — linked issue #123 could not be fetched"`) is rendered verbatim.
-  - `contextUnavailable` — the Step 1 state.
-  - `presubmit` — `downgradeApprove` / `downgradeRequestChanges` / `downgradeReasons` from the presubmit report.
-  - `modelId` — for the footer.
-
-  The output is `{event, body, baseEvent, cappedBy, downgraded}`. Submit `event` and `body` **verbatim** — the body already carries the footer, and an empty body means send an empty body. Report `baseEvent`/`cappedBy` in the terminal summary so the user can see when a would-be Approve was capped. The guarantees the subcommand owns (and its tests pin): `C` counts body Criticals; a cap state (cannot-tell existing Critical, uncoverable chunk, unreviewed dimension, context-unavailable) forbids `APPROVE` but never softens a `REQUEST_CHANGES`; a self-PR downgrade keeps body Criticals after the downgrade sentence; the "no blockers" opener appears only when the review can certify it; every disclosure survives every stacking.
-
-  Read the `event` and `body` you are about to send, and confirm they are `compose-review`'s output **verbatim** — the check is byte equality with what the subcommand returned, never your own re-derivation (its disclosure-bearing RC bodies and clause-composed COMMENT bodies are correct even where older habits expect an empty body or a one-liner). Two ways this goes wrong, both observed. **An `APPROVE` alongside inline Suggestions:** on PR #6584 a review filed three Suggestions, submitted `APPROVE` with an empty body, and publicly approved a PR it had just asked for changes to — an event the subcommand did not return. **Extra prose in the body:** on PR #6631 a Suggestion that would not anchor became a second paragraph of the public review. If your `body` holds text `compose-review` did not emit, that text is a finding you failed to anchor: a Critical belongs in `bodyCriticals` (re-run the subcommand), and a Suggestion gets deleted — it is already in the terminal output and the Step 8 report, where the author will see it without it becoming a public review paragraph that no line of code answers to.
-
-  **"Actually downgraded" means the verdict would have differed.** The downgrade sentence is only true when, without the presubmit's downgrade flag, the event would have been `APPROVE` (no Critical **and** no Suggestion) or `REQUEST_CHANGES` (has a Critical). A Suggestion-only review is already `COMMENT` on its own; saying it was "downgraded from Approve" tells the author their PR would otherwise have been approved, which is false. Decide the event from the findings **first**, then apply the downgrade flag, and only write the sentence if applying it changed the answer.
+The verdict is a computed fact and this is the second place it must not be re-derived: Step 6 printed it from this same `state`, and `submit` will post it from this same `state`. What the machine guarantees (its tests pin all of it): `REQUEST_CHANGES` whenever any Critical is confirmed, inline or body-only; `COMMENT` for a Suggestion-only run and for every capped or downgraded outcome; `APPROVE` only for a clean, uncapped, undowngraded, zero-finding run whose coverage the transcripts confirm. A cap state forbids `APPROVE` but never softens a `REQUEST_CHANGES`; body Criticals count toward `C`; the "no blockers" opener appears only when the review can certify it. Two live failures this replaces: a review that filed three Suggestions and then publicly `APPROVE`d the PR (#6584), and a Suggestion that would not anchor becoming a second paragraph of the public body (#6631) — both impossible now, because the caller no longer writes the event or the body.
 
 - `comments`: high-confidence **Critical and Suggestion** findings. Skip Nice to have and low-confidence. Each must reference a line in the diff — the `line` `resolve-anchors` computed, never one you derived.
 - **Multi-line anchors get a `start_line` — and both `side` fields with it.** When a finding's resolution has `startLine !== line`, GitHub can highlight the whole construct instead of just its last line — the `if` and its condition, the three lines of a broken guard — which is something a bare line number could not express, and it is free: the resolver already computed both ends. But GitHub requires **`side` and `start_side` on any multi-line comment**, and rejects the whole review with a 422 without them. Emit all four together, or none:
@@ -880,31 +851,7 @@ qwen review submit \
 
 Recovery, if it is genuinely an anchor: recheck them against `files[].hunks[]` from the fetch report — a pure lookup, no API calls (in lightweight mode, against the `gh pr diff` output you already have): an entry is valid if its `line` appears **anywhere inside a diff hunk** for `path` — an added or modified line, or an unchanged context line rendered within the hunk (every comment is on the `RIGHT` side: a single-line one by default, a multi-line one because it says so explicitly). For a multi-line entry, **one hunk must contain the whole range**: `newStart <= start_line <= line <= newEnd` for the _same_ hunk. Checking the two ends independently passes a range whose endpoints sit in different hunks, and a reversed range (`start_line > line`) passes both checks and 422s anyway — a second rejection you paid a round trip to discover. Check that it carries `side` and `start_side` too, whose absence is itself a 422. What GitHub rejects is a line in **no hunk at all**, or a file the PR does not touch. Drop every entry that fails that test, then resubmit once: move each failing **Critical** into the `body` as a whole-PR observation, and discard each failing **Suggestion** (it stays in the terminal output and the Step 8 report — Suggestion text must not enter `body`, see above). **You recompute nothing.** Update the payload and resubmit: each relocated Critical moves into `state.bodyCriticals`, each discarded Suggestion increments `state.suggestionsDiscarded`, and the failing entries come out of `comments`. `submit` recomposes the event and body from what you hand it, so the guarantees the recovery used to hand-derive are structural: a discarded Suggestion still counts toward `S`, so the verdict never upgrades to `APPROVE` on the resubmit; a context-unavailable run keeps its diff-only wording; a relocated blocker keeps `REQUEST_CHANGES` (body Criticals count toward `C` exactly like anchored ones). If the resubmit still 422s, submit once more with `"comments": []` — every remaining Critical in `state.bodyCriticals`, every Suggestion counted in `state.suggestionsDiscarded`: a review with the blockers in prose beats no review at all, and the truth table produces a non-empty `COMMENT` body when no Critical remains, so the one combination GitHub is documented to reject (no body, no comments) cannot be constructed. Never let a single mis-anchored Suggestion suppress a Critical blocker. Log which entries were relocated and which were discarded.
 
-If there are **no confirmed findings**, this branch is **not a shortcut around the invariant**: it is the same submission as every other, with an empty `comments` array. The cap states (`cannotTellCriticals`, `uncoverableChunks`, `unreviewedDimensions`, `contextUnavailable`) and the presubmit flags still go into `state` — `submit` returns the `APPROVE`/LGTM shape **only when no cap state is present**, and zero findings with a whiffed Security lens is not an approval. Write the same payload shape as any other run:
-
-**The review JSON carries no verdict, and `submit` refuses one that does.** Write it with `write_file`:
-
-```json
-{
-  "commit_id": "<the fetchedSha from Step 1>",
-  "comments": [{ "path": "...", "line": 42, "body": "**[Critical]** ..." }],
-  "state": {
-    /* exactly the compose-review state from Step 6 */
-  }
-}
-```
-
-```bash
-qwen review submit \
-  --pr {pr_number} --repo {owner}/{repo} \
-  --review .qwen/tmp/qwen-review-{target}-review.json
-```
-
-`submit` **composes the event and body itself**, from that `state` and from the comments you attached — it is the same computation `compose-review` printed for you in Step 6, run again on the same input, so the posted verdict and the one you told the user are the same thing by construction rather than by transcription. There is no `event` field for you to write and no `body` field for you to build; a payload carrying either is refused.
-
-**And the inline counts are counted, not accepted.** `criticalsInline` and `suggestionsInline` are read off the `**[Critical]**` / `**[Suggestion]**` prefixes of the comments in the payload — a `state` that supplies them is refused. A number typed beside a list is a number that can disagree with the list, and one did: the breaching run posted a body reading "Suggestions are inline" beside an **empty** `comments` array and a summary claiming `0 Suggestion inline`.
-
-A zero-finding run is still a **write**, and it is still gated: an unauthorised `APPROVE` is exactly as public and exactly as unasked-for as an unauthorised `REQUEST_CHANGES`. `submit` refuses it on the same terms.
+**No confirmed findings is not a shortcut around any of this.** Write the same payload shape — `commit_id`, an empty `comments` array, and the full `state` — and submit it the same way. The cap states and presubmit flags still go into `state`, and `submit` returns the `APPROVE`/LGTM shape **only when no cap state is present and the transcripts confirm coverage**; zero findings with a whiffed Security lens or a chunk nobody read is not an approval. A zero-finding run is still a public **write**, and still gated: an unauthorised `APPROVE` is exactly as unasked-for as an unauthorised `REQUEST_CHANGES`, and `submit` refuses it on the same terms.
 
 Clean up the JSON files in Step 9.
 
