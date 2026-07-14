@@ -5,7 +5,11 @@
  */
 
 import type { Part } from '@google/genai';
-import { ToolNames } from '@qwen-code/qwen-code-core';
+import {
+  formatVisionBridgeNoticeDisplay,
+  isVisionBridgeNoticeDisplay,
+  ToolNames,
+} from '@qwen-code/qwen-code-core';
 import type { ChatRecord, Kind } from '@qwen-code/qwen-code-core';
 import { buildTruncatedDiffPreviewText } from '../../../utils/truncatedDiffPreview.js';
 import { getToolResultCallId } from '../../../utils/chat-record-tool-call-id.js';
@@ -152,9 +156,21 @@ function buildToolCallMessageFromResult(
       (toolCallResult as { args?: unknown } | undefined)?.args,
   );
 
-  const content =
+  const resultContent =
     extractDiffContent(toolCallResult?.resultDisplay) ??
     transformPartsToToolCallContent(record.message?.parts ?? []);
+  const content = isVisionBridgeNoticeDisplay(toolCallResult?.resultDisplay)
+    ? [
+        {
+          type: 'content',
+          content: {
+            type: 'text',
+            text: formatVisionBridgeNoticeDisplay(toolCallResult.resultDisplay),
+          },
+        },
+        ...resultContent,
+      ]
+    : resultContent;
 
   return {
     uuid: record.uuid,

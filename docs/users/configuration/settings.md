@@ -258,9 +258,9 @@ The `extra_body` field allows you to add custom parameters to the request body s
 
 #### visionModel
 
-| Setting       | Type   | Description                                                                                                                                                                                                                        | Default |
-| ------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| `visionModel` | string | Image-capable model used as the vision bridge: when a text-only main model receives an image, it is transcribed by this model first. Leave empty to auto-pick a same-provider vision model. Can also be set via `/model --vision`. | `""`    |
+| Setting       | Type   | Description                                                                                                                                                                                                                                                                                                                                                                                                                         | Default |
+| ------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `visionModel` | string | Image-capable model used as the vision bridge: when a text-only main model receives an image, or `read_file` needs the bounded PDF visual fallback, it is transcribed by this model first. Setting this explicitly authorizes bridge calls to that model even when it uses another provider; the tool display discloses the endpoint. Leave empty to auto-pick a same-provider vision model. Can also be set via `/model --vision`. | `""`    |
 
 #### visionBridgeTimeoutMs
 

@@ -19,9 +19,11 @@ import {
   OutputFormat,
   ToolErrorType,
   createDebugLogger,
+  formatVisionBridgeNoticeDisplay,
   getArenaSystemReminder,
   getMCPServerStatus,
   getPlanModeSystemReminder,
+  isVisionBridgeNoticeDisplay,
 } from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
 import type {
@@ -612,6 +614,13 @@ export function functionResponsePartsToString(parts: Part[]): string {
 export function toolResultContent(
   response: ToolCallResponseInfo,
 ): string | undefined {
+  if (isVisionBridgeNoticeDisplay(response.resultDisplay)) {
+    const notice = formatVisionBridgeNoticeDisplay(response.resultDisplay);
+    if (response.responseParts && response.responseParts.length > 0) {
+      return `${notice}\n${functionResponsePartsToString(response.responseParts)}`;
+    }
+    return response.error ? `${notice}\n${response.error.message}` : notice;
+  }
   if (
     typeof response.resultDisplay === 'string' &&
     response.resultDisplay.trim().length > 0

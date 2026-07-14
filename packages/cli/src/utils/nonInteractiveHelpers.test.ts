@@ -1173,6 +1173,54 @@ describe('toolResultContent', () => {
     expect(toolResultContent(response)).toBe('Result content');
   });
 
+  it('includes the vision bridge disclosure with successful tool content', () => {
+    const response: ToolCallResponseInfo = {
+      callId: 'pdf-success',
+      resultDisplay: {
+        type: 'vision_bridge_notice',
+        summary: 'Transcribed PDF pages 20-23; remaining pages 24-25',
+        notice:
+          'Converted 4 images via qwen3-vl-plus (dashscope.aliyuncs.com).',
+      },
+      responseParts: [
+        {
+          functionResponse: {
+            response: { output: 'Page 20: transcribed content' },
+          },
+        },
+      ],
+      error: undefined,
+      errorType: undefined,
+    };
+
+    expect(toolResultContent(response)).toBe(
+      'Transcribed PDF pages 20-23; remaining pages 24-25\n' +
+        'Converted 4 images via qwen3-vl-plus (dashscope.aliyuncs.com).\n' +
+        'Page 20: transcribed content',
+    );
+  });
+
+  it('includes the vision bridge disclosure with a tool error', () => {
+    const response: ToolCallResponseInfo = {
+      callId: 'pdf-failure',
+      resultDisplay: {
+        type: 'vision_bridge_notice',
+        summary: 'Failed to read PDF after rendering pages 20-23',
+        notice:
+          'Vision bridge (qwen3-vl-plus (dashscope.aliyuncs.com)) failed.',
+      },
+      responseParts: [],
+      error: new Error('No extractable text layer.'),
+      errorType: ToolErrorType.READ_CONTENT_FAILURE,
+    };
+
+    expect(toolResultContent(response)).toBe(
+      'Failed to read PDF after rendering pages 20-23\n' +
+        'Vision bridge (qwen3-vl-plus (dashscope.aliyuncs.com)) failed.\n' +
+        'No extractable text layer.',
+    );
+  });
+
   it('should return undefined for empty resultDisplay string', () => {
     const response: ToolCallResponseInfo = {
       callId: 'test-call',

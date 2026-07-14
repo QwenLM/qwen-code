@@ -20,7 +20,12 @@ import type {
   ToolKind,
 } from '@agentclientprotocol/sdk';
 import type { Part } from '@google/genai';
-import { ToolNames, Kind } from '@qwen-code/qwen-code-core';
+import {
+  formatVisionBridgeNoticeDisplay,
+  isVisionBridgeNoticeDisplay,
+  ToolNames,
+  Kind,
+} from '@qwen-code/qwen-code-core';
 import { buildTruncatedDiffPreviewText } from '../../../utils/truncatedDiffPreview.js';
 
 const KIND_MAP: Record<Kind, ToolKind> = {
@@ -148,6 +153,16 @@ export class ToolCallEmitter extends BaseEmitter {
     } else {
       // Normal case: transform message parts to ToolCallContent[]
       contentArray = this.transformPartsToToolCallContent(params.message);
+    }
+
+    if (isVisionBridgeNoticeDisplay(params.resultDisplay)) {
+      contentArray.unshift({
+        type: 'content',
+        content: {
+          type: 'text',
+          text: formatVisionBridgeNoticeDisplay(params.resultDisplay),
+        },
+      });
     }
 
     // Build the update
