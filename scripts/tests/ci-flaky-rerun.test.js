@@ -262,6 +262,17 @@ describe('ci flaky rerun patrol', () => {
     ]);
   });
 
+  it('requests the PR number when refreshing current PR state', async () => {
+    const api = new GhClient('QwenLM/qwen-code');
+    let args = [];
+    api.gh = async (nextArgs) => {
+      args = nextArgs;
+      return JSON.stringify({ ...pr(), state: 'OPEN' });
+    };
+    await api.currentPr(42);
+    expect(args[args.indexOf('--json') + 1].split(',')).toContain('number');
+  });
+
   it('handles an exact run attempt once and allows a new attempt', () => {
     const comments = [markerComment()];
     expect(alreadyHandled(comments, target(), 'patrol-bot')).toBe(true);

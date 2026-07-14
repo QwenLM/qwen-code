@@ -533,7 +533,7 @@ export class GhClient {
         '--repo',
         this.repo,
         '--json',
-        'headRefOid,state,isDraft,baseRefName,statusCheckRollup,files',
+        'number,headRefOid,state,isDraft,baseRefName,statusCheckRollup,files',
       ]),
     );
   }
