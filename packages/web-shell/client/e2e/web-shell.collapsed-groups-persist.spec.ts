@@ -17,6 +17,11 @@ const DEMO_FRAMES_DIR = join(
   'docs/assets/web-shell-collapsed-session-groups-frames',
 );
 
+function demoSidebar(page: Page) {
+  // Prefer the desktop <aside>; the mobile drawer reuses the same aria-label.
+  return page.locator('aside[aria-label="Workspace sidebar"]');
+}
+
 test('persists collapsed session groups across reload @demo', async ({
   page,
 }, testInfo) => {
@@ -29,6 +34,18 @@ test('persists collapsed session groups across reload @demo', async ({
 
   await gotoSession(page, scenario, daemon);
 
+  // Demo capture focuses on the project session groups: hide the Pinned block
+  // so collapse/reload is unambiguous in the GIF captions.
+  if (CAPTURE_DEMO) {
+    const pinnedHeader = page.getByRole('button', { name: /^Pinned/ });
+    if (
+      (await pinnedHeader.count()) > 0 &&
+      (await pinnedHeader.getAttribute('aria-expanded')) === 'true'
+    ) {
+      await pinnedHeader.click();
+    }
+  }
+
   const backendSection = page.locator('section[aria-label="Backend"]');
   const backendHeader = backendSection.getByRole('button', {
     name: /^Backend/,
@@ -36,7 +53,7 @@ test('persists collapsed session groups across reload @demo', async ({
   await expect(backendHeader).toHaveAttribute('aria-expanded', 'true');
   await expect(backendSection).toContainText('API review');
   if (CAPTURE_DEMO) {
-    await page.screenshot({
+    await demoSidebar(page).screenshot({
       path: join(DEMO_FRAMES_DIR, '01-expanded.png'),
     });
   }
@@ -46,7 +63,7 @@ test('persists collapsed session groups across reload @demo', async ({
   await expect(backendSection).not.toContainText('API review');
   if (CAPTURE_DEMO) {
     await page.waitForTimeout(300);
-    await page.screenshot({
+    await demoSidebar(page).screenshot({
       path: join(DEMO_FRAMES_DIR, '02-collapsed.png'),
     });
   }
@@ -81,8 +98,16 @@ test('persists collapsed session groups across reload @demo', async ({
     'Release notes',
   );
   if (CAPTURE_DEMO) {
+    // Keep Pinned closed again after remount so the after-reload frame matches.
+    const pinnedHeader = page.getByRole('button', { name: /^Pinned/ });
+    if (
+      (await pinnedHeader.count()) > 0 &&
+      (await pinnedHeader.getAttribute('aria-expanded')) === 'true'
+    ) {
+      await pinnedHeader.click();
+    }
     await page.waitForTimeout(300);
-    await page.screenshot({
+    await demoSidebar(page).screenshot({
       path: join(DEMO_FRAMES_DIR, '03-after-reload.png'),
     });
   }

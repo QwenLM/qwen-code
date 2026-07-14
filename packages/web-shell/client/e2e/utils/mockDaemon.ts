@@ -296,7 +296,14 @@ export async function installMockDaemon(
       return;
     }
 
-    await handleDaemonRoute(route, method, path, scenario, body);
+    await handleDaemonRoute(
+      route,
+      method,
+      path,
+      scenario,
+      body,
+      url.searchParams,
+    );
   });
 
   return {
@@ -512,6 +519,7 @@ async function handleDaemonRoute(
   path: string,
   scenario: WebShellDaemonScenario,
   body: unknown,
+  searchParams: URLSearchParams = new URLSearchParams(),
 ): Promise<void> {
   if (method === 'GET' && path === '/health') {
     await json(route, { ok: true, healthy: true });
@@ -576,7 +584,14 @@ async function handleDaemonRoute(
     return;
   }
   if (method === 'GET' && /^\/workspace\/.+\/sessions\/?$/.test(path)) {
-    await json(route, { sessions: scenario.sessions });
+    // Mirror daemon filters so the Pinned bucket does not clone every
+    // session and bury the grouped-collapse demo in duplicate rows.
+    const group = searchParams.get('group');
+    const sessions =
+      group === 'pinned'
+        ? scenario.sessions.filter((session) => Boolean(session.isPinned))
+        : scenario.sessions.filter((session) => !session.isPinned);
+    await json(route, { sessions });
     return;
   }
   if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
