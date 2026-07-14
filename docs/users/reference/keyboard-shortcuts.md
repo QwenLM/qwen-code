@@ -69,7 +69,7 @@ This document lists the available keyboard shortcuts in Qwen Code.
 
 ## History scrollback
 
-Active when `ui.useTerminalBuffer` is enabled (Settings → UI → Virtualized History) and screen reader mode is off, which is the default for non-screen-reader sessions. In that mode conversation history is rendered inside an in-app viewport instead of the host terminal scrollback, so the keys below replace the terminal's native scroll.
+Active when `ui.useTerminalBuffer` is enabled (Settings → UI → Virtualized History), screen reader mode is off, and Qwen Code is running in a compatible interactive terminal (`stdout` is a TTY, CI is inactive, and `TERM` is not `dumb`), which is the default for ordinary non-screen-reader sessions. In that mode conversation history is rendered inside an in-app viewport instead of the host terminal scrollback, so the keys below replace the terminal's native scroll.
 
 | Shortcut        | Description                                          |
 | --------------- | ---------------------------------------------------- |
