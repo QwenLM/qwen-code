@@ -573,14 +573,13 @@ export function executeChild({ command, cwd, env }) {
       finish({
         error,
         relaySignal: forwardedSignal,
-        signal: forwardedSignal,
         status: null,
       });
     });
     child.once('exit', (status, signal) => {
       finish({
         relaySignal: forwardedSignal,
-        signal: forwardedSignal ?? signal,
+        signal,
         status,
       });
     });
@@ -600,12 +599,20 @@ class ValidationFailure extends Error {
 }
 
 function commandFailure(stage, command, result) {
-  if (!result.error && !result.signal && result.status === 0) return undefined;
-  const signalNumber = result.signal
-    ? osConstants.signals[result.signal]
+  if (
+    !result.error &&
+    !result.relaySignal &&
+    !result.signal &&
+    result.status === 0
+  ) {
+    return undefined;
+  }
+  const failureSignal = result.signal ?? result.relaySignal;
+  const signalNumber = failureSignal
+    ? osConstants.signals[failureSignal]
     : undefined;
   const exitCode =
-    typeof result.status === 'number'
+    typeof result.status === 'number' && result.status !== 0
       ? result.status
       : typeof signalNumber === 'number'
         ? 128 + signalNumber
@@ -614,7 +621,9 @@ function commandFailure(stage, command, result) {
     ? `spawn error: ${result.error.message}`
     : result.signal
       ? `terminated by signal ${result.signal}`
-      : `exited with status ${exitCode}`;
+      : result.relaySignal
+        ? `interrupted after forwarding signal ${result.relaySignal}`
+        : `exited with status ${exitCode}`;
   return new ValidationFailure({
     command,
     detail,

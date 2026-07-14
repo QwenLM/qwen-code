@@ -616,6 +616,99 @@ describe('validation profiles', () => {
 });
 
 describe('step execution', () => {
+  it.skipIf(process.platform === 'win32')(
+    'keeps a forwarded signal separate when the child exits cleanly',
+    async () => {
+      const moduleUrl = new URL('../verify-pr.js', import.meta.url).href;
+      const harnessScript = `
+        import { executeChild } from ${JSON.stringify(moduleUrl)};
+
+        const result = await executeChild({
+          command: [
+            process.execPath,
+            '--input-type=module',
+            '--eval',
+            'process.on("SIGINT", () => process.exit(0)); console.log("CHILD_READY"); setInterval(() => {}, 1000);',
+          ],
+          cwd: process.cwd(),
+          env: process.env,
+        });
+        console.log('RESULT:' + JSON.stringify(result));
+      `;
+      const harness = spawn(
+        process.execPath,
+        ['--input-type=module', '--eval', harnessScript],
+        {
+          cwd: path.resolve(import.meta.dirname, '../..'),
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+      let output = '';
+      harness.stdout.on('data', (chunk) => {
+        output += chunk;
+      });
+      harness.stderr.on('data', (chunk) => {
+        output += chunk;
+      });
+      const completion = new Promise((resolve) => {
+        harness.once('exit', (code, signal) => resolve({ code, signal }));
+      });
+
+      try {
+        await new Promise((resolve, reject) => {
+          const timeout = setTimeout(
+            () => reject(new Error(`Signal harness did not start:\n${output}`)),
+            5000,
+          );
+          const checkReady = () => {
+            if (!output.includes('CHILD_READY')) return;
+            clearTimeout(timeout);
+            resolve();
+          };
+          harness.stdout.on('data', checkReady);
+          checkReady();
+        });
+
+        harness.kill('SIGINT');
+        await expect(completion).resolves.toEqual({ code: 0, signal: null });
+        const result = JSON.parse(output.split('RESULT:').at(-1).trim());
+        expect(result).toEqual({
+          relaySignal: 'SIGINT',
+          signal: null,
+          status: 0,
+        });
+      } finally {
+        if (harness.exitCode === null && harness.signalCode === null) {
+          harness.kill('SIGKILL');
+          await completion;
+        }
+      }
+    },
+  );
+
+  it('reports a forwarded signal without claiming child termination', async () => {
+    await expect(
+      runSteps({
+        allocatePort: async () => 43123,
+        baseEnv: {},
+        cwd: '/temporary-worktree',
+        execute: () => ({
+          relaySignal: 'SIGINT',
+          signal: null,
+          status: 0,
+        }),
+        home: '/temporary-home',
+        log: () => {},
+        steps: createValidationSteps({ profile: 'github_ci_only' }).slice(0, 1),
+      }),
+    ).rejects.toMatchObject({
+      detail: 'interrupted after forwarding signal SIGINT',
+      exitCode: 130,
+      relaySignal: 'SIGINT',
+      signal: undefined,
+    });
+  });
+
   it('uses a controlled environment and isolated HOME for every step', () => {
     const steps = [
       ...createValidationSteps({ profile: 'full' }),
@@ -984,7 +1077,7 @@ describe('step execution', () => {
             },
           });
         } catch (error) {
-          relayedSignal = error.signal;
+          relayedSignal = error.relaySignal;
         }
 
         const registrations = spawnSync(
