@@ -238,13 +238,7 @@ export function registerWorkspaceExtensionRoutes(
     runtime: WorkspaceRuntime,
     generation: number,
   ): void => {
-    appliedGenerationByWorkspaceId.set(
-      runtime.workspaceId,
-      Math.max(
-        appliedGenerationByWorkspaceId.get(runtime.workspaceId) ?? 0,
-        generation,
-      ),
-    );
+    appliedGenerationByWorkspaceId.set(runtime.workspaceId, generation);
   };
   const globalReconciliationOptions = () =>
     workspaceRegistry
@@ -289,7 +283,7 @@ export function registerWorkspaceExtensionRoutes(
           .list()
           .filter(
             (runtime) =>
-              (appliedGenerationByWorkspaceId.get(runtime.workspaceId) ?? 0) <
+              (appliedGenerationByWorkspaceId.get(runtime.workspaceId) ?? 0) !==
               generation,
           );
         if (generation === observedGeneration && pendingRuntimes.length === 0)
@@ -314,13 +308,7 @@ export function registerWorkspaceExtensionRoutes(
         results.forEach((result, index) => {
           if (result.status === 'fulfilled') {
             const workspaceId = runtimes[index]!.workspaceId;
-            appliedGenerationByWorkspaceId.set(
-              workspaceId,
-              Math.max(
-                appliedGenerationByWorkspaceId.get(workspaceId) ?? 0,
-                generation,
-              ),
-            );
+            appliedGenerationByWorkspaceId.set(workspaceId, generation);
           } else {
             writeStderrLine(
               `qwen serve: extension generation reconciliation failed for workspace ${runtimes[index]!.workspaceId}: ${redactUrlCredentials(

@@ -596,6 +596,54 @@ describe('extension management v2 REST', () => {
     }
   });
 
+  it('reconciles runtimes when the authoritative generation rolls back', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness();
+    mockExtensionManager();
+    const rolledBackSnapshot: ExtensionStoreSnapshot = {
+      version: 2,
+      generation: 6,
+      legacyProjectionHash: 'rolled-back-hash',
+      extensions: {
+        [extensionId]: {
+          name: 'demo',
+          defaultActivation: 'disabled',
+          workspaceOverrides: {},
+        },
+      },
+    };
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+
+      vi.mocked(
+        ExtensionManager.prototype.getExtensionStoreSnapshot,
+      ).mockResolvedValue(rolledBackSnapshot);
+      vi.mocked(
+        ExtensionManager.prototype.refreshCacheWithSnapshot,
+      ).mockResolvedValue(rolledBackSnapshot);
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledTimes(2);
+      const projection = await auth(
+        request(h.app).get(
+          `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions`,
+        ),
+      );
+      expect(projection.body).toMatchObject({
+        desiredGeneration: 6,
+        appliedGeneration: 6,
+      });
+    } finally {
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('reconciles a runtime added after the generation stabilizes', async () => {
     vi.useFakeTimers();
     const h = await makeHarness();
