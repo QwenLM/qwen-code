@@ -924,7 +924,11 @@ describe('DingtalkChannel inbound media', () => {
 
   it('keeps media attachment best-effort when app token refresh fails', async () => {
     const channel = createChannel();
-    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('network down'));
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+      new Error(
+        'request failed for https://oapi.dingtalk.com/gettoken?appkey=client-id&appsecret=client-secret',
+      ),
+    );
     const stderrSpy = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
@@ -935,6 +939,11 @@ describe('DingtalkChannel inbound media', () => {
     expect(stderrSpy).toHaveBeenCalledWith(
       '[DingTalk:test-dingtalk] Cannot download media: access token refresh failed.\n',
     );
+    const logged = stderrSpy.mock.calls.map((call) => String(call[0])).join('');
+    expect(logged).toContain(
+      '[DingTalk:test-dingtalk] access token fetch failed.\n',
+    );
+    expect(logged).not.toContain('client-secret');
   });
 });
 
