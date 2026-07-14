@@ -165,39 +165,46 @@ export async function recordFlow(
     recordVideo: { dir: VIDEO_RAW_DIR, size: { ...VISUAL_VIEWPORT } },
   });
   let page: Page | undefined;
+  // Track failure with an explicit boolean, not the truthiness of the caught
+  // value: `throw undefined` / `throw null` / `Promise.reject()` must still mark
+  // the flow failed (otherwise an aborted flow would look passed).
+  let driveFailed = false;
   let driveError: unknown;
   try {
     page = await context.newPage();
     await drive(page);
   } catch (error) {
+    driveFailed = true;
     driveError = error;
   } finally {
     try {
       await context.close();
     } catch {
       // Best-effort close (the browser may have crashed mid-drive); preserve
-      // driveError for the re-throw below instead of masking it here.
+      // the drive failure for the re-throw below instead of masking it here.
     }
   }
+
   const video = page?.video();
-  if (video) {
+  if (driveFailed) {
+    // The flow errored — discard the partial recording rather than publishing a
+    // meaningless "failed flow" video into the artifact.
+    await video?.delete().catch(() => {});
+  } else if (video) {
     try {
       await video.saveAs(join(VIDEO_DIR, `${name}.webm`));
       await video.delete(); // drop the hash-named raw copy; keep only the named one
     } catch (videoError) {
-      // If drive() failed, the video may never have finalized — keep the real
-      // driveError (rethrown below) rather than masking it. If drive() SUCCEEDED,
-      // surface the video failure so a missing recording isn't swallowed silently.
-      if (!driveError) {
-        console.warn(`video.saveAs failed for flow "${name}":`, videoError);
-      }
+      // Drive succeeded but the video failed to finalize — surface it so a
+      // missing recording isn't swallowed silently.
+      console.warn(`video.saveAs failed for flow "${name}":`, videoError);
     }
-  } else if (!driveError) {
+  } else {
     console.warn(
       `No video recorded for flow "${name}" — recording may not have started.`,
     );
   }
-  if (driveError) throw driveError;
+  if (driveFailed) throw driveError;
 }
 
 /** A short, human-readable pause so a recorded flow is legible as a GIF. */

@@ -23,6 +23,11 @@ on:
       - 'packages/web-shell/package.json'
       - 'packages/web-shell/vite.config.ts'
       - 'packages/web-shell/playwright.visuals.config.ts'
+      # The visuals dev server aliases these runtime sources (see the `resolve.
+      # alias` block in packages/web-shell/vite.config.ts), so UI-affecting
+      # changes there must also refresh the preview.
+      - 'packages/webui/src/**'
+      - 'packages/sdk-typescript/src/**'
 
 permissions:
   contents: 'read'
@@ -119,23 +124,40 @@ jobs:
           PR_NUMBER: '${{ github.event.pull_request.number }}'
         run: |-
           set -euo pipefail
-          mkdir -p "${OUT_DIR}"
+          # Ensure both dirs exist so the counts below are robust even when an
+          # upstream step produced none (e.g. no ffmpeg -> no gifs/). (The finds
+          # sit inside `echo "$(...)"`, so a missing dir wouldn't actually trip
+          # set -e — echo masks it — but create them for clarity all the same.)
+          mkdir -p "${OUT_DIR}/screenshots" "${OUT_DIR}/gifs"
           # PR number for the workflow_run publish job (which validates it).
           # The head SHA is intentionally NOT shipped in the artifact: the
           # publish job binds to the authenticated github.event.workflow_run
           # .head_sha, and an artifact-sourced SHA would be untrusted.
           printf '%s\n' "${PR_NUMBER}" > "${OUT_DIR}/pr.txt"
-          echo "Screenshots: $(find "${OUT_DIR}/screenshots" -name '*.png' 2>/dev/null | wc -l | tr -d ' ')"
-          echo "GIFs: $(find "${OUT_DIR}/gifs" -name '*.gif' 2>/dev/null | wc -l | tr -d ' ')"
+          echo "Screenshots: $(find "${OUT_DIR}/screenshots" -name '*.png' | wc -l | tr -d ' ')"
+          echo "GIFs: $(find "${OUT_DIR}/gifs" -name '*.gif' | wc -l | tr -d ' ')"
 
-      - name: 'Upload web-shell visuals artifact'
+      # The privileged publish workflow downloads THIS artifact, so keep the raw
+      # videos out of it: an untrusted PR could drop a multi-GB file under
+      # video/ and exhaust the publisher's bandwidth/disk/timeout. Screenshots
+      # and GIFs (which the publisher hosts) are size-capped again on that side.
+      - name: 'Upload web-shell visuals artifact (published)'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'web-shell-visuals'
           path: |-
             ${{ runner.temp }}/web-shell-visuals/screenshots
             ${{ runner.temp }}/web-shell-visuals/gifs
-            ${{ runner.temp }}/web-shell-visuals/video
             ${{ runner.temp }}/web-shell-visuals/pr.txt
           if-no-files-found: 'warn'
+          retention-days: 7
+
+      # Raw recordings live in a SEPARATE artifact the publish workflow never
+      # downloads — they're only the "full-resolution recordings" link target.
+      - name: 'Upload raw flow recordings'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'web-shell-visuals-video'
+          path: '${{ runner.temp }}/web-shell-visuals/video'
+          if-no-files-found: 'ignore'
           retention-days: 7

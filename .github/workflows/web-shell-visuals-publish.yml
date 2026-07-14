@@ -80,39 +80,57 @@ jobs:
             echo "::warning::Artifact has no valid PR number; aborting."
             exit 0
           fi
-          pr_json="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" 2>/dev/null || true)"
-          # Guard empty responses (network error / rate limit): jq on empty
-          # stdin would error and `set -e` would kill the job.
-          if [ -z "${pr_json}" ]; then
-            echo "::warning::Empty response fetching PR #${PR} (network / rate limit); skipping."
+
+          # Authenticated bot identity — the dedup lookup filters on this so a
+          # participant who posts the marker can't hijack or redirect the update.
+          BOT_LOGIN="$(gh api user --jq '.login' 2>/dev/null || true)"
+          if [ -z "${BOT_LOGIN}" ]; then
+            echo "::warning::Could not resolve the bot identity; skipping to avoid mis-targeting a comment."
             exit 0
           fi
-          pr_state="$(jq -r '.state // empty' <<< "${pr_json}")"
-          pr_head="$(jq -r '.head.sha // empty' <<< "${pr_json}")"
-          if [ "${pr_state}" != "open" ]; then
-            echo "::notice::PR #${PR} is not open (state='${pr_state:-unknown}'); skipping."
-            exit 0
-          fi
-          if [ -z "${RUN_HEAD_SHA}" ] || [ "${pr_head}" != "${RUN_HEAD_SHA}" ]; then
-            echo "::warning::PR #${PR} head (${pr_head:-none}) != this run's head (${RUN_HEAD_SHA:-none}); refusing to post (stale run or forged/mismatched PR number)."
-            exit 0
-          fi
+
+          # Re-runnable gate: PR must be open AND its current head must equal this
+          # run's authenticated head SHA. This binds the untrusted artifact PR
+          # number to the real run, and is re-checked right before the comment
+          # write to close the validate->write TOCTOU window (a push/close during
+          # asset upload must not let a stale run post).
+          validate_pr() {
+            local j st hd
+            j="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" 2>/dev/null || true)"
+            [ -n "${j}" ] || { echo "::warning::Empty response fetching PR #${PR}."; return 1; }
+            st="$(jq -r '.state // empty' <<< "${j}")"
+            hd="$(jq -r '.head.sha // empty' <<< "${j}")"
+            [ "${st}" = "open" ] || { echo "::notice::PR #${PR} not open (state=${st:-unknown})."; return 1; }
+            { [ -n "${RUN_HEAD_SHA}" ] && [ "${hd}" = "${RUN_HEAD_SHA}" ]; } || {
+              echo "::warning::PR #${PR} head (${hd:-none}) != run head (${RUN_HEAD_SHA:-none}); refusing."
+              return 1
+            }
+            return 0
+          }
+          validate_pr || exit 0
           SHORT_SHA="${RUN_HEAD_SHA:0:7}"
 
           # --- Stage + validate the images ----------------------------------
-          # The images are produced by untrusted PR code. Validate magic bytes
-          # with coreutils `od` (no fragile `xxd` dependency), sanitize names,
-          # and CAP count + per-file size so a hostile PR can't blow past the
-          # comment size limit or bloat the pr-assets branch.
+          # Untrusted PR content: bound BOTH the number of candidates EXAMINED
+          # (so tens of thousands of junk files can't burn the job's budget on
+          # wc/od before reaching valid files) and the number ACCEPTED, plus a
+          # per-file size cap. Validate magic bytes with coreutils `od`.
           STAGE="${RUNNER_TEMP}/visuals-stage"
           rm -rf "${STAGE}"
           mkdir -p "${STAGE}"
           shopt -s nullglob
-          MAX_IMAGES=30
-          MAX_BYTES=$((6 * 1024 * 1024))
+          MAX_CANDIDATES=200
+          MAX_IMAGES=14
+          MAX_BYTES=$((3 * 1024 * 1024))
+          examined=0
           count=0
           for f in "${ART}"/screenshots/*.png "${ART}"/gifs/*.gif; do
             [ -f "${f}" ] || continue
+            examined=$((examined + 1))
+            if [ "${examined}" -gt "${MAX_CANDIDATES}" ]; then
+              echo "::warning::Examined ${MAX_CANDIDATES} candidate files; stopping."
+              break
+            fi
             if [ "${count}" -ge "${MAX_IMAGES}" ]; then
               echo "::warning::Reached the ${MAX_IMAGES}-image cap; skipping the rest."
               break
@@ -139,7 +157,11 @@ jobs:
                 esac
                 ;;
             esac
-            safe="$(basename "${f}" | tr -c 'A-Za-z0-9._-' '_')"
+            # Capture basename FIRST so command substitution strips its trailing
+            # newline BEFORE `tr` — otherwise `tr -c` turns that newline into `_`,
+            # producing "name.png_" and breaking the .png/.gif extension filter.
+            base="$(basename "${f}")"
+            safe="$(printf '%s' "${base}" | tr -c 'A-Za-z0-9._-' '_')"
             cp "${f}" "${STAGE}/${safe}"
             count=$((count + 1))
           done
@@ -149,54 +171,29 @@ jobs:
           fi
           echo "Staged ${count} image(s) for PR #${PR}."
 
-          # --- Host the images on the pr-assets branch ----------------------
-          # Per-PR asset branch under the repo's existing `pr-assets/<slug>`
-          # convention. A bare `pr-assets` branch would D/F-conflict with the
-          # existing `pr-assets/*` refs, and per-PR branches also avoid cross-PR
-          # push contention. Reference images by immutable commit SHA so URLs
-          # never break as later runs append. Each run writes a unique <run>
-          # subdir, so a concurrent same-PR push only needs a fast-forward
-          # rebase, never a content merge.
+          # --- Host on the PR's own pr-assets branch (bounded) --------------
+          # Replace the branch with a SINGLE orphan snapshot each run and
+          # force-push, so untrusted PR content can't accumulate unbounded
+          # history in the base repo. The comment always points at the new
+          # immutable commit SHA; the previous snapshot becomes unreachable and
+          # is GC'd. Per-PR branch under the existing pr-assets/<slug> convention
+          # (a bare `pr-assets` branch would D/F-conflict with pr-assets/*), and
+          # the per-PR concurrency group serializes same-PR runs so the
+          # force-push never drops a concurrent snapshot.
           BRANCH="pr-assets/web-shell-visuals-${PR}"
-          DEST="${RUN_ID}"
-          WORK="${RUNNER_TEMP}/pr-assets"
           AUTH_URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          WORK="${RUNNER_TEMP}/pr-assets"
           rm -rf "${WORK}"
-          mkdir -p "${WORK}"
+          mkdir -p "${WORK}/imgs"
+          cp "${STAGE}"/* "${WORK}/imgs/"
           cd "${WORK}"
           git init -q
           git config user.name 'qwen-code-bot'
           git config user.email 'qwen-code-bot@users.noreply.github.com'
-          git remote add origin "${AUTH_URL}"
-          if git ls-remote --exit-code --heads origin "${BRANCH}" >/dev/null 2>&1; then
-            git fetch -q --depth 1 origin "${BRANCH}"
-            git checkout -q -B "${BRANCH}" FETCH_HEAD
-          else
-            echo "Branch ${BRANCH} does not exist yet; creating it."
-            git checkout -q --orphan "${BRANCH}"
-          fi
-          mkdir -p "${DEST}"
-          cp "${STAGE}"/* "${DEST}/"
-          git add "${DEST}"
-          if git diff --cached --quiet; then
-            echo "Images already present on ${BRANCH}; reusing the existing commit."
-          else
-            git commit -q -m "web-shell visuals: PR #${PR} (run ${RUN_ID})"
-            pushed=0
-            for attempt in 1 2 3 4 5; do
-              if git push -q origin "HEAD:${BRANCH}" 2>/dev/null; then
-                pushed=1
-                break
-              fi
-              echo "::notice::push attempt ${attempt} rejected; rebasing onto the latest ${BRANCH}."
-              git fetch -q --depth 1 origin "${BRANCH}" || true
-              git rebase -q FETCH_HEAD || git rebase --abort >/dev/null 2>&1 || true
-            done
-            if [ "${pushed}" -ne 1 ]; then
-              echo "::error::Failed to push web-shell visuals to ${BRANCH} after retries."
-              exit 1
-            fi
-          fi
+          git checkout -q --orphan snapshot
+          git add imgs
+          git commit -q -m "web-shell visuals: PR #${PR} (run ${RUN_ID})"
+          git push -q --force "${AUTH_URL}" "HEAD:${BRANCH}"
           ASSET_SHA="$(git rev-parse HEAD)"
           cd "${GITHUB_WORKSPACE}"
           echo "web-shell visuals hosted on ${BRANCH} at ${ASSET_SHA}."
@@ -205,7 +202,7 @@ jobs:
           BODY_FILE="${RUNNER_TEMP}/visuals-comment.md"
           export STAGE
           export BODY_FILE
-          export RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${ASSET_SHA}/${DEST}"
+          export RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${ASSET_SHA}/imgs"
           export SHORT_SHA RUN_URL
           node <<'NODE'
           const fs = require('node:fs');
@@ -289,7 +286,7 @@ jobs:
 
           if (runUrl) {
             out.push(
-              `<sub>Full-resolution recordings (.webm) are attached to the <a href="${runUrl}">workflow run</a>.</sub>`,
+              `<sub>Full-resolution recordings (.webm) are attached to the <a href="${esc(runUrl)}">workflow run</a>.</sub>`,
             );
           }
           out.push('');
@@ -299,15 +296,29 @@ jobs:
           console.log(`Comment body: ${out.length} lines, ${shots.length} screenshots, ${gifs.length} gifs.`);
           NODE
 
-          # --- Post or update the PR comment (dedup on the marker) ----------
+          # --- Post or update the PR comment --------------------------------
+          # Re-validate immediately before the write (TOCTOU): a push/close during
+          # asset upload must not let this now-stale run post a preview.
+          validate_pr || { echo "::notice::PR #${PR} changed during publish; not posting."; exit 0; }
+
+          # Dedup only against OUR OWN prior comment (bot author + marker), and
+          # only after a SUCCESSFUL listing — a failed/partial list must not read
+          # as "no existing comment" (that would POST a duplicate on every failure).
           MARKER='<!-- qwen:web-shell-visuals -->'
-          if ! EXISTING="$(
-            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" \
-              --method GET --paginate -F per_page=100 \
-              | jq -sr --arg m "${MARKER}" '[.[][] | select(.body | contains($m))] | last | .id // empty'
-          )"; then
-            echo "::warning::Failed to list existing comments; will create a new one."
-            EXISTING=''
+          EXISTING=''
+          listed=0
+          for attempt in 1 2 3; do
+            if resp="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --method GET --paginate -F per_page=100 2>/dev/null)"; then
+              EXISTING="$(jq -sr --arg m "${MARKER}" --arg u "${BOT_LOGIN}" \
+                '[.[][] | select((.user.login == $u) and (.body | contains($m)))] | last | .id // empty' <<< "${resp}")"
+              listed=1
+              break
+            fi
+            echo "::notice::comment lookup attempt ${attempt} failed; retrying."
+          done
+          if [ "${listed}" -ne 1 ]; then
+            echo "::error::Could not list PR comments after retries; not posting (avoids duplicates)."
+            exit 1
           fi
           if [ -n "${EXISTING}" ]; then
             gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING}" -F body=@"${BODY_FILE}" >/dev/null
