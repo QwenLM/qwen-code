@@ -100,11 +100,13 @@ describe('parseChannelMemoryIntent', () => {
     expect(parseChannelMemoryIntent('/forget m-a31f0d82c7e4')).toBeNull();
   });
 
-  it('keeps clear requests ahead of item updates', () => {
+  it('parses item updates before broad clear requests', () => {
     expect(
       parseChannelMemoryIntent('把 m-a31f0d82c7e4 改成默认的记忆清空'),
     ).toEqual({
-      kind: 'clear_request',
+      kind: 'update',
+      id: 'm-a31f0d82c7e4',
+      text: '默认的记忆清空',
     });
   });
 

@@ -72,11 +72,6 @@ export function parseChannelMemoryIntent(
       return { kind: 'clear_confirm' };
     }
   }
-  for (const pattern of CLEAR_REQUEST_PATTERNS) {
-    if (pattern.test(trimmed)) {
-      return { kind: 'clear_request' };
-    }
-  }
   for (const pattern of REMOVE_PATTERNS) {
     const match = trimmed.match(pattern);
     if (match?.[1] && MEMORY_ID_PATTERN.test(match[1])) {
@@ -89,6 +84,11 @@ export function parseChannelMemoryIntent(
     const updated = match?.[2]?.trim();
     if (id && updated && MEMORY_ID_PATTERN.test(id)) {
       return { kind: 'update', id, text: updated };
+    }
+  }
+  for (const pattern of CLEAR_REQUEST_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      return { kind: 'clear_request' };
     }
   }
   for (const pattern of INSPECT_PATTERNS) {
