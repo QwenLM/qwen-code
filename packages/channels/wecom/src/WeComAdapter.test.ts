@@ -11,7 +11,16 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import type {
   ChannelAgentBridge,
   ChannelConfig,
@@ -368,7 +377,20 @@ function channelFileDirs(): string[] {
   return readdirSync(parent).map((entry) => join(parent, entry));
 }
 
+const suiteTmpDir = mkdtempSync(join(tmpdir(), 'qwen-wecom-test-'));
+
 describe('WeComChannel', () => {
+  beforeAll(() => {
+    vi.stubEnv('TMPDIR', suiteTmpDir);
+    vi.stubEnv('TMP', suiteTmpDir);
+    vi.stubEnv('TEMP', suiteTmpDir);
+  });
+
+  afterAll(() => {
+    vi.unstubAllEnvs();
+    rmSync(suiteTmpDir, { recursive: true, force: true });
+  });
+
   beforeEach(() => {
     mocks.instances.length = 0;
     mocks.httpCalls.length = 0;
