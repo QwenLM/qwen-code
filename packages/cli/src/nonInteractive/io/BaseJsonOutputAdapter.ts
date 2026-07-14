@@ -1404,10 +1404,19 @@ export function toolResultContent(
 ): string | undefined {
   if (isVisionBridgeNoticeDisplay(response.resultDisplay)) {
     const notice = formatVisionBridgeNoticeDisplay(response.resultDisplay);
+    if (response.error) {
+      return `${notice}\n${response.error.message}`;
+    }
+    const responsePartsError = checkResponsePartsForError(
+      response.responseParts,
+    );
+    if (responsePartsError) {
+      return `${notice}\n${responsePartsError}`;
+    }
     if (response.responseParts && response.responseParts.length > 0) {
       return `${notice}\n${functionResponsePartsToString(response.responseParts)}`;
     }
-    return response.error ? `${notice}\n${response.error.message}` : notice;
+    return notice;
   }
   if (response.error) {
     return response.error.message;

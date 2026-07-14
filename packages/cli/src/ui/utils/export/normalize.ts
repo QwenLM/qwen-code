@@ -13,6 +13,7 @@ import {
 import type { ChatRecord, Kind } from '@qwen-code/qwen-code-core';
 import { buildTruncatedDiffPreviewText } from '../../../utils/truncatedDiffPreview.js';
 import { getToolResultCallId } from '../../../utils/chat-record-tool-call-id.js';
+import { sanitizeTerminalText } from '../textUtils.js';
 import type {
   ExportConfig,
   ExportMessage,
@@ -165,7 +166,9 @@ function buildToolCallMessageFromResult(
           type: 'content',
           content: {
             type: 'text',
-            text: formatVisionBridgeNoticeDisplay(toolCallResult.resultDisplay),
+            text: sanitizeTerminalText(
+              formatVisionBridgeNoticeDisplay(toolCallResult.resultDisplay),
+            ),
           },
         },
         ...resultContent,

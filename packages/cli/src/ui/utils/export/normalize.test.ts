@@ -184,6 +184,61 @@ describe('normalizeSessionData', () => {
     },
   );
 
+  it('sanitizes terminal control characters in exported vision bridge disclosures', () => {
+    const record: ChatRecord = {
+      uuid: 'tool-pdf-sanitized',
+      parentUuid: null,
+      sessionId: 'session-1',
+      timestamp: '2025-01-01T00:00:00.000Z',
+      type: 'tool_result',
+      cwd: '',
+      version: '1.0.0',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-pdf-sanitized',
+              name: 'read_file',
+              response: { output: 'Page content' },
+            },
+          },
+        ],
+      },
+      toolCallResult: {
+        callId: 'call-pdf-sanitized',
+        resultDisplay: {
+          type: 'vision_bridge_notice',
+          summary: 'Read PDF \u001b[31mreport.pdf\u001b[0m',
+          notice: 'Converted via \u202eqwen-vl',
+        },
+      },
+    };
+
+    const normalized = normalizeSessionData(
+      {
+        sessionId: 'session-1',
+        startTime: '2025-01-01T00:00:00.000Z',
+        messages: [],
+      },
+      [record],
+      config,
+    );
+    const notice = normalized.messages[0].toolCall?.content?.[0];
+
+    expect(notice).toMatchObject({
+      type: 'content',
+      content: { type: 'text' },
+    });
+    if (notice?.type !== 'content' || notice.content.type !== 'text') {
+      throw new Error('Expected exported vision bridge notice text');
+    }
+    expect(notice.content.text).not.toContain('\u001b');
+    expect(notice.content.text).not.toContain('\u202e');
+    expect(notice.content.text).toContain('report.pdf');
+    expect(notice.content.text).toContain('qwen-vl');
+  });
+
   it('matches tool results by functionResponse id when callId is absent', () => {
     const record: ChatRecord = {
       uuid: 'tool-result-record',

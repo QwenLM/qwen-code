@@ -9,7 +9,6 @@ import type {
   Config,
   SessionMetrics,
   AgentResultDisplay,
-  ToolCallResponseInfo,
 } from '@qwen-code/qwen-code-core';
 import {
   ToolErrorType,
@@ -32,7 +31,6 @@ import {
   createAgentToolProgressHandler,
   functionResponsePartsToString,
   insertAfterFunctionResponses,
-  toolResultContent,
 } from './nonInteractiveHelpers.js';
 
 // Mock dependencies
@@ -1158,163 +1156,6 @@ describe('functionResponsePartsToString', () => {
       },
     ];
     expect(functionResponsePartsToString(parts)).toBe('');
-  });
-});
-
-describe('toolResultContent', () => {
-  it('should return resultDisplay string when available', () => {
-    const response: ToolCallResponseInfo = {
-      callId: 'test-call',
-      resultDisplay: 'Result content',
-      responseParts: [],
-      error: undefined,
-      errorType: undefined,
-    };
-    expect(toolResultContent(response)).toBe('Result content');
-  });
-
-  it('includes the vision bridge disclosure with successful tool content', () => {
-    const response: ToolCallResponseInfo = {
-      callId: 'pdf-success',
-      resultDisplay: {
-        type: 'vision_bridge_notice',
-        summary: 'Transcribed PDF pages 20-23; remaining pages 24-25',
-        notice:
-          'Converted 4 images via qwen3-vl-plus (dashscope.aliyuncs.com).',
-      },
-      responseParts: [
-        {
-          functionResponse: {
-            response: { output: 'Page 20: transcribed content' },
-          },
-        },
-      ],
-      error: undefined,
-      errorType: undefined,
-    };
-
-    expect(toolResultContent(response)).toBe(
-      'Transcribed PDF pages 20-23; remaining pages 24-25\n' +
-        'Converted 4 images via qwen3-vl-plus (dashscope.aliyuncs.com).\n' +
-        'Page 20: transcribed content',
-    );
-  });
-
-  it('includes the vision bridge disclosure with a tool error', () => {
-    const response: ToolCallResponseInfo = {
-      callId: 'pdf-failure',
-      resultDisplay: {
-        type: 'vision_bridge_notice',
-        summary: 'Failed to read PDF after rendering pages 20-23',
-        notice:
-          'Vision bridge (qwen3-vl-plus (dashscope.aliyuncs.com)) failed.',
-      },
-      responseParts: [
-        {
-          functionResponse: {
-            response: { error: 'No extractable text layer.' },
-          },
-        },
-      ],
-      error: new Error('No extractable text layer.'),
-      errorType: ToolErrorType.READ_CONTENT_FAILURE,
-    };
-
-    expect(toolResultContent(response)).toBe(
-      'Failed to read PDF after rendering pages 20-23\n' +
-        'Vision bridge (qwen3-vl-plus (dashscope.aliyuncs.com)) failed.\n' +
-        'No extractable text layer.',
-    );
-  });
-
-  it('should return undefined for empty resultDisplay string', () => {
-    const response: ToolCallResponseInfo = {
-      callId: 'test-call',
-      resultDisplay: '   ',
-      responseParts: [],
-      error: undefined,
-      errorType: undefined,
-    };
-    expect(toolResultContent(response)).toBeUndefined();
-  });
-
-  it('should use functionResponsePartsToString for responseParts', () => {
-    const response: ToolCallResponseInfo = {
-      callId: 'test-call',
-      resultDisplay: undefined,
-      responseParts: [
-        {
-          functionResponse: {
-            response: {
-              output: 'function output',
-            },
-          },
-        },
-      ],
-      error: undefined,
-      errorType: undefined,
-    };
-    expect(toolResultContent(response)).toBe('function output');
-  });
-
-  it('should return error message when error is present', () => {
-    const response: ToolCallResponseInfo = {
-      callId: 'test-call',
-      resultDisplay: undefined,
-      responseParts: [],
-      error: new Error('Test error message'),
-      errorType: undefined,
-    };
-    expect(toolResultContent(response)).toBe('Test error message');
-  });
-
-  it('should prefer resultDisplay over responseParts', () => {
-    const response: ToolCallResponseInfo = {
-      callId: 'test-call',
-      resultDisplay: 'Direct result',
-      responseParts: [
-        {
-          functionResponse: {
-            response: {
-              output: 'function output',
-            },
-          },
-        },
-      ],
-      error: undefined,
-      errorType: undefined,
-    };
-    expect(toolResultContent(response)).toBe('Direct result');
-  });
-
-  it('should prefer responseParts over error', () => {
-    const response: ToolCallResponseInfo = {
-      callId: 'test-call',
-      resultDisplay: undefined,
-      error: new Error('Error message'),
-      responseParts: [
-        {
-          functionResponse: {
-            response: {
-              output: 'function output',
-            },
-          },
-        },
-      ],
-      errorType: undefined,
-    };
-    expect(toolResultContent(response)).toBe('function output');
-  });
-
-  it('should return undefined when no content is available', () => {
-    const response: ToolCallResponseInfo = {
-      callId: 'test-call',
-      resultDisplay: undefined,
-      responseParts: [],
-      error: undefined,
-      errorType: undefined,
-    };
-    expect(toolResultContent(response)).toBeUndefined();
   });
 });
 

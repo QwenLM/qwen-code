@@ -1631,7 +1631,7 @@ describe('BaseJsonOutputAdapter', () => {
         );
       });
 
-      it('includes the vision bridge disclosure with a tool error', () => {
+      it('prefers a top-level tool error over content with a vision bridge disclosure', () => {
         const response = {
           callId: 'pdf-failure',
           resultDisplay: {
@@ -1639,8 +1639,45 @@ describe('BaseJsonOutputAdapter', () => {
             summary: 'Failed to read PDF after rendering pages 20-23',
             notice: 'Vision bridge (qwen3-vl-plus) failed.',
           },
-          responseParts: [],
+          responseParts: [
+            {
+              functionResponse: {
+                response: { output: 'Partial transcription' },
+              },
+            },
+          ],
           error: new Error('No extractable text layer.'),
+          errorType: undefined,
+        };
+
+        expect(toolResultContent(response)).toBe(
+          'Failed to read PDF after rendering pages 20-23\n' +
+            'Vision bridge (qwen3-vl-plus) failed.\n' +
+            'No extractable text layer.',
+        );
+      });
+
+      it('prefers an embedded tool error over content with a vision bridge disclosure', () => {
+        const response = {
+          callId: 'pdf-failure',
+          resultDisplay: {
+            type: 'vision_bridge_notice' as const,
+            summary: 'Failed to read PDF after rendering pages 20-23',
+            notice: 'Vision bridge (qwen3-vl-plus) failed.',
+          },
+          responseParts: [
+            {
+              functionResponse: {
+                response: { output: 'Partial transcription' },
+              },
+            },
+            {
+              functionResponse: {
+                response: { error: 'No extractable text layer.' },
+              },
+            },
+          ],
+          error: undefined,
           errorType: undefined,
         };
 
