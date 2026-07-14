@@ -224,19 +224,13 @@ describe('normalizeSessionData', () => {
       [record],
       config,
     );
-    const notice = normalized.messages[0].toolCall?.content?.[0];
-
-    expect(notice).toMatchObject({
+    expect(normalized.messages[0].toolCall?.content?.[0]).toEqual({
       type: 'content',
-      content: { type: 'text' },
+      content: {
+        type: 'text',
+        text: 'Read PDF \\u001b[31mreport.pdf\\u001b[0m\nConverted via qwen-vl',
+      },
     });
-    if (notice?.type !== 'content' || notice.content.type !== 'text') {
-      throw new Error('Expected exported vision bridge notice text');
-    }
-    expect(notice.content.text).not.toContain('\u001b');
-    expect(notice.content.text).not.toContain('\u202e');
-    expect(notice.content.text).toContain('report.pdf');
-    expect(notice.content.text).toContain('qwen-vl');
   });
 
   it('matches tool results by functionResponse id when callId is absent', () => {
