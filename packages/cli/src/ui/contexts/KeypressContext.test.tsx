@@ -359,13 +359,11 @@ describe('KeypressContext - Kitty Protocol', () => {
       );
     });
 
-    it('Ctrl+C escapes a paste mode that never received its paste-end marker', async () => {
-      // Regression test for the "must restart terminal" lockup reported by
-      // a user on Ghostty + Sogou pinyin: bracketed-paste-start arrived,
-      // isPaste was set true, and paste-end never followed. Every
-      // subsequent keystroke — including Ctrl+C — was silently buffered.
-      // This test checks that Ctrl+C is always dispatched regardless of
-      // paste mode state.
+    it('treats 0x03 inside bracketed paste as verbatim content, not Ctrl+C', async () => {
+      // Bracketed paste carries verbatim content, so a 0x03 byte in the
+      // pasted text must NOT be interpreted as Ctrl+C. A paste that never
+      // receives its paste-end marker is recovered by the idle timeout
+      // (see the next test), not by an in-paste Ctrl+C escape hatch.
       const keyHandler = vi.fn();
 
       const { result } = renderHook(() => useKeypressContext(), {
@@ -376,23 +374,21 @@ describe('KeypressContext - Kitty Protocol', () => {
         result.current.subscribe(keyHandler);
       });
 
-      // Send ONLY the paste-start marker (no paste-end) — this puts the
-      // dispatcher into the broken state.
+      // paste-start, then content containing 0x03, then paste-end.
       act(() => {
-        stdin.emit('data', Buffer.from('\x1b[200~'));
+        stdin.emit('data', Buffer.from('\x1b[200~ab\x03cd\x1b[201~'));
       });
       await new Promise((r) => setTimeout(r, 50));
 
-      // Ctrl+C should fire now, not get buffered into the stuck paste.
-      act(() => {
-        stdin.emit('data', Buffer.from('\x03'));
-      });
-      await new Promise((r) => setTimeout(r, 50));
-
+      // The 0x03 must NOT surface as a Ctrl+C keypress...
       const ctrlCSeen = keyHandler.mock.calls.some(
         (c) => c[0]?.ctrl === true && c[0]?.name === 'c',
       );
-      expect(ctrlCSeen).toBe(true);
+      expect(ctrlCSeen).toBe(false);
+
+      // ...it stays embedded in the verbatim paste payload.
+      const pasteEvent = keyHandler.mock.calls.find((c) => c[0]?.paste);
+      expect(pasteEvent?.[0]?.sequence).toBe('ab\x03cd');
     });
 
     it('auto-recovers from a stuck paste mode via idle timeout', async () => {

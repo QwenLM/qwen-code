@@ -21,7 +21,6 @@ import {
   useState,
 } from 'react';
 import readline from 'node:readline';
-import { exec } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { noteInteraction } from '../../utils/housekeeping/lastInteractionAt.js';
 import {
@@ -132,7 +131,6 @@ export type MouseHandler = (event: SgrMouseEvent) => void;
 export interface PasteProgress {
   active: boolean;
   receivedBytes: number;
-  totalBytes: number | null;
 }
 
 interface KeypressContextValue {
@@ -180,7 +178,6 @@ export function KeypressProvider({
   const [pasteProgress, setPasteProgress] = useState<PasteProgress>({
     active: false,
     receivedBytes: 0,
-    totalBytes: null,
   });
 
   const subscribe = useCallback(
@@ -1297,6 +1294,9 @@ export function KeypressProvider({
       const content = Buffer.concat(rawPasteChunks);
       rawPasteChunks = [];
       rawPasteAccumulating = false;
+      // Drop any buffered partial paste-end marker; otherwise those bytes
+      // would leak into the next chunk as regular input after this flush.
+      rawStdinTail = Buffer.alloc(0);
       // pasteAlreadyFlushed is set inside broadcastPasteFromRaw.
       broadcastPasteFromRaw(content);
     };
@@ -1314,7 +1314,7 @@ export function KeypressProvider({
       // keypress-level handler is swallowed instead of broadcasting a
       // second (duplicate) paste event. Covers all call sites.
       pasteAlreadyFlushed = true;
-      setPasteProgress({ active: false, receivedBytes: 0, totalBytes: null });
+      setPasteProgress({ active: false, receivedBytes: 0 });
       const text = content.toString('utf-8');
       if (text.length > 0) {
         broadcast({
@@ -1350,30 +1350,13 @@ export function KeypressProvider({
 
       while (cursor < buf.length) {
         if (rawPasteAccumulating) {
-          // Ctrl+C (0x03) inside a stuck paste must escape immediately,
-          // matching the Ctrl+C escape-hatch in handleKeypress.
-          const ctrlCIdx = buf.indexOf(0x03, cursor);
+          // Bracketed paste carries verbatim content, so we must NOT scan
+          // for control chars like Ctrl+C (0x03) here — they can legitimately
+          // appear in pasted text. A paste that never receives its paste-end
+          // marker is recovered by the idle timeout below.
           const suffixIdx = buf.indexOf(pasteModeSuffixBuf, cursor);
 
-          // If Ctrl+C comes before paste-end (or there is no paste-end),
-          // flush the accumulated paste and let Ctrl+C through.
-          if (ctrlCIdx !== -1 && (suffixIdx === -1 || ctrlCIdx < suffixIdx)) {
-            if (ctrlCIdx > cursor) {
-              rawPasteChunks.push(buf.subarray(cursor, ctrlCIdx));
-            }
-            clearRawPasteIdleTimeout();
-            rawPasteAccumulating = false;
-            rawPasteChunks = [];
-            pasteAlreadyFlushed = true;
-            setPasteProgress({
-              active: false,
-              receivedBytes: 0,
-              totalBytes: null,
-            });
-            // Forward Ctrl+C to readline so handleKeypress processes it
-            keypressStream.write(buf.subarray(ctrlCIdx, ctrlCIdx + 1));
-            cursor = ctrlCIdx + 1;
-          } else if (suffixIdx === -1) {
+          if (suffixIdx === -1) {
             // No paste-end in this chunk. Check for partial suffix at
             // the tail that might complete in the next chunk.
             const remaining = buf.subarray(cursor);
@@ -1443,24 +1426,6 @@ export function KeypressProvider({
             setPasteProgress({
               active: true,
               receivedBytes: 0,
-              totalBytes: null,
-            });
-            // Probe clipboard size for progress bar. Platform-specific:
-            // macOS: pbpaste | wc -c; Linux: xclip/xsel/wl-paste | wc -c
-            const sizeCmd =
-              process.platform === 'darwin'
-                ? 'pbpaste | wc -c'
-                : process.platform === 'win32'
-                  ? 'powershell.exe -command "(Get-Clipboard -Raw).Length"'
-                  : 'command -v xclip >/dev/null 2>&1 && xclip -selection clipboard -o | wc -c || command -v xsel >/dev/null 2>&1 && xsel --clipboard --output | wc -c || command -v wl-paste >/dev/null 2>&1 && wl-paste | wc -c';
-            exec(sizeCmd, { timeout: 2000 }, (err, stdout) => {
-              if (err || !rawPasteAccumulating) return;
-              const bytes = parseInt(stdout.trim(), 10);
-              if (bytes > 0) {
-                setPasteProgress((prev) =>
-                  prev.active ? { ...prev, totalBytes: bytes } : prev,
-                );
-              }
             });
             cursor = prefixIdx + pasteModePrefixBuf.length;
           }

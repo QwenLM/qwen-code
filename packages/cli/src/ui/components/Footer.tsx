@@ -29,26 +29,12 @@ import { useKeypressContext } from '../contexts/KeypressContext.js';
 
 import type { PasteProgress } from '../contexts/KeypressContext.js';
 
-const PASTE_BAR_WIDTH = 20;
-
 const PasteProgressBar: React.FC<{ progress: PasteProgress }> = ({
   progress,
 }) => {
-  const { receivedBytes, totalBytes } = progress;
+  const { receivedBytes } = progress;
   const kb = receivedBytes / 1024;
   const label = kb >= 1 ? `${kb.toFixed(0)} KB` : `${receivedBytes} B`;
-
-  if (totalBytes && totalBytes > 0) {
-    const pct = Math.min(1, receivedBytes / totalBytes);
-    const filled = Math.round(pct * PASTE_BAR_WIDTH);
-    const bar = '█'.repeat(filled) + '░'.repeat(PASTE_BAR_WIDTH - filled);
-    const pctLabel = `${Math.round(pct * 100)}%`;
-    return (
-      <Text dimColor>
-        {t('Pasting…')} <Text color="blue">{bar}</Text> {pctLabel} ({label})
-      </Text>
-    );
-  }
 
   return (
     <Text dimColor>
