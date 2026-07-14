@@ -2596,9 +2596,9 @@ export class GeminiChat {
               }
               return;
             } catch (error) {
+              attemptState.rollback();
               if (!(error instanceof InvalidStreamError)) throw error;
 
-              attemptState.rollback();
               const maxContinuationRetries =
                 error.type === 'PROTOCOL_TAG_LEAK'
                   ? INVALID_STREAM_RETRY_CONFIG.protocolTagLeakMaxRetries
