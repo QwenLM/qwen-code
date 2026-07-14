@@ -1442,6 +1442,10 @@ export function convertOpenAIChunkToGemini(
       const isPossibleTag = canBeStandaloneThinkingTagPrefix(
         combinedCandidateText,
       );
+      const finishedWhitespaceCandidate =
+        Boolean(choice.finish_reason) &&
+        !closingTagName &&
+        !/\S/.test(combinedCandidateText);
 
       if (openingTag) {
         throwProtocolTagLeak(requestContext);
@@ -1451,7 +1455,14 @@ export function convertOpenAIChunkToGemini(
         throwProtocolTagLeak(requestContext);
       }
 
-      if (isPossibleTag) {
+      if (finishedWhitespaceCandidate) {
+        parts = parts.filter((part) => !getVisibleText(part));
+        if (combinedCandidateText) {
+          parts.push({ text: combinedCandidateText });
+        }
+        visibleText = combinedCandidateText;
+        requestContext.pendingThinkingTagCandidate = undefined;
+      } else if (isPossibleTag) {
         if (
           !closingTagName &&
           combinedCandidateText.length > MAX_THINKING_TAG_CANDIDATE_LENGTH

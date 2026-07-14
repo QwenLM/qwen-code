@@ -767,6 +767,27 @@ describe('StreamingToolCallParser', () => {
       ]);
     });
 
+    it('should normalize a tool call name before storing it', () => {
+      parser.addChunk(0, '{}', 'call_1', ' read_file ');
+
+      expect(parser.getCompletedToolCalls()).toEqual([
+        {
+          id: 'call_1',
+          name: 'read_file',
+          args: {},
+          index: 0,
+        },
+      ]);
+    });
+
+    it('should preserve the first non-empty name for a tool call ID', () => {
+      parser.addChunk(0, '{"file_path":', 'call_1', 'read_file');
+      parser.addChunk(0, '"a.ts"}', 'call_1', 'shell');
+
+      expect(parser.getCompletedToolCalls()[0]?.name).toBe('read_file');
+      expect(parser.hasConflictingToolCallIdentity()).toBe(true);
+    });
+
     it('should detect index collision and find new index', () => {
       // First complete tool call at index 0
       parser.addChunk(0, '{"param1": "value1"}', 'call_1', 'function1');
@@ -789,6 +810,19 @@ describe('StreamingToolCallParser', () => {
       expect(call2).toBeDefined();
       expect(call1?.args).toEqual({ param1: 'value1' });
       expect(call2?.args).toEqual({ param2: 'value2' });
+      expect(parser.hasConflictingToolCallIdentity()).toBe(false);
+    });
+
+    it('should reject unsafe provider indices', () => {
+      const result = parser.addChunk(
+        Number.MAX_SAFE_INTEGER + 1,
+        '{}',
+        'call_1',
+        'read_file',
+      );
+
+      expect(result.error?.message).toContain('Invalid tool call index');
+      expect(parser.hasConflictingToolCallIdentity()).toBe(true);
     });
 
     it('should handle continuation chunks without ID correctly', () => {

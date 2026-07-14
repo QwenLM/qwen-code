@@ -73,13 +73,20 @@ export class StreamingToolCallParser {
     id?: string,
     name?: string,
   ): ToolCallParseResult {
-    const validName = name?.trim() ? name : undefined;
+    const validName = name?.trim() || undefined;
     if (!id && !validName && !chunk.trim()) {
       const depth = this.depths.get(index) ?? 0;
       const inString = this.inStrings.get(index) ?? false;
       if (!this.buffers.has(index) || (depth === 0 && !inString)) {
         return { complete: false };
       }
+    }
+    if (!Number.isSafeInteger(index) || index < 0) {
+      this.conflictingToolCallIdentity = true;
+      return {
+        complete: false,
+        error: new Error(`Invalid tool call index: ${index}`),
+      };
     }
 
     let actualIndex = index;
@@ -101,32 +108,22 @@ export class StreamingToolCallParser {
           const existingMeta = this.toolCallMeta.get(index);
 
           if (existingMeta?.id && existingMeta.id !== id) {
-            this.conflictingToolCallIdentity = true;
-          }
-
-          // Check if we have a complete tool call at this index. Occupancy
-          // is signaled by the name metadata, not the buffer: an empty
-          // buffer with a name is a complete no-argument call.
-          if (
-            existingMeta?.id &&
-            existingMeta.id !== id &&
-            (!existingMeta.name || existingDepth === 0)
-          ) {
-            let existingComplete = true;
-            if (existingBuffer.trim()) {
+            let existingComplete = existingDepth === 0;
+            if (existingComplete && existingBuffer.trim()) {
               try {
                 JSON.parse(existingBuffer);
               } catch {
-                // Existing buffer is not complete JSON, we can reuse this index
                 existingComplete = false;
               }
             }
             if (existingComplete) {
-              // We have a complete tool call with a different ID at this index
-              // Find a new index for this tool call
-              while (this.buffers.has(actualIndex)) {
-                actualIndex++;
+              actualIndex = 0;
+              while (this.buffers.has(actualIndex)) actualIndex += 1;
+              if (!existingMeta.name) {
+                this.conflictingToolCallIdentity = true;
               }
+            } else {
+              this.conflictingToolCallIdentity = true;
             }
           }
         }
@@ -198,8 +195,15 @@ export class StreamingToolCallParser {
     }
 
     // Update metadata
+    const identityChanged = Boolean(id && meta.id && meta.id !== id);
     if (id) meta.id = id;
-    if (validName) meta.name = validName;
+    if (validName) {
+      if (!identityChanged && meta.name && meta.name !== validName) {
+        this.conflictingToolCallIdentity = true;
+      } else {
+        meta.name = validName;
+      }
+    }
 
     // Get current state for the actual index
     const currentInString = this.inStrings.get(actualIndex)!;

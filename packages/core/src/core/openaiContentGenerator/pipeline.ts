@@ -588,7 +588,14 @@ export class ContentGenerationPipeline {
         }
       }
 
-      if (context.pendingThinkingTagCandidate) {
+      if (
+        context.pendingThinkingTagCandidate &&
+        !context.pendingThinkingTagCandidate.closingTagName &&
+        !/\S/.test(context.pendingThinkingTagCandidate.text)
+      ) {
+        context.pendingThinkingTagCandidate = undefined;
+        context.pendingUntrustedResponseParts = undefined;
+      } else if (context.pendingThinkingTagCandidate) {
         throw new InvalidStreamError(
           'Model response leaked thinking tags.',
           'PROTOCOL_TAG_LEAK',
@@ -606,6 +613,12 @@ export class ContentGenerationPipeline {
         throw error;
       }
 
+      // Re-throw StreamContentError directly so it can be handled by
+      // the caller's retry logic (e.g., TPM throttling retry in sendMessageStream)
+      if (error instanceof StreamContentError) {
+        throw redactProxyError(error);
+      }
+
       if (
         context.pendingThinkingTagCandidate?.closingTagName &&
         request.config?.abortSignal?.aborted !== true
@@ -616,12 +629,6 @@ export class ContentGenerationPipeline {
           'Model response leaked thinking tags.',
           'PROTOCOL_TAG_LEAK',
         );
-      }
-
-      // Re-throw StreamContentError directly so it can be handled by
-      // the caller's retry logic (e.g., TPM throttling retry in sendMessageStream)
-      if (error instanceof StreamContentError) {
-        throw redactProxyError(error);
       }
 
       // Bypass handleError: it strips `code` from timeout errors, which would
