@@ -18,10 +18,14 @@ describe('TypeScript SDK release workflow', () => {
     expect(workflow).toContain(
       'echo "HAS_PERSISTED_SOURCE=true" >> "${GITHUB_OUTPUT}"',
     );
-    expect(
-      workflow.split(
-        "steps.persist_source.outputs.HAS_PERSISTED_SOURCE == 'true'",
-      ),
-    ).toHaveLength(3);
+    expect(workflow).toContain(
+      'echo "::notice::No version changes in sdk-typescript; skipping release branch push and PR creation."',
+    );
+    const persistedSourceGuardCount = (
+      workflow.match(
+        /steps\.persist_source\.outputs\.HAS_PERSISTED_SOURCE == 'true'/g,
+      ) ?? []
+    ).length;
+    expect(persistedSourceGuardCount).toBe(2);
   });
 });
