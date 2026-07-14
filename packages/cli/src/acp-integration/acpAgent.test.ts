@@ -11345,13 +11345,15 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
-  it('refreshes extension state and system instruction for the live session', async () => {
+  it('refreshes extension state without a duplicate direct skill refresh', async () => {
     const extensionManager = {
       refreshCache: vi.fn().mockResolvedValue(undefined),
       refreshTools: vi.fn().mockResolvedValue(undefined),
     };
     const skillManager = {
-      refreshCache: vi.fn().mockResolvedValue(undefined),
+      refreshCache: vi
+        .fn()
+        .mockRejectedValue(new Error('direct skill refresh should not run')),
     };
     const refreshHierarchicalMemory = vi.fn().mockResolvedValue(undefined);
     const cfg = makeConfig({
@@ -11403,7 +11405,7 @@ describe('sessionLanguage multi-session propagation', () => {
     ).resolves.toEqual({ ok: true });
 
     expect(extensionManager.refreshCache).toHaveBeenCalledOnce();
-    expect(skillManager.refreshCache).toHaveBeenCalledOnce();
+    expect(skillManager.refreshCache).not.toHaveBeenCalled();
     expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
     expect(refreshHierarchicalMemory).not.toHaveBeenCalled();
     expect(refreshSystemInstruction).toHaveBeenCalledOnce();
@@ -11486,7 +11488,7 @@ describe('sessionLanguage multi-session propagation', () => {
     );
 
     expect(extensionManager.refreshCache).toHaveBeenCalledOnce();
-    expect(skillManager.refreshCache).toHaveBeenCalledOnce();
+    expect(skillManager.refreshCache).not.toHaveBeenCalled();
     expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
     expect(cfg.refreshHierarchicalMemory).not.toHaveBeenCalled();
     expect(
@@ -11551,7 +11553,7 @@ describe('sessionLanguage multi-session propagation', () => {
     ).rejects.toThrow('bad tool schema');
 
     expect(extensionManager.refreshCache).toHaveBeenCalledOnce();
-    expect(skillManager.refreshCache).toHaveBeenCalledOnce();
+    expect(skillManager.refreshCache).not.toHaveBeenCalled();
     expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
     expect(cfg.refreshHierarchicalMemory).not.toHaveBeenCalled();
     expect(

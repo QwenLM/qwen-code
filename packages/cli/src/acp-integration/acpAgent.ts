@@ -7543,7 +7543,6 @@ class QwenAgent implements Agent {
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
         const extensionManager = config.getExtensionManager();
-        const skillManager = config.getSkillManager();
         const errors: unknown[] = [];
         const runRefresh = async (refresh: () => Promise<unknown>) => {
           try {
@@ -7552,10 +7551,7 @@ class QwenAgent implements Agent {
             errors.push(error);
           }
         };
-        await Promise.all([
-          runRefresh(async () => await extensionManager.refreshCache()),
-          runRefresh(async () => await skillManager?.refreshCache()),
-        ]);
+        await runRefresh(async () => await extensionManager.refreshCache());
         await runRefresh(async () => await extensionManager.refreshTools());
         await runRefresh(
           async () =>
