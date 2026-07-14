@@ -29,6 +29,7 @@ import {
   coverageFromTranscripts,
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
+import { promptRecordDir } from './lib/prompt-record.js';
 
 let dir: string;
 let ENV: NodeJS.ProcessEnv;
@@ -42,8 +43,14 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-/** A plan with `n` chunks, backdated so every transcript counts as newer. */
-function plan(n = 2): string {
+/**
+ * A plan with `n` chunks, backdated so every transcript counts as newer.
+ *
+ * It also lays down the prompt record `agent-prompt` would have written for each
+ * chunk, because that is the state of a run that used the command it was told to
+ * use. Pass `{ record: false }` for a run that hand-wrote its prompts instead.
+ */
+function plan(n = 2, opts: { record?: boolean } = {}): string {
   const p = join(dir, 'plan.json');
   writeFileSync(
     p,
@@ -56,6 +63,9 @@ function plan(n = 2): string {
       })),
     }),
   );
+  if (opts.record !== false) {
+    for (let c = 1; c <= n; c++) built(p, c);
+  }
   const old = new Date(2020, 0, 1);
   utimesSync(p, old, old);
   return p;
@@ -122,13 +132,40 @@ function transcript(
   );
 }
 
-/** What `agent-prompt` builds: the diff and the read are in it. */
+/**
+ * What `agent-prompt` builds: the diff, and the read of *this* chunk's lines.
+ *
+ * The offsets are the chunk's own, as the real command emits them. The first
+ * version of this helper gave every chunk `offset=0, limit=100` and coverage still
+ * passed, because coverage was attributed from the words `chunk N of 2` and never
+ * looked at the range. That is the same blindness the Step 3A topology walked into
+ * for real: no agent's prompt says `chunk N of M` there, so no chunk was ever
+ * attributed to anyone.
+ */
 const good = (c: number) =>
-  `You are reviewing chunk ${c} of 2.\nread_file(file_path="${DIFF}", offset=0, limit=100)`;
+  `You are reviewing chunk ${c} of 2.\n` +
+  `read_file(file_path="${DIFF}", offset=${(c - 1) * 100}, limit=100)`;
+
+/** What Step 3A hands every dimension agent: the whole diff, chunk by chunk. */
+const wholeDiff = () =>
+  'Security review of the whole diff.\n' +
+  `read_file(file_path="${DIFF}", offset=0, limit=100)\n` +
+  `read_file(file_path="${DIFF}", offset=100, limit=100)`;
 
 /** What the orchestrator actually sent, 23 times: no diff anywhere in it. */
 const blind = (c: number) =>
   `The changes are in chunk ${c} of 2, covering lines 1-100 of the diff.`;
+
+/**
+ * The CLI's own record of the prompt it built — what `agent-prompt` writes and
+ * what the rewrite check reads back. Without it every chunk agent reads as
+ * hand-prompted, which is exactly what the check is for.
+ */
+function built(planPath: string, c: number, prompt = good(c)): void {
+  const d = promptRecordDir(planPath);
+  mkdirSync(d, { recursive: true });
+  writeFileSync(join(d, `chunk-${c}.txt`), prompt);
+}
 
 describe('coverage — from the harness, not from the caller', () => {
   it('passes when every chunk was read by an agent that opened the diff', () => {
@@ -298,7 +335,14 @@ describe('coverage — from the harness, not from the caller', () => {
         type: 'assistant',
         message: {
           role: 'model',
-          parts: [{ functionCall: { name: 'read_file', args: {} } }],
+          parts: [
+            {
+              functionCall: {
+                name: 'read_file',
+                args: { file_path: DIFF, offset: 0, limit: 100 },
+              },
+            },
+          ],
         },
       }),
       JSON.stringify({
@@ -432,5 +476,174 @@ describe('coverage — from the harness, not from the caller', () => {
     const p = join(dir, 'bad.json');
     writeFileSync(p, JSON.stringify({}));
     expect(() => coverageFromTranscripts(p, ENV)).toThrow(/diffPathAbsolute/);
+  });
+});
+
+// The topology most pull requests get, and the one this file could not see at all.
+describe('Step 3A — dimension agents, no territory, no receipts', () => {
+  it('credits the chunks a whole-diff agent was pointed at and opened', () => {
+    // Not one Step 3A prompt says `chunk N of M` — every dimension agent walks the
+    // whole diff. Attributing coverage from that phrase meant attributing none:
+    // against a real 3A review whose fifteen agents each opened the diff and filed
+    // findings, this returned `0/2 chunk(s) reviewed … Nobody read those lines`,
+    // in the same breath as `16 agent(s) ran; 16 did work`. `compose-review` runs
+    // the same computation, so the verdict was capped away from Approve and the
+    // body it would have POSTED to the PR said nobody had read it.
+    transcript('sec', wholeDiff(), { calls: 8 });
+    transcript('perf', wholeDiff(), { calls: 5 });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.coveredChunks).toEqual([1, 2]);
+    expect(r.missingChunks).toEqual([]);
+    expect(r.ok).toBe(true);
+  });
+
+  it('does not credit a chunk to an agent that was never pointed at it', () => {
+    // Half the diff delivered is half the diff reviewed. An agent given only the
+    // first chunk's read does not cover the second by having the file open.
+    transcript(
+      'half',
+      `Security review.\nread_file(file_path="${DIFF}", offset=0, limit=100)`,
+      { calls: 4 },
+    );
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.coveredChunks).toEqual([1]);
+    expect(r.missingChunks).toEqual([2]);
+    expect(r.ok).toBe(false);
+  });
+});
+
+describe('worked, but not on the diff', () => {
+  it('catches the agent that was pointed at the diff and never opened it', () => {
+    // The old bar was one successful tool call, and a `glob` for test files is a
+    // successful tool call. This agent read the post-change source instead — which
+    // on a diff with deletions shows it precisely nothing: the removed line is not
+    // in that file, and nothing marks where it was.
+    const base = {
+      agentId: 'a1',
+      agentName: 'general-purpose',
+      sessionId: 'S1',
+    };
+    writeFileSync(
+      join(dir, 'subagents', 'S1', 'agent-a1.jsonl'),
+      [
+        JSON.stringify({
+          ...base,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: good(1) }] },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'c1',
+                  name: 'read_file',
+                  args: { file_path: '/src/pay.ts' }, // the source, not the diff
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'c1',
+                  name: 'read_file',
+                  response: { output: 'source bytes' },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'Reviewed chunk 1.' }] },
+        }),
+      ].join('\n') + '\n',
+    );
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.idleAgents).toEqual([]); // it made a successful call
+    expect(r.unopenedAgents).toEqual(['chunk 1']);
+    expect(r.coveredChunks).toEqual([2]);
+    expect(r.ok).toBe(false);
+  });
+});
+
+describe('the prompt the CLI built, against the prompt the agent got', () => {
+  it('catches a paraphrase — the diff path survives it, so nothing else can', () => {
+    // Dogfooded: the orchestrator called `agent-prompt` for all five chunks and
+    // then rewrote what it printed. The delivered prompt dropped the rule against
+    // reciting a stock sentence, dropped the half-read warning, and replaced the
+    // project's review rules with three sentences of its own — while keeping the
+    // `read_file` line, so every other check in this file passed it.
+    const p = plan();
+    // What the CLI built, in miniature: the read, the rule the whole command
+    // exists to deliver, and the project's rules.
+    built(
+      p,
+      1,
+      `You are reviewing chunk 1 of 2.\n` +
+        `read_file(file_path="${DIFF}", offset=0, limit=100)\n` +
+        `Do not recite a stock sentence: a return that names nothing you read is ` +
+        `indistinguishable from never having read anything.\n` +
+        `## Project rules\nEvery added field must have its read sites grepped.`,
+    );
+    // What the agent got: the read survived, the rules became a summary, and the
+    // sentence that stops a whiff is gone — replaced by a receipt to recite.
+    transcript(
+      'a1',
+      `You are reviewing chunk 1 of 2.\n` +
+        `read_file(file_path="${DIFF}", offset=0, limit=100)\n` +
+        `Project rules: grep read sites. Match house style.\n` +
+        `If you find no issues, say "No issues found — reviewed chunk 1".`,
+      { calls: 3 },
+    );
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.rewrittenPrompts).toEqual([
+      'chunk 1 — launched with a prompt that is not the one the CLI built',
+    ]);
+    // It still read the diff, so the chunk is covered — the review is not blind,
+    // it is unfaithful. Both facts are reported, and the run does not certify.
+    expect(r.coveredChunks).toEqual([1, 2]);
+    expect(r.ok).toBe(false);
+  });
+
+  it('catches a chunk prompt the CLI was never asked to build', () => {
+    const p = plan(2, { record: false });
+    transcript('a1', good(1), { calls: 3 });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.rewrittenPrompts).toHaveLength(2);
+    expect(r.rewrittenPrompts[0]).toContain('`agent-prompt` never ran');
+    expect(r.ok).toBe(false);
+  });
+
+  it('allows a wrapper around the built prompt, but not an edit of it', () => {
+    // Containment, not equality: prefixing "You are reviewing PR #6766." is
+    // harmless, and failing a run over trailing whitespace would teach the reader
+    // to distrust the check.
+    const p = plan();
+    transcript('a1', `Context: PR #6766.\n\n${good(1)}  \n\nGo.`, { calls: 3 });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.rewrittenPrompts).toEqual([]);
+    expect(r.ok).toBe(true);
   });
 });

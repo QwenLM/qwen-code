@@ -18,7 +18,12 @@ import { join } from 'node:path';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({ writeStdoutLine: vi.fn() }));
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { buildChunkAgentPrompt, agentPromptCommand } from './agent-prompt.js';
+import {
+  buildChunkAgentPrompt,
+  buildWholeDiffBlock,
+  agentPromptCommand,
+} from './agent-prompt.js';
+import { readRecordedPrompts } from './lib/prompt-record.js';
 
 const PLAN = {
   diffPathAbsolute: '/abs/.qwen/tmp/qwen-review-pr-6771-diff.txt',
@@ -296,5 +301,93 @@ describe('agent-prompt (command boundary)', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('records what it handed out, so a rewrite of it can be seen', () => {
+    // The command was called correctly for all five chunks of a real review — and
+    // the orchestrator then paraphrased what it printed on the way to the agent.
+    // Nothing could see that, because a paraphrase keeps the diff path. So the
+    // builder writes down what it emitted, at a path derived from the plan that
+    // the caller is never given and never asked to write to.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-rec-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+
+      (agentPromptCommand.handler as (a: unknown) => void)({ plan, chunk: 13 });
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        'whole-diff': true,
+      });
+
+      const recorded = readRecordedPrompts(plan);
+      expect([...recorded.keys()].sort()).toEqual(['chunk-13', 'whole-diff']);
+      expect(recorded.get('chunk-13')).toBe(buildChunkAgentPrompt(PLAN, 13));
+      expect(recorded.get('whole-diff')).toBe(buildWholeDiffBlock(PLAN));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// The half of the fan-out this command did not cover. Measured against one real
+// Step 3B run: all three whole-diff agents — cross-file tracer, test-coverage
+// matrix, build & test — were launched with a prompt that named no diff file at
+// all. The test-coverage matrix was told in prose to "Read the diff chunks", and
+// given no path to read them from.
+describe('buildWholeDiffBlock — the agents that walk the whole diff', () => {
+  it("names the diff and every chunk's read", () => {
+    const block = buildWholeDiffBlock(PLAN);
+    expect(block).toContain(PLAN.diffPathAbsolute);
+    for (const c of PLAN.chunks) {
+      const offset = c.startLine - 1;
+      const limit = c.endLine - c.startLine + 1;
+      expect(block).toContain(
+        `read_file(file_path="${PLAN.diffPathAbsolute}", offset=${offset}, limit=${limit})`,
+      );
+    }
+  });
+
+  it('says the source tree is not a substitute for the diff', () => {
+    // The blind whole-diff agents did not sit idle: they went and read the
+    // post-change source. On a deletion that shows them nothing — the line is
+    // simply not there, and nothing marks where it was.
+    expect(buildWholeDiffBlock(PLAN)).toContain(
+      'deletion leaves no trace in the post-change file',
+    );
+  });
+
+  it('hands the agent no sentence to recite when it finds nothing', () => {
+    const block = buildWholeDiffBlock(PLAN);
+    expect(block).toContain('say what you examined');
+    expect(block).not.toMatch(/say ["`']No issues found/i);
+  });
+
+  it('carries the project rules when it is given them', () => {
+    expect(buildWholeDiffBlock(PLAN, 'No `any` in new code.')).toContain(
+      'No `any` in new code.',
+    );
+  });
+
+  it('refuses a plan with no diff path — the whole point of the command', () => {
+    expect(() => buildWholeDiffBlock({ chunks: PLAN.chunks })).toThrow(
+      /diffPathAbsolute/,
+    );
+  });
+
+  it.each([
+    ['neither', {}],
+    ['both', { chunk: 13, 'whole-diff': true }],
+  ])('rejects a call that names %s of the two modes', (_, extra) => {
+    // A run that named neither used to fall through to the chunk builder with
+    // `undefined`, and the plan would then report that it "has no chunk undefined"
+    // — an error about the plan, for a mistake in the call. It is checked before
+    // the plan is read, so the message is about the call.
+    expect(() =>
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan: '/nonexistent/plan.json',
+        ...extra,
+      }),
+    ).toThrow(/exactly one of --chunk/);
   });
 });

@@ -226,6 +226,24 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
             'agent-prompt`)',
         );
       }
+      // Worked, but not on the diff. Not idle and not blind — it had the path and
+      // spent its run somewhere else, which on a diff with deletions means it
+      // reviewed a file the removed lines are simply not in.
+      for (const label of cov.unopenedAgents) {
+        unreviewed.push(
+          `${label} — pointed at diff lines it never opened: it made tool calls, ` +
+            'but none of them read the diff',
+        );
+      }
+      // The prompt was built in code and edited on the way to the agent. This caps
+      // for the same reason the others do: what the agent was actually asked is not
+      // what this skill's guarantees are written against.
+      for (const label of cov.rewrittenPrompts) {
+        unreviewed.push(
+          `${label} — not launched with the prompt the CLI built (pass ` +
+            '`agent-prompt` output verbatim)',
+        );
+      }
     } catch (err) {
       // Two different failures, and they must not wear each other's message. A
       // malformed plan is the caller's mistake and says so; missing transcripts

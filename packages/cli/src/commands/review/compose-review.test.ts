@@ -15,6 +15,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promptRecordDir } from './lib/prompt-record.js';
 import {
   composeReview,
   composeReviewCommand,
@@ -127,9 +128,21 @@ function transcript(
   );
 }
 
-/** A prompt the CLI would have built: it names the diff and the read. */
+/**
+ * A prompt the CLI would have built: it names the diff and the read of THIS
+ * chunk's lines. The offsets are the chunk's own, as `agent-prompt` emits them —
+ * coverage is attributed from the range delivered, not from the words `chunk N`.
+ */
 function goodPrompt(chunk: number): string {
-  return `You are reviewing chunk ${chunk} of 2.\nread_file(file_path="${DIFF}", offset=0, limit=100)`;
+  const offset = (chunk - 1) * 100;
+  return `You are reviewing chunk ${chunk} of 2.\nread_file(file_path="${DIFF}", offset=${offset}, limit=100)`;
+}
+
+/** Lay down the CLI's record of the prompt it built for `chunk`. */
+function recordBuilt(planPath: string, chunk: number): void {
+  const d = promptRecordDir(planPath);
+  mkdirSync(d, { recursive: true });
+  writeFileSync(join(d, `chunk-${chunk}.txt`), goodPrompt(chunk));
 }
 
 /** The prompt the orchestrator actually sent, 23 times: no diff anywhere. */
@@ -141,7 +154,10 @@ function blindPrompt(chunk: number): string {
 function coveredPlan(): string {
   transcript('a1', goodPrompt(1), { toolCalls: 3 });
   transcript('a2', goodPrompt(2), { toolCalls: 2 });
-  return plan();
+  const p = plan();
+  recordBuilt(p, 1);
+  recordBuilt(p, 2);
+  return p;
 }
 
 /** Agents given the diff, that never opened it — and said so at length. */

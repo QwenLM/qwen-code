@@ -41,10 +41,14 @@ import type { CommandModule } from 'yargs';
 import { readFileSync } from 'node:fs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { READ_FILE_CHAR_CAP, type DiffChunk } from './lib/diff-plan.js';
+import { recordPrompt } from './lib/prompt-record.js';
 
 interface AgentPromptArgs {
   plan: string;
-  chunk: number;
+  /** The territory this agent owns (Step 3B). Mutually exclusive with `wholeDiff`. */
+  chunk?: number;
+  /** This agent walks the whole diff (every 3A agent; 3B's whole-diff agents). */
+  wholeDiff?: boolean;
   rules?: string;
 }
 
@@ -250,7 +254,128 @@ export function buildChunkAgentPrompt(
   return parts.join('\n');
 }
 
+/**
+ * The block every review agent that is NOT a territory agent must be launched
+ * with — the Step-3A dimension agents, and 3B's whole-diff agents (removed
+ * behaviour, cross-file tracing, the test-coverage matrix, the invariant agents).
+ *
+ * They were the half of the fan-out this command did not cover, and they were
+ * launched exactly the way the chunk agents used to be. Measured against the
+ * harness's record of one real 3B run: all three whole-diff agents — cross-file
+ * tracer, test-coverage matrix, build-and-test — got a prompt that named **no diff
+ * file at all**. The test-coverage matrix was told, in prose, to "Read the diff
+ * chunks and the test files", and given no path to read them from. It went and
+ * read the post-change source instead, which on a diff with deletions shows it
+ * precisely nothing: a removed `clearTimeout` is not in the file any more.
+ *
+ * These agents own the classes a chunk agent is structurally blind to. The review's
+ * only cross-file trace, its only cross-chunk removed-behaviour audit, and its only
+ * test-coverage matrix were all done by agents that never opened the diff — and the
+ * coverage gate could not see it, because it only ever asked the question of agents
+ * whose prompt said `chunk N of M`.
+ */
+export function buildWholeDiffBlock(
+  report: PlanReport,
+  rules?: string,
+): string {
+  const diffPath = report.diffPathAbsolute;
+  if (typeof diffPath !== 'string' || diffPath.length === 0) {
+    throw new Error(
+      'agent-prompt: the plan has no `diffPathAbsolute`. Without it the agent ' +
+        'has no way to reach the diff — which is the entire bug this command ' +
+        'exists to prevent. Pass the report written by fetch-pr / plan-diff / ' +
+        'capture-local.',
+    );
+  }
+  if (!Array.isArray(report.chunks) || report.chunks.length === 0) {
+    throw new Error('agent-prompt: the plan has no `chunks[]`.');
+  }
+  const chunks = report.chunks as DiffChunk[];
+
+  const reads = chunks
+    .map((c) => {
+      const offset = c.startLine - 1;
+      const limit = c.endLine - c.startLine + 1;
+      return `read_file(file_path="${diffPath}", offset=${offset}, limit=${limit})`;
+    })
+    .join('\n');
+
+  const unreachable = chunks.filter((c) => c.maxLineChars > READ_FILE_CHAR_CAP);
+
+  const parts = [
+    '## The diff',
+    '',
+    '**Read the diff first. It is a file on disk — nothing in this prompt contains the code.**',
+    '',
+    'Walk it chunk by chunk. Each of these reads fits inside one un-truncated ' +
+      '`read_file`; asking for the whole file in one call does not, and you would ' +
+      'silently receive its first screenful.',
+    '',
+    '```',
+    reads,
+    '```',
+    '',
+    '**If a read comes back with `isTruncated` set, you do not have that range.** ' +
+      'Keep calling `read_file` with a larger `offset` until you do. Reasoning about ' +
+      'lines you never received is worse than saying you did not receive them.',
+    '',
+    'You may also `read_file` the **full source files** the diff touches, from the ' +
+      "worktree, whenever a hunk's correctness depends on code outside it. But the diff " +
+      'is not optional and the source is not a substitute for it: a **deletion leaves no ' +
+      'trace in the post-change file**. The removed line is simply not there, and nothing ' +
+      'marks where it was. The `-` lines are the only evidence it ever existed.',
+  ];
+
+  if (unreachable.length > 0) {
+    parts.push(
+      '',
+      `**${unreachable.length} chunk(s) hold a single line longer than one read returns** — ` +
+        `${unreachable.map((c) => `chunk ${c.id} (${c.maxLineChars} chars)`).join(', ')}. ` +
+        'Paging cannot reach such a line: every page starts at a line boundary. Do not ' +
+        'claim to have reviewed them. Say which ones you could not read.',
+    );
+  }
+
+  parts.push(
+    '',
+    FINDING_FORMAT,
+    '',
+    SEVERITY,
+    '',
+    'Review the diff, not pre-existing issues in unchanged code.',
+  );
+
+  if (rules && rules.trim()) {
+    parts.push('', '## Project rules', '', rules.trim());
+  }
+
+  parts.push(
+    '',
+    '## When you are done',
+    '',
+    'If you found nothing, say so **and say what you examined** — the specific lines, files ' +
+      'and cases you walked, in your own words. Do not recite a stock sentence: a return that ' +
+      'names nothing you read is indistinguishable from never having read anything, and will ' +
+      'be treated as such.',
+  );
+
+  return parts.join('\n');
+}
+
 function runAgentPrompt(args: AgentPromptArgs): void {
+  // Exactly one mode. A call that named neither used to fall through to the chunk
+  // builder with `undefined`, which then reported that the *plan* had no chunk
+  // `undefined` — an error about the plan, for a mistake in the call.
+  const hasChunk = typeof args.chunk === 'number';
+  if (hasChunk === !!args.wholeDiff) {
+    throw new Error(
+      'agent-prompt: pass exactly one of --chunk <id> (a Step 3B territory ' +
+        'agent) or --whole-diff (an agent that walks the whole diff: every ' +
+        "Step 3A dimension agent, and 3B's removed-behaviour, cross-file, " +
+        'test-matrix and invariant agents).',
+    );
+  }
+
   let report: PlanReport;
   try {
     report = JSON.parse(readFileSync(args.plan, 'utf8')) as PlanReport;
@@ -279,14 +404,30 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     }
   }
 
-  writeStdoutLine(buildChunkAgentPrompt(report, args.chunk, rules));
+  // Write down what was handed out, at a path derived from the plan. The caller is
+  // never told this path and is never asked to write to it: it is the CLI's record
+  // of its own output, and the only thing that can tell a delivered prompt from a
+  // rewritten one. Dogfooded, the orchestrator called this command for all five
+  // chunks and then paraphrased what it printed — dropping the rule against
+  // reciting a stock sentence, and replacing the project's review rules with a
+  // summary of its own — and every check downstream passed, because a paraphrase
+  // keeps the diff path.
+  const prompt = args.wholeDiff
+    ? buildWholeDiffBlock(report, rules)
+    : buildChunkAgentPrompt(report, args.chunk as number, rules);
+  recordPrompt(
+    args.plan,
+    args.wholeDiff ? 'whole-diff' : `chunk-${args.chunk}`,
+    prompt,
+  );
+  writeStdoutLine(prompt);
 }
 
 export const agentPromptCommand: CommandModule = {
   command: 'agent-prompt',
   describe:
-    "Build a chunk agent's launch prompt from the plan (the diff path and its " +
-    'byte range are welded in, not left to the caller to remember)',
+    "Build a review agent's launch prompt from the plan (the diff path and its " +
+    'line ranges are welded in, not left to the caller to remember)',
   builder: (yargs) =>
     yargs
       .option('plan', {
@@ -297,8 +438,15 @@ export const agentPromptCommand: CommandModule = {
       })
       .option('chunk', {
         type: 'number',
-        demandOption: true,
-        describe: 'Which chunk id this agent owns',
+        describe: 'Which chunk id this agent owns (a Step 3B territory agent)',
+      })
+      .option('whole-diff', {
+        type: 'boolean',
+        describe:
+          'Build the diff-reading block for an agent that walks the WHOLE diff ' +
+          "(every Step 3A dimension agent; 3B's removed-behaviour, cross-file, " +
+          'test-matrix and invariant agents). Paste it verbatim ahead of the ' +
+          "agent's own brief.",
       })
       .option('rules', {
         type: 'string',
@@ -307,6 +455,11 @@ export const agentPromptCommand: CommandModule = {
           'review has none)',
       }),
   handler: (argv) => {
-    runAgentPrompt(argv as unknown as AgentPromptArgs);
+    runAgentPrompt({
+      plan: argv['plan'] as string,
+      chunk: argv['chunk'] as number | undefined,
+      wholeDiff: argv['whole-diff'] === true,
+      rules: argv['rules'] as string | undefined,
+    });
   },
 };

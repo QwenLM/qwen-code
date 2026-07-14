@@ -149,6 +149,8 @@ describe('wasGivenTheDiff', () => {
     agentName: 'general-purpose',
     launchPrompt,
     successfulToolCalls: 0,
+    diffToolCalls: 0,
+    diffReads: [],
     finalText: '',
     mtimeMs: 0,
   });
