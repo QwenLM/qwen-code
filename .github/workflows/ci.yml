@@ -460,6 +460,7 @@ jobs:
 
       - name: 'Install Playwright Chromium (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
+        # Self-hosted ECS runners already include system deps; --with-deps can race apt locks.
         run: 'npx playwright install chromium'
 
       - name: 'Choose web-shell Playwright port'
