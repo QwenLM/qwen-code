@@ -3954,6 +3954,56 @@ describe('runQwenServe runtime startup failures', () => {
     );
   });
 
+  it('stops the deferred runtime extension reconciler during close', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-reconciler-close-')),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const bridge = makeRuntimeBridge();
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockReturnValue(
+      bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+    const stopExtensionGenerationReconciler = vi.fn();
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(() => {
+      const runtimeApp = express();
+      runtimeApp.locals['stopExtensionGenerationReconciler'] =
+        stopExtensionGenerationReconciler;
+      return runtimeApp;
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      const healthRes = await fetch(`${handle.url}/health`);
+      expect(healthRes.status).toBe(200);
+      await handle.runtimeReady;
+    } finally {
+      await handle.close();
+    }
+
+    expect(stopExtensionGenerationReconciler).toHaveBeenCalledOnce();
+    expect(
+      stopExtensionGenerationReconciler.mock.invocationCallOrder[0],
+    ).toBeLessThan(vi.mocked(bridge.shutdown).mock.invocationCallOrder[0]!);
+  });
+
   it('does not cancel deferred runtime once startup is already running', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-close-running-')),
@@ -4008,6 +4058,124 @@ describe('runQwenServe runtime startup failures', () => {
     await closePromise;
 
     expect(createBridge).toHaveBeenCalledTimes(1);
+    await expect(handle.runtimeReady).rejects.toThrow(
+      'Daemon runtime stopped before mounting.',
+    );
+  });
+
+  it('disposes a deferred runtime app that finishes after the shutdown wait', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-close-late-app-')),
+    );
+    let resolveTelemetry:
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
+      | undefined;
+    const telemetryPromise = new Promise<qwenCore.ResolvedTelemetrySettings>(
+      (resolve) => {
+        resolveTelemetry = resolve;
+      },
+    );
+    const resolveTelemetrySettings = vi
+      .spyOn(qwenCore, 'resolveTelemetrySettings')
+      .mockReturnValue(telemetryPromise);
+    const bridge = makeRuntimeBridge();
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockReturnValue(
+      bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+    const stopExtensionGenerationReconciler = vi.fn();
+    const stopScheduledTaskKeepalive = vi.fn(() => {
+      throw new Error('keepalive dispose failed');
+    });
+    const stopWorkspaceGitState = vi.fn();
+    const stopSubSession = vi.fn();
+    const disposeEventLoopMonitor = vi.fn();
+    vi.spyOn(qwenCore, 'startEventLoopLagMonitor').mockReturnValueOnce({
+      snapshot: () => ({
+        meanMs: 0,
+        p50Ms: 0,
+        p99Ms: 0,
+        maxMs: 0,
+      }),
+      dispose: disposeEventLoopMonitor,
+    });
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(() => {
+      const runtimeApp = express();
+      runtimeApp.locals['stopExtensionGenerationReconciler'] =
+        stopExtensionGenerationReconciler;
+      runtimeApp.locals['stopScheduledTaskKeepalive'] =
+        stopScheduledTaskKeepalive;
+      runtimeApp.locals['stopWorkspaceGitState'] = stopWorkspaceGitState;
+      let subSessionStoppers: Array<() => void> = [];
+      Object.defineProperty(runtimeApp.locals, 'subSessionStoppers', {
+        configurable: true,
+        get: () => subSessionStoppers,
+        set: (stoppers: Array<() => void>) => {
+          stoppers.push(stopSubSession);
+          subSessionStoppers = stoppers;
+        },
+      });
+      return runtimeApp;
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    const healthRes = await fetch(`${handle.url}/health`);
+    expect(healthRes.status).toBe(200);
+    await vi.waitFor(
+      () => expect(resolveTelemetrySettings).toHaveBeenCalledTimes(1),
+      { timeout: 500 },
+    );
+
+    const nativeSetTimeout = globalThis.setTimeout;
+    let acceleratedRuntimeWait = false;
+    const setTimeoutSpy = vi
+      .spyOn(globalThis, 'setTimeout')
+      .mockImplementation(((
+        callback: (...args: unknown[]) => void,
+        delay?: number,
+        ...args: unknown[]
+      ) => {
+        if (!acceleratedRuntimeWait && delay === 5_000) {
+          acceleratedRuntimeWait = true;
+          return nativeSetTimeout(callback, 0, ...args);
+        }
+        return nativeSetTimeout(callback, delay, ...args);
+      }) as typeof setTimeout);
+    try {
+      await handle.close();
+    } finally {
+      setTimeoutSpy.mockRestore();
+    }
+    expect(stopExtensionGenerationReconciler).not.toHaveBeenCalled();
+
+    resolveTelemetry?.({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+
+    await vi.waitFor(
+      () => expect(stopExtensionGenerationReconciler).toHaveBeenCalledOnce(),
+      { timeout: 1_000 },
+    );
+    expect(stopScheduledTaskKeepalive).toHaveBeenCalledOnce();
+    expect(stopWorkspaceGitState).toHaveBeenCalledOnce();
+    expect(stopSubSession).toHaveBeenCalledOnce();
+    expect(disposeEventLoopMonitor).toHaveBeenCalledOnce();
+    expect(bridge.shutdown).toHaveBeenCalledOnce();
     await expect(handle.runtimeReady).rejects.toThrow(
       'Daemon runtime stopped before mounting.',
     );

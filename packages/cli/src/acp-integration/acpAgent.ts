@@ -7541,34 +7541,36 @@ class QwenAgent implements Agent {
       case SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh: {
         const sessionId = params['sessionId'] as string;
         const session = this.sessionOrThrow(sessionId);
-        const extensionManager = session.getConfig().getExtensionManager();
-        const skillManager = session.getConfig().getSkillManager();
-        await Promise.all([
-          extensionManager.refreshCache().catch((err: unknown) => {
-            debugLogger.warn(
-              `Extension refresh failed for session ${sessionId}: ${
-                err instanceof Error ? err.message : String(err)
-              }`,
-            );
-          }),
-          skillManager?.refreshCache().catch((err: unknown) => {
-            debugLogger.warn(
-              `Skill refresh failed after extension refresh for session ${sessionId}: ${
-                err instanceof Error ? err.message : String(err)
-              }`,
-            );
-          }),
-        ]);
-        try {
-          await extensionManager.refreshTools();
-        } catch (err) {
-          debugLogger.warn(
-            `Extension tool refresh failed for session ${sessionId}: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
+        const config = session.getConfig();
+        const extensionManager = config.getExtensionManager();
+        const errors: unknown[] = [];
+        const runRefresh = async (refresh: () => Promise<unknown>) => {
+          try {
+            await refresh();
+          } catch (error) {
+            errors.push(error);
+          }
+        };
+        await runRefresh(async () => await extensionManager.refreshCache());
+        await runRefresh(async () => await extensionManager.refreshTools());
+        await runRefresh(
+          async () =>
+            await config.getGeminiClient()?.refreshSystemInstruction(),
+        );
+        await runRefresh(
+          async () => await session.sendAvailableCommandsUpdate(),
+        );
+        if (errors.length > 0) {
+          const details = errors
+            .map((error) =>
+              error instanceof Error ? error.message : String(error),
+            )
+            .join('; ');
+          throw new AggregateError(
+            errors,
+            `Extension runtime refresh failed: ${details}`,
           );
         }
-        await session.sendAvailableCommandsUpdate();
         return { ok: true };
       }
       case 'deleteSession': {

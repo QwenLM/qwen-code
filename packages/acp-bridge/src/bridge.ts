@@ -1519,6 +1519,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // daemon. Cleared in the `finally` of the creator.
   let inFlightChannelSpawn: Promise<ChannelInfo> | undefined;
   const byId = new Map<string, SessionEntry>();
+  const inFlightExtensionRefreshes = new Map<
+    string,
+    { connection: ClientSideConnection; promise: Promise<void> }
+  >();
   const toSessionSummary = (entry: SessionEntry): BridgeSessionSummary => {
     let isWaitingForPermission = false;
     let isWaitingForUserQuestion = false;
@@ -5748,12 +5752,28 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             return { refreshed: 0, failed: 0 };
           }
           try {
-            await Promise.race([
-              withTimeout(
-                entry.connection.extMethod(
+            let inFlight = inFlightExtensionRefreshes.get(entry.sessionId);
+            if (!inFlight || inFlight.connection !== entry.connection) {
+              const promise = (async () => {
+                await entry.connection.extMethod(
                   SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
                   { sessionId: entry.sessionId },
-                ),
+                );
+              })();
+              inFlight = { connection: entry.connection, promise };
+              inFlightExtensionRefreshes.set(entry.sessionId, inFlight);
+              const clear = () => {
+                if (
+                  inFlightExtensionRefreshes.get(entry.sessionId) === inFlight
+                ) {
+                  inFlightExtensionRefreshes.delete(entry.sessionId);
+                }
+              };
+              void promise.then(clear, clear);
+            }
+            await Promise.race([
+              withTimeout(
+                inFlight.promise,
                 30_000,
                 SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
               ),

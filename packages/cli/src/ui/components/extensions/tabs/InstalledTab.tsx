@@ -461,17 +461,25 @@ export const InstalledTab = ({
           : t('Enabling "{{name}}"...', { name: item.name }),
       });
       try {
+        let result;
         if (item.isActive) {
-          await extensionManager.disableExtension(item.name, scope);
+          result = await extensionManager.disableExtension(item.name, scope);
         } else {
-          await extensionManager.enableExtension(item.name, scope);
+          result = await extensionManager.enableExtension(item.name, scope);
         }
+        const warnings = result.warnings ?? [];
         onStatus({
-          type: 'success',
-          text: t('"{{name}}" {{state}}.', {
-            name: item.name,
-            state: item.isActive ? t('disabled') : t('enabled'),
-          }),
+          type: warnings.length > 0 ? 'warning' : 'success',
+          text:
+            warnings.length > 0
+              ? t('"{{name}}" changed with warnings: {{detail}}', {
+                  name: item.name,
+                  detail: warnings.map((warning) => warning.error).join('; '),
+                })
+              : t('"{{name}}" {{state}}.', {
+                  name: item.name,
+                  state: item.isActive ? t('disabled') : t('enabled'),
+                }),
         });
         await load();
       } catch (error) {

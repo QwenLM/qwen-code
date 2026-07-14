@@ -56,6 +56,9 @@ import {
   Storage,
   TrustGateError,
   type Extension,
+  type CommittedExtensionMutation,
+  type PrepareExtensionInstallOptions,
+  type PreparedExtensionMutation,
   type SessionListItem,
 } from '@qwen-code/qwen-code-core';
 import * as qwenCore from '@qwen-code/qwen-code-core';
@@ -319,6 +322,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_extensions',
   'session_branch',
   'workspace_qualified_rest_core',
+  'extension_management_v2',
   'workspace_persisted_transcript',
   'workspace_session_export',
   // Baseline (always advertised) — presence means the `/voice/stream`
@@ -366,6 +370,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_extensions' &&
       f !== 'session_branch' &&
       f !== 'workspace_qualified_rest_core' &&
+      f !== 'extension_management_v2' &&
       f !== 'workspace_persisted_transcript' &&
       f !== 'workspace_session_export' &&
       f !== 'voice_transcribe',
@@ -406,6 +411,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'persistent_workspace_registration',
   'workspace_runtime_removal',
   'workspace_qualified_rest_core',
+  'extension_management_v2',
   'workspace_persisted_transcript',
   'workspace_session_export',
   'workspace_qualified_acp',
@@ -2822,7 +2828,14 @@ describe('createServeApp', () => {
         'persistent_workspace_registration',
       );
       expect(before.body.features).not.toContain('multi_workspace_sessions');
-      expect(before.body.workspaces).toBeUndefined();
+      expect(before.body.workspaces).toEqual([
+        {
+          id: 'primary-id',
+          cwd: WS_BOUND,
+          primary: true,
+          trusted: true,
+        },
+      ]);
 
       registry.add(
         makeWorkspaceRuntimeForTest({
@@ -3647,16 +3660,47 @@ describe('createServeApp', () => {
 
     const mockExtensionManagerMethods = (overrides?: {
       refreshCache?: () => Promise<void>;
-      installExtension?: () => Promise<Extension>;
+      prepareExtensionInstall?: (
+        options: PrepareExtensionInstallOptions,
+      ) => Promise<Extension>;
+      prepareExtensionUpdate?: (extension: Extension) => Promise<Extension>;
+      commitPreparedExtension?: (
+        prepared: PreparedExtensionMutation,
+      ) => Promise<CommittedExtensionMutation>;
+      disposePreparedExtension?: (
+        prepared: PreparedExtensionMutation,
+      ) => Promise<void>;
       getLoadedExtensions?: () => Extension[];
-      enableExtension?: () => Promise<void>;
-      disableExtension?: () => Promise<void>;
-      uninstallExtension?: () => Promise<void>;
+      enableExtension?: () => Promise<unknown>;
+      disableExtension?: () => Promise<unknown>;
+      uninstallExtension?: () => Promise<unknown>;
       checkForAllExtensionUpdates?: (
         cb: (name: string, state: ExtensionUpdateState) => void,
+        signal?: AbortSignal,
+        schedule?: <T>(task: () => Promise<T>) => Promise<T>,
       ) => Promise<void>;
       updateExtension?: () => Promise<{ updatedVersion?: string } | undefined>;
     }) => {
+      const preparedExtensions = new Map<
+        PreparedExtensionMutation,
+        Extension
+      >();
+      let generation = 0;
+      const createPrepared = (
+        extension: Extension,
+        operation: 'install' | 'update',
+      ): PreparedExtensionMutation => {
+        const prepared = {
+          operation,
+          identity: {
+            id: extension.id ?? 'a'.repeat(64),
+            name: extension.name,
+          },
+          version: extension.version ?? extension.config.version ?? '1.0.0',
+        } as PreparedExtensionMutation;
+        preparedExtensions.set(prepared, extension);
+        return prepared;
+      };
       const spies = [
         vi
           .spyOn(ExtensionManager.prototype, 'refreshCache')
@@ -3664,10 +3708,57 @@ describe('createServeApp', () => {
             overrides?.refreshCache ?? (async () => undefined),
           ),
         vi
-          .spyOn(ExtensionManager.prototype, 'installExtension')
+          .spyOn(ExtensionManager.prototype, 'prepareExtensionInstall')
+          .mockImplementation(async function (options) {
+            const extension = overrides?.prepareExtensionInstall
+              ? await overrides.prepareExtensionInstall.call(this, options)
+              : testExtension('installed-ext');
+            return createPrepared(extension, 'install');
+          }),
+        vi
+          .spyOn(ExtensionManager.prototype, 'prepareExtensionUpdate')
+          .mockImplementation(async function ({ extension, signal }) {
+            const state = await qwenCore.checkForExtensionUpdate(
+              extension,
+              this,
+              signal,
+            );
+            if (state === ExtensionUpdateState.UP_TO_DATE) {
+              return { upToDate: true, extension };
+            }
+            if (state !== ExtensionUpdateState.UPDATE_AVAILABLE) {
+              throw new Error(
+                `Extension "${extension.name}" update check returned ${state}.`,
+              );
+            }
+            const updated = overrides?.prepareExtensionUpdate
+              ? await overrides.prepareExtensionUpdate.call(this, extension)
+              : ({
+                  ...extension,
+                  config: { ...extension.config, version: '1.2.4' },
+                  version: '1.2.4',
+                } as Extension);
+            return {
+              upToDate: false,
+              prepared: createPrepared(updated, 'update'),
+            };
+          }),
+        vi
+          .spyOn(ExtensionManager.prototype, 'commitPreparedExtension')
+          .mockImplementation(async (prepared) =>
+            overrides?.commitPreparedExtension
+              ? await overrides.commitPreparedExtension(prepared)
+              : {
+                  identity: prepared.identity,
+                  version: prepared.version,
+                  generation: ++generation,
+                  extension: preparedExtensions.get(prepared),
+                },
+          ),
+        vi
+          .spyOn(ExtensionManager.prototype, 'disposePreparedExtension')
           .mockImplementation(
-            overrides?.installExtension ??
-              (async () => testExtension('installed-ext')),
+            overrides?.disposePreparedExtension ?? (async () => undefined),
           ),
         vi
           .spyOn(ExtensionManager.prototype, 'getLoadedExtensions')
@@ -3678,17 +3769,20 @@ describe('createServeApp', () => {
         vi
           .spyOn(ExtensionManager.prototype, 'enableExtension')
           .mockImplementation(
-            overrides?.enableExtension ?? (async () => undefined),
+            (overrides?.enableExtension ??
+              (async () => ({ generation: ++generation }))) as never,
           ),
         vi
           .spyOn(ExtensionManager.prototype, 'disableExtension')
           .mockImplementation(
-            overrides?.disableExtension ?? (async () => undefined),
+            (overrides?.disableExtension ??
+              (async () => ({ generation: ++generation }))) as never,
           ),
         vi
           .spyOn(ExtensionManager.prototype, 'uninstallExtension')
           .mockImplementation(
-            overrides?.uninstallExtension ?? (async () => undefined),
+            (overrides?.uninstallExtension ??
+              (async () => ({ generation: ++generation }))) as never,
           ),
         vi
           .spyOn(ExtensionManager.prototype, 'checkForAllExtensionUpdates')
@@ -3764,7 +3858,7 @@ describe('createServeApp', () => {
       );
       let managerTrustedFlag: boolean | undefined;
       const restore = mockExtensionManagerMethods({
-        async installExtension() {
+        async prepareExtensionInstall() {
           managerTrustedFlag = (
             this as unknown as { isWorkspaceTrusted?: boolean }
           ).isWorkspaceTrusted;
@@ -3820,7 +3914,7 @@ describe('createServeApp', () => {
     it('queues extension install and refreshes active sessions', async () => {
       let requestSettingError: string | undefined;
       const restore = mockExtensionManagerMethods({
-        async installExtension() {
+        async prepareExtensionInstall() {
           const manager = this as unknown as {
             requestSetting?: (setting: { envVar: string }) => Promise<string>;
           };
@@ -3869,14 +3963,15 @@ describe('createServeApp', () => {
           });
         });
         expect(
-          vi.mocked(ExtensionManager.prototype.installExtension),
+          vi.mocked(ExtensionManager.prototype.prepareExtensionInstall),
         ).toHaveBeenCalledWith(
           expect.objectContaining({
-            ref: 'v1.2.3',
-            autoUpdate: true,
-            allowPreRelease: true,
+            installMetadata: expect.objectContaining({
+              ref: 'v1.2.3',
+              autoUpdate: true,
+              allowPreRelease: true,
+            }),
           }),
-          expect.any(Function),
         );
         expect(requestSettingError).toContain(
           'requires interactive configuration',
@@ -3917,7 +4012,7 @@ describe('createServeApp', () => {
         releaseInstall = resolve;
       });
       const restore = mockExtensionManagerMethods({
-        installExtension: async () => {
+        prepareExtensionInstall: async () => {
           await installBlocker;
           return testExtension('installed-ext');
         },
@@ -3959,25 +4054,45 @@ describe('createServeApp', () => {
           .send({ source: 'https://example.com/second-ext', consent: true });
         expect(second.status).toBe(202);
 
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(
+              `/workspace/extensions/operations/${encodeURIComponent(
+                second.body.operationId as string,
+              )}`,
+            )
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body.status).toBe('running');
+        });
+
+        const third = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source: 'https://example.com/third-ext', consent: true });
+        expect(third.status).toBe(202);
+
         const queued = await request(app)
           .get(
             `/workspace/extensions/operations/${encodeURIComponent(
-              second.body.operationId as string,
+              third.body.operationId as string,
             )}`,
           )
           .set('Host', `127.0.0.1:${tokenOpts.port}`)
           .set('Authorization', 'Bearer secret');
         expect(queued.status).toBe(200);
         expect(queued.body).toMatchObject({
-          operationId: second.body.operationId,
+          operationId: third.body.operationId,
           operation: 'install',
           status: 'queued',
-          source: 'https://example.com/second-ext',
+          source: 'https://example.com/third-ext',
         });
 
         releaseInstall!();
         await vi.waitFor(() => {
-          expect(bridge.extensionEvents.length).toBeGreaterThanOrEqual(2);
+          expect(bridge.extensionEvents.length).toBeGreaterThanOrEqual(3);
         });
       } finally {
         releaseInstall?.();
@@ -3985,9 +4100,163 @@ describe('createServeApp', () => {
       }
     });
 
+    it('commits in preparation completion order', async () => {
+      let releaseFirst: (() => void) | undefined;
+      let firstStarted = false;
+      const commits: string[] = [];
+      let generation = 0;
+      const restore = mockExtensionManagerMethods({
+        prepareExtensionInstall: async ({ installMetadata }) => {
+          const name = installMetadata.source.endsWith('/first-ext')
+            ? 'first-ext'
+            : 'second-ext';
+          if (name === 'first-ext') {
+            firstStarted = true;
+            await new Promise<void>((resolve) => {
+              releaseFirst = resolve;
+            });
+          }
+          return testExtension(name);
+        },
+        commitPreparedExtension: async (prepared) => {
+          commits.push(prepared.identity.name);
+          return {
+            identity: prepared.identity,
+            version: prepared.version,
+            generation: ++generation,
+          };
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source: 'https://example.com/first-ext', consent: true });
+        await vi.waitFor(() => expect(firstStarted).toBe(true));
+
+        await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source: 'https://example.com/second-ext', consent: true });
+        await vi.waitFor(() => expect(commits).toEqual(['second-ext']));
+
+        releaseFirst?.();
+        await vi.waitFor(() =>
+          expect(commits).toEqual(['second-ext', 'first-ext']),
+        );
+        await vi.waitFor(() => expect(bridge.extensionEvents).toHaveLength(2));
+      } finally {
+        releaseFirst?.();
+        restore();
+      }
+    });
+
+    it('maps coded commit warnings to the legacy refresh-error status', async () => {
+      const restore = mockExtensionManagerMethods({
+        commitPreparedExtension: async (prepared) => ({
+          identity: prepared.identity,
+          version: prepared.version,
+          generation: 3,
+          warnings: [
+            {
+              code: 'extension_temp_cleanup_failed',
+              error: 'cleanup denied',
+            },
+          ],
+        }),
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge({ knownClientIds: ['client-1'] }) },
+        );
+        const started = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source: 'https://example.com/warning-ext', consent: true });
+
+        await vi.waitFor(async () => {
+          const operation = await request(app)
+            .get(`/workspace/extensions/operations/${started.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(operation.body).toMatchObject({
+            status: 'succeeded_with_refresh_error',
+            result: { error: 'cleanup denied' },
+            warnings: [
+              {
+                code: 'extension_temp_cleanup_failed',
+                error: 'cleanup denied',
+              },
+            ],
+          });
+        });
+      } finally {
+        restore();
+      }
+    });
+
+    it('maps resultless committed warnings to a legacy top-level error', async () => {
+      const restore = mockExtensionManagerMethods({
+        commitPreparedExtension: async (prepared) => ({
+          identity: prepared.identity,
+          version: prepared.version,
+          generation: 3,
+        }),
+        disposePreparedExtension: async () => {
+          throw new Error('cleanup exploded');
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge({ knownClientIds: ['client-1'] }) },
+        );
+        const started = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source: 'https://example.com/warning-ext', consent: true });
+
+        await vi.waitFor(async () => {
+          const operation = await request(app)
+            .get(`/workspace/extensions/operations/${started.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(operation.body).toMatchObject({
+            status: 'succeeded_with_refresh_error',
+            error:
+              'Commit succeeded but post-commit work failed: cleanup exploded',
+          });
+          expect(operation.body).not.toHaveProperty('result');
+        });
+      } finally {
+        restore();
+      }
+    });
+
     it('evicts the oldest terminal extension operations', async () => {
       const restore = mockExtensionManagerMethods({
-        async installExtension() {
+        async prepareExtensionInstall() {
           return testExtension('installed-ext');
         },
       });
@@ -4073,9 +4342,12 @@ describe('createServeApp', () => {
     });
 
     it('broadcasts a failed extension install with redacted error details', async () => {
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
       const restore = mockExtensionManagerMethods({
-        installExtension: async () => {
-          throw new Error('https://user:token@example.com/private-ext failed');
+        prepareExtensionInstall: async () => {
+          throw new Error(
+            'https://user:\n\tsecret@example.com/private-ext failed',
+          );
         },
       });
       try {
@@ -4108,7 +4380,7 @@ describe('createServeApp', () => {
             error: 'https://***REDACTED***@example.com/private-ext failed',
           });
         });
-        expect(bridge.extensionEvents.at(-1)?.error).not.toContain('token');
+        expect(bridge.extensionEvents.at(-1)?.error).not.toContain('secret');
 
         const poll = await request(app)
           .get(
@@ -4126,23 +4398,45 @@ describe('createServeApp', () => {
           source: 'https://example.com/private-ext',
           error: 'https://***REDACTED***@example.com/private-ext failed',
         });
-        expect(poll.body.error).not.toContain('token');
+        expect(poll.body.error).not.toContain('secret');
+        const logged = stderr.mock.calls
+          .map(([chunk]) => String(chunk))
+          .join('');
+        expect(logged).toContain(
+          'https://***REDACTED***@example.com/private-ext failed',
+        );
+        expect(logged).not.toContain('secret');
       } finally {
+        stderr.mockRestore();
         restore();
       }
     });
 
     it('does not report a successful extension install as failed when session refresh fails', async () => {
       const restore = mockExtensionManagerMethods({
-        async installExtension() {
+        async prepareExtensionInstall() {
           return testExtension('installed-ext');
+        },
+        async commitPreparedExtension(prepared) {
+          return {
+            identity: prepared.identity,
+            version: prepared.version,
+            generation: 3,
+            warnings: [
+              {
+                code: 'extension_temp_cleanup_failed',
+                error: 'cleanup denied',
+              },
+            ],
+          };
         },
       });
       try {
         const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
         const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const refreshError = 'x'.repeat(600);
         bridge.refreshExtensionsForAllSessions = async () => {
-          throw new Error('refresh broke');
+          throw new Error(refreshError);
         };
         const app = createServeApp(
           { ...tokenOpts, workspace: WS_BOUND },
@@ -4169,7 +4463,7 @@ describe('createServeApp', () => {
             name: 'installed-ext',
             refreshed: 0,
             failed: 1,
-            error: 'refresh broke',
+            error: refreshError.slice(0, 500),
           });
         });
 
@@ -4190,8 +4484,11 @@ describe('createServeApp', () => {
             status: 'installed',
             refreshed: 0,
             failed: 1,
-            error: 'refresh broke',
+            error: refreshError.slice(0, 500),
           },
+          warnings: expect.arrayContaining([
+            expect.objectContaining({ error: refreshError.slice(0, 500) }),
+          ]),
         });
       } finally {
         restore();
@@ -4204,7 +4501,7 @@ describe('createServeApp', () => {
         releaseInstall = resolve;
       });
       const restore = mockExtensionManagerMethods({
-        installExtension: async () => {
+        prepareExtensionInstall: async () => {
           await installBlocker;
           return testExtension('installed-ext');
         },
@@ -4233,13 +4530,39 @@ describe('createServeApp', () => {
           Array.from({ length: 10 }, () => install()),
         );
         const rejected = await install();
+        const legacyRequests = Promise.all([
+          request(app)
+            .post('/workspace/extensions/check-updates')
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret')
+            .set('X-Qwen-Client-Id', 'client-1')
+            .send({}),
+          request(app)
+            .post('/workspace/extensions/refresh')
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret')
+            .set('X-Qwen-Client-Id', 'client-1')
+            .send({}),
+        ]);
+        const releaseTimer = setTimeout(() => releaseInstall?.(), 100);
+        const [checkUpdatesResponse, refresh] = await legacyRequests;
+        clearTimeout(releaseTimer);
+
+        releaseInstall?.();
 
         expect(accepted.every((res) => res.status === 202)).toBe(true);
         expect(rejected.status).toBe(429);
         expect(rejected.body).toMatchObject({
           code: 'extension_queue_full',
         });
-        releaseInstall?.();
+        expect(checkUpdatesResponse.status).toBe(429);
+        expect(checkUpdatesResponse.body).toMatchObject({
+          code: 'extension_queue_full',
+        });
+        expect(refresh.status).toBe(429);
+        expect(refresh.body).toMatchObject({
+          code: 'extension_queue_full',
+        });
         await vi.waitFor(() => {
           expect(
             bridge.extensionEvents.filter(
@@ -4413,6 +4736,7 @@ describe('createServeApp', () => {
         'http://example.com/repo',
         'ftp://example.com/repo',
         'file:///tmp/repo',
+        'git@github.com:owner/repo.git',
       ]) {
         const res = await request(app)
           .post('/workspace/extensions/install')
@@ -4425,7 +4749,7 @@ describe('createServeApp', () => {
           });
 
         expect(res.status).toBe(400);
-        expect(res.body.error).toBe('`source` must use https or ssh');
+        expect(res.body.error).toBe('`source` must use https');
       }
     });
 
@@ -4718,21 +5042,24 @@ describe('createServeApp', () => {
       }
     });
 
-    it('serializes check-updates behind queued extension mutations', async () => {
-      let releaseInstall: (() => void) | undefined;
+    it('shares the two preparation slots with check-updates', async () => {
+      const releases: Array<() => void> = [];
       const calls: string[] = [];
       const restore = mockExtensionManagerMethods({
-        installExtension: async () => {
-          calls.push('install:start');
+        prepareExtensionInstall: async () => {
+          const index = releases.length + 1;
+          calls.push(`install-${index}:start`);
           await new Promise<void>((resolve) => {
-            releaseInstall = resolve;
+            releases.push(resolve);
           });
-          calls.push('install:end');
-          return testExtension('installed-ext');
+          calls.push(`install-${index}:end`);
+          return testExtension(`installed-ext-${index}`);
         },
-        checkForAllExtensionUpdates: async (cb) => {
-          calls.push('check-updates');
-          cb('test-ext', ExtensionUpdateState.UP_TO_DATE);
+        checkForAllExtensionUpdates: async (cb, _signal, schedule) => {
+          await schedule!(async () => {
+            calls.push('check-updates');
+            cb('test-ext', ExtensionUpdateState.UP_TO_DATE);
+          });
         },
       });
       try {
@@ -4744,17 +5071,19 @@ describe('createServeApp', () => {
           { bridge },
         );
 
-        await request(app)
-          .post('/workspace/extensions/install')
-          .set('Host', `127.0.0.1:${tokenOpts.port}`)
-          .set('Authorization', 'Bearer secret')
-          .set('X-Qwen-Client-Id', 'client-1')
-          .send({
-            source: 'https://example.com/installed-ext',
-            consent: true,
-          });
+        for (const name of ['first', 'second']) {
+          await request(app)
+            .post('/workspace/extensions/install')
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret')
+            .set('X-Qwen-Client-Id', 'client-1')
+            .send({
+              source: `https://example.com/${name}`,
+              consent: true,
+            });
+        }
         await vi.waitFor(() => {
-          expect(calls).toEqual(['install:start']);
+          expect(calls).toEqual(['install-1:start', 'install-2:start']);
         });
 
         const checkUpdates = request(app)
@@ -4764,19 +5093,28 @@ describe('createServeApp', () => {
           .set('X-Qwen-Client-Id', 'client-1')
           .send({})
           .then((response) => response);
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        expect(calls).toEqual(['install:start']);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(calls).toEqual(['install-1:start', 'install-2:start']);
 
-        releaseInstall?.();
+        releases[0]?.();
+        await vi.waitFor(() => expect(calls).toContain('check-updates'));
         const res = await checkUpdates;
         expect(res.status).toBe(200);
         expect(calls).toEqual([
-          'install:start',
-          'install:end',
+          'install-1:start',
+          'install-2:start',
+          'install-1:end',
           'check-updates',
         ]);
+        releases[1]?.();
+        await vi.waitFor(() =>
+          expect(bridge.extensionEvents).toEqual([
+            expect.objectContaining({ status: 'installed' }),
+            expect.objectContaining({ status: 'installed' }),
+          ]),
+        );
       } finally {
-        releaseInstall?.();
+        releases.forEach((release) => release());
         restore();
       }
     });
@@ -4850,10 +5188,20 @@ describe('createServeApp', () => {
         });
         expect(
           vi.mocked(ExtensionManager.prototype.enableExtension),
-        ).toHaveBeenCalledWith('test-ext', expect.anything(), WS_BOUND);
+        ).toHaveBeenCalledWith(
+          'test-ext',
+          expect.anything(),
+          WS_BOUND,
+          expect.any(Function),
+        );
         expect(
           vi.mocked(ExtensionManager.prototype.disableExtension),
-        ).toHaveBeenCalledWith('test-ext', expect.anything(), WS_BOUND);
+        ).toHaveBeenCalledWith(
+          'test-ext',
+          expect.anything(),
+          WS_BOUND,
+          expect.any(Function),
+        );
       } finally {
         restore();
       }
@@ -4887,10 +5235,20 @@ describe('createServeApp', () => {
         await vi.waitFor(() => {
           expect(
             vi.mocked(ExtensionManager.prototype.enableExtension),
-          ).toHaveBeenCalledWith('test-ext', expect.anything(), WS_BOUND);
+          ).toHaveBeenCalledWith(
+            'test-ext',
+            expect.anything(),
+            WS_BOUND,
+            expect.any(Function),
+          );
           expect(
             vi.mocked(ExtensionManager.prototype.disableExtension),
-          ).toHaveBeenCalledWith('test-ext', expect.anything(), WS_BOUND);
+          ).toHaveBeenCalledWith(
+            'test-ext',
+            expect.anything(),
+            WS_BOUND,
+            expect.any(Function),
+          );
         });
       } finally {
         restore();
@@ -4921,10 +5279,10 @@ describe('createServeApp', () => {
       });
     });
 
-    it('serializes extension refresh behind queued mutations', async () => {
+    it('does not block manual refresh behind preparation', async () => {
       let releaseInstall: (() => void) | undefined;
       const restore = mockExtensionManagerMethods({
-        installExtension: async () => {
+        prepareExtensionInstall: async () => {
           await new Promise<void>((resolve) => {
             releaseInstall = resolve;
           });
@@ -4951,7 +5309,7 @@ describe('createServeApp', () => {
           });
         await vi.waitFor(() => {
           expect(
-            vi.mocked(ExtensionManager.prototype.installExtension),
+            vi.mocked(ExtensionManager.prototype.prepareExtensionInstall),
           ).toHaveBeenCalled();
         });
 
@@ -4962,18 +5320,82 @@ describe('createServeApp', () => {
           .set('X-Qwen-Client-Id', 'client-1')
           .send({})
           .then((response) => response);
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        expect(bridge.extensionEvents).toEqual([]);
-
-        releaseInstall?.();
         const res = await refresh;
         expect(res.status).toBe(200);
         expect(bridge.extensionEvents).toEqual([
-          expect.objectContaining({ status: 'installed' }),
           expect.objectContaining({ refreshed: 1, failed: 0 }),
         ]);
+
+        releaseInstall?.();
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents).toEqual([
+            expect.objectContaining({ refreshed: 1, failed: 0 }),
+            expect.objectContaining({ status: 'installed' }),
+          ]);
+        });
       } finally {
         releaseInstall?.();
+        restore();
+      }
+    });
+
+    it('serializes manual refresh behind an extension commit', async () => {
+      let releaseEnable: (() => void) | undefined;
+      const restore = mockExtensionManagerMethods({
+        enableExtension: async () => {
+          await new Promise<void>((resolve) => {
+            releaseEnable = resolve;
+          });
+          return { generation: 1 };
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const enable = await request(app)
+          .post('/workspace/extensions/test-ext/enable')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ scope: 'workspace' });
+        expect(enable.status).toBe(202);
+        await vi.waitFor(() => {
+          expect(
+            vi.mocked(ExtensionManager.prototype.enableExtension),
+          ).toHaveBeenCalled();
+        });
+
+        const refreshRequest = request(app)
+          .post('/workspace/extensions/refresh')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({});
+        const requestStarted = new Promise<void>((resolve) => {
+          refreshRequest.on('request', () => resolve());
+        });
+        const refresh = refreshRequest.then((response) => response);
+        await requestStarted;
+        const state = await Promise.race([
+          refresh.then(() => 'settled'),
+          new Promise<'pending'>((resolve) =>
+            setTimeout(() => resolve('pending'), 50),
+          ),
+        ]);
+        expect(state).toBe('pending');
+
+        releaseEnable?.();
+        const res = await refresh;
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({ refreshed: 1, failed: 0 });
+      } finally {
+        releaseEnable?.();
         restore();
       }
     });
@@ -5193,7 +5615,12 @@ describe('createServeApp', () => {
         });
         expect(
           vi.mocked(ExtensionManager.prototype.uninstallExtension),
-        ).toHaveBeenCalledWith('test-ext', false, WS_BOUND);
+        ).toHaveBeenCalledWith(
+          'test-ext',
+          false,
+          WS_BOUND,
+          expect.any(Function),
+        );
       } finally {
         restore();
       }
@@ -5227,7 +5654,12 @@ describe('createServeApp', () => {
         });
         expect(
           vi.mocked(ExtensionManager.prototype.uninstallExtension),
-        ).toHaveBeenCalledWith('test-ext', false, WS_BOUND);
+        ).toHaveBeenCalledWith(
+          'test-ext',
+          false,
+          WS_BOUND,
+          expect.any(Function),
+        );
       } finally {
         restore();
       }

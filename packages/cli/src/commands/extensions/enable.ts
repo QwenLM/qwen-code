@@ -6,7 +6,7 @@
 
 import { type CommandModule } from 'yargs';
 import { FatalConfigError, getErrorMessage } from '@qwen-code/qwen-code-core';
-import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { getExtensionManager, resolveExtensionCommandScope } from './utils.js';
 import { t } from '../../i18n/index.js';
 
@@ -20,7 +20,7 @@ export async function handleEnable(args: EnableArgs) {
 
   try {
     const scope = resolveExtensionCommandScope(args.scope);
-    await extensionManager.enableExtension(args.name, scope);
+    const result = await extensionManager.enableExtension(args.name, scope);
     if (args.scope) {
       writeStdoutLine(
         t('Extension "{{name}}" successfully enabled for scope "{{scope}}".', {
@@ -34,6 +34,9 @@ export async function handleEnable(args: EnableArgs) {
           name: args.name,
         }),
       );
+    }
+    for (const warning of result.warnings ?? []) {
+      writeStderrLine(`${warning.code}: ${warning.error}`);
     }
   } catch (error) {
     throw new FatalConfigError(getErrorMessage(error));

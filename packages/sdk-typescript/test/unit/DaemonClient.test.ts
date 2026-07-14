@@ -3997,6 +3997,402 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('extension management v2', () => {
+    it('waits for an operation without cancelling it when polling completes', async () => {
+      let polls = 0;
+      const { fetch } = recordingFetch(() => {
+        polls += 1;
+        return jsonResponse(200, {
+          v: 1,
+          operationId: 'op-1',
+          operation: 'install',
+          status: polls === 1 ? 'running' : 'succeeded',
+          createdAt: 1,
+          updatedAt: 2,
+        });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.waitForExtensionOperation(
+        { accepted: true, operationId: 'op-1' },
+        { pollIntervalMs: 0, timeoutMs: 100 },
+      );
+
+      expect(result.status).toBe('succeeded');
+      expect(polls).toBe(2);
+    });
+
+    it('disposes fallback abort listeners after a settled poll', async () => {
+      const anyDescriptor = Object.getOwnPropertyDescriptor(AbortSignal, 'any');
+      Object.defineProperty(AbortSignal, 'any', {
+        configurable: true,
+        value: undefined,
+      });
+      const controller = new AbortController();
+      const removeEventListener = vi.spyOn(
+        controller.signal,
+        'removeEventListener',
+      );
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          operationId: 'op-1',
+          operation: 'install',
+          status: 'succeeded',
+          createdAt: 1,
+          updatedAt: 2,
+        }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 0,
+      });
+
+      try {
+        await client.waitForExtensionOperation(
+          { accepted: true, operationId: 'op-1' },
+          { timeoutMs: 100, signal: controller.signal },
+        );
+        expect(removeEventListener).toHaveBeenCalledWith(
+          'abort',
+          expect.any(Function),
+        );
+        expect(removeEventListener).toHaveBeenCalledTimes(1);
+        expect(controller.signal.aborted).toBe(false);
+      } finally {
+        if (anyDescriptor) {
+          Object.defineProperty(AbortSignal, 'any', anyDescriptor);
+        } else {
+          delete (AbortSignal as { any?: unknown }).any;
+        }
+      }
+    });
+
+    it('times out polling without cancelling the accepted operation', async () => {
+      let polls = 0;
+      const { fetch } = recordingFetch(() => {
+        polls += 1;
+        return jsonResponse(200, {
+          v: 1,
+          operationId: 'op-1',
+          operation: 'install',
+          status: 'running',
+          createdAt: 1,
+          updatedAt: 2,
+        });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.waitForExtensionOperation(
+          { accepted: true, operationId: 'op-1' },
+          { timeoutMs: 0 },
+        ),
+      ).rejects.toThrow('server operation was not cancelled');
+      expect(polls).toBe(0);
+    });
+
+    it('aborts an in-flight poll when the operation deadline expires', async () => {
+      let pollSignal: AbortSignal | null | undefined;
+      const { fetch } = recordingFetch(
+        (request) =>
+          new Promise<Response>(() => {
+            pollSignal = request.signal;
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 0,
+      });
+
+      await expect(
+        client.waitForExtensionOperation(
+          { accepted: true, operationId: 'op-1' },
+          { timeoutMs: 10 },
+        ),
+      ).rejects.toThrow('server operation was not cancelled');
+      expect(pollSignal?.aborted).toBe(true);
+    });
+
+    it('aborts an in-flight poll when the caller aborts', async () => {
+      let pollSignal: AbortSignal | null | undefined;
+      const { fetch } = recordingFetch(
+        (request) =>
+          new Promise<Response>((_resolve, reject) => {
+            pollSignal = request.signal;
+            request.signal?.addEventListener(
+              'abort',
+              () => reject(request.signal?.reason),
+              { once: true },
+            );
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 0,
+      });
+      const controller = new AbortController();
+      const reason = new Error('navigation cancelled');
+
+      const waiting = client.waitForExtensionOperation(
+        { accepted: true, operationId: 'op-1' },
+        { signal: controller.signal },
+      );
+      await vi.waitFor(() => expect(pollSignal).toBeDefined());
+      controller.abort(reason);
+
+      await expect(waiting).rejects.toBe(reason);
+      expect(pollSignal?.aborted).toBe(true);
+    });
+
+    it('supports an unbounded operation timeout', async () => {
+      let pollSignal: AbortSignal | null | undefined;
+      const { fetch } = recordingFetch(
+        (request) =>
+          new Promise<Response>((_resolve, reject) => {
+            pollSignal = request.signal;
+            request.signal?.addEventListener(
+              'abort',
+              () => reject(request.signal?.reason),
+              { once: true },
+            );
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 0,
+      });
+      const controller = new AbortController();
+      const reason = new Error('stop unbounded wait');
+      const outcome = client
+        .waitForExtensionOperation(
+          { accepted: true, operationId: 'op-1' },
+          { timeoutMs: Number.POSITIVE_INFINITY, signal: controller.signal },
+        )
+        .catch((error: unknown) => error);
+
+      try {
+        await vi.waitFor(() => expect(pollSignal).toBeDefined());
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(pollSignal?.aborted).toBe(false);
+        controller.abort(reason);
+        await expect(outcome).resolves.toBe(reason);
+      } finally {
+        controller.abort(reason);
+      }
+    });
+
+    it('chunks operation timeouts larger than the maximum timer delay', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      let pollSignal: AbortSignal | null | undefined;
+      const { fetch } = recordingFetch(
+        (request) =>
+          new Promise<Response>((_resolve, reject) => {
+            pollSignal = request.signal;
+            request.signal?.addEventListener(
+              'abort',
+              () => reject(request.signal?.reason),
+              { once: true },
+            );
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 0,
+      });
+      const maximumTimerDelayMs = 2_147_483_647;
+      const outcome = client
+        .waitForExtensionOperation(
+          { accepted: true, operationId: 'op-1' },
+          { timeoutMs: maximumTimerDelayMs + 100 },
+        )
+        .catch((error: unknown) => error);
+
+      try {
+        await vi.advanceTimersByTimeAsync(maximumTimerDelayMs);
+        expect(pollSignal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(99);
+        expect(pollSignal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(outcome).resolves.toMatchObject({
+          message: expect.stringContaining(
+            'server operation was not cancelled',
+          ),
+        });
+        expect(pollSignal?.aborted).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('caps polling intervals larger than the maximum timer delay', async () => {
+      vi.useFakeTimers();
+      let polls = 0;
+      const { fetch } = recordingFetch(() => {
+        polls += 1;
+        return jsonResponse(200, {
+          v: 1,
+          operationId: 'op-1',
+          operation: 'install',
+          status: polls === 1 ? 'running' : 'succeeded',
+          createdAt: 1,
+          updatedAt: 2,
+        });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const maximumTimerDelayMs = 2_147_483_647;
+      const waiting = client.waitForExtensionOperation(
+        { accepted: true, operationId: 'op-1' },
+        {
+          pollIntervalMs: maximumTimerDelayMs + 100,
+          timeoutMs: Number.POSITIVE_INFINITY,
+        },
+      );
+
+      try {
+        await vi.advanceTimersByTimeAsync(maximumTimerDelayMs);
+        await expect(waiting).resolves.toMatchObject({ status: 'succeeded' });
+        expect(polls).toBe(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('routes global extension methods through /extensions/*', async () => {
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url === 'http://daemon/extensions') {
+          return jsonResponse(200, { v: 1, generation: 1, extensions: [] });
+        }
+        if (req.url.includes('/operations/')) {
+          return jsonResponse(200, {
+            v: 1,
+            operationId: 'op-1',
+            operation: 'install',
+            status: 'succeeded',
+            createdAt: 1,
+            updatedAt: 2,
+          });
+        }
+        return jsonResponse(202, { accepted: true, operationId: 'op-2' });
+      });
+      const transportFetch = vi.fn(async () =>
+        jsonResponse(500, { error: 'transport should not be used' }),
+      );
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+
+      await client.extensionCatalog();
+      await client.installUserExtension(
+        {
+          source: 'owner/repo',
+          consent: true,
+          activation: { scope: 'user' },
+        },
+        'client-1',
+      );
+      await client.checkUserExtensionUpdates('client-1');
+      await client.updateUserExtension('a'.repeat(64), 'client-1');
+      await client.uninstallUserExtension('a'.repeat(64), 'client-1');
+      await client.setExtensionDefaultActivation(
+        'a'.repeat(64),
+        'disabled',
+        'client-1',
+      );
+      await client.extensionOperation('op-1');
+
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/extensions'],
+        ['POST', 'http://daemon/extensions/install'],
+        ['POST', 'http://daemon/extensions/check-updates'],
+        ['POST', `http://daemon/extensions/${'a'.repeat(64)}/update`],
+        ['DELETE', `http://daemon/extensions/${'a'.repeat(64)}`],
+        ['PUT', `http://daemon/extensions/${'a'.repeat(64)}/activation`],
+        ['GET', 'http://daemon/extensions/operations/op-1'],
+      ]);
+      expect(transportFetch).not.toHaveBeenCalled();
+    });
+
+    it('treats a missing V2 extension uninstall as idempotent success', async () => {
+      const { fetch } = recordingFetch(
+        () => new Response(null, { status: 204 }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.uninstallUserExtension('a'.repeat(64)),
+      ).resolves.toBeUndefined();
+    });
+
+    it('routes only projection and activation methods through a workspace', async () => {
+      const status = {
+        v: 1,
+        workspaceId: 'ws-a',
+        workspaceCwd: '/work/a',
+        trusted: true,
+        desiredGeneration: 1,
+        appliedGeneration: 1,
+        extensions: [],
+      };
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/extensions')) return jsonResponse(200, status);
+        return jsonResponse(202, { accepted: true, operationId: 'op-2' });
+      });
+      const transportFetch = vi.fn(async () =>
+        jsonResponse(500, { error: 'transport should not be used' }),
+      );
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+      const ws = client.workspaceByCwd('/work/a');
+
+      await expect(ws.workspaceExtensions()).resolves.toEqual(status);
+      await ws.setExtensionActivation('a'.repeat(64), 'enabled', 'client-1');
+      await ws.clearExtensionActivation('a'.repeat(64), 'client-1');
+      await ws.refreshExtensionRuntime('client-1');
+
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/workspaces/%2Fwork%2Fa/extensions'],
+        [
+          'PUT',
+          `http://daemon/workspaces/%2Fwork%2Fa/extensions/${'a'.repeat(64)}/activation`,
+        ],
+        [
+          'DELETE',
+          `http://daemon/workspaces/%2Fwork%2Fa/extensions/${'a'.repeat(64)}/activation`,
+        ],
+        ['POST', 'http://daemon/workspaces/%2Fwork%2Fa/extensions/refresh'],
+      ]);
+      expect(transportFetch).not.toHaveBeenCalled();
+    });
+  });
+
   describe('error coercion', () => {
     it('falls back to text body when the response is not JSON', async () => {
       const { fetch } = recordingFetch(
