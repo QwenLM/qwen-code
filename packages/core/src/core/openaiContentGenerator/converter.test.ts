@@ -96,6 +96,18 @@ describe('OpenAIContentConverter', () => {
   }
 
   describe('stream-local parser state', () => {
+    const streamChunk = (
+      id: string,
+      delta: Record<string, unknown>,
+      finishReason: string | null = null,
+    ) =>
+      ({
+        id,
+        created: 1,
+        model: 'test',
+        choices: [{ index: 0, delta, finish_reason: finishReason }],
+      }) as unknown as OpenAI.Chat.ChatCompletionChunk;
+
     it('creates fresh parser instances', () => {
       const ctx1 = new StreamingToolCallParser();
       const ctx2 = new StreamingToolCallParser();
@@ -350,6 +362,169 @@ describe('OpenAIContentConverter', () => {
       expect(fn?.name).toBe('list_sessions');
       expect(fn?.args).toEqual({});
       expect(fn?.id).toBe('call_noargs');
+    });
+
+    it('ignores a phantom slot beside a valid tool call', () => {
+      const stream = withStreamParser();
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('open', {
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_edit',
+              function: { name: 'edit', arguments: '{}' },
+            },
+            { index: 1, function: {} },
+          ],
+        }),
+        stream,
+      );
+
+      const result = converter.convertOpenAIChunkToGemini(
+        streamChunk('finish', {}, 'tool_calls'),
+        stream,
+      );
+
+      expect(result.candidates?.[0]?.content?.parts).toEqual([
+        {
+          functionCall: { id: 'call_edit', name: 'edit', args: {} },
+        },
+      ]);
+      expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+    });
+
+    it('rejects a tool-call finish without a completed named call', () => {
+      const stream = withStreamParser();
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('open', { tool_calls: [{ index: 0, function: {} }] }),
+        stream,
+      );
+
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('finish', {}, 'tool_calls'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'MALFORMED_TOOL_CALL' }));
+    });
+
+    it('rejects a tool call that never provides a function name', () => {
+      const stream = withStreamParser();
+      const partial = converter.convertOpenAIChunkToGemini(
+        streamChunk('open', {
+          content: 'discard me',
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_without_name',
+              function: { arguments: '{"path":"a.ts"}' },
+            },
+          ],
+        }),
+        stream,
+      );
+
+      expect(partial.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('finish', {}, 'stop'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'MALFORMED_TOOL_CALL' }));
+    });
+
+    it('rejects the recorded cross-channel thinking-tag leak', () => {
+      const stream = withStreamParser();
+      const reasoning = converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', {
+          reasoning_content: 'Let me check<think>',
+        }),
+        stream,
+      );
+
+      expect(reasoning.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('content', { content: 'the result\n</think>\n' }),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('rejects a closing tag split after a visible line break', () => {
+      const stream = withStreamParser();
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', {
+          reasoning_content: 'Let me check<think>',
+        }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('content', { content: 'the result\n' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('blank-lines', { content: '\n'.repeat(256) }),
+        stream,
+      );
+
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('closing-tag', { content: '</think>\n' }),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('preserves a split literal closing tag after ordinary reasoning', () => {
+      const stream = withStreamParser();
+      const reasoning = converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Explain the syntax.' }),
+        stream,
+      );
+      const prefix = converter.convertOpenAIChunkToGemini(
+        streamChunk('prefix', { content: 'Use ' }),
+        stream,
+      );
+      const closingTag = converter.convertOpenAIChunkToGemini(
+        streamChunk('closing-tag', { content: '</think> to close the tag.' }),
+        stream,
+      );
+
+      expect(reasoning.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'Explain the syntax.' },
+      ]);
+      expect(prefix.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'Use ' },
+      ]);
+      expect(closingTag.candidates?.[0]?.content?.parts).toEqual([
+        { text: '</think> to close the tag.' },
+      ]);
+    });
+
+    it('releases inline thinking-tag references in both channels', () => {
+      const stream = withStreamParser();
+      const reasoning = converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', {
+          reasoning_content: 'The format may contain <think> tags.',
+        }),
+        stream,
+      );
+      const content = converter.convertOpenAIChunkToGemini(
+        streamChunk('content', { content: 'Use </think> to close the tag.' }),
+        stream,
+      );
+      const finish = converter.convertOpenAIChunkToGemini(
+        streamChunk('finish', {}, 'stop'),
+        stream,
+      );
+
+      expect(reasoning.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(content.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'The format may contain <think> tags.' },
+        { text: 'Use </think> to close the tag.' },
+      ]);
     });
   });
 
