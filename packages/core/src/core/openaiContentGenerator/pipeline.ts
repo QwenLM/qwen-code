@@ -443,6 +443,7 @@ export class ContentGenerationPipeline {
           guarded,
           context,
           request,
+          userPromptId,
         );
         async function* drainThenCleanup(): AsyncGenerator<GenerateContentResponse> {
           try {
@@ -469,6 +470,7 @@ export class ContentGenerationPipeline {
     stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
     context: RequestContext,
     request: GenerateContentParameters,
+    userPromptId: string,
   ): AsyncGenerator<GenerateContentResponse> {
     const collectedGeminiResponses: GenerateContentResponse[] = [];
 
@@ -506,7 +508,7 @@ export class ContentGenerationPipeline {
           context.protocolTagSanitized = undefined;
           const event = new ProtocolTagSanitizedEvent({
             model: context.model,
-            promptId: context.userPromptId,
+            promptId: userPromptId,
             responseId: response.responseId,
             tagName: sanitization.tagName,
             toolCallCount: sanitization.toolCallCount,
@@ -971,11 +973,7 @@ export class ContentGenerationPipeline {
       context: RequestContext,
     ) => Promise<T>,
   ): Promise<T> {
-    const context = this.createRequestContext(
-      request,
-      isStreaming,
-      userPromptId,
-    );
+    const context = this.createRequestContext(request, isStreaming);
 
     try {
       const openaiRequest = await this.buildRequest(
@@ -1017,7 +1015,6 @@ export class ContentGenerationPipeline {
   private createRequestContext(
     request: GenerateContentParameters,
     isStreaming: boolean,
-    userPromptId: string,
   ): RequestContext {
     const effectiveModel = request.model || this.contentGeneratorConfig.model;
     const providerOverrides =
@@ -1034,7 +1031,6 @@ export class ContentGenerationPipeline {
 
     return {
       model: effectiveModel,
-      userPromptId,
       modalities: this.contentGeneratorConfig.modalities ?? {},
       startTime: Date.now(),
       splitToolMedia:

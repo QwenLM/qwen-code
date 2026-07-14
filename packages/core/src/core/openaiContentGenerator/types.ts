@@ -39,7 +39,6 @@ export interface StreamingTextDeltaState {
 
 export interface RequestContext {
   model: string;
-  userPromptId?: string;
   modalities: InputModalities;
   startTime: number;
   toolCallParser?: StreamingToolCallParser;

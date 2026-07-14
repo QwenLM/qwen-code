@@ -276,6 +276,22 @@ export class StreamingToolCallParser {
     return this.namelessToolCallIndices.size > 0;
   }
 
+  hasInvalidToolCallArguments(): boolean {
+    for (const [index, buffer] of this.buffers.entries()) {
+      if (!this.toolCallMeta.get(index)?.name || !buffer.trim()) continue;
+
+      try {
+        const args: unknown = JSON.parse(buffer);
+        if (typeof args !== 'object' || args === null || Array.isArray(args)) {
+          return true;
+        }
+      } catch {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /**
    * Gets all completed tool calls that are ready to be emitted
    *

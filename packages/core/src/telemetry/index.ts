@@ -62,7 +62,6 @@ export {
   logMemoryExtract,
   logMemoryDream,
   logMemoryRecall,
-  logProtocolTagSanitized,
 } from './loggers.js';
 export type { SlashCommandEvent, ChatCompressionEvent } from './types.js';
 export {
@@ -92,7 +91,6 @@ export {
   MemoryExtractEvent,
   MemoryDreamEvent,
   MemoryRecallEvent,
-  ProtocolTagSanitizedEvent,
 } from './types.js';
 export { makeSlashCommandEvent, makeChatCompressionEvent } from './types.js';
 export type {

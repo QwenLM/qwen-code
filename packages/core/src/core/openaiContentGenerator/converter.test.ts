@@ -697,6 +697,41 @@ describe('OpenAIContentConverter', () => {
       expect(stream.protocolTagSanitized).toBeUndefined();
     });
 
+    it.each(['{bad}', 'null', '[]', '42'])(
+      'rejects a standalone closing thinking tag with invalid tool arguments %s',
+      (toolArguments) => {
+        const stream = withStreamParser();
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('reasoning', { reasoning_content: 'Let me check.' }),
+          stream,
+        );
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('tool-call', {
+            content: '</think>',
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_read',
+                function: {
+                  name: 'read_file',
+                  arguments: toolArguments,
+                },
+              },
+            ],
+          }),
+          stream,
+        );
+
+        expect(() =>
+          converter.convertOpenAIChunkToGemini(
+            streamChunk('finish', {}, 'tool_calls'),
+            stream,
+          ),
+        ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+        expect(stream.protocolTagSanitized).toBeUndefined();
+      },
+    );
+
     it('rejects a closing tag split after a visible line break', () => {
       const stream = withStreamParser();
       converter.convertOpenAIChunkToGemini(

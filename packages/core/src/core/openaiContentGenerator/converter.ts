@@ -1109,6 +1109,15 @@ function canBeStandaloneThinkingTagPrefix(text: string): boolean {
   });
 }
 
+function throwProtocolTagLeak(requestContext: RequestContext): never {
+  requestContext.pendingThinkingTagCandidate = undefined;
+  requestContext.pendingUntrustedResponseParts = undefined;
+  throw new InvalidStreamError(
+    'Model response leaked thinking tags.',
+    'PROTOCOL_TAG_LEAK',
+  );
+}
+
 /**
  * Convert OpenAI response to Gemini format.
  */
@@ -1424,21 +1433,11 @@ export function convertOpenAIChunkToGemini(
       );
 
       if (openingTag) {
-        requestContext.pendingThinkingTagCandidate = undefined;
-        requestContext.pendingUntrustedResponseParts = undefined;
-        throw new InvalidStreamError(
-          'Model response leaked thinking tags.',
-          'PROTOCOL_TAG_LEAK',
-        );
+        throwProtocolTagLeak(requestContext);
       }
 
       if (pendingTagCandidate?.closingTagName && !closingTagName) {
-        requestContext.pendingThinkingTagCandidate = undefined;
-        requestContext.pendingUntrustedResponseParts = undefined;
-        throw new InvalidStreamError(
-          'Model response leaked thinking tags.',
-          'PROTOCOL_TAG_LEAK',
-        );
+        throwProtocolTagLeak(requestContext);
       }
 
       if (isPossibleTag) {
@@ -1446,12 +1445,7 @@ export function convertOpenAIChunkToGemini(
           !closingTagName &&
           combinedCandidateText.length > MAX_THINKING_TAG_CANDIDATE_LENGTH
         ) {
-          requestContext.pendingThinkingTagCandidate = undefined;
-          requestContext.pendingUntrustedResponseParts = undefined;
-          throw new InvalidStreamError(
-            'Model response leaked thinking tags.',
-            'PROTOCOL_TAG_LEAK',
-          );
+          throwProtocolTagLeak(requestContext);
         }
         requestContext.pendingThinkingTagCandidate = closingTagName
           ? { text: `</${closingTagName}>`, closingTagName }
@@ -1460,12 +1454,7 @@ export function convertOpenAIChunkToGemini(
         visibleText = '';
 
         if (choice.finish_reason && !closingTagName) {
-          requestContext.pendingThinkingTagCandidate = undefined;
-          requestContext.pendingUntrustedResponseParts = undefined;
-          throw new InvalidStreamError(
-            'Model response leaked thinking tags.',
-            'PROTOCOL_TAG_LEAK',
-          );
+          throwProtocolTagLeak(requestContext);
         }
       } else if (pendingTagCandidate) {
         parts = parts.filter((part) => !getVisibleText(part));
@@ -1495,11 +1484,7 @@ export function convertOpenAIChunkToGemini(
         /^[^\S\r\n]*$/.test(lineSuffix);
     }
     if (leakedThinkingTag) {
-      requestContext.pendingUntrustedResponseParts = undefined;
-      throw new InvalidStreamError(
-        'Model response leaked thinking tags.',
-        'PROTOCOL_TAG_LEAK',
-      );
+      throwProtocolTagLeak(requestContext);
     }
 
     const toolCallWithoutName = toolCallParser.hasNamelessToolCall();
@@ -1511,7 +1496,6 @@ export function convertOpenAIChunkToGemini(
     const toolCallsTruncated = choice.finish_reason
       ? toolCallParser.hasIncompleteToolCalls()
       : false;
-
     if (
       choice.finish_reason &&
       requestContext.pendingThinkingTagCandidate?.closingTagName
@@ -1519,13 +1503,10 @@ export function convertOpenAIChunkToGemini(
       if (
         completedToolCalls.length === 0 ||
         toolCallWithoutName ||
-        toolCallsTruncated
+        toolCallsTruncated ||
+        toolCallParser.hasInvalidToolCallArguments()
       ) {
-        requestContext.pendingUntrustedResponseParts = undefined;
-        throw new InvalidStreamError(
-          'Model response leaked thinking tags.',
-          'PROTOCOL_TAG_LEAK',
-        );
+        throwProtocolTagLeak(requestContext);
       }
       requestContext.protocolTagSanitized = {
         tagName: requestContext.pendingThinkingTagCandidate.closingTagName,
