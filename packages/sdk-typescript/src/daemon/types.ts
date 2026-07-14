@@ -1099,6 +1099,7 @@ export interface DaemonWorkspaceSkillStatus extends DaemonStatusCell {
   description: string;
   level: DaemonSkillLevel;
   modelInvocable: boolean;
+  userInvocable?: false;
   installedPath?: string;
   argumentHint?: string;
   model?: string;
@@ -1991,6 +1992,17 @@ export interface DaemonApprovalModeResult {
 export interface DaemonToolToggleResult {
   toolName: string;
   enabled: boolean;
+}
+
+export type DaemonSkillToggleActivation = 'applied' | 'deferred' | 'partial';
+
+export interface DaemonSkillToggleResult {
+  skillName: string;
+  enabled: boolean;
+  changed: boolean;
+  activation: DaemonSkillToggleActivation;
+  sessionsRefreshed: number;
+  sessionsFailed: number;
 }
 
 export interface DaemonSettingDescriptor {

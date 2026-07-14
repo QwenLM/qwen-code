@@ -897,6 +897,8 @@ async function loadServeRuntimeModules() {
     createDaemonWorkspaceService: workspaceModule.createDaemonWorkspaceService,
     WorkspaceSettingsPartialPersistError:
       workspaceTypesModule.WorkspaceSettingsPartialPersistError,
+    WorkspaceSkillNotToggleableError:
+      workspaceTypesModule.WorkspaceSkillNotToggleableError,
     createDaemonStatusProvider:
       daemonStatusProviderModule.createDaemonStatusProvider,
     createWorkspaceProvidersStatusProvider:
@@ -2953,6 +2955,75 @@ export async function runQwenServe(
           [...next].sort(),
         );
       });
+    const persistDisabledSkillsFn = (
+      workspace: string,
+      skillName: string,
+      enabled: boolean,
+    ) =>
+      withSettingsLock(workspace, async () => {
+        const fresh = settingsRuntime.settings.loadSettings(workspace);
+        const normalizedName = skillName.trim().toLowerCase();
+        const disabledNames = (value: unknown): string[] =>
+          Array.isArray(value)
+            ? value.filter(
+                (entry): entry is string => typeof entry === 'string',
+              )
+            : [];
+        const lockedScopes = [
+          ['system', fresh.system.settings.skills?.disabled],
+          ['user', fresh.user.settings.skills?.disabled],
+          ['systemDefaults', fresh.systemDefaults.settings.skills?.disabled],
+        ] as const;
+        for (const [scope, names] of lockedScopes) {
+          if (
+            disabledNames(names).some(
+              (name) => name.trim().toLowerCase() === normalizedName,
+            )
+          ) {
+            throw new runtime.WorkspaceSkillNotToggleableError(
+              skillName,
+              'locked',
+              scope,
+            );
+          }
+        }
+
+        const workspaceDisabled = disabledNames(
+          fresh.workspace.settings.skills?.disabled,
+        );
+        const next: string[] = [];
+        let found = false;
+        let changed = false;
+        for (const name of workspaceDisabled) {
+          if (name.trim().toLowerCase() !== normalizedName) {
+            next.push(name);
+            continue;
+          }
+          if (enabled) {
+            changed = true;
+            continue;
+          }
+          if (!found) {
+            next.push(skillName);
+            found = true;
+            if (name !== skillName) changed = true;
+          } else {
+            changed = true;
+          }
+        }
+        if (!enabled && !found) {
+          next.push(skillName);
+          changed = true;
+        }
+        if (!changed) return { changed: false, disabled: workspaceDisabled };
+
+        fresh.setValue(
+          WORKSPACE_SETTING_SCOPE,
+          'skills.disabled',
+          next.length > 0 ? next : undefined,
+        );
+        return { changed: true, disabled: next };
+      });
     const persistSettingFn = (
       workspace: string,
       scope: import('../config/settings.js').SettingScope,
@@ -3081,6 +3152,7 @@ export async function runQwenServe(
       workspaceSkillsStatusProvider,
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools: persistDisabledToolsFn,
+      persistDisabledSkills: persistDisabledSkillsFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
       preheatAcpChild: () => bridge.preheat(),
@@ -3388,6 +3460,7 @@ export async function runQwenServe(
         isChannelLive: () => secondaryBridge.isChannelLive(),
         preheatAcpChild: () => secondaryBridge.preheat(),
         persistDisabledTools: persistDisabledToolsFn,
+        persistDisabledSkills: persistDisabledSkillsFn,
         persistSetting: persistSettingFn,
         persistSettings: persistSettingsFn,
         reloadDaemonEnv: (workspace) =>
@@ -3756,6 +3829,7 @@ export async function runQwenServe(
           isChannelLive: () => wsBridge.isChannelLive(),
           preheatAcpChild: () => wsBridge.preheat(),
           persistDisabledTools: persistDisabledToolsFn,
+          persistDisabledSkills: persistDisabledSkillsFn,
           persistSetting: persistSettingFn,
           persistSettings: persistSettingsFn,
           reloadDaemonEnv: (workspace) =>
@@ -4050,6 +4124,7 @@ export async function runQwenServe(
       // so the WS provider and the child-answering bridge share one sender map.
       clientMcpSenderRegistry,
       persistDisabledTools: persistDisabledToolsFn,
+      persistDisabledSkills: persistDisabledSkillsFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
       sessionArtifactsPersistenceAvailable:
