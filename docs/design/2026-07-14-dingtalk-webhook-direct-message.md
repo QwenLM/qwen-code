@@ -15,8 +15,9 @@
 
 - 将 daemon Webhook 任务结果投递到钉钉单聊目标。
 - 保持现有钉钉群聊 Webhook 投递行为不变。
+- 保持普通主动投递和 channel loop 仍只接受钉钉群聊目标，不把入站单聊的会话 ID 当作用户 ID。
 - 复用现有的目标配置结构、Token 缓存、Markdown 格式化、消息分片、重试和投递错误处理。
-- 实现范围限定在现有钉钉 adapter 内，不新增 channel。
+- 沿用现有钉钉 channel，不新增 channel 或配置字段。
 
 ## 非目标
 
@@ -67,7 +68,7 @@
 
 ## 投递链路
 
-daemon 路由、worker IPC 和共享 channel runtime 均保持不变：
+daemon 路由和 worker IPC 保持不变；共享 channel runtime 仅增加 Webhook 专用目标检查：
 
 ```text
 POST /channels/:channelName/webhooks/:source
@@ -77,6 +78,8 @@ POST /channels/:channelName/webhooks/:source
   -> adapter 根据 target.isGroup 选择钉钉 API
   -> 钉钉接收 Markdown
 ```
+
+共享 channel runtime 使用独立的 Webhook 目标能力检查。默认实现仍沿用普通主动投递的目标规则；钉钉仅在 Webhook 任务解析时额外接受 `isGroup: false`。因此普通 channel loop 继续拒绝单聊目标，避免把入站单聊的 `conversationId` 错当成一对一消息 API 所需的用户 ID。
 
 群聊目标继续使用现有请求体：
 
@@ -116,7 +119,7 @@ POST /channels/:channelName/webhooks/:source
 
 ### 单元测试
 
-- 接受显式配置的群聊和单聊主动投递目标。
+- Webhook 接受显式配置的群聊和单聊目标，普通主动投递仍只接受群聊目标。
 - 拒绝缺少 `isGroup`、ID 为空、使用 Webhook URL 和设置 `threadId` 的目标。
 - 保持现有群聊 endpoint 和包含 `openConversationId` 的请求体不变。
 - 单聊使用一对一消息 endpoint 和包含 `userIds` 的请求体。
@@ -143,4 +146,4 @@ POST /channels/:channelName/webhooks/:source
 
 ## 兼容性
 
-本次为增量变更。现有群聊目标的配置、校验、endpoint、请求体、格式化和重试行为均不变，无需迁移配置。
+本次为增量变更。现有群聊目标的配置、校验、endpoint、请求体、格式化和重试行为均不变，无需迁移配置。共享 runtime 新增的 Webhook 目标检查默认委托给原有主动投递目标检查，因此其他 channel 的行为不变。

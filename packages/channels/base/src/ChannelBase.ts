@@ -605,6 +605,10 @@ export abstract class ChannelBase {
     return target.threadId === undefined;
   }
 
+  protected supportsProactiveWebhookTarget(target: SessionTarget): boolean {
+    return this.supportsProactiveTarget(target);
+  }
+
   protected async pushProactive(
     target: SessionTarget,
     text: string,
@@ -1017,7 +1021,7 @@ export abstract class ChannelBase {
       task.source,
       task.targetRef,
     );
-    if (!this.supportsProactiveTarget(target)) {
+    if (!this.supportsProactiveWebhookTarget(target)) {
       throw new Error(
         'Channel does not support proactive webhook messages for this chat target.',
       );

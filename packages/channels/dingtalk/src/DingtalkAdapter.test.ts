@@ -113,6 +113,12 @@ vi.mock('@qwen-code/channel-base', async () => {
         _sessionId: string,
         _messageIds: string[],
       ): void {}
+      protected supportsProactiveTarget(target: SessionTarget): boolean {
+        return target.threadId === undefined;
+      }
+      protected supportsProactiveWebhookTarget(target: SessionTarget): boolean {
+        return this.supportsProactiveTarget(target);
+      }
 
       constructor(
         name: string,
@@ -1912,6 +1918,7 @@ describe('DingtalkChannel proactive send', () => {
   function proactive(channel: DingtalkChannelInstance) {
     return channel as unknown as {
       supportsProactiveTarget(target: SessionTarget): boolean;
+      supportsProactiveWebhookTarget(target: SessionTarget): boolean;
       pushProactive(target: SessionTarget, text: string): Promise<void>;
     };
   }
@@ -1960,28 +1967,33 @@ describe('DingtalkChannel proactive send', () => {
     expect(createChannel().supportsProactiveSend()).toBe(true);
   });
 
-  it('accepts explicit group and direct-message targets', () => {
+  it('accepts direct-message targets only for webhooks', () => {
     const channel = proactive(createChannel());
     expect(channel.supportsProactiveTarget(groupTarget)).toBe(true);
-    expect(channel.supportsProactiveTarget(directTarget)).toBe(true);
+    expect(channel.supportsProactiveTarget(directTarget)).toBe(false);
+    expect(channel.supportsProactiveWebhookTarget(groupTarget)).toBe(true);
+    expect(channel.supportsProactiveWebhookTarget(directTarget)).toBe(true);
     expect(
-      channel.supportsProactiveTarget({
+      channel.supportsProactiveWebhookTarget({
         channelName: groupTarget.channelName,
         senderId: groupTarget.senderId,
         chatId: groupTarget.chatId,
       }),
     ).toBe(false);
     expect(
-      channel.supportsProactiveTarget({
+      channel.supportsProactiveWebhookTarget({
         ...groupTarget,
         chatId: 'https://oapi.dingtalk.com/robot/sendBySession?session=abc',
       }),
     ).toBe(false);
     expect(
-      channel.supportsProactiveTarget({ ...groupTarget, chatId: '' }),
+      channel.supportsProactiveWebhookTarget({ ...groupTarget, chatId: '' }),
     ).toBe(false);
     expect(
-      channel.supportsProactiveTarget({ ...groupTarget, threadId: '7' }),
+      channel.supportsProactiveWebhookTarget({
+        ...groupTarget,
+        threadId: '7',
+      }),
     ).toBe(false);
   });
 
@@ -2057,17 +2069,17 @@ describe('DingtalkChannel proactive send', () => {
   it('stops at the first failed chunk', async () => {
     const channel = proactive(createChannel());
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    const { sendCalls } = stubProactiveFetch(
+    const { directSendCalls } = stubProactiveFetch(
       () => new Response('denied', { status: 403 }),
     );
 
     const longLine = 'x'.repeat(100);
     const longText = Array.from({ length: 50 }, () => longLine).join('\n');
-    await expect(channel.pushProactive(groupTarget, longText)).rejects.toThrow(
+    await expect(channel.pushProactive(directTarget, longText)).rejects.toThrow(
       'HTTP 403',
     );
 
-    expect(sendCalls()).toHaveLength(1);
+    expect(directSendCalls()).toHaveLength(1);
   });
 
   it('surfaces API detail in the error and log on failure', async () => {
@@ -2087,17 +2099,17 @@ describe('DingtalkChannel proactive send', () => {
     );
   });
 
-  it('refreshes the token and retries once on 401', async () => {
+  it('refreshes the token and retries a direct message once on 401', async () => {
     const channel = proactive(createChannel());
-    const { sendCalls, tokenCalls } = stubProactiveFetch((sendCall) =>
+    const { directSendCalls, tokenCalls } = stubProactiveFetch((sendCall) =>
       sendCall === 0
         ? new Response('expired', { status: 401 })
         : new Response('{}', { status: 200 }),
     );
 
-    await channel.pushProactive(groupTarget, 'hello');
+    await channel.pushProactive(directTarget, 'hello');
 
-    expect(sendCalls()).toHaveLength(2);
+    expect(directSendCalls()).toHaveLength(2);
     expect(tokenCalls()).toHaveLength(2);
   });
 
