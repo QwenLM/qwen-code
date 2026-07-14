@@ -7,9 +7,13 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
-const workflow = readFileSync('.github/workflows/release.yml', 'utf8');
+const releaseWorkflow = readFileSync('.github/workflows/release.yml', 'utf8');
+const finalizeWorkflow = readFileSync(
+  '.github/workflows/finalize-release.yml',
+  'utf8',
+);
 
-function getStep(name) {
+function getStep(workflow, name) {
   const match = new RegExp(
     `\\n      - name: '${name}'[\\s\\S]*?(?=\\n      - name: '|\\n    [A-Za-z0-9_-]+:|$)`,
   ).exec(`\n${workflow}`);
@@ -20,26 +24,72 @@ function getStep(name) {
 }
 
 describe('stable release notes workflow', () => {
-  it('generates AI-assisted notes only for stable releases', () => {
-    const step = getStep('Generate AI-assisted stable release notes');
+  it('publishes immediately with GitHub-generated notes', () => {
+    const step = getStep(releaseWorkflow, 'Create GitHub Release and Tag');
 
-    expect(step).toContain(
-      "needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false'",
+    expect(step).toContain('--notes-start-tag "${PREVIOUS_RELEASE_TAG}"');
+    expect(step).toContain('--generate-notes');
+    expect(releaseWorkflow).not.toContain(
+      "name: 'Generate AI-assisted stable release notes'",
     );
-    expect(step).toContain('timeout-minutes: 5');
-    expect(step).toContain('node scripts/generate-release-notes.js');
-    expect(step).toContain("OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'");
-    expect(step).toContain("OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'");
-    expect(step).toContain("OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'");
+    expect(releaseWorkflow).not.toContain("name: 'Regenerate CHANGELOG.md'");
+    expect(releaseWorkflow).not.toContain(
+      "name: 'Create PR to merge release branch into main'",
+    );
   });
 
-  it('uses the generated file when present and keeps GitHub generation as fallback', () => {
-    const step = getStep('Create GitHub Release and Tag');
-
-    expect(step).toContain('NOTES_ARGS=(--notes-file "${RELEASE_NOTES_FILE}")');
-    expect(step).toContain(
-      'NOTES_ARGS=(--notes-start-tag "${PREVIOUS_RELEASE_TAG}" --generate-notes)',
+  it('finalizes stable releases asynchronously', () => {
+    const generate = getStep(
+      finalizeWorkflow,
+      'Generate AI-assisted release notes',
     );
-    expect(step).toContain('"${NOTES_ARGS[@]}"');
+    const update = getStep(finalizeWorkflow, 'Update GitHub Release notes');
+    const changelog = getStep(finalizeWorkflow, 'Regenerate CHANGELOG.md');
+
+    expect(finalizeWorkflow).toContain("types: ['published']");
+    expect(finalizeWorkflow).toContain('workflow_dispatch:');
+    expect(finalizeWorkflow).toContain(
+      'if [[ "${TAG}" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]',
+    );
+    expect(generate).toContain('timeout-minutes: 15');
+    expect(generate).toContain('continue-on-error: true');
+    expect(generate).toContain('node scripts/generate-release-notes.js');
+    expect(update).toContain('continue-on-error: true');
+    expect(update).toContain(
+      'gh release edit "${RELEASE_TAG}" --notes-file "${RELEASE_NOTES_FILE}"',
+    );
+    expect(changelog).toContain('continue-on-error: true');
+  });
+
+  it('updates the changelog before opening the release PR', () => {
+    const changelog = finalizeWorkflow.indexOf(
+      "name: 'Regenerate CHANGELOG.md'",
+    );
+    const pr = finalizeWorkflow.indexOf(
+      "name: 'Create PR to merge release branch into main'",
+    );
+
+    expect(changelog).toBeGreaterThanOrEqual(0);
+    expect(pr).toBeGreaterThan(changelog);
+    expect(finalizeWorkflow).toContain("name: 'Approve release PR'");
+    expect(finalizeWorkflow).toContain(
+      "name: 'Enable auto-merge for release PR'",
+    );
+  });
+
+  it('does not recreate an already merged release PR during retries', () => {
+    const pr = getStep(
+      finalizeWorkflow,
+      'Create PR to merge release branch into main',
+    );
+    const approve = getStep(finalizeWorkflow, 'Approve release PR');
+    const merge = getStep(finalizeWorkflow, 'Enable auto-merge for release PR');
+
+    expect(pr).toContain('--state all');
+    expect(pr).toContain('select(.state == "MERGED")');
+    expect(pr).toContain('if [[ "${pr_state}" == "MERGED" ]]');
+    expect(pr).toContain('SHOULD_MERGE=false');
+    expect(approve).toContain("steps.pr.outputs.SHOULD_MERGE == 'true'");
+    expect(merge).toContain("steps.pr.outputs.SHOULD_MERGE == 'true'");
   });
 });
