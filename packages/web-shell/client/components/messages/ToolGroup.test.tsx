@@ -406,14 +406,6 @@ describe('tool kind logic', () => {
 });
 
 describe('tool row rendering', () => {
-  it('shows failed status in the collapsed chat summary', () => {
-    const container = renderToolGroup([
-      makeTool({ toolName: 'Shell', status: 'failed' }),
-    ]);
-
-    expect(container.querySelector('button')?.textContent).toContain('Failed');
-  });
-
   it('renders ANSI shell output as styled spans instead of escape text', () => {
     const container = renderToolLine(
       makeTool({

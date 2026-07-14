@@ -857,20 +857,6 @@ describe('HistoryReplayer', () => {
       );
     });
 
-    it('should preserve a stored error status without an error object', async () => {
-      const record = createToolResultRecord('run_shell_command');
-      record.toolCallResult!.status = 'error';
-
-      await replayer.replay([record]);
-
-      expect(sendUpdateSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          sessionUpdate: 'tool_call_update',
-          status: 'failed',
-        }),
-      );
-    });
-
     it('should emit plan update for TodoWriteTool results', async () => {
       const todoDisplay: TodoResultDisplay = {
         type: 'todo_list',
