@@ -165,7 +165,7 @@ import type {
   SetSessionModelResponse,
   AgentSideConnection,
 } from '@agentclientprotocol/sdk';
-import type { LoadedSettings } from '../../config/settings.js';
+import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import { z } from 'zod';
 import {
   insertAfterFunctionResponses,
@@ -3812,31 +3812,59 @@ export class Session implements SessionContext {
 
   async sendAvailableCommandsUpdate(): Promise<void> {
     try {
-      const { availableCommands, availableSkills, availableSkillDetails } =
-        await buildAvailableCommandsSnapshot(
-          this.config,
-          undefined,
-          this.settings,
-        );
-
-      const update: SessionUpdate = {
-        sessionUpdate: 'available_commands_update',
-        availableCommands,
-        ...(availableSkills !== undefined
-          ? {
-              _meta: {
-                availableSkills,
-                ...(availableSkillDetails ? { availableSkillDetails } : {}),
-              },
-            }
-          : {}),
-      };
-
-      await this.sendUpdate(update);
+      await this.sendAvailableCommandsUpdateOrThrow();
     } catch (error) {
       // Log error but don't fail session creation
       debugLogger.error('Error sending available commands update:', error);
     }
+  }
+
+  async refreshSkillsFromSettings(): Promise<void> {
+    this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+    const skillManager = this.config.getSkillManager();
+    let updateFailed = false;
+    let updateError: unknown;
+    try {
+      await this.sendAvailableCommandsUpdateOrThrow();
+    } catch (error) {
+      updateFailed = true;
+      updateError = error;
+    }
+    if (skillManager) {
+      try {
+        skillManager.suppressNextSlashReload();
+        await skillManager.notifyConfigChanged();
+      } catch (error) {
+        if (!updateFailed) throw error;
+        debugLogger.error(
+          'SkillManager refresh failed after command update failure:',
+          error,
+        );
+      }
+    }
+    if (updateFailed) throw updateError;
+  }
+
+  private async sendAvailableCommandsUpdateOrThrow(): Promise<void> {
+    const { availableCommands, availableSkills, availableSkillDetails } =
+      await buildAvailableCommandsSnapshot(
+        this.config,
+        undefined,
+        this.settings,
+      );
+    const update: SessionUpdate = {
+      sessionUpdate: 'available_commands_update',
+      availableCommands,
+      ...(availableSkills !== undefined
+        ? {
+            _meta: {
+              availableSkills,
+              ...(availableSkillDetails ? { availableSkillDetails } : {}),
+            },
+          }
+        : {}),
+    };
+    await this.sendUpdate(update);
   }
 
   /**
@@ -5627,7 +5655,7 @@ export class Session implements SessionContext {
         // Replace bare \n with Markdown hard line-breaks (two trailing spaces)
         // so Zed's Markdown renderer preserves the line structure.
         const rendered = (result.content || '').replace(/\n/g, '  \n');
-        await this.messageEmitter.emitAgentMessage(rendered);
+        await this.messageEmitter.emitSlashCommandOutput(rendered);
         // Write a system/slash_command record so history replay on restart can
         // re-emit this message. system records are skipped by
         // buildApiHistoryFromConversation, so this won't pollute model context.
@@ -5652,7 +5680,7 @@ export class Session implements SessionContext {
           if (msg.messageType === 'error') {
             throw new Error(msg.content || 'Slash command failed.');
           }
-          await this.messageEmitter.emitAgentMessage(
+          await this.messageEmitter.emitSlashCommandOutput(
             (msg.content || '').replace(/\n/g, '  \n'),
           );
           chunks.push(msg.content || '');

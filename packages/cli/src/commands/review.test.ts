@@ -41,11 +41,17 @@ describe('reviewCommand', () => {
     expect(registeredSubcommands()).toEqual([
       'parse-args',
       'fetch-pr',
+      'capture-local',
       'plan-diff',
       'pr-context',
       'load-rules',
+      'agent-prompt',
+      'resolve-anchors',
+      'check-coverage',
       'presubmit',
+      'test-efficacy',
       'compose-review',
+      'submit',
       'cleanup',
     ]);
   });

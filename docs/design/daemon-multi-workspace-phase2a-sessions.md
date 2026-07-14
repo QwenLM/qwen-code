@@ -1,5 +1,13 @@
 # Phase 2a Multi-Workspace Sessions Foundation
 
+> **Historical status:** The live-session rewind snapshots, rewind, and shell
+> limitations recorded in this document are superseded by
+> [`daemon-multi-workspace-session-file-ops.md`](./daemon-multi-workspace-session-file-ops.md).
+> The later primary-only classification of live-session continue, language,
+> and artifact mutations is also superseded: those singular REST routes now
+> dispatch to the owning trusted workspace runtime. The remaining Phase 2a
+> scope statements are unchanged.
+
 ## Summary
 
 This document records the multi-workspace sessions contract for issue #6378

@@ -8,6 +8,8 @@ import pkg from './package.json' with { type: 'json' };
 
 const COMPONENT_SCOPE =
   ':where([data-web-shell-root][data-web-shell-shadcn], [data-web-shell-portal-root][data-web-shell-shadcn], [data-web-shell-root][data-web-shell-shadcn] *, [data-web-shell-portal-root][data-web-shell-shadcn] *)';
+const COMPONENT_ROOT_SCOPE =
+  ':where([data-web-shell-root][data-web-shell-shadcn], [data-web-shell-portal-root][data-web-shell-shadcn])';
 
 function scopeComponentCss(css: string): string {
   const root = postcss.parse(css);
@@ -57,6 +59,14 @@ function scopeComponentCss(css: string): string {
         return;
       }
       parent = parent.parent;
+    }
+    if (
+      rule.selectors.every(
+        (selector) => selector === ':root' || selector === ':host',
+      )
+    ) {
+      rule.selector = COMPONENT_ROOT_SCOPE;
+      return;
     }
     rule.selector = selectorParser((selectors) => {
       selectors.each((selector) => {

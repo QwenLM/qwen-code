@@ -1519,6 +1519,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // daemon. Cleared in the `finally` of the creator.
   let inFlightChannelSpawn: Promise<ChannelInfo> | undefined;
   const byId = new Map<string, SessionEntry>();
+  const inFlightExtensionRefreshes = new Map<
+    string,
+    { connection: ClientSideConnection; promise: Promise<void> }
+  >();
   const toSessionSummary = (entry: SessionEntry): BridgeSessionSummary => {
     let isWaitingForPermission = false;
     let isWaitingForUserQuestion = false;
@@ -1607,6 +1611,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // (b) `server.close` rejecting new connections, during which a
   // late-arriving `POST /session` slips a fresh child past cleanup.
   let shuttingDown = false;
+  let shutdownPromise: Promise<void> | undefined;
 
   // Tee writeServeDebugLine through the optional onDiagnosticLine callback.
   // The module-level writeServeDebugLine is left intact for other entry points;
@@ -1817,11 +1822,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // at the session/update fan-in to the daemon host's metrics ring via
         // the telemetry seam. Optional-chained so non-daemon callers (tests,
         // Mode A) that wire no `tokenUsage` metric are a silent no-op.
-        (inputTokens, outputTokens, durationMs) =>
+        (inputTokens, outputTokens, durationMs, apiErrors, apiRetries) =>
           telemetry.metrics?.tokenUsage?.(
             inputTokens,
             outputTokens,
             durationMs,
+            apiErrors,
+            apiRetries,
           ),
         // `create_sub_session` tool: forward the request/response hook so a child
         // tool can ask the daemon to spawn a sub-session and (for 'first-turn')
@@ -5745,12 +5752,28 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             return { refreshed: 0, failed: 0 };
           }
           try {
-            await Promise.race([
-              withTimeout(
-                entry.connection.extMethod(
+            let inFlight = inFlightExtensionRefreshes.get(entry.sessionId);
+            if (!inFlight || inFlight.connection !== entry.connection) {
+              const promise = (async () => {
+                await entry.connection.extMethod(
                   SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
                   { sessionId: entry.sessionId },
-                ),
+                );
+              })();
+              inFlight = { connection: entry.connection, promise };
+              inFlightExtensionRefreshes.set(entry.sessionId, inFlight);
+              const clear = () => {
+                if (
+                  inFlightExtensionRefreshes.get(entry.sessionId) === inFlight
+                ) {
+                  inFlightExtensionRefreshes.delete(entry.sessionId);
+                }
+              };
+              void promise.then(clear, clear);
+            }
+            await Promise.race([
+              withTimeout(
+                inFlight.promise,
                 30_000,
                 SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
               ),
@@ -6880,100 +6903,111 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
     },
 
-    async shutdown() {
-      // Set BEFORE the snapshot so any racing `spawnOrAttach` triggered
-      // by an in-flight HTTP connection after `runQwenServe.close()`
-      // entered the bridge.shutdown() phase fails fast instead of
-      // spawning a child this teardown won't see.
-      shuttingDown = true;
-      cancelIdleTimer();
-      stopSessionReaper();
-      const entries = Array.from(byId.values());
-      // Snapshot every alive channel (typically 1; up to 2 during a
-      // `killSession`-then-`spawnOrAttach` overlap) — entries are
-      // intentionally NOT removed from `aliveChannels` here; their
-      // `channel.exited` handlers clear them once the OS has reaped
-      // each child. That preserves the BkUyD invariant: a
-      // double-Ctrl+C arriving mid-SIGTERM-grace can still find every
-      // alive channel via `killAllSync`. Marking each `isDying` makes
-      // them invisible to any racing `ensureChannel` call — but
-      // `shuttingDown` already blocks new `spawnOrAttach` upstream,
-      // so this is mostly belt-and-suspenders (a direct internal
-      // `ensureChannel` past the gate would still see the dying
-      // state and not attach).
-      const channels = Array.from(aliveChannels);
-      for (const ci of channels) ci.isDying = true;
-      // Drain mediator pending state before clearing byId so awaiting
-      // `requestPermission` callers unwind. Each `forgetSession`
-      // settles all matching pending as session_closed; the bridge's
-      // per-entry index gets cleared alongside.
-      for (const e of entries) {
-        permissionMediator.forgetSession(e.sessionId);
-        e.pendingPermissionIds.clear();
-        e.pendingInteractions.clear();
-      }
-      defaultEntry = undefined;
-      byId.clear();
-      // Publish a terminal `session_died` BEFORE closing each bus so SSE
-      // subscribers can distinguish "daemon shut down" from a transient
-      // network error and don't sit indefinitely retrying. The
-      // channel.exited handler also publishes this on a child crash,
-      // but at shutdown time the entry has already been removed from
-      // `byId` (above), so the handler's `byId.get(...)` is undefined
-      // and the automatic publish wouldn't fire.
-      for (const e of entries) {
-        telemetry.metrics?.sessionLifecycle('die');
-        emitSessionLifecycle({
-          type: 'removed',
-          sessionId: e.sessionId,
-          workspaceCwd: e.workspaceCwd,
-          reason: 'daemon_shutdown',
-        });
-        try {
-          e.events.publish({
-            type: 'session_died',
-            data: { sessionId: e.sessionId, reason: 'daemon_shutdown' },
-          });
-        } catch {
-          /* bus already closed */
+    shutdown(options) {
+      if (shutdownPromise) return shutdownPromise;
+      const shutdownReason = options?.reason ?? 'daemon_shutdown';
+      let resolveShutdown: (() => void) | undefined;
+      let rejectShutdown: ((reason?: unknown) => void) | undefined;
+      shutdownPromise = new Promise<void>((resolve, reject) => {
+        resolveShutdown = resolve;
+        rejectShutdown = reject;
+      });
+      void (async () => {
+        // Set BEFORE the snapshot so any racing `spawnOrAttach` triggered
+        // by an in-flight HTTP connection after `runQwenServe.close()`
+        // entered the bridge.shutdown() phase fails fast instead of
+        // spawning a child this teardown won't see.
+        shuttingDown = true;
+        cancelIdleTimer();
+        stopSessionReaper();
+        const entries = Array.from(byId.values());
+        // Snapshot every alive channel (typically 1; up to 2 during a
+        // `killSession`-then-`spawnOrAttach` overlap) — entries are
+        // intentionally NOT removed from `aliveChannels` here; their
+        // `channel.exited` handlers clear them once the OS has reaped
+        // each child. That preserves the BkUyD invariant: a
+        // double-Ctrl+C arriving mid-SIGTERM-grace can still find every
+        // alive channel via `killAllSync`. Marking each `isDying` makes
+        // them invisible to any racing `ensureChannel` call — but
+        // `shuttingDown` already blocks new `spawnOrAttach` upstream,
+        // so this is mostly belt-and-suspenders (a direct internal
+        // `ensureChannel` past the gate would still see the dying
+        // state and not attach).
+        const channels = Array.from(aliveChannels);
+        for (const ci of channels) ci.isDying = true;
+        // Drain mediator pending state before clearing byId so awaiting
+        // `requestPermission` callers unwind. Each `forgetSession`
+        // settles all matching pending as session_closed; the bridge's
+        // per-entry index gets cleared alongside.
+        for (const e of entries) {
+          permissionMediator.forgetSession(e.sessionId);
+          e.pendingPermissionIds.clear();
+          e.pendingInteractions.clear();
         }
-        e.events.close();
-      }
-      // Wait for in-flight channel + session spawns. The snapshot
-      // above only sees what's already registered; a doSpawn past
-      // `newSession()` but pre-`byId.set` is missed, as is an
-      // `ensureChannel` past `channelFactory()` but pre-`channelInfo
-      // = info`. The late-shutdown re-checks at doSpawn/ensureChannel
-      // catch both — but without these awaits, `bridge.shutdown()`
-      // would resolve before they finish, and the orphan stderr
-      // error from a half-built child would fire AFTER the daemon
-      // claimed graceful shutdown (log-confusing).
-      const inFlightSessionAwaits = Array.from(inFlightSpawns.values()).map(
-        (p): Promise<void> =>
-          p.then(
-            () => undefined,
-            () => undefined,
-          ),
-      );
-      const inFlightRestoreAwaits = Array.from(inFlightRestores.values()).map(
-        (restore): Promise<void> =>
-          restore.promise.then(
-            () => undefined,
-            () => undefined,
-          ),
-      );
-      const inFlightChannelAwait: Promise<void> = inFlightChannelSpawn
-        ? inFlightChannelSpawn.then(
-            () => undefined,
-            () => undefined,
-          )
-        : Promise.resolve();
-      await Promise.all([
-        ...channels.map((ci) => ci.channel.kill().catch(() => {})),
-        ...inFlightSessionAwaits,
-        ...inFlightRestoreAwaits,
-        inFlightChannelAwait,
-      ]);
+        defaultEntry = undefined;
+        byId.clear();
+        // Publish a terminal `session_died` BEFORE closing each bus so SSE
+        // subscribers can distinguish "daemon shut down" from a transient
+        // network error and don't sit indefinitely retrying. The
+        // channel.exited handler also publishes this on a child crash,
+        // but at shutdown time the entry has already been removed from
+        // `byId` (above), so the handler's `byId.get(...)` is undefined
+        // and the automatic publish wouldn't fire.
+        for (const e of entries) {
+          telemetry.metrics?.sessionLifecycle('die');
+          emitSessionLifecycle({
+            type: 'removed',
+            sessionId: e.sessionId,
+            workspaceCwd: e.workspaceCwd,
+            reason: shutdownReason,
+          });
+          try {
+            e.events.publish({
+              type: 'session_died',
+              data: { sessionId: e.sessionId, reason: shutdownReason },
+            });
+          } catch {
+            /* bus already closed */
+          }
+          e.events.close();
+        }
+        // Wait for in-flight channel + session spawns. The snapshot
+        // above only sees what's already registered; a doSpawn past
+        // `newSession()` but pre-`byId.set` is missed, as is an
+        // `ensureChannel` past `channelFactory()` but pre-`channelInfo
+        // = info`. The late-shutdown re-checks at doSpawn/ensureChannel
+        // catch both — but without these awaits, `bridge.shutdown()`
+        // would resolve before they finish, and the orphan stderr
+        // error from a half-built child would fire AFTER the daemon
+        // claimed graceful shutdown (log-confusing).
+        const inFlightSessionAwaits = Array.from(inFlightSpawns.values()).map(
+          (p): Promise<void> =>
+            p.then(
+              () => undefined,
+              () => undefined,
+            ),
+        );
+        const inFlightRestoreAwaits = Array.from(inFlightRestores.values()).map(
+          (restore): Promise<void> =>
+            restore.promise.then(
+              () => undefined,
+              () => undefined,
+            ),
+        );
+        const inFlightChannelAwait: Promise<void> = inFlightChannelSpawn
+          ? inFlightChannelSpawn.then(
+              () => undefined,
+              () => undefined,
+            )
+          : Promise.resolve();
+        await Promise.all([
+          ...channels.map((ci) => ci.channel.kill().catch(() => {})),
+          ...inFlightSessionAwaits,
+          ...inFlightRestoreAwaits,
+          inFlightChannelAwait,
+        ]);
+      })().then(resolveShutdown, rejectShutdown);
+      return shutdownPromise;
     },
 
     async preheat() {

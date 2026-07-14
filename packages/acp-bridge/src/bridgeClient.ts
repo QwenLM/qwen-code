@@ -593,11 +593,16 @@ export class BridgeClient implements Client {
      * `agent_message_chunk._meta.usage` at {@link sessionUpdate} (the single
      * session/update fan-in). Wired only by the daemon host for the Daemon
      * Status token-burn chart; omitted by tests / Mode A in-process consumers.
+     * `apiErrors` / `apiRetries` are the per-round model-API-error and
+     * automatic-retry increments riding the same `_meta` frame (0 when the
+     * round had none), for the daemon's model-API-health charts.
      */
     private readonly onTokenUsage?: (
       inputTokens: number,
       outputTokens: number,
       durationMs?: number,
+      apiErrors?: number,
+      apiRetries?: number,
     ) => void,
     /**
      * Daemon-host seam for the `create_sub_session` tool. Invoked from the
@@ -877,12 +882,17 @@ export class BridgeClient implements Client {
     if (typeof inputTokens !== 'number' && typeof outputTokens !== 'number') {
       return;
     }
-    // `_meta.durationMs` (the LLM API round-trip) rides the same frame.
+    // `_meta.durationMs` (the LLM API round-trip) rides the same frame, as do
+    // the per-round model-API-error / auto-retry increments (absent → 0).
     const durationMs = updateMeta?.['durationMs'];
+    const apiErrors = updateMeta?.['apiErrors'];
+    const apiRetries = updateMeta?.['apiRetries'];
     this.onTokenUsage(
       typeof inputTokens === 'number' ? inputTokens : 0,
       typeof outputTokens === 'number' ? outputTokens : 0,
       typeof durationMs === 'number' ? durationMs : undefined,
+      typeof apiErrors === 'number' ? apiErrors : 0,
+      typeof apiRetries === 'number' ? apiRetries : 0,
     );
   }
 

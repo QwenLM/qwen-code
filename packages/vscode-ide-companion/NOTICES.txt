@@ -3105,7 +3105,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ============================================================
-dotenv@17.1.0
+dotenv@17.4.2
 (git://github.com/motdotla/dotenv.git)
 
 Copyright (c) 2015, Scott Motte

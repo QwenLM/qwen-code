@@ -49,6 +49,7 @@ interface CreateServeFeaturesDeps {
   sessionShellCommandEnabled: boolean;
   multiWorkspaceSessionsEnabled: () => boolean;
   persistentWorkspaceRegistrationAvailable: boolean;
+  workspaceRuntimeRemovalAvailable?: boolean;
   env?: Readonly<Record<string, string | undefined>>;
 }
 
@@ -72,6 +73,7 @@ export function createServeFeatures(
     sessionShellCommandEnabled,
     multiWorkspaceSessionsEnabled,
     persistentWorkspaceRegistrationAvailable,
+    workspaceRuntimeRemovalAvailable,
   } = deps;
   const env = deps.env ?? process.env;
   let cachedVoiceTranscriptionAvailable: boolean | undefined;
@@ -80,7 +82,11 @@ export function createServeFeatures(
   };
   const getCachedVoiceTranscriptionAvailable = () => {
     cachedVoiceTranscriptionAvailable ??=
-      isWorkspaceVoiceTranscriptionAvailable(boundWorkspace);
+      isWorkspaceVoiceTranscriptionAvailable(
+        boundWorkspace,
+        env,
+        deps.env !== undefined,
+      );
     return cachedVoiceTranscriptionAvailable;
   };
 
@@ -108,6 +114,7 @@ export function createServeFeatures(
         channelControlAvailable,
         multiWorkspaceSessionsEnabled: multiWorkspaceSessionsEnabled(),
         persistentWorkspaceRegistrationAvailable,
+        workspaceRuntimeRemovalAvailable,
         acpHttpEnabled: resolveAcpHttpEnabled(),
         clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
         cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
@@ -127,10 +134,13 @@ export function createServeFeatures(
 
 function isWorkspaceVoiceTranscriptionAvailable(
   boundWorkspace: string,
+  env: Readonly<Record<string, string | undefined>>,
+  skipLoadEnvironment: boolean,
 ): boolean {
   try {
     return hasConfiguredBatchVoiceTranscriptionModel(
-      loadSettings(boundWorkspace),
+      loadSettings(boundWorkspace, { skipLoadEnvironment }),
+      { env },
     );
   } catch (err) {
     writeStderrLine(

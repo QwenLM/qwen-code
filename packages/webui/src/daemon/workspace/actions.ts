@@ -287,7 +287,11 @@ export function createDaemonWorkspaceActions({
       );
     },
 
-    async setWorkspaceSetting(scope: 'workspace', key: string, value: unknown) {
+    async setWorkspaceSetting(
+      scope: 'workspace' | 'user',
+      key: string,
+      value: unknown,
+    ) {
       const client = requireClient(getClient, 'Set setting failed');
       return withActionTimeout(
         client.setWorkspaceSetting(scope, key, value),
@@ -612,6 +616,38 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async activeExtensionOperations() {
+      const client = requireClient(
+        getClient,
+        'Load active extension operations failed',
+      );
+      return withActionTimeout(
+        client.activeExtensionOperations(),
+        'Load active extension operations timed out',
+      );
+    },
+
+    async respondToExtensionInteraction(
+      operationId,
+      interactionId,
+      response,
+      clientId,
+    ) {
+      const client = requireClient(
+        getClient,
+        'Respond to extension interaction failed',
+      );
+      return withActionTimeout(
+        client.respondToExtensionInteraction(
+          operationId,
+          interactionId,
+          response,
+          clientId,
+        ),
+        'Respond to extension interaction timed out',
+      );
+    },
+
     async checkExtensionUpdates(clientId) {
       const client = requireClient(getClient, 'Check extension updates failed');
       return withActionTimeout(
@@ -708,11 +744,30 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async deleteModel(target) {
+      const client = requireClient(getClient, 'Delete model failed');
+      return withActionTimeout(
+        client.deleteModel(target),
+        'Delete model timed out',
+      );
+    },
+
     async addWorkspace(cwd, options) {
       const client = requireClient(getClient, 'Add workspace failed');
       return withActionTimeout(
         client.addWorkspace(cwd, options),
         'Add workspace timed out',
+      );
+    },
+
+    async removeWorkspace(workspaceId, options) {
+      const client = requireClient(getClient, 'Remove workspace failed');
+      const removal = client.workspaceById(workspaceId).remove(options);
+      if (options?.timeoutMs === 0) return removal;
+      return withActionTimeout(
+        removal,
+        'Remove workspace timed out',
+        options?.timeoutMs,
       );
     },
   };

@@ -45,9 +45,14 @@ import {
   WorkspaceInitRaceError,
   WorkspaceInitSymlinkError,
   WorkspaceMismatchError,
+  WorkspaceDrainingError,
   TotalSessionLimitExceededError,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
+import {
+  WorkspaceSkillNotFoundError,
+  WorkspaceSkillNotToggleableError,
+} from '../workspace-service/types.js';
 
 export type BridgeErrorContext = {
   route?: string;
@@ -152,6 +157,24 @@ export function sendBridgeError(
   ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
+  if (err instanceof WorkspaceSkillNotFoundError) {
+    res.status(404).json({
+      error: err.message,
+      code: 'skill_not_found',
+      skillName: err.skillName,
+    });
+    return;
+  }
+  if (err instanceof WorkspaceSkillNotToggleableError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'skill_not_toggleable',
+      skillName: err.skillName,
+      reason: err.reason,
+      ...(err.lockedScope ? { lockedScope: err.lockedScope } : {}),
+    });
+    return;
+  }
   if (err instanceof InvalidSessionTranscriptCursorError) {
     res.status(400).json({
       error: err.message,
@@ -185,6 +208,15 @@ export function sendBridgeError(
       sessionId: err.sessionId,
       snapshotSize: err.snapshotSize,
       maxBytes: err.maxBytes,
+    });
+    return;
+  }
+  if (err instanceof WorkspaceDrainingError) {
+    res.set('Retry-After', '5');
+    res.status(503).json({
+      error: err.message,
+      code: 'workspace_draining',
+      workspaceCwd: err.workspaceCwd,
     });
     return;
   }

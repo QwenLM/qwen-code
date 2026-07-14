@@ -4,8 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  rmSync,
+  utimesSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -20,12 +27,152 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 }));
 
 const MODEL = 'test-model';
+
+// Coverage is read from the harness's transcripts on disk, so the fixtures build
+// them: a plan, and the `agent-<id>.jsonl` files the harness would have written.
+let dir: string;
+/** Passed explicitly, so these tests never race another suite over process.env. */
+let ENV: NodeJS.ProcessEnv;
+
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), 'compose-cov-'));
+  ENV = { QWEN_CODE_PROJECT_DIR: dir, QWEN_CODE_SESSION_ID: 'S1' };
+  mkdirSync(join(dir, 'subagents', 'S1'), { recursive: true });
+});
+
+afterEach(() => {
+  rmSync(dir, { recursive: true, force: true });
+});
+
+const DIFF = '/abs/diff.txt';
+
+/** Write a plan with two chunks, and return its path. */
+function plan(): string {
+  const p = join(dir, 'plan.json');
+  writeFileSync(
+    p,
+    JSON.stringify({
+      diffPathAbsolute: DIFF,
+      chunks: [
+        { id: 1, startLine: 1, endLine: 100 },
+        { id: 2, startLine: 101, endLine: 200 },
+      ],
+    }),
+  );
+  // Backdate it. The transcripts are written first and the stale-transcript
+  // filter is `mtime < planMtime`; on a filesystem with millisecond granularity
+  // both land in the same tick and the comparison flips at random. An explicit
+  // gap makes the fixture say what it means: these transcripts are newer.
+  const old = new Date(2020, 0, 1);
+  utimesSync(p, old, old);
+  return p;
+}
+
+/** Write one agent transcript, as the harness would. */
+function transcript(
+  id: string,
+  launchPrompt: string,
+  opts: { toolCalls?: number; text?: string } = {},
+): void {
+  const base = { agentId: id, agentName: 'general-purpose', sessionId: 'S1' };
+  const lines: string[] = [
+    JSON.stringify({
+      ...base,
+      type: 'user',
+      message: { role: 'user', parts: [{ text: launchPrompt }] },
+    }),
+  ];
+  for (let i = 0; i < (opts.toolCalls ?? 0); i++) {
+    lines.push(
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            { functionCall: { name: 'read_file', args: { file_path: DIFF } } },
+          ],
+        },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: 'ok' },
+              },
+            },
+          ],
+        },
+      }),
+    );
+  }
+  lines.push(
+    JSON.stringify({
+      ...base,
+      type: 'assistant',
+      message: {
+        role: 'model',
+        parts: [{ text: opts.text ?? 'No issues found.' }],
+      },
+    }),
+  );
+  writeFileSync(
+    join(dir, 'subagents', 'S1', `agent-${id}.jsonl`),
+    lines.join('\n') + '\n',
+  );
+}
+
+/** A prompt the CLI would have built: it names the diff and the read. */
+function goodPrompt(chunk: number): string {
+  return `You are reviewing chunk ${chunk} of 2.\nread_file(file_path="${DIFF}", offset=0, limit=100)`;
+}
+
+/** The prompt the orchestrator actually sent, 23 times: no diff anywhere. */
+function blindPrompt(chunk: number): string {
+  return `The changes are in chunk ${chunk} of 2, covering lines 1-100 of the diff.`;
+}
+
+/** Both chunks reviewed by agents that opened the diff. */
+function coveredPlan(): string {
+  transcript('a1', goodPrompt(1), { toolCalls: 3 });
+  transcript('a2', goodPrompt(2), { toolCalls: 2 });
+  return plan();
+}
+
+/** Agents given the diff, that never opened it — and said so at length. */
+function idlePlan(): string {
+  transcript('a1', goodPrompt(1), {
+    toolCalls: 0,
+    text: 'No issues found — reviewed chunk 1 (src/pay.ts) thoroughly.',
+  });
+  transcript('a2', goodPrompt(2), { toolCalls: 0 });
+  return plan();
+}
+
+/** Agents launched with no diff in their prompt. They could not have read it. */
+function blindPlan(): string {
+  transcript('a1', blindPrompt(1), { toolCalls: 0 });
+  transcript('a2', blindPrompt(2), { toolCalls: 0 });
+  return plan();
+}
+
 const FOOTER = `_— ${MODEL} via Qwen Code /review_`;
 
 function base(overrides: Partial<ComposeReviewInput>): ComposeReviewInput {
   return {
     criticalsInline: 0,
     suggestionsInline: 0,
+    // These cases exercise the C/S table, the body clauses and the downgrades —
+    // not coverage. Coverage is no longer an input at all (it is recomputed from
+    // the harness's transcripts), so a table test that means to reach a clean
+    // APPROVE points at a plan whose agents did read it. See coveredPlan().
+    planPath: coveredPlan(),
+    env: ENV,
     modelId: MODEL,
     ...overrides,
   };
@@ -484,5 +631,191 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     expect(written.event).toBe('COMMENT');
     expect(written.body).toContain('Suggestions are inline.');
     expect(written.body.endsWith(FOOTER)).toBe(true);
+  });
+
+  it('strips a model-supplied `env` — it cannot redirect the transcript lookup', () => {
+    // The input is a JSON the model wrote. `env` decides where the harness
+    // transcripts are read from; if the handler honoured it, a model could point
+    // it at a directory of transcripts it fabricated — the whole gate reopened
+    // through one extra key. The handler must drop it and resolve from the real
+    // environment (which, here, points nowhere valid — so it caps, not approves).
+    const dir = mkdtempSync(join(tmpdir(), 'compose-env-'));
+    try {
+      const forged = join(dir, 'forged');
+      const fdir = join(forged, 'subagents', 'S1');
+      mkdirSync(fdir, { recursive: true });
+      // A plan whose one chunk a FABRICATED, fully-covering transcript would
+      // approve. If the handler honoured the model's env, this transcript would be
+      // read and the review would APPROVE. Stripping env sends the lookup to the
+      // real (empty) environment, so it caps. The two outcomes differ — which is
+      // what makes this test able to fail.
+      const planPath = join(dir, 'plan.json');
+      writeFileSync(
+        planPath,
+        JSON.stringify({
+          diffPathAbsolute: '/d.txt',
+          chunks: [{ id: 1, startLine: 1, endLine: 10 }],
+        }),
+      );
+      const good =
+        'You are reviewing chunk 1 of 1.\nread_file(file_path="/d.txt", offset=0, limit=10)';
+      const b = {
+        agentId: 'f1',
+        agentName: 'general-purpose',
+        sessionId: 'S1',
+      };
+      writeFileSync(
+        join(fdir, 'agent-f1.jsonl'),
+        [
+          JSON.stringify({
+            ...b,
+            type: 'user',
+            message: { role: 'user', parts: [{ text: good }] },
+          }),
+          JSON.stringify({
+            ...b,
+            type: 'assistant',
+            message: {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    name: 'read_file',
+                    args: { file_path: '/d.txt' },
+                  },
+                },
+              ],
+            },
+          }),
+          JSON.stringify({
+            ...b,
+            type: 'tool_result',
+            message: {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    name: 'read_file',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+          }),
+          JSON.stringify({
+            ...b,
+            type: 'assistant',
+            message: {
+              role: 'model',
+              parts: [{ text: 'Reviewed chunk 1, walked all ten lines.' }],
+            },
+          }),
+        ].join('\n') + '\n',
+      );
+      const inputPath = join(dir, 'in.json');
+      writeFileSync(
+        inputPath,
+        JSON.stringify({
+          criticalsInline: 0,
+          suggestionsInline: 0,
+          planPath,
+          env: { QWEN_CODE_PROJECT_DIR: forged, QWEN_CODE_SESSION_ID: 'S1' },
+          modelId: MODEL,
+        }),
+      );
+      const outPath = join(dir, 'out.json');
+      const prevProj = process.env['QWEN_CODE_PROJECT_DIR'];
+      delete process.env['QWEN_CODE_PROJECT_DIR']; // real env cannot find transcripts
+      try {
+        (composeReviewCommand.handler as (argv: unknown) => void)({
+          input: inputPath,
+          out: outPath,
+        });
+      } finally {
+        if (prevProj === undefined) delete process.env['QWEN_CODE_PROJECT_DIR'];
+        else process.env['QWEN_CODE_PROJECT_DIR'] = prevProj;
+      }
+      const written = JSON.parse(
+        readFileSync(outPath, 'utf8'),
+      ) as ComposeReviewResult;
+      // If env had been honoured, the fabricated transcript would APPROVE. It
+      // was stripped, so the real (empty) env cannot show coverage and it caps.
+      expect(written.event).not.toBe('APPROVE');
+      expect(written.body).toMatch(/transcripts|no plan/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('coverage is recomputed, never accepted', () => {
+  it('caps when no plan is given — nothing can show the diff was read', () => {
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      modelId: MODEL,
+    });
+    expect(r.event).not.toBe('APPROVE');
+    expect(r.body).toContain('no plan was given');
+  });
+
+  it('caps when the agents made no tool call — whatever their prose said', () => {
+    // The dogfood run, from its real transcripts: every agent returned confident,
+    // specific text and not one of them opened the diff.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: idlePlan(),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).not.toBe('APPROVE');
+    expect(r.body).toContain('read nothing');
+  });
+
+  it('names a blind launch as itself, not as a whiff', () => {
+    // An agent whose prompt never named the diff could not have read it, and
+    // relaunching it produces another agent that cannot either. The prompt is the
+    // defect, and the body has to say so or the reader will retry forever.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: blindPlan(),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).not.toBe('APPROVE');
+    expect(r.body).toContain('never named the diff file');
+    expect(r.body).toContain('agent-prompt');
+  });
+
+  it('caps when the transcripts cannot be read at all — and says so', () => {
+    // A read-only HOME must not read as "every agent idled". It still caps, but
+    // it names the infrastructure, not the agents. Env passed explicitly, like
+    // every other test here: mutating `process.env` leaks across a concurrent
+    // suite, which is how a sibling test started failing only when run together.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(),
+      env: {
+        QWEN_CODE_PROJECT_DIR: join(dir, 'no-such-project'),
+        QWEN_CODE_SESSION_ID: 'S1',
+      },
+      modelId: MODEL,
+    });
+    expect(r.event).not.toBe('APPROVE');
+    expect(r.body).toContain('transcripts');
+  });
+
+  it('approves when the agents actually read their chunks', () => {
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('APPROVE');
   });
 });

@@ -36,6 +36,13 @@ export class WorkspaceGitState {
     this.entries.clear();
   }
 
+  disposeWorkspace(workspaceCwd: string): void {
+    const pending = this.entries.get(workspaceCwd);
+    if (!pending) return;
+    this.entries.delete(workspaceCwd);
+    void pending.then((entry) => entry.dispose()).catch(() => {});
+  }
+
   private getOrCreateEntry(
     workspaceCwd: string,
     bridge: AcpSessionBridge,
@@ -44,7 +51,9 @@ export class WorkspaceGitState {
     if (existing) return existing;
 
     const pending = this.createEntry(workspaceCwd, bridge).catch((error) => {
-      this.entries.delete(workspaceCwd);
+      if (this.entries.get(workspaceCwd) === pending) {
+        this.entries.delete(workspaceCwd);
+      }
       throw error;
     });
     this.entries.set(workspaceCwd, pending);

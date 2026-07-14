@@ -164,6 +164,51 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('memoizes shutdown and keeps the first workspace-removal reason', async () => {
+    const lifecycle: Array<{ type: string; reason?: string }> = [];
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+      sessionLifecycle: (event) => lifecycle.push(event),
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const iterator = bridge
+      .subscribeEvents(session.sessionId)
+      [Symbol.asyncIterator]();
+    const terminalEvent = iterator.next();
+
+    const first = bridge.shutdown({ reason: 'workspace_removed' });
+    const second = bridge.shutdown({ reason: 'daemon_shutdown' });
+
+    expect(second).toBe(first);
+    await first;
+    await expect(terminalEvent).resolves.toMatchObject({
+      value: {
+        type: 'session_died',
+        data: { reason: 'workspace_removed' },
+      },
+    });
+    expect(lifecycle.at(-1)).toMatchObject({
+      type: 'removed',
+      reason: 'workspace_removed',
+    });
+  });
+
+  it('publishes the shutdown promise before lifecycle callbacks can re-enter', async () => {
+    let reentered: Promise<void> | undefined;
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+      sessionLifecycle: (event) => {
+        if (event.type === 'removed') reentered = bridge.shutdown();
+      },
+    });
+    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    const first = bridge.shutdown({ reason: 'workspace_removed' });
+
+    expect(reentered).toBe(first);
+    await first;
+  });
+
   it('accepts a valid BridgeOptions.eventRingSize at construction time', () => {
     // Smoke: positive finite integers are accepted; the underlying
     // EventBus ring-size threading is exercised end-to-end in
@@ -1235,6 +1280,57 @@ describe('createAcpSessionBridge', () => {
     });
     abort.abort();
     await bridge.shutdown();
+  });
+
+  it('bounds a hung session extension refresh', async () => {
+    vi.useFakeTimers();
+    const refreshGate = deferred<Record<string, unknown>>();
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh
+          ? await refreshGate.promise
+          : {},
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+    });
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const refresh = bridge.refreshExtensionsForAllSessions();
+
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      await expect(refresh).resolves.toEqual({ refreshed: 0, failed: 1 });
+
+      const retry = bridge.refreshExtensionsForAllSessions();
+      expect(
+        handle.agent.extMethodCalls.filter(
+          (call) =>
+            call.method ===
+            SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+        ),
+      ).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await expect(retry).resolves.toEqual({ refreshed: 0, failed: 1 });
+
+      refreshGate.resolve({});
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(bridge.refreshExtensionsForAllSessions()).resolves.toEqual({
+        refreshed: 1,
+        failed: 0,
+      });
+      expect(
+        handle.agent.extMethodCalls.filter(
+          (call) =>
+            call.method ===
+            SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+        ),
+      ).toHaveLength(2);
+    } finally {
+      refreshGate.resolve({});
+      vi.useRealTimers();
+      await bridge.shutdown();
+    }
   });
 
   it('does not refresh or broadcast extensions when no sessions are live', async () => {
