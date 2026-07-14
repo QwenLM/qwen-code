@@ -81,16 +81,19 @@ import { AddWorkspaceDialog } from '../dialogs/AddWorkspaceDialog';
 import { WorkspaceSection } from './WorkspaceSection';
 import { SessionGroupSection } from './SessionGroupSection';
 import {
+  COLLAPSED_SESSION_SECTIONS_STORAGE_KEY,
+  isPrimaryCollapsedSectionId,
+  readCollapsedSessionSectionIds,
+  replaceOwnedCollapsedSessionSectionIds,
+} from './collapsedSessionSections';
+import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
 } from '../../constants/sessions';
 import styles from './WebShellSidebar.module.css';
 
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
-// Same `qwen-code-web-shell-*` prefix as sidebar width / chat width / theme.
-// App-wide JSON array of collapsed section ids (`group:<id>`, `recent`, `color:<name>`).
-export const COLLAPSED_SESSION_SECTIONS_STORAGE_KEY =
-  'qwen-code-web-shell-collapsed-session-groups';
+export { COLLAPSED_SESSION_SECTIONS_STORAGE_KEY };
 const SIDEBAR_DEFAULT_WIDTH = 260;
 const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 420;
@@ -355,37 +358,6 @@ function writeSidebarWidth(width: number): void {
   }
 }
 
-function readCollapsedSessionSectionIds(): Set<string> {
-  if (typeof window === 'undefined') return new Set();
-  try {
-    const raw = window.localStorage.getItem(
-      COLLAPSED_SESSION_SECTIONS_STORAGE_KEY,
-    );
-    if (!raw) return new Set();
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return new Set();
-    return new Set(
-      parsed.filter(
-        (item): item is string =>
-          typeof item === 'string' && item.trim().length > 0,
-      ),
-    );
-  } catch {
-    return new Set();
-  }
-}
-
-function writeCollapsedSessionSectionIds(ids: ReadonlySet<string>): void {
-  try {
-    window.localStorage.setItem(
-      COLLAPSED_SESSION_SECTIONS_STORAGE_KEY,
-      JSON.stringify(Array.from(ids).sort()),
-    );
-  } catch {
-    // localStorage can be unavailable in private or embedded contexts.
-  }
-}
-
 function IconNewChat() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -476,6 +448,7 @@ export function WebShellSidebar({
     sessions,
     loading,
     error,
+    data: sessionsPage,
     reload,
     deleteSession,
     exportSession,
@@ -489,6 +462,14 @@ export function WebShellSidebar({
       ? { view: 'organized' as const, group: 'all' }
       : {}),
   });
+  // useDaemonResource starts with loading=false before autoLoad runs, so
+  // !loading is not “settled”. Treat the first data/error as the ready signal
+  // (empty lists are still defined data) so the initial-catalog latch waits.
+  const sessionsCatalogReady =
+    !organizationEnabled ||
+    !includePrimaryWorkspaceSessions ||
+    sessionsPage !== undefined ||
+    Boolean(error);
   const { sessions: primaryPinnedSessions, reload: reloadPinnedSessions } =
     useSessions({
       autoLoad: organizationEnabled,
@@ -559,13 +540,22 @@ export function WebShellSidebar({
   } | null>(null);
   const [collapsedSessionSectionIds, setCollapsedSessionSectionIds] = useState<
     Set<string>
-  >(() => readCollapsedSessionSectionIds());
+  >(
+    () =>
+      new Set(
+        Array.from(readCollapsedSessionSectionIds()).filter(
+          isPrimaryCollapsedSectionId,
+        ),
+      ),
+  );
   const knownSessionSectionIdsRef = useRef<Set<string>>(new Set());
-  // Dedicated first-sync latch: do NOT infer initial catalog from
-  // knownSessionSectionIdsRef.size === 0. If a future change seeds that set
-  // before this effect, a size check would falsely treat the first sync as a
-  // mid-session update and auto-collapse every restored expanded section.
+  // Dedicated first-sync latch. Cleared only after both groups catalog and
+  // sessions list have settled (including empty responses). Do not infer this
+  // from knownSessionSectionIdsRef.size — seeding that set early would make the
+  // first real sync look mid-session and auto-collapse restored expansions.
   const awaitingInitialSessionCatalogRef = useRef(true);
+  const [groupsCatalogReady, setGroupsCatalogReady] =
+    useState(!organizationEnabled);
   const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
   const [projectExpanded, setProjectExpanded] = useState(false);
   const [projectsExpanded, setProjectsExpanded] = useState(true);
@@ -877,6 +867,7 @@ export function WebShellSidebar({
     if (!organizationEnabled) {
       setGroups([]);
       setColorOptions([]);
+      setGroupsCatalogReady(true);
       return;
     }
     try {
@@ -886,6 +877,10 @@ export function WebShellSidebar({
       setColorOptions(catalog.colorOptions);
     } catch (err) {
       onError(err, t('sidebar.groupsLoadFailed'));
+    } finally {
+      // Empty catalogs still settle the latch — sessions/groups hydrate on
+      // independent requests, so readiness cannot wait for a non-empty list.
+      setGroupsCatalogReady(true);
     }
   }, [onError, organizationEnabled, t, workspaceActions]);
 
@@ -893,8 +888,10 @@ export function WebShellSidebar({
     if (!organizationEnabled) {
       setGroups([]);
       setColorOptions([]);
+      setGroupsCatalogReady(true);
       return;
     }
+    setGroupsCatalogReady(false);
     void reloadGroups();
   }, [organizationEnabled, reloadGroups]);
 
@@ -1973,27 +1970,42 @@ export function WebShellSidebar({
   }, [filteredSessions, groups, organizationEnabled, searchQuery, t]);
 
   useEffect(() => {
+    if (!organizationEnabled) return;
+    // Wait for both independent catalog sources. Flipping the latch on the
+    // first non-empty derived sections would treat later initial recent/color
+    // ids as brand-new and auto-collapse them; leaving the latch set when the
+    // first ready catalog is empty would leave the first real section expanded.
+    if (!groupsCatalogReady || !sessionsCatalogReady) return;
+
     const unseenIds = sessionSections
       .map((section) => section.id)
       .filter((id) => !knownSessionSectionIdsRef.current.has(id));
-    if (unseenIds.length === 0) return;
-    // First catalog sync: register ids only. Restored localStorage (or the
-    // empty default) owns expand/collapse; auto-collapse would otherwise wipe
-    // expanded sections on every remount.
     const isInitialCatalog = awaitingInitialSessionCatalogRef.current;
-    awaitingInitialSessionCatalogRef.current = false;
+    if (isInitialCatalog) {
+      awaitingInitialSessionCatalogRef.current = false;
+      for (const id of unseenIds) knownSessionSectionIdsRef.current.add(id);
+      return;
+    }
+    if (unseenIds.length === 0) return;
     for (const id of unseenIds) knownSessionSectionIdsRef.current.add(id);
-    if (isInitialCatalog) return;
     // Brand-new sections that appear mid-session still start collapsed.
     setCollapsedSessionSectionIds((current) => {
       const next = new Set(current);
       for (const id of unseenIds) next.add(id);
       return next;
     });
-  }, [sessionSections]);
+  }, [
+    groupsCatalogReady,
+    organizationEnabled,
+    sessionSections,
+    sessionsCatalogReady,
+  ]);
 
   useEffect(() => {
-    writeCollapsedSessionSectionIds(collapsedSessionSectionIds);
+    replaceOwnedCollapsedSessionSectionIds(
+      collapsedSessionSectionIds,
+      isPrimaryCollapsedSectionId,
+    );
   }, [collapsedSessionSectionIds]);
 
   const toggleSessionSection = useCallback((sectionId: string) => {

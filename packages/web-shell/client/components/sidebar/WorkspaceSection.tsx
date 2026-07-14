@@ -13,6 +13,10 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { FolderClosedIcon, FolderOpenIcon } from 'lucide-react';
 import { SESSION_LIST_PAGE_SIZE } from '../../constants/sessions';
+import {
+  readWorkspaceCollapsedGroupIds,
+  writeWorkspaceCollapsedGroupIds,
+} from './collapsedSessionSections';
 import { SessionGroupSection } from './SessionGroupSection';
 import styles from './WorkspaceSection.module.css';
 
@@ -109,8 +113,8 @@ export function WorkspaceSection({
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
   const [loadError, setLoadError] = useState(false);
   const [internalExpanded, setInternalExpanded] = useState(false);
-  const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(
-    () => new Set(),
+  const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(() =>
+    readWorkspaceCollapsedGroupIds(workspace.id),
   );
   const [actionsVisible, setActionsVisible] = useState(false);
   const expanded = controlledExpanded ?? internalExpanded;
@@ -121,6 +125,21 @@ export function WorkspaceSection({
   useEffect(() => {
     if (controlledExpanded === undefined) setInternalExpanded(false);
   }, [controlledExpanded, workspace.id]);
+
+  // Remounted workspace folders must reload their own collapse prefs from the
+  // shared key (ids are namespaced as `ws:<id>|…` so they cannot collide with
+  // the primary catalog or another workspace).
+  useEffect(() => {
+    setCollapsedGroupIds(readWorkspaceCollapsedGroupIds(workspace.id));
+  }, [workspace.id]);
+
+  useEffect(() => {
+    // Depend on collapsedGroupIds only. Including workspace.id would briefly
+    // write the previous folder's local ids under the new workspace key before
+    // the reload effect above replaces state.
+    writeWorkspaceCollapsedGroupIds(workspace.id, collapsedGroupIds);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see comment above
+  }, [collapsedGroupIds]);
 
   useEffect(() => {
     if (controlledExpanded === undefined && autoExpandKey) {

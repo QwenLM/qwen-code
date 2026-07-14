@@ -584,13 +584,14 @@ async function handleDaemonRoute(
     return;
   }
   if (method === 'GET' && /^\/workspace\/.+\/sessions\/?$/.test(path)) {
-    // Mirror daemon filters so the Pinned bucket does not clone every
-    // session and bury the grouped-collapse demo in duplicate rows.
+    // Mirror production query modes: `group=pinned` is the pinned bucket;
+    // `group=all` (and missing group) returns the full active list. The UI
+    // excludes pinned rows from organized sections via `excludePinned`.
     const group = searchParams.get('group');
     const sessions =
       group === 'pinned'
         ? scenario.sessions.filter((session) => Boolean(session.isPinned))
-        : scenario.sessions.filter((session) => !session.isPinned);
+        : scenario.sessions;
     await json(route, { sessions });
     return;
   }

@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
+"""Assemble labeled demo GIF frames for the collapsed-groups persistence story.
+
+Requires: pip install Pillow
+"""
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
+# Requires: pip install Pillow
 from PIL import Image, ImageDraw, ImageFont
 
 

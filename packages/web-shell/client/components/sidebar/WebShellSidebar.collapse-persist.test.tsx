@@ -6,16 +6,23 @@ import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 
 const { connection, workspace, workspaceActions, active, pinned, archived } =
   vi.hoisted(() => {
-    const makeSessions = () => ({
-      sessions: [] as DaemonSessionSummary[],
-      loading: false,
-      error: null,
-      reload: vi.fn().mockResolvedValue(undefined),
-      deleteSession: vi.fn().mockResolvedValue(true),
-      archiveSession: vi.fn().mockResolvedValue(true),
-      unarchiveSession: vi.fn().mockResolvedValue(true),
-      exportSession: vi.fn(),
-    });
+    const makeSessions = () => {
+      const state = {
+        sessions: [] as DaemonSessionSummary[],
+        loading: false,
+        error: null as Error | null,
+        // Mirror useDaemonSessions: data is undefined until the first list
+        // settles. Unit tests treat the mock as already settled.
+        data: [] as DaemonSessionSummary[] | undefined,
+        reload: vi.fn().mockResolvedValue(undefined),
+        deleteSession: vi.fn().mockResolvedValue(true),
+        archiveSession: vi.fn().mockResolvedValue(true),
+        unarchiveSession: vi.fn().mockResolvedValue(true),
+        exportSession: vi.fn(),
+      };
+      state.data = state.sessions;
+      return state;
+    };
     return {
       connection: {
         status: 'connected',
@@ -209,8 +216,11 @@ beforeEach(() => {
       groupId: null,
     }),
   ];
+  active.data = active.sessions;
   pinned.sessions = [];
+  pinned.data = pinned.sessions;
   archived.sessions = [];
+  archived.data = archived.sessions;
 });
 
 afterEach(() => {
@@ -341,6 +351,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
         color: 'red',
       }),
     ];
+    active.data = active.sessions;
     renderSidebar();
     await flushSidebar();
 
@@ -350,5 +361,75 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       container.querySelector('section[aria-label="Red"]')?.textContent,
     ).not.toContain('Release notes');
     expect(groupHeader('Backend').getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('restores multiple section kinds and keeps sibling ids when one is removed', async () => {
+    active.sessions = [
+      makeSession('session-a', {
+        displayName: 'API review',
+        groupId: 'group-1',
+      }),
+      makeSession('session-b', {
+        displayName: 'Release notes',
+        groupId: null,
+      }),
+      makeSession('session-c', {
+        displayName: 'Hotfix',
+        groupId: null,
+        color: 'red',
+      }),
+    ];
+    active.data = active.sessions;
+    window.localStorage.setItem(
+      COLLAPSED_SESSION_SECTIONS_STORAGE_KEY,
+      JSON.stringify(['color:red', 'group:group-1', 'recent']),
+    );
+
+    renderSidebar();
+    await flushSidebar();
+
+    expect(groupHeader('Backend').getAttribute('aria-expanded')).toBe('false');
+    expect(groupHeader('Ungrouped').getAttribute('aria-expanded')).toBe(
+      'false',
+    );
+    expect(groupHeader('Red').getAttribute('aria-expanded')).toBe('false');
+
+    act(() => click(groupHeader('Backend')));
+    await flushSidebar();
+
+    expect(groupHeader('Backend').getAttribute('aria-expanded')).toBe('true');
+    expect(groupHeader('Ungrouped').getAttribute('aria-expanded')).toBe(
+      'false',
+    );
+    expect(groupHeader('Red').getAttribute('aria-expanded')).toBe('false');
+    expect(
+      JSON.parse(
+        window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ??
+          '[]',
+      ),
+    ).toEqual(['color:red', 'recent']);
+  });
+
+  it('does not clobber workspace-scoped collapse ids when primary toggles', async () => {
+    window.localStorage.setItem(
+      COLLAPSED_SESSION_SECTIONS_STORAGE_KEY,
+      JSON.stringify([
+        'group:group-1',
+        'ws:other|group:g2',
+        'ws:other|ungrouped',
+      ]),
+    );
+
+    renderSidebar();
+    await flushSidebar();
+    act(() => click(groupHeader('Backend')));
+    await flushSidebar();
+
+    expect(
+      JSON.parse(
+        window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ??
+          '[]',
+      ),
+    ).toEqual(['ws:other|group:g2', 'ws:other|ungrouped']);
   });
 });

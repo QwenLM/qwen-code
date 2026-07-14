@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
+import { COLLAPSED_SESSION_SECTIONS_STORAGE_KEY } from '../components/sidebar/collapsedSessionSections';
 import {
   createWebShellDaemonScenario,
   installMockDaemon,
@@ -9,20 +10,17 @@ import {
   type WebShellDaemonScenario,
 } from './utils/mockDaemon';
 
-const COLLAPSED_SESSION_SECTIONS_STORAGE_KEY =
-  'qwen-code-web-shell-collapsed-session-groups';
 const CAPTURE_DEMO = process.env.CAPTURE_COLLAPSED_GROUPS_DEMO === '1';
-const DEMO_FRAMES_DIR = join(
-  process.cwd(),
-  'docs/assets/web-shell-collapsed-session-groups-frames',
-);
+const DEMO_FRAMES_DIR =
+  process.env.CAPTURE_COLLAPSED_GROUPS_FRAMES_DIR ??
+  join(process.cwd(), 'docs/assets/web-shell-collapsed-session-groups-frames');
 
 function demoSidebar(page: Page) {
   // Prefer the desktop <aside>; the mobile drawer reuses the same aria-label.
   return page.locator('aside[aria-label="Workspace sidebar"]');
 }
 
-test('persists collapsed session groups across reload @demo', async ({
+test('persists collapsed session groups across reload @smoke @demo', async ({
   page,
 }, testInfo) => {
   if (CAPTURE_DEMO) {
