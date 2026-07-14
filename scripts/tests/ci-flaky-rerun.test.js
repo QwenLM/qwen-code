@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -12,6 +12,7 @@ import {
   currentActionCount,
   fileSha256,
   fingerprint,
+  GhClient,
   resetSuccessfulFailures,
   selectCandidateTargets,
   skillLog,
@@ -214,6 +215,33 @@ describe('ci flaky rerun patrol', () => {
 
   it('rejects a command-line flag without a value', () => {
     expect(() => argsMap(['--repo'])).toThrow('missing value for --repo');
+  });
+
+  it('runs from an entry path containing spaces', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ci flaky rerun-'));
+    const script = join(dir, 'ci flaky rerun.mjs');
+    try {
+      copyFileSync(
+        join(process.cwd(), '.github/scripts/ci-flaky-rerun.mjs'),
+        script,
+      );
+      const result = spawnSync(process.execPath, [script, 'invalid'], {
+        encoding: 'utf8',
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('command must be scan, act, or reset');
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  it('ignores empty lines in paginated comment output', async () => {
+    const api = new GhClient('QwenLM/qwen-code');
+    api.gh = async () => '{"body":"first"}\n\n{"body":"second"}\n';
+    await expect(api.comments(42)).resolves.toEqual([
+      { body: 'first' },
+      { body: 'second' },
+    ]);
   });
 
   it('handles an exact run attempt once and allows a new attempt', () => {

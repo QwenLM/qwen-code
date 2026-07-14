@@ -2,8 +2,9 @@
 
 import { execFile as execFileCallback } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
 const execFile = promisify(execFileCallback);
@@ -429,7 +430,7 @@ export function fileSha256(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
-class GhClient {
+export class GhClient {
   constructor(repo, trustedMarkerLogin) {
     this.repo = repo;
     this.trustedMarkerLogin = trustedMarkerLogin;
@@ -492,6 +493,7 @@ class GhClient {
       ? output
           .trim()
           .split('\n')
+          .filter((line) => line.length > 0)
           .map((line) => JSON.parse(line))
       : [];
   }
@@ -740,7 +742,7 @@ async function main() {
   throw new Error('command must be scan, act, or reset');
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   main().catch((error) => {
     console.error(
       error.stderr ? `${error.message}\n${error.stderr}` : error.message,
