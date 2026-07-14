@@ -26,6 +26,23 @@ export function reviewBranch(prNumber: string | number): string {
 }
 
 /**
+ * A `target` reduced to a single safe filename component.
+ *
+ * `target` is a file-path review's own path — `src/foo.ts` — or a PR/local
+ * label. Interpolated raw, `src/foo.ts` becomes `qwen-review-src/foo.ts-diff.txt`,
+ * a nested path whose parent nobody created (ENOENT), and a crafted `../../evil`
+ * escapes `.qwen/tmp` and lets `writeFileSync` land anywhere. Flatten every
+ * separator and dot-segment to a single component so the file always sits
+ * directly in the temp dir.
+ */
+function safeTarget(target: string): string {
+  const flat = target
+    .replace(/[^A-Za-z0-9._-]/g, '_') // separators and anything odd → underscore
+    .replace(/\.\.+/g, '_'); // no run of dots survives as a traversal token
+  return flat.replace(/^[._]+/, '') || 'target';
+}
+
+/**
  * Per-target side-file path (review JSON, PR context, presubmit report).
  *
  * Files live under `.qwen/tmp/` rather than the OS temp dir so the path is
@@ -34,10 +51,10 @@ export function reviewBranch(prNumber: string | number): string {
  * and so they're scoped to the project rather than the user's whole machine.
  */
 export function tmpFile(target: string, suffix: string): string {
-  return join(REVIEW_TMP_DIR, `qwen-review-${target}-${suffix}`);
+  return join(REVIEW_TMP_DIR, `qwen-review-${safeTarget(target)}-${suffix}`);
 }
 
 /** Filename prefix used by `tmpFile`; useful for cleanup globbing. */
 export function tmpPrefix(target: string): string {
-  return `qwen-review-${target}-`;
+  return `qwen-review-${safeTarget(target)}-`;
 }

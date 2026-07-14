@@ -74,6 +74,8 @@ export {
   type DaemonWorkspaceInitializedEvent,
   type DaemonWorkspaceCapability,
   type DaemonWorkspaceGitStatus,
+  type DaemonWorkspaceRemovalActivity,
+  type DaemonWorkspaceRemovalResult,
   type DaemonAvailableCommand,
   type DaemonCapabilities,
   type DaemonEnvCell,

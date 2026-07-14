@@ -1,4 +1,4 @@
-import type * as React from 'react';
+import * as React from 'react';
 import { AlertDialog as AlertDialogPrimitive } from 'radix-ui';
 
 import { cn } from '@/lib/utils';
@@ -33,12 +33,13 @@ function AlertDialogPortal({
   );
 }
 
-function AlertDialogOverlay({
-  className,
-  ...props
-}: React.ComponentProps<typeof AlertDialogPrimitive.Overlay>) {
+const AlertDialogOverlay = React.forwardRef<
+  React.ComponentRef<typeof AlertDialogPrimitive.Overlay>,
+  React.ComponentProps<typeof AlertDialogPrimitive.Overlay>
+>(function AlertDialogOverlay({ className, ...props }, ref) {
   return (
     <AlertDialogPrimitive.Overlay
+      ref={ref}
       data-slot="alert-dialog-overlay"
       className={cn(
         'fixed inset-0 z-50 bg-black/10 duration-100 supports-backdrop-filter:backdrop-blur-xs data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0',
@@ -47,19 +48,23 @@ function AlertDialogOverlay({
       {...props}
     />
   );
-}
+});
 
-function AlertDialogContent({
-  className,
-  size = 'default',
-  ...props
-}: React.ComponentProps<typeof AlertDialogPrimitive.Content> & {
+type AlertDialogContentProps = React.ComponentProps<
+  typeof AlertDialogPrimitive.Content
+> & {
   size?: 'default' | 'sm';
-}) {
+};
+
+const AlertDialogContent = React.forwardRef<
+  React.ComponentRef<typeof AlertDialogPrimitive.Content>,
+  AlertDialogContentProps
+>(function AlertDialogContent({ className, size = 'default', ...props }, ref) {
   return (
     <AlertDialogPortal>
       <AlertDialogOverlay />
       <AlertDialogPrimitive.Content
+        ref={ref}
         data-slot="alert-dialog-content"
         data-size={size}
         className={cn(
@@ -70,7 +75,7 @@ function AlertDialogContent({
       />
     </AlertDialogPortal>
   );
-}
+});
 
 function AlertDialogHeader({
   className,

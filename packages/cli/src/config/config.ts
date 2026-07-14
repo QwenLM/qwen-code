@@ -2240,6 +2240,11 @@ export async function loadCliConfig(
     },
     agents: settings.agents
       ? {
+          builtin: settings.agents.builtin
+            ? {
+                exploreModel: settings.agents.builtin.exploreModel,
+              }
+            : undefined,
           maxParallelAgents: settings.agents.maxParallelAgents,
           displayMode: settings.agents.displayMode,
           arena: settings.agents.arena

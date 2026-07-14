@@ -6,6 +6,7 @@
 
 import {
   TotalSessionLimitExceededError,
+  WorkspaceDrainingError,
   type BridgeFreshSessionAdmission,
   type BridgeFreshSessionAdmissionContext,
   type BridgeFreshSessionReservation,
@@ -28,6 +29,12 @@ export interface TotalSessionAdmissionSnapshot {
 export interface TotalSessionAdmissionController {
   readonly admit: BridgeFreshSessionAdmission;
   readonly snapshot: () => TotalSessionAdmissionSnapshot;
+  readonly snapshotForWorkspace: (
+    workspaceCwd: string,
+  ) => TotalSessionAdmissionSnapshot;
+  readonly beginWorkspaceDrain: (workspaceCwd: string) => void;
+  readonly cancelWorkspaceDrain: (workspaceCwd: string) => void;
+  readonly completeWorkspaceDrain: (workspaceCwd: string) => void;
 }
 
 export function createTotalSessionAdmissionController({
@@ -35,6 +42,8 @@ export function createTotalSessionAdmissionController({
   getBridges,
 }: TotalSessionAdmissionOptions): TotalSessionAdmissionController {
   let inFlight = 0;
+  const inFlightByWorkspace = new Map<string, number>();
+  const drainingWorkspaces = new Set<string>();
   const limit =
     maxTotalSessions === undefined ||
     maxTotalSessions === 0 ||
@@ -46,6 +55,9 @@ export function createTotalSessionAdmissionController({
     admit(
       context: BridgeFreshSessionAdmissionContext,
     ): BridgeFreshSessionReservation {
+      if (drainingWorkspaces.has(context.workspaceCwd)) {
+        throw new WorkspaceDrainingError(context.workspaceCwd);
+      }
       if (limit !== Number.POSITIVE_INFINITY) {
         if (getLiveCount(getBridges()) + inFlight >= limit) {
           throw Object.assign(new TotalSessionLimitExceededError(limit), {
@@ -60,17 +72,46 @@ export function createTotalSessionAdmissionController({
       }
 
       inFlight++;
+      inFlightByWorkspace.set(
+        context.workspaceCwd,
+        (inFlightByWorkspace.get(context.workspaceCwd) ?? 0) + 1,
+      );
       let released = false;
       return {
         release() {
           if (released) return;
           released = true;
           inFlight--;
+          const workspaceInFlight =
+            (inFlightByWorkspace.get(context.workspaceCwd) ?? 1) - 1;
+          if (workspaceInFlight <= 0) {
+            inFlightByWorkspace.delete(context.workspaceCwd);
+          } else {
+            inFlightByWorkspace.set(context.workspaceCwd, workspaceInFlight);
+          }
         },
       };
     },
     snapshot() {
       return { liveCount: getLiveCount(getBridges()), inFlight };
+    },
+    snapshotForWorkspace(workspaceCwd) {
+      return {
+        // Per-workspace live sessions remain bridge-owned; removal reads
+        // `runtime.bridge.sessionCount`. This controller only owns admission
+        // reservations, so the aggregate snapshot shape uses zero here.
+        liveCount: 0,
+        inFlight: inFlightByWorkspace.get(workspaceCwd) ?? 0,
+      };
+    },
+    beginWorkspaceDrain(workspaceCwd) {
+      drainingWorkspaces.add(workspaceCwd);
+    },
+    cancelWorkspaceDrain(workspaceCwd) {
+      drainingWorkspaces.delete(workspaceCwd);
+    },
+    completeWorkspaceDrain(workspaceCwd) {
+      drainingWorkspaces.delete(workspaceCwd);
     },
   };
 }

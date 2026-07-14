@@ -30,6 +30,10 @@ export interface WorkspaceRuntime {
   readonly workspaceCwd: string;
   readonly primary: boolean;
   readonly trusted: boolean;
+  /** Whether this runtime may be removed without restarting the daemon. */
+  readonly removable?: boolean;
+  /** Persistent registration ids that restore this runtime on daemon startup. */
+  readonly registrationIds?: readonly string[];
   readonly env: WorkspaceRuntimeEnvMetadata;
   readonly bridge: AcpSessionBridge;
   readonly workspaceService: DaemonWorkspaceService;
@@ -61,6 +65,7 @@ export interface WorkspaceSessionOwnerIndex {
   register(sessionId: string, workspaceCwd: string): void;
   remove(sessionId: string, workspaceCwd?: string): void;
   getWorkspaceCwds(sessionId: string): readonly string[];
+  removeWorkspace(workspaceCwd: string): void;
   handleBridgeSessionLifecycle(event: WorkspaceSessionLifecycleEvent): void;
 }
 
@@ -74,7 +79,15 @@ export interface WorkspaceRegistry {
   ): WorkspaceRuntime | undefined;
   resolveLiveSessionOwner(sessionId: string): WorkspaceSessionOwnerResolution;
   add(runtime: WorkspaceRuntime): void;
+  listManaged(): readonly WorkspaceRuntime[];
+  getManagedByWorkspaceCwd(workspaceCwd: string): WorkspaceRuntime | undefined;
+  getManagedByWorkspaceId(workspaceId: string): WorkspaceRuntime | undefined;
+  beginDrain(runtime: WorkspaceRuntime): boolean;
+  cancelDrain(runtime: WorkspaceRuntime): void;
+  completeDrain(runtime: WorkspaceRuntime): void;
 }
+
+type WorkspaceRuntimeState = 'active' | 'draining' | 'removed';
 
 export interface WorkspaceRegistryOptions {
   readonly sessionOwnerIndex?: WorkspaceSessionOwnerIndex;
@@ -109,6 +122,12 @@ export function createWorkspaceSessionOwnerIndex(): WorkspaceSessionOwnerIndex {
     register,
     remove,
     getWorkspaceCwds: (sessionId) => [...(bySessionId.get(sessionId) ?? [])],
+    removeWorkspace: (workspaceCwd) => {
+      for (const [sessionId, owners] of bySessionId) {
+        owners.delete(workspaceCwd);
+        if (owners.size === 0) bySessionId.delete(sessionId);
+      }
+    },
     handleBridgeSessionLifecycle: (event) => {
       if (event.type === 'registered') {
         register(event.sessionId, event.workspaceCwd);
@@ -159,6 +178,9 @@ export function createWorkspaceRegistry(
   }
 
   const runtimes: WorkspaceRuntime[] = [...inputRuntimes];
+  const states = new WeakMap<WorkspaceRuntime, WorkspaceRuntimeState>(
+    inputRuntimes.map((runtime) => [runtime, 'active']),
+  );
   const primary = primaryRuntimes[0]!;
   const sessionOwnerIndex = options.sessionOwnerIndex;
   const scanLiveOwners = (
@@ -166,6 +188,7 @@ export function createWorkspaceRegistry(
   ): WorkspaceSessionOwnerResolution => {
     const matches: WorkspaceRuntime[] = [];
     for (const runtime of runtimes) {
+      if (states.get(runtime) !== 'active') continue;
       try {
         runtime.bridge.getSessionSummary(sessionId);
         matches.push(runtime);
@@ -188,11 +211,31 @@ export function createWorkspaceRegistry(
     primary,
     // Return a frozen snapshot: `runtimes` is mutable internally (see `add`),
     // but callers must not be able to push/splice into the registry's state.
-    list: () => Object.freeze([...runtimes]) as readonly WorkspaceRuntime[],
-    getByWorkspaceCwd: (workspaceCwd) => byCwd.get(workspaceCwd),
-    getByWorkspaceId: (workspaceId) => byId.get(workspaceId),
+    list: () =>
+      Object.freeze(
+        runtimes.filter((runtime) => states.get(runtime) === 'active'),
+      ) as readonly WorkspaceRuntime[],
+    listManaged: () =>
+      Object.freeze([...runtimes]) as readonly WorkspaceRuntime[],
+    getByWorkspaceCwd: (workspaceCwd) => {
+      const runtime = byCwd.get(workspaceCwd);
+      return runtime && states.get(runtime) === 'active' ? runtime : undefined;
+    },
+    getByWorkspaceId: (workspaceId) => {
+      const runtime = byId.get(workspaceId);
+      return runtime && states.get(runtime) === 'active' ? runtime : undefined;
+    },
+    getManagedByWorkspaceCwd: (workspaceCwd) => byCwd.get(workspaceCwd),
+    getManagedByWorkspaceId: (workspaceId) => byId.get(workspaceId),
     resolveWorkspaceCwd: (workspaceCwd) =>
-      workspaceCwd === undefined ? primary : byCwd.get(workspaceCwd),
+      workspaceCwd === undefined
+        ? primary
+        : (() => {
+            const runtime = byCwd.get(workspaceCwd);
+            return runtime && states.get(runtime) === 'active'
+              ? runtime
+              : undefined;
+          })(),
     add: (runtime) => {
       if (byCwd.has(runtime.workspaceCwd)) {
         throw new Error(
@@ -207,6 +250,24 @@ export function createWorkspaceRegistry(
       byCwd.set(runtime.workspaceCwd, runtime);
       byId.set(runtime.workspaceId, runtime);
       runtimes.push(runtime);
+      states.set(runtime, 'active');
+    },
+    beginDrain: (runtime) => {
+      if (runtime.primary || states.get(runtime) !== 'active') return false;
+      states.set(runtime, 'draining');
+      return true;
+    },
+    cancelDrain: (runtime) => {
+      if (states.get(runtime) === 'draining') states.set(runtime, 'active');
+    },
+    completeDrain: (runtime) => {
+      if (runtime.primary || states.get(runtime) !== 'draining') return;
+      states.set(runtime, 'removed');
+      byCwd.delete(runtime.workspaceCwd);
+      byId.delete(runtime.workspaceId);
+      const index = runtimes.indexOf(runtime);
+      if (index >= 0) runtimes.splice(index, 1);
+      sessionOwnerIndex?.removeWorkspace(runtime.workspaceCwd);
     },
     resolveLiveSessionOwner: (sessionId) => {
       const indexedCwds = sessionOwnerIndex?.getWorkspaceCwds(sessionId) ?? [];
@@ -214,10 +275,11 @@ export function createWorkspaceRegistry(
         const matches: WorkspaceRuntime[] = [];
         for (const workspaceCwd of indexedCwds) {
           const runtime = byCwd.get(workspaceCwd);
-          if (!runtime) {
+          if (!runtime || states.get(runtime) === 'removed') {
             sessionOwnerIndex?.remove(sessionId, workspaceCwd);
             continue;
           }
+          if (states.get(runtime) !== 'active') continue;
           try {
             runtime.bridge.getSessionSummary(sessionId);
             matches.push(runtime);

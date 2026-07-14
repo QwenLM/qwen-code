@@ -194,6 +194,27 @@ When the selector resolves to another auth type, Qwen Code creates a dedicated
 runtime provider for that subagent request and sends the provider only the bare
 model ID.
 
+The built-in Explore agent inherits the main session model by default. To
+select a different model for only that built-in agent, configure
+`agents.builtin.exploreModel` in `settings.json` and restart Qwen Code:
+
+Earlier versions used `fastModel` for Explore by default. To preserve that
+behavior, set `agents.builtin.exploreModel` to `fast`.
+
+```json
+{
+  "agents": {
+    "builtin": {
+      "exploreModel": "fast"
+    }
+  }
+}
+```
+
+This setting accepts the same selectors described above. It is applied only
+when Qwen Code resolves the built-in Explore definition; a session, project,
+user, or extension agent named Explore keeps its own `model` setting.
+
 #### Permission Mode
 
 Use the optional `approvalMode` frontmatter field to control how a subagent's tool calls are approved. Valid values:

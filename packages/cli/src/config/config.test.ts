@@ -1150,6 +1150,17 @@ describe('loadCliConfig', () => {
     expect(config.getShellDefaultTimeoutMs()).toBe(300000);
   });
 
+  it('passes agents.builtin.exploreModel from settings to core config', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { agents: { builtin: { exploreModel: 'fast' } } },
+      argv,
+    );
+
+    expect(config.getAgentsSettings().builtin?.exploreModel).toBe('fast');
+  });
+
   it('should ignore blank settings fallback models', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();

@@ -16,10 +16,12 @@ import {
   useConnection,
   useDaemonFollowupSuggestion,
   useSettings,
+  useProviders,
   useSessionNotices,
   useStreamingState,
   useTranscriptBlocks,
   useTranscriptStore,
+  useWorkspace,
   useWorkspaceActions,
   useWorkspaceEventSignals,
   type DaemonWorkspaceActions,
@@ -61,6 +63,7 @@ import {
   ModelDialog,
   type ModelDialogMode,
 } from './components/dialogs/ModelDialog';
+import { ModelFallbacksDialog } from './components/dialogs/ModelFallbacksDialog';
 import {
   AgentsMessage,
   type AgentsInitialMode,
@@ -130,7 +133,6 @@ import {
 } from './utils/copyCommand';
 import { isEditableTarget } from './utils/dom';
 import { getModelDisplayName } from './utils/modelDisplay';
-import { hasMultipleWorkspaces, workspaceBasename } from './utils/workspace';
 import { isVisibleComposerModel } from './utils/composerModels';
 import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
 import { decideEscapeIntent } from './utils/escapeIntent';
@@ -194,6 +196,7 @@ import {
   THEME_SETTING_KEY,
   LANGUAGE_SETTING_KEY,
   themeSettingToWebShellTheme,
+  webShellThemeToSettingValue,
   type WebShellTheme,
 } from './themeContext';
 import {
@@ -412,7 +415,7 @@ export interface WebShellSidebarOptions {
   defaultCollapsed?: boolean;
   /** Whether to show WebShell's built-in compact drawer toggle. Defaults to true. */
   showCompactToggle?: boolean;
-  /** Hide or replace the leading New Chat brand mark. */
+  /** Hide or replace the complete sidebar branding row. */
   branding?: false | WebShellSidebarBranding;
   /** Hide the footer completely or select the built-in entries it exposes. */
   footer?: false | WebShellSidebarFooterOptions;
@@ -428,8 +431,6 @@ export interface WebShellApi {
   openSplitView: () => void;
   /** Open the Session Overview panel, matching the built-in sidebar button. */
   openSessionOverview: () => void;
-  /** Open the compact session drawer, matching the hamburger control. */
-  openSessionDrawer: () => void;
 }
 
 export type WebShellComposerPlaceholderState = ComposerPlaceholderState;
@@ -440,7 +441,10 @@ export type WebShellComposerPlaceholders = Readonly<
 
 export interface WebShellProps {
   /** Called whenever the attached daemon session id changes. */
-  onSessionIdChange?: (sessionId: string | undefined) => void;
+  onSessionIdChange?: (
+    sessionId: string | undefined,
+    workspaceId?: string,
+  ) => void;
   /** Called after a new session is created. Session setup waits up to 30 seconds. */
   onSessionCreated?: (sessionId: string) => Promise<void> | void;
   /** Visual theme for the embedded shell. */
@@ -584,6 +588,7 @@ export interface WebShellProps {
 type SessionActionsWithCreate = {
   createSession: (options?: {
     workspaceCwd?: string;
+    approvalMode?: string;
   }) => Promise<{ sessionId: string }>;
   attachSession: () => Promise<void>;
   clearSession: () => Promise<void>;
@@ -936,6 +941,25 @@ function translateCopyMessage(
   return message;
 }
 
+/**
+ * Read a model setting's value for the scope currently being edited. Model
+ * pickers persist to `modelSettingScope`, so their "current" value reflects
+ * only that scope's own value (not the merged/effective one) — otherwise the
+ * User tab would show, and appear to clear, an inherited workspace value.
+ */
+function readScopedModelSetting(
+  settings: ReadonlyArray<{
+    key: string;
+    values: { effective: unknown; user?: unknown; workspace?: unknown };
+  }>,
+  scope: 'workspace' | 'user',
+  key: string,
+): unknown {
+  const setting = settings.find((s) => s.key === key);
+  if (!setting) return undefined;
+  return scope === 'user' ? setting.values.user : setting.values.workspace;
+}
+
 export function App({
   onSessionIdChange,
   onSessionCreated,
@@ -1014,10 +1038,8 @@ export function App({
     string | null
   >(null);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
-  const [forceMobileDrawer, setForceMobileDrawer] = useState(false);
   const closeMobileDrawer = useCallback(() => {
     setMobileDrawerOpen(false);
-    setForceMobileDrawer(false);
   }, []);
   // The Session Overview panel (mission control for managing many sessions at
   // once) is only offered on large screens; below that there is no room for it
@@ -1032,11 +1054,11 @@ export function App({
   useEffect(() => {
     const mql = window.matchMedia('(max-width: 760px)');
     const handler = (e: MediaQueryListEvent) => {
-      if (!e.matches) closeMobileDrawer();
+      if (!e.matches) setMobileDrawerOpen(false);
     };
     mql.addEventListener('change', handler);
     return () => mql.removeEventListener('change', handler);
-  }, [closeMobileDrawer]);
+  }, []);
 
   useEffect(() => {
     if (!mobileDrawerOpen) return;
@@ -1138,6 +1160,11 @@ export function App({
   const store = useTranscriptStore();
   const blocks = useTranscriptBlocks();
   const connection = useConnection();
+  const workspace = useWorkspace();
+  const workspaces = useMemo(
+    () => workspace.capabilities?.workspaces ?? [],
+    [workspace.capabilities?.workspaces],
+  );
   const sessionActions = useActions();
   const { notices, dismissNotice } = useSessionNotices();
   const workspaceActions = useWorkspaceActions();
@@ -1149,6 +1176,42 @@ export function App({
   >(undefined);
   const selectedWorkspaceCwdRef = useRef(selectedWorkspaceCwd);
   selectedWorkspaceCwdRef.current = selectedWorkspaceCwd;
+  const [selectedWorkspaceGitBranch, setSelectedWorkspaceGitBranch] = useState<
+    string | undefined
+  >(undefined);
+  useEffect(() => {
+    if (connection.sessionId) {
+      setSelectedWorkspaceGitBranch(undefined);
+      return;
+    }
+    const primaryWorkspaceCwd = workspaces.find((entry) => entry.primary)?.cwd;
+    const workspaceCwd = selectedWorkspaceCwd ?? primaryWorkspaceCwd;
+    if (!workspaceCwd) {
+      setSelectedWorkspaceGitBranch(undefined);
+      return;
+    }
+    let cancelled = false;
+    setSelectedWorkspaceGitBranch(undefined);
+    void workspace.client
+      .workspaceByCwd(workspaceCwd)
+      .workspaceGit()
+      .then((git) => {
+        if (!cancelled) {
+          setSelectedWorkspaceGitBranch(git.branch ?? undefined);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setSelectedWorkspaceGitBranch(undefined);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    connection.sessionId,
+    selectedWorkspaceCwd,
+    workspaces,
+    workspace.client,
+  ]);
   const onToastRef = useRef(onToast);
   onToastRef.current = onToast;
   const toastIdRef = useRef(0);
@@ -1187,6 +1250,7 @@ export function App({
   const chatPaneRef = useRef<HTMLDivElement | null>(null);
   const currentSessionIdRef = useRef(connection.sessionId);
   const lastNotifiedSessionIdRef = useRef<string | undefined>(undefined);
+  const lastNotifiedWorkspaceIdRef = useRef<string | undefined>(undefined);
   const lastGoalSessionIdRef = useRef(connection.sessionId);
   const displayMessages = useMemo(() => {
     const localMessages = [recapMessage].filter(
@@ -1954,6 +2018,20 @@ export function App({
 
   const [modelDialogMode, setModelDialogMode] =
     useState<ModelDialogMode | null>(null);
+  // Mirror of modelDialogMode (and the fallbacks/auth dialog flags below) for
+  // reading the latest values inside the async voice loadProviders callback, so
+  // it doesn't open the voice picker on top of a surface opened while loading
+  // (see the voiceModel branch in onSubDialog).
+  const modelDialogModeRef = useRef<ModelDialogMode | null>(modelDialogMode);
+  // Scope a model sub-dialog opened from the Settings panel persists to. Set
+  // when opening from the User/Workspace settings tab; reset to 'workspace'
+  // whenever the model dialog closes (any path) so command-launched pickers
+  // (/model --vision, etc.) always write workspace.
+  const [modelSettingScope, setModelSettingScope] = useState<
+    'workspace' | 'user'
+  >('workspace');
+  const [showFallbacksDialog, setShowFallbacksDialog] = useState(false);
+  const showFallbacksDialogRef = useRef(showFallbacksDialog);
   const [voiceModels, setVoiceModels] = useState<VoiceModelOption[]>([]);
   const [showApprovalModeDialog, setShowApprovalModeDialog] = useState(false);
   const [showResumeDialog, setShowResumeDialog] = useState(false);
@@ -2054,12 +2132,6 @@ export function App({
     () => ({
       openSplitView: () => requestOpenSplitView(),
       openSessionOverview: () => openPanel('sessions'),
-      openSessionDrawer: () => {
-        setActivePanel(null);
-        setMainView('chat');
-        setForceMobileDrawer(true);
-        setMobileDrawerOpen(true);
-      },
     }),
     [openPanel, requestOpenSplitView],
   );
@@ -2270,6 +2342,7 @@ export function App({
   }, [toolApprovalOverlayVisible]);
   const [showMemoryDialog, setShowMemoryDialog] = useState(false);
   const [showAuthDialog, setShowAuthDialog] = useState(false);
+  const showAuthDialogRef = useRef(showAuthDialog);
   const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
   const [memoryAddSignal, setMemoryAddSignal] = useState(0);
   const [externalInteractionBlockCount, setExternalInteractionBlockCount] =
@@ -2410,12 +2483,15 @@ export function App({
         currentModelRef.current || connectionRef.current.currentModel;
       const modeId =
         currentModeRef.current || connectionRef.current.currentMode;
+      const primaryWorkspaceCwd = workspaces.find(
+        (entry) => entry.primary,
+      )?.cwd;
       await createAndAttachSessionForPrompt({
         sessionActions: sessionActions as typeof sessionActions &
           SessionActionsWithCreate,
         modelId,
         modeId,
-        workspaceCwd: selectedWorkspaceCwdRef.current,
+        workspaceCwd: selectedWorkspaceCwdRef.current ?? primaryWorkspaceCwd,
         onSessionCreated: onSessionCreatedRef.current,
         onSessionAllocated: (sessionId) => {
           preparingSessionIdRef.current = sessionId;
@@ -2436,7 +2512,7 @@ export function App({
     };
     void promise.then(clearPreparation, clearPreparation);
     return promise;
-  }, [sessionActions]);
+  }, [sessionActions, workspaces]);
   const onSubmitBeforeRef = useRef(onSubmitBefore);
   onSubmitBeforeRef.current = onSubmitBefore;
   const [sessionListReloadToken, setSessionListReloadToken] = useState(0);
@@ -2936,6 +3012,12 @@ export function App({
   const workspaceSettingsState = useSettings({
     autoLoad: true,
   });
+  const providersState = useProviders({ autoLoad: true });
+  // useProviders returns a fresh object each render, but its `reload` identity is
+  // stable — pull it out so callbacks can depend on the function alone without
+  // re-creating on every render (and without an exhaustive-deps warning).
+  const reloadProviders = providersState.reload;
+  const [modelActionBusy, setModelActionBusy] = useState(false);
   const {
     settings: workspaceSettings,
     setValue: setWorkspaceSetting,
@@ -2951,24 +3033,63 @@ export function App({
     (setting) => setting.key === LANGUAGE_SETTING_KEY,
   );
   const currentVoiceModel = (() => {
-    const value = workspaceSettings.find(
-      (setting) => setting.key === 'voiceModel',
-    )?.values.effective;
+    const value = readScopedModelSetting(
+      workspaceSettings,
+      modelSettingScope,
+      'voiceModel',
+    );
     return typeof value === 'string' && value.trim() ? value.trim() : undefined;
   })();
   const currentVisionModel = (() => {
-    const value = workspaceSettings.find(
-      (setting) => setting.key === 'visionModel',
-    )?.values.effective;
+    const value = readScopedModelSetting(
+      workspaceSettings,
+      modelSettingScope,
+      'visionModel',
+    );
     if (typeof value !== 'string' || !value.trim()) return undefined;
     return decodeVisionModelForPicker(value.trim());
   })();
   const currentFastModel = (() => {
-    const value = workspaceSettings.find(
-      (setting) => setting.key === 'fastModel',
-    )?.values.effective;
+    const value = readScopedModelSetting(
+      workspaceSettings,
+      modelSettingScope,
+      'fastModel',
+    );
     return typeof value === 'string' && value.trim() ? value.trim() : undefined;
   })();
+  const currentModelFallbacks = useMemo(() => {
+    const value = readScopedModelSetting(
+      workspaceSettings,
+      modelSettingScope,
+      'modelFallbacks',
+    );
+    return typeof value === 'string'
+      ? value
+          .split(',')
+          .map((entry) => entry.trim())
+          .filter(Boolean)
+      : [];
+  }, [workspaceSettings, modelSettingScope]);
+  // Fallback candidates are the selectable (non-runtime) models, keyed by their
+  // base id — the same value shape the modelFallbacks setting stores.
+  const fallbackModelOptions = useMemo(() => {
+    // modelFallbacks stores bare ids and the dialog keys rows by baseId, so
+    // dedupe here — multiple endpoints can expose the same base model id.
+    const seen = new Set<string>();
+    const options: Array<{ baseId: string; label: string }> = [];
+    for (const m of (connection.models ?? [])
+      .filter(isVisibleComposerModel)
+      .filter((m) => !m.isRuntime)) {
+      const baseId = m.baseModelId ?? extractBareModelId(m.id);
+      if (seen.has(baseId)) continue;
+      seen.add(baseId);
+      options.push({
+        baseId,
+        label: getModelDisplayName(m.label || m.baseModelId || m.id),
+      });
+    }
+    return options;
+  }, [connection.models]);
   const [compactMode, setCompactMode] = useState(false);
   const compactModeRef = useRef(compactMode);
   compactModeRef.current = compactMode;
@@ -3000,9 +3121,15 @@ export function App({
   }, [providedLanguage, languageSetting?.values.effective]);
 
   const handleSettingsLanguageChange = useCallback(
-    (nextLanguage: WebShellLanguage) => {
+    (nextLanguage: WebShellLanguage, scope: 'user' | 'workspace' = 'user') => {
       const previousLanguage = selectedLanguage;
-      const command = `/language ui ${nextLanguage}`;
+      // Forward the settings tab's scope to the command so a Workspace-tab edit
+      // persists to workspace settings instead of always writing user scope
+      // (the /language command otherwise defaults to user). The command still
+      // switches the daemon's live locale so command descriptions re-localize —
+      // which a plain scoped settings write wouldn't do.
+      const scopeFlag = scope === 'workspace' ? ' --project' : ' --global';
+      const command = `/language ui ${nextLanguage}${scopeFlag}`;
       handleLanguageChange(nextLanguage);
       const refreshSettings = () => {
         return Promise.all([
@@ -3108,6 +3235,12 @@ export function App({
   }, [streamingState]);
 
   useEffect(() => {
+    modelDialogModeRef.current = modelDialogMode;
+    showFallbacksDialogRef.current = showFallbacksDialog;
+    showAuthDialogRef.current = showAuthDialog;
+  }, [modelDialogMode, showFallbacksDialog, showAuthDialog]);
+
+  useEffect(() => {
     let retryableTurnErrorId: string | null = null;
     for (let i = blocks.length - 1; i >= 0; i--) {
       const block = blocks[i];
@@ -3196,12 +3329,34 @@ export function App({
       // Keep the dead-session route visible until the user explicitly starts a
       // new chat; clearing it here would immediately hide the recovery state.
       lastNotifiedSessionIdRef.current = connection.sessionId;
+      lastNotifiedWorkspaceIdRef.current = undefined;
       return;
     }
-    if (lastNotifiedSessionIdRef.current === connection.sessionId) return;
+    const activeWorkspace = workspaces.find(
+      (entry) => entry.cwd === connection.workspaceCwd,
+    );
+    if (connection.sessionId && !workspace.capabilities) return;
+    const workspaceId =
+      activeWorkspace && !activeWorkspace.primary
+        ? activeWorkspace.id
+        : undefined;
+    if (
+      lastNotifiedSessionIdRef.current === connection.sessionId &&
+      lastNotifiedWorkspaceIdRef.current === workspaceId
+    ) {
+      return;
+    }
     lastNotifiedSessionIdRef.current = connection.sessionId;
-    onSessionIdChange?.(connection.sessionId);
-  }, [connection.missingSession, connection.sessionId, onSessionIdChange]);
+    lastNotifiedWorkspaceIdRef.current = workspaceId;
+    onSessionIdChange?.(connection.sessionId, workspaceId);
+  }, [
+    connection.missingSession,
+    connection.sessionId,
+    connection.workspaceCwd,
+    onSessionIdChange,
+    workspace.capabilities,
+    workspaces,
+  ]);
 
   const lastRenameSessionRef = useRef<string | undefined>(undefined);
   const lastRenameNameRef = useRef<string | undefined>(undefined);
@@ -3388,23 +3543,28 @@ export function App({
     branchCurrentSession();
   }, [branchCurrentSession]);
 
-  const createNewSession = useCallback(async () => {
-    // Close the drawer before awaiting so a failed createSession() doesn't leave
-    // it stuck open with the page scroll still locked, matching loadSidebarSession.
-    closeMobileDrawer();
-    // Starting a new chat means the user wants to see it — leave any open
-    // Settings/Status panel so the fresh chat is visible (no-op when closed).
-    closePanel();
-    try {
-      await (
-        sessionActions as typeof sessionActions & SessionActionsWithCreate
-      ).clearSession();
-      return true;
-    } catch (error) {
-      reportError(error, 'Failed to start a new chat');
-      return false;
-    }
-  }, [closeMobileDrawer, closePanel, reportError, sessionActions]);
+  const createNewSession = useCallback(
+    async (workspaceCwd?: string) => {
+      selectedWorkspaceCwdRef.current = workspaceCwd;
+      setSelectedWorkspaceCwd(workspaceCwd);
+      // Close the drawer before awaiting so a failed createSession() doesn't leave
+      // it stuck open with the page scroll still locked, matching loadSidebarSession.
+      closeMobileDrawer();
+      // Starting a new chat means the user wants to see it — leave any open
+      // Settings/Status panel so the fresh chat is visible (no-op when closed).
+      closePanel();
+      try {
+        await (
+          sessionActions as typeof sessionActions & SessionActionsWithCreate
+        ).clearSession();
+        return true;
+      } catch (error) {
+        reportError(error, 'Failed to start a new chat');
+        return false;
+      }
+    },
+    [closeMobileDrawer, closePanel, reportError, sessionActions],
+  );
   const handleMissingSessionNewSession = useCallback(async () => {
     if (creatingMissingSessionRef.current) return;
     creatingMissingSessionRef.current = true;
@@ -3422,7 +3582,7 @@ export function App({
   }, [createNewSession, onSessionIdChange]);
 
   const loadSidebarSession = useCallback(
-    async (sessionId: string) => {
+    async (sessionId: string, workspaceCwd?: string) => {
       setSidebarSwitchingSessionId(sessionId);
       // Close the drawer before awaiting the load; the transcript clears
       // immediately and shows its loading skeleton for the selected session.
@@ -3431,7 +3591,7 @@ export function App({
       // Settings/Status panel (no-op when the panel is closed).
       closePanel();
       try {
-        await sessionActions.loadSession(sessionId);
+        await sessionActions.loadSession(sessionId, { workspaceCwd });
       } catch (error) {
         setSidebarSwitchingSessionId((current) =>
           current === sessionId ? null : current,
@@ -4982,6 +5142,11 @@ export function App({
         setPendingModel(modelId);
         return;
       }
+      // Drive the shared busy flag so the model-management rows disable while a
+      // selection is in flight — rapid Set current clicks would otherwise launch
+      // concurrent setModel calls that can resolve out of order and leave a
+      // model other than the user's last click active.
+      setModelActionBusy(true);
       sessionActions
         .setModel(modelId)
         .then((result) => {
@@ -4998,9 +5163,108 @@ export function App({
         })
         .catch((error: unknown) => {
           reportError(error, t('model.switch'));
-        });
+        })
+        .finally(() => setModelActionBusy(false));
     },
     [sessionActions, store, reportError, t, setPendingModel],
+  );
+
+  const handleDeleteModel = useCallback(
+    (target: { authType: string; modelId: string; baseUrl?: string }) => {
+      setModelActionBusy(true);
+      workspaceActions
+        .deleteModel(target)
+        .then((result) => {
+          // A scrubbed fallback requires a restart — surface it like the
+          // settings panel does.
+          if (result?.requiresRestart) {
+            store.dispatch([
+              { type: 'status', text: t('settings.requiresRestart') },
+            ]);
+          }
+          // A transient reload failure shouldn't surface as "delete failed" —
+          // the model was already removed. Just log it. Reload settings too so a
+          // cleared active model / scrubbed fallback isn't shown stale.
+          reloadProviders().catch((err: unknown) => {
+            console.warn(
+              '[web-shell] failed to reload providers after delete',
+              err,
+            );
+          });
+          reloadWorkspaceSettings().catch((err: unknown) => {
+            console.warn(
+              '[web-shell] failed to reload settings after delete',
+              err,
+            );
+          });
+        })
+        .catch((error: unknown) => {
+          reportError(error, t('settings.models.deleteFailed'));
+        })
+        .finally(() => setModelActionBusy(false));
+    },
+    // Depend on the stable `reload` fn, not the whole providersState object,
+    // which useProviders returns fresh each render (would defeat the memo).
+    [
+      workspaceActions,
+      reloadProviders,
+      reloadWorkspaceSettings,
+      reportError,
+      store,
+      t,
+    ],
+  );
+
+  const handleCloseAuthDialog = useCallback(() => {
+    setShowAuthDialog(false);
+    // The provider install flow doesn't broadcast a settings change, so refresh
+    // the model list on close to surface any newly added models. Log a failed
+    // reload (leaves stale model data) rather than swallowing it.
+    reloadProviders().catch((err: unknown) => {
+      console.warn(
+        '[web-shell] failed to reload providers after auth dialog close',
+        err,
+      );
+    });
+  }, [reloadProviders]);
+
+  const handleFallbacksConfirm = useCallback(
+    (baseIds: string[]) => {
+      setShowFallbacksDialog(false);
+      setWorkspaceSetting(
+        modelSettingScope,
+        'modelFallbacks',
+        baseIds.join(','),
+      )
+        .then((result) => {
+          // modelFallbacks requiresRestart — tell the user, like the settings
+          // panel does for restart-required edits.
+          if (result?.requiresRestart) {
+            store.dispatch([
+              { type: 'status', text: t('settings.requiresRestart') },
+            ]);
+          }
+          // A reload failure shouldn't surface as "save failed" — the value
+          // was already persisted. Just log it.
+          reloadWorkspaceSettings().catch((err: unknown) => {
+            console.warn(
+              '[web-shell] failed to reload settings after fallbacks save',
+              err,
+            );
+          });
+        })
+        .catch((error: unknown) =>
+          reportError(error, t('settings.models.fallbacks.saveFailed')),
+        );
+    },
+    [
+      modelSettingScope,
+      setWorkspaceSetting,
+      reloadWorkspaceSettings,
+      reportError,
+      store,
+      t,
+    ],
   );
 
   const handleFastModelSelect = useCallback(
@@ -5020,7 +5284,13 @@ export function App({
       // Closing first returns them to the chat to see it in context (matching
       // the pre-panel modal behavior).
       closePanel();
-      sendPrompt(`/model --fast ${modelId}`)
+      // Persist to the scope the picker was opened for (matching the silent
+      // vision/voice pickers). `/model` parses --global/--project as the persist
+      // scope; without a flag the command would default to its own scope logic
+      // and ignore the user's User-vs-Workspace choice.
+      const scopeFlag =
+        modelSettingScope === 'user' ? ' --global' : ' --project';
+      sendPrompt(`/model --fast ${modelId}${scopeFlag}`)
         .then(() => {
           // sendPrompt resolves only after the `/model --fast` turn *completes*
           // (actions.ts → waitForAcceptedPromptCompletion), so the change is
@@ -5048,6 +5318,7 @@ export function App({
       streamingState,
       reportError,
       reloadWorkspaceSettings,
+      modelSettingScope,
     ],
   );
 
@@ -5056,11 +5327,11 @@ export function App({
       // Model IDs from the voice picker arrive as bare model IDs (baseModelId),
       // not ACP format. extractVoiceModels() sets id to the baseModelId.
       const bareModelId = extractBareModelId(modelId);
-      setWorkspaceSetting('workspace', 'voiceModel', bareModelId).catch(
+      setWorkspaceSetting(modelSettingScope, 'voiceModel', bareModelId).catch(
         (error: unknown) => reportError(error, t('model.setVoice')),
       );
     },
-    [reportError, setWorkspaceSetting, t],
+    [modelSettingScope, reportError, setWorkspaceSetting, t],
   );
 
   const handleVisionModelSelect = useCallback(
@@ -5068,11 +5339,11 @@ export function App({
       // Model IDs from the picker arrive in ACP format: `modelId(authType)`.
       // Core's resolveVisionModelSelection() expects `authType:modelId`.
       const encoded = encodeVisionModelForSetting(modelId);
-      setWorkspaceSetting('workspace', 'visionModel', encoded).catch(
+      setWorkspaceSetting(modelSettingScope, 'visionModel', encoded).catch(
         (error: unknown) => reportError(error, t('model.setVision')),
       );
     },
-    [reportError, setWorkspaceSetting, t],
+    [modelSettingScope, reportError, setWorkspaceSetting, t],
   );
 
   const modelHandlers: Record<ModelDialogMode, (id: string) => void> = {
@@ -5081,6 +5352,16 @@ export function App({
     voice: handleVoiceModelSelect,
     vision: handleVisionModelSelect,
   };
+
+  // Once every settings-launched model surface is closed (the model picker via
+  // modelDialogMode, the fallbacks dialog, or the Add Model / auth dialog),
+  // reset the persist scope so a later command-launched picker defaults back
+  // to workspace.
+  useEffect(() => {
+    if (!modelDialogMode && !showFallbacksDialog && !showAuthDialog) {
+      setModelSettingScope('workspace');
+    }
+  }, [modelDialogMode, showFallbacksDialog, showAuthDialog]);
 
   const commands = useMemo(() => {
     return localizeBuiltinDescriptions(
@@ -5450,7 +5731,7 @@ export function App({
             <DialogShell
               title={t('auth.title')}
               size="lg"
-              onClose={() => setShowAuthDialog(false)}
+              onClose={handleCloseAuthDialog}
             >
               <AuthMessage
                 onMessage={(text, type = 'status') => {
@@ -5460,7 +5741,22 @@ export function App({
                       : { type: 'status', text },
                   ]);
                 }}
-                onClose={() => setShowAuthDialog(false)}
+                onClose={handleCloseAuthDialog}
+              />
+            </DialogShell>
+          )}
+          {showFallbacksDialog && (
+            <DialogShell
+              title={t('settings.models.fallbacks.title')}
+              size="md"
+              onClose={() => setShowFallbacksDialog(false)}
+            >
+              <ModelFallbacksDialog
+                models={fallbackModelOptions}
+                current={currentModelFallbacks}
+                max={3}
+                onConfirm={handleFallbacksConfirm}
+                onClose={() => setShowFallbacksDialog(false)}
               />
             </DialogShell>
           )}
@@ -5547,7 +5843,6 @@ export function App({
                 className={[
                   styles.mobileDrawer,
                   mobileDrawerOpen ? styles.mobileDrawerOpen : undefined,
-                  forceMobileDrawer ? styles.mobileDrawerForced : undefined,
                 ]
                   .filter(Boolean)
                   .join(' ')}
@@ -5586,13 +5881,22 @@ export function App({
                     openSplitView();
                   }}
                   canOpenSplitView={isLargeScreen}
-                  onNewSession={() => {
-                    setMainView('chat');
-                    return createNewSession();
+                  theme={selectedTheme}
+                  onThemeChange={(theme) => {
+                    handleThemeChange(theme);
+                    void setWorkspaceSetting(
+                      'workspace',
+                      THEME_SETTING_KEY,
+                      webShellThemeToSettingValue(theme),
+                    );
                   }}
-                  onLoadSession={(sessionId) => {
+                  onNewSession={(workspaceCwd) => {
                     setMainView('chat');
-                    return loadSidebarSession(sessionId);
+                    return createNewSession(workspaceCwd);
+                  }}
+                  onLoadSession={(sessionId, workspaceCwd) => {
+                    setMainView('chat');
+                    return loadSidebarSession(sessionId, workspaceCwd);
                   }}
                   onError={reportError}
                   mobileOpen={mobileDrawerOpen}
@@ -5631,7 +5935,6 @@ export function App({
                       .filter(Boolean)
                       .join(' ')}
                     onClick={() => {
-                      setForceMobileDrawer(false);
                       setMobileDrawerOpen((open) => !open);
                     }}
                     aria-label={t('sidebar.toggleMenu')}
@@ -5703,12 +6006,63 @@ export function App({
                         onThemeChange={handleThemeChange}
                         chatWidthMode={chatWidthMode}
                         onChatWidthModeChange={handleChatWidthModeChange}
-                        onSubDialog={(key) => {
-                          if (key === 'fastModel') setModelDialogMode('fast');
-                          else if (key === 'visionModel')
+                        modelManagement={{
+                          providers: providersState.providers,
+                          currentModelId:
+                            connection.currentModel ?? undefined,
+                          loading: providersState.loading,
+                          error: providersState.error,
+                          busy: modelActionBusy,
+                          onSelectModel: handleModelSelect,
+                          onDeleteModel: handleDeleteModel,
+                          onAddModel: () => setShowAuthDialog(true),
+                        }}
+                        onSubDialog={(key, scope) => {
+                          // Record the persist scope only for model settings —
+                          // the reset effect is gated on the dialog/fallback/auth
+                          // flags, so it never runs for the approvalMode dialog
+                          // and would leave a stale scope behind.
+                          if (key === 'fastModel') {
+                            setModelSettingScope(scope);
+                            setModelDialogMode('fast');
+                          } else if (key === 'visionModel') {
+                            setModelSettingScope(scope);
                             setModelDialogMode('vision');
-                          else if (key === 'tools.approvalMode')
+                          } else if (key === 'voiceModel') {
+                            // The voice picker opens asynchronously (after
+                            // loadProviders), so DON'T record the scope up front:
+                            // if the user opens and closes another picker while
+                            // loading, the reset effect would clobber it and the
+                            // voice model would persist to the wrong scope. Set
+                            // the scope together with the open, from this click's
+                            // captured `scope`, and only when no other surface
+                            // opened meanwhile.
+                            workspaceActions
+                              .loadProviders()
+                              .then((status) => {
+                                setVoiceModels(extractVoiceModels(status));
+                                // "No other surface opened meanwhile" — mirror the
+                                // reset effect's condition so the voice picker
+                                // never opens on top of a fallbacks/auth dialog.
+                                if (
+                                  modelDialogModeRef.current === null &&
+                                  !showFallbacksDialogRef.current &&
+                                  !showAuthDialogRef.current
+                                ) {
+                                  setModelSettingScope(scope);
+                                  setModelDialogMode('voice');
+                                }
+                              })
+                              .catch((error: unknown) =>
+                                reportError(error, t('model.setVoice')),
+                              );
+                          } else if (key === 'modelFallbacks') {
+                            setModelSettingScope(scope);
+                            setShowFallbacksDialog(true);
+                          } else if (key === 'tools.approvalMode') {
+                            // Not a model setting — leave modelSettingScope alone.
                             setShowApprovalModeDialog(true);
+                          }
                         }}
                       />
                     ) : activePanel === 'status' ? (
@@ -6138,14 +6492,11 @@ export function App({
                           onClearQueuedMessages={clearQueuedPrompts}
                           currentMode={currentMode}
                           currentModel={currentModel}
-                          gitBranch={connection.gitBranch}
-                          workspaceName={
-                            hasMultipleWorkspaces(connection.capabilities) &&
-                            connection.workspaceCwd
-                              ? workspaceBasename(connection.workspaceCwd)
-                              : undefined
+                          gitBranch={
+                            connection.sessionId
+                              ? connection.gitBranch
+                              : selectedWorkspaceGitBranch
                           }
-                          workspaceTitle={connection.workspaceCwd || undefined}
                           chatWidthMode={chatWidthMode}
                           showChatWidthToggle={!isChatEmptyState}
                           chatWidthToggleMin={chatWidthToggleMin}
@@ -6153,6 +6504,43 @@ export function App({
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
+                          workspaces={
+                            workspaces.length > 1
+                              ? workspaces.map((entry) => ({
+                                    id: entry.id,
+                                    cwd: entry.cwd,
+                                    label:
+                                      entry.cwd
+                                        .split(/[\\/]+/)
+                                        .filter(Boolean)
+                                        .at(-1) ?? entry.cwd,
+                                    primary: entry.primary,
+                                  }))
+                              : undefined
+                          }
+                          selectedWorkspaceCwd={
+                            connection.sessionId
+                              ? workspaces.find(
+                                  (entry) =>
+                                    entry.cwd === connection.workspaceCwd,
+                                )?.primary
+                                ? undefined
+                                : connection.workspaceCwd
+                              : selectedWorkspaceCwd
+                          }
+                          workspaceSelectionDisabled={Boolean(
+                            connection.sessionId,
+                          )}
+                          atWorkspaceCwd={
+                            connection.sessionId
+                              ? connection.workspaceCwd
+                              : (selectedWorkspaceCwd ??
+                                workspaces.find((entry) => entry.primary)?.cwd)
+                          }
+                          onSelectWorkspace={(cwd) => {
+                            selectedWorkspaceCwdRef.current = cwd;
+                            setSelectedWorkspaceCwd(cwd);
+                          }}
                           onChatWidthModeChange={handleChatWidthModeChange}
                           sessionName={sessionDisplayName}
                           dialogOpen={
