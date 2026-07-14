@@ -68,6 +68,15 @@ export interface AgentRecord {
    * verifier) can still show which lines it opened.
    */
   diffReads: Array<[number, number]>;
+  /**
+   * The arguments of every successful tool call, serialized.
+   *
+   * So a check can ask "did this agent open *that* file" of any path, not only the
+   * diff. The one that matters is the agent's own brief: the launch prompt now
+   * points at it rather than containing it, and whether the agent read it is a fact
+   * the harness wrote down, not a hope.
+   */
+  successfulCallArgs: string[];
   /** The agent's own final text, as the harness saw it. */
   finalText: string;
   /** When the transcript was last written. */
@@ -190,8 +199,10 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
   interface Pending {
     namedTheDiff: boolean;
     range: [number, number] | null;
+    args: string;
   }
   const diffReads: Array<[number, number]> = [];
+  const successfulCallArgs: string[] = [];
   const byId = new Map<string, Pending>();
   const anonymous: Pending[] = [];
 
@@ -234,6 +245,7 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
       const pending: Pending = {
         namedTheDiff,
         range: namedTheDiff ? rangeOf(args) : null,
+        args: JSON.stringify(args),
       };
       if (typeof fc.id === 'string' && fc.id) byId.set(fc.id, pending);
       else anonymous.push(pending);
@@ -254,6 +266,7 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
       }
       if (!isErrorPart(part as FunctionResponsePart)) {
         successfulToolCalls++;
+        successfulCallArgs.push(pending.args);
         if (pending.namedTheDiff) {
           diffToolCalls++;
           if (pending.range) diffReads.push(pending.range);
@@ -283,6 +296,7 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
     successfulToolCalls,
     diffToolCalls,
     diffReads,
+    successfulCallArgs,
     finalText,
     mtimeMs,
   };

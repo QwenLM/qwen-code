@@ -151,6 +151,7 @@ describe('wasGivenTheDiff', () => {
     successfulToolCalls: 0,
     diffToolCalls: 0,
     diffReads: [],
+    successfulCallArgs: [],
     finalText: '',
     mtimeMs: 0,
   });

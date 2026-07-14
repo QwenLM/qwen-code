@@ -244,6 +244,17 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
             '`agent-prompt` output verbatim)',
         );
       }
+      // A dimension nobody reviewed. This is exactly what `unreviewedDimensions`
+      // has always meant, arrived at from the plan instead of from the orchestrator
+      // noticing — which, on the run that never launched Agent 0, it did not.
+      for (const label of cov.missingRoles) {
+        unreviewed.push(`${label} — this agent never ran`);
+      }
+      // Launched, but never read the brief it was pointed at: it reviewed with no
+      // dimension, no severity definitions and no project rules.
+      for (const label of cov.unreadBriefs) {
+        unreviewed.push(label);
+      }
     } catch (err) {
       // Two different failures, and they must not wear each other's message. A
       // malformed plan is the caller's mistake and says so; missing transcripts

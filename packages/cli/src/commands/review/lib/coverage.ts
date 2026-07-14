@@ -59,7 +59,17 @@ import {
   TranscriptsUnavailableError,
   type AgentRecord,
 } from './transcripts.js';
-import { readRecordedPrompts, wasDeliveredVerbatim } from './prompt-record.js';
+import {
+  readRecordedPrompts,
+  wasDeliveredVerbatim,
+  briefPath,
+} from './prompt-record.js';
+import {
+  requiredAgents,
+  type RequiredAgent,
+  type RosterPlan,
+} from './roster.js';
+import { BRIEFS } from './agent-briefs.js';
 
 export interface CoverageFromTranscripts {
   /** True only when every chunk was reviewed by an agent that could and did. */
@@ -96,6 +106,26 @@ export interface CoverageFromTranscripts {
    * rules with a three-sentence summary of its own.
    */
   rewrittenPrompts: string[];
+  /**
+   * Agents the plan requires that this review did not launch.
+   *
+   * Every other field here asks a question of an agent that ran. An agent that did
+   * not run leaves no transcript to ask, so its absence is invisible — which is how
+   * a real PR review shipped having never launched Agent 0 at all, on a review whose
+   * job includes asking whether the PR fixes the thing it claims to. The roster is
+   * derived from the plan; nothing in it is supplied by the caller.
+   */
+  missingRoles: string[];
+  /**
+   * Required agents that never opened the brief they were pointed at.
+   *
+   * The launch prompt names the brief rather than containing it — a 4 652-character
+   * prompt is not something an orchestrator pastes twelve times, and the run that
+   * was asked to delivered 2 893 characters of it. So the instructions arrive only
+   * if the agent reads the file. Whether it did is a tool call, and the harness
+   * wrote it down.
+   */
+  unreadBriefs: string[];
   /** Chunk ids no working agent covered. */
   missingChunks: number[];
   /** Chunk ids an agent declared unreachable. */
@@ -104,7 +134,7 @@ export interface CoverageFromTranscripts {
   coveredChunks: number[];
 }
 
-/** The plan, as far as coverage needs it. */
+/** The plan, as far as coverage needs it. The roster reads more of it — see RosterPlan. */
 interface Plan {
   diffPathAbsolute: string;
   chunks: Array<{ id: number; startLine: number; endLine: number }>;
@@ -174,6 +204,21 @@ function pointedAt(prompt: string, plan: Plan): Array<[number, number]> {
 }
 
 const UNCOVERABLE_RE = /^\s*Uncoverable:\s*chunk\s+(\d+)\b/im;
+
+/** A required agent, named the way a reader has to act on it. */
+function roleLabel(req: RequiredAgent): string {
+  if (req.role === 'chunk') return `chunk ${req.chunk}`;
+  const base = BRIEFS[req.role].label;
+  return req.file ? `${base} — ${req.file}` : base;
+}
+
+/** The exact call that would have built it. An error a reader can act on names the fix. */
+function promptFlags(req: RequiredAgent): string {
+  if (req.role === 'chunk') return `--chunk ${req.chunk}`;
+  return req.file
+    ? `--role ${req.role} --file ${req.file}`
+    : `--role ${req.role}`;
+}
 
 /** Something a reader can act on. `agentName` is `general-purpose` for all of them. */
 function label(rec: AgentRecord, chunk: number | null): string {
@@ -293,6 +338,49 @@ export function coverageFromTranscripts(
   // response to.
   for (const id of uncoverable) covered.delete(id);
 
+  // Who *should* have been here. Every other check in this file asks a question of
+  // an agent that ran; an agent that never ran leaves no transcript to ask, so an
+  // omission is invisible precisely because it is an omission. Dogfooded, a real
+  // PR review simply never launched Agent 0 — issue fidelity, on a review whose
+  // whole job includes asking whether the PR fixes the thing it claims to — and
+  // nothing in the run could tell. The roster is derived from the plan, which the
+  // caller does not write, and matched against the prompts the CLI recorded itself
+  // emitting.
+  const missingRoles: string[] = [];
+  const unreadBriefs: string[] = [];
+  for (const req of requiredAgents(plan as unknown as RosterPlan)) {
+    const b = built.get(req.key);
+    if (b === undefined) {
+      missingRoles.push(
+        `${roleLabel(req)} — no prompt was built for it ` +
+          `(\`agent-prompt ${promptFlags(req)}\` never ran)`,
+      );
+      continue;
+    }
+    const agent = records.find((r) => wasDeliveredVerbatim(r.launchPrompt, b));
+    if (!agent) {
+      missingRoles.push(
+        `${roleLabel(req)} — its prompt was built, but no agent was launched with it`,
+      );
+      continue;
+    }
+    // The launch prompt points at the brief rather than containing it, because a
+    // 4 652-character prompt is not a thing an orchestrator will paste twelve times
+    // — measured, it delivered 2 893 of them and cut the rest. Which means the
+    // instructions now arrive only if the agent opens the file. That is not a hope:
+    // it is a tool call, and the harness wrote it down.
+    if (req.role !== 'chunk') {
+      const brief = briefPath(planPath, req.key);
+      const opened = agent.successfulCallArgs.some((a) => a.includes(brief));
+      if (!opened) {
+        unreadBriefs.push(
+          `${roleLabel(req)} — never opened its brief (${brief}), so it reviewed ` +
+            'without the instructions it was launched to follow',
+        );
+      }
+    }
+  }
+
   const planned = plan.chunks.map((c) => c.id);
   const missingChunks = planned.filter(
     (id) => !covered.has(id) && !uncoverable.has(id),
@@ -304,6 +392,8 @@ export function coverageFromTranscripts(
       idleAgents.length === 0 &&
       unopenedAgents.length === 0 &&
       rewrittenPrompts.length === 0 &&
+      missingRoles.length === 0 &&
+      unreadBriefs.length === 0 &&
       // An uncoverable chunk is a disclosed gap, not coverage: a diff with a line
       // no read can reach was not reviewed, and the verdict may not be Approve on
       // its strength. `compose-review` already caps on it; the report must agree.
@@ -314,6 +404,8 @@ export function coverageFromTranscripts(
     idleAgents,
     unopenedAgents,
     rewrittenPrompts,
+    missingRoles,
+    unreadBriefs,
     missingChunks,
     uncoverableChunks: [...uncoverable].sort((a, b) => a - b),
     coveredChunks: [...covered].sort((a, b) => a - b),

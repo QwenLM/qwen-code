@@ -48,6 +48,52 @@ export function promptRecordDir(planPath: string): string {
   return join(dirname(p), `${basename(p).replace(/\.json$/i, '')}-prompts`);
 }
 
+/**
+ * A key as a filename.
+ *
+ * An invariant agent's key carries the path of the file it owns —
+ * `invariant-a--packages/cli/src/x.ts` — and a `/` in a filename is a directory
+ * that does not exist. Percent-encoding is reversible, so the reader recovers the
+ * key exactly rather than guessing it back from a mangled name.
+ */
+const fileFor = (key: string) => `${encodeURIComponent(key)}.txt`;
+
+/** Where this agent's brief lives — the file it is told to read first. */
+export function briefPath(planPath: string, key: string): string {
+  return join(promptRecordDir(planPath), `${encodeURIComponent(key)}.brief.md`);
+}
+
+/**
+ * Write the brief this agent is told to read.
+ *
+ * The brief is not in the launch prompt, and that is deliberate. Measured on a real
+ * run: asked to paste a 4 652-character prompt to each of twelve agents, the
+ * orchestrator delivered 2 893 characters — it kept the head, added a preamble of
+ * its own, and **cut 1 900 characters out of the middle**. It will not carry
+ * fifty-five kilobytes of instructions across twelve tool calls, and telling it
+ * again to do so is the same prose that has failed every time.
+ *
+ * So the brief goes where the diff already goes: on disk, read by the agent that
+ * needs it. What the orchestrator has to carry shrinks to something it will
+ * actually carry — and whether the agent read it is then a fact in the harness's
+ * transcript, not a hope.
+ */
+export function writeBrief(
+  planPath: string,
+  key: string,
+  brief: string,
+): string {
+  const p = briefPath(planPath, key);
+  try {
+    mkdirSync(promptRecordDir(planPath), { recursive: true });
+    writeFileSync(p, brief);
+  } catch {
+    // Same reasoning as recordPrompt: a read-only tmp dir fails at the check, where
+    // a reader can act on it, not here.
+  }
+  return p;
+}
+
 /** Record the prompt `key` was built with. Best-effort: never fails a build. */
 export function recordPrompt(
   planPath: string,
@@ -57,7 +103,7 @@ export function recordPrompt(
   try {
     const dir = promptRecordDir(planPath);
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, `${key}.txt`), prompt);
+    writeFileSync(join(dir, fileFor(key)), prompt);
   } catch {
     // A read-only tmp dir must not stop a review from being *built*. The check
     // that reads these back reports "no prompt was recorded" and fails there,
@@ -76,9 +122,18 @@ export function readRecordedPrompts(planPath: string): Map<string, string> {
     return out; // Never run, or nothing to record. The caller decides what that means.
   }
   for (const name of names) {
+    // `.txt` is the launch prompt — the thing the orchestrator must deliver
+    // verbatim. `.brief.md` beside it is the agent's own reading, and is not what
+    // the delivery check compares against.
     if (!name.endsWith('.txt')) continue;
     try {
-      out.set(name.slice(0, -4), readFileSync(join(dir, name), 'utf8'));
+      let key: string;
+      try {
+        key = decodeURIComponent(name.slice(0, -4));
+      } catch {
+        continue; // Not a name this module wrote.
+      }
+      out.set(key, readFileSync(join(dir, name), 'utf8'));
     } catch {
       /* raced with a cleanup */
     }

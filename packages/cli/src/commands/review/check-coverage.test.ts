@@ -20,6 +20,8 @@ import {
   mkdtempSync,
   rmSync,
   writeFileSync,
+  readFileSync,
+  existsSync,
   mkdirSync,
   utimesSync,
 } from 'node:fs';
@@ -29,7 +31,8 @@ import {
   coverageFromTranscripts,
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
-import { promptRecordDir } from './lib/prompt-record.js';
+import { promptRecordDir, briefPath } from './lib/prompt-record.js';
+import { requiredAgents, type RosterPlan } from './lib/roster.js';
 
 let dir: string;
 let ENV: NodeJS.ProcessEnv;
@@ -50,12 +53,23 @@ afterEach(() => rmSync(dir, { recursive: true, force: true }));
  * chunk, because that is the state of a run that used the command it was told to
  * use. Pass `{ record: false }` for a run that hand-wrote its prompts instead.
  */
-function plan(n = 2, opts: { record?: boolean } = {}): string {
+function plan(
+  n = 2,
+  opts: { record?: boolean; roster?: boolean } = {},
+): string {
   const p = join(dir, 'plan.json');
   writeFileSync(
     p,
     JSON.stringify({
       diffPathAbsolute: DIFF,
+      // A territory fan-out, captured cross-repo, with no deletions: the smallest
+      // plan whose roster is exactly the chunks plus the test matrix. The fixtures
+      // below are about chunk agents, so this keeps the roster out of their way
+      // without switching it off — a plan that requires nothing is not a plan any
+      // capture command writes.
+      srcDiffLines: 5000,
+      diffLines: 5000,
+      files: [{ path: 'a.ts', kind: 'source', removedLines: 0, heavy: false }],
       chunks: Array.from({ length: n }, (_, i) => ({
         id: i + 1,
         startLine: i * 100 + 1,
@@ -66,16 +80,61 @@ function plan(n = 2, opts: { record?: boolean } = {}): string {
   if (opts.record !== false) {
     for (let c = 1; c <= n; c++) built(p, c);
   }
+  if (opts.roster !== false) satisfyRoster(p);
   const old = new Date(2020, 0, 1);
   utimesSync(p, old, old);
   return p;
+}
+
+/**
+ * Build and launch every agent this plan's roster requires that the test has not
+ * already set up itself.
+ *
+ * A run that launched only its chunk agents is a run that skipped the whole-diff
+ * half of the fan-out, and the roster check is right to fail it — so the fixtures
+ * have to look like real runs. These stand-ins name no line ranges, so they grant
+ * no coverage: a review may not certify lines on the strength of "somebody had the
+ * file open".
+ */
+function satisfyRoster(planPath: string): void {
+  const p = JSON.parse(readFileSync(planPath, 'utf8')) as RosterPlan;
+  const d = promptRecordDir(planPath);
+  mkdirSync(d, { recursive: true });
+  for (const req of requiredAgents(p)) {
+    // Not the chunk agents: their prompts are what most of these tests are ABOUT,
+    // and writing one here would quietly satisfy the check a test is trying to fail.
+    if (req.role === 'chunk') continue;
+    const f = join(d, `${encodeURIComponent(req.key)}.txt`);
+    if (existsSync(f)) continue;
+    // The launch prompt POINTS at the brief; the brief is what the agent reads.
+    // Both are written by the CLI, and the agent opening the second is what proves
+    // the instructions arrived — a 4 652-character prompt is not something an
+    // orchestrator pastes twelve times, and the run asked to do so delivered 2 893.
+    const brief = briefPath(planPath, req.key);
+    writeFileSync(brief, `The ${req.key} brief.`);
+    const prompt =
+      `You are ${req.key}.\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    writeFileSync(f, prompt);
+    transcript(`r-${req.key.replace(/[^a-z0-9]/gi, '_')}`, prompt, {
+      calls: 2,
+      opens: [brief],
+    });
+  }
 }
 
 /** Write a transcript the way the harness writes one. */
 function transcript(
   id: string,
   launchPrompt: string,
-  opts: { calls?: number; failed?: boolean; text?: string } = {},
+  opts: {
+    calls?: number;
+    failed?: boolean;
+    text?: string;
+    /** Extra paths this agent successfully opened — its brief, most of all. */
+    opens?: string[];
+  } = {},
 ): void {
   const base = { agentId: id, agentName: 'general-purpose', sessionId: 'S1' };
   const lines = [
@@ -109,6 +168,35 @@ function transcript(
                 response: opts.failed
                   ? { error: 'permission denied' }
                   : { output: 'diff bytes' },
+              },
+            },
+          ],
+        },
+      }),
+    );
+  }
+  for (const path of opts.opens ?? []) {
+    lines.push(
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            { functionCall: { name: 'read_file', args: { file_path: path } } },
+          ],
+        },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: 'brief' },
               },
             },
           ],
@@ -165,6 +253,53 @@ function built(planPath: string, c: number, prompt = good(c)): void {
   const d = promptRecordDir(planPath);
   mkdirSync(d, { recursive: true });
   writeFileSync(join(d, `chunk-${c}.txt`), prompt);
+}
+
+/** A genuine Step 3A plan: a small source change, every dimension walking it all. */
+function plan3a(): string {
+  const p = join(dir, 'plan.json');
+  writeFileSync(
+    p,
+    JSON.stringify({
+      diffPathAbsolute: DIFF,
+      srcDiffLines: 200,
+      diffLines: 300,
+      files: [{ path: 'a.ts', kind: 'source', removedLines: 0, heavy: false }],
+      chunks: [
+        { id: 1, startLine: 1, endLine: 100 },
+        { id: 2, startLine: 101, endLine: 200 },
+      ],
+    }),
+  );
+  satisfyRoster(p);
+  const old = new Date(2020, 0, 1);
+  utimesSync(p, old, old);
+  return p;
+}
+
+/** A same-repo PR: there is a tree to grep and build, and an issue to check against. */
+function planPr(): string {
+  const p = join(dir, 'plan.json');
+  writeFileSync(
+    p,
+    JSON.stringify({
+      diffPathAbsolute: DIFF,
+      srcDiffLines: 200,
+      diffLines: 300,
+      prNumber: '6766',
+      ownerRepo: 'QwenLM/qwen-code',
+      worktreePath: '.qwen/tmp/review-pr-6766',
+      files: [{ path: 'a.ts', kind: 'source', removedLines: 0, heavy: false }],
+      chunks: [
+        { id: 1, startLine: 1, endLine: 100 },
+        { id: 2, startLine: 101, endLine: 200 },
+      ],
+    }),
+  );
+  satisfyRoster(p);
+  const old = new Date(2020, 0, 1);
+  utimesSync(p, old, old);
+  return p;
 }
 
 describe('coverage — from the harness, not from the caller', () => {
@@ -492,7 +627,7 @@ describe('Step 3A — dimension agents, no territory, no receipts', () => {
     transcript('sec', wholeDiff(), { calls: 8 });
     transcript('perf', wholeDiff(), { calls: 5 });
 
-    const r = coverageFromTranscripts(plan(), ENV);
+    const r = coverageFromTranscripts(plan3a(), ENV);
     expect(r.coveredChunks).toEqual([1, 2]);
     expect(r.missingChunks).toEqual([]);
     expect(r.ok).toBe(true);
@@ -507,7 +642,7 @@ describe('Step 3A — dimension agents, no territory, no receipts', () => {
       { calls: 4 },
     );
 
-    const r = coverageFromTranscripts(plan(), ENV);
+    const r = coverageFromTranscripts(plan3a(), ENV);
     expect(r.coveredChunks).toEqual([1]);
     expect(r.missingChunks).toEqual([2]);
     expect(r.ok).toBe(false);
@@ -579,6 +714,63 @@ describe('worked, but not on the diff', () => {
     expect(r.unopenedAgents).toEqual(['chunk 1']);
     expect(r.coveredChunks).toEqual([2]);
     expect(r.ok).toBe(false);
+  });
+});
+
+// The failure no other check in this file can see. Every other question is asked of
+// an agent that ran; an agent that never ran leaves no transcript to ask.
+describe('the roster — who should have been here', () => {
+  it('catches the agent that was never launched at all', () => {
+    // Dogfooded, a real PR review simply never launched Agent 0 — issue fidelity —
+    // and nothing in the run could tell. The other eight dimensions ran and did
+    // real work, so every check passed, and the review certified a diff whose
+    // "does this even fix the thing it claims to" question nobody asked.
+    const p = planPr();
+    // Un-launch one of them: delete its record and its transcript.
+    rmSync(join(promptRecordDir(p), '1c.txt'), { force: true });
+    rmSync(join(dir, 'subagents', 'S1', 'agent-r-1c.jsonl'), { force: true });
+    transcript('sec', wholeDiff(), { calls: 8 }); // somebody covered the chunks
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.missingRoles).toHaveLength(1);
+    expect(r.missingRoles[0]).toContain('Cross-file tracer');
+    expect(r.missingRoles[0]).toContain('--role 1c');
+    expect(r.ok).toBe(false);
+    // And it is not confused with the agents that *did* run.
+    expect(r.idleAgents).toEqual([]);
+    expect(r.coveredChunks).toEqual([1, 2]);
+  });
+
+  it('catches a prompt that was built and then never used', () => {
+    // Half of the failure: the command was called, so the record exists — but the
+    // agent was launched with something else, or not launched at all.
+    const p = plan3a();
+    rmSync(join(dir, 'subagents', 'S1', 'agent-r-2.jsonl'), { force: true });
+    transcript('sec', wholeDiff(), { calls: 8 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.missingRoles).toEqual([
+      'Agent 2: Security — its prompt was built, but no agent was launched with it',
+    ]);
+    expect(r.ok).toBe(false);
+  });
+
+  it('does not demand a build-and-test agent from a diff with no tree to build', () => {
+    // A cross-repo lightweight review has the diff and nothing else. Requiring
+    // Agent 7 or the cross-file tracer of it would fail every such review for not
+    // doing something it cannot do.
+    const p = plan3a();
+    transcript('sec', wholeDiff(), { calls: 8 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.missingRoles).toEqual([]);
+    expect(r.ok).toBe(true);
+    // The same plan WITH a worktree does demand them.
+    expect(
+      requiredAgents(
+        JSON.parse(readFileSync(planPr(), 'utf8')) as RosterPlan,
+      ).map((a) => a.key),
+    ).toEqual(expect.arrayContaining(['0', '1c', '7']));
   });
 });
 

@@ -21,6 +21,8 @@ import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import {
   buildChunkAgentPrompt,
   buildWholeDiffBlock,
+  buildRoleBrief,
+  buildRoleLaunchPrompt,
   agentPromptCommand,
 } from './agent-prompt.js';
 import { readRecordedPrompts } from './lib/prompt-record.js';
@@ -389,5 +391,203 @@ describe('buildWholeDiffBlock — the agents that walk the whole diff', () => {
         ...extra,
       }),
     ).toThrow(/exactly one of --chunk/);
+  });
+});
+
+// The rest of the fan-out. Every agent's prompt is now built here — because the
+// half that was not got launched with no diff path at all, and the one that was
+// never launched at all could not be seen by anything that inspects the agents
+// that ran.
+describe('buildRolePrompt — every agent, not just the territory ones', () => {
+  const PR_PLAN = {
+    ...PLAN,
+    prNumber: '6766',
+    ownerRepo: 'QwenLM/qwen-code',
+    worktreePath: '.qwen/tmp/review-pr-6766',
+    mergeBaseSha: 'abc123',
+  };
+
+  it.each([
+    '1a',
+    '1b',
+    '1c',
+    '2',
+    '3',
+    '4',
+    '5',
+    '6a',
+    '6b',
+    '6c',
+    'test-matrix',
+  ] as const)('welds the diff and every chunk read into role %s', (role) => {
+    const p = buildRoleBrief(PLAN, role);
+    expect(p).toContain(PLAN.diffPathAbsolute);
+    for (const c of PLAN.chunks) {
+      expect(p).toContain(
+        `offset=${c.startLine - 1}, limit=${c.endLine - c.startLine + 1}`,
+      );
+    }
+    // And the things a paraphrase drops.
+    expect(p).toContain('say what you examined');
+    expect(p).toContain('**Critical**');
+    expect(p).not.toMatch(/If you find no issues, say/i);
+  });
+
+  it('gives Agent 7 no diff — its evidence is the commands it ran', () => {
+    // It runs the build. Requiring it to open the diff would be requiring a thing
+    // its job does not involve, and reporting it "blind" for not doing so would
+    // send the reader to fix a prompt that is correct.
+    const p = buildRoleBrief(PR_PLAN, '7');
+    expect(p).not.toContain(PLAN.diffPathAbsolute);
+    expect(p).toContain('npm run build');
+    expect(p).toContain('Source: [build]');
+  });
+
+  it('pins Agent 7 to the PR worktree and hands it the test-efficacy probe', () => {
+    const p = buildRoleBrief(PR_PLAN, '7', { planPath: '/tmp/plan.json' });
+    expect(p).toContain('.qwen/tmp/review-pr-6766');
+    expect(p).toContain('qwen review test-efficacy /tmp/plan.json');
+    expect(p).toContain('--base abc123');
+  });
+
+  it('welds the PR into Agent 0 — a bare `gh pr view` judges the wrong issue', () => {
+    const p = buildRoleBrief(PR_PLAN, '0', {
+      planPath: '/x/qwen-review-pr-6766-fetch.json',
+    });
+    expect(p).toContain('#6766');
+    expect(p).toContain('QwenLM/qwen-code');
+    expect(p).toContain('/x/qwen-review-pr-6766-context.md');
+    // The empty scope is a complete answer, and it needs evidence to be one.
+    expect(p).toContain('scope empty');
+  });
+
+  it('refuses Agent 0 on a plan with no pull request in it', () => {
+    expect(() => buildRoleBrief(PLAN, '0')).toThrow(/prNumber/);
+  });
+
+  it('gives an invariant agent the file, its added ranges, and its diff slice', () => {
+    // The third is not optional. A deletion leaves no trace in the post-change
+    // file — the removed line is simply not there, and nothing marks where it was.
+    const plan = {
+      ...PLAN,
+      files: [
+        {
+          path: 'src/big.ts',
+          heavy: true,
+          addedRanges: [{ start: 10, end: 40 }],
+          diffRange: { startLine: 100, endLine: 300 },
+        },
+      ],
+    };
+    const p = buildRoleBrief(plan, 'invariant-a', { file: 'src/big.ts' });
+    expect(p).toContain('read_file(file_path="src/big.ts")');
+    expect(p).toContain('10-40');
+    expect(p).toContain(
+      `read_file(file_path="${PLAN.diffPathAbsolute}", offset=99, limit=201)`,
+    );
+    expect(p).toContain('setTimeout');
+  });
+
+  it('refuses an invariant agent on a file the diff did not rewrite', () => {
+    const plan = {
+      ...PLAN,
+      files: [{ path: 'src/small.ts', heavy: false }],
+    };
+    expect(() =>
+      buildRoleBrief(plan, 'invariant-a', { file: 'src/small.ts' }),
+    ).toThrow(/not a heavy file/);
+  });
+
+  it('splits the invariant checklist three ways, and says so', () => {
+    const plan = {
+      ...PLAN,
+      files: [
+        {
+          path: 'f.ts',
+          heavy: true,
+          addedRanges: [],
+          diffRange: { startLine: 1, endLine: 2 },
+        },
+      ],
+    };
+    const a = buildRoleBrief(plan, 'invariant-a', { file: 'f.ts' });
+    const b = buildRoleBrief(plan, 'invariant-b', { file: 'f.ts' });
+    const c = buildRoleBrief(plan, 'invariant-c', { file: 'f.ts' });
+    expect(a).toContain('Timers');
+    expect(b).toContain('Retry counters');
+    expect(c).toContain('Early returns');
+    for (const p of [a, b, c]) expect(p).toContain('do not attempt the others');
+  });
+
+  it('carries the project rules into every role', () => {
+    expect(buildRoleBrief(PLAN, '2', { rules: 'No `any`.' })).toContain(
+      'No `any`.',
+    );
+    expect(
+      buildRoleBrief(
+        { ...PLAN, prNumber: '1', ownerRepo: 'a/b', worktreePath: 'w' },
+        '7',
+        { rules: 'No `any`.' },
+      ),
+    ).toContain('No `any`.');
+  });
+
+  it('records each role under the key the roster looks it up by', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-role-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PR_PLAN));
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: '1c',
+      });
+      (agentPromptCommand.handler as (a: unknown) => void)({ plan, role: '2' });
+      const recorded = readRecordedPrompts(plan);
+      expect([...recorded.keys()].sort()).toEqual(['1c', '2']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// The size problem, stated as a test. A 4 652-character prompt is not a thing an
+// orchestrator will paste twelve times: measured on a real run, it delivered 2 893
+// characters of one — head kept, preamble of its own added, 1 900 characters cut
+// out of the middle — then read the check's exit-3, decided "the agents clearly did
+// their job", skipped compose-review, and filed an Approve it had written itself.
+describe('buildRoleLaunchPrompt — small enough to actually be carried', () => {
+  it('points at the brief instead of containing it', () => {
+    const p = buildRoleLaunchPrompt(PLAN, '2', '/tmp/prompts/2.brief.md');
+    expect(p).toContain('read_file(file_path="/tmp/prompts/2.brief.md")');
+    expect(p).toContain('Your brief is a file');
+    // The brief's own text is NOT in it.
+    expect(p).not.toContain('Injection (SQL, command');
+  });
+
+  it('still names the diff and every range — coverage is computed from this', () => {
+    const p = buildRoleLaunchPrompt(PLAN, '2', '/tmp/2.brief.md');
+    expect(p).toContain(PLAN.diffPathAbsolute);
+    for (const c of PLAN.chunks) {
+      expect(p).toContain(
+        `offset=${c.startLine - 1}, limit=${c.endLine - c.startLine + 1}`,
+      );
+    }
+  });
+
+  it('gives Agent 7 no diff — it runs the build', () => {
+    const p = buildRoleLaunchPrompt(PLAN, '7', '/tmp/7.brief.md');
+    expect(p).not.toContain(PLAN.diffPathAbsolute);
+    expect(p).toContain('/tmp/7.brief.md');
+  });
+
+  it('stays under a kilobyte, where the full brief does not', () => {
+    // The number is the point. Twelve of these is a few kilobytes the orchestrator
+    // copies without editing; twelve of the briefs is fifty-five, which it does not.
+    for (const role of ['0', '1a', '1c', '2', '6a', '7'] as const) {
+      const launch = buildRoleLaunchPrompt(PLAN, role, '/tmp/x.brief.md');
+      expect(launch.length).toBeLessThan(1024);
+    }
+    const brief = buildRoleBrief(PLAN, '1c');
+    expect(brief.length).toBeGreaterThan(3000);
   });
 });

@@ -128,6 +128,26 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         `unedited — copy it, do not retype it.`,
     );
   }
+  // The one failure no other check in this file can see. Every other question is
+  // asked of an agent that ran; an agent that never ran leaves nothing to ask.
+  if (report.missingRoles.length > 0) {
+    writeStderrLine(
+      `ERROR: ${report.missingRoles.length} required agent(s) never ran — ` +
+        `${report.missingRoles.join('; ')}. The roster comes from the plan, not ` +
+        `from anything this run wrote. A dimension nobody reviewed cannot be ` +
+        `certified clean: build each prompt with the call named above and launch ` +
+        `an agent with it, verbatim.`,
+    );
+  }
+  if (report.unreadBriefs.length > 0) {
+    writeStderrLine(
+      `ERROR: ${report.unreadBriefs.length} agent(s) never opened their brief — ` +
+        `${report.unreadBriefs.join('; ')}. The launch prompt points at the brief ` +
+        `instead of containing it, so an agent that did not read it reviewed with ` +
+        `no dimension, no severity definitions and no project rules. Relaunch each ` +
+        `once, with the prompt \`agent-prompt\` printed.`,
+    );
+  }
   if (report.unopenedAgents.length > 0) {
     writeStderrLine(
       `ERROR: ${report.unopenedAgents.length} agent(s) were pointed at diff lines ` +

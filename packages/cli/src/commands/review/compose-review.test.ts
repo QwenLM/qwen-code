@@ -15,7 +15,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { promptRecordDir } from './lib/prompt-record.js';
+import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import {
   composeReview,
   composeReviewCommand,
@@ -47,13 +47,23 @@ afterEach(() => {
 
 const DIFF = '/abs/diff.txt';
 
-/** Write a plan with two chunks, and return its path. */
+/**
+ * Write a plan with two chunks, and return its path.
+ *
+ * A territory fan-out captured cross-repo, with no deletions: the smallest plan
+ * whose roster is exactly the chunks plus the test matrix. `coveredPlan()` below
+ * satisfies that one. A plan that requires nothing is not a plan any capture
+ * command writes, and coverage now reads the roster out of it.
+ */
 function plan(): string {
   const p = join(dir, 'plan.json');
   writeFileSync(
     p,
     JSON.stringify({
       diffPathAbsolute: DIFF,
+      srcDiffLines: 5000,
+      diffLines: 5000,
+      files: [{ path: 'a.ts', kind: 'source', removedLines: 0, heavy: false }],
       chunks: [
         { id: 1, startLine: 1, endLine: 100 },
         { id: 2, startLine: 101, endLine: 200 },
@@ -73,7 +83,7 @@ function plan(): string {
 function transcript(
   id: string,
   launchPrompt: string,
-  opts: { toolCalls?: number; text?: string } = {},
+  opts: { toolCalls?: number; text?: string; opens?: string[] } = {},
 ): void {
   const base = { agentId: id, agentName: 'general-purpose', sessionId: 'S1' };
   const lines: string[] = [
@@ -105,6 +115,35 @@ function transcript(
               functionResponse: {
                 name: 'read_file',
                 response: { output: 'ok' },
+              },
+            },
+          ],
+        },
+      }),
+    );
+  }
+  for (const path of opts.opens ?? []) {
+    lines.push(
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            { functionCall: { name: 'read_file', args: { file_path: path } } },
+          ],
+        },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: 'brief' },
               },
             },
           ],
@@ -145,6 +184,22 @@ function recordBuilt(planPath: string, chunk: number): void {
   writeFileSync(join(d, `chunk-${chunk}.txt`), goodPrompt(chunk));
 }
 
+/**
+ * The one whole-diff agent this plan's roster requires, built and launched.
+ *
+ * Its prompt names no line ranges, so it grants no coverage — a review may not
+ * certify lines on the strength of "somebody had the file open".
+ */
+function recordMatrix(planPath: string): void {
+  const d = promptRecordDir(planPath);
+  mkdirSync(d, { recursive: true });
+  const brief = briefPath(planPath, 'test-matrix');
+  writeFileSync(brief, 'The test-matrix brief.');
+  const launch = `You are the test-coverage matrix agent.\nread_file(file_path="${brief}")\nread_file(file_path="${DIFF}")`;
+  writeFileSync(join(d, 'test-matrix.txt'), launch);
+  transcript('tm', launch, { toolCalls: 2, opens: [brief] });
+}
+
 /** The prompt the orchestrator actually sent, 23 times: no diff anywhere. */
 function blindPrompt(chunk: number): string {
   return `The changes are in chunk ${chunk} of 2, covering lines 1-100 of the diff.`;
@@ -157,6 +212,7 @@ function coveredPlan(): string {
   const p = plan();
   recordBuilt(p, 1);
   recordBuilt(p, 2);
+  recordMatrix(p);
   return p;
 }
 
