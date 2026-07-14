@@ -36,6 +36,8 @@ type ChatEditorTestProps = {
   isPreparing?: boolean;
   dialogOpen?: boolean;
   placeholderText?: string;
+  workspaces?: Array<{ id: string; cwd: string }>;
+  atWorkspaceCwd?: string;
 };
 
 const {
@@ -132,6 +134,8 @@ const {
           sessionId: string | null,
         ) => Promise<void>;
         onCreateViaChat?: () => void;
+        workspaces?: Array<{ id: string; cwd: string }>;
+        lockedWorkspace?: { id: string; cwd: string; primary: boolean };
       } | null,
     },
     sidebarTokens: [] as Array<number | undefined>,
@@ -583,6 +587,8 @@ vi.doMock('./components/dialogs/ScheduledTasksDialog', async () => {
   return {
     ScheduledTasksDialog: (props: {
       onRunPrompt?: (prompt: string, sessionId: string | null) => Promise<void>;
+      workspaces?: Array<{ id: string; cwd: string }>;
+      lockedWorkspace?: { id: string; cwd: string; primary: boolean };
     }) => {
       testState.latestScheduledTasksProps = props;
       return React.createElement('div');
@@ -718,6 +724,7 @@ beforeEach(() => {
     })),
   });
   mockConnection.sessionId = 'session-1';
+  mockConnection.workspaceCwd = '/tmp/project';
   mockConnection.status = 'connected';
   mockConnection.displayName = 'Session One';
   mockConnection.error = undefined;
@@ -725,6 +732,9 @@ beforeEach(() => {
   mockConnection.missingSession = false;
   mockConnection.loadingTranscript = false;
   mockConnection.catchingUp = false;
+  mockWorkspace.capabilities = {
+    workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
+  };
   testState.prompt = 'hello';
   testState.inputAnnotations = undefined;
   testState.streamingState = 'idle';
@@ -784,6 +794,82 @@ afterEach(() => {
 });
 
 describe('App session callbacks', () => {
+  it('reports the current workspace id and path', async () => {
+    mockConnection.workspaceCwd = '/work/secondary';
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true },
+        { id: 'secondary', cwd: '/work/secondary', primary: false },
+      ],
+    };
+    const onSessionIdChange = vi.fn();
+
+    renderApp({ onSessionIdChange });
+    await flush();
+
+    expect(onSessionIdChange).toHaveBeenCalledWith(
+      'session-1',
+      'secondary',
+      '/work/secondary',
+    );
+  });
+
+  it('creates new sessions in the locked workspace without a selector', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true },
+        { id: 'secondary', cwd: '/work/secondary', primary: false },
+      ],
+    };
+    renderApp({ lockedWorkspaceCwd: '/work/secondary' });
+    await flush();
+
+    expect(testState.latestChatEditorProps?.workspaces).toBeUndefined();
+    expect(testState.latestChatEditorProps?.atWorkspaceCwd).toBe(
+      '/work/secondary',
+    );
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('locked prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceCwd: '/work/secondary' }),
+    );
+  });
+
+  it('uses a registered capability fallback while the workspace list is stale', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/workspace',
+      workspaces: undefined,
+    };
+    const lockedWorkspaceCapability = {
+      id: 'secondary',
+      cwd: '/work/secondary',
+      primary: false,
+      trusted: true,
+    };
+    testState.prompt = '/schedule';
+    const { container } = renderApp({
+      lockedWorkspaceCwd: '/work/secondary',
+      lockedWorkspaceCapability,
+    });
+    await flush();
+    await clickSubmit(container);
+    await flush();
+
+    expect(testState.latestScheduledTasksProps?.workspaces).toEqual([
+      lockedWorkspaceCapability,
+    ]);
+    expect(testState.latestScheduledTasksProps?.lockedWorkspace).toEqual(
+      lockedWorkspaceCapability,
+    );
+  });
+
   it('uses configured composer placeholders by state and falls back for blank values', async () => {
     const composerPlaceholders = {
       idle: 'Ask a question',
