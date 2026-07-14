@@ -19,7 +19,6 @@ import {
   RefreshCwIcon,
   SearchIcon,
   ServerIcon,
-  SettingsIcon,
   SparklesIcon,
 } from 'lucide-react';
 import {
@@ -66,7 +65,6 @@ import {
   Card,
   CardContent,
   CardDescription,
-  CardFooter,
   CardHeader,
   CardTitle,
 } from '../ui/card';
@@ -98,12 +96,6 @@ import { RadioGroup, RadioGroupItem } from '../ui/radio-group';
 import { Separator } from '../ui/separator';
 import { Spinner } from '../ui/spinner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '../ui/tooltip';
 type Scope = 'user' | 'workspace';
 type Mutation = 'enable' | 'disable';
 type T = ReturnType<typeof useI18n>['t'];
@@ -117,7 +109,7 @@ const UPDATE_AVAILABLE: DaemonExtensionUpdateState = 'update available';
 
 interface ExtensionsManagerPageProps {
   onClose: () => void;
-  backButtonRef?: Ref<HTMLButtonElement>;
+  initialFocusRef?: Ref<HTMLHeadingElement>;
 }
 
 function extensionTitle(extension: DaemonExtensionEntry): string {
@@ -147,6 +139,8 @@ function updateLabel(
       return t('extensions.manage.updating');
     case 'updated':
       return t('extensions.manage.updateComplete');
+    case 'updated with warnings':
+      return t('extensions.manage.updatedWithWarnings');
     case 'updated, needs restart':
       return t('extensions.manage.restartRequired');
     case 'error':
@@ -389,7 +383,7 @@ function ExtensionInteractionDialog({
 
 export function ExtensionsManagerPage({
   onClose,
-  backButtonRef,
+  initialFocusRef,
 }: ExtensionsManagerPageProps) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -933,7 +927,6 @@ export function ExtensionsManagerPage({
       <BreadcrumbList className="text-base">
         <BreadcrumbItem>
           <Button
-            ref={backButtonRef}
             variant="ghost"
             size="icon"
             onClick={onClose}
@@ -1025,23 +1018,6 @@ export function ExtensionsManagerPage({
                   {statusLabel(selectedExtension, t)}
                 </Badge>
               </div>
-              {selectedExtension.description ? (
-                <TooltipProvider delayDuration={300}>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <p
-                        className="mt-1 line-clamp-2 text-sm text-muted-foreground"
-                        tabIndex={0}
-                      >
-                        {selectedExtension.description}
-                      </p>
-                    </TooltipTrigger>
-                    <TooltipContent className="max-w-sm whitespace-normal">
-                      {selectedExtension.description}
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-              ) : null}
             </div>
             <DropdownMenu open={actionsOpen} onOpenChange={setActionsOpen}>
               <DropdownMenuTrigger asChild>
@@ -1291,7 +1267,11 @@ export function ExtensionsManagerPage({
       <div className="flex w-full flex-col gap-6">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-semibold">
+            <h1
+              ref={initialFocusRef}
+              tabIndex={-1}
+              className="text-2xl font-semibold outline-none"
+            >
               {t('extensions.manage.title')}
             </h1>
             <p className="mt-1 text-sm text-muted-foreground">
@@ -1350,7 +1330,6 @@ export function ExtensionsManagerPage({
             {filteredExtensions.map((extension) => {
               const state =
                 updateStates[extension.name] ?? extension.updateState;
-              const capabilities = extension.capabilities;
               return (
                 <Card
                   key={extension.id || extension.name}
@@ -1375,77 +1354,34 @@ export function ExtensionsManagerPage({
                       <div className="row-span-3 flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted">
                         <PackageIcon className="size-5" />
                       </div>
-                      <CardTitle className="min-w-0 truncate">
-                        {extensionTitle(extension)}
-                      </CardTitle>
-                      <div className="col-start-2 flex flex-wrap gap-2">
-                        <Badge variant="outline">v{extension.version}</Badge>
-                        <Badge
-                          variant="secondary"
-                          className={
-                            extension.isActive
-                              ? 'bg-[var(--success-bg)] text-[var(--success-color)]'
-                              : undefined
-                          }
-                        >
-                          {statusLabel(extension, t)}
-                        </Badge>
-                        {state === UPDATE_AVAILABLE ? (
-                          <Badge>{updateLabel(state, t)}</Badge>
-                        ) : null}
+                      <div className="col-start-2 flex min-w-0 items-start justify-between gap-2">
+                        <CardTitle className="min-w-0 truncate">
+                          {extensionTitle(extension)}
+                        </CardTitle>
+                        <div className="flex shrink-0 justify-end">
+                          <Badge
+                            variant="secondary"
+                            className={
+                              extension.isActive
+                                ? 'bg-[var(--success-bg)] text-[var(--success-color)]'
+                                : undefined
+                            }
+                          >
+                            {statusLabel(extension, t)}
+                          </Badge>
+                        </div>
                       </div>
-                      <CardDescription className="col-start-2 line-clamp-2">
+                      {state === UPDATE_AVAILABLE ? (
+                        <div className="col-start-2">
+                          <Badge>{updateLabel(state, t)}</Badge>
+                        </div>
+                      ) : null}
+                      <CardDescription className="col-start-2 truncate">
                         {extension.description ||
                           t('extensions.manage.noDescription')}
                       </CardDescription>
                     </div>
                   </CardHeader>
-                  <CardFooter className="mt-auto flex flex-wrap justify-end gap-4 border-0 bg-transparent pt-0 text-xs text-muted-foreground tabular-nums">
-                    <span className="inline-flex items-center gap-1">
-                      <CommandIcon className="size-4" />
-                      <span className="sr-only">
-                        {t('extensions.manage.commands')}
-                      </span>
-                      {capabilities.commandCount}
-                    </span>
-                    <span className="inline-flex items-center gap-1">
-                      <SparklesIcon className="size-4" />
-                      <span className="sr-only">
-                        {t('extensions.manage.skills')}
-                      </span>
-                      {capabilities.skillCount}
-                    </span>
-                    <span className="inline-flex items-center gap-1">
-                      <BotIcon className="size-4" />
-                      <span className="sr-only">
-                        {t('extensions.manage.agents')}
-                      </span>
-                      {capabilities.agentCount}
-                    </span>
-                    <span className="inline-flex items-center gap-1">
-                      <ServerIcon className="size-4" />
-                      <span className="sr-only">
-                        {t('extensions.manage.mcpServers')}
-                      </span>
-                      {capabilities.mcpServerCount}
-                    </span>
-                    <span className="inline-flex items-center gap-1">
-                      <FileTextIcon className="size-4" />
-                      <span className="sr-only">
-                        {t('extensions.manage.contextFiles')}
-                      </span>
-                      {capabilities.contextFileCount}
-                    </span>
-                    {capabilities.hasSettings ? (
-                      <span
-                        className="inline-flex items-center"
-                        aria-label={t('extensions.manage.settings')}
-                        title={t('extensions.manage.settings')}
-                      >
-                        <SettingsIcon className="size-4" />
-                      </span>
-                    ) : null}
-                  </CardFooter>
                 </Card>
               );
             })}

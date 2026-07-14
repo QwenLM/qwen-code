@@ -240,6 +240,38 @@ describe('workspace service REST integration', () => {
       // No client-id header on GET — should be undefined
       expect(ctx.originatorClientId).toBeUndefined();
     });
+
+    it('only includes userInvocable when manual invocation is disabled', async () => {
+      const { app } = createTestApp({
+        workspaceOverrides: {
+          getWorkspaceSkillsStatus: vi.fn().mockResolvedValue({
+            v: 1,
+            workspaceCwd: WS_BOUND,
+            initialized: true,
+            skills: [
+              { name: 'normal-skill', source: 'project' },
+              {
+                name: 'hidden-skill',
+                source: 'project',
+                userInvocable: false,
+              },
+            ],
+          }),
+        },
+      });
+
+      const res = await request(app).get('/workspace/skills').set(hostHeader());
+
+      expect(res.status).toBe(200);
+      expect(res.body.skills).toEqual([
+        { name: 'normal-skill', source: 'project' },
+        {
+          name: 'hidden-skill',
+          source: 'project',
+          userInvocable: false,
+        },
+      ]);
+    });
   });
 
   // -------------------------------------------------------------------------

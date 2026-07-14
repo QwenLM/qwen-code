@@ -170,10 +170,50 @@ function Row({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
-function Card({ title, children }: { title: string; children: ReactNode }) {
+// Self-documenting metric: an ⓘ affordance next to a chart title whose hover /
+// focus reveals a plain-language explanation (what it measures, its unit, and
+// what's normal). The button's `aria-label` carries the text to assistive tech,
+// so the visual bubble is `aria-hidden` to avoid a double read. Purpose: cut the
+// "what does this mean / why two 'errors'?" support questions the dense metrics
+// tab otherwise generates.
+function InfoHint({ text }: { text: string }) {
+  return (
+    <span className={styles.infoHint}>
+      <button type="button" className={styles.infoHintButton} aria-label={text}>
+        <span aria-hidden="true">ⓘ</span>
+      </button>
+      <span aria-hidden="true" className={styles.infoHintTip}>
+        {text}
+      </span>
+    </span>
+  );
+}
+
+function Card({
+  title,
+  help,
+  children,
+}: {
+  title: string;
+  help?: string;
+  children: ReactNode;
+}) {
   return (
     <section className={styles.card}>
-      <h3 className={styles.cardTitle}>{title}</h3>
+      {/* Keep the ⓘ a SIBLING of the heading, not a child: the accessible-name
+          algorithm folds a descendant button's `aria-label` (the whole help
+          sentence) into the heading name, so a nested hint would make screen
+          readers announce "Model API health Each failed attempt = 1 error…"
+          in the heading rotor. The flex header preserves the visual inline
+          layout. Cards without help keep the bare heading. */}
+      {help ? (
+        <div className={styles.cardHeader}>
+          <h3 className={styles.cardTitle}>{title}</h3>
+          <InfoHint text={help} />
+        </div>
+      ) : (
+        <h3 className={styles.cardTitle}>{title}</h3>
+      )}
       {children}
     </section>
   );
@@ -323,8 +363,9 @@ function MetricsCharts({ series }: { series: DaemonMetricsSeriesBucket[] }) {
     titleKey: string,
     format: (v: number) => string,
     lines: ChartSeries[],
+    helpKey: string,
   ): ReactNode => (
-    <Card title={t(titleKey)}>
+    <Card title={t(titleKey)} help={t(helpKey)}>
       <SvgLineChart
         series={lines}
         timestamps={times}
@@ -336,153 +377,229 @@ function MetricsCharts({ series }: { series: DaemonMetricsSeriesBucket[] }) {
   );
   return (
     <div className={`${styles.grid} ${styles.chartsGrid}`}>
-      {chart('daemon.charts.concurrency', formatCount, [
-        {
-          label: t('daemon.charts.activePrompts'),
-          values: col((b) => b.activePrompts),
-          color: 'var(--primary)',
-        },
-        {
-          label: t('daemon.charts.queuedPrompts'),
-          values: col((b) => b.queuedPrompts),
-          color: 'var(--warning-color)',
-        },
-        {
-          label: t('daemon.charts.activeSessions'),
-          values: col((b) => b.activeSessions),
-          color: 'var(--muted-foreground)',
-        },
-      ])}
-      {chart('daemon.charts.requests', formatCount, [
-        {
-          label: t('daemon.charts.reqTotal'),
-          values: col((b) => b.requests),
-          color: 'var(--success-color)',
-        },
-        {
-          label: t('daemon.charts.reqErrors'),
-          values: col((b) => b.errors),
-          color: 'var(--error-color)',
-        },
-        {
-          label: t('daemon.charts.reqRejected'),
-          values: col((b) => b.rateLimitRejected),
-          color: 'var(--warning-color)',
-        },
-      ])}
-      {chart('daemon.charts.apiLatency', formatDurationMs, [
-        {
-          label: 'p50',
-          values: col((b) => b.latencyP50Ms),
-          color: 'var(--agent-blue-400)',
-        },
-        {
-          label: 'p95',
-          values: col((b) => b.latencyP95Ms),
-          color: 'var(--warning-color)',
-        },
-      ])}
-      {chart('daemon.charts.llmLatency', formatDurationMs, [
-        {
-          label: 'p50',
-          values: col((b) => b.llmApiP50Ms),
-          color: 'var(--agent-blue-400)',
-        },
-        {
-          label: 'p95',
-          values: col((b) => b.llmApiP95Ms),
-          color: 'var(--primary)',
-        },
-      ])}
-      {chart('daemon.charts.promptLatency', formatDurationMs, [
-        {
-          label: t('daemon.charts.queueWait'),
-          values: col((b) => b.promptQueueWaitP95Ms),
-          color: 'var(--warning-color)',
-        },
-        {
-          label: t('daemon.charts.promptDuration'),
-          values: col((b) => b.promptDurationP95Ms),
-          color: 'var(--primary)',
-        },
-      ])}
-      {chart('daemon.charts.eventLoop', formatDurationMs, [
-        {
-          label: t('daemon.charts.eventLoopLag'),
-          values: col((b) => b.eventLoopLagP99Ms),
-          color: 'var(--error-color)',
-        },
-      ])}
-      {chart('daemon.charts.cpu', formatPercent, [
-        {
-          label: t('daemon.charts.cpuDaemon'),
-          values: col((b) => b.cpuPercent),
-          color: 'var(--muted-foreground)',
-        },
-        {
-          label: t('daemon.charts.cpuChild'),
-          values: col((b) => b.childCpuPercent),
-          color: 'var(--primary)',
-        },
-      ])}
-      {chart('daemon.charts.memory', formatBytes, [
-        {
-          label: t('daemon.charts.rssDaemon'),
-          values: col((b) => b.rssBytes),
-          color: 'var(--muted-foreground)',
-        },
-        {
-          label: t('daemon.charts.heap'),
-          values: col((b) => b.heapUsedBytes),
-          color: 'var(--agent-blue-400)',
-        },
-        {
-          label: t('daemon.charts.rssChild'),
-          values: col((b) => b.childRssBytes),
-          color: 'var(--primary)',
-        },
-      ])}
-      {chart('daemon.charts.pipe', formatBytes, [
-        {
-          label: t('daemon.charts.pipeIn'),
-          values: col((b) => b.pipeInBytes),
-          color: 'var(--agent-blue-400)',
-        },
-        {
-          label: t('daemon.charts.pipeOut'),
-          values: col((b) => b.pipeOutBytes),
-          color: 'var(--success-color)',
-        },
-      ])}
-      {chart('daemon.charts.connections', formatCount, [
-        {
-          label: 'SSE',
-          values: col((b) => b.sseConnections),
-          color: 'var(--primary)',
-        },
-        {
-          label: 'WS',
-          values: col((b) => b.wsConnections),
-          color: 'var(--agent-blue-400)',
-        },
-        {
-          label: 'ACP',
-          values: col((b) => b.acpConnections),
-          color: 'var(--muted-foreground)',
-        },
-      ])}
-      {chart('daemon.charts.tokens', formatCount, [
-        {
-          label: t('daemon.charts.tokensIn'),
-          values: col((b) => b.tokensIn),
-          color: 'var(--agent-blue-400)',
-        },
-        {
-          label: t('daemon.charts.tokensOut'),
-          values: col((b) => b.tokensOut),
-          color: 'var(--success-color)',
-        },
-      ])}
+      {chart(
+        'daemon.charts.concurrency',
+        formatCount,
+        [
+          {
+            label: t('daemon.charts.activePrompts'),
+            values: col((b) => b.activePrompts),
+            color: 'var(--primary)',
+          },
+          {
+            label: t('daemon.charts.queuedPrompts'),
+            values: col((b) => b.queuedPrompts),
+            color: 'var(--warning-color)',
+          },
+          {
+            label: t('daemon.charts.activeSessions'),
+            values: col((b) => b.activeSessions),
+            color: 'var(--muted-foreground)',
+          },
+        ],
+        'daemon.charts.concurrency.help',
+      )}
+      {chart(
+        'daemon.charts.requests',
+        formatCount,
+        [
+          {
+            label: t('daemon.charts.reqTotal'),
+            values: col((b) => b.requests),
+            color: 'var(--success-color)',
+          },
+          {
+            label: t('daemon.charts.reqErrors'),
+            values: col((b) => b.errors),
+            color: 'var(--error-color)',
+          },
+          {
+            label: t('daemon.charts.reqRejected'),
+            values: col((b) => b.rateLimitRejected),
+            color: 'var(--warning-color)',
+          },
+        ],
+        'daemon.charts.requests.help',
+      )}
+      {chart(
+        'daemon.charts.apiLatency',
+        formatDurationMs,
+        [
+          {
+            label: 'p50',
+            values: col((b) => b.latencyP50Ms),
+            color: 'var(--agent-blue-400)',
+          },
+          {
+            label: 'p95',
+            values: col((b) => b.latencyP95Ms),
+            color: 'var(--warning-color)',
+          },
+        ],
+        'daemon.charts.apiLatency.help',
+      )}
+      {chart(
+        'daemon.charts.llmLatency',
+        formatDurationMs,
+        [
+          {
+            label: 'p50',
+            values: col((b) => b.llmApiP50Ms),
+            color: 'var(--agent-blue-400)',
+          },
+          {
+            label: 'p95',
+            values: col((b) => b.llmApiP95Ms),
+            color: 'var(--primary)',
+          },
+        ],
+        'daemon.charts.llmLatency.help',
+      )}
+      {/* Model API health: provider-side errors vs. the automatic retries that
+          absorb them. `?? 0` guards a report from a daemon predating these
+          fields (older daemon, newer web shell) so the chart reads clean zero
+          rather than gapping. */}
+      {chart(
+        'daemon.charts.apiHealth',
+        formatCount,
+        [
+          {
+            label: t('daemon.charts.apiErrors'),
+            values: col((b) => b.llmApiErrors ?? 0),
+            color: 'var(--error-color)',
+          },
+          {
+            label: t('daemon.charts.apiRetries'),
+            values: col((b) => b.llmApiRetries ?? 0),
+            color: 'var(--warning-color)',
+          },
+        ],
+        'daemon.charts.apiHealth.help',
+      )}
+      {chart(
+        'daemon.charts.promptLatency',
+        formatDurationMs,
+        [
+          {
+            label: t('daemon.charts.queueWait'),
+            values: col((b) => b.promptQueueWaitP95Ms),
+            color: 'var(--warning-color)',
+          },
+          {
+            label: t('daemon.charts.promptDuration'),
+            values: col((b) => b.promptDurationP95Ms),
+            color: 'var(--primary)',
+          },
+        ],
+        'daemon.charts.promptLatency.help',
+      )}
+      {chart(
+        'daemon.charts.eventLoop',
+        formatDurationMs,
+        [
+          {
+            label: t('daemon.charts.eventLoopLag'),
+            values: col((b) => b.eventLoopLagP99Ms),
+            color: 'var(--error-color)',
+          },
+        ],
+        'daemon.charts.eventLoop.help',
+      )}
+      {chart(
+        'daemon.charts.cpu',
+        formatPercent,
+        [
+          {
+            label: t('daemon.charts.cpuDaemon'),
+            values: col((b) => b.cpuPercent),
+            color: 'var(--muted-foreground)',
+          },
+          {
+            label: t('daemon.charts.cpuChild'),
+            values: col((b) => b.childCpuPercent),
+            color: 'var(--primary)',
+          },
+        ],
+        'daemon.charts.cpu.help',
+      )}
+      {chart(
+        'daemon.charts.memory',
+        formatBytes,
+        [
+          {
+            label: t('daemon.charts.rssDaemon'),
+            values: col((b) => b.rssBytes),
+            color: 'var(--muted-foreground)',
+          },
+          {
+            label: t('daemon.charts.heap'),
+            values: col((b) => b.heapUsedBytes),
+            color: 'var(--agent-blue-400)',
+          },
+          {
+            label: t('daemon.charts.rssChild'),
+            values: col((b) => b.childRssBytes),
+            color: 'var(--primary)',
+          },
+        ],
+        'daemon.charts.memory.help',
+      )}
+      {chart(
+        'daemon.charts.pipe',
+        formatBytes,
+        [
+          {
+            label: t('daemon.charts.pipeIn'),
+            values: col((b) => b.pipeInBytes),
+            color: 'var(--agent-blue-400)',
+          },
+          {
+            label: t('daemon.charts.pipeOut'),
+            values: col((b) => b.pipeOutBytes),
+            color: 'var(--success-color)',
+          },
+        ],
+        'daemon.charts.pipe.help',
+      )}
+      {chart(
+        'daemon.charts.connections',
+        formatCount,
+        [
+          {
+            label: 'SSE',
+            values: col((b) => b.sseConnections),
+            color: 'var(--primary)',
+          },
+          {
+            label: 'WS',
+            values: col((b) => b.wsConnections),
+            color: 'var(--agent-blue-400)',
+          },
+          {
+            label: 'ACP',
+            values: col((b) => b.acpConnections),
+            color: 'var(--muted-foreground)',
+          },
+        ],
+        'daemon.charts.connections.help',
+      )}
+      {chart(
+        'daemon.charts.tokens',
+        formatCount,
+        [
+          {
+            label: t('daemon.charts.tokensIn'),
+            values: col((b) => b.tokensIn),
+            color: 'var(--agent-blue-400)',
+          },
+          {
+            label: t('daemon.charts.tokensOut'),
+            values: col((b) => b.tokensOut),
+            color: 'var(--success-color)',
+          },
+        ],
+        'daemon.charts.tokens.help',
+      )}
     </div>
   );
 }

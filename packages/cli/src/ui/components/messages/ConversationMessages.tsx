@@ -269,6 +269,7 @@ export const AssistantMessageContent: React.FC<
 );
 
 const MAX_STREAMING_THINKING_VISUAL_LINES = 4;
+const BRIEF_THOUGHT_THRESHOLD_MS = 1_000;
 
 function tailVisualLines(
   text: string,
@@ -342,12 +343,15 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
 }) => {
   const durationSuffix =
     durationMs != null ? ` ${formatDuration(durationMs)}` : '';
+  const completedLabel =
+    durationMs == null
+      ? null
+      : durationMs < BRIEF_THOUGHT_THRESHOLD_MS
+        ? t('Thought briefly')
+        : `${t('Thought for')} ${formatDuration(durationMs)}`;
 
   if (!isPending && !expanded) {
-    const label =
-      durationMs != null
-        ? `${t('Thought for')} ${formatDuration(durationMs)}`
-        : t('Thinking');
+    const label = completedLabel ?? t('Thinking');
     const hint = clickable
       ? t('(click or {{keyHint}} to expand)', { keyHint: toggleKeyHint })
       : t('({{keyHint}} to expand)', { keyHint: toggleKeyHint });
@@ -361,9 +365,7 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
 
   const label = isPending
     ? `${t('Thinking')}…${durationSuffix}`
-    : durationMs != null
-      ? `${t('Thought for')} ${formatDuration(durationMs)}`
-      : `${t('Thinking')}…`;
+    : (completedLabel ?? `${t('Thinking')}…`);
   const collapseHint =
     !isPending && expanded
       ? ` ${t('({{keyHint}} to collapse)', { keyHint: toggleKeyHint })}`

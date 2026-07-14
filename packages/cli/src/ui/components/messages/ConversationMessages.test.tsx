@@ -87,6 +87,40 @@ describe('<ThinkMessage />', () => {
     expect(output).toContain(`${toggleKeyHint} to expand`);
   });
 
+  it.each([0, 999])(
+    'should describe a %dms completed thought as brief',
+    (durationMs) => {
+      for (const expanded of [false, true]) {
+        const { lastFrame } = render(
+          <ThinkMessage
+            {...defaultProps}
+            isPending={false}
+            expanded={expanded}
+            durationMs={durationMs}
+          />,
+        );
+        const output = lastFrame();
+        expect(output).toContain('Thought briefly');
+        expect(output).not.toContain('Thought for');
+        expect(output).not.toContain('0s');
+      }
+    },
+  );
+
+  it('should show a numeric duration at the one-second boundary', () => {
+    const { lastFrame } = render(
+      <ThinkMessage
+        {...defaultProps}
+        isPending={false}
+        expanded={false}
+        durationMs={1000}
+      />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('Thought for 1s');
+    expect(output).not.toContain('Thought briefly');
+  });
+
   it('should show present-tense duration while pending (streaming)', () => {
     const { lastFrame } = render(
       <ThinkMessage {...defaultProps} isPending={true} durationMs={8000} />,

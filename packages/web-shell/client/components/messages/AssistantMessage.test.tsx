@@ -42,6 +42,30 @@ function render(node: ReactNode): HTMLElement {
   return container;
 }
 
+function renderCompletedThinking(
+  durationMs: number,
+  language: 'en' | 'zh-CN' = 'en',
+): HTMLElement {
+  vi.setSystemTime(0);
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  const tree = (isStreaming: boolean) => (
+    <I18nProvider language={language}>
+      <ThinkingMessage
+        content="private chain of thought"
+        isStreaming={isStreaming}
+        timestamp={0}
+      />
+    </I18nProvider>
+  );
+  act(() => root.render(tree(true)));
+  vi.setSystemTime(durationMs);
+  act(() => root.render(tree(false)));
+  mounted.push({ root, container });
+  return container;
+}
+
 describe('AssistantMessage thinking logic', () => {
   it('uses the running summary while streaming before answer content', () => {
     expect(getThinkingSummaryKey({ isStreaming: true })).toBe(
@@ -52,6 +76,10 @@ describe('AssistantMessage thinking logic', () => {
   it('uses the finished summary after streaming ends', () => {
     expect(getThinkingSummaryKey({ isStreaming: false })).toBe('thinking.done');
     expect(getThinkingSummaryKey({})).toBe('thinking.done');
+    expect(getThinkingSummaryKey({ durationMs: 999 })).toBe(
+      'thinking.doneBriefly',
+    );
+    expect(getThinkingSummaryKey({ durationMs: 1000 })).toBe('thinking.done');
   });
 
   it('formats thinking durations', () => {
@@ -63,13 +91,35 @@ describe('AssistantMessage thinking logic', () => {
     expect(formatThinkingDuration(120_000)).toBe('2m');
   });
 
-  it('omits the duration after thinking finishes', () => {
+  it('keeps replayed completed thinking durationless', () => {
     const container = render(
       <ThinkingMessage content="private chain of thought" timestamp={0} />,
     );
 
     expect(container.textContent).toContain('Done thinking');
     expect(container.textContent).not.toContain('Thought for');
+  });
+
+  it.each([
+    [999, 'Thought briefly'],
+    [1000, 'Thought for 1s'],
+  ] as const)(
+    'shows the completed label for a %dms live thought',
+    (durationMs, expectedLabel) => {
+      const container = renderCompletedThinking(durationMs);
+
+      expect(container.textContent).toContain(expectedLabel);
+      const toggle = container.querySelector<HTMLButtonElement>('button');
+      act(() => toggle?.click());
+      expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+      expect(container.textContent).toContain(expectedLabel);
+    },
+  );
+
+  it('localizes a brief completed thought in Simplified Chinese', () => {
+    const container = renderCompletedThinking(999, 'zh-CN');
+
+    expect(container.textContent).toContain('思考片刻');
   });
 
   it('keeps the duration while thinking is running', () => {

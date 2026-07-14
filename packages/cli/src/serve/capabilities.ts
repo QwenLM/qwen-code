@@ -143,6 +143,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // unregistered — the toggle takes effect on the next ACP child spawn
   // (`tools.disabled` is consulted at `Config` construction time).
   workspace_tool_toggle: { since: 'v1' },
+  workspace_skill_toggle: { since: 'v1' },
   workspace_settings: { since: 'v1' },
   // `GET /workspace/permissions` is always available when this tag is
   // advertised. `POST /workspace/permissions` updates the active ACP
@@ -284,9 +285,14 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // workspace agent CRUD, and persisted session organization surfaces.
   // Workspace-qualified settings also require the existing
   // `workspace_settings` tag because that surface depends on settings
-  // persistence. ACP/WebSocket, auth, voice, and extensions stay on their
-  // existing primary-workspace routes in this phase.
+  // persistence. ACP/WebSocket, auth, and voice stay on their existing
+  // primary-workspace routes in this phase; V2 extension management is
+  // advertised separately via `extension_management_v2`.
   workspace_qualified_rest_core: { since: 'v1' },
+  // Global extension catalog/mutations plus workspace-qualified activation
+  // projections. This is additive to the legacy primary-workspace
+  // `workspace_extensions` contract.
+  extension_management_v2: { since: 'v1' },
   // Workspace-qualified, daemon-local persisted transcript paging. The tag is
   // unconditional because the route also serves a trusted single-workspace
   // primary; authorization is evaluated for the selected runtime per request.

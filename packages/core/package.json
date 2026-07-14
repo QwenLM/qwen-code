@@ -47,7 +47,6 @@
     "chokidar": "^4.0.3",
     "diff": "^7.0.0",
     "dotenv": "^17.1.0",
-    "extract-zip": "^2.0.1",
     "fast-levenshtein": "^2.0.6",
     "fast-uri": "^3.0.6",
     "fdir": "^6.4.6",
@@ -73,7 +72,8 @@
     "uuid": "^9.0.1",
     "web-tree-sitter": "^0.24.7",
     "ws": "^8.18.0",
-    "yaml": "^2.8.1"
+    "yaml": "^2.8.1",
+    "yauzl": "^2.10.0"
   },
   "optionalDependencies": {
     "@lydell/node-pty": "1.2.0-beta.10",
@@ -91,6 +91,7 @@
     "@types/picomatch": "^4.0.1",
     "@types/prompts": "^2.4.9",
     "@types/tar": "^6.1.13",
+    "@types/yauzl": "^2.9.1",
     "@types/ws": "^8.5.10",
     "msw": "^2.3.4",
     "tree-sitter-wasms": "^0.1.13",

@@ -593,13 +593,21 @@ vi.doMock('./components/extensions/ExtensionsManagerPage', async () => {
   const React = await import('react');
   return {
     ExtensionsManagerPage: (props: {
-      backButtonRef?: React.Ref<HTMLButtonElement>;
+      initialFocusRef?: React.Ref<HTMLHeadingElement>;
     }) =>
       React.createElement(
         'div',
         { 'data-testid': 'extensions-manager-page' },
+        React.createElement(
+          'h1',
+          {
+            ref: props.initialFocusRef,
+            tabIndex: -1,
+            'data-testid': 'extensions-manager-heading',
+          },
+          'Manage extensions',
+        ),
         React.createElement('button', {
-          ref: props.backButtonRef,
           'data-testid': 'extensions-manager-back',
         }),
       ),
@@ -1496,8 +1504,12 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="extensions-manager-page"]'),
     ).not.toBeNull();
+    const backButton = container.querySelector(
+      '[data-testid="extensions-manager-back"]',
+    );
+    expect(document.activeElement).not.toBe(backButton);
     expect(document.activeElement).toBe(
-      container.querySelector('[data-testid="extensions-manager-back"]'),
+      container.querySelector('[data-testid="extensions-manager-heading"]'),
     );
   });
 

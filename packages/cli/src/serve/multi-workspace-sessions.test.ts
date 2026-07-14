@@ -119,6 +119,25 @@ interface FakeBridge extends AcpSessionBridge {
     taskKind: 'agent' | 'shell' | 'monitor';
   }>;
   readonly goalClearCalls: string[];
+  readonly continueCalls: Array<{
+    sessionId: string;
+    context?: BridgeClientRequestContext;
+  }>;
+  readonly languageCalls: Array<{
+    sessionId: string;
+    params: Parameters<AcpSessionBridge['setSessionLanguage']>[1];
+    context?: BridgeClientRequestContext;
+  }>;
+  readonly addArtifactCalls: Array<{
+    sessionId: string;
+    artifact: Parameters<AcpSessionBridge['addSessionArtifact']>[1];
+    context?: BridgeClientRequestContext;
+  }>;
+  readonly removeArtifactCalls: Array<{
+    sessionId: string;
+    artifactId: string;
+    context?: BridgeClientRequestContext;
+  }>;
   readonly rewindSnapshotCalls: string[];
   readonly rewindCalls: Array<{
     sessionId: string;
@@ -256,6 +275,10 @@ function makeBridge(
   const midTurnMessageCalls: FakeBridge['midTurnMessageCalls'] = [];
   const taskCancelCalls: FakeBridge['taskCancelCalls'] = [];
   const goalClearCalls: string[] = [];
+  const continueCalls: FakeBridge['continueCalls'] = [];
+  const languageCalls: FakeBridge['languageCalls'] = [];
+  const addArtifactCalls: FakeBridge['addArtifactCalls'] = [];
+  const removeArtifactCalls: FakeBridge['removeArtifactCalls'] = [];
   const rewindSnapshotCalls: string[] = [];
   const rewindCalls: FakeBridge['rewindCalls'] = [];
   const shellCalls: FakeBridge['shellCalls'] = [];
@@ -282,6 +305,10 @@ function makeBridge(
     midTurnMessageCalls,
     taskCancelCalls,
     goalClearCalls,
+    continueCalls,
+    languageCalls,
+    addArtifactCalls,
+    removeArtifactCalls,
     rewindSnapshotCalls,
     rewindCalls,
     shellCalls,
@@ -468,6 +495,61 @@ function makeBridge(
         cleared: workspaceCwd === SECONDARY_CWD,
         condition: workspaceCwd,
       };
+    },
+    async continueSession(
+      sessionId: string,
+      context?: BridgeClientRequestContext,
+    ) {
+      continueCalls.push({
+        sessionId,
+        ...(context ? { context } : {}),
+      });
+      return {
+        accepted: true,
+        interruption: 'interrupted_turn' as const,
+        promptId: context?.promptId,
+        lastEventId: 42,
+      };
+    },
+    async setSessionLanguage(
+      sessionId: string,
+      params: Parameters<AcpSessionBridge['setSessionLanguage']>[1],
+      context?: BridgeClientRequestContext,
+    ) {
+      languageCalls.push({
+        sessionId,
+        params,
+        ...(context ? { context } : {}),
+      });
+      return {
+        language: params.language,
+        outputLanguage: params.syncOutputLanguage ? params.language : null,
+        refreshed: params.syncOutputLanguage,
+      };
+    },
+    async addSessionArtifact(
+      sessionId: string,
+      artifact: Parameters<AcpSessionBridge['addSessionArtifact']>[1],
+      context?: BridgeClientRequestContext,
+    ) {
+      addArtifactCalls.push({
+        sessionId,
+        artifact,
+        ...(context ? { context } : {}),
+      });
+      return { v: 1 as const, sessionId, changes: [] };
+    },
+    async removeSessionArtifact(
+      sessionId: string,
+      artifactId: string,
+      context?: BridgeClientRequestContext,
+    ) {
+      removeArtifactCalls.push({
+        sessionId,
+        artifactId,
+        ...(context ? { context } : {}),
+      });
+      return { v: 1 as const, sessionId, changes: [] };
     },
     async getRewindSnapshots(sessionId: string) {
       rewindSnapshotCalls.push(sessionId);
@@ -1663,6 +1745,310 @@ describe('multi-workspace session dispatch', () => {
     ]) {
       expect(calls).toEqual([]);
     }
+  });
+
+  it('routes continue, language, and artifact mutations to the owning non-primary bridge', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      token: TEST_TOKEN,
+    });
+    const auth = (test: request.Test) =>
+      test.set('Host', host()).set('Authorization', TEST_AUTHORIZATION);
+
+    const firstContinue = await auth(
+      request(app).post('/session/secondary-session/continue'),
+    )
+      .set('X-Qwen-Client-Id', 'secondary-client')
+      .send({});
+    const secondContinue = await auth(
+      request(app).post('/session/secondary-session/continue'),
+    )
+      .set('X-Qwen-Client-Id', 'secondary-client')
+      .send({});
+    expect(firstContinue.status).toBe(200);
+    expect(secondContinue.status).toBe(200);
+    expect(firstContinue.body.promptId).toEqual(expect.any(String));
+    expect(secondContinue.body.promptId).toEqual(expect.any(String));
+    expect(firstContinue.body.promptId).not.toBe('');
+    expect(secondContinue.body.promptId).not.toBe('');
+    expect(secondContinue.body.promptId).not.toBe(firstContinue.body.promptId);
+
+    const language = await auth(
+      request(app).post('/session/secondary-session/language'),
+    )
+      .set('X-Qwen-Client-Id', 'secondary-client')
+      .send({ language: 'zh', syncOutputLanguage: true });
+    expect(language.status).toBe(200);
+    expect(language.body).toEqual({
+      language: 'zh',
+      outputLanguage: 'zh',
+      refreshed: true,
+    });
+
+    const addArtifact = await auth(
+      request(app).post('/session/secondary-session/artifacts'),
+    )
+      .set('X-Qwen-Client-Id', 'secondary-client')
+      .send({
+        title: 'Secondary artifact',
+        url: 'https://example.com/secondary',
+        retention: 'ephemeral',
+      });
+    expect(addArtifact.status).toBe(200);
+    expect(addArtifact.body).toMatchObject({
+      v: 1,
+      sessionId: 'secondary-session',
+    });
+
+    const removeArtifact = await auth(
+      request(app).delete(
+        '/session/secondary-session/artifacts/artifact-secondary',
+      ),
+    ).set('X-Qwen-Client-Id', 'secondary-client');
+    expect(removeArtifact.status).toBe(200);
+    expect(removeArtifact.body).toMatchObject({
+      v: 1,
+      sessionId: 'secondary-session',
+    });
+
+    expect(secondaryBridge.continueCalls).toHaveLength(2);
+    for (const call of secondaryBridge.continueCalls) {
+      expect(call).toMatchObject({
+        sessionId: 'secondary-session',
+        context: {
+          clientId: 'secondary-client',
+          promptId: expect.any(String),
+        },
+      });
+    }
+    expect(secondaryBridge.languageCalls).toEqual([
+      {
+        sessionId: 'secondary-session',
+        params: { language: 'zh', syncOutputLanguage: true },
+        context: { clientId: 'secondary-client' },
+      },
+    ]);
+    expect(secondaryBridge.addArtifactCalls).toEqual([
+      expect.objectContaining({
+        sessionId: 'secondary-session',
+        artifact: expect.objectContaining({
+          title: 'Secondary artifact',
+          url: 'https://example.com/secondary',
+          retention: 'ephemeral',
+        }),
+        context: { clientId: 'secondary-client' },
+      }),
+    ]);
+    expect(secondaryBridge.removeArtifactCalls).toEqual([
+      {
+        sessionId: 'secondary-session',
+        artifactId: 'artifact-secondary',
+        context: { clientId: 'secondary-client' },
+      },
+    ]);
+    expect(primaryBridge.continueCalls).toEqual([]);
+    expect(primaryBridge.languageCalls).toEqual([]);
+    expect(primaryBridge.addArtifactCalls).toEqual([]);
+    expect(primaryBridge.removeArtifactCalls).toEqual([]);
+  });
+
+  it('preserves mutation auth while leaving language on its existing non-strict gate', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness();
+
+    const responses = await Promise.all([
+      request(app)
+        .post('/session/secondary-session/continue')
+        .set('Host', host())
+        .send({}),
+      request(app)
+        .post('/session/secondary-session/artifacts')
+        .set('Host', host())
+        .set('X-Qwen-Client-Id', 'secondary-client')
+        .send({ title: 'blocked', url: 'https://example.com/blocked' }),
+      request(app)
+        .delete('/session/secondary-session/artifacts/artifact-secondary')
+        .set('Host', host())
+        .set('X-Qwen-Client-Id', 'secondary-client'),
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([
+      401, 401, 401,
+    ]);
+
+    const language = await request(app)
+      .post('/session/secondary-session/language')
+      .set('Host', host())
+      .send({ language: 'zh' });
+    expect(language.status).toBe(200);
+    expect(secondaryBridge.languageCalls).toEqual([
+      {
+        sessionId: 'secondary-session',
+        params: { language: 'zh', syncOutputLanguage: false },
+      },
+    ]);
+    for (const bridge of [primaryBridge, secondaryBridge]) {
+      expect(bridge.continueCalls).toEqual([]);
+      expect(bridge.addArtifactCalls).toEqual([]);
+      expect(bridge.removeArtifactCalls).toEqual([]);
+    }
+  });
+
+  it('rejects remaining mutations for an untrusted non-primary owner', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      secondaryTrusted: false,
+      token: TEST_TOKEN,
+    });
+    const auth = (test: request.Test) =>
+      test.set('Host', host()).set('Authorization', TEST_AUTHORIZATION);
+
+    const responses = await Promise.all([
+      auth(request(app).post('/session/secondary-session/continue')).send({}),
+      auth(request(app).post('/session/secondary-session/language')).send({
+        language: 'zh',
+      }),
+      auth(request(app).post('/session/secondary-session/artifacts'))
+        .set('X-Qwen-Client-Id', 'secondary-client')
+        .send({ title: 'blocked', url: 'https://example.com/blocked' }),
+      auth(
+        request(app).delete(
+          '/session/secondary-session/artifacts/artifact-secondary',
+        ),
+      ).set('X-Qwen-Client-Id', 'secondary-client'),
+    ]);
+
+    expect(responses.map((response) => response.status)).toEqual([
+      403, 403, 403, 403,
+    ]);
+    for (const response of responses) {
+      expect(response.body.code).toBe('untrusted_workspace');
+    }
+    for (const bridge of [primaryBridge, secondaryBridge]) {
+      expect(bridge.continueCalls).toEqual([]);
+      expect(bridge.languageCalls).toEqual([]);
+      expect(bridge.addArtifactCalls).toEqual([]);
+      expect(bridge.removeArtifactCalls).toEqual([]);
+    }
+  });
+
+  it('fails closed for missing and ambiguous remaining mutation owners', async () => {
+    const missing = makeHarness({ token: TEST_TOKEN });
+    const auth = (test: request.Test) =>
+      test.set('Host', host()).set('Authorization', TEST_AUTHORIZATION);
+    const missingResponses = await Promise.all([
+      auth(request(missing.app).post('/session/missing/continue')).send({}),
+      auth(request(missing.app).post('/session/missing/language')).send({
+        language: 'zh',
+      }),
+      auth(request(missing.app).post('/session/missing/artifacts'))
+        .set('X-Qwen-Client-Id', 'secondary-client')
+        .send({ title: 'missing', url: 'https://example.com/missing' }),
+      auth(
+        request(missing.app).delete('/session/missing/artifacts/artifact-1'),
+      ).set('X-Qwen-Client-Id', 'secondary-client'),
+    ]);
+    expect(missingResponses.map((response) => response.status)).toEqual([
+      404, 404, 404, 404,
+    ]);
+    for (const response of missingResponses) {
+      expect(response.body.code).toBe('session_not_found');
+    }
+    for (const bridge of [missing.primaryBridge, missing.secondaryBridge]) {
+      expect(bridge.continueCalls).toEqual([]);
+      expect(bridge.languageCalls).toEqual([]);
+      expect(bridge.addArtifactCalls).toEqual([]);
+      expect(bridge.removeArtifactCalls).toEqual([]);
+    }
+
+    const duplicate = makeSummary('duplicate-session', PRIMARY_CWD);
+    const ambiguous = makeHarness({
+      token: TEST_TOKEN,
+      primarySummaries: [duplicate],
+      secondarySummaries: [makeSummary('duplicate-session', SECONDARY_CWD)],
+    });
+    const ambiguousResponses = await Promise.all([
+      auth(
+        request(ambiguous.app).post('/session/duplicate-session/language'),
+      ).send({ language: 'zh' }),
+      auth(
+        request(ambiguous.app).post('/session/duplicate-session/continue'),
+      ).send({}),
+    ]);
+    expect(ambiguousResponses.map((response) => response.status)).toEqual([
+      500, 500,
+    ]);
+    for (const response of ambiguousResponses) {
+      expect(response.body.code).toBe('ambiguous_session_owner');
+    }
+    expect(ambiguous.primaryBridge.languageCalls).toEqual([]);
+    expect(ambiguous.secondaryBridge.languageCalls).toEqual([]);
+    expect(ambiguous.primaryBridge.continueCalls).toEqual([]);
+    expect(ambiguous.secondaryBridge.continueCalls).toEqual([]);
+  });
+
+  it('preserves primary routing for remaining mutations', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      token: TEST_TOKEN,
+    });
+    const auth = (test: request.Test) =>
+      test.set('Host', host()).set('Authorization', TEST_AUTHORIZATION);
+
+    const responses = await Promise.all([
+      auth(request(app).post('/session/primary-session/continue'))
+        .set('X-Qwen-Client-Id', 'primary-client')
+        .send({}),
+      auth(request(app).post('/session/primary-session/language'))
+        .set('X-Qwen-Client-Id', 'primary-client')
+        .send({ language: 'en', syncOutputLanguage: true }),
+      auth(request(app).post('/session/primary-session/artifacts'))
+        .set('X-Qwen-Client-Id', 'primary-client')
+        .send({
+          title: 'Primary artifact',
+          url: 'https://example.com/primary',
+        }),
+      auth(
+        request(app).delete(
+          '/session/primary-session/artifacts/artifact-primary',
+        ),
+      ).set('X-Qwen-Client-Id', 'primary-client'),
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([
+      200, 200, 200, 200,
+    ]);
+    expect(primaryBridge.continueCalls).toEqual([
+      {
+        sessionId: 'primary-session',
+        context: {
+          clientId: 'primary-client',
+          promptId: expect.any(String),
+        },
+      },
+    ]);
+    expect(primaryBridge.languageCalls).toEqual([
+      {
+        sessionId: 'primary-session',
+        params: { language: 'en', syncOutputLanguage: true },
+        context: { clientId: 'primary-client' },
+      },
+    ]);
+    expect(primaryBridge.addArtifactCalls).toEqual([
+      expect.objectContaining({
+        sessionId: 'primary-session',
+        artifact: expect.objectContaining({
+          title: 'Primary artifact',
+          url: 'https://example.com/primary',
+        }),
+        context: { clientId: 'primary-client' },
+      }),
+    ]);
+    expect(primaryBridge.removeArtifactCalls).toEqual([
+      {
+        sessionId: 'primary-session',
+        artifactId: 'artifact-primary',
+        context: { clientId: 'primary-client' },
+      },
+    ]);
+    expect(secondaryBridge.continueCalls).toEqual([]);
+    expect(secondaryBridge.languageCalls).toEqual([]);
+    expect(secondaryBridge.addArtifactCalls).toEqual([]);
+    expect(secondaryBridge.removeArtifactCalls).toEqual([]);
   });
 
   it('preserves primary routing for owner-local actions', async () => {

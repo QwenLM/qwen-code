@@ -629,6 +629,38 @@ describe('ExtensionsManagerPage', () => {
     expect(document.querySelector('h1')?.textContent).toContain('Demo');
   });
 
+  it('shows the extension description only once on the detail page', async () => {
+    await mount([
+      { ...extension(), description: 'A single extension description' },
+    ]);
+
+    click(document.querySelector('[data-slot="card"]') ?? undefined);
+    await flush();
+
+    expect(
+      document.body.textContent?.match(/A single extension description/g),
+    ).toHaveLength(1);
+  });
+
+  it('keeps only the status beside the card title without a footer', async () => {
+    await mount([extension()]);
+
+    const card = document.querySelector('[data-slot="card"]');
+    const titleRow = card?.querySelector(
+      '[data-slot="card-title"]',
+    )?.parentElement;
+
+    expect(titleRow?.textContent).toContain('Demo');
+    expect(titleRow?.textContent).toContain('enabled');
+    expect(card?.textContent).not.toContain('v1.0.0');
+    expect(card?.querySelector('[data-slot="card-footer"]')).toBeNull();
+    expect(
+      card
+        ?.querySelector('[data-slot="card-description"]')
+        ?.classList.contains('truncate'),
+    ).toBe(true);
+  });
+
   it('clears stale update states when the extensions signal changes', async () => {
     actions.checkExtensionUpdates
       .mockResolvedValueOnce({ states: { demo: 'update available' } })
