@@ -99,14 +99,7 @@ export function selectCandidateTargets(prs, options = {}) {
     }
   }
 
-  const seenPrs = new Set();
-  return targets
-    .sort((a, b) => timeMs(b.completedAt) - timeMs(a.completedAt))
-    .filter((target) => {
-      if (seenPrs.has(target.prNumber)) return false;
-      seenPrs.add(target.prNumber);
-      return true;
-    });
+  return targets.sort((a, b) => timeMs(b.completedAt) - timeMs(a.completedAt));
 }
 
 function markerFor(target, action, count) {
@@ -571,9 +564,12 @@ class GhClient {
   }
 }
 
-function argsMap(argv) {
+export function argsMap(argv) {
   const args = new Map();
   for (let index = 0; index < argv.length; index += 2) {
+    if (!argv[index]?.startsWith('--') || argv[index + 1] === undefined) {
+      throw new Error(`unexpected argument: ${argv[index] ?? ''}`);
+    }
     args.set(argv[index].replace(/^--/, ''), argv[index + 1]);
   }
   return args;
@@ -627,9 +623,11 @@ async function scan(args) {
     staleMinutes: numberArg(args, 'stale-minutes', DEFAULT_STALE_MINUTES),
   });
   const candidates = [];
+  const selectedPrs = new Set();
 
   for (const target of targets) {
     if (candidates.length >= maxCandidates) break;
+    if (selectedPrs.has(target.prNumber)) continue;
     try {
       if (target.jobId === null) continue;
       const before = await client.run(target.runId);
@@ -672,6 +670,7 @@ async function scan(args) {
         ...main,
         log,
       });
+      selectedPrs.add(target.prNumber);
     } catch (error) {
       const stderr = error.stderr ? `\n${String(error.stderr).trim()}` : '';
       process.stderr.write(

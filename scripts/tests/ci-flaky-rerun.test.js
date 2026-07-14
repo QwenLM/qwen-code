@@ -7,6 +7,7 @@ import {
   actOnDecision,
   actOnDecisions,
   alreadyHandled,
+  argsMap,
   currentActionCount,
   fileSha256,
   fingerprint,
@@ -183,6 +184,35 @@ describe('ci flaky rerun patrol', () => {
       { now: NOW },
     );
     expect(selected.map((item) => item.prNumber)).toEqual([42, 41]);
+  });
+
+  it('keeps distinct failures from the same PR available for scanning', () => {
+    const selected = selectCandidateTargets(
+      [
+        pr({
+          statusCheckRollup: [
+            run(),
+            run({
+              databaseId: 12,
+              name: 'Unit Tests',
+              completedAt: '2026-07-12T07:25:00.000Z',
+              detailsUrl:
+                'https://github.com/QwenLM/qwen-code/actions/runs/124/job/2',
+            }),
+          ],
+        }),
+      ],
+      { now: NOW },
+    );
+
+    expect(selected.map((item) => item.checkName)).toEqual([
+      'Unit Tests',
+      'E2E Tests',
+    ]);
+  });
+
+  it('rejects a command-line flag without a value', () => {
+    expect(() => argsMap(['--repo'])).toThrow('unexpected argument: --repo');
   });
 
   it('handles an exact run attempt once and allows a new attempt', () => {
