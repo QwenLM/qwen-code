@@ -589,8 +589,8 @@
           ]
         },
         "maxSessionTurns": {
-          "description": "Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.",
-          "type": "number",
+          "description": "Maximum number of user/model/tool turns to keep in a session. Must be an integer; -1 means unlimited.",
+          "type": "integer",
           "default": -1
         },
         "maxWallTimeSeconds": {
@@ -634,7 +634,7 @@
         },
         "maxToolCallsPerTurn": {
           "description": "Hard cap on tool calls within a single turn (one model turn plus its tool-result continuations; blocking Stop-hook continuations such as /goal iterations start a fresh budget). An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.",
-          "type": "number",
+          "type": "integer",
           "default": 100
         },
         "skipStartupContext": {

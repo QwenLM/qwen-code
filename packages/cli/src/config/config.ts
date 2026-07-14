@@ -889,7 +889,7 @@ export async function parseArguments(): Promise<CliArgs> {
         })
         .option('max-session-turns', {
           type: 'number',
-          description: 'Maximum number of session turns',
+          description: 'Maximum number of session turns (must be an integer)',
         })
         .option('max-wall-time', {
           type: 'string',

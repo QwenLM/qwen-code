@@ -144,6 +144,11 @@ def test_rejects_invalid_max_session_turns() -> None:
         validate_query_options(QueryOptions(max_session_turns=-2))
 
 
+def test_rejects_fractional_max_session_turns() -> None:
+    with pytest.raises(ValidationError, match="max_session_turns"):
+        validate_query_options(QueryOptions(max_session_turns=cast(Any, 0.5)))
+
+
 def test_rejects_empty_qwen_executable_path() -> None:
     with pytest.raises(
         ValidationError, match="path_to_qwen_executable cannot be empty"
