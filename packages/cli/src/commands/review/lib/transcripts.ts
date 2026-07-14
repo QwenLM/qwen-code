@@ -42,16 +42,12 @@ import { join } from 'node:path';
 
 /** One subagent, as the harness recorded it. */
 export interface AgentRecord {
-  /** `agent-<id>.jsonl`, for messages that have to name a file. */
-  file: string;
   agentId: string;
   agentName: string;
   /** The prompt the agent was launched with — the transcript's first record. */
   launchPrompt: string;
   /** Tool calls that came back without an error. */
   successfulToolCalls: number;
-  /** Tool calls of any kind, including failed and hallucinated ones. */
-  toolCalls: number;
   /** The agent's own final text, as the harness saw it. */
   finalText: string;
   /** When the transcript was last written. */
@@ -136,7 +132,6 @@ function parseTranscript(file: string): AgentRecord | null {
   let agentName = '';
   let launchPrompt = '';
   let finalText = '';
-  let toolCalls = 0;
   let successfulToolCalls = 0;
   const pendingCalls: string[] = [];
 
@@ -173,7 +168,6 @@ function parseTranscript(file: string): AgentRecord | null {
     );
 
     if (hasCall) {
-      toolCalls++;
       pendingCalls.push('call');
     }
     if (hasResponse) {
@@ -198,11 +192,9 @@ function parseTranscript(file: string): AgentRecord | null {
   }
 
   return {
-    file,
     agentId,
     agentName,
     launchPrompt,
-    toolCalls,
     successfulToolCalls,
     finalText,
     mtimeMs,

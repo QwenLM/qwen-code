@@ -194,6 +194,9 @@ describe('coverage — from the harness, not from the caller', () => {
     const r = coverageFromTranscripts(plan(), ENV);
     expect(r.uncoverableChunks).toEqual([2]);
     expect(r.missingChunks).toEqual([]);
+    // A disclosed gap is not coverage: the verdict may not approve on its
+    // strength. Every other test here asserts `ok`; this one was the exception.
+    expect(r.ok).toBe(false);
   });
 
   it('ignores transcripts older than the plan they are evidence for', () => {

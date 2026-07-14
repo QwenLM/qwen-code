@@ -200,10 +200,15 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       const cov = coverageFromTranscripts(input.planPath, input.env);
       for (const id of cov.missingChunks) missingReceipts.push(id);
       for (const id of cov.uncoverableChunks) {
-        // The caller may already have named it. Rendered twice, the body reads
-        // "Not reviewed: chunk 5, chunk 5".
-        const entry = `chunk ${id}`;
-        if (!uncoverable.includes(entry)) uncoverable.push(entry);
+        // The caller may already have named this chunk, but in a richer form:
+        // `chunk 5 (src/big.min.js)` vs the bare `chunk 5` here. A strict-equality
+        // dedup misses that and the body reads "Not reviewed: chunk 5, chunk 5".
+        // Compare by the `chunk <id>` prefix.
+        const prefix = `chunk ${id}`;
+        const already = uncoverable.some(
+          (e) => e === prefix || e.startsWith(`${prefix} `),
+        );
+        if (!already) uncoverable.push(prefix);
       }
       for (const label of cov.idleAgents) {
         unreviewed.push(

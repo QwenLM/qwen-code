@@ -173,7 +173,10 @@ import {
 import { DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES } from '../utils/qwenIgnoreParser.js';
 import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaults.js';
 import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
-import { registerSessionProjectDir } from '../utils/sessionIdContext.js';
+import {
+  registerSessionProjectDir,
+  unregisterSessionProjectDir,
+} from '../utils/sessionIdContext.js';
 import { Storage } from './storage.js';
 import {
   ChatRecordingService,
@@ -4054,6 +4057,12 @@ export class Config {
    */
   async shutdown(): Promise<void> {
     try {
+      // Drop this session's project-dir registry entry. It is registered in the
+      // constructor, so it is released here regardless of initialization state —
+      // in daemon mode, where one process serves many sessions, an unreleased
+      // entry per session is a leak that grows for the life of the process.
+      unregisterSessionProjectDir(this.sessionId);
+
       // Stop the settings watcher regardless of initialization state —
       // it is started before Config.initialize() and would leak otherwise.
       this.settingsWatcher?.stopWatching();

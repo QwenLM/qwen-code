@@ -122,6 +122,14 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         `that made no call still returned confident, specific text.`,
     );
   }
+  if (report.uncoverableChunks.length > 0) {
+    writeStderrLine(
+      `ERROR: ${report.uncoverableChunks.length} chunk(s) were declared ` +
+        `uncoverable — ${report.uncoverableChunks.join(', ')}. A diff with a ` +
+        `line no read can reach was not reviewed; the verdict may not approve on ` +
+        `its strength. Report them to the user as an unreviewed gap.`,
+    );
+  }
   if (report.missingChunks.length > 0) {
     writeStderrLine(
       `ERROR: ${report.missingChunks.length} chunk(s) were not reviewed — ` +
