@@ -23,7 +23,7 @@ function createProviderConfig(
   return {
     apiKey: 'xai-test-key',
     baseUrl: 'https://api.x.ai/v1',
-    model: 'grok-4',
+    model: 'grok-4.5',
     ...overrides,
   } as ContentGeneratorConfig;
 }
@@ -40,16 +40,20 @@ describe('Grok provider selection', () => {
     expect(provider).toBeInstanceOf(DefaultOpenAICompatibleProvider);
   });
 
-  it.each(['grok-4', 'grok-4-heavy', 'grok-3'])(
-    'uses the default provider for %s',
-    (model) => {
-      const provider = determineProvider(
-        createProviderConfig({ model }),
-        createCliConfig(),
-      );
-      expect(provider).toBeInstanceOf(DefaultOpenAICompatibleProvider);
-    },
-  );
+  it.each([
+    'grok-4.5',
+    'grok-4.3',
+    'grok-4.20-0309-reasoning',
+    'grok-4.20-0309-non-reasoning',
+    'grok-4.20-multi-agent-0309',
+    'grok-build-0.1',
+  ])('uses the default provider for %s', (model) => {
+    const provider = determineProvider(
+      createProviderConfig({ model }),
+      createCliConfig(),
+    );
+    expect(provider).toBeInstanceOf(DefaultOpenAICompatibleProvider);
+  });
 
   it('leaves outgoing requests unchanged (no provider-specific rewriting)', () => {
     const provider = determineProvider(
@@ -57,7 +61,7 @@ describe('Grok provider selection', () => {
       createCliConfig(),
     );
     const request = {
-      model: 'grok-4',
+      model: 'grok-4.5',
       messages: [{ role: 'user' as const, content: 'Say OK' }],
       max_tokens: 100,
     };

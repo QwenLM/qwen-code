@@ -29,6 +29,17 @@ describe('grokProvider', () => {
     });
   });
 
+  it('exposes all xAI chat & code models with their context windows', () => {
+    expect(grokProvider.models).toEqual([
+      { id: 'grok-4.5', contextWindowSize: 500000 },
+      { id: 'grok-4.3', contextWindowSize: 1000000 },
+      { id: 'grok-4.20-0309-reasoning', contextWindowSize: 1000000 },
+      { id: 'grok-4.20-0309-non-reasoning', contextWindowSize: 1000000 },
+      { id: 'grok-4.20-multi-agent-0309', contextWindowSize: 1000000 },
+      { id: 'grok-build-0.1', contextWindowSize: 256000 },
+    ]);
+  });
+
   it('is registered and discoverable in the provider registry', () => {
     expect(findProviderById('grok')).toBe(grokProvider);
     expect(ALL_PROVIDERS).toContain(grokProvider);
@@ -50,7 +61,7 @@ describe('grokProvider', () => {
     const plan = buildInstallPlan(grokProvider, {
       baseUrl: 'https://api.x.ai/v1',
       apiKey: 'xai-key',
-      modelIds: ['grok-3', 'grok-4'],
+      modelIds: ['grok-4.5', 'grok-4.3'],
     });
 
     expect(plan.env).toEqual({ XAI_API_KEY: 'xai-key' });
@@ -58,17 +69,17 @@ describe('grokProvider', () => {
     const models = plan.modelProviders?.[0]?.models;
     expect(models).toHaveLength(2);
     expect(models?.[0]).toMatchObject({
-      id: 'grok-3',
-      name: '[Grok] grok-3',
+      id: 'grok-4.5',
+      name: '[Grok] grok-4.5',
       baseUrl: 'https://api.x.ai/v1',
       envKey: 'XAI_API_KEY',
     });
     // Standard OpenAI format: only the context window, no extra_body.
     expect(models?.[0]?.generationConfig).toEqual({
-      contextWindowSize: 131072,
+      contextWindowSize: 500000,
     });
     expect(models?.[1]?.generationConfig).toEqual({
-      contextWindowSize: 256000,
+      contextWindowSize: 1000000,
     });
   });
 
@@ -76,7 +87,7 @@ describe('grokProvider', () => {
     const plan = buildInstallPlan(grokProvider, {
       baseUrl: 'https://api.x.ai/v1',
       apiKey: 'xai-key',
-      modelIds: ['grok-4', 'grok-future'],
+      modelIds: ['grok-4.5', 'grok-future'],
     });
 
     const models = plan.modelProviders?.[0]?.models;
