@@ -92,8 +92,12 @@ describe('runBuildTest', () => {
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), 'bt-'));
-    // node_modules present, so the install is skipped and no network is touched.
+    // A COMPLETE node_modules — the `.package-lock.json` marker npm writes only when
+    // the tree is fully materialised — so the install is skipped and no network is
+    // touched. (Gating on the marker, not the bare directory, is what stops a partial
+    // tree from being mistaken for a finished install.)
     mkdirSync(join(root, 'node_modules'), { recursive: true });
+    writeFileSync(join(root, 'node_modules', '.package-lock.json'), '{}');
   });
 
   afterEach(() => {
@@ -112,6 +116,68 @@ describe('runBuildTest', () => {
     expect(rep.toolchain).toBe('unsupported');
     expect(rep.ok).toBe(true);
     expect(rep.build).toEqual([]);
+  });
+
+  it('reports `unsupported` — not a false "nothing to build" — for an unmodeled glob', () => {
+    // `packages/**` matches real paths that the walker cannot resolve, so a diff
+    // inside it would otherwise yield an empty affected set and a confident green.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/**'] }),
+    );
+    mkdirSync(join(root, 'packages', 'a'), { recursive: true });
+    writeFileSync(
+      join(root, 'packages', 'a', 'package.json'),
+      JSON.stringify({ name: '@x/a', scripts: { build: 'exit 0' } }),
+    );
+    writePlan(['packages/a/src/x.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      install: false,
+    });
+    expect(rep.toolchain).toBe('unsupported');
+    expect(rep.note).toContain('does not model');
+    expect(rep.note).not.toContain('no package to build');
+  });
+
+  it('reinstalls when node_modules exists but is INCOMPLETE (no .package-lock.json)', () => {
+    // A partial tree — left by a timed-out install here, or by the agent's own shell
+    // kill one level up — has the directory but not npm's completeness marker. Gating
+    // on the directory would skip the install and build against the partial tree.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/a', { name: '@x/a', scripts: { build: 'exit 0' } });
+    writePlan(['packages/a/src/x.ts']);
+    // Bare node_modules, no marker — the beforeEach wrote both, so drop the marker.
+    rmSync(join(root, 'node_modules', '.package-lock.json'), { force: true });
+
+    const calls: string[] = [];
+    runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: true,
+      exec: (command, cwd) => {
+        calls.push(command);
+        if (command.startsWith('npm ci')) {
+          writeFileSync(join(cwd, 'node_modules', '.package-lock.json'), '{}');
+        }
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+    // The install ran despite the directory already existing.
+    expect(calls.some((c) => c.startsWith('npm ci'))).toBe(true);
   });
 
   it('builds and tests nothing for a docs-only diff — and says so', () => {
@@ -171,7 +237,7 @@ describe('runBuildTest', () => {
       'npm test --workspace=packages/core',
     ]);
     expect(rep.ok).toBe(true);
-  });
+  }, 30_000);
 
   it('reports a build failure with its output, and does not call it ok', () => {
     writeFileSync(
@@ -194,8 +260,12 @@ describe('runBuildTest', () => {
     expect(rep.build.at(-1)?.exitCode).toBe(1);
     expect(rep.build.at(-1)?.output).toContain('TS2345');
     expect(rep.note).toContain('Correlate');
-  });
+  }, 30_000);
 
+  // Spawns real `npm run` and uses `node -e` fixture scripts so it runs on Windows
+  // too (the merge-queue `test_windows` job runs through cmd.exe, where POSIX
+  // `touch`/`test -f` do not exist). The pure buildSetFor ordering is also covered,
+  // shell-free, in workspaces.test.ts.
   it('widens on a compiler-named workspace package, and leaves no false failure behind', () => {
     writeFileSync(
       join(root, 'package.json'),
@@ -206,15 +276,15 @@ describe('runBuildTest', () => {
     // It fails until the marker that `templates`' build drops appears.
     pkg('packages/templates', {
       name: '@x/templates',
-      scripts: { build: 'touch ../../.templates-built' },
+      scripts: {
+        build: `node -e "require('fs').writeFileSync('../../.templates-built','')"`,
+      },
     });
     pkg('packages/leaf', {
       name: '@x/leaf',
       scripts: {
-        build:
-          'test -f ../../.templates-built || ' +
-          '{ echo "error TS2307: Cannot find module \'@x/templates\'"; exit 2; }',
-        test: 'exit 0',
+        build: `node -e "if(!require('fs').existsSync('../../.templates-built')){console.log(\\"error TS2307: Cannot find module '@x/templates'\\");process.exit(2)}"`,
+        test: `node -e ""`,
       },
     });
     writePlan(['packages/leaf/src/x.ts']);
@@ -236,7 +306,7 @@ describe('runBuildTest', () => {
     // report. An agent told "a build failure in a changed file is a Critical" would
     // read it and file a public blocker on a PR whose build passes.
     expect(rep.build.filter((r) => r.exitCode !== 0)).toEqual([]);
-  });
+  }, 30_000);
 
   it('carries on when the install exits non-zero but leaves a usable tree', () => {
     // The live failure this pins. `npm ci` runs the project's `prepare` script, and
@@ -265,12 +335,14 @@ describe('runBuildTest', () => {
       worktree: root,
       timeout: 60,
       install: true,
-      // An install that fails the way this repo's does: the tree lands, the
+      // An install that fails the way this repo's does: the tree lands COMPLETE (the
+      // `.package-lock.json` marker is written before `prepare` runs), then the
       // building `prepare` script blows up on someone else's file, exit 1.
       exec: (command, cwd, _timeoutMs) => {
         calls.push(command);
         if (command.startsWith('npm ci')) {
           mkdirSync(join(cwd, 'node_modules'), { recursive: true });
+          writeFileSync(join(cwd, 'node_modules', '.package-lock.json'), '{}');
           return {
             command,
             exitCode: 1,
@@ -329,12 +401,18 @@ describe('runBuildTest', () => {
     expect(rep.note).toContain('nothing could be built');
   });
 
+  // `node -e "setTimeout(...)"` rather than `sleep 30`, so it runs on the Windows
+  // merge-queue job (cmd.exe has no `sleep`). The exec-seam timeout tests below cover
+  // the classification logic shell-free.
   it('calls a deadline an infrastructure result, never a defect in the diff', () => {
     writeFileSync(
       join(root, 'package.json'),
       JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
     );
-    pkg('packages/a', { name: '@x/a', scripts: { build: 'sleep 30' } });
+    pkg('packages/a', {
+      name: '@x/a',
+      scripts: { build: `node -e "setTimeout(()=>{},30000)"` },
+    });
     writePlan(['packages/a/src/x.ts']);
 
     const rep = runBuildTest({
@@ -348,7 +426,7 @@ describe('runBuildTest', () => {
     // The whole point of the field: the agent must not file this as a Critical.
     expect(rep.note).toContain('infrastructure');
     expect(rep.note).not.toContain('Critical');
-  });
+  }, 30_000);
 
   it('aborts when the install times out, rather than building an incomplete tree', () => {
     // A timeout kills `npm ci` mid-download and leaves a PARTIAL node_modules.

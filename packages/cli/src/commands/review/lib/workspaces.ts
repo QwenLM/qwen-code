@@ -101,6 +101,27 @@ export function workspaceDirFor(
   return owner;
 }
 
+/**
+ * Does the workspace list use a glob shape `workspaceDirFor` does not model?
+ *
+ * The walker handles exactly two shapes: a literal path, and a single trailing
+ * one-segment star (`packages/` then `*`). npm also permits a globstar
+ * (`packages/` then `**`), a prefix star (`packages/foo-`then `*`), and a star in
+ * the middle of a path — and for those the walker matches nothing, so a diff
+ * inside them yields an EMPTY affected set and the report says "no package to
+ * build", a confident false green for the one deterministic check a review has.
+ * A caller that cannot model the layout should fall back (report `unsupported`)
+ * rather than silently pass, so this flags the shapes it must not guess about.
+ */
+export function hasUnmodeledWorkspaceGlob(globs: string[]): boolean {
+  return globs.some((glob) => {
+    const g = glob.replace(/^!/, '');
+    if (!g.includes('*')) return false; // a literal path — fully modeled
+    // The one modeled star shape: a single trailing `/*` and no other star.
+    return !/^[^*]+\/\*$/.test(g);
+  });
+}
+
 /** The `workspaces` globs from a repo root's `package.json` (empty when none). */
 export function readWorkspaceGlobs(root: string): string[] {
   try {

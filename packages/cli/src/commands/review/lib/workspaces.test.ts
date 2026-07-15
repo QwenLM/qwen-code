@@ -10,6 +10,7 @@ import {
   isWorkspaceMember,
   affectedWorkspaces,
   buildSetFor,
+  hasUnmodeledWorkspaceGlob,
   type WorkspacePackage,
 } from './workspaces.js';
 
@@ -68,6 +69,23 @@ describe('workspaceDirFor', () => {
     expect(workspaceDirFor('./packages/cli/src/a.ts', GLOBS)).toBe(
       'packages/cli',
     );
+  });
+});
+
+describe('hasUnmodeledWorkspaceGlob', () => {
+  it('is false for the shapes the walker models — literals and a trailing /*', () => {
+    expect(hasUnmodeledWorkspaceGlob(GLOBS)).toBe(false);
+    expect(hasUnmodeledWorkspaceGlob(['packages/*', 'apps/web'])).toBe(false);
+    expect(hasUnmodeledWorkspaceGlob(['!packages/desktop'])).toBe(false);
+  });
+
+  it('is true for `**`, an inner `*`, or a `foo-*` prefix the walker cannot model', () => {
+    // A diff inside these resolves to an empty affected set, which would read as a
+    // confident "nothing to build" — so build-test must fall back instead.
+    expect(hasUnmodeledWorkspaceGlob(['packages/**'])).toBe(true);
+    expect(hasUnmodeledWorkspaceGlob(['packages/*/lib'])).toBe(true);
+    expect(hasUnmodeledWorkspaceGlob(['packages/foo-*'])).toBe(true);
+    expect(hasUnmodeledWorkspaceGlob(['packages/*', 'apps/**'])).toBe(true);
   });
 });
 

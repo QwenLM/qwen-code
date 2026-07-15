@@ -39,12 +39,13 @@
 
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import {
   affectedWorkspaces,
   buildSetFor,
+  hasUnmodeledWorkspaceGlob,
   readWorkspaceGlobs,
   readWorkspacePackages,
   type WorkspacePackage,
@@ -73,7 +74,11 @@ export interface BuildTestReport {
   install: CommandResult | null;
   build: CommandResult[];
   test: CommandResult[];
-  /** True when every command that ran exited 0. */
+  /**
+   * True when every build and test command exited 0. An install that exits non-zero
+   * but leaves a usable tree (a failed `prepare` hook) does NOT set this false — the
+   * build below is the authoritative signal, and the `note` explains the install.
+   */
   ok: boolean;
   /**
    * Commands killed by the deadline. These are NOT findings: a review must not
@@ -133,7 +138,13 @@ function run(command: string, cwd: string, timeoutMs: number): CommandResult {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: buildRunEnv(),
   });
-  const timedOut = r.signal === 'SIGTERM' && r.status === null;
+  // `spawnSync` sets `error.code === 'ETIMEDOUT'` when the deadline fired — that is
+  // the authoritative signal. The `SIGTERM`/null-status pair is only a fallback: it
+  // also matches an external SIGTERM (a container stop), and it misses a non-default
+  // `killSignal`. Check the authoritative one first.
+  const timedOut =
+    (r.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT' ||
+    (r.signal === 'SIGTERM' && r.status === null);
   return {
     command,
     exitCode: r.status,
@@ -211,7 +222,17 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   const globs = readWorkspaceGlobs(root);
   const packages = readWorkspacePackages(root);
 
-  if (globs.length === 0 || packages.length === 0) {
+  // `unsupported` when there is nothing to scope, OR when the layout uses a glob
+  // shape the walker does not model (`packages/**`, `foo-*`, `*/lib`). The second
+  // is the load-bearing addition: without it, a diff inside an unmodeled workspace
+  // resolves to an EMPTY affected set and the report says "no package to build" — a
+  // confident false green for the review's one deterministic check. Falling back to
+  // the brief's precedence list is the safe direction.
+  // The unmodeled-glob check comes FIRST: `packages/**` also makes
+  // `readWorkspacePackages` find nothing, so ordering it after the empty-packages
+  // check would mislabel it "no workspaces here" instead of naming the real reason.
+  const unmodeled = globs.length > 0 && hasUnmodeledWorkspaceGlob(globs);
+  if (unmodeled || globs.length === 0 || packages.length === 0) {
     return {
       toolchain: 'unsupported',
       affected: [],
@@ -222,9 +243,13 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
       test: [],
       ok: true,
       timedOut: [],
-      note:
-        'No npm workspaces here, so there is nothing to scope. Fall back to the ' +
-        'build/test precedence in your brief, and give each command a deadline it can actually meet.',
+      note: unmodeled
+        ? 'This repo uses a workspace glob shape this command does not model ' +
+          '(e.g. `**`, an inner `*`, or a `foo-*` prefix), so it cannot safely decide ' +
+          'which packages the diff touches. Fall back to the build/test precedence in ' +
+          'your brief, and give each command a deadline it can actually meet.'
+        : 'No npm workspaces here, so there is nothing to scope. Fall back to the ' +
+          'build/test precedence in your brief, and give each command a deadline it can actually meet.',
     };
   }
 
@@ -285,22 +310,33 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   // Building against that produces "module not found" errors that look like defects
   // in the diff and are not — so a timed-out install aborts, exactly like an install
   // that left no tree at all.
-  if (args.install && !existsSync(join(root, 'node_modules'))) {
+  //
+  // Whether to install is gated on npm's **completeness marker**, not the bare
+  // directory. `npm ci` (and `install`) write `node_modules/.package-lock.json` only
+  // once the tree is fully materialised, so a partial tree — left by a timeout here,
+  // or by the agent's own shell-tool kill one level up — has the directory but not
+  // the marker. Gating on the directory would let every later run *skip* the install
+  // and build against that partial tree; gating on the marker reinstalls it.
+  const installComplete = (): boolean =>
+    existsSync(join(root, 'node_modules', '.package-lock.json'));
+  if (args.install && !installComplete()) {
     const install = exec('npm ci --no-audit --no-fund', root, perCommandMs);
     results.install = install;
     if (install.timedOut) results.timedOut.push(install.command);
-    if (
-      install.timedOut ||
-      (install.exitCode !== 0 && !existsSync(join(root, 'node_modules')))
-    ) {
+    // A timeout leaves a partial tree — remove it, so this is not mistaken next time
+    // for a complete install to build against.
+    if (install.timedOut) {
+      rmSync(join(root, 'node_modules'), { recursive: true, force: true });
+    }
+    if (install.timedOut || !installComplete()) {
       results.ok = false;
       results.note = install.timedOut
         ? `\`${install.command}\` ran out of time (${args.timeout}s) and left an ` +
-          'incomplete `node_modules`, so nothing could be built or tested against it. ' +
-          'This is an infrastructure result, not a defect in the diff — report it as ' +
-          'informational.'
-        : 'The install failed and left no `node_modules`, so nothing could be built ' +
-          'or tested. This is an environment failure, not a defect in the diff — ' +
+          'incomplete `node_modules` (now removed), so nothing could be built or tested ' +
+          'against it. This is an infrastructure result, not a defect in the diff — ' +
+          'report it as informational.'
+        : 'The install failed and left no usable `node_modules`, so nothing could be ' +
+          'built or tested. This is an environment failure, not a defect in the diff — ' +
           'report it as informational.';
       return results;
     }
@@ -364,8 +400,12 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     // was too small, which is this command's mistake, not the author's. Left in
     // `build[]`, an agent told "a build failure in a changed file is a Critical"
     // reads `packages/vscode-ide-companion rc=2` and files exactly that — a public
-    // blocker on a PR whose build passes.
+    // blocker on a PR whose build passes. Drop it from `timedOut` too: a build that
+    // both ran out of time and named a missing workspace package would otherwise
+    // survive the retry only in `timedOut`, and an `ok: true` report would still
+    // instruct the agent to note an infrastructure event that did not happen.
     results.build = results.build.filter((r) => r !== failure);
+    results.timedOut = results.timedOut.filter((c) => c !== failure.command);
 
     for (const name of missing) widened.add(name);
     for (const name of missing) {
