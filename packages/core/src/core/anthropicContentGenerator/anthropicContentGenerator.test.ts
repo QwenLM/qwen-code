@@ -3655,4 +3655,87 @@ describe('AnthropicContentGenerator', () => {
       expect(chunks[0]?.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
     });
   });
+
+  describe('tool_choice mapping from Gemini toolConfig', () => {
+    async function sendWithToolConfig(
+      mode: string | undefined,
+      hasTools = true,
+    ) {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model: 'claude-opus-4-6',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-6',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      const tools = hasTools
+        ? [
+            {
+              functionDeclarations: [
+                {
+                  name: 'respond_in_schema',
+                  description: 'test',
+                  parameters: {
+                    type: 'object' as const,
+                    properties: {
+                      shouldBlock: { type: 'boolean' as const },
+                    },
+                  },
+                },
+              ],
+            },
+          ]
+        : undefined;
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: [{ role: 'user', parts: [{ text: 'test' }] }],
+        config: {
+          tools,
+          ...(mode !== undefined && {
+            toolConfig: { functionCallingConfig: { mode } },
+          }),
+        },
+      } as unknown as GenerateContentParameters);
+
+      return anthropicState.lastCreateArgs?.[0] as Record<string, unknown>;
+    }
+
+    it('sets tool_choice=any when mode is ANY', async () => {
+      const req = await sendWithToolConfig('ANY');
+      expect(req['tool_choice']).toEqual({ type: 'any' });
+    });
+
+    it('sets tool_choice=none when mode is NONE', async () => {
+      const req = await sendWithToolConfig('NONE');
+      expect(req['tool_choice']).toEqual({ type: 'none' });
+    });
+
+    it('omits tool_choice when mode is AUTO', async () => {
+      const req = await sendWithToolConfig('AUTO');
+      expect(req['tool_choice']).toBeUndefined();
+    });
+
+    it('omits tool_choice when no toolConfig is set', async () => {
+      const req = await sendWithToolConfig(undefined);
+      expect(req['tool_choice']).toBeUndefined();
+    });
+
+    it('omits tool_choice when there are no tools even with mode ANY', async () => {
+      const req = await sendWithToolConfig('ANY', false);
+      expect(req['tool_choice']).toBeUndefined();
+    });
+  });
 });
