@@ -31,6 +31,7 @@ import {
   mergeSessionsById,
   workspaceBasename,
 } from '../utils/workspace';
+import { isEditableTarget } from '../utils/dom';
 import styles from './SplitView.module.css';
 
 const MAX_PANES = MAX_SPLIT_PANES;
@@ -133,6 +134,10 @@ export function SplitView({
     return currentSessionId ? [currentSessionId] : [];
   });
   const [pickerOpen, setPickerOpen] = useState(false);
+  // Which pane, if any, is maximized to fill the whole split. Purely visual and
+  // ephemeral (not deep-linked via `?split=`, like the dialog fullscreen toggle
+  // it mirrors): the other panes stay mounted and streaming, just hidden.
+  const [maximizedPaneId, setMaximizedPaneId] = useState<string | null>(null);
   const addWrapRef = useRef<HTMLDivElement | null>(null);
   // A per-tab/per-mount nonce: two browser tabs opening the same split must not
   // register the same daemon client id, or suppressOwnUserEcho would treat one
@@ -249,6 +254,9 @@ export function SplitView({
         return;
       }
       const next = [...currentPaneIds, sessionId];
+      // Reveal the freshly added pane rather than leaving it hidden behind a
+      // still-maximized one.
+      setMaximizedPaneId(null);
       if (sessionIdsControlled) {
         onPanesChange?.(next);
       } else {
@@ -292,11 +300,48 @@ export function SplitView({
     [onPanesChange, sessionIdsControlled],
   );
 
+  const toggleMaximize = useCallback((sessionId: string) => {
+    setMaximizedPaneId((current) => (current === sessionId ? null : sessionId));
+  }, []);
+
+  // Maximize only makes sense against another pane, so drop it whenever it no
+  // longer can hold: the maximized pane left the set (closed here, or removed by
+  // a controlled-mode sync), or the split shrank to a lone pane. Without the
+  // length guard a surviving maximized pane would keep a stale `maximizedPaneId`
+  // that silently re-hides the next pane a controlled parent adds back.
+  useEffect(() => {
+    if (
+      maximizedPaneId &&
+      (paneIds.length < 2 || !paneIds.includes(maximizedPaneId))
+    ) {
+      setMaximizedPaneId(null);
+    }
+  }, [paneIds, maximizedPaneId]);
+
+  // Escape restores the tiled layout, but only when the key is otherwise unused:
+  // defer to an open picker (its own Escape closes it first), and never steal
+  // Escape from the composer — it cancels the in-flight turn / closes its menus —
+  // or from an open dialog. `isEditableTarget` covers `.cm-editor` and dialog
+  // keyboard scopes, so a maximized pane's composer keeps its Escape.
+  useEffect(() => {
+    if (!maximizedPaneId) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      if (pickerOpen || isEditableTarget(event.target)) return;
+      setMaximizedPaneId(null);
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [maximizedPaneId, pickerOpen]);
+
   const available = useMemo(
     () => allSessions.filter((session) => !paneIds.includes(session.sessionId)),
     [allSessions, paneIds],
   );
   const canAdd = paneIds.length < MAX_PANES && available.length > 0;
+  // Only offer per-pane maximize once there's another pane to maximize against —
+  // a lone pane already fills the split.
+  const canMaximize = paneIds.length > 1;
 
   return (
     <div className={styles.split} data-testid="split-view">
@@ -374,9 +419,14 @@ export function SplitView({
         ) : (
           paneIds.map((sessionId) => {
             const paneWorkspaceCwd = workspaceCwdById.get(sessionId);
+            const isMaximized = maximizedPaneId === sessionId;
+            // When one pane is maximized, the rest stay mounted (their sessions
+            // keep streaming) but are hidden via CSS — a purely visual solo.
+            const isHidden = maximizedPaneId !== null && !isMaximized;
             return (
               <div
                 className={styles.paneSlot}
+                data-pane-hidden={isHidden ? '' : undefined}
                 // Include the resolved workspace in the key on a multi-workspace
                 // daemon so a pane whose workspace resolves only after mount (e.g.
                 // a `?split=` deep link) remounts under the right workspace rather
@@ -433,6 +483,12 @@ export function SplitView({
                       title={titleById.get(sessionId)}
                       workspaceCwd={paneWorkspaceCwd}
                       onClose={() => removePane(sessionId)}
+                      onToggleMaximize={
+                        canMaximize
+                          ? () => toggleMaximize(sessionId)
+                          : undefined
+                      }
+                      isMaximized={isMaximized}
                       onError={onError}
                       onRightPanelOpen={onRightPanelOpen}
                       onPaneArtifactsChange={onPaneArtifactsChange}
