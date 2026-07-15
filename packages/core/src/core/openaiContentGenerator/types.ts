@@ -79,11 +79,21 @@ export interface RequestContext {
    * emitted after the reasoning thought if no tagged thought appears.
    */
   pendingContentParts?: Part[];
+  /** Tool IDs whose preparing metadata has already been emitted in this stream. */
+  preparedToolCallIds?: Set<string>;
   pendingUntrustedResponseParts?: Part[];
   hasStructuredReasoningContent?: boolean;
   hasThinkingTagInReasoning?: boolean;
   hasVisibleContent?: boolean;
   atVisibleLineStart?: boolean;
+  pendingThinkingTagCandidate?: {
+    text: string;
+    closingTagName?: 'think' | 'thinking';
+  };
+  protocolTagSanitized?: {
+    tagName: 'think' | 'thinking';
+    toolCallCount: number;
+  };
 }
 
 export interface ErrorHandler {

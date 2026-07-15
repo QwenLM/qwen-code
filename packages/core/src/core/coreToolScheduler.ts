@@ -64,7 +64,7 @@ import {
 import { escapeSystemReminderTags } from '../utils/xml.js';
 import { unescapePath, PATH_ARG_KEYS } from '../utils/paths.js';
 import type { MemoryPressureMonitor } from '../services/memoryPressureMonitor.js';
-import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
+import { CONCURRENCY_SAFE_KINDS, isShellProgressData } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import { parsePositiveIntegerEnv } from '../utils/env.js';
@@ -200,6 +200,7 @@ function extractTextFromPartListUnion(c: PartListUnion): string {
       const resp = fr?.response;
       if (resp) {
         if (typeof resp['output'] === 'string') return resp['output'];
+        if (typeof resp['error'] === 'string') return resp['error'];
         if (typeof resp['content'] === 'string') return resp['content'];
       }
     }
@@ -788,6 +789,39 @@ export function convertToFunctionResponse(
   return [createFunctionResponsePart(callId, toolName, TOOL_SUCCEEDED_OUTPUT)];
 }
 
+export function convertToFunctionErrorResponse(
+  toolName: string,
+  callId: string,
+  llmContent: PartListUnion,
+  fallbackError: string,
+): Part[] {
+  return convertToFunctionResponse(toolName, callId, llmContent).map((part) => {
+    const functionResponse = part.functionResponse;
+    if (!functionResponse) return part;
+
+    const response = functionResponse.response ?? {};
+    const existingError = response['error'];
+    const output = response['output'];
+    const error =
+      typeof existingError === 'string' && existingError.trim()
+        ? existingError
+        : typeof output === 'string' &&
+            output.trim() &&
+            output !== TOOL_SUCCEEDED_OUTPUT
+          ? output
+          : fallbackError;
+    const { output: _output, ...responseWithoutOutput } = response;
+
+    return {
+      ...part,
+      functionResponse: {
+        ...functionResponse,
+        response: { ...responseWithoutOutput, error },
+      },
+    };
+  });
+}
+
 function toParts(input: PartListUnion): Part[] {
   const parts: Part[] = [];
   for (const part of Array.isArray(input) ? input : [input]) {
@@ -807,13 +841,18 @@ function toParts(input: PartListUnion): Part[] {
  */
 const BATCH_OFFLOAD_PREVIEW_CHARS = 2000;
 
-/** Total model-facing string output across a completed call's responseParts. */
+/** Total model-facing string result across a completed call's responseParts. */
 function batchResponseOutputSize(call: CompletedToolCall): number {
-  if (call.status !== 'success') return 0;
   let size = 0;
   for (const part of call.response.responseParts) {
-    const output = part.functionResponse?.response?.['output'];
-    if (typeof output === 'string') size += output.length;
+    const response = part.functionResponse?.response;
+    const output = response?.['output'];
+    const error = response?.['error'];
+    if (typeof output === 'string') {
+      size += output.length;
+    } else if (typeof error === 'string') {
+      size += error.length;
+    }
   }
   return size;
 }
@@ -842,6 +881,7 @@ const createErrorResponse = (
   error: Error,
   errorType: ToolErrorType | undefined,
   artifacts?: ToolArtifact[],
+  resultDisplay?: ToolResultDisplay,
 ): ToolCallResponseInfo => ({
   callId: request.callId,
   error,
@@ -854,7 +894,7 @@ const createErrorResponse = (
       },
     },
   ],
-  resultDisplay: error.message,
+  resultDisplay: resultDisplay ?? error.message,
   errorType,
   contentLength: error.message.length,
   ...(artifacts && artifacts.length > 0 ? { artifacts } : {}),
@@ -3602,6 +3642,16 @@ export class CoreToolScheduler {
 
     const liveOutputCallback = scheduledCall.tool.canUpdateOutput
       ? (outputChunk: ToolResultDisplay) => {
+          if (isShellProgressData(outputChunk)) {
+            // Liveness heartbeat, not display content: forward to the
+            // outputUpdateHandler (stream-json progress events) but keep it
+            // out of liveOutput — replacing the accumulated command output
+            // with a stats object would blank the live view.
+            if (this.outputUpdateHandler) {
+              this.outputUpdateHandler(callId, outputChunk);
+            }
+            return;
+          }
           const compactOutput =
             this.compactResultDisplayForInteractiveHistory(outputChunk);
           if (this.outputUpdateHandler) {
@@ -3729,11 +3779,15 @@ export class CoreToolScheduler {
       }
 
       let toolResult: ToolResult;
+      let schedulerTimeoutResultSelected = false;
+      let schedulerTimeoutWon = false;
       if (timeoutController) {
         let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
         try {
           toolResult = await new Promise<ToolResult>((resolve, reject) => {
             timeoutTimer = setTimeout(() => {
+              schedulerTimeoutResultSelected = true;
+              schedulerTimeoutWon = !signal.aborted;
               debugLogger.warn(
                 `Tool ${canonicalName} (${callId}) timed out after ` +
                   `${toolExecutionTimeoutMs}ms — aborting`,
@@ -3768,9 +3822,10 @@ export class CoreToolScheduler {
       // Mirror the abort signal here — and pass `cancelled: true` so the
       // exec sub-span ends UNSET, matching setToolSpanCancelled on the
       // parent (#4212, #4302 review).
-      const aborted = signal.aborted;
       const isTimeout =
-        !aborted && toolResult.error?.type === ToolErrorType.EXECUTION_TIMEOUT;
+        toolResult.error?.type === ToolErrorType.EXECUTION_TIMEOUT &&
+        (!schedulerTimeoutResultSelected || schedulerTimeoutWon);
+      const aborted = signal.aborted && !isTimeout;
       endToolExecutionSpan(execSpan, {
         success: toolResult.error === undefined && !aborted,
         error: aborted
@@ -3835,7 +3890,7 @@ export class CoreToolScheduler {
       }
 
       if (toolResult.error === undefined) {
-        let content = toolResult.llmContent;
+        let content = toolResult.llmContent ?? '';
         let contentLength: number | undefined =
           typeof content === 'string' ? content.length : undefined;
 
@@ -4189,7 +4244,9 @@ export class CoreToolScheduler {
       } else {
         // It is a failure
         // PostToolUseFailure Hook
-        let errorMessage = toolResult.error.message;
+        const operationalErrorMessage = toolResult.error.message;
+        let errorMessage = operationalErrorMessage;
+        let failureHookAdditionalContext: string | undefined;
         let failureHookArtifacts: ToolArtifact[] | undefined;
         if (hooksEnabled && messageBus) {
           const failureHookResult = await this.withHookSpan(
@@ -4215,9 +4272,67 @@ export class CoreToolScheduler {
 
           // Append additional context from hook if provided
           if (failureHookResult.additionalContext) {
-            errorMessage += `\n\n${failureHookResult.additionalContext}`;
+            if (isTimeout) {
+              failureHookAdditionalContext =
+                failureHookResult.additionalContext;
+            } else {
+              errorMessage += `\n\n${failureHookResult.additionalContext}`;
+            }
           }
           failureHookArtifacts = failureHookResult.artifacts;
+        }
+
+        if (isTimeout) {
+          const timeoutContent = await this.maybePersistLargeToolResult(
+            callId,
+            toolName,
+            toolResult.llmContent,
+          );
+          let responseParts = convertToFunctionErrorResponse(
+            toolName,
+            callId,
+            timeoutContent,
+            operationalErrorMessage,
+          );
+          if (failureHookAdditionalContext && responseParts.length > 0) {
+            const lastIndex = responseParts.length - 1;
+            responseParts = [...responseParts];
+            responseParts[lastIndex] = appendContextToResponsePart(
+              responseParts[lastIndex],
+              failureHookAdditionalContext,
+            );
+          }
+
+          const contentLength = responseParts.reduce((total, part) => {
+            const error = part.functionResponse?.response?.['error'];
+            return total + (typeof error === 'string' ? error.length : 0);
+          }, 0);
+          this.safelyAddToolResultAttributes(
+            span,
+            toolName,
+            `ERROR: ${operationalErrorMessage}`,
+          );
+          const artifacts = [
+            ...(toolResult.artifacts ?? []),
+            ...(failureHookArtifacts ?? []),
+          ];
+          this.setStatusInternal(callId, 'error', {
+            callId,
+            responseParts,
+            resultDisplay: this.compactResultDisplayForInteractiveHistory(
+              toolResult.returnDisplay,
+            ),
+            error: new Error(operationalErrorMessage),
+            errorType: ToolErrorType.EXECUTION_TIMEOUT,
+            contentLength,
+            ...(artifacts.length > 0 ? { artifacts } : {}),
+          });
+          setToolSpanFailure(
+            span,
+            TOOL_FAILURE_KIND_TIMEOUT,
+            TOOL_SPAN_STATUS_TOOL_TIMEOUT,
+          );
+          return;
         }
 
         // Truncate oversized error messages (e.g., large stderr)
@@ -4248,21 +4363,18 @@ export class CoreToolScheduler {
           error,
           toolResult.error.type,
           failureHookArtifacts,
+          typeof toolResult.returnDisplay === 'string'
+            ? undefined
+            : this.compactResultDisplayForInteractiveHistory(
+                toolResult.returnDisplay,
+              ),
         );
         this.setStatusInternal(callId, 'error', errorResponse);
-        if (toolResult.error.type === ToolErrorType.EXECUTION_TIMEOUT) {
-          setToolSpanFailure(
-            span,
-            TOOL_FAILURE_KIND_TIMEOUT,
-            TOOL_SPAN_STATUS_TOOL_TIMEOUT,
-          );
-        } else {
-          setToolSpanFailure(
-            span,
-            TOOL_FAILURE_KIND_TOOL_ERROR,
-            TOOL_SPAN_STATUS_TOOL_ERROR,
-          );
-        }
+        setToolSpanFailure(
+          span,
+          TOOL_FAILURE_KIND_TOOL_ERROR,
+          TOOL_SPAN_STATUS_TOOL_ERROR,
+        );
       }
     } catch (executionError: unknown) {
       const errorMessage =
@@ -4640,29 +4752,32 @@ export class CoreToolScheduler {
 
   /**
    * Spill a single completed call's text output to disk, replacing it with a
-   * small preview + recoverable pointer. Returns null (skip) for non-success,
-   * multi-part, media-bearing, or already-persisted results.
+   * small preview + recoverable pointer. Returns null (skip) for multi-part,
+   * media-bearing, non-text, or already-persisted results.
    */
   private async offloadCallOutput(
     call: CompletedToolCall,
   ): Promise<CompletedToolCall | null> {
-    if (call.status !== 'success') return null;
     const parts = call.response.responseParts;
     if (parts.length !== 1) return null;
     const fr = parts[0]?.functionResponse;
     if (!fr) return null;
-    const output = fr.response?.['output'];
-    if (typeof output !== 'string') return null;
+    const response = fr.response ?? {};
+    const output = response['output'];
+    const error = response['error'];
+    const key = typeof output === 'string' ? 'output' : 'error';
+    const content = typeof output === 'string' ? output : error;
+    if (typeof content !== 'string') return null;
     if (fr.parts && fr.parts.length > 0) return null; // media present
-    if (output.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)) return null; // already
-    if (output.startsWith('<persisted-output>')) return null;
+    if (content.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)) return null; // already
+    if (content.startsWith('<persisted-output>')) return null;
 
     let truncated: { content: string; outputFile?: string };
     try {
       truncated = await truncateToolOutput(
         this.config,
         call.request.name,
-        output,
+        content,
         { threshold: BATCH_OFFLOAD_PREVIEW_CHARS },
         call.request.prompt_id,
       );
@@ -4677,10 +4792,10 @@ export class CoreToolScheduler {
         ...call.response,
         responseParts: [
           {
+            ...parts[0],
             functionResponse: {
-              id: fr.id,
-              name: fr.name,
-              response: { output: truncated.content },
+              ...fr,
+              response: { ...response, [key]: truncated.content },
             },
           },
         ],

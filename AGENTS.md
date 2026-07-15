@@ -128,15 +128,15 @@ cd integration-tests && \
 **Gotcha:** In interactive tests, always call `session.idle()` between sends —
 ANSI output streams asynchronously.
 
-### Linting & Formatting
+### Linting, Formatting & Verification
 
 ```bash
 npm run lint       # ESLint check
 npm run lint:fix   # Auto-fix lint issues
 npm run format     # Prettier formatting
 npm run typecheck  # TypeScript type checking
-npm run preflight  # Full check: clean → install → format → lint → build
-                   # → typecheck → test
+npm run preflight  # Legacy broad check; writes formatting and omits some PR CI checks
+npm run verify:pr  # Final clean PR gate after committing, before pushing
 ```
 
 ## Code Conventions
@@ -211,6 +211,10 @@ npm run preflight  # Full check: clean → install → format → lint → build
    Here, `/review` means the Codex code-review workflow, not Qwen Review or
    the `qwen-review` plugin. Do not invoke Qwen Review unless the user
    explicitly requests it by name.
+6. **Final PR verification** — after the final changes are committed and the
+   working tree is clean, run `npm run verify:pr` before the first PR push and
+   before pushing updates. This is the final local deterministic gate; it does
+   not replace remote CI.
 
 ### Feature development
 
@@ -288,6 +292,12 @@ applicable.
 - **Line wrapping**: do not hard-wrap the PR body at a fixed column width.
   GitHub renders single newlines as `<br>`, so a wrapped description displays
   as a narrow column. Write each paragraph or list item as one long line.
+- **Don't let review rounds balloon the PR.** Every accepted change widens the
+  diff and tends to trigger another round, so a PR can drift far past its
+  original intent. Once a PR has been through roughly **5 review rounds**, land
+  only Critical fixes — correctness, security, data loss, regressions — and
+  defer remaining Suggestions to a follow-up issue or PR. Record each deferral
+  in the PR thread so nothing is silently dropped.
 
 ## Project Directories
 

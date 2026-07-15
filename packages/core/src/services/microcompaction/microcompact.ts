@@ -26,6 +26,7 @@ const COMPACTABLE_TOOLS = new Set<string>([
   ToolNames.READ_MCP_RESOURCE,
   ToolNames.EDIT,
   ToolNames.WRITE_FILE,
+  ToolNames.SKILL,
 ]);
 
 /**

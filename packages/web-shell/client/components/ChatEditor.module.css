@@ -14,7 +14,11 @@
   border-radius: 12px;
   margin: 0;
   cursor: text;
+  --chat-editor-min-height: 140px;
+  --chat-editor-max-height: min(350px, 40vh);
+  --chat-editor-input-min-height: 44px;
   --chat-editor-input-max-height: 300px;
+  --chat-editor-attachments-max-height: 136px;
   --dac-glow-on: 0;
   --dac-glow-pulse: 0;
   --dac-g1: #6a78ff;
@@ -27,8 +31,11 @@
   position: relative;
   z-index: 2;
   display: flex;
-  height: 140px;
+  box-sizing: border-box;
+  min-height: var(--chat-editor-min-height, 140px);
+  max-height: var(--chat-editor-max-height, min(350px, 40vh));
   flex-direction: column;
+  overflow: visible;
   border: 1.5px solid var(--agent-gray-200);
   border-radius: inherit;
   background: var(--chat-editor-bg-primary);
@@ -178,65 +185,66 @@
   }
 }
 
-.slashPortalLayer {
-  display: contents;
-}
-
 .atPortalLayer {
   display: contents;
 }
 
-.slashPanel {
-  position: fixed;
-  z-index: var(--web-shell-popover-z-index, 1000);
-  /* Round cap sized for ~12 command rows plus their section headers/dividers,
-     bounded by 45vh so it stays proportional on short viewports. */
-  --slash-panel-max-height: min(460px, 45vh);
-  --slash-anchor-width: 620px;
-  --slash-command-col: 20ch;
-  --slash-desc-col: 32ch;
-  --slash-column-gap: 2ch;
-  --slash-row-width: calc(
-    var(--slash-command-col) + var(--slash-desc-col) + var(--slash-column-gap) +
-      16px
-  );
-  width: fit-content;
-  min-width: min(240px, calc(var(--slash-anchor-width) - 32px));
-  max-width: min(
-    620px,
-    calc(var(--slash-anchor-width) - 32px),
+:global([data-web-shell-slash-menu]) {
+  width: min(
+    max(
+      240px,
+      calc(
+        var(--slash-command-col) + var(--slash-desc-col) +
+          var(--slash-column-gap) + 20px
+      )
+    ),
+    calc(var(--radix-popover-trigger-width) - 32px),
+    var(--radix-popover-content-available-width),
     calc(100vw - 24px)
   );
-  max-height: var(--slash-panel-max-height);
-  padding: 6px;
-  overflow: visible;
-  border: 1px solid var(--chat-editor-border-color);
-  border-radius: 8px;
-  background: var(--background);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
-  color: var(--chat-editor-text-primary);
+  max-height: var(--radix-popover-content-available-height);
+  overflow: hidden;
+}
+
+:global([data-web-shell-slash-detail]) {
+  z-index: calc(var(--web-shell-popover-z-index, 1000) + 1);
+  width: min(
+    320px,
+    var(--radix-popover-content-available-width),
+    calc(100vw - 24px)
+  );
+  max-height: min(200px, var(--radix-popover-content-available-height));
+  overflow: hidden;
+}
+
+:global([data-web-shell-toolbar-popover]) {
+  width: min(18rem, var(--radix-popover-content-available-width));
+  max-height: var(--radix-popover-content-available-height);
+  overflow: hidden;
+}
+
+.slashPanel {
+  max-height: min(
+    460px,
+    calc(var(--radix-popover-content-available-height) - 20px)
+  );
+  overflow: hidden;
   cursor: default;
-  font-family: var(--font-sans, system-ui, sans-serif);
-  font-size: 13px;
-  line-height: 1.35;
 }
 
 .slashPanelBody {
-  max-height: calc(var(--slash-panel-max-height) - 12px);
+  max-height: inherit;
   overflow: hidden;
-  border-radius: 6px;
 }
 
 .slashList {
   display: flex;
-  width: min(var(--slash-row-width), calc(100vw - 46px));
-  max-width: 100%;
+  width: 100%;
   max-height: inherit;
   flex-direction: column;
   gap: 2px;
   overflow-x: hidden;
   overflow-y: auto;
-  border-radius: 6px;
   scroll-padding-bottom: 12px;
   scrollbar-color: var(--chat-editor-border-color) transparent;
   scrollbar-width: thin;
@@ -295,9 +303,9 @@
   width: 100%;
   min-width: 0;
   grid-template-columns:
-    minmax(0, var(--slash-command-col))
-    minmax(0, var(--slash-desc-col));
-  column-gap: var(--slash-column-gap);
+    minmax(0, 2fr)
+    minmax(0, 3fr);
+  column-gap: 8px;
   align-items: baseline;
   padding: 5px 8px;
   border: 0;
@@ -307,6 +315,11 @@
   font: inherit;
   text-align: left;
   cursor: pointer;
+}
+
+.slashItem:not([data-has-description]) {
+  grid-template-columns: minmax(0, 1fr);
+  column-gap: 0;
 }
 
 .slashItem:hover,
@@ -320,22 +333,13 @@
 }
 
 .slashDetail {
-  position: fixed;
-  z-index: calc(var(--web-shell-popover-z-index, 1000) + 1);
-  width: min(320px, calc(100vw - 48px));
-  padding: 8px 10px;
+  min-height: 0;
+  max-height: min(
+    180px,
+    max(0px, calc(var(--radix-popover-content-available-height) - 20px))
+  );
   overflow: auto;
-  border: 1px solid var(--chat-editor-border-color);
-  border-radius: 6px;
-  background: var(--background);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
-  color: var(--foreground);
-  font-family: var(--font-sans, system-ui, sans-serif);
-  font-size: 12px;
-  font-weight: 400;
-  line-height: 20px;
   overflow-wrap: anywhere;
-  pointer-events: auto;
 }
 
 .slashDetailCommand {
@@ -692,12 +696,6 @@
 }
 
 @container (max-width: 699px) {
-  .slashPanel {
-    left: 12px;
-    width: calc(100% - 24px);
-    min-width: 0;
-  }
-
   .slashList {
     width: 100%;
   }
@@ -709,8 +707,19 @@
   }
 }
 
+.attachments {
+  display: flex;
+  min-height: 0;
+  max-height: var(--chat-editor-attachments-max-height, 136px);
+  flex: 0 1 auto;
+  flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 .tags {
   display: flex;
+  flex: 0 0 auto;
   flex-wrap: wrap;
   gap: 6px;
   padding: 0 0 8px;
@@ -731,14 +740,23 @@
   line-height: 1.2;
 }
 
+.tagContent {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  flex: 1 1 auto;
+  align-items: center;
+}
+
 .tagTooltip {
-  position: absolute;
   z-index: calc(var(--web-shell-tooltip-z-index, 1000) + 1);
-  top: calc(100% + 6px);
-  left: 0;
-  display: none;
+  box-sizing: border-box;
   min-width: 160px;
   max-width: min(320px, 80vw);
+  max-height: min(
+    calc(100vh - 16px),
+    var(--radix-tooltip-content-available-height, calc(100vh - 16px))
+  );
   padding: 8px 10px;
   border: 1px solid var(--chat-editor-border-color);
   border-radius: 6px;
@@ -748,12 +766,10 @@
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 12px;
   line-height: 1.5;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  pointer-events: auto;
   white-space: normal;
-}
-
-.tag:hover .tagTooltip,
-.tag:focus-within .tagTooltip {
-  display: block;
 }
 
 .tagLabel,
@@ -819,20 +835,34 @@
 .editorArea {
   display: flex;
   flex: 1 1 auto;
-  align-items: flex-start;
+  align-items: stretch;
   gap: 6px;
-  min-height: 0;
+  min-height: var(--chat-editor-input-min-height, 44px);
   padding: 4px 0;
-  overflow: auto;
+  overflow: clip;
 }
 
 .editorArea > :last-child {
+  display: grid;
   min-width: 0;
+  min-height: var(--chat-editor-input-min-height, 44px);
   flex: 1;
+  overflow: clip;
+}
+
+.editorArea :global(.cm-editor) {
+  height: 100%;
+  min-height: 0;
+}
+
+.editorArea :global(.cm-scroller) {
+  height: 100%;
+  min-height: 0;
 }
 
 .shellPrefix {
   flex: 0 0 auto;
+  align-self: flex-start;
   padding-top: 1px;
   color: var(--chat-editor-accent-color);
   font-family: var(--font-mono);
@@ -870,6 +900,7 @@
 
 .toolbar {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
   min-width: 0;
@@ -997,101 +1028,13 @@
   pointer-events: none;
 }
 
-@container (max-width: 699px) {
-  .toolbarLeft {
-    flex-wrap: nowrap;
-    gap: 2px;
-  }
-
-  .toolbarLeft .dropdownWrapper {
-    width: 28px;
-    flex: 0 0 28px;
-  }
-
-  .gitBranchChip {
-    width: 28px;
-    max-width: 28px;
-    flex: 0 0 28px;
-    gap: 0;
-    padding: 0 6px;
-  }
-
-  .gitBranchText,
-  .workspaceChipText,
-  .modeToolBtn .toolBtnText,
-  .modelToolBtn .toolBtnText,
-  .modeToolBtn .toolBtnArrow,
-  .modelToolBtn .toolBtnArrow {
-    display: none;
-  }
-
-  .toolbarLeft .workspaceChip,
-  .workspaceSelectTooltipTrigger,
-  .workspaceSelectTrigger,
-  .modeToolBtn,
-  .modelToolBtn {
-    width: 28px;
-    max-width: 28px;
-    flex: 0 0 28px;
-    gap: 0;
-    padding: 0 6px;
-    justify-content: center;
-    box-sizing: border-box;
-  }
-
-  .toolbarLeft .workspaceSelectTrigger [data-slot='select-value'],
-  .workspaceSelectTrigger > svg:last-child {
-    display: none;
-  }
-}
-
 .dropdownWrapper {
   position: relative;
 }
 
-.dropdown {
-  position: fixed;
-  z-index: 100;
-  display: flex;
-  min-width: 0;
-  padding: 4px;
-  overflow: hidden;
-  background: var(--background);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow:
-    0 2px 4px -2px rgba(0, 0, 0, 0.1),
-    0 4px 6px -1px rgba(0, 0, 0, 0.1);
-  flex-direction: column;
-  gap: 2px;
-}
-
-.dropdownRich {
-  padding: 6px;
-  gap: 2px;
-}
-
-.dropdownCheck {
-  padding: 6px;
-  gap: 2px;
-}
-
-.dropdownSearch {
-  width: 100%;
-  min-height: 30px;
-  flex: 0 0 auto;
-  padding: 5px 8px;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  outline: none;
-  background: var(--chat-editor-bg-tertiary);
-  color: var(--foreground);
-  font: inherit;
-  font-size: 13px;
-}
-
-.dropdownSearch:focus-visible {
-  border-color: var(--agent-blue-500);
+.dropdownWrapperCompact {
+  width: 28px;
+  flex: 0 0 28px;
 }
 
 .dropdownList {
@@ -1102,6 +1045,10 @@
   gap: 2px;
   overflow-x: hidden;
   overflow-y: auto;
+}
+
+.dropdownListConstrained {
+  max-height: 250px;
 }
 
 .dropdownEmpty {
@@ -1266,6 +1213,36 @@
   white-space: nowrap;
 }
 
+.gitBranchChipCompact,
+.workspaceChipCompact,
+.workspaceSelectTriggerCompact,
+.toolBtnCompact {
+  width: 28px;
+  max-width: 28px;
+  flex: 0 0 28px;
+  gap: 0;
+  padding: 0 6px;
+  justify-content: center;
+  box-sizing: border-box;
+}
+
+.workspaceSelectTooltipTriggerCompact {
+  width: 28px;
+  max-width: 28px;
+  flex: 0 0 28px;
+}
+
+.gitBranchChipCompact .gitBranchText,
+.workspaceChipCompact .workspaceChipText,
+.workspaceSelectTriggerCompact [data-slot='select-value'],
+.workspaceSelectTriggerCompact > svg:last-child,
+.workspaceSelectTriggerCompact .toolBtnText,
+.workspaceSelectTriggerCompact .toolBtnArrow,
+.toolBtnCompact .toolBtnText,
+.toolBtnCompact .toolBtnArrow {
+  display: none;
+}
+
 .toolBtn[data-tooltip]:hover::after,
 .toolBtn[data-tooltip]:focus-visible::after {
   position: absolute;
@@ -1357,22 +1334,15 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 10px;
-  height: 10px;
-  margin-left: 2px;
+  width: 16px;
+  height: 16px;
+  color: var(--muted-foreground);
 }
 
 .toolBtnArrow svg {
   display: block;
-}
-
-.chevronDown {
-  width: 7px;
-  height: 7px;
-  border-right: 1px solid currentColor;
-  border-bottom: 1px solid currentColor;
-  transform: rotate(45deg);
-  margin-top: -3px;
+  width: 16px;
+  height: 16px;
 }
 
 .quickActionsPanel {
@@ -1666,6 +1636,7 @@
 
 .images {
   display: flex;
+  flex: 0 0 auto;
   gap: 6px;
   padding: 4px 0 0;
   flex-wrap: wrap;

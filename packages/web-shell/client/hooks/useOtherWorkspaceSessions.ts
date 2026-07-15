@@ -39,17 +39,21 @@ const EMPTY: DaemonSessionSummary[] = [];
  *   `capabilities.workspaces`, or only the primary), so merging it is a no-op
  *   and the single-workspace UI is byte-identical.
  */
-export function useOtherWorkspaceSessions(): OtherWorkspaceSessionsResult {
+export function useOtherWorkspaceSessions(
+  enabled = true,
+): OtherWorkspaceSessionsResult {
   const workspace = useWorkspace();
   const client = workspace.client;
 
   // A newline-joined key of the non-primary trusted cwds, so `load` (and the
   // effect that runs it) only change identity when the actual target set does —
   // not on every capabilities re-render.
-  const targetsKey = (workspace.capabilities?.workspaces ?? [])
-    .filter((w) => !w.primary && w.trusted)
-    .map((w) => w.cwd)
-    .join('\n');
+  const targetsKey = enabled
+    ? (workspace.capabilities?.workspaces ?? [])
+        .filter((w) => !w.primary && w.trusted)
+        .map((w) => w.cwd)
+        .join('\n')
+    : '';
 
   const [sessions, setSessions] = useState<DaemonSessionSummary[]>(EMPTY);
 

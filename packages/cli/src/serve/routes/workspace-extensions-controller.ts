@@ -9,6 +9,7 @@ import {
   ExtensionManager,
   redactUrlCredentials,
   stripAnsiAndControl,
+  type ClaudeMarketplaceConfig,
   type ExtensionSetting,
 } from '@qwen-code/qwen-code-core';
 import type { Request, Response } from 'express';
@@ -34,6 +35,20 @@ const MAX_UNFINISHED_EXTENSION_OPERATIONS = 10;
 
 const sanitizeDaemonMessage = (message: string): string =>
   redactUrlCredentials(stripAnsiAndControl(message));
+
+export const redactExtensionDisplaySource = (source: string): string => {
+  const redacted = redactUrlCredentials(source);
+  if (/^[A-Za-z]:[\\/]/.test(redacted)) return redacted;
+  try {
+    const url = new URL(redacted);
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return redacted;
+  }
+};
+
 const EXTENSION_PREPARATION_CONCURRENCY = 2;
 const EXTENSION_REFRESH_TIMEOUT_MS = 30_000;
 const RECONCILE_SLOW_MS = 30_000;
@@ -62,6 +77,34 @@ export type ExtensionMutationEvent = {
   states?: Record<string, string>;
 };
 
+export type ExtensionPendingInteraction =
+  | {
+      id: string;
+      kind: 'marketplace_plugin';
+      marketplace: { name: string };
+      plugins: Array<{
+        name: string;
+        description?: string;
+        source: string;
+        category?: string;
+        tags?: string[];
+      }>;
+    }
+  | {
+      id: string;
+      kind: 'setting';
+      setting: {
+        name: string;
+        description: string;
+        sensitive: boolean;
+      };
+    };
+
+export interface ExtensionInteractionHandlers {
+  requestSetting(setting: ExtensionSetting): Promise<string>;
+  requestChoicePlugin(marketplace: ClaudeMarketplaceConfig): Promise<string>;
+}
+
 export type ExtensionOperationStatus = {
   v: 1;
   operationId: string;
@@ -69,6 +112,7 @@ export type ExtensionOperationStatus = {
   status:
     | 'queued'
     | 'running'
+    | 'waiting_for_input'
     | 'succeeded'
     | 'succeeded_with_warnings'
     | 'failed';
@@ -82,6 +126,7 @@ export type ExtensionOperationStatus = {
     failed?: number;
     error?: string;
   };
+  interaction?: ExtensionPendingInteraction;
   error?: string;
   code?: string;
   warnings?: Array<{
@@ -126,6 +171,7 @@ export interface ExtensionsController {
   createExtensionManager(
     workspaceDir?: string,
     isWorkspaceTrusted?: boolean,
+    interactions?: ExtensionInteractionHandlers,
   ): ExtensionManager;
   buildLocalExtensionsStatus(): Promise<ServeWorkspaceExtensionsStatus>;
   refreshExtensionsForAllSessions(): Promise<{
@@ -133,6 +179,11 @@ export interface ExtensionsController {
     failed: number;
   }>;
   getOperation(operationId: string): ExtensionOperationStatus | undefined;
+  getActiveOperations(): ExtensionOperationStatus[];
+  updateOperation(
+    operationId: string,
+    patch: Partial<Omit<ExtensionOperationStatus, 'operationId' | 'createdAt'>>,
+  ): void;
   preparationQueue: FifoTaskQueue;
   acquireOperationSlot(res: Response): (() => void) | undefined;
   validateExtensionMutationClient(
@@ -151,9 +202,12 @@ export interface ExtensionsController {
       extensionManager: ExtensionManager,
       signal?: AbortSignal,
       context?: ExtensionOperationContext,
+      operationId?: string,
     ) => Promise<ExtensionMutationEvent>,
     options?: {
       manager?: ExtensionManager;
+      createManager?: (operationId: string) => ExtensionManager;
+      onSettled?: (operationId: string) => void;
       refreshRuntimes?:
         | readonly WorkspaceRuntime[]
         | (() => readonly WorkspaceRuntime[]);
@@ -201,6 +255,7 @@ export function createExtensionsController(
   const createExtensionManager = (
     workspaceDir = boundWorkspace,
     trustedOverride?: boolean,
+    interactions?: ExtensionInteractionHandlers,
   ) =>
     new ExtensionManager({
       workspaceDir,
@@ -210,16 +265,20 @@ export function createExtensionsController(
           .effective.state === 'trusted',
       requestConsent: () => Promise.resolve(),
       networkPolicy: 'public',
-      requestSetting: async (setting: ExtensionSetting) => {
-        throw new Error(
-          `Extension setting "${setting.envVar}" requires interactive configuration and is not supported over the daemon install endpoint.`,
-        );
-      },
-      requestChoicePlugin: async () => {
-        throw new Error(
-          'Marketplace plugin selection is not supported over the daemon install endpoint. Specify a plugin name in the source.',
-        );
-      },
+      requestSetting:
+        interactions?.requestSetting ??
+        (async (setting: ExtensionSetting) => {
+          throw new Error(
+            `Extension setting "${setting.envVar}" requires interactive configuration and is not supported over the daemon install endpoint.`,
+          );
+        }),
+      requestChoicePlugin:
+        interactions?.requestChoicePlugin ??
+        (async () => {
+          throw new Error(
+            'Marketplace plugin selection is not supported over the daemon install endpoint. Specify a plugin name in the source.',
+          );
+        }),
     });
 
   const validateExtensionMutationClient = (
@@ -249,12 +308,17 @@ export function createExtensionsController(
   const extensionOperations = new Map<string, ExtensionOperationStatus>();
   const isTerminalExtensionOperation = (
     operation: ExtensionOperationStatus,
-  ): boolean => operation.status !== 'queued' && operation.status !== 'running';
+  ): boolean =>
+    operation.status !== 'queued' &&
+    operation.status !== 'running' &&
+    operation.status !== 'waiting_for_input';
   const redactExtensionOperationResult = (
     event: ExtensionMutationEvent,
   ): ExtensionMutationEvent => ({
     ...event,
-    ...(event.source ? { source: redactUrlCredentials(event.source) } : {}),
+    ...(event.source
+      ? { source: redactExtensionDisplaySource(event.source) }
+      : {}),
   });
   const bridgeMutationEvent = (event: ExtensionMutationEvent) => {
     const redacted = redactExtensionOperationResult(event);
@@ -346,9 +410,12 @@ export function createExtensionsController(
       extensionManager: ExtensionManager,
       signal?: AbortSignal,
       context?: ExtensionOperationContext,
+      operationId?: string,
     ) => Promise<ExtensionMutationEvent>,
     options: {
       manager?: ExtensionManager;
+      createManager?: (operationId: string) => ExtensionManager;
+      onSettled?: (operationId: string) => void;
       refreshRuntimes?:
         | readonly WorkspaceRuntime[]
         | (() => readonly WorkspaceRuntime[]);
@@ -374,7 +441,7 @@ export function createExtensionsController(
       createdAt: now,
       updatedAt: now,
       ...(failureContext.source
-        ? { source: redactUrlCredentials(failureContext.source) }
+        ? { source: redactExtensionDisplaySource(failureContext.source) }
         : {}),
       ...(failureContext.name ? { name: failureContext.name } : {}),
     });
@@ -412,7 +479,10 @@ export function createExtensionsController(
           status: 'running',
           phase: 'preparing',
         });
-        const extensionManager = options.manager ?? createExtensionManager();
+        const extensionManager =
+          options.manager ??
+          options.createManager?.(operationId) ??
+          createExtensionManager();
         const deadlineController = new AbortController();
         let deadlineStarted = false;
         const startDeadline = () => {
@@ -526,6 +596,7 @@ export function createExtensionsController(
           extensionManager,
           deadlineController.signal,
           context,
+          operationId,
         );
         mutationEvent = event;
         if (deadline) clearTimeout(deadline);
@@ -786,7 +857,9 @@ export function createExtensionsController(
                 : {
                     ...(failureContext.source
                       ? {
-                          source: redactUrlCredentials(failureContext.source),
+                          source: redactExtensionDisplaySource(
+                            failureContext.source,
+                          ),
                         }
                       : {}),
                     ...(failureContext.name
@@ -812,6 +885,7 @@ export function createExtensionsController(
         updateExtensionOperation(operationId, {
           status: 'failed',
           phase: undefined,
+          interaction: undefined,
           error: message.slice(0, 500),
           ...(code ? { code } : {}),
         });
@@ -819,7 +893,7 @@ export function createExtensionsController(
           bridge.broadcastExtensionsChanged({
             status: 'failed',
             ...(failureContext.source
-              ? { source: redactUrlCredentials(failureContext.source) }
+              ? { source: redactExtensionDisplaySource(failureContext.source) }
               : {}),
             ...(failureContext.name ? { name: failureContext.name } : {}),
             refreshed: 0,
@@ -845,6 +919,7 @@ export function createExtensionsController(
       } finally {
         if (deadline) clearTimeout(deadline);
         reconciliationReservation?.release();
+        options.onSettled?.(operationId);
         releaseOperationSlot();
       }
     })();
@@ -890,7 +965,11 @@ export function createExtensionsController(
             isActive: ext.isActive,
             path: ext.path,
             ...(ext.installMetadata?.source
-              ? { source: redactUrlCredentials(ext.installMetadata.source) }
+              ? {
+                  source: redactExtensionDisplaySource(
+                    ext.installMetadata.source,
+                  ),
+                }
               : {}),
             ...(ext.installMetadata?.type
               ? { installType: ext.installMetadata.type }
@@ -937,6 +1016,11 @@ export function createExtensionsController(
     buildLocalExtensionsStatus,
     refreshExtensionsForAllSessions,
     getOperation: (operationId) => extensionOperations.get(operationId),
+    getActiveOperations: () =>
+      [...extensionOperations.values()].filter(
+        (operation) => !isTerminalExtensionOperation(operation),
+      ),
+    updateOperation: updateExtensionOperation,
     preparationQueue,
     acquireOperationSlot,
     validateExtensionMutationClient,

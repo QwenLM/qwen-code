@@ -1091,6 +1091,13 @@ export interface ConfigParameters {
    * getShellDefaultTimeoutMs.
    */
   shellDefaultTimeoutMs?: number;
+  /**
+   * Interval, in ms, between liveness heartbeats emitted while a foreground
+   * shell command produces no output. 0 disables heartbeats; unset falls
+   * back to the shell tool's built-in default. See
+   * getShellHeartbeatIntervalMs.
+   */
+  shellHeartbeatIntervalMs?: number;
   eventEmitter?: EventEmitter;
   output?: OutputSettings;
   inputFormat?: InputFormat;
@@ -1318,6 +1325,29 @@ export function normalizeMaxSubagentDepth(
   return value == null || !Number.isFinite(value)
     ? DEFAULT_MAX_SUBAGENT_DEPTH
     : Math.min(MAX_SUBAGENT_DEPTH_LIMIT, Math.max(1, Math.floor(value)));
+}
+
+/**
+ * Validates the session-turn limit at config and persisted-agent boundaries.
+ */
+export function validateMaxSessionTurns(value: number | undefined): number {
+  const resolved = value ?? -1;
+  if (!Number.isInteger(resolved)) {
+    throw new FatalConfigError(
+      `Invalid maxSessionTurns: must be an integer, got ${String(resolved)}`,
+    );
+  }
+  return resolved;
+}
+
+function validateMaxToolCallsPerTurn(value: number | undefined): number {
+  const resolved = value ?? DEFAULT_MAX_TOOL_CALLS_PER_TURN;
+  if (!Number.isInteger(resolved)) {
+    throw new FatalConfigError(
+      `Invalid maxToolCallsPerTurn: must be an integer, got ${String(resolved)}`,
+    );
+  }
+  return resolved;
 }
 
 /** Maximum number of fallback models allowed in the chain. */
@@ -1786,6 +1816,7 @@ export class Config {
   private readonly truncateToolOutputLines: number;
   private readonly toolOutputBatchBudget: number;
   private readonly shellDefaultTimeoutMs: number | undefined;
+  private readonly shellHeartbeatIntervalMs: number | undefined;
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
   private readonly jsonFd: number | undefined;
@@ -1901,7 +1932,7 @@ export class Config {
     this.userMemory = params.userMemory ?? '';
     this.geminiMdFileCount = params.geminiMdFileCount ?? 0;
     this.contextRuleExcludes = params.contextRuleExcludes ?? [];
-    this.approvalMode = params.approvalMode ?? ApprovalMode.DEFAULT;
+    this.approvalMode = params.approvalMode ?? ApprovalMode.AUTO;
     this.accessibility = params.accessibility ?? {};
     this.showResponseTokensPerSecond =
       params.showResponseTokensPerSecond ?? false;
@@ -1956,7 +1987,7 @@ export class Config {
     this.cwd = params.cwd ?? process.cwd();
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
-    this.maxSessionTurns = params.maxSessionTurns ?? -1;
+    this.maxSessionTurns = validateMaxSessionTurns(params.maxSessionTurns);
     this.maxSubagentDepth = normalizeMaxSubagentDepth(params.maxSubagentDepth);
     this.maxWallTimeSeconds = params.maxWallTimeSeconds ?? -1;
     this.maxToolCalls = params.maxToolCalls ?? -1;
@@ -2011,8 +2042,9 @@ export class Config {
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
     this.skipLoopDetection = params.skipLoopDetection ?? false;
-    this.maxToolCallsPerTurn =
-      params.maxToolCallsPerTurn ?? DEFAULT_MAX_TOOL_CALLS_PER_TURN;
+    this.maxToolCallsPerTurn = validateMaxToolCallsPerTurn(
+      params.maxToolCallsPerTurn,
+    );
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.bareMode = params.bareMode ?? false;
     this.safeMode = params.safeMode ?? isSafeModeEnv();
@@ -2061,6 +2093,16 @@ export class Config {
       params.shellDefaultTimeoutMs >= 0 &&
       params.shellDefaultTimeoutMs <= 2_147_483_647
         ? params.shellDefaultTimeoutMs
+        : undefined;
+    // Same timer-safety gate as shellDefaultTimeoutMs: the value reaches
+    // `setInterval`, which needs an integer in [0, 2^31-1]. 0 is valid and
+    // disables heartbeats.
+    this.shellHeartbeatIntervalMs =
+      params.shellHeartbeatIntervalMs !== undefined &&
+      Number.isInteger(params.shellHeartbeatIntervalMs) &&
+      params.shellHeartbeatIntervalMs >= 0 &&
+      params.shellHeartbeatIntervalMs <= 2_147_483_647
+        ? params.shellHeartbeatIntervalMs
         : undefined;
     this.channel = params.channel;
     this.jsonFd = params.jsonFd;
@@ -2157,7 +2199,7 @@ export class Config {
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
     this.enableTeamMemory = params.enableTeamMemory ?? false;
     this.enableTeamMemorySync = params.enableTeamMemorySync ?? false;
-    this.enableAutoSkill = params.enableAutoSkill ?? true;
+    this.enableAutoSkill = params.enableAutoSkill ?? false;
     this.autoSkillConfirm = params.autoSkillConfirm ?? true;
     // Clamp: schema validation only runs on interactive edit paths, so a
     // negative value in settings.json would otherwise reach the agent runtime
@@ -6032,6 +6074,15 @@ export class Config {
    */
   getShellDefaultTimeoutMs(): number | undefined {
     return this.shellDefaultTimeoutMs;
+  }
+
+  /**
+   * Configured interval (ms) between silent-command heartbeats, or
+   * `undefined` when unset (the shell tool falls back to its built-in
+   * default). 0 disables heartbeats.
+   */
+  getShellHeartbeatIntervalMs(): number | undefined {
+    return this.shellHeartbeatIntervalMs;
   }
 
   getToolOutputBatchBudget(): number {

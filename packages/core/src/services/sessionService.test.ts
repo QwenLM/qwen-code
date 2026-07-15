@@ -2810,7 +2810,7 @@ describe('SessionService', () => {
       );
       fs.mkdirSync(chatsDir, { recursive: true });
       const file = realPath.join(chatsDir, `${sessionId}.jsonl`);
-      const lines = [
+      const lines: Array<Record<string, unknown>> = [
         {
           uuid: 'u1',
           parentUuid: null,
@@ -3450,7 +3450,7 @@ describe('SessionService', () => {
       );
     });
 
-    it('drops the source parent_session record so the fork inherits no lineage', async () => {
+    it('drops creation metadata so the fork inherits no lineage or source', async () => {
       // A fork is a fresh top-level session, not a sub-session. Copying the
       // source's parent_session record would make the fork report the original's
       // parent as its own. Seed the parent_session record on the active branch
@@ -3463,7 +3463,7 @@ describe('SessionService', () => {
       );
       fs.mkdirSync(chatsDir, { recursive: true });
       const srcFile = realPath.join(chatsDir, `${oldId}.jsonl`);
-      const lines = [
+      const lines: Array<Record<string, unknown>> = [
         {
           uuid: 'u1',
           parentUuid: null,
@@ -3487,7 +3487,7 @@ describe('SessionService', () => {
         },
         {
           uuid: 'u2',
-          parentUuid: 'up',
+          parentUuid: 'us',
           sessionId: oldId,
           type: 'assistant',
           timestamp: '2026-04-22T00:00:01.000Z',
@@ -3496,6 +3496,20 @@ describe('SessionService', () => {
           message: { role: 'model', parts: [{ text: 'hi' }] },
         },
       ];
+      lines.splice(2, 0, {
+        uuid: 'us',
+        parentUuid: 'up',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'session_source',
+        timestamp: '2026-04-22T00:00:00.750Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          sourceType: 'scheduled_task',
+          sourceId: 'task-123',
+        },
+      });
       fs.writeFileSync(
         srcFile,
         lines.map((l) => JSON.stringify(l)).join('\n') + '\n',
@@ -3513,10 +3527,20 @@ describe('SessionService', () => {
           (r) => r.type === 'system' && r.subtype === 'parent_session',
         ),
       ).toBe(false);
+      expect(
+        written.some(
+          (r) => r.type === 'system' && r.subtype === 'session_source',
+        ),
+      ).toBe(false);
 
       // The source keeps its lineage; the fork carries none of it.
       expect(await service.readParentSessionId(oldId)).toBe('P');
       expect(await service.readParentSessionId(newId)).toBeUndefined();
+      expect(await service.readCreationMetadata(oldId)).toMatchObject({
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      });
+      expect(await service.readCreationMetadata(newId)).toEqual({});
     });
   });
 
@@ -3789,6 +3813,21 @@ describe('SessionService', () => {
       systemPayload: { parentSessionId },
     });
 
+    const sessionSourceLine = (sessionId: string) => ({
+      uuid: 'u3',
+      parentUuid: 'u2',
+      sessionId,
+      type: 'system',
+      subtype: 'session_source',
+      timestamp: '2026-04-22T00:00:02.000Z',
+      cwd,
+      version: 'test',
+      systemPayload: {
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      },
+    });
+
     const writeSession = (
       sessionId: string,
       lines: Array<Record<string, unknown>>,
@@ -3802,7 +3841,12 @@ describe('SessionService', () => {
     };
 
     const findItem = (
-      items: Array<{ sessionId: string; parentSessionId?: string }>,
+      items: Array<{
+        sessionId: string;
+        parentSessionId?: string;
+        sourceType?: string;
+        sourceId?: string;
+      }>,
       sessionId: string,
     ) => items.find((item) => item.sessionId === sessionId);
 
@@ -3818,6 +3862,46 @@ describe('SessionService', () => {
       const item = findItem(result.items, sessionId);
       expect(item).toBeDefined();
       expect(item?.parentSessionId).toBe('parent-abc');
+    });
+
+    it('rehydrates source metadata for lists and direct restore lookup', async () => {
+      const sessionId = '77777777-7777-7777-7777-777777777777';
+      writeSession(sessionId, [
+        userLine(sessionId, 'hello'),
+        parentSessionLine(sessionId, 'parent-abc'),
+        sessionSourceLine(sessionId),
+      ]);
+
+      const result = await service.listSessions();
+
+      expect(findItem(result.items, sessionId)).toMatchObject({
+        parentSessionId: 'parent-abc',
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      });
+      expect(await service.readCreationMetadata(sessionId)).toEqual({
+        parentSessionId: 'parent-abc',
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      });
+    });
+
+    it('keeps the first immutable source record', async () => {
+      const sessionId = '88888888-8888-8888-8888-888888888888';
+      writeSession(sessionId, [
+        userLine(sessionId, 'hello'),
+        sessionSourceLine(sessionId),
+        {
+          ...sessionSourceLine(sessionId),
+          uuid: 'u4',
+          systemPayload: { sourceType: 'api', sourceId: 'request-456' },
+        },
+      ]);
+
+      expect(await service.readCreationMetadata(sessionId)).toMatchObject({
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      });
     });
 
     it('leaves parentSessionId undefined when no parent_session record exists', async () => {

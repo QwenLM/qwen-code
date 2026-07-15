@@ -1501,6 +1501,65 @@ describe('DaemonClient', () => {
       });
     });
 
+    it('forwards session source metadata when supplied', async () => {
+      const { fetch, calls } = recordingFetch((request) =>
+        request.url.endsWith('/capabilities')
+          ? jsonResponse(200, {
+              v: 1,
+              mode: 'http-bridge',
+              features: ['session_source_metadata'],
+              modelServices: [],
+            })
+          : jsonResponse(200, {
+              sessionId: 's-1',
+              workspaceCwd: '/work/a',
+              attached: false,
+              sourceType: 'scheduled_task',
+              sourceId: 'task-123',
+            }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const session = await client.createOrAttachSession({
+        workspaceCwd: '/work/a',
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      });
+
+      expect(session).toMatchObject({
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      });
+      expect(calls[0]?.url).toBe('http://daemon/capabilities');
+      expect(JSON.parse(calls[1]!.body!)).toEqual({
+        cwd: '/work/a',
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      });
+    });
+
+    it('rejects source metadata before creating against an old daemon', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_create'],
+          modelServices: [],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.createOrAttachSession({ sourceType: 'scheduled_task' }),
+      ).rejects.toMatchObject({
+        name: 'DaemonCapabilityMissingError',
+        capability: 'session_source_metadata',
+      });
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/capabilities',
+      ]);
+    });
+
     it('sends client identity in a header, not the request body', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, {
@@ -2712,6 +2771,67 @@ describe('DaemonClient', () => {
       expect(calls[0]?.url).toBe(
         'http://daemon/workspaces/%2Fwork%2Fa/sessions?size=20&parentSessionId=P',
       );
+    });
+
+    it('serializes source filters into both workspace session-list clients', async () => {
+      const { fetch, calls } = recordingFetch((request) =>
+        request.url.endsWith('/capabilities')
+          ? jsonResponse(200, {
+              v: 1,
+              mode: 'http-bridge',
+              features: ['session_source_metadata'],
+              modelServices: [],
+            })
+          : jsonResponse(200, {
+              sessions: [
+                {
+                  sessionId: 's-source',
+                  workspaceCwd: '/work/a',
+                  sourceType: 'scheduled_task',
+                  sourceId: 'task-123',
+                },
+              ],
+            }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const options = {
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      };
+
+      await client.listWorkspaceSessionsPage('/work/a', options);
+      await client.workspaceByCwd('/work/a').listWorkspaceSessionsPage(options);
+
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/capabilities',
+        'http://daemon/workspace/%2Fwork%2Fa/sessions?size=20&sourceType=scheduled_task&sourceId=task-123',
+        'http://daemon/capabilities',
+        'http://daemon/workspaces/%2Fwork%2Fa/sessions?size=20&sourceType=scheduled_task&sourceId=task-123',
+      ]);
+    });
+
+    it('rejects source filtering before listing against an old daemon', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_list'],
+          modelServices: [],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.listWorkspaceSessionsPage('/work/a', {
+          sourceType: 'scheduled_task',
+        }),
+      ).rejects.toMatchObject({
+        name: 'DaemonCapabilityMissingError',
+        capability: 'session_source_metadata',
+      });
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/capabilities',
+      ]);
     });
 
     it('manages session groups and session organization', async () => {
@@ -3971,6 +4091,22 @@ describe('DaemonClient', () => {
   });
 
   describe('extension operations', () => {
+    it('GETs active extension operations', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { v: 1, operations: [] }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.activeExtensionOperations()).resolves.toEqual({
+        v: 1,
+        operations: [],
+      });
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/extensions/operations',
+      );
+      expect(calls[0]?.method).toBe('GET');
+    });
+
     it('GETs an extension operation status by id', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, {
@@ -3994,6 +4130,63 @@ describe('DaemonClient', () => {
         operationId: 'op/1',
         status: 'succeeded',
       });
+    });
+
+    it('POSTs an extension interaction response with encoded ids', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { accepted: true }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.respondToExtensionInteraction(
+        'op/1',
+        'interaction/1',
+        { cancelled: true },
+        'client-1',
+      );
+
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/extensions/operations/op%2F1/interactions/interaction%2F1',
+      );
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(calls[0]?.body).toBe(JSON.stringify({ cancelled: true }));
+      expect(result).toEqual({ accepted: true });
+    });
+
+    it('routes extension operation recovery and interaction responses through REST', async () => {
+      const { fetch, calls } = recordingFetch((req) =>
+        req.method === 'GET'
+          ? jsonResponse(200, { v: 1, operations: [] })
+          : jsonResponse(200, { accepted: true }),
+      );
+      const transportFetch = vi.fn(async () =>
+        jsonResponse(500, { error: 'transport should not be used' }),
+      );
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+
+      await client.activeExtensionOperations();
+      await client.respondToExtensionInteraction(
+        'op-1',
+        'interaction-1',
+        { cancelled: true },
+        'client-1',
+      );
+
+      expect(calls.map((call) => call.method)).toEqual(['GET', 'POST']);
+      expect(transportFetch).not.toHaveBeenCalled();
     });
   });
 
@@ -5359,6 +5552,26 @@ describe('DaemonClient', () => {
           DaemonHttpError,
         );
       }
+    });
+
+    it('passes glob limits and cancellation to workspace-qualified requests', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { matches: [] }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const controller = new AbortController();
+
+      await client.workspaceByCwd('/tmp/work space').glob('**/*readme*', {
+        maxResults: 50,
+        signal: controller.signal,
+      });
+
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/%2Ftmp%2Fwork%20space/glob?pattern=**%2F*readme*&maxResults=50',
+      );
+      expect(calls[0]?.signal?.aborted).toBe(false);
+      controller.abort();
+      expect(calls[0]?.signal?.aborted).toBe(true);
     });
 
     it('workspaceById and workspaceByCwd call workspace-qualified agents routes', async () => {
