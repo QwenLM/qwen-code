@@ -23,10 +23,10 @@ The architecture has four ownership layers:
 
 There are two card types, not one generic card lifecycle:
 
-| Card                  | Business object                         | DingTalk protocol                                        | Local lifecycle                                                       |
-| --------------------- | --------------------------------------- | -------------------------------------------------------- | --------------------------------------------------------------------- |
-| Streaming status card | One Channel-owned prompt run            | `createAndDeliver`, `/card/streaming`, `/card/instances` | `running`, `waiting_input`, `completed`, `failed`, `cancelled`        |
-| Form callback card    | One Channel-owned user-question request | `createAndDeliver`, card callback, `/card/instances`     | `pending`, `submitted`, `cancelled`, `expired`, `externally_resolved` |
+| Card                  | Business object                         | DingTalk protocol                                        | Local lifecycle                                                         |
+| --------------------- | --------------------------------------- | -------------------------------------------------------- | ----------------------------------------------------------------------- |
+| Streaming status card | One Channel-owned prompt run            | `createAndDeliver`, `/card/streaming`, `/card/instances` | `running`, `waiting_input`, `completed`, `failed`, `cancelled`          |
+| Form callback card    | One Channel-owned user-question request | `createAndDeliver`, card callback, `/card/instances`     | `pending`, `submitted`, `cancelled`, `expired`, `resolved_outside_card` |
 
 They share authentication and callback ingress, but they keep independent registries and state machines.
 
@@ -41,6 +41,15 @@ They share authentication and callback ingress, but they keep independent regist
 - DingTalk already has Stream connectivity and a generic downstream callback ingress.
 - CLI/TUI, Web, and IDE surfaces already render user questions natively.
 
+## Source constraints verified
+
+The behavioral constraints below were rechecked against `origin/main` at `38429bc100a7`:
+
+- `packages/channels/base/src/ChannelBase.ts` registers each pending permission, including its request and chat index, before formatting or sending the existing Markdown prompt. The same registry supports multiple requests in one chat and drives `/approve`, `/approve-always`, and `/deny` lookup.
+- `packages/channels/base/src/ChannelAgentBridge.ts` includes the permission outcome on `PermissionResolvedEvent`. `packages/channels/base/src/AcpBridge.ts` emits that event synchronously before a successful responder returns, while `packages/channels/base/src/DaemonChannelBridge.ts` retains a responded-request mapping and can emit the event later.
+- `packages/core/src/tools/askUserQuestion.ts` permits one to four questions. `packages/acp-bridge/src/bridgeClient.ts` derives each question's `answerKey` from its array index, and the ACP session consumes a separate `answers` object in addition to the permission outcome.
+- The generic permission commands submit an option or cancellation outcome, not structured answers. When more than one request is pending, the existing ambiguity response already lists request IDs and titles, so the design does not add another card field only for command disambiguation.
+
 ## Channel-neutral user-input seam
 
 `ChannelBase` gains one semantic presentation hook with three explicit outcomes:
@@ -52,10 +61,14 @@ type UserInputPresentationResult =
   | { kind: 'unsupported' };
 
 type UserInputSettlementReason =
-  | 'answered_elsewhere'
+  | 'resolved_outside_card'
   | 'request_cancelled'
   | 'run_cancelled'
   | 'expired';
+
+type ChannelUserInputResponse = RequestPermissionResponse & {
+  answers?: Record<string, string>;
+};
 
 interface ChannelUserInputRequestContext {
   requestId: string;
@@ -63,9 +76,9 @@ interface ChannelUserInputRequestContext {
   runId: string;
   target: SessionTarget;
   ownerId: string;
-  request: PermissionRequest;
+  request: PermissionRequestEvent['request'];
   settlementSignal: AbortSignal;
-  respond(response: PermissionResponse): Promise<boolean>;
+  respond(response: ChannelUserInputResponse): Promise<boolean>;
 }
 
 protected presentUserInputRequest(
@@ -83,13 +96,13 @@ active = current Channel-owned ActivePrompt for event.sessionId
 if request is ask_user_question and active has runId + ownerId:
   construct context from active
   result = presentUserInputRequest(context)
-  presented   -> keep pending and return
+  presented   -> mark structured input as presented, keep pending, and return
   handled     -> remove pending and return
   unsupported -> continue
 format and send the existing permission message
 ```
 
-Every path that removes a pending permission settles the controller exactly once. This includes permission commands, a direct responder call, daemon `permissionResolved`, timeout, session cleanup, task cancellation, and bridge replacement. `answered_elsewhere` is reserved for an independent `permissionResolved` received while no local responder claim is in flight; it is distinct from request or run destruction so an adapter never labels a cancelled question as answered on another surface.
+Every path that removes a pending permission settles the controller exactly once. This includes permission commands, a direct responder call, daemon `permissionResolved`, timeout, session cleanup, task cancellation, and bridge replacement. `ChannelBase` classifies an independent `permissionResolved` from its `outcome` before removing the pending request: `cancelled`, or a selected option whose original permission option is `reject_once`, becomes `request_cancelled`; any other or missing outcome becomes the neutral `resolved_outside_card`. This classification does not guess which client responded.
 
 The hook is only eligible for the current Channel-owned `ActivePrompt`. When no such prompt, `runId`, or owner exists, `ChannelBase` does not construct the context or invoke the hook; it treats presentation as `unsupported` and continues the existing permission path. A run started by CLI, Web, IDE, SDK, or another client therefore creates neither DingTalk card. The initial design does not add cross-client run ownership or identity federation.
 
@@ -130,7 +143,7 @@ Only the DingTalk adapter reads `interactiveCards` and registers the card callba
 - Per-card serialized update queues, transient in-flight claims, and terminal tombstones.
 - DingTalk-local fallback and structured error reporting.
 
-The status registry also keeps `pendingQuestionIds: Set<string>` for each run. The question registry does not supersede an older question merely because a newer question exists in the same session.
+The status registry also keeps `pendingQuestionRequestIds: Set<string>` for each run. The question registry does not supersede an older request merely because a newer request exists in the same session.
 
 ## Streaming status-card lifecycle
 
@@ -155,6 +168,8 @@ running | waiting_input -> failed
 running | waiting_input -> cancelled
 ```
 
+`waiting_input` deliberately means that at least one DingTalk question card is awaiting structured answers; it is not a general host-blocked state. Ordinary tool permissions continue through the existing Markdown and permission-command path and do not move the status card out of `running`. Covering every permission wait would require a broader shared permission-lifecycle signal and is outside this two-card proposal.
+
 The core lifecycle remains `cancelled`; no `stopped` event is introduced. A cancellation with reason `cancel_command` may be presented as “Stopped” in DingTalk, while other cancellation reasons may be presented as “Cancelled”.
 
 Terminal updates follow one serialized order:
@@ -167,11 +182,12 @@ Completed, failed, and cancelled all project to DingTalk `flowStatus=3`; the fin
 
 ## Form callback-card lifecycle
 
-The question card represents one permission request. It is created with `card_status=pending` and does not call `/card/streaming`. All presentation changes use `/card/instances` with `updateCardDataByKey=true`.
+The question card represents one permission request containing the request's complete question array. The tool schema allows one to four questions, and the existing bridge derives each question's `answerKey` from its array index. One card therefore renders and submits the full set; there is no per-question registry or card lifecycle. It is created with `card_status=pending` and does not call `/card/streaming`. All presentation changes use `/card/instances` with `updateCardDataByKey=true`.
 
 Each pending record contains:
 
-- `requestId`, `questionId`, `outTrackId`, and `runId`.
+- `requestId`, `outTrackId`, and `runId`.
+- The complete ordered question set and its answer keys.
 - The typed owner identity.
 - The original one-shot responder.
 - Timeout and settlement subscriptions.
@@ -179,7 +195,7 @@ Each pending record contains:
 
 The callback order is authoritative:
 
-1. Locate the record by `outTrackId` and correlate the request, question, and run.
+1. Locate the record by `outTrackId` and correlate the request and run.
 2. Parse the submit or cancel payload without changing the record.
 3. Validate the action owner.
 4. Synchronously claim the current live record before the first asynchronous operation.
@@ -189,22 +205,24 @@ The callback order is authoritative:
 
 The card never displays submission success before the responder accepts the answer:
 
-| Event                            | Local state             | Card projection                                                         |
-| -------------------------------- | ----------------------- | ----------------------------------------------------------------------- |
-| `respond(...) === true`          | `submitted`             | Submitted and disabled                                                  |
-| `respond(...) === false`         | `cancelled`             | Non-interactive `card_status=cancelled`, “Permission no longer pending” |
-| `respond(...)` throws            | `cancelled`             | Non-interactive failure projection, disabled, and not retryable         |
-| Independent `permissionResolved` | `externally_resolved`   | Non-interactive `card_status=cancelled`, “Handled in another client”    |
-| User cancellation accepted       | `cancelled`             | Cancelled and disabled                                                  |
-| Timeout                          | `expired`               | Expired and disabled                                                    |
-| Request or run destroyed         | `cancelled`             | Cancelled or Stopped and disabled                                       |
-| Duplicate or late callback       | Existing terminal state | Acknowledge and ignore                                                  |
+| Event                              | Local state             | Card projection                                                         |
+| ---------------------------------- | ----------------------- | ----------------------------------------------------------------------- |
+| Submit responder returns `true`    | `submitted`             | Submitted and disabled                                                  |
+| Cancel responder returns `true`    | `cancelled`             | Cancelled and disabled                                                  |
+| `respond(...) === false`           | `cancelled`             | Non-interactive `card_status=cancelled`, “Permission no longer pending” |
+| `respond(...)` throws              | `cancelled`             | Non-interactive failure projection, disabled, and not retryable         |
+| Independent non-cancel settlement  | `resolved_outside_card` | Non-interactive `card_status=cancelled`, “Resolved outside this card”   |
+| Independent cancel/deny settlement | `cancelled`             | Non-interactive `card_status=cancelled`, “Cancelled outside this card”  |
+| Timeout                            | `expired`               | Expired and disabled                                                    |
+| Request or run destroyed           | `cancelled`             | Cancelled or Stopped and disabled                                       |
+| Duplicate or late callback         | Existing terminal state | Acknowledge and ignore                                                  |
+| Settlement on a terminal record    | Existing terminal state | Ignore through the terminal tombstone                                   |
 
-The `externally_resolved` local state is entered only from an independent settlement event, not inferred from a `false` responder result. `false` means only that the permission response was not accepted: the request mapping may be absent, its session may be gone, or another surface may already have won. It therefore uses the existing cancelled projection with the neutral “Permission no longer pending” message.
+The `resolved_outside_card` local state is entered only from an independent non-cancel settlement event, not inferred from a `false` responder result. `false` means only that the permission response was not accepted: the request mapping may be absent, its session may be gone, or another surface may already have won. It therefore uses the existing cancelled projection with the neutral “Permission no longer pending” message.
 
 The existing daemon bridge consumes the request-to-session mapping when `respondToPermission()` throws, and `ChannelBase` removes the pending request on the same path. A later daemon `permissionResolved` is no longer a reliable cleanup signal because the bridge may reject it as an unknown request. DingTalk therefore logs the failure, removes its pending record, retains the terminal tombstone, and immediately makes a best-effort non-success projection. It does not release the claim or promise callback retry.
 
-`AcpBridge` emits `permissionResolved` synchronously before a successful `respondToPermission()` returns. While the DingTalk responder claim is in flight, the adapter therefore defers only an `answered_elsewhere` settlement projection until the responder result is known. A `true` result wins as `submitted`; `false` and throws use the terminal rows above. A settlement received without a local responder claim remains `externally_resolved`. Timeout, request/run cancellation, and task terminal events are not deferred and still take precedence. This arbitration reuses the transient claim and adds no public processing state, retry queue, or error taxonomy.
+`AcpBridge` emits `permissionResolved` synchronously before a successful `respondToPermission()` returns. While the DingTalk responder claim is in flight, the adapter therefore defers the matching settlement projection until the responder result and callback action are known. An accepted submit becomes `submitted`; an accepted cancel becomes `cancelled`; `false` and throws use the terminal rows above. A settlement received without a local responder claim follows the outcome-aware rows above. The daemon bridge emits its successful settlement later, after it has retained a responded-request mapping; if the card is already terminal, the tombstone ignores that event. Timeout, request/run cancellation, and task terminal events are not deferred and still take precedence. This arbitration reuses the transient claim and adds no public processing state, retry queue, or error taxonomy.
 
 An instance update is a UI projection, not the permission transaction. If the responder succeeds but the subsequent card update fails, the permission remains resolved, the local record remains terminal, duplicate callbacks remain rejected, and the adapter logs the failed UI projection.
 
@@ -258,12 +276,12 @@ The initial design does not add a background retry queue and does not retain a p
 | Exact-run cancellation returns `false`        | Release the transient claim only if the same record remains current and non-terminal; keep the status card active so Stop can be retried.                                     |
 | Question responder returns `false`            | Finish with the existing cancelled projection and a neutral “Permission no longer pending” message.                                                                           |
 | Question responder throws                     | Remove the pending record, finish the claimed record as cancelled, retain a tombstone, project non-success immediately, and do not advertise callback retry.                  |
-| Another surface answers first                 | When no local responder claim is in flight, settle as `answered_elsewhere` and project the card as handled elsewhere.                                                         |
+| Another path resolves first                   | When no local responder claim is in flight, classify the settlement outcome as cancelled/denied or `resolved_outside_card` and use a neutral projection.                      |
 | Request/run is destroyed                      | Settle as request/run cancellation; project the card as cancelled or Stopped.                                                                                                 |
 | Another IM adapter owns the session           | Return `unsupported` and preserve its existing permission message and commands.                                                                                               |
-| Ordinary permission                           | Keep `/approve`, `/approve-always`, and `/deny` unchanged.                                                                                                                    |
+| Ordinary permission                           | Keep `/approve`, `/approve-always`, and `/deny` unchanged; it does not affect the question-only `waiting_input` presentation state.                                           |
 
-`/approve` is not a question-card fallback because it cannot carry structured answer values. The initial design does not promise automatic callback retry.
+For a card-presented question, `/approve`, `/approve-always`, and `/deny` remain recognized commands but do not call the responder; they instruct the user to submit or cancel through the card. The card is the only DingTalk-local settlement surface for that presented request. This is required because the existing permission commands supply only an option ID or cancellation outcome, while a question submission consumes a separate `answers` object. Other permissions and adapters keep their current command behavior. The initial design does not promise automatic callback retry.
 
 ## Client impact
 
@@ -279,7 +297,7 @@ The initial design does not add a background retry queue and does not retain a p
 | Other IM adapters                                          | No direct code or behavior change; inherit `unsupported`.                              |
 | Ordinary permissions                                       | No change on any client.                                                               |
 
-Permission resolution remains first-responder-wins. The transient DingTalk claim only serializes callbacks for one card and arbitrates a matching settlement that arrives during its responder call; it does not replace shared settlement. If an independent settlement arrives without a local claim, DingTalk becomes `externally_resolved`. If DingTalk's responder returns `true`, DingTalk becomes `submitted` and the matching `permissionResolved` is cleanup rather than evidence that another surface won.
+Permission resolution remains first-responder-wins. The transient DingTalk claim only serializes callbacks for one card and arbitrates a matching settlement that arrives during its responder call; it does not replace shared settlement. If an independent settlement arrives without a local claim, DingTalk classifies its outcome without claiming which client responded. If the card responder returns `true`, the callback action selects `submitted` or `cancelled`, and a matching `permissionResolved` is cleanup rather than evidence that another surface won.
 
 ## Chapter 2: Current impact on other IM adapters
 
