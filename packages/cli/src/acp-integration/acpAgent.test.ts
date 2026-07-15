@@ -752,6 +752,7 @@ import {
   registerAcpEventLoopLagGauge,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   mcpServerRequiresOAuth,
+  APPROVAL_MODES,
 } from '@qwen-code/qwen-code-core';
 import type { McpServer } from '@agentclientprotocol/sdk';
 import { AgentSideConnection } from '@agentclientprotocol/sdk';
@@ -768,6 +769,7 @@ import {
   SERVE_STATUS_EXT_METHODS,
   SERVE_CONTROL_EXT_METHODS,
 } from '@qwen-code/acp-bridge/status';
+import { TODO_STOP_GUARD_QUEUE_RELEASE_METHOD } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import {
   updateOutputLanguageFile,
@@ -1349,6 +1351,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         restoreHistory: ReturnType<typeof vi.fn>;
         rewindToTurn: ReturnType<typeof vi.fn>;
         getRewindableUserTurnCount: ReturnType<typeof vi.fn>;
+        clearTodoStopGuardTrust: ReturnType<typeof vi.fn>;
+        releaseTodoStopGuardQueuedPromptWait: ReturnType<typeof vi.fn>;
       }
     | undefined;
   let processExitSpy: MockInstance<typeof process.exit>;
@@ -2132,6 +2136,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           .fn()
           .mockReturnValue({ targetTurnIndex: 1, apiTruncateIndex: 2 }),
         getRewindableUserTurnCount: vi.fn().mockReturnValue(1),
+        clearTodoStopGuardTrust: vi.fn(),
+        releaseTodoStopGuardQueuedPromptWait: vi.fn().mockReturnValue(true),
       };
       lastSessionMock = sessionMock;
       return sessionMock as unknown as InstanceType<typeof Session>;
@@ -2211,6 +2217,23 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       'mcp.excluded',
       ['aone'],
     );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('releases a Todo Stop Guard that yielded to a cancelled FIFO prompt', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(TODO_STOP_GUARD_QUEUE_RELEASE_METHOD, { sessionId }),
+    ).resolves.toEqual({ released: true });
+    expect(
+      lastSessionMock?.releaseTodoStopGuardQueuedPromptWait,
+    ).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -2343,6 +2366,73 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     ).resolves.toMatchObject({
       servers: [expect.not.objectContaining({ requiresAuth: true })],
     });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('clears Todo Stop Guard trust when approval mode enters plan', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    let approvalMode = 'default';
+    Object.assign(innerConfig, {
+      getApprovalMode: vi.fn(() => approvalMode),
+      setApprovalMode: vi.fn((mode: string) => {
+        approvalMode = mode;
+      }),
+    });
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const approvalModes = APPROVAL_MODES as unknown as string[];
+    approvalModes.push('default', 'plan');
+    try {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionApprovalMode, {
+          sessionId,
+          mode: 'plan',
+        }),
+      ).resolves.toEqual({ previous: 'default', current: 'plan' });
+      expect(lastSessionMock?.clearTodoStopGuardTrust).toHaveBeenCalledOnce();
+    } finally {
+      approvalModes.splice(0);
+    }
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('clears Todo Stop Guard trust after a successful working-directory change', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const targetDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-todo-guard-cwd-'),
+    );
+    const canonicalTargetDir = await fs.realpath(targetDir);
+    const innerConfig = await setupSessionMocks(sessionId);
+    Object.assign(innerConfig, {
+      getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      isRestrictiveSandbox: vi.fn().mockReturnValue(false),
+      relocateWorkingDirectory: vi.fn().mockResolvedValue({}),
+    });
+    Object.assign(innerConfig.getGeminiClient(), {
+      addWorkingDirectoryChangedContext: vi.fn().mockResolvedValue(undefined),
+    });
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    try {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+          sessionId,
+          path: targetDir,
+        }),
+      ).resolves.toMatchObject({
+        previousCwd: '/tmp',
+        newCwd: canonicalTargetDir,
+      });
+      expect(lastSessionMock?.clearTodoStopGuardTrust).toHaveBeenCalledOnce();
+    } finally {
+      await fs.rm(targetDir, { recursive: true, force: true });
+    }
 
     mockConnectionState.resolve();
     await agentPromise;

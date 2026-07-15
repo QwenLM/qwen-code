@@ -90,6 +90,7 @@ import {
   LOAD_REPLAY_MODE_META_KEY,
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
+  TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
 } from './bridgeTypes.js';
 import type {
   BridgeSession,
@@ -457,6 +458,8 @@ interface SessionEntry {
    * tail of `sendPrompt`.
    */
   pendingPromptList: PendingPromptEntry[];
+  /** Set only when the child Guard explicitly yielded to this FIFO. */
+  todoStopGuardAwaitingQueuedPrompt?: boolean;
   /**
    * Mid-turn user messages pushed by the browser (`POST
    * /session/:id/mid-turn-message`) while a turn is running. The ACP child
@@ -4721,6 +4724,25 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       };
       entry.pendingPromptList.push(pendingEntry);
       if (isQueued) {
+        pendingAbort.signal.addEventListener(
+          'abort',
+          () => {
+            if (pendingEntry.state !== 'queued') return;
+            if (!entry.todoStopGuardAwaitingQueuedPrompt) return;
+            const hasAnotherQueuedPrompt = entry.pendingPromptList.some(
+              (candidate) =>
+                candidate !== pendingEntry &&
+                candidate.state === 'queued' &&
+                !candidate.abortController.signal.aborted,
+            );
+            if (hasAnotherQueuedPrompt) return;
+            entry.todoStopGuardAwaitingQueuedPrompt = false;
+            void entry.connection
+              .extMethod(TODO_STOP_GUARD_QUEUE_RELEASE_METHOD, { sessionId })
+              .catch(() => {});
+          },
+          { once: true },
+        );
         entry.events.publish({
           type: 'pending_prompt_added',
           promptId: pendingEntry.promptId,
@@ -4750,6 +4772,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // 'running' and publish a started event now that it has
           // reached the head of the FIFO.
           if (pendingEntry.state === 'queued') {
+            entry.todoStopGuardAwaitingQueuedPrompt = false;
             pendingEntry.state = 'running';
             entry.events.publish({
               type: 'pending_prompt_started',

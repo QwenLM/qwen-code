@@ -65,6 +65,7 @@ import {
   readManyFiles,
   clampInlineMediaPart,
   Storage,
+  Kind,
   ToolNames,
   ToolErrorType,
   fireNotificationHook,
@@ -237,11 +238,53 @@ import {
   MessageRewriteMiddleware,
   loadRewriteConfig,
 } from './rewrite/index.js';
+import {
+  DaemonTodoStopGuard,
+  type TodoStopGuardContinuation,
+} from './daemon-todo-stop-guard.js';
 
 const debugLogger = createDebugLogger('SESSION');
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
+const TODO_STOP_GUARD_PROMPT_PREFIX = '[Todo Stop Guard] ';
+const TODO_STOP_GUARD_PROMPT_BODY_SUFFIX =
+  ' todo item(s) are still pending or in progress. Continue executing the current task now. Do not ask the user whether to continue. If progress requires user input, use the structured question or permission flow. If progress depends on external state, report the blocker explicitly.';
+const TODO_STOP_GUARD_FINAL_PROMPT_SUFFIX =
+  ' This is the final automatic continuation. Before ending, either complete/update the todos or report the completed progress and the exact blocker.';
+
+function isTodoStopGuardPromptText(text: unknown): text is string {
+  if (typeof text !== 'string') return false;
+  if (!text.startsWith(TODO_STOP_GUARD_PROMPT_PREFIX)) return false;
+
+  const remainder = text.slice(TODO_STOP_GUARD_PROMPT_PREFIX.length);
+  const separator = remainder.indexOf(' ');
+  if (separator <= 0) return false;
+  const countText = remainder.slice(0, separator);
+  const count = Number(countText);
+  if (
+    !Number.isSafeInteger(count) ||
+    count <= 0 ||
+    String(count) !== countText
+  ) {
+    return false;
+  }
+
+  const body = `${countText}${TODO_STOP_GUARD_PROMPT_BODY_SUFFIX}`;
+  return (
+    remainder === body ||
+    remainder === body + TODO_STOP_GUARD_FINAL_PROMPT_SUFFIX
+  );
+}
+
+function isCompressionFailureStatus(status: CompressionStatus): boolean {
+  return (
+    status === CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT ||
+    status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR ||
+    status === CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY ||
+    status === CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED
+  );
+}
 
 /** Finalizes preparations without allowing ACP cleanup to change the stream outcome. */
 async function finalizeToolCallPreparations(
@@ -276,6 +319,44 @@ type RunToolResult = {
   repeatedDuplicateProviderToolCall?: boolean;
   loopDetected?: boolean;
   memoryWriteCandidates?: MemoryWriteCandidate[];
+};
+
+type MidTurnDrainResult = {
+  parts: Part[];
+  hasQueuedPrompt: boolean;
+};
+
+type NextMessageAfterToolRun = {
+  message: Content | null;
+  hadMidTurnUserInput: boolean;
+};
+
+type TodoStopGuardBackgroundBaseline = {
+  agents: Set<string>;
+  shells: Set<string>;
+  monitors: Set<string>;
+  wakeups: Set<string>;
+};
+
+type TodoStopGuardPromptPreparation = {
+  startsWorkChain: boolean;
+  drainSupersededAutomaticQueues: boolean;
+};
+
+type StopContinuationResult =
+  | { kind: 'natural_stop'; supersededAutomaticContinuation?: boolean }
+  | {
+      kind: 'terminal';
+      stopReason: PromptResponse['stopReason'];
+      supersededAutomaticContinuation?: boolean;
+    };
+
+type BeforeModelSendDecision =
+  | { kind: 'send'; message: Part[] }
+  | { kind: 'stop'; stopReason: PromptResponse['stopReason'] };
+
+type BeforeModelSendContext = {
+  compressionFailed: boolean;
 };
 
 type DaemonToolLoopState = {
@@ -654,9 +735,11 @@ interface CronFire {
 interface CronQueueItem {
   prompt: string;
   source: 'cron' | 'loop';
+  taskId?: string;
 }
 
 const MAX_NOTIFICATION_QUEUE = 20;
+const MAX_DEFERRED_UNRELATED_CRON_QUEUE = 20;
 
 export function resolveHomeLoopResolverRoots({
   homeQwenDir = Storage.getGlobalQwenDir(),
@@ -1008,6 +1091,10 @@ export class Session implements SessionContext {
   // batch so a transient stall can't silently lose them. See
   // `#drainMidTurnUserMessages`.
   private midTurnRecoveredMessages: DrainedMidTurnMessage[] = [];
+  private readonly todoStopGuard: DaemonTodoStopGuard;
+  private todoStopGuardBackgroundBaseline: TodoStopGuardBackgroundBaseline;
+  private todoStopGuardQueuedPromptPriority = false;
+  private todoStopGuardDrainAutomaticQueuesWhenIdle = false;
 
   // Background notification drain state. ACP does not have the TUI's idle
   // hook, so the session serializes registry callbacks through this queue.
@@ -1059,6 +1146,19 @@ export class Session implements SessionContext {
   ) {
     this.sessionId = id;
     this.runtimeBaseDir = Storage.getRuntimeBaseDir();
+    const todoStopGuardEnabled =
+      this.settings.merged.experimental?.todoStopGuard === true &&
+      !this.config.getBareMode() &&
+      !this.config.isSafeMode();
+    this.todoStopGuard = new DaemonTodoStopGuard(todoStopGuardEnabled);
+    this.todoStopGuardBackgroundBaseline = todoStopGuardEnabled
+      ? this.#captureTodoStopGuardBackgroundBaseline()
+      : {
+          agents: new Set(),
+          shells: new Set(),
+          monitors: new Set(),
+          wakeups: new Set(),
+        };
 
     // Initialize modular components with this session as context
     this.toolCallEmitter = new ToolCallEmitter(this);
@@ -1069,6 +1169,236 @@ export class Session implements SessionContext {
     this.#installGoalTerminalObserver();
     this.#registerBackgroundNotificationCallbacks();
     this.#registerSubSessionSpawner();
+  }
+
+  #prepareTodoStopGuardForPrompt(
+    params: PromptRequest,
+  ): TodoStopGuardPromptPreparation {
+    if (!this.todoStopGuard.enabled) {
+      return {
+        startsWorkChain: false,
+        drainSupersededAutomaticQueues: false,
+      };
+    }
+
+    const drainSupersededAutomaticQueues =
+      this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
+      this.todoStopGuard.hasCommittedContinuation ||
+      this.todoStopGuardQueuedPromptPriority;
+
+    if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
+      this.todoStopGuardQueuedPromptPriority = false;
+      this.todoStopGuard.blockUntilOrdinaryPromptStarts();
+      return {
+        startsWorkChain: false,
+        drainSupersededAutomaticQueues,
+      };
+    }
+
+    const metadata = (params as { _meta?: Record<string, unknown> })._meta;
+    const isRetry =
+      (params as { retry?: boolean }).retry === true ||
+      metadata?.[DAEMON_RETRY_META_KEY] === true;
+    const isContinue = metadata?.[DAEMON_CONTINUE_META_KEY] === true;
+    if (isRetry || isContinue) {
+      this.todoStopGuardQueuedPromptPriority = false;
+      if (this.todoStopGuard.hasTrustedUnfinishedState) {
+        this.todoStopGuard.resumeTrustedPrompt();
+        return {
+          startsWorkChain: false,
+          drainSupersededAutomaticQueues: false,
+        };
+      }
+      this.todoStopGuard.blockUntilOrdinaryPromptStarts();
+      return {
+        startsWorkChain: true,
+        drainSupersededAutomaticQueues,
+      };
+    }
+
+    this.todoStopGuardQueuedPromptPriority = false;
+    this.todoStopGuard.blockUntilOrdinaryPromptStarts();
+    return {
+      startsWorkChain: true,
+      drainSupersededAutomaticQueues,
+    };
+  }
+
+  #prepareTodoStopGuardForAutomaticTurn(
+    continuesCurrentWorkChain: boolean,
+  ): void {
+    if (!this.todoStopGuard.enabled) return;
+    if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
+      this.todoStopGuard.blockUntilOrdinaryPromptStarts();
+      return;
+    }
+    if (continuesCurrentWorkChain && this.todoStopGuard.isHardSuspended) {
+      return;
+    }
+    if (
+      continuesCurrentWorkChain &&
+      this.todoStopGuard.hasTrustedUnfinishedState
+    ) {
+      this.todoStopGuard.resumeTrustedPrompt();
+      return;
+    }
+
+    this.todoStopGuard.clearTrust();
+    this.todoStopGuardBackgroundBaseline =
+      this.#captureTodoStopGuardBackgroundBaseline();
+  }
+
+  #clearTodoStopGuardTrustAndDrainAutomaticQueues(): void {
+    const preserveQueuedPromptPriority = this.todoStopGuardQueuedPromptPriority;
+    const shouldDrain =
+      (this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
+        this.todoStopGuard.hasCommittedContinuation) &&
+      !preserveQueuedPromptPriority;
+    this.todoStopGuard.blockUntilOrdinaryPromptStarts();
+    if (preserveQueuedPromptPriority || !shouldDrain) return;
+    if (this.pendingPrompt) {
+      this.todoStopGuardDrainAutomaticQueuesWhenIdle = true;
+      return;
+    }
+    void this.#drainCronQueue();
+    void this.#drainNotificationQueue();
+  }
+
+  releaseTodoStopGuardQueuedPromptWait(): boolean {
+    if (!this.todoStopGuardQueuedPromptPriority) return false;
+    this.todoStopGuardQueuedPromptPriority = false;
+    this.todoStopGuard.blockUntilOrdinaryPromptStarts();
+    if (this.pendingPrompt) {
+      this.todoStopGuardDrainAutomaticQueuesWhenIdle = true;
+      return true;
+    }
+    void this.#drainCronQueue();
+    void this.#drainNotificationQueue();
+    return true;
+  }
+
+  clearTodoStopGuardTrust(): void {
+    this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
+  }
+
+  #beginTodoStopGuardQueuedPromptCheck(): void {
+    this.todoStopGuardQueuedPromptPriority =
+      this.todoStopGuard.awaitQueuedPrompt();
+  }
+
+  #finishTodoStopGuardQueuedPromptCheck(hasQueuedPrompt: boolean): boolean {
+    const shouldWait =
+      hasQueuedPrompt && this.todoStopGuardQueuedPromptPriority;
+    this.todoStopGuardQueuedPromptPriority = shouldWait;
+    if (!shouldWait) this.todoStopGuard.resumeTrustedPrompt();
+    return shouldWait;
+  }
+
+  #notificationContinuesTodoStopGuardWorkChain(
+    item: BackgroundNotificationQueueItem,
+  ): boolean {
+    const baseline = this.todoStopGuardBackgroundBaseline;
+    if (item.kind === 'agent') return !baseline.agents.has(item.taskId);
+    if (item.kind === 'shell') return !baseline.shells.has(item.taskId);
+    return !baseline.monitors.has(item.taskId);
+  }
+
+  #cronContinuesTodoStopGuardWorkChain(item: CronQueueItem): boolean {
+    return (
+      item.source === 'loop' &&
+      item.taskId !== undefined &&
+      !this.todoStopGuardBackgroundBaseline.wakeups.has(item.taskId)
+    );
+  }
+
+  #captureTodoStopGuardBackgroundBaseline(): TodoStopGuardBackgroundBaseline {
+    const agents = this.config.getBackgroundTaskRegistry?.()?.getAll?.() ?? [];
+    const shells = this.config.getBackgroundShellRegistry?.()?.getAll?.() ?? [];
+    const monitors = this.config.getMonitorRegistry?.()?.getAll?.() ?? [];
+    const wakeups = this.config.isCronEnabled?.()
+      ? (this.config.getCronScheduler?.()?.list?.() ?? []).filter(
+          (job) => job.cronExpr === '@wakeup',
+        )
+      : [];
+
+    return {
+      agents: new Set([
+        ...agents.map((task) => task.id),
+        ...this.notificationQueue
+          .filter((item) => item.kind === 'agent')
+          .map((item) => item.taskId),
+      ]),
+      shells: new Set([
+        ...shells.map((task) => task.id),
+        ...this.notificationQueue
+          .filter((item) => item.kind === 'shell')
+          .map((item) => item.taskId),
+      ]),
+      monitors: new Set([
+        ...monitors.map((task) => task.id),
+        ...this.notificationQueue
+          .filter((item) => item.kind === 'monitor')
+          .map((item) => item.taskId),
+      ]),
+      wakeups: new Set([
+        ...wakeups.map((job) => job.id),
+        ...this.cronQueue.flatMap((item) =>
+          item.source === 'loop' && item.taskId ? [item.taskId] : [],
+        ),
+      ]),
+    };
+  }
+
+  #hasRelevantTodoStopGuardBackgroundInput(): boolean {
+    if (
+      this.notificationQueue.some((item) =>
+        this.#notificationContinuesTodoStopGuardWorkChain(item),
+      ) ||
+      this.cronQueue.some((item) =>
+        this.#cronContinuesTodoStopGuardWorkChain(item),
+      )
+    ) {
+      return true;
+    }
+
+    const baseline = this.todoStopGuardBackgroundBaseline;
+    const agents = this.config.getBackgroundTaskRegistry?.()?.getAll?.() ?? [];
+    if (
+      agents.some(
+        (task) =>
+          !baseline.agents.has(task.id) &&
+          task.isBackgrounded &&
+          (task.status === 'running' ||
+            task.status === 'paused' ||
+            (task.status === 'cancelled' && !task.notified)),
+      )
+    ) {
+      return true;
+    }
+
+    const shells = this.config.getBackgroundShellRegistry?.()?.getAll?.() ?? [];
+    if (
+      shells.some(
+        (task) => !baseline.shells.has(task.id) && task.status === 'running',
+      )
+    ) {
+      return true;
+    }
+
+    const monitors = this.config.getMonitorRegistry?.()?.getAll?.() ?? [];
+    if (
+      monitors.some(
+        (task) => !baseline.monitors.has(task.id) && task.status === 'running',
+      )
+    ) {
+      return true;
+    }
+
+    if (!this.config.isCronEnabled?.()) return false;
+    const wakeups = this.config.getCronScheduler?.()?.list?.() ?? [];
+    return wakeups.some(
+      (job) => job.cronExpr === '@wakeup' && !baseline.wakeups.has(job.id),
+    );
   }
 
   /**
@@ -1159,6 +1489,9 @@ export class Session implements SessionContext {
 
   dispose(): void {
     this.disposed = true;
+    this.todoStopGuardQueuedPromptPriority = false;
+    this.todoStopGuardDrainAutomaticQueuesWhenIdle = false;
+    this.todoStopGuard.clearTrust();
     this.notificationQueue = [];
     this.cronQueue = [];
     this.notificationAbortController?.abort();
@@ -1287,6 +1620,12 @@ export class Session implements SessionContext {
 
     chat.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
+    const preserveQueuedPromptPriority = this.todoStopGuardQueuedPromptPriority;
+    const shouldDrainAutomaticQueues =
+      (this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
+        this.todoStopGuard.hasCommittedContinuation) &&
+      !preserveQueuedPromptPriority;
+    this.todoStopGuard.blockUntilOrdinaryPromptStarts();
 
     const rewindFiles = opts?.rewindFiles !== false;
     const fileHistoryService = this.config.getFileHistoryService();
@@ -1305,6 +1644,11 @@ export class Session implements SessionContext {
         { truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex) },
         survivingSnapshots,
       );
+
+    if (shouldDrainAutomaticQueues) {
+      void this.#drainCronQueue();
+      void this.#drainNotificationQueue();
+    }
 
     return { targetTurnIndex, apiTruncateIndex };
   }
@@ -1347,6 +1691,7 @@ export class Session implements SessionContext {
       .getGeminiClient()!
       .getChat()
       .setHistory(structuredClone(history));
+    this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }
 
   #computeApiTruncationIndexForUserTurn(
@@ -1394,6 +1739,14 @@ export class Session implements SessionContext {
     // is NOT excluded.
     if (isSystemReminderContent(content)) return false;
 
+    if (
+      content.parts.some(
+        (part) => 'text' in part && isTodoStopGuardPromptText(part.text),
+      )
+    ) {
+      return false;
+    }
+
     return content.parts.some((part) => 'text' in part && part.text);
   }
 
@@ -1410,6 +1763,8 @@ export class Session implements SessionContext {
     if (!hadPrompt && !hadCron && !hadNotification) {
       throw new Error(NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE);
     }
+
+    this.todoStopGuard.suspend();
 
     if (this.pendingPrompt) {
       this.pendingPrompt.abort(USER_CANCEL_ABORT_REASON);
@@ -1445,6 +1800,8 @@ export class Session implements SessionContext {
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
+    const todoStopGuardPreparation =
+      this.#prepareTodoStopGuardForPrompt(params);
     // Install this prompt's AbortController before awaiting the previous
     // prompt, so that a session/cancel during the wait targets us.
     this.pendingPrompt?.abort();
@@ -1506,6 +1863,13 @@ export class Session implements SessionContext {
       return { stopReason: 'cancelled' };
     }
 
+    if (todoStopGuardPreparation.startsWorkChain) {
+      this.todoStopGuardQueuedPromptPriority = false;
+      this.todoStopGuard.startOrdinaryPrompt();
+      this.todoStopGuardBackgroundBaseline =
+        this.#captureTodoStopGuardBackgroundBaseline();
+    }
+
     this.duplicateProviderToolCallResponseIds.clear();
 
     // Track this prompt's completion for the next prompt to await
@@ -1524,6 +1888,17 @@ export class Session implements SessionContext {
       return result;
     } finally {
       this.pendingPrompt = null;
+      const shouldDrainAutomaticQueues =
+        todoStopGuardPreparation.drainSupersededAutomaticQueues ||
+        this.todoStopGuardDrainAutomaticQueuesWhenIdle ||
+        this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
+        this.todoStopGuard.hasCommittedContinuation ||
+        this.todoStopGuardQueuedPromptPriority;
+      this.todoStopGuardDrainAutomaticQueuesWhenIdle = false;
+      if (shouldDrainAutomaticQueues) {
+        void this.#drainCronQueue();
+        void this.#drainNotificationQueue();
+      }
       // Start the scheduler in finally, not the success path: a turn can arm
       // a wakeup via LoopWakeup and then throw on a later step. Gated on
       // hasPendingWork/disposed/disabled, so it only starts when a wakeup (or
@@ -1615,6 +1990,12 @@ export class Session implements SessionContext {
    */
   #maybeEmitFollowupSuggestion(result: PromptResponse): void {
     if (result.stopReason !== 'end_turn') return;
+    if (
+      this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
+      this.todoStopGuardQueuedPromptPriority
+    ) {
+      return;
+    }
     // Enabled by default — only an explicit `false` opts out. The schema
     // `default: true` isn't applied at runtime by `mergeSettings`, so an unset
     // value must be treated as enabled here.
@@ -1999,6 +2380,7 @@ export class Session implements SessionContext {
               while (nextMessage !== null) {
                 turnCount++;
                 if (pendingSend.signal.aborted) {
+                  this.todoStopGuard.suspend();
                   this.#getCurrentChat().addHistory(nextMessage);
                   return { stopReason: 'cancelled' };
                 }
@@ -2023,6 +2405,7 @@ export class Session implements SessionContext {
                       { modelOverride: fullTurnModelOverride },
                     );
                   if (!sendResult.responseStream) {
+                    this.todoStopGuard.suspend();
                     // Preserve the full message (not just functionResponse
                     // parts) for a continuation: its content was stripped from
                     // history before the send, so dropping it here on a
@@ -2041,6 +2424,7 @@ export class Session implements SessionContext {
                   try {
                     for await (const resp of responseStream) {
                       if (pendingSend.signal.aborted) {
+                        this.todoStopGuard.suspend();
                         return { stopReason: 'cancelled' };
                       }
 
@@ -2128,8 +2512,11 @@ export class Session implements SessionContext {
                     pendingSend.signal.reason === USER_CANCEL_ABORT_REASON &&
                     this.#isAbortError(error)
                   ) {
+                    this.todoStopGuard.suspend();
                     return { stopReason: 'cancelled' };
                   }
+
+                  this.todoStopGuard.pauseForTrustedRetry();
 
                   // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
                   // Aligned with useGeminiStream.ts handleFinishedWithErrorEvent
@@ -2199,18 +2586,22 @@ export class Session implements SessionContext {
                       ),
                   );
                   if (toolRun.stopAfterPermissionCancel) {
+                    this.todoStopGuard.suspend();
                     await this.#preserveStoppedToolRun(
                       toolRun,
                       pendingSend.signal,
                     );
                     return { stopReason: 'end_turn' };
                   }
-                  nextMessage = await this.#buildNextMessageAfterToolRun(
-                    toolRun,
-                    pendingSend.signal,
-                    onFullTurnModel,
-                  );
+                  const nextAfterTools =
+                    await this.#buildNextMessageAfterToolRun(
+                      toolRun,
+                      pendingSend.signal,
+                      onFullTurnModel,
+                    );
+                  nextMessage = nextAfterTools.message;
                   if (toolRun.loopDetected) {
+                    this.todoStopGuard.suspend();
                     await this.#preserveStoppedToolRun(
                       toolRun,
                       pendingSend.signal,
@@ -2232,6 +2623,7 @@ export class Session implements SessionContext {
                 promptId,
                 hooksEnabled,
                 messageBus,
+                true,
                 fullTurnModelOverride,
               );
             } finally {
@@ -2251,23 +2643,12 @@ export class Session implements SessionContext {
     );
   }
 
-  /**
-   * Handles the Stop hook iteration loop.
-   * This method processes Stop hooks after a model response completes with no pending tool calls.
-   * If a Stop hook requests continuation, it sends a follow-up message and loops back.
-   * Maximum iterations (100) prevent infinite loops.
-   *
-   * @param pendingSend - The abort controller for the current prompt
-   * @param promptId - The prompt ID for tracking
-   * @param hooksEnabled - Whether hooks are enabled
-   * @param messageBus - The MessageBus for hook communication (may be undefined)
-   * @returns The ACP stop reason for the prompt.
-   */
   async #handleStopHookLoop(
     pendingSend: AbortController,
     promptId: string,
     hooksEnabled: boolean,
     messageBus: MessageBus | undefined,
+    allowExternalHooks = true,
     modelOverride?: string,
   ): Promise<{ stopReason: PromptResponse['stopReason'] }> {
     const stopHookBlockingCap = this.config.getStopHookBlockingCap();
@@ -2280,288 +2661,710 @@ export class Session implements SessionContext {
       modelOverride = model;
       return true;
     };
+    let midTurnContinuationCount = 0;
 
-    while (stopHookIterationCount < stopHookBlockingCap) {
-      if (
-        !hooksEnabled ||
-        !messageBus ||
-        pendingSend.signal.aborted ||
-        !this.config.hasHooksForEvent?.('Stop')
-      ) {
+    while (true) {
+      if (pendingSend.signal.aborted) {
+        this.todoStopGuard.suspend();
         return { stopReason: 'end_turn' };
       }
 
-      // Extract last model text without cloning the full history.
-      const responseText =
-        this.#getCurrentChat().getLastModelMessageText?.() ||
-        '[no response text]';
-
-      const contextUsage = buildContextUsage(
-        this.config.getContentGeneratorConfig()?.contextWindowSize ??
-          DEFAULT_TOKEN_LIMIT,
-        this.lastPromptTokenCount,
-      );
-
-      const response = await messageBus.request<
-        HookExecutionRequest,
-        HookExecutionResponse
-      >(
-        {
-          type: MessageBusType.HOOK_EXECUTION_REQUEST,
-          eventName: 'Stop',
-          input: {
-            stop_hook_active: true,
-            last_assistant_message: responseText,
-            ...contextUsage,
-          },
-          signal: pendingSend.signal,
-        },
-        MessageBusType.HOOK_EXECUTION_RESPONSE,
-      );
-
-      // Check if aborted after hook execution
-      if (pendingSend.signal.aborted) {
-        return { stopReason: 'cancelled' };
+      if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
+        this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
       }
 
-      const hookOutput = response.output
-        ? createHookOutput('Stop', response.output)
-        : undefined;
-
-      const stopOutput = hookOutput as StopHookOutput | undefined;
-
-      // Emit system message if provided by hook
-      if (stopOutput?.systemMessage) {
-        await this.messageEmitter.emitAgentMessage(stopOutput.systemMessage);
+      if (this.todoStopGuardQueuedPromptPriority) {
+        return { stopReason: 'end_turn' };
       }
 
-      // For Stop hooks, blocking/stop execution should force continuation
-      if (
-        stopOutput?.isBlockingDecision() ||
-        stopOutput?.shouldStopExecution()
-      ) {
-        const continueReason = stopOutput.getEffectiveReason();
-
-        // Track Stop hook iterations
-        stopHookIterationCount++;
-        stopHookReasons = [...stopHookReasons, continueReason];
-
-        if (stopHookIterationCount >= stopHookBlockingCap) {
-          const warning = formatStopHookBlockingCapWarning(
-            'Stop',
-            stopHookBlockingCap,
+      if (this.todoStopGuard.needsStopInspection) {
+        this.#beginTodoStopGuardQueuedPromptCheck();
+        const drained = await this.#drainMidTurnInput(pendingSend.signal, {
+          watchQueuedPromptForTodoStopGuard: true,
+          onFullTurnModel,
+        });
+        const waitsForQueuedPrompt = this.#finishTodoStopGuardQueuedPromptCheck(
+          drained.hasQueuedPrompt,
+        );
+        if (drained.parts.length > 0) {
+          this.todoStopGuard.acceptMidTurnUserInput();
+          const continuation = await this.#runStopContinuation(
+            pendingSend,
+            promptId + '_mid_turn_' + ++midTurnContinuationCount,
+            promptId,
+            drained.parts,
+            false,
+            {
+              onFullTurnModel,
+              getModelOverride: () => modelOverride,
+            },
           );
-          abortGoalForStopHookCap(
-            this.config,
-            this.config.getSessionId(),
-            warning,
-          );
-          await this.messageEmitter.emitAgentMessage(warning);
-          debugLogger.warn(warning);
+          if (continuation.kind === 'terminal') {
+            return { stopReason: continuation.stopReason };
+          }
+          continue;
+        }
+        if (waitsForQueuedPrompt) {
           return { stopReason: 'end_turn' };
         }
-
-        if (stopHookIterationCount > 1) {
-          await this.messageEmitter.emitStopHookLoop(
-            stopHookIterationCount,
-            stopHookReasons,
-            response.stopHookCount ?? 1,
-          );
-        }
-
-        // Continue the conversation with the hook's reason
-        const continueParts: Part[] = [{ text: continueReason }];
-        let nextMessage: Content | null = {
-          role: 'user',
-          parts: continueParts,
-        };
-        const toolLoopState = createDaemonToolLoopState();
-
-        // Process the follow-up message and any tool calls that result
-        while (nextMessage !== null) {
-          if (pendingSend.signal.aborted) {
-            return { stopReason: 'cancelled' };
-          }
-
-          const functionCalls: FunctionCall[] = [];
-          const preparationTracker = new ToolCallPreparationTracker(
-            this.toolCallEmitter,
-          );
-          let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
-          const streamStartTime = Date.now();
-          const messageDisplay = this.#createMessageDisplayDispatcher(
-            pendingSend.signal,
-          );
-
-          try {
-            const continueSendResult =
-              await this.#sendMessageStreamWithAutoCompression(
-                promptId + '_stop_hook_' + stopHookIterationCount,
-                nextMessage?.parts ?? [],
-                pendingSend.signal,
-                {
-                  skipCompression: stopHookIterationCount > 1,
-                  modelOverride,
-                },
-              );
-            if (!continueSendResult.responseStream) {
-              this.#preserveUnsentMessageHistory(
-                nextMessage,
-                continueSendResult.stopReason === 'cancelled',
-              );
-              return { stopReason: continueSendResult.stopReason };
-            }
-            const continueResponseStream = continueSendResult.responseStream;
-            nextMessage = null;
-
-            let streamFailed = false;
-            try {
-              for await (const resp of continueResponseStream) {
-                if (pendingSend.signal.aborted) {
-                  return { stopReason: 'cancelled' };
-                }
-
-                if (
-                  resp.type === StreamEventType.CHUNK &&
-                  resp.value.candidates &&
-                  resp.value.candidates.length > 0
-                ) {
-                  const candidate = resp.value.candidates[0];
-                  for (const part of candidate.content?.parts ?? []) {
-                    if (!part.text) continue;
-                    this.messageEmitter.emitMessage(
-                      part.text,
-                      'assistant',
-                      part.thought,
-                    );
-                    if (!part.thought) {
-                      messageDisplay?.addChunk(part.text);
-                    }
-                  }
-                }
-
-                if (
-                  resp.type === StreamEventType.CHUNK &&
-                  resp.value.usageMetadata
-                ) {
-                  usageMetadata = resp.value.usageMetadata;
-                }
-
-                if (resp.type === StreamEventType.CHUNK) {
-                  await preparationTracker.observe(resp.value);
-                  if (resp.value.functionCalls) {
-                    preparationTracker.resolve(resp.value.functionCalls);
-                    functionCalls.push(...resp.value.functionCalls);
-                  }
-                }
-                if (
-                  resp.type === StreamEventType.RETRY ||
-                  resp.type === StreamEventType.MODEL_FALLBACK
-                ) {
-                  await finalizeToolCallPreparations(
-                    preparationTracker,
-                    true,
-                    `Stop Hook continuation ${resp.type}`,
-                  );
-                  functionCalls.length = 0;
-                }
-              }
-            } catch (error) {
-              streamFailed = true;
-              throw error;
-            } finally {
-              await finalizeToolCallPreparations(
-                preparationTracker,
-                streamFailed || pendingSend.signal.aborted,
-                'Stop Hook continuation',
-              );
-            }
-          } catch (error) {
-            // Fire StopFailure hook (fire-and-forget)
-            const errorStatus = getErrorStatus(error);
-            const errorMessage =
-              error instanceof Error ? error.message : String(error);
-            const errorType = classifyApiError({
-              message: errorMessage,
-              status: errorStatus,
-            });
-
-            const hookSystem = this.config.getHookSystem?.();
-            const hooksEnabledForStopFailure =
-              !this.config.getDisableAllHooks?.();
-            if (
-              hooksEnabledForStopFailure &&
-              hookSystem &&
-              this.config.hasHooksForEvent?.('StopFailure')
-            ) {
-              hookSystem
-                .fireStopFailureEvent(errorType, errorMessage)
-                .catch((err) => {
-                  debugLogger.warn(`StopFailure hook failed: ${err}`);
-                });
-            }
-
-            if (errorStatus === 429) {
-              throw new RequestError(
-                429,
-                'Rate limit exceeded. Try again later.',
-              );
-            }
-
-            throw error;
-          } finally {
-            // Same contract as the main prompt loop: is_final (skipped on
-            // abort) is delivered and drained on every exit path.
-            await messageDisplay?.finish();
-          }
-
-          if (usageMetadata) {
-            this.#recordPromptTokenCount(usageMetadata);
-            const durationMs = Date.now() - streamStartTime;
-            await this.messageEmitter.emitUsageMetadata(
-              usageMetadata,
-              '',
-              durationMs,
-            );
-          }
-
-          // Process tool calls from the follow-up message
-          if (functionCalls.length > 0) {
-            const toolRun = await this.#runWithFullTurnModel(
-              modelOverride,
-              () =>
-                this.runToolCalls(
-                  pendingSend.signal,
-                  promptId,
-                  functionCalls,
-                  toolLoopState,
-                ),
-            );
-            if (toolRun.stopAfterPermissionCancel) {
-              await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
-              return { stopReason: 'end_turn' };
-            }
-            nextMessage = await this.#buildNextMessageAfterToolRun(
-              toolRun,
-              pendingSend.signal,
-              onFullTurnModel,
-            );
-            if (toolRun.loopDetected) {
-              await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
-              return { stopReason: 'end_turn' };
-            }
-          }
-        }
-
-        // Loop continues to check Stop hook again after processing the follow-up
-        continue;
       }
 
-      // Stop hook allowed stopping, exit the loop
-      break;
+      let externalReason: string | null = null;
+      let stopHookCount = 1;
+      if (
+        allowExternalHooks &&
+        hooksEnabled &&
+        messageBus &&
+        stopHookIterationCount < stopHookBlockingCap &&
+        this.config.hasHooksForEvent?.('Stop')
+      ) {
+        const responseText =
+          this.#getCurrentChat().getLastModelMessageText?.() ||
+          '[no response text]';
+        const contextUsage = buildContextUsage(
+          this.config.getContentGeneratorConfig()?.contextWindowSize ??
+            DEFAULT_TOKEN_LIMIT,
+          this.lastPromptTokenCount,
+        );
+        let response: HookExecutionResponse;
+        try {
+          response = await messageBus.request<
+            HookExecutionRequest,
+            HookExecutionResponse
+          >(
+            {
+              type: MessageBusType.HOOK_EXECUTION_REQUEST,
+              eventName: 'Stop',
+              input: {
+                stop_hook_active: true,
+                last_assistant_message: responseText,
+                ...contextUsage,
+              },
+              signal: pendingSend.signal,
+            },
+            MessageBusType.HOOK_EXECUTION_RESPONSE,
+          );
+        } catch (error) {
+          this.todoStopGuard.pauseForTrustedRetry();
+          throw error;
+        }
+
+        if (pendingSend.signal.aborted) {
+          this.todoStopGuard.suspend();
+          return { stopReason: 'cancelled' };
+        }
+
+        if (this.todoStopGuard.needsStopInspection) {
+          this.#beginTodoStopGuardQueuedPromptCheck();
+          const drained = await this.#drainMidTurnInput(pendingSend.signal, {
+            watchQueuedPromptForTodoStopGuard: true,
+            onFullTurnModel,
+          });
+          const waitsForQueuedPrompt =
+            this.#finishTodoStopGuardQueuedPromptCheck(drained.hasQueuedPrompt);
+          if (drained.parts.length > 0) {
+            this.todoStopGuard.acceptMidTurnUserInput();
+            const continuation = await this.#runStopContinuation(
+              pendingSend,
+              promptId + '_mid_turn_' + ++midTurnContinuationCount,
+              promptId,
+              drained.parts,
+              false,
+              {
+                onFullTurnModel,
+                getModelOverride: () => modelOverride,
+              },
+            );
+            if (continuation.kind === 'terminal') {
+              return { stopReason: continuation.stopReason };
+            }
+            continue;
+          }
+          if (waitsForQueuedPrompt) {
+            return { stopReason: 'end_turn' };
+          }
+        }
+
+        const hookOutput = response.output
+          ? createHookOutput('Stop', response.output)
+          : undefined;
+        const stopOutput = hookOutput as StopHookOutput | undefined;
+
+        if (stopOutput?.systemMessage) {
+          await this.messageEmitter.emitAgentMessage(stopOutput.systemMessage);
+        }
+
+        if (
+          stopOutput?.isBlockingDecision() ||
+          stopOutput?.shouldStopExecution()
+        ) {
+          externalReason = stopOutput.getEffectiveReason();
+          stopHookIterationCount++;
+          stopHookReasons = [...stopHookReasons, externalReason];
+          stopHookCount = response.stopHookCount ?? 1;
+        }
+      }
+
+      const guardDecision = this.todoStopGuard.decide(
+        this.todoStopGuard.needsStopInspection
+          ? this.#hasRelevantTodoStopGuardBackgroundInput()
+          : false,
+      );
+      const guardContinuation =
+        guardDecision.kind === 'continue' ? guardDecision : null;
+
+      if (guardDecision.kind === 'exhausted') {
+        await this.#emitTodoStopGuardExhausted(guardDecision);
+        if (!externalReason) return { stopReason: 'end_turn' };
+      }
+
+      if (externalReason && stopHookIterationCount >= stopHookBlockingCap) {
+        const warning = formatStopHookBlockingCapWarning(
+          'Stop',
+          stopHookBlockingCap,
+        );
+        abortGoalForStopHookCap(
+          this.config,
+          this.config.getSessionId(),
+          warning,
+        );
+        this.todoStopGuard.suspend();
+        await this.messageEmitter.emitAgentMessage(warning);
+        debugLogger.warn(warning);
+        return { stopReason: 'end_turn' };
+      }
+
+      if (!externalReason && !guardContinuation) {
+        return { stopReason: 'end_turn' };
+      }
+
+      const continueParts: Part[] = [];
+      if (externalReason) continueParts.push({ text: externalReason });
+      if (guardContinuation) {
+        continueParts.push({
+          text: this.#buildTodoStopGuardPrompt(guardContinuation),
+        });
+      }
+
+      const continuationPromptId = externalReason
+        ? promptId + '_stop_hook_' + stopHookIterationCount
+        : promptId + '_todo_stop_guard_' + guardContinuation!.attempt;
+      if (externalReason && stopHookIterationCount > 1 && !guardContinuation) {
+        await this.messageEmitter.emitStopHookLoop(
+          stopHookIterationCount,
+          stopHookReasons,
+          stopHookCount,
+        );
+      }
+      const continuation = await this.#runStopContinuation(
+        pendingSend,
+        continuationPromptId,
+        promptId,
+        continueParts,
+        stopHookIterationCount > 1 || (guardContinuation?.attempt ?? 0) > 1,
+        {
+          ...(guardContinuation ? { guardContinuation } : {}),
+          ...(externalReason
+            ? { externalParts: [{ text: externalReason }] }
+            : {}),
+          ...(externalReason && stopHookIterationCount > 1 && guardContinuation
+            ? {
+                onAutomaticContinuationValidated: () =>
+                  this.messageEmitter.emitStopHookLoop(
+                    stopHookIterationCount,
+                    stopHookReasons,
+                    stopHookCount,
+                  ),
+              }
+            : {}),
+          onFullTurnModel,
+          getModelOverride: () => modelOverride,
+        },
+      );
+      if (continuation.supersededAutomaticContinuation && externalReason) {
+        stopHookIterationCount--;
+        stopHookReasons = stopHookReasons.slice(0, -1);
+      }
+      if (continuation.kind === 'terminal') {
+        return { stopReason: continuation.stopReason };
+      }
+    }
+  }
+
+  async #runStopContinuation(
+    pendingSend: AbortController,
+    streamPromptId: string,
+    toolPromptId: string,
+    parts: Part[],
+    skipCompression: boolean,
+    options: {
+      guardContinuation?: TodoStopGuardContinuation;
+      externalParts?: Part[];
+      onAutomaticContinuationValidated?: () => Promise<void>;
+      onFullTurnModel?: (model: string) => boolean;
+      getModelOverride?: () => string | undefined;
+    } = {},
+  ): Promise<StopContinuationResult> {
+    let nextMessage: Content | null = { role: 'user', parts };
+    let nextGuardContinuation = options.guardContinuation;
+    const toolLoopState = createDaemonToolLoopState();
+    let initialSend = true;
+    let automaticContinuationValidated = false;
+    let supersededAutomaticContinuation = false;
+
+    while (nextMessage !== null) {
+      if (pendingSend.signal.aborted) {
+        this.todoStopGuard.suspend();
+        return {
+          kind: 'terminal',
+          stopReason: 'cancelled',
+          ...(supersededAutomaticContinuation
+            ? { supersededAutomaticContinuation: true }
+            : {}),
+        };
+      }
+
+      const functionCalls: FunctionCall[] = [];
+      const preparationTracker = new ToolCallPreparationTracker(
+        this.toolCallEmitter,
+      );
+      let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
+      const streamStartTime = Date.now();
+      let streamFailed = false;
+      let guardForThisSend = nextGuardContinuation;
+      let preserveGuardOnSkippedSend = false;
+      let messageForPreservation = nextMessage;
+      const externalParts = initialSend ? options.externalParts : undefined;
+      const promptIdForSend =
+        guardForThisSend &&
+        guardForThisSend.attempt !== options.guardContinuation?.attempt
+          ? toolPromptId + '_todo_stop_guard_' + guardForThisSend.attempt
+          : streamPromptId;
+      const messageDisplay = this.#createMessageDisplayDispatcher(
+        pendingSend.signal,
+      );
+
+      try {
+        const sendResult = await this.#sendMessageStreamWithAutoCompression(
+          promptIdForSend,
+          nextMessage.parts ?? [],
+          pendingSend.signal,
+          {
+            skipCompression:
+              skipCompression || (guardForThisSend?.attempt ?? 0) > 1,
+            getModelOverride: options.getModelOverride,
+            beforeSend:
+              guardForThisSend ||
+              (!automaticContinuationValidated &&
+                options.onAutomaticContinuationValidated)
+                ? async ({ compressionFailed }) => {
+                    const inspectGuardPriority = guardForThisSend !== undefined;
+                    const guardCompressionFailed =
+                      inspectGuardPriority && compressionFailed;
+
+                    if (inspectGuardPriority) {
+                      this.#beginTodoStopGuardQueuedPromptCheck();
+                      const drained = await this.#drainMidTurnInput(
+                        pendingSend.signal,
+                        {
+                          watchQueuedPromptForTodoStopGuard: true,
+                          onFullTurnModel: options.onFullTurnModel,
+                        },
+                      );
+                      const waitsForQueuedPrompt =
+                        this.#finishTodoStopGuardQueuedPromptCheck(
+                          drained.hasQueuedPrompt,
+                        );
+                      if (drained.parts.length > 0) {
+                        this.todoStopGuard.acceptMidTurnUserInput();
+                        guardForThisSend = undefined;
+                        nextGuardContinuation = undefined;
+                        if (initialSend) {
+                          supersededAutomaticContinuation = true;
+                        }
+                        const replacementMessage = initialSend
+                          ? drained.parts
+                          : [
+                              ...(nextMessage?.parts ?? []).filter(
+                                (part) =>
+                                  !(
+                                    'text' in part &&
+                                    isTodoStopGuardPromptText(part.text)
+                                  ),
+                              ),
+                              ...drained.parts,
+                            ];
+                        messageForPreservation = {
+                          role: 'user',
+                          parts: replacementMessage,
+                        };
+                        return {
+                          kind: 'send',
+                          message: replacementMessage,
+                        };
+                      }
+                      if (waitsForQueuedPrompt) {
+                        guardForThisSend = undefined;
+                        nextGuardContinuation = undefined;
+                        preserveGuardOnSkippedSend = true;
+                        if (initialSend) {
+                          supersededAutomaticContinuation = true;
+                        }
+                        return { kind: 'stop', stopReason: 'end_turn' };
+                      }
+
+                      if (guardCompressionFailed) {
+                        this.todoStopGuard.suspend();
+                        guardForThisSend = undefined;
+                        nextGuardContinuation = undefined;
+                        if (!externalParts || externalParts.length === 0) {
+                          preserveGuardOnSkippedSend = true;
+                          return { kind: 'stop', stopReason: 'end_turn' };
+                        }
+                      }
+
+                      if (
+                        guardForThisSend &&
+                        this.config.getApprovalMode() === ApprovalMode.PLAN
+                      ) {
+                        this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
+                      }
+                      if (guardForThisSend) {
+                        const hasRelevantBackgroundInput =
+                          this.#hasRelevantTodoStopGuardBackgroundInput();
+                        const refreshedDecision = guardForThisSend.toolClosure
+                          ? this.todoStopGuard.decideToolClosure(
+                              guardForThisSend.attempt - 1,
+                              hasRelevantBackgroundInput,
+                            )
+                          : this.todoStopGuard.decide(
+                              hasRelevantBackgroundInput,
+                            );
+                        if (
+                          refreshedDecision.kind !== 'continue' ||
+                          refreshedDecision.attempt !== guardForThisSend.attempt
+                        ) {
+                          guardForThisSend = undefined;
+                          nextGuardContinuation = undefined;
+                          if (!options.externalParts) {
+                            preserveGuardOnSkippedSend = true;
+                            return { kind: 'stop', stopReason: 'end_turn' };
+                          }
+                          if (!initialSend && nextMessage) {
+                            nextMessage = {
+                              ...nextMessage,
+                              parts: (nextMessage.parts ?? []).filter(
+                                (part) =>
+                                  !(
+                                    'text' in part &&
+                                    isTodoStopGuardPromptText(part.text)
+                                  ),
+                              ),
+                            };
+                          }
+                        }
+                      }
+                    }
+
+                    if (
+                      !automaticContinuationValidated &&
+                      options.onAutomaticContinuationValidated
+                    ) {
+                      await options.onAutomaticContinuationValidated();
+                      automaticContinuationValidated = true;
+                    }
+                    const selectedMessage =
+                      guardForThisSend || !externalParts
+                        ? (nextMessage?.parts ?? [])
+                        : externalParts;
+                    messageForPreservation = {
+                      role: 'user',
+                      parts: selectedMessage,
+                    };
+                    return {
+                      kind: 'send',
+                      message: selectedMessage,
+                    };
+                  }
+                : undefined,
+          },
+        );
+        if (!sendResult.responseStream) {
+          if (
+            !automaticContinuationValidated &&
+            !supersededAutomaticContinuation &&
+            options.onAutomaticContinuationValidated
+          ) {
+            await options.onAutomaticContinuationValidated();
+            automaticContinuationValidated = true;
+          }
+          if (!preserveGuardOnSkippedSend) {
+            this.todoStopGuard.suspend();
+          }
+          const preservedParts = (messageForPreservation.parts ?? []).filter(
+            (part) => !('text' in part && isTodoStopGuardPromptText(part.text)),
+          );
+          this.#preserveUnsentMessageHistory(
+            preservedParts.length > 0
+              ? { ...messageForPreservation, parts: preservedParts }
+              : null,
+            sendResult.stopReason === 'cancelled',
+          );
+          return {
+            kind: 'terminal',
+            stopReason: sendResult.stopReason,
+            ...(supersededAutomaticContinuation
+              ? { supersededAutomaticContinuation: true }
+              : {}),
+          };
+        }
+
+        const responseStream = sendResult.responseStream;
+        nextMessage = null;
+        initialSend = false;
+        if (guardForThisSend) {
+          const guardCommitted = this.todoStopGuard.commitContinuation(
+            guardForThisSend.attempt,
+          );
+          await this.#emitTodoStopGuardContinuation(guardForThisSend);
+          if (!guardCommitted && externalParts) {
+            guardForThisSend = undefined;
+          }
+        }
+
+        for await (const response of responseStream) {
+          if (pendingSend.signal.aborted) {
+            this.todoStopGuard.suspend();
+            return {
+              kind: 'terminal',
+              stopReason: 'cancelled',
+              ...(supersededAutomaticContinuation
+                ? { supersededAutomaticContinuation: true }
+                : {}),
+            };
+          }
+
+          if (
+            response.type === StreamEventType.CHUNK &&
+            response.value.candidates &&
+            response.value.candidates.length > 0
+          ) {
+            const candidate = response.value.candidates[0];
+            for (const part of candidate.content?.parts ?? []) {
+              if (!part.text) continue;
+              this.messageEmitter.emitMessage(
+                part.text,
+                'assistant',
+                part.thought,
+              );
+              if (!part.thought) messageDisplay?.addChunk(part.text);
+            }
+          }
+
+          if (
+            response.type === StreamEventType.CHUNK &&
+            response.value.usageMetadata
+          ) {
+            usageMetadata = response.value.usageMetadata;
+          }
+          if (response.type === StreamEventType.CHUNK) {
+            await preparationTracker.observe(response.value);
+            if (response.value.functionCalls) {
+              preparationTracker.resolve(response.value.functionCalls);
+              functionCalls.push(...response.value.functionCalls);
+            }
+          }
+          if (
+            response.type === StreamEventType.RETRY ||
+            response.type === StreamEventType.MODEL_FALLBACK
+          ) {
+            await finalizeToolCallPreparations(
+              preparationTracker,
+              true,
+              `daemon continuation ${response.type}`,
+            );
+            functionCalls.length = 0;
+          }
+        }
+      } catch (error) {
+        streamFailed = true;
+        this.todoStopGuard.pauseForTrustedRetry();
+        const errorStatus = getErrorStatus(error);
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        const errorType = classifyApiError({
+          message: errorMessage,
+          status: errorStatus,
+        });
+        const hookSystem = this.config.getHookSystem?.();
+        if (
+          !this.config.getDisableAllHooks?.() &&
+          hookSystem &&
+          this.config.hasHooksForEvent?.('StopFailure')
+        ) {
+          hookSystem
+            .fireStopFailureEvent(errorType, errorMessage)
+            .catch((err) => {
+              debugLogger.warn(`StopFailure hook failed: ${err}`);
+            });
+        }
+        if (errorStatus === 429) {
+          throw new RequestError(429, 'Rate limit exceeded. Try again later.');
+        }
+        throw error;
+      } finally {
+        try {
+          await finalizeToolCallPreparations(
+            preparationTracker,
+            streamFailed || pendingSend.signal.aborted,
+            'daemon continuation',
+          );
+        } finally {
+          await messageDisplay?.finish();
+        }
+      }
+
+      if (usageMetadata) {
+        this.#recordPromptTokenCount(usageMetadata);
+        const durationMs = Date.now() - streamStartTime;
+        await this.messageEmitter.emitUsageMetadata(
+          usageMetadata,
+          '',
+          durationMs,
+        );
+      }
+
+      if (functionCalls.length > 0) {
+        const toolRun = await this.#runWithFullTurnModel(
+          options.getModelOverride?.(),
+          () =>
+            this.runToolCalls(
+              pendingSend.signal,
+              toolPromptId,
+              functionCalls,
+              toolLoopState,
+            ),
+        );
+        if (toolRun.stopAfterPermissionCancel || toolRun.loopDetected) {
+          this.todoStopGuard.suspend();
+          await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
+          return {
+            kind: 'terminal',
+            stopReason: 'end_turn',
+            ...(supersededAutomaticContinuation
+              ? { supersededAutomaticContinuation: true }
+              : {}),
+          };
+        }
+        const nextAfterTools = await this.#buildNextMessageAfterToolRun(
+          toolRun,
+          pendingSend.signal,
+          options.onFullTurnModel,
+        );
+        nextMessage = nextAfterTools.message;
+        if (nextAfterTools.hadMidTurnUserInput) {
+          nextGuardContinuation = undefined;
+          continue;
+        }
+        if (guardForThisSend && nextMessage) {
+          const nextDecision = this.todoStopGuard.decideToolClosure(
+            guardForThisSend.attempt,
+            this.#hasRelevantTodoStopGuardBackgroundInput(),
+          );
+          if (
+            nextDecision.kind === 'continue' &&
+            nextDecision.attempt > guardForThisSend.attempt
+          ) {
+            nextGuardContinuation = nextDecision;
+            if (!nextDecision.toolClosure) {
+              nextMessage = {
+                ...nextMessage,
+                parts: [
+                  ...(nextMessage.parts ?? []),
+                  { text: this.#buildTodoStopGuardPrompt(nextDecision) },
+                ],
+              };
+            }
+          } else if (
+            nextDecision.kind === 'continue' &&
+            nextDecision.attempt <= guardForThisSend.attempt
+          ) {
+            nextGuardContinuation = undefined;
+          } else if (options.externalParts) {
+            // This tool loop was also started by an external Stop hook. Once
+            // the Guard can no longer sponsor another stream, keep the
+            // pre-existing hook continuation alive without appending another
+            // Guard prompt or charging another Guard attempt.
+            nextGuardContinuation = undefined;
+          } else {
+            this.#preserveUnsentMessageHistory(nextMessage, true);
+            return {
+              kind: 'natural_stop',
+              ...(supersededAutomaticContinuation
+                ? { supersededAutomaticContinuation: true }
+                : {}),
+            };
+          }
+        } else {
+          nextGuardContinuation = undefined;
+        }
+      }
     }
 
-    return { stopReason: 'end_turn' };
+    return {
+      kind: 'natural_stop',
+      ...(supersededAutomaticContinuation
+        ? { supersededAutomaticContinuation: true }
+        : {}),
+    };
+  }
+
+  #buildTodoStopGuardPrompt(state: TodoStopGuardContinuation): string {
+    const prompt = `${TODO_STOP_GUARD_PROMPT_PREFIX}${state.unfinishedCount}${TODO_STOP_GUARD_PROMPT_BODY_SUFFIX}`;
+    if (state.attempt < state.maxAttempts) return prompt;
+    return prompt + TODO_STOP_GUARD_FINAL_PROMPT_SUFFIX;
+  }
+
+  async #emitTodoStopGuardContinuation(
+    state: TodoStopGuardContinuation,
+  ): Promise<void> {
+    await this.#emitTodoStopGuardMessageSafely(
+      `[Todo Stop Guard] Automatic continuation ${state.attempt}/${state.maxAttempts} started; ${state.unfinishedCount} todo item(s) remain unfinished.`,
+      state,
+    );
+  }
+
+  async #emitTodoStopGuardExhausted(
+    state: TodoStopGuardContinuation,
+  ): Promise<void> {
+    if (!this.todoStopGuard.markExhaustionReported()) return;
+    await this.#emitTodoStopGuardMessageSafely(
+      `[Todo Stop Guard] Automatic continuation stopped after ${state.maxAttempts} attempts; ${state.unfinishedCount} todo item(s) remain unfinished.`,
+      state,
+    );
+  }
+
+  async #emitTodoStopGuardMessageSafely(
+    text: string,
+    state: TodoStopGuardContinuation,
+  ): Promise<void> {
+    try {
+      await this.sendUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text },
+        _meta: {
+          source: 'todo_stop_guard',
+          qwenDiscreteMessage: true,
+          attempt: state.attempt,
+          maxAttempts: state.maxAttempts,
+          unfinishedCount: state.unfinishedCount,
+        },
+      });
+    } catch (error) {
+      debugLogger.warn(
+        `Failed to emit Todo Stop Guard status: ${this.#formatError(error)}`,
+      );
+    }
   }
 
   async sendUpdate(update: SessionUpdate): Promise<void> {
@@ -2591,14 +3394,6 @@ export class Session implements SessionContext {
   }
 
   /**
-   * Mirrors the core send path for ACP model sends.
-   *
-   * Attempts automatic chat compression first, checks the session token limit,
-   * emits an ACP-visible notice when compression succeeds, and returns the ACP
-   * stop reason when the provider send should be skipped because the request
-   * was cancelled or the session token limit was exceeded.
-   */
-  /**
    * Create the MessageDisplay hook dispatcher for one model call's streamed
    * reply, or null when the hook isn't registered (the common case — keeps
    * the streaming loops zero-cost). The ACP surface consumes GeminiChat's
@@ -2627,16 +3422,35 @@ export class Session implements SessionContext {
     );
   }
 
+  /**
+   * Mirrors the core send path for ACP model sends.
+   *
+   * Attempts automatic chat compression first, checks the session token limit,
+   * emits an ACP-visible notice when compression succeeds, and returns the ACP
+   * stop reason when the provider send should be skipped because the request
+   * was cancelled or the session token limit was exceeded.
+   */
   async #sendMessageStreamWithAutoCompression(
     promptId: string,
     message: Part[],
     abortSignal: AbortSignal,
-    options: { skipCompression?: boolean; modelOverride?: string } = {},
+    options: {
+      skipCompression?: boolean;
+      modelOverride?: string;
+      getModelOverride?: () => string | undefined;
+      beforeSend?: (
+        context: BeforeModelSendContext,
+      ) => Promise<BeforeModelSendDecision>;
+    } = {},
   ): Promise<AutoCompressionSendResult> {
     const geminiClient = this.config.getGeminiClient()!;
     let compressionDiagnostic: string | null = null;
     let compressionInfo: ChatCompressionInfo | null = null;
-    if (!options.skipCompression && !options.modelOverride) {
+    let compressionFailed = false;
+    if (
+      !options.skipCompression &&
+      !(options.getModelOverride?.() ?? options.modelOverride)
+    ) {
       try {
         const compressed = await geminiClient.tryCompressChat(
           promptId,
@@ -2645,6 +3459,9 @@ export class Session implements SessionContext {
         );
         compressionInfo = compressed;
         this.#recordCompressionTokenCount(compressed);
+        compressionFailed = isCompressionFailureStatus(
+          compressed.compressionStatus,
+        );
         if (compressed.compressionStatus === CompressionStatus.COMPRESSED) {
           // Context was just compacted; a loop.md tick must re-deliver the full
           // task block (a short reminder refers back to a message that is no
@@ -2669,6 +3486,7 @@ export class Session implements SessionContext {
           `Auto-compression failed for prompt ${promptId}; proceeding without compression: ` +
             this.#formatError(compressionError),
         );
+        compressionFailed = true;
       }
     }
 
@@ -2713,8 +3531,25 @@ export class Session implements SessionContext {
       return { responseStream: null, stopReason: 'cancelled' };
     }
 
+    if (options.beforeSend) {
+      const decision = await options.beforeSend({ compressionFailed });
+      if (decision.kind === 'stop') {
+        return { responseStream: null, stopReason: decision.stopReason };
+      }
+      message = decision.message;
+    }
+
+    if (abortSignal.aborted) {
+      debugLogger.debug(
+        `Send aborted after pre-send validation for prompt ${promptId}`,
+      );
+      return { responseStream: null, stopReason: 'cancelled' };
+    }
+
     const responseStream = await this.#getCurrentChat().sendMessageStream(
-      options.modelOverride ?? this.config.getModel(),
+      options.getModelOverride?.() ??
+        options.modelOverride ??
+        this.config.getModel(),
       {
         message,
         config: {
@@ -2780,22 +3615,30 @@ export class Session implements SessionContext {
     toolRun: RunToolResult,
     abortSignal: AbortSignal,
     onFullTurnModel?: (model: string) => boolean,
-  ): Promise<Content | null> {
+  ): Promise<NextMessageAfterToolRun> {
     if (toolRun.loopDetected) {
       debugLogger.debug('Stopping ACP turn after daemon loop detection.');
-      return null;
+      return { message: null, hadMidTurnUserInput: false };
     }
     if (toolRun.repeatedDuplicateProviderToolCall) {
+      this.todoStopGuard.suspend();
       debugLogger.debug(
         'Stopping ACP turn after dropping repeated duplicate provider tool-call response.',
       );
-      return null;
+      return { message: null, hadMidTurnUserInput: false };
     }
-    const parts = [
-      ...toolRun.parts,
-      ...(await this.#drainMidTurnUserMessages(abortSignal, onFullTurnModel)),
-    ];
-    return { role: 'user', parts };
+    const drained = await this.#drainMidTurnInput(abortSignal, {
+      onFullTurnModel,
+    });
+    const hadMidTurnUserInput = drained.parts.length > 0;
+    if (hadMidTurnUserInput) {
+      this.todoStopGuard.acceptMidTurnUserInput();
+    }
+    const parts = [...toolRun.parts, ...drained.parts];
+    return {
+      message: { role: 'user', parts },
+      hadMidTurnUserInput,
+    };
   }
 
   #recordCompressionTokenCount(info: ChatCompressionInfo): void {
@@ -2908,6 +3751,17 @@ export class Session implements SessionContext {
     abortSignal: AbortSignal,
     onFullTurnModel?: (model: string) => boolean,
   ): Promise<Part[]> {
+    return (await this.#drainMidTurnInput(abortSignal, { onFullTurnModel }))
+      .parts;
+  }
+
+  async #drainMidTurnInput(
+    abortSignal: AbortSignal,
+    options: {
+      watchQueuedPromptForTodoStopGuard?: boolean;
+      onFullTurnModel?: (model: string) => boolean;
+    } = {},
+  ): Promise<MidTurnDrainResult> {
     // Flush anything recovered from a PRIOR timed-out drain first: the daemon
     // splices + SSE-publishes synchronously, so on a timeout the browser has
     // already deduped those messages — discarding the late response would lose
@@ -2916,13 +3770,23 @@ export class Session implements SessionContext {
     const recovered = this.#takeRecoveredMidTurnMessages();
 
     if (this.midTurnDrainUnavailable) {
-      return this.#buildMidTurnParts(recovered, abortSignal, onFullTurnModel);
+      return {
+        parts: await this.#buildMidTurnParts(
+          recovered,
+          abortSignal,
+          options.onFullTurnModel,
+        ),
+        hasQueuedPrompt: false,
+      };
     }
 
     let drainPromise: ReturnType<AgentSideConnection['extMethod']> | undefined;
     try {
       drainPromise = this.client.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
         sessionId: this.sessionId,
+        ...(options.watchQueuedPromptForTodoStopGuard
+          ? { todoStopGuardWatchQueuedPrompt: true }
+          : {}),
       });
       let timeoutHandle: NodeJS.Timeout | undefined;
       const timeoutPromise = new Promise<never>((_, reject) => {
@@ -2938,11 +3802,15 @@ export class Session implements SessionContext {
         clearTimeout(timeoutHandle);
       }
       this.midTurnDrainTimeoutStrikes = 0;
-      return this.#buildMidTurnParts(
-        [...recovered, ...parseMidTurnDrainResponse(response)],
-        abortSignal,
-        onFullTurnModel,
-      );
+      return {
+        parts: await this.#buildMidTurnParts(
+          [...recovered, ...parseMidTurnDrainResponse(response)],
+          abortSignal,
+          options.onFullTurnModel,
+        ),
+        hasQueuedPrompt:
+          isRecord(response) && response['hasQueuedPrompt'] === true,
+      };
     } catch (error) {
       // The ACP SDK rejects with the raw JSON-RPC error object
       // (`{ code, message, data }`), which is not an `Error` instance, so
@@ -2992,7 +3860,14 @@ export class Session implements SessionContext {
       );
       // Even on a failed/timed-out drain, still inject anything recovered from
       // an EARLIER timeout so a transient stall never strands those messages.
-      return this.#buildMidTurnParts(recovered, abortSignal, onFullTurnModel);
+      return {
+        parts: await this.#buildMidTurnParts(
+          recovered,
+          abortSignal,
+          options.onFullTurnModel,
+        ),
+        hasQueuedPrompt: false,
+      };
     }
   }
 
@@ -3134,12 +4009,48 @@ export class Session implements SessionContext {
     scheduler.start((job: CronFire) => {
       if (this.cronDisabledByTokenLimit) return;
       if (job.missed && detectAutonomousSentinel(job.prompt)) return;
-      this.cronQueue.push({
+      this.#enqueueCronPrompt({
         prompt: job.prompt,
         source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
+        ...(job.id ? { taskId: job.id } : {}),
       });
       void this.#drainCronQueue();
     });
+  }
+
+  #enqueueCronPrompt(item: CronQueueItem): void {
+    if (
+      (this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
+        this.todoStopGuardQueuedPromptPriority) &&
+      !this.#cronContinuesTodoStopGuardWorkChain(item)
+    ) {
+      if (item.taskId) {
+        const duplicateIndex = this.cronQueue.findIndex(
+          (queued) =>
+            queued.taskId === item.taskId &&
+            !this.#cronContinuesTodoStopGuardWorkChain(queued),
+        );
+        if (duplicateIndex >= 0) {
+          this.cronQueue[duplicateIndex] = item;
+          return;
+        }
+      }
+
+      const unrelatedIndices = this.cronQueue
+        .map((queued, index) =>
+          this.#cronContinuesTodoStopGuardWorkChain(queued) ? -1 : index,
+        )
+        .filter((index) => index >= 0);
+      if (unrelatedIndices.length >= MAX_DEFERRED_UNRELATED_CRON_QUEUE) {
+        const evictedIndex = unrelatedIndices[0]!;
+        const [evicted] = this.cronQueue.splice(evictedIndex, 1);
+        debugLogger.warn(
+          `Cron queue overflow while automatic work is deferred: evicting task=${evicted?.taskId ?? 'unknown'}`,
+        );
+      }
+    }
+
+    this.cronQueue.push(item);
   }
 
   /**
@@ -3153,6 +4064,7 @@ export class Session implements SessionContext {
     // drained after the prompt completes (see end of prompt()).
     if (this.pendingPrompt) return;
     if (this.notificationProcessing) return;
+    if (this.#nextCronQueueIndex() < 0) return;
     this.cronProcessing = true;
 
     let resolveCompletion!: () => void;
@@ -3162,7 +4074,10 @@ export class Session implements SessionContext {
 
     try {
       while (this.cronQueue.length > 0) {
-        const item = this.cronQueue.shift()!;
+        const nextIndex = this.#nextCronQueueIndex();
+        if (nextIndex < 0) break;
+        const [item] = this.cronQueue.splice(nextIndex, 1);
+        if (!item) break;
         await this.#executeCronPrompt(item);
       }
     } finally {
@@ -3183,6 +4098,15 @@ export class Session implements SessionContext {
         }
       }
     }
+  }
+
+  #nextCronQueueIndex(): number {
+    if (this.cronQueue.length === 0) return -1;
+    if (this.todoStopGuardQueuedPromptPriority) return -1;
+    if (!this.todoStopGuard.blocksUnrelatedAutomaticTurns) return 0;
+    return this.cronQueue.findIndex((item) =>
+      this.#cronContinuesTodoStopGuardWorkChain(item),
+    );
   }
 
   #getLoopTickResolver(): LoopTickResolver {
@@ -3231,6 +4155,9 @@ export class Session implements SessionContext {
       async () => {
         const ac = new AbortController();
         this.cronAbortController = ac;
+        this.#prepareTodoStopGuardForAutomaticTurn(
+          this.#cronContinuesTodoStopGuardWorkChain(item),
+        );
         const promptId =
           this.config.getSessionId() + '########cron' + Date.now();
         let cronHadError = false;
@@ -3384,7 +4311,10 @@ export class Session implements SessionContext {
 
               while (nextMessage !== null) {
                 turnCount++;
-                if (ac.signal.aborted) return;
+                if (ac.signal.aborted) {
+                  this.todoStopGuard.suspend();
+                  return;
+                }
 
                 const functionCalls: FunctionCall[] = [];
                 const preparationTracker = new ToolCallPreparationTracker(
@@ -3401,6 +4331,7 @@ export class Session implements SessionContext {
                     ac.signal,
                   );
                 if (!sendResult.responseStream) {
+                  this.todoStopGuard.suspend();
                   this.#preserveUnsentMessageHistory(
                     nextMessage,
                     sendResult.stopReason === 'cancelled',
@@ -3426,7 +4357,10 @@ export class Session implements SessionContext {
                 let streamFailed = false;
                 try {
                   for await (const resp of responseStream) {
-                    if (ac.signal.aborted) return;
+                    if (ac.signal.aborted) {
+                      this.todoStopGuard.suspend();
+                      return;
+                    }
 
                     if (
                       resp.type === StreamEventType.CHUNK &&
@@ -3511,21 +4445,38 @@ export class Session implements SessionContext {
                     toolLoopState,
                   );
                   if (toolRun.stopAfterPermissionCancel) {
+                    this.todoStopGuard.suspend();
                     await this.#preserveStoppedToolRun(toolRun, ac.signal);
                     return;
                   }
-                  nextMessage = await this.#buildNextMessageAfterToolRun(
-                    toolRun,
-                    ac.signal,
-                  );
+                  const nextAfterTools =
+                    await this.#buildNextMessageAfterToolRun(
+                      toolRun,
+                      ac.signal,
+                    );
+                  nextMessage = nextAfterTools.message;
                   if (toolRun.loopDetected) {
+                    this.todoStopGuard.suspend();
                     await this.#preserveStoppedToolRun(toolRun, ac.signal);
                     return;
                   }
                 }
               }
+              if (this.todoStopGuard.needsStopInspection) {
+                const guardStop = await this.#handleStopHookLoop(
+                  ac,
+                  promptId,
+                  false,
+                  undefined,
+                  false,
+                );
+                if (guardStop.stopReason === 'max_tokens') {
+                  this.#stopCronAfterTokenLimit();
+                }
+              }
             } catch (error) {
               if (ac.signal.aborted) return;
+              this.todoStopGuard.pauseForTrustedRetry();
               cronHadError = true;
               debugLogger.error('Error processing cron prompt:', error);
               const msg =
@@ -3557,6 +4508,7 @@ export class Session implements SessionContext {
   }
 
   #stopCronAfterTokenLimit(): void {
+    this.todoStopGuard.suspend();
     this.cronDisabledByTokenLimit = true;
     this.cronQueue = [];
     if (!this.config.isCronEnabled()) return;
@@ -3654,9 +4606,28 @@ export class Session implements SessionContext {
 
   #enqueueBackgroundNotification(item: BackgroundNotificationQueueItem): void {
     while (this.notificationQueue.length >= MAX_NOTIFICATION_QUEUE) {
-      const evicted = this.notificationQueue.shift()!;
+      let evictedIndex = 0;
+      if (
+        this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
+        this.todoStopGuardQueuedPromptPriority
+      ) {
+        const incomingIsRelated =
+          this.#notificationContinuesTodoStopGuardWorkChain(item);
+        evictedIndex = this.notificationQueue.findIndex(
+          (queued) =>
+            !this.#notificationContinuesTodoStopGuardWorkChain(queued),
+        );
+        if (evictedIndex < 0 && !incomingIsRelated) {
+          debugLogger.warn(
+            `Notification queue overflow: dropping unrelated task=${item.taskId} kind=${item.kind} while automatic work is deferred`,
+          );
+          return;
+        }
+        if (evictedIndex < 0) evictedIndex = 0;
+      }
+      const [evicted] = this.notificationQueue.splice(evictedIndex, 1);
       debugLogger.warn(
-        `Notification queue overflow: evicting task=${evicted.taskId} kind=${evicted.kind}`,
+        `Notification queue overflow: evicting task=${evicted?.taskId ?? 'unknown'} kind=${evicted?.kind ?? 'unknown'}`,
       );
     }
     this.notificationQueue.push(item);
@@ -3670,6 +4641,7 @@ export class Session implements SessionContext {
       return;
     }
     if (this.notificationQueue.length === 0) return;
+    if (this.#nextNotificationQueueIndex() < 0) return;
 
     this.notificationProcessing = true;
     let resolveCompletion!: () => void;
@@ -3690,7 +4662,10 @@ export class Session implements SessionContext {
         // notification carries distinct task metadata (taskId, status, kind,
         // toolUseId) used in display and response _meta. Merging would
         // misattribute the combined response to a single task.
-        const item = this.notificationQueue.shift()!;
+        const nextIndex = this.#nextNotificationQueueIndex();
+        if (nextIndex < 0) break;
+        const [item] = this.notificationQueue.splice(nextIndex, 1);
+        if (!item) break;
         await sessionIdContext.run(this.config.getSessionId(), () =>
           this.#executeBackgroundNotificationPromptInner(item),
         );
@@ -3713,6 +4688,15 @@ export class Session implements SessionContext {
     }
   }
 
+  #nextNotificationQueueIndex(): number {
+    if (this.notificationQueue.length === 0) return -1;
+    if (this.todoStopGuardQueuedPromptPriority) return -1;
+    if (!this.todoStopGuard.blocksUnrelatedAutomaticTurns) return 0;
+    return this.notificationQueue.findIndex((item) =>
+      this.#notificationContinuesTodoStopGuardWorkChain(item),
+    );
+  }
+
   async #executeBackgroundNotificationPromptInner(
     item: BackgroundNotificationQueueItem,
   ): Promise<void> {
@@ -3722,6 +4706,9 @@ export class Session implements SessionContext {
       async () => {
         const ac = new AbortController();
         this.notificationAbortController = ac;
+        this.#prepareTodoStopGuardForAutomaticTurn(
+          this.#notificationContinuesTodoStopGuardWorkChain(item),
+        );
         const promptId =
           this.config.getSessionId() + '########notification' + Date.now();
         try {
@@ -3742,6 +4729,7 @@ export class Session implements SessionContext {
 
           while (nextMessage !== null) {
             if (ac.signal.aborted) {
+              this.todoStopGuard.suspend();
               await this.#emitBackgroundNotificationEndTurn('cancelled');
               return;
             }
@@ -3761,6 +4749,7 @@ export class Session implements SessionContext {
               ac.signal,
             );
             if (!sendResult.responseStream) {
+              this.todoStopGuard.suspend();
               this.#preserveUnsentMessageHistory(
                 nextMessage,
                 sendResult.stopReason === 'cancelled',
@@ -3781,6 +4770,7 @@ export class Session implements SessionContext {
             try {
               for await (const resp of responseStream) {
                 if (ac.signal.aborted) {
+                  this.todoStopGuard.suspend();
                   await this.#emitBackgroundNotificationEndTurn('cancelled');
                   return;
                 }
@@ -3879,15 +4869,18 @@ export class Session implements SessionContext {
                 toolLoopState,
               );
               if (toolRun.stopAfterPermissionCancel) {
+                this.todoStopGuard.suspend();
                 await this.#preserveStoppedToolRun(toolRun, ac.signal);
                 await this.#emitBackgroundNotificationEndTurn('end_turn');
                 return;
               }
-              nextMessage = await this.#buildNextMessageAfterToolRun(
+              const nextAfterTools = await this.#buildNextMessageAfterToolRun(
                 toolRun,
                 ac.signal,
               );
+              nextMessage = nextAfterTools.message;
               if (toolRun.loopDetected) {
+                this.todoStopGuard.suspend();
                 await this.#preserveStoppedToolRun(toolRun, ac.signal);
                 await this.#emitBackgroundNotificationEndTurn('end_turn');
                 return;
@@ -3899,12 +4892,25 @@ export class Session implements SessionContext {
             await this.messageRewriter.waitForPendingRewrites();
           }
 
-          await this.#emitBackgroundNotificationEndTurn('end_turn');
+          let stopReason: PromptResponse['stopReason'] = 'end_turn';
+          if (this.todoStopGuard.needsStopInspection) {
+            stopReason = (
+              await this.#handleStopHookLoop(
+                ac,
+                promptId,
+                false,
+                undefined,
+                false,
+              )
+            ).stopReason;
+          }
+          await this.#emitBackgroundNotificationEndTurn(stopReason);
         } catch (error) {
           if (ac.signal.aborted) {
             await this.#emitBackgroundNotificationEndTurn('cancelled');
             return;
           }
+          this.todoStopGuard.pauseForTrustedRetry();
           debugLogger.error('Error processing background notification:', error);
           const msg = error instanceof Error ? error.message : String(error);
           try {
@@ -4087,6 +5093,9 @@ export class Session implements SessionContext {
       );
     }
     this.config.setApprovalMode(approvalMode);
+    if (approvalMode === ApprovalMode.PLAN) {
+      this.clearTodoStopGuardTrust();
+    }
 
     // A2 (#4511): notify attached clients of an in-session mode switch.
     // Mirrors the model-update extNotification in `setModel`.
@@ -4929,6 +5938,10 @@ export class Session implements SessionContext {
 
         // Detect TodoWriteTool early - route to plan updates instead of tool_call events
         const isTodoWriteTool = tool.name === ToolNames.TODO_WRITE;
+        const isTrustedTodoWriteTool =
+          isTodoWriteTool &&
+          tool.kind === Kind.Think &&
+          tool.constructor.name === 'TodoWriteTool';
         const isAgentTool = tool.name === ToolNames.AGENT;
         const isExitPlanModeTool = tool.name === ToolNames.EXIT_PLAN_MODE;
         const isEnterPlanModeTool = tool.name === ToolNames.ENTER_PLAN_MODE;
@@ -5566,6 +6579,9 @@ export class Session implements SessionContext {
             this.config.getApprovalMode() !== approvalMode
           ) {
             await this.sendCurrentModeUpdateNotification();
+            if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
+              this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
+            }
           }
 
           // Create response parts first (needed for emitResult and recordToolResult)
@@ -5601,6 +6617,14 @@ export class Session implements SessionContext {
               ? new Error('Tool execution was cancelled')
               : undefined;
 
+          if (isTrustedTodoWriteTool && !toolResult.error) {
+            this.todoStopGuard.observeTodoWrite(
+              toolResult.returnDisplay,
+              this.config.getApprovalMode() !== ApprovalMode.PLAN,
+            );
+            if (aborted) this.todoStopGuard.suspend();
+          }
+
           // Fire PostToolUse hook on successful execution (aligned with core path)
           if (
             hooksEnabledForTool &&
@@ -5633,6 +6657,7 @@ export class Session implements SessionContext {
               debugLogger.info(
                 `PostToolUse hook requested stop for ${toolName}: ${stopMessage}`,
               );
+              this.todoStopGuard.suspend();
               return earlyErrorResponse(new Error(stopMessage), toolName);
             }
 
