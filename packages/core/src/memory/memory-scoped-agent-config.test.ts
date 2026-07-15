@@ -398,3 +398,57 @@ describe('isAllowedMemoryPath with a symlinked project root', () => {
     expect(isAllowedMemoryPath(outsideFile, projectRoot)).toBe(false);
   });
 });
+
+describe('isAllowedMemoryPath with a symlinked managed-memory suffix', () => {
+  // Unlike the block above (where the symlink sits ABOVE the trusted anchor —
+  // the project root itself is a symlink, like macOS `/var`), here the symlink
+  // is a repo-tracked `.qwen` INSIDE the managed suffix pointing outside the
+  // project. Canonicalizing such a symlink would relocate the "allowed" root
+  // out of the project, so the anchor is canonicalized but the `.qwen/memory`
+  // suffix is appended literally and the write is denied.
+  const originalMemoryLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+  let baseDir: string;
+  let projectRoot: string;
+  let outsideDir: string;
+
+  beforeEach(async () => {
+    process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+    baseDir = await fs.mkdtemp(path.join(os.tmpdir(), 'memory-qwenlink-'));
+    projectRoot = path.join(baseDir, 'repo');
+    outsideDir = path.join(baseDir, 'outside');
+    await fs.mkdir(projectRoot, { recursive: true });
+    await fs.mkdir(outsideDir, { recursive: true });
+    // The whole `.qwen` dir is a symlink escaping the project — a malicious
+    // repo can ship this as a git-tracked symlink.
+    await fs.symlink(outsideDir, path.join(projectRoot, '.qwen'));
+    clearAutoMemoryRootCache();
+  });
+
+  afterEach(async () => {
+    if (originalMemoryLocal === undefined) {
+      delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    } else {
+      process.env['QWEN_CODE_MEMORY_LOCAL'] = originalMemoryLocal;
+    }
+    clearAutoMemoryRootCache();
+    await fs.rm(baseDir, { recursive: true, force: true });
+  });
+
+  it('denies a write via a `.qwen` symlink escaping the project when the target is absent', () => {
+    // `.qwen -> /outside` with `/outside/memory` not yet created: the candidate
+    // resolves to `/outside/memory/project.md`, but the allowed root keeps the
+    // literal `.qwen/memory` suffix, so the escape is rejected before it can
+    // create `/outside/memory/project.md`.
+    const memoryFile = path.join(getAutoMemoryRoot(projectRoot), 'project.md');
+    expect(isAllowedMemoryPath(memoryFile, projectRoot)).toBe(false);
+  });
+
+  it('denies a write via a `.qwen` symlink escaping the project when the target already exists', async () => {
+    // The same escape must stay denied even once `/outside/memory` exists —
+    // otherwise realpath'ing the whole root would resolve the symlink on both
+    // sides and let the write through.
+    await fs.mkdir(path.join(outsideDir, 'memory'), { recursive: true });
+    const memoryFile = path.join(getAutoMemoryRoot(projectRoot), 'project.md');
+    expect(isAllowedMemoryPath(memoryFile, projectRoot)).toBe(false);
+  });
+});

@@ -15,7 +15,11 @@ import type {
 import { ToolNames } from '../tools/tool-names.js';
 import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
-import { getAutoMemoryRoot, getUserAutoMemoryRoot } from './paths.js';
+import {
+  getAutoMemoryRoot,
+  getAutoMemoryTrustedAnchor,
+  getUserAutoMemoryRoot,
+} from './paths.js';
 
 type MemoryScopedPermissionManager = Pick<
   PermissionManager,
@@ -78,7 +82,10 @@ export function isAllowedMemoryPath(
 ): boolean {
   if (!filePath) return false;
   const includeUserMemory = options.includeUserMemory ?? true;
-  const projectMemoryRoot = realpathOrResolved(getAutoMemoryRoot(projectRoot));
+  const projectMemoryRoot = resolveTrustedMemoryRoot(
+    getAutoMemoryRoot(projectRoot),
+    getAutoMemoryTrustedAnchor(projectRoot),
+  );
   const userMemoryRoot = realpathOrResolved(getUserAutoMemoryRoot());
   const isAllowed = (candidate: string): boolean =>
     isWithinRoot(candidate, projectMemoryRoot) ||
@@ -130,6 +137,33 @@ function realpathOrResolved(filePath: string): string {
     // and misclassifies allowed writes as outside managed memory.
     return realpathNewPath(filePath) ?? path.resolve(filePath);
   }
+}
+
+/**
+ * Resolve a managed-memory root for the write-boundary comparison.
+ *
+ * The candidate path is always realpath-resolved, so the root must resolve the
+ * same symlinks in its trusted prefix (macOS `/var` -> `/private/var`, a
+ * symlinked project dir or linked worktree) to avoid false denials. But it must
+ * NOT follow a symlink that lives inside the managed suffix — e.g. a repo-
+ * tracked `.qwen -> /outside` under `QWEN_CODE_MEMORY_LOCAL` — which would
+ * relocate the "allowed" root out of the project and let the first managed
+ * write land outside it. So we canonicalize the trusted anchor only and append
+ * the managed suffix literally.
+ */
+function resolveTrustedMemoryRoot(literalRoot: string, anchor: string): string {
+  const suffix = path.relative(anchor, literalRoot);
+  if (
+    suffix === '' ||
+    suffix === '..' ||
+    suffix.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(suffix)
+  ) {
+    // The root is not under its expected anchor (unexpected layout); resolve
+    // the whole path, matching the behavior before this anchor guard existed.
+    return realpathOrResolved(literalRoot);
+  }
+  return path.join(realpathOrResolved(anchor), suffix);
 }
 
 function isWithinRoot(filePath: string, root: string): boolean {
