@@ -32,6 +32,26 @@ export const SCENARIOS = [
   { name: 'health', method: 'GET', path: '/health', auth: false },
   { name: 'health-deep', method: 'GET', path: '/health?deep=1', auth: false },
   { name: 'capabilities', method: 'GET', path: '/capabilities', auth: true },
+  {
+    // Create one session, THEN probe deep health — exercises the session
+    // lifecycle and the cross-workspace session aggregation (#6961's exact
+    // case). Runs last so the earlier probes see the idle daemon. The volatile
+    // `lastActivityAt` / `idleSinceMs` in the response are masked by
+    // serve-ab-diff.mjs; the meaningful counts (sessions, pendingPermissions,
+    // activePrompts, connectedClients, channelAlive) are stable.
+    name: 'health-deep-with-session',
+    setup: [
+      {
+        method: 'POST',
+        path: '/session',
+        auth: true,
+        body: ({ home }) => ({ clientId: 'serve-ab', workspaceCwd: home }),
+      },
+    ],
+    method: 'GET',
+    path: '/health?deep=1',
+    auth: true,
+  },
 ];
 
 function freePort() {
@@ -96,12 +116,25 @@ export async function driveCli(cliEntry, outDir) {
   const base = `http://127.0.0.1:${port}`;
   try {
     await waitForHealth(base);
-    for (const s of SCENARIOS) {
-      const headers = s.auth ? { Authorization: `Bearer ${token}` } : {};
-      const res = await fetch(`${base}${s.path}`, {
-        method: s.method,
+    const doRequest = (spec) => {
+      const headers = spec.auth ? { Authorization: `Bearer ${token}` } : {};
+      let body;
+      if (spec.body) {
+        headers['Content-Type'] = 'application/json';
+        const b =
+          typeof spec.body === 'function' ? spec.body({ home }) : spec.body;
+        body = JSON.stringify(b);
+      }
+      return fetch(`${base}${spec.path}`, {
+        method: spec.method,
         headers,
+        body,
       });
+    };
+    for (const s of SCENARIOS) {
+      // Run any setup requests (e.g. create a session) before the capture.
+      for (const step of s.setup ?? []) await doRequest(step);
+      const res = await doRequest(s);
       const text = await res.text();
       let json;
       try {

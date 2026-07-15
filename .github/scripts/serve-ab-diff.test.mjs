@@ -81,6 +81,14 @@ test('diffJson: a type change (array → object) is one "changed"', () => {
 test('maskPath / diffJson skips volatile fields (timestamps, pid, uptime …)', () => {
   assert.equal(maskPath('daemon.uptimeMs'), true);
   assert.equal(maskPath('startedAt'), true);
+  // Session-lifecycle volatiles (from the create-session scenario).
+  assert.equal(maskPath('lastActivityAt'), true);
+  assert.equal(maskPath('idleSinceMs'), true);
+  assert.equal(maskPath('sessionId'), true);
+  assert.equal(maskPath('workspaceCwd'), true);
+  // …but the meaningful counts next to them are NOT masked.
+  assert.equal(maskPath('sessions'), false); // not `sessionId`
+  assert.equal(maskPath('activePrompts'), false);
   assert.equal(maskPath('features'), false);
   // A change only in a volatile field yields no diff.
   assert.deepEqual(

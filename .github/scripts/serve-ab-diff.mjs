@@ -25,7 +25,7 @@ import { pathToFileURL } from 'node:url';
 // noise. Masked paths are ignored. Extend per scenario as richer endpoints are
 // added (session ids, createdAt, …).
 export const DEFAULT_VOLATILE = [
-  /(^|[.\]])(uptime|uptimeMs|startedAt|timestamp|now|pid|port|elapsed|durationMs|latencyMs|memory|rss|heap)([.[]|$)/i,
+  /(^|[.\]])(uptime|uptimeMs|startedAt|createdAt|updatedAt|expiresAt|lastActivityAt|idleSince|idleSinceMs|sessionId|clientId|workspaceCwd|workspaceRoot|cwd|timestamp|now|pid|port|elapsed|durationMs|latencyMs|memory|rss|heap)([.[]|$)/i,
 ];
 
 export function maskPath(path, patterns = DEFAULT_VOLATILE) {
