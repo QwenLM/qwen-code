@@ -299,6 +299,137 @@ describe('runBuildTest', () => {
     expect(rep.build.length).toBeGreaterThan(0);
   });
 
+  it('hands off (not a false green) when an affected dir maps to no package', () => {
+    // A nested package listed before a `*` that also claims its parent segment: the
+    // walker maps `packages/nested/pkg/...` to `packages/nested` (no package.json),
+    // which would be dropped from the build set — zero commands, ok:true, "Everything
+    // passed" — the confident false green. A sibling package keeps the package map
+    // non-empty so this reaches the affected-dir guard, not the empty-packages one.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/nested/pkg', 'packages/*'],
+      }),
+    );
+    pkg('packages/nested/pkg', {
+      name: '@x/nested',
+      scripts: { build: 'exit 1', test: 'exit 1' },
+    });
+    pkg('packages/sibling', { name: '@x/sib', scripts: { build: 'exit 0' } });
+    writePlan(['packages/nested/pkg/src/x.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    // NOT a scoped `ok: true` over zero commands — it hands off instead.
+    expect(rep.toolchain).toBe('unsupported');
+    expect(rep.note).toContain('map to no package');
+    expect(rep.build).toEqual([]);
+  });
+
+  it('hands off a cold yarn repo (no install possible) instead of a false Critical', () => {
+    // A review worktree is cold. `npm ci` cannot install a yarn repo, and building
+    // against absent deps fails with `Cannot find module` in the PR's own files — the
+    // false-Critical steer. So it hands off, naming the tool to install with.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    rmSync(join(root, 'package-lock.json'), { force: true });
+    rmSync(join(root, 'node_modules'), { recursive: true, force: true });
+    writeFileSync(join(root, 'yarn.lock'), '');
+    pkg('packages/a', { name: '@x/a', scripts: { build: 'exit 1' } });
+    writePlan(['packages/a/src/x.ts']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: true,
+      exec: (command) => {
+        calls.push(command);
+        return {
+          command,
+          exitCode: 1,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+    expect(rep.toolchain).toBe('unsupported');
+    expect(rep.note).toContain('yarn.lock');
+    expect(rep.install).toBeNull();
+    // Never ran a build that could only fail misleadingly.
+    expect(calls).toEqual([]);
+    expect(rep.note).not.toContain('Critical');
+  });
+
+  it('reorders when two affected packages have an undeclared source-reach', () => {
+    // Both the needer (`aaa`) and the undeclared-needed (`zzz`) are changed, and the
+    // alphabet orders the needer first. The TS2307 names an in-set package; filtering
+    // on `!built.has` (not `!set.includes`) lets that trigger a reorder via alsoBuild
+    // rather than terminal-fail with a false "Correlate → Critical".
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/aaa', {
+      name: '@x/aaa',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/zzz', {
+      name: '@x/zzz',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writePlan(['packages/aaa/src/x.ts', 'packages/zzz/src/y.ts']);
+
+    let zzzBuilt = false;
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: (command) => {
+        const ws = /--workspace="([^"]+)"/.exec(command)?.[1] ?? '';
+        if (command.startsWith('npm run build') && ws === 'packages/zzz') {
+          zzzBuilt = true;
+        }
+        if (
+          command.startsWith('npm run build') &&
+          ws === 'packages/aaa' &&
+          !zzzBuilt
+        ) {
+          return {
+            command,
+            exitCode: 2,
+            seconds: 1,
+            timedOut: false,
+            output: "error TS2307: Cannot find module '@x/zzz'",
+          };
+        }
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+    // The reorder fixed it — a green build, not a terminal false failure.
+    expect(rep.ok).toBe(true);
+    expect(rep.buildSet.indexOf('packages/zzz')).toBeLessThan(
+      rep.buildSet.indexOf('packages/aaa'),
+    );
+  });
+
   // The exec seam stands in for real `npm run`: these tests are about which packages
   // get built, in what order, and how a result is classified — not about npm's own
   // workspace resolution. Driving real npm here made the suite spawn dozens of slow

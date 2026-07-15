@@ -249,6 +249,22 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   const exec = args.exec ?? run;
   const changed = changedFilesFrom(args.plan);
 
+  // `unsupported`: build-test cannot safely scope this repo, so the agent's brief
+  // falls back to its build/test precedence (installing dependencies first). `ok` is
+  // true because nothing was found wrong — it is a handoff, not a failure.
+  const unsupportedReport = (note: string): BuildTestReport => ({
+    toolchain: 'unsupported',
+    affected: [],
+    buildSet: [],
+    widenedWith: [],
+    install: null,
+    build: [],
+    test: [],
+    ok: true,
+    timedOut: [],
+    note,
+  });
+
   const globs = readWorkspaceGlobs(root);
   let packages = readWorkspacePackages(root);
 
@@ -277,25 +293,16 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     unmodeled ||
     (!singleRoot && (globs.length === 0 || packages.length === 0))
   ) {
-    return {
-      toolchain: 'unsupported',
-      affected: [],
-      buildSet: [],
-      widenedWith: [],
-      install: null,
-      build: [],
-      test: [],
-      ok: true,
-      timedOut: [],
-      note: unmodeled
+    return unsupportedReport(
+      unmodeled
         ? 'This repo uses a workspace glob shape this command does not model ' +
-          '(e.g. `**`, an inner `*`, or a `foo-*` prefix), so it cannot safely decide ' +
-          'which packages the diff touches. Fall back to the build/test precedence in ' +
-          'your brief, and give each command a deadline it can actually meet.'
+            '(e.g. `**`, an inner `*`, or a `foo-*` prefix), so it cannot safely decide ' +
+            'which packages the diff touches. Fall back to the build/test precedence in ' +
+            'your brief, and give each command a deadline it can actually meet.'
         : 'No npm package here to scope (no workspaces, and the root has no build/test ' +
-          'script). Fall back to the build/test precedence in your brief — installing ' +
-          'dependencies first — and give each command a deadline it can actually meet.',
-    };
+            'script). Fall back to the build/test precedence in your brief — installing ' +
+            'dependencies first — and give each command a deadline it can actually meet.',
+    );
   }
 
   // A single-root repo builds and tests its one package whenever the diff changes
@@ -324,6 +331,25 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   }
 
   const byDir = new Map(packages.map((p) => [p.dir, p]));
+
+  // A changed dir the walker mapped to something that is NOT a package (a nested
+  // package listed before a `*` that also claims its parent segment; a loose file
+  // directly under a `packages/*` base) would be dropped from the build set without
+  // a trace: zero commands, `ok: true`, "Everything passed" — the confident false
+  // green this command exists to prevent. If any affected dir is not a known
+  // package, the scoping cannot be trusted; hand the whole thing to the brief's
+  // precedence rather than certify a build that never ran.
+  const unmapped = affected.filter((d) => d !== '.' && !byDir.has(d));
+  if (unmapped.length > 0) {
+    return unsupportedReport(
+      `The diff touches ${unmapped.join(', ')}, which the workspace globs map to no ` +
+        'package (a nested package ordered before a `*`, or a loose file under a ' +
+        'workspace base). Scoping cannot be trusted here, so fall back to the ' +
+        'build/test precedence in your brief — installing dependencies first — rather ' +
+        'than trust a scoped build that would silently skip it.',
+    );
+  }
+
   const results: BuildTestReport = {
     toolchain: 'npm',
     affected,
@@ -378,6 +404,31 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   const npmLock = existsSync(join(root, 'package-lock.json'));
   const installComplete = (): boolean =>
     existsSync(join(root, 'node_modules', '.package-lock.json'));
+
+  // A non-npm repo (yarn/bun/pnpm — `workspaces` is their syntax too) with no
+  // installed tree cannot be installed here: `npm ci` needs the npm lockfile, and
+  // building against absent dependencies fails with `Cannot find module` **inside the
+  // PR's own changed files** — the false-Critical steer this command exists to
+  // prevent. A review worktree is cold by construction, so this is the common case,
+  // not an edge. Hand it to the brief, naming the tool to install with. (The warm
+  // case — a tree already present — is trusted below and never reaches here.)
+  if (args.install && !npmLock && !existsSync(join(root, 'node_modules'))) {
+    const altLock = [
+      ['yarn.lock', 'yarn install --frozen-lockfile'],
+      ['pnpm-lock.yaml', 'pnpm install --frozen-lockfile'],
+      ['bun.lockb', 'bun install --frozen-lockfile'],
+      ['bun.lock', 'bun install --frozen-lockfile'],
+    ].find(([f]) => existsSync(join(root, f)));
+    return unsupportedReport(
+      altLock
+        ? `This is a ${altLock[0]} repo with no installed \`node_modules\`, so \`npm ci\` ` +
+            `cannot install it. Run \`${altLock[1]}\` first, then fall back to the ` +
+            'build/test precedence in your brief, each command with a deadline it can meet.'
+        : 'There is no lockfile and no `node_modules` here, so nothing can be installed ' +
+            'deterministically. Install dependencies first, then fall back to the ' +
+            'build/test precedence in your brief.',
+    );
+  }
   if (args.install && npmLock && !installComplete()) {
     const install = exec('npm ci --no-audit --no-fund', root, perCommandMs);
     results.install = install;
@@ -443,10 +494,15 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
 
     if (!failure) break;
 
-    // Did it fail because the set was too small? The declared graph under-
-    // approximates whenever a package reaches into another's *sources* — a
-    // tsconfig `paths` entry pointing at `../cli/src/...` compiles that package's
-    // imports without ever declaring a dependency on them.
+    // Did it fail because the set was too small — or mis-ordered? The declared graph
+    // under-approximates whenever a package reaches into another's *sources* (a
+    // tsconfig `paths` entry into `../cli/src/...` compiles that package's imports
+    // without declaring a dependency), and the compiler names the package it could
+    // not resolve. Filter on `!built.has(dir)`, not `!set.includes(dir)`: when BOTH
+    // the needer and the undeclared-needed package are affected and the alphabet
+    // ordered the needer first, the named package is already IN the set but not yet
+    // built — re-seeding it into `alsoBuild` (which sorts first) fixes the order. The
+    // attempt cap bounds the loop; a package that is truly missing is not in the map.
     //
     // A **timeout** must not enter this path. A build killed at the deadline leaves
     // partial output that can happen to contain a `Cannot find module` line, which
@@ -457,7 +513,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
       ? []
       : unresolvedWorkspaceDeps(failure.output, packages).filter((name) => {
           const dir = packages.find((p) => p.name === name)?.dir;
-          return dir && !set.includes(dir);
+          return dir && !built.has(dir);
         });
     if (missing.length === 0 || failure.timedOut || attempt === 3) {
       results.ok = false;
