@@ -28,6 +28,8 @@ on:
       # changes there must also refresh the preview.
       - 'packages/webui/src/**'
       - 'packages/sdk-typescript/src/**'
+      # The capture pipeline itself, so a workflow-only change is exercised.
+      - '.github/workflows/web-shell-visuals.yml'
 
 permissions:
   contents: 'read'
@@ -129,6 +131,24 @@ jobs:
           # sit inside `echo "$(...)"`, so a missing dir wouldn't actually trip
           # set -e — echo masks it — but create them for clarity all the same.)
           mkdir -p "${OUT_DIR}/screenshots" "${OUT_DIR}/gifs"
+          # Bound artifact contents BEFORE upload: this job ran untrusted PR
+          # code, so drop oversized files and cap the count per directory —
+          # otherwise a hostile spec could bloat the published artifact (which
+          # the privileged publisher downloads) or the retained video artifact.
+          MAX_FILE_BYTES=$((6 * 1024 * 1024))
+          MAX_FILES=40
+          for d in screenshots gifs video; do
+            dir="${OUT_DIR}/${d}"
+            [ -d "${dir}" ] || continue
+            find "${dir}" -maxdepth 1 -type f -size "+${MAX_FILE_BYTES}c" \
+              -printf '::warning::dropping oversized artifact file %p\n' -delete || true
+            find "${dir}" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort \
+              | tail -n "+$((MAX_FILES + 1))" \
+              | while IFS= read -r extra; do
+                  echo "::warning::dropping excess artifact file ${d}/${extra}"
+                  rm -f "${dir}/${extra}"
+                done
+          done
           # PR number for the workflow_run publish job (which validates it).
           # The head SHA is intentionally NOT shipped in the artifact: the
           # publish job binds to the authenticated github.event.workflow_run

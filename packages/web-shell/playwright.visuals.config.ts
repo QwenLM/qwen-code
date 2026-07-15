@@ -5,6 +5,7 @@
  */
 
 import { defineConfig, devices } from '@playwright/test';
+import { VISUAL_VIEWPORT } from './client/e2e/visuals/constants';
 
 // Separate port default from playwright.config.ts (5174) so a stray base-config
 // dev server does not collide when both are run locally back to back.
@@ -12,9 +13,8 @@ const port = Number(process.env['PLAYWRIGHT_PORT'] ?? 5175);
 const baseURL =
   process.env['PLAYWRIGHT_BASE_URL'] ?? `http://127.0.0.1:${port}`;
 
-// Fixed viewport so captures are stable across runs. Must match VISUAL_VIEWPORT
-// in client/e2e/visuals/harness.ts.
-const viewport = { width: 1280, height: 800 };
+// Single source of truth for the capture viewport (shared with the harness).
+const viewport = { ...VISUAL_VIEWPORT };
 
 export default defineConfig({
   testDir: './client/e2e/visuals',

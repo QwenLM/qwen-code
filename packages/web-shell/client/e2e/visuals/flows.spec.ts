@@ -49,6 +49,9 @@ test('flow: open the slash menu and switch model', async ({
       .locator('[data-web-shell-model-option][data-model-id="qwen-test-alt"]')
       .click();
     await expect(page.locator('[data-web-shell-model-dialog]')).toHaveCount(0);
+    // Confirm the switch actually reached the daemon (not just the dialog UI
+    // closing), so the "switch model" GIF reflects a real model change.
+    await expect.poll(() => daemon.modelRequests().length).toBe(1);
     await beat(page, 900);
   });
 });

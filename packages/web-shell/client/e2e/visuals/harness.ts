@@ -20,11 +20,11 @@ import {
   type MockDaemonController,
   type WebShellDaemonScenario,
 } from '../utils/mockDaemon';
+import { VISUAL_VIEWPORT } from './constants';
 
 export type VisualTheme = 'dark' | 'light';
 
-/** Fixed viewport so captures have a stable layout/size run to run. */
-export const VISUAL_VIEWPORT = { width: 1280, height: 800 } as const;
+export { VISUAL_VIEWPORT };
 
 /** localStorage key the web-shell reads for its persisted theme (see index.html). */
 const THEME_STORAGE_KEY = 'qwen-code-web-shell-theme';

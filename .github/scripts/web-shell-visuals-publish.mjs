@@ -36,7 +36,8 @@ import { pathToFileURL } from 'node:url';
 // Bounds on UNTRUSTED artifact content: cap files EXAMINED (so a flood of junk
 // can't burn the budget before valid files), files ACCEPTED, and per-file size.
 export const MAX_CANDIDATES = 200;
-export const MAX_IMAGES = 14;
+export const MAX_SCREENSHOTS = 20;
+export const MAX_GIFS = 6;
 export const MAX_BYTES = 3 * 1024 * 1024;
 
 const PNG_MAGIC = '89504e470d0a1a0a';
@@ -71,8 +72,15 @@ export function classifyMagic(ext, magicHex) {
  */
 export function selectImages(candidates, opts = {}) {
   const maxCandidates = opts.maxCandidates ?? MAX_CANDIDATES;
-  const maxImages = opts.maxImages ?? MAX_IMAGES;
   const maxBytes = opts.maxBytes ?? MAX_BYTES;
+  // Per-kind caps so a large screenshot set can't starve the flow GIFs: a
+  // shared total cap over PNG-first candidates would let >=N screenshots
+  // silently drop every GIF from the preview.
+  const maxPerKind = {
+    png: opts.maxScreenshots ?? MAX_SCREENSHOTS,
+    gif: opts.maxGifs ?? MAX_GIFS,
+  };
+  const kindCount = { png: 0, gif: 0 };
   const accepted = [];
   const warnings = [];
   let examined = 0;
@@ -80,10 +88,6 @@ export function selectImages(candidates, opts = {}) {
     examined += 1;
     if (examined > maxCandidates) {
       warnings.push(`examined ${maxCandidates} candidate files; stopping`);
-      break;
-    }
-    if (accepted.length >= maxImages) {
-      warnings.push(`reached the ${maxImages}-image cap; skipping the rest`);
       break;
     }
     if (c.size > maxBytes) {
@@ -95,6 +99,13 @@ export function selectImages(candidates, opts = {}) {
       warnings.push(`${c.name} is not a valid ${c.ext}; skipping`);
       continue;
     }
+    if (kindCount[kind] >= maxPerKind[kind]) {
+      warnings.push(
+        `reached the ${kind} cap (${maxPerKind[kind]}); skipping ${c.name}`,
+      );
+      continue;
+    }
+    kindCount[kind] += 1;
     accepted.push({
       name: c.name,
       safeName: sanitizeName(basename(c.name)),
@@ -170,7 +181,13 @@ export function buildComment(files, ctx = {}) {
     out.push('');
     for (const g of gifs) {
       const key = g.replace(/\.gif$/i, '');
-      out.push(`**${esc(FLOW_LABELS[key] || pretty(key))}**`);
+      // Own-property only: `FLOW_LABELS[key]` would otherwise inherit
+      // Object.prototype members, so a `toString.gif` would render the function
+      // source as the label.
+      const label = Object.hasOwn(FLOW_LABELS, key)
+        ? FLOW_LABELS[key]
+        : pretty(key);
+      out.push(`**${esc(label)}**`);
       out.push('');
       out.push(`<img src="${url(g)}" width="640" alt="${esc(key)} flow">`);
       out.push('');

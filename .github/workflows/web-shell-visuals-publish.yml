@@ -70,6 +70,11 @@ jobs:
           # Authenticated (NOT artifact-sourced) head SHA of the run that
           # triggered this publish — used to bind the artifact to its real PR.
           RUN_HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
+          # Authenticated head repo + branch. A (repo, branch) pair maps to at
+          # most one open PR, so binding on it rejects a sibling PR that merely
+          # shares the same head commit SHA.
+          RUN_HEAD_REPO: '${{ github.event.workflow_run.head_repository.full_name }}'
+          RUN_HEAD_BRANCH: '${{ github.event.workflow_run.head_branch }}'
         run: |-
           set -euo pipefail
 
@@ -105,14 +110,22 @@ jobs:
           # write to close the validate->write TOCTOU window (a push/close during
           # asset upload must not let a stale run post).
           validate_pr() {
-            local j st hd
+            local j st hd rr rf
             j="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" 2>/dev/null || true)"
             [ -n "${j}" ] || { echo "::warning::Empty response fetching PR #${PR}."; return 1; }
             st="$(jq -r '.state // empty' <<< "${j}")"
             hd="$(jq -r '.head.sha // empty' <<< "${j}")"
+            rr="$(jq -r '.head.repo.full_name // empty' <<< "${j}")"
+            rf="$(jq -r '.head.ref // empty' <<< "${j}")"
             [ "${st}" = "open" ] || { echo "::notice::PR #${PR} not open (state=${st:-unknown})."; return 1; }
             { [ -n "${RUN_HEAD_SHA}" ] && [ "${hd}" = "${RUN_HEAD_SHA}" ]; } || {
               echo "::warning::PR #${PR} head (${hd:-none}) != run head (${RUN_HEAD_SHA:-none}); refusing."
+              return 1
+            }
+            # Also bind repo+branch: two open PRs can share a head SHA (same
+            # commit on different branches) but not the same (repo, branch).
+            { [ -n "${RUN_HEAD_REPO}" ] && [ "${rr}" = "${RUN_HEAD_REPO}" ] && [ "${rf}" = "${RUN_HEAD_BRANCH}" ]; } || {
+              echo "::warning::PR #${PR} head ${rr:-none}#${rf:-none} != run ${RUN_HEAD_REPO:-none}#${RUN_HEAD_BRANCH:-none}; refusing."
               return 1
             }
             return 0
@@ -133,6 +146,11 @@ jobs:
             exit 0
           fi
           echo "Staged ${count} image(s) for PR #${PR}."
+
+          # Re-validate right before the force-push too: a close/new-head during
+          # download+staging must not force-push a stale snapshot (which would
+          # orphan the commit the existing comment still points at).
+          validate_pr || { echo "::notice::PR #${PR} changed before hosting; not publishing."; exit 0; }
 
           # --- Host on the PR's own pr-assets branch (bounded) --------------
           # Replace the branch with a SINGLE orphan snapshot each run and
@@ -186,10 +204,6 @@ jobs:
             "${SHORT_SHA}" "${RUN_URL}" "${BODY_FILE}"
 
           # --- Post or update the PR comment --------------------------------
-          # Re-validate immediately before the write (TOCTOU): a push/close during
-          # asset upload must not let this now-stale run post a preview.
-          validate_pr || { echo "::notice::PR #${PR} changed during publish; not posting."; exit 0; }
-
           # Dedup only against OUR OWN prior comment (bot author + marker), and
           # only after a SUCCESSFUL listing — a failed/partial list must not read
           # as "no existing comment" (that would POST a duplicate on every failure).
@@ -209,6 +223,12 @@ jobs:
             echo "::error::Could not list PR comments after retries; not posting (avoids duplicates)."
             exit 1
           fi
+
+          # Final TOCTOU gate: re-validate (open + head SHA + repo/branch) AFTER
+          # the paginated/retried lookup, immediately before the write — a
+          # close or new head during validation/lookup must not post a stale one.
+          validate_pr || { echo "::notice::PR #${PR} changed during publish; not posting."; exit 0; }
+
           if [ -n "${EXISTING}" ]; then
             gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING}" -F body=@"${BODY_FILE}" >/dev/null
             echo "Updated existing web-shell visuals comment on PR #${PR}."

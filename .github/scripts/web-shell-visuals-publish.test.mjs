@@ -12,7 +12,8 @@ import {
   classifyMagic,
   MAX_BYTES,
   MAX_CANDIDATES,
-  MAX_IMAGES,
+  MAX_GIFS,
+  MAX_SCREENSHOTS,
   sanitizeName,
   selectImages,
 } from './web-shell-visuals-publish.mjs';
@@ -69,16 +70,31 @@ test('selectImages skips oversized and magic-invalid files', () => {
   assert.ok(r.warnings.some((w) => w.includes('not a valid')));
 });
 
-test('selectImages enforces the accepted-image cap', () => {
-  const many = Array.from({ length: MAX_IMAGES + 5 }, (_, i) => ({
-    name: `s${i}-light.png`,
-    ext: 'png',
+test('selectImages caps screenshots per-kind WITHOUT starving gifs', () => {
+  const many = [
+    ...Array.from({ length: MAX_SCREENSHOTS + 5 }, (_, i) => ({
+      name: `s${i}-light.png`,
+      ext: 'png',
+      size: 10,
+      magic: PNG,
+    })),
+    { name: 'model-switch.gif', ext: 'gif', size: 10, magic: GIF89 },
+  ];
+  const { accepted } = selectImages(many);
+  const png = accepted.filter((a) => a.kind === 'png').length;
+  const gif = accepted.filter((a) => a.kind === 'gif').length;
+  assert.equal(png, MAX_SCREENSHOTS); // screenshots capped
+  assert.equal(gif, 1); // the gif survives the screenshot flood (not starved)
+});
+
+test('selectImages caps gifs per-kind', () => {
+  const gifs = Array.from({ length: MAX_GIFS + 3 }, (_, i) => ({
+    name: `flow${i}.gif`,
+    ext: 'gif',
     size: 10,
-    magic: PNG,
+    magic: GIF89,
   }));
-  const { accepted, warnings } = selectImages(many);
-  assert.equal(accepted.length, MAX_IMAGES);
-  assert.ok(warnings.some((w) => w.includes('image cap')));
+  assert.equal(selectImages(gifs).accepted.length, MAX_GIFS);
 });
 
 test('selectImages bounds EXAMINED candidates so a junk flood cannot run forever', () => {
@@ -116,6 +132,14 @@ test('buildComment pairs light/dark, lists gifs, labels flows, escapes, links th
   // Exactly one screenshot row: the single view with light+dark paired.
   const rows = body.split('\n').filter((l) => l.startsWith('<tr><td'));
   assert.equal(rows.length, 1);
+});
+
+test('buildComment does not leak Object.prototype members as flow labels', () => {
+  const body = buildComment(['toString.gif', 'constructor.gif'], {
+    rawBase: 'r',
+  });
+  assert.doesNotMatch(body, /native code/);
+  assert.match(body, /\*\*ToString\*\*/); // falls back to the prettified filename
 });
 
 test('buildComment is empty-safe and marks a missing pair with an em dash', () => {
