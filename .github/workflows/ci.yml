@@ -212,7 +212,7 @@ jobs:
           node scripts/lint.js --setup
           node scripts/lint.js --actionlint
           node scripts/lint.js --yamllint
-          node --test .github/scripts/pr-safety-precheck.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/resolve-sandbox-image.test.mjs
+          node --test .github/scripts/pr-safety-precheck.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs
 
       # Self-hosted can't reach nodejs.org reliably; reuse the machine's Node.
       - name: 'Set up Node.js 22.x (hosted)'
