@@ -185,7 +185,6 @@ function MermaidBlock({ code }: { code: string }) {
     origX: number;
     origY: number;
   } | null>(null);
-  const wrapperRef = useRef<HTMLDivElement>(null);
   const mermaidTheme = appTheme === 'light' ? 'default' : 'dark';
 
   const ZOOM_MIN = 0.5;
@@ -198,10 +197,10 @@ function MermaidBlock({ code }: { code: string }) {
   const handleZoomOut = () => {
     setZoom((z) => Math.max(ZOOM_MIN, Math.round((z - ZOOM_STEP) * 100) / 100));
   };
-  const handleZoomReset = () => {
+  const resetZoomAndPan = useCallback(() => {
     setZoom(1);
     setOffset({ x: 0, y: 0 });
-  };
+  }, []);
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
@@ -217,22 +216,37 @@ function MermaidBlock({ code }: { code: string }) {
     [offset],
   );
 
-  const handleMouseMove = useCallback((e: React.MouseEvent) => {
-    if (!dragRef.current) return;
-    const dx = e.clientX - dragRef.current.startX;
-    const dy = e.clientY - dragRef.current.startY;
-    setOffset({ x: dragRef.current.origX + dx, y: dragRef.current.origY + dy });
-  }, []);
+  useEffect(() => {
+    if (!isDragging) return;
 
-  const handleMouseUp = useCallback(() => {
-    dragRef.current = null;
-    setIsDragging(false);
-  }, []);
+    const onMouseMove = (e: MouseEvent) => {
+      if (!dragRef.current) return;
+      const dx = e.clientX - dragRef.current.startX;
+      const dy = e.clientY - dragRef.current.startY;
+      // Clamp Y to prevent dragging into overflow-y: hidden clipped area.
+      // X is unclamped — overflow-x: auto provides native horizontal scroll.
+      const PAN_LIMIT = 1500;
+      setOffset({
+        x: dragRef.current.origX + dx,
+        y: Math.max(
+          -PAN_LIMIT,
+          Math.min(PAN_LIMIT, dragRef.current.origY + dy),
+        ),
+      });
+    };
 
-  const handleDoubleClick = useCallback(() => {
-    setOffset({ x: 0, y: 0 });
-    setZoom(1);
-  }, []);
+    const onMouseUp = () => {
+      dragRef.current = null;
+      setIsDragging(false);
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+  }, [isDragging]);
 
   useEffect(() => {
     let cancelled = false;
@@ -319,7 +333,8 @@ function MermaidBlock({ code }: { code: string }) {
               </button>
               <button
                 className={styles.codeBlockCopy}
-                onClick={handleZoomReset}
+                onClick={resetZoomAndPan}
+                title={t('mermaid.zoomReset')}
                 disabled={zoom === 1 && offset.x === 0 && offset.y === 0}
               >
                 {t('mermaid.zoomReset')}
@@ -361,13 +376,9 @@ function MermaidBlock({ code }: { code: string }) {
         </div>
       ) : (
         <div
-          ref={wrapperRef}
           className={`${styles.mermaidZoomWrapper} ${isDragging ? styles.mermaidDragging : ''}`}
           onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseUp={handleMouseUp}
-          onMouseLeave={handleMouseUp}
-          onDoubleClick={handleDoubleClick}
+          onDoubleClick={resetZoomAndPan}
         >
           <div
             className={`${styles.mermaidBlock} ${styles.mermaidInline}`}
