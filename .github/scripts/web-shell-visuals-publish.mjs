@@ -147,7 +147,7 @@ export function buildComment(files, ctx = {}) {
   out.push('<!-- qwen:web-shell-visuals -->');
   out.push('### 🖼️ web-shell visual preview');
   out.push(
-    `Rendered against a mock daemon (no real backend): \`main\` vs this PR head \`${esc(shortSha)}\`. Only **screenshots** that changed are shown (flows below, if any, are head-only) — refreshes on every push.`,
+    `Rendered against a mock daemon (no real backend): the PR base vs this PR head \`${esc(shortSha)}\`. Only **screenshots** that changed are shown (flows below, if any, are head-only) — refreshes on every push.`,
   );
   out.push('');
 
@@ -161,7 +161,7 @@ export function buildComment(files, ctx = {}) {
       out.push('');
     }
   } else {
-    out.push('✅ _No screenshot changes against `main`._');
+    out.push('✅ _No screenshot changes against the PR base._');
     out.push('');
   }
 

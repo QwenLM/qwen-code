@@ -102,7 +102,7 @@ function compositeHtml({
     ? `${changedPct.toFixed(1)}% changed`
     : 'new scenario';
   const beforePanel = hasBefore
-    ? `<figure style="margin:0"><figcaption style="font:600 12px system-ui;color:#6b7280;text-align:center;margin-bottom:6px">main (before)</figcaption><img src="${beforeUri}" style="display:block;width:${PANEL_WIDTH}px;border:1px solid #cbd5e1;border-radius:6px"></figure>`
+    ? `<figure style="margin:0"><figcaption style="font:600 12px system-ui;color:#6b7280;text-align:center;margin-bottom:6px">PR base (before)</figcaption><img src="${beforeUri}" style="display:block;width:${PANEL_WIDTH}px;border:1px solid #cbd5e1;border-radius:6px"></figure>`
     : '';
   return `<!doctype html><html><body style="margin:0;background:#e5e7eb">
     <div id="cap" style="display:inline-block;padding:16px;font-family:-apple-system,system-ui,sans-serif">
@@ -117,9 +117,9 @@ function compositeHtml({
     </div></body></html>`;
 }
 
-// Differing-pixel fraction (%) between two same-size PNG data URIs, measured on
-// a canvas (no native image deps). Compares over the overlapping region so a
-// height change between before/after still yields a sane number.
+// Differing-pixel fraction (%) between two PNG data URIs, measured on a canvas
+// (no native image deps). A size mismatch short-circuits to 100% (a dimension
+// change is itself a visual change); equal-size images compare pixel-for-pixel.
 async function diffPct(page, beforeUri, afterUri) {
   return page.evaluate(
     // This arrow runs in the BROWSER (page.evaluate), where Image/document are
@@ -140,8 +140,12 @@ async function diffPct(page, beforeUri, afterUri) {
       // An undecodable image can't be compared → treat the view as fully
       // changed (so it is shown, not silently dropped).
       if (!ia || !ib) return 100;
-      const w = Math.min(ia.width, ib.width);
-      const h = Math.min(ia.height, ib.height);
+      // A dimension change IS a visual change: comparing only the overlapping
+      // rectangle would hide it (a taller viewport whose top pixels are
+      // unchanged would read 0%). Treat any size mismatch as fully changed.
+      if (ia.width !== ib.width || ia.height !== ib.height) return 100;
+      const w = ia.width;
+      const h = ia.height;
       const c = document.createElement('canvas');
       c.width = w;
       c.height = h;

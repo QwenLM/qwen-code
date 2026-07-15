@@ -150,7 +150,7 @@ test('buildComment says "no visual changes" when there are no composites', () =>
   const empty = buildComment([], { shortSha: 'abc1234' });
   assert.match(empty, /web-shell visual preview/);
   assert.doesNotMatch(empty, /<img /); // no screenshots, no flows
-  assert.match(empty, /No screenshot changes against `main`/);
+  assert.match(empty, /No screenshot changes against the PR base/);
 });
 
 test('buildComment lists a lone composite as one wide image (no light/dark table)', () => {

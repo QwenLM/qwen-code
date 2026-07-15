@@ -119,13 +119,26 @@ jobs:
           HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
         run: |-
           set -euo pipefail
-          # Read token suffices and works for fork PRs; fall back to the base tip
-          # if the compare API is briefly unavailable.
-          MB="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${BASE_SHA}...${HEAD_SHA}" --jq '.merge_base_commit.sha' 2>/dev/null || true)"
-          echo "sha=${MB:-$BASE_SHA}" >> "${GITHUB_OUTPUT}"
-          echo "before (merge-base) = ${MB:-$BASE_SHA}; base tip = ${BASE_SHA}"
+          # Read token suffices and works for fork PRs. Retry a few times; if it
+          # STILL fails, emit an EMPTY sha so the before render is skipped
+          # entirely (after-only). Falling back to the base-branch tip would
+          # reintroduce the exact reversed-diff bug the merge-base prevents.
+          MB=''
+          for attempt in 1 2 3; do
+            MB="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${BASE_SHA}...${HEAD_SHA}" --jq '.merge_base_commit.sha' 2>/dev/null || true)"
+            [ -n "${MB}" ] && break
+            sleep 2
+          done
+          echo "sha=${MB}" >> "${GITHUB_OUTPUT}"
+          if [ -n "${MB}" ]; then
+            echo "before (merge-base) = ${MB}"
+          else
+            echo "::warning::could not resolve the merge-base; skipping the before render (after-only)."
+          fi
 
       - name: 'Check out the merge-base (before render)'
+        id: 'base_checkout'
+        if: "${{ steps.mergebase.outputs.sha != '' }}"
         continue-on-error: true
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -135,15 +148,20 @@ jobs:
           persist-credentials: false
 
       - name: 'Install base dependencies'
+        id: 'base_install'
+        if: "${{ steps.base_checkout.outcome == 'success' }}"
         continue-on-error: true
         working-directory: 'base'
         run: 'npm ci --prefer-offline --no-audit --progress=false'
 
-      # Screenshots only — the base flow videos are discarded (before-videos are
-      # never used), so rendering flows here would just burn CI minutes. `--`
-      # passes the spec through to `playwright test`. Playwright browsers are
-      # already installed on the runner and shared across checkouts.
+      # Run ONLY when the checkout AND install both succeeded. `base/` is nested
+      # under the head checkout, so if the base's own node_modules is absent (a
+      # failed npm ci) the render would resolve Playwright/Vite UP to the head's
+      # node_modules and produce a HYBRID before. A skip here → absent baseline →
+      # after-only. Screenshots only (base flow videos are discarded); `--`
+      # passes the spec through to `playwright test`; browsers are shared.
       - name: 'Capture before (base) screenshots'
+        if: "${{ steps.base_checkout.outcome == 'success' && steps.base_install.outcome == 'success' }}"
         working-directory: 'base'
         continue-on-error: true
         env:
