@@ -95,6 +95,21 @@ describe('installAccessLogMiddleware', () => {
     expect(h.logger.warn).not.toHaveBeenCalled();
   });
 
+  it('routes non-error responses to info and errors to warn', () => {
+    const h = harness();
+    h.begin({ path: '/success', status: 399 }).response.emit('finish');
+    h.begin({ path: '/failure', status: 400 }).response.emit('finish');
+
+    expect(h.logger.info).toHaveBeenCalledWith(
+      'request completed',
+      expect.objectContaining({ route: 'GET /success', status: 399 }),
+    );
+    expect(h.logger.warn).toHaveBeenCalledWith(
+      'request completed',
+      expect.objectContaining({ route: 'GET /failure', status: 400 }),
+    );
+  });
+
   it('caps UTF-8 fields, uses the first raw client header, and tolerates clock retreat', () => {
     const h = harness();
     const sessionId = '你'.repeat(100);

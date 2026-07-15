@@ -182,7 +182,7 @@ function writeDaemonLifecycleBestEffort(write: () => void): void {
   try {
     write();
   } catch {
-    // Lifecycle cleanup must not be skipped when stderr is unavailable.
+    // Best-effort lifecycle diagnostics must not make shutdown throw.
   }
 }
 

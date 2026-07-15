@@ -858,7 +858,9 @@ async function removeFailedFallbackBestEffort(input: {
       return;
     }
     if (maintenance.compromised || input.family.lease.compromised) return;
-    await input.fs.rm(input.family.familyDir, { recursive: true, force: true });
+    await input.fs
+      .rm(input.family.familyDir, { recursive: true, force: true })
+      .catch(() => {});
   } finally {
     await maintenance.release().catch(() => {});
   }
