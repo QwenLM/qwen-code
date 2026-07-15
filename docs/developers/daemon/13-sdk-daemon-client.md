@@ -361,6 +361,8 @@ When `workspace_persisted_transcript` is advertised, `client.workspaceById(works
 
 When `workspace_session_export` is advertised, `client.workspaceById(workspaceId).exportSession(sessionId, { format })` or `client.workspaceByCwd(workspaceCwd).exportSession(...)` exports the selected trusted workspace's active persisted transcript. It returns the existing `DaemonSessionExportResult`, preserves optional client identity and client-wide fetch timeout behavior, and always uses native REST even if the client has a replaceable transport. Do not infer this method's server support from `session_export` or `workspace_qualified_rest_core`; older daemons keep primary-only export.
 
+When `workspace_archived_session_export` is advertised, use `client.workspaceById(workspaceId).exportArchivedSession(sessionId, { format })` or the corresponding `workspaceByCwd` method to export only the selected workspace's archived persisted transcript. The method uses the same result type and native REST behavior as active export, but it never falls back to an active session; support cannot be inferred from any active export capability.
+
 ### Seeding `lastEventId` at Construction
 
 Callers that persist the cursor across process restarts can seed it:

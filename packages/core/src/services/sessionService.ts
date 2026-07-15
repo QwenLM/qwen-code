@@ -46,6 +46,7 @@ import {
   type RebuiltSessionArtifactSnapshot,
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
+import { SessionTranscriptTooLargeError } from './session-transcript-reader.js';
 
 const debugLogger = createDebugLogger('SESSION');
 
@@ -1120,8 +1121,49 @@ export class SessionService {
   async loadSession(
     sessionId: string,
   ): Promise<ResumedSessionData | undefined> {
-    const chatsDir = this.getChatsDir();
-    const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+    return this.loadSessionFromState(sessionId, 'active');
+  }
+
+  /**
+   * Reads an archived session without changing its archive state.
+   * Daemon load/resume paths must continue to use {@link loadSession}.
+   */
+  async loadArchivedSession(
+    sessionId: string,
+    options: { maxBytes: number },
+  ): Promise<ResumedSessionData | undefined> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
+      return undefined;
+    }
+    const filePath = this.getSessionFilePath(sessionId, 'archived');
+    let stats: fs.Stats;
+    try {
+      stats = fs.statSync(filePath);
+      if (stats.size > options.maxBytes) {
+        throw new SessionTranscriptTooLargeError(
+          sessionId,
+          stats.size,
+          options.maxBytes,
+        );
+      }
+    } catch (error) {
+      if (error instanceof SessionTranscriptTooLargeError) {
+        throw error;
+      }
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
+      return undefined;
+    }
+    return this.loadSessionFromState(sessionId, 'archived', stats);
+  }
+
+  private async loadSessionFromState(
+    sessionId: string,
+    state: SessionArchiveState,
+    stats?: fs.Stats,
+  ): Promise<ResumedSessionData | undefined> {
+    const filePath = this.getSessionFilePath(sessionId, state);
 
     const records = await this.readAllRecords(filePath);
     if (records.length === 0) {
@@ -1166,7 +1208,7 @@ export class SessionService {
     }
 
     const lastMessage = messages[messages.length - 1];
-    const stats = fs.statSync(filePath);
+    stats ??= fs.statSync(filePath);
 
     const conversation: ConversationRecord = {
       sessionId: firstRecord.sessionId,
