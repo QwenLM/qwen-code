@@ -5851,6 +5851,91 @@ describe('DaemonClient', () => {
       ).rejects.toBeInstanceOf(DaemonHttpError);
     });
 
+    it('archived workspace export uses encoded native REST and parses attachment metadata', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        textResponse(200, '# archived export', {
+          'content-type': 'text/markdown; charset=utf-8',
+          'content-disposition': 'attachment; filename="archived.md"',
+        }),
+      );
+      const transportFetch = vi.fn(async () => {
+        throw new Error('replaceable transport must not be used');
+      });
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        token: 'secret',
+        fetch,
+        transport,
+      });
+
+      await expect(
+        client
+          .workspaceByCwd('/tmp/work space')
+          .exportArchivedSession('session/1', {
+            format: 'md',
+            clientId: 'client-1',
+          }),
+      ).resolves.toEqual({
+        content: '# archived export',
+        filename: 'archived.md',
+        mimeType: 'text/markdown; charset=utf-8',
+        format: 'md',
+      });
+
+      expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspaces/%2Ftmp%2Fwork%20space/session/session%2F1/archive/export?format=md',
+        headers: {
+          authorization: 'Bearer secret',
+          'x-qwen-client-id': 'client-1',
+        },
+      });
+    });
+
+    it('archived workspace export defaults to html and surfaces HTTP errors', async () => {
+      const success = recordingFetch(() =>
+        textResponse(200, '<html>archived</html>', {
+          'content-type': 'text/html; charset=utf-8',
+        }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: success.fetch,
+      });
+
+      await expect(
+        client.workspaceById('workspace/id').exportArchivedSession('s/1'),
+      ).resolves.toMatchObject({ format: 'html' });
+      expect(success.calls[0]?.url).toBe(
+        'http://daemon/workspaces/workspace%2Fid/session/s%2F1/archive/export',
+      );
+
+      const failure = recordingFetch(() =>
+        jsonResponse(409, {
+          error: 'Session is active.',
+          code: 'session_not_archived',
+        }),
+      );
+      const failingClient = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: failure.fetch,
+      });
+      await expect(
+        failingClient
+          .workspaceById('workspace-id')
+          .exportArchivedSession('session-1'),
+      ).rejects.toBeInstanceOf(DaemonHttpError);
+    });
+
     it('workspaceByCwd deleteSessionGroup uses workspace-qualified group route', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, { deleted: true }),

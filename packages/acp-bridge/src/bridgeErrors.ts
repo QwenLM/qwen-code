@@ -74,6 +74,19 @@ export class SessionArchivedError extends Error {
   }
 }
 
+// Used by daemon archived-export routes; ACP itself does not throw this error.
+export class SessionNotArchivedError extends Error {
+  readonly sessionId: string;
+
+  constructor(sessionId: string) {
+    super(
+      `Session "${sessionId}" is active. Archive it before exporting from archived storage.`,
+    );
+    this.name = 'SessionNotArchivedError';
+    this.sessionId = sessionId;
+  }
+}
+
 export class SessionConflictError extends Error {
   readonly sessionId: string;
 

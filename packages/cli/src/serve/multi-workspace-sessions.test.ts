@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import { describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import {
+  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SessionService,
   Storage,
   createDebugLogger,
@@ -778,6 +779,7 @@ describe('multi-workspace session dispatch', () => {
     expect(res.body.features).not.toContain('multi_workspace_session_shell');
     expect(res.body.features).toContain('workspace_persisted_transcript');
     expect(res.body.features).toContain('workspace_session_export');
+    expect(res.body.features).toContain('workspace_archived_session_export');
     expect(res.body.workspaces).toEqual([
       { id: 'primary-id', cwd: PRIMARY_CWD, primary: true, trusted: true },
       {
@@ -3598,6 +3600,320 @@ describe('multi-workspace session dispatch', () => {
         releaseLoad();
         loadSpy.mockRestore();
         await Promise.allSettled([exportPromise]);
+      }
+    });
+  });
+
+  it('exports only the selected workspace archived transcript in every format', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440285';
+      await writeStoredSession({
+        sessionId,
+        cwd: PRIMARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'primary active collision marker',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const archivedMarker = `secondary archived collision marker ${'x'.repeat(
+        128 * 1024,
+      )}`;
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:01:00.000Z',
+        prompt: archivedMarker,
+        mtime: new Date('2026-07-08T00:01:00.000Z'),
+      });
+      await archiveStoredSession(SECONDARY_CWD, sessionId);
+      const { app, primaryBridge, secondaryBridge } = makeHarness();
+
+      for (const [format, mimeType] of [
+        ['html', 'text/html'],
+        ['md', 'text/markdown'],
+        ['json', 'application/json'],
+        ['jsonl', 'application/jsonl'],
+      ] as const) {
+        const response = await request(app)
+          .get(
+            `/workspaces/${encodeURIComponent(SECONDARY_CWD)}/session/${sessionId}/archive/export?format=${format}`,
+          )
+          .set('Host', host())
+          .expect(200);
+
+        expect(response.headers['content-type']).toContain(mimeType);
+        expect(response.headers['cache-control']).toBe('no-store');
+        expect(response.headers['x-content-type-options']).toBe('nosniff');
+        expect(response.headers['content-disposition']).toContain(
+          `.${format}"`,
+        );
+        expect(response.text).toContain('secondary archived collision marker');
+        expect(response.text).not.toContain('primary active collision marker');
+      }
+
+      expect(primaryBridge.spawnCalls).toEqual([]);
+      expect(primaryBridge.restoreCalls).toEqual([]);
+      expect(primaryBridge.summaryCalls).toEqual([]);
+      expect(secondaryBridge.spawnCalls).toEqual([]);
+      expect(secondaryBridge.restoreCalls).toEqual([]);
+      expect(secondaryBridge.summaryCalls).toEqual([]);
+      expect(secondaryBridge.closeCalls).toEqual([]);
+    });
+  });
+
+  it('enforces archived export state, selector, trust, and format boundaries', async () => {
+    await withRuntimeDir(async () => {
+      const activeId = '550e8400-e29b-41d4-a716-446655440286';
+      const missingId = '550e8400-e29b-41d4-a716-446655440287';
+      const conflictId = '550e8400-e29b-41d4-a716-446655440288';
+      await writeStoredSession({
+        sessionId: activeId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'active secondary',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: missingId,
+        cwd: PRIMARY_CWD,
+        timestamp: '2026-07-08T00:01:00.000Z',
+        prompt: 'other workspace only',
+        mtime: new Date('2026-07-08T00:01:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: conflictId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:02:00.000Z',
+        prompt: 'conflicting secondary',
+        mtime: new Date('2026-07-08T00:02:00.000Z'),
+      });
+      const chatsDir = path.join(
+        new Storage(SECONDARY_CWD).getProjectDir(),
+        'chats',
+      );
+      await fsp.mkdir(path.join(chatsDir, 'archive'), { recursive: true });
+      await fsp.copyFile(
+        path.join(chatsDir, `${conflictId}.jsonl`),
+        path.join(chatsDir, 'archive', `${conflictId}.jsonl`),
+      );
+      const trusted = makeHarness();
+
+      const active = await request(trusted.app)
+        .get(`/workspaces/secondary-id/session/${activeId}/archive/export`)
+        .set('Host', host());
+      expect(active.status).toBe(409);
+      expect(active.body).toMatchObject({
+        code: 'session_not_archived',
+        sessionId: activeId,
+      });
+
+      const missing = await request(trusted.app)
+        .get(`/workspaces/secondary-id/session/${missingId}/archive/export`)
+        .set('Host', host());
+      expect(missing.status).toBe(404);
+      expect(missing.body).toMatchObject({
+        code: 'session_not_found',
+        sessionId: missingId,
+      });
+
+      const conflict = await request(trusted.app)
+        .get(`/workspaces/secondary-id/session/${conflictId}/archive/export`)
+        .set('Host', host());
+      expect(conflict.status).toBe(409);
+      expect(conflict.body).toMatchObject({
+        code: 'session_conflict',
+        sessionId: conflictId,
+      });
+
+      const invalidFormat = await request(trusted.app)
+        .get(
+          `/workspaces/secondary-id/session/${conflictId}/archive/export?format=pdf`,
+        )
+        .set('Host', host());
+      expect(invalidFormat.status).toBe(400);
+      expect(invalidFormat.body.code).toBe('invalid_export_format');
+
+      const unknown = await request(trusted.app)
+        .get(
+          `/workspaces/missing-id/session/${missingId}/archive/export?format=pdf`,
+        )
+        .set('Host', host());
+      expect(unknown.status).toBe(400);
+      expect(unknown.body.code).toBe('workspace_mismatch');
+
+      const untrusted = makeHarness({ secondaryTrusted: false });
+      const forbidden = await request(untrusted.app)
+        .get(
+          `/workspaces/secondary-id/session/${missingId}/archive/export?format=pdf`,
+        )
+        .set('Host', host());
+      expect(forbidden.status).toBe(403);
+      expect(forbidden.body.code).toBe('untrusted_workspace');
+    });
+  });
+
+  it('rejects archived exports above the persisted source size limit', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440291';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'oversized archived export',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      await archiveStoredSession(SECONDARY_CWD, sessionId);
+      const archivedPath = path.join(
+        new Storage(SECONDARY_CWD).getProjectDir(),
+        'chats',
+        'archive',
+        `${sessionId}.jsonl`,
+      );
+      await fsp.truncate(archivedPath, SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1);
+      const { app } = makeHarness({ secondarySummaries: [] });
+
+      const response = await request(app)
+        .get(`/workspaces/secondary-id/session/${sessionId}/archive/export`)
+        .set('Host', host());
+
+      expect(response.status).toBe(413);
+      expect(response.body).toMatchObject({
+        code: 'transcript_too_large',
+        sessionId,
+        snapshotSize: SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1,
+        maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+      });
+    });
+  });
+
+  it('keeps unarchive and delete blocked while archived export is in flight', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440289';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'archived export lock marker',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      await archiveStoredSession(SECONDARY_CWD, sessionId);
+      let loadStarted!: () => void;
+      let releaseLoad!: () => void;
+      const loadStartedPromise = new Promise<void>((resolve) => {
+        loadStarted = resolve;
+      });
+      const loadReleasedPromise = new Promise<void>((resolve) => {
+        releaseLoad = resolve;
+      });
+      const originalLoad = SessionService.prototype.loadArchivedSession;
+      const loadSpy = vi
+        .spyOn(SessionService.prototype, 'loadArchivedSession')
+        .mockImplementation(async function (this: SessionService, id, opts) {
+          const result = await originalLoad.call(this, id, opts);
+          if (id === sessionId) {
+            loadStarted();
+            await loadReleasedPromise;
+          }
+          return result;
+        });
+      const { app } = makeHarness({ secondarySummaries: [] });
+      const exportPromise = request(app)
+        .get(`/workspaces/secondary-id/session/${sessionId}/archive/export`)
+        .set('Host', host())
+        .then((response) => response);
+
+      try {
+        await loadStartedPromise;
+        const unarchive = await request(app)
+          .post('/workspaces/secondary-id/sessions/unarchive')
+          .set('Host', host())
+          .send({ sessionIds: [sessionId] });
+        expect(unarchive.status).toBe(409);
+        expect(unarchive.body.code).toBe('session_archiving');
+
+        const remove = await request(app)
+          .post('/workspaces/secondary-id/sessions/delete')
+          .set('Host', host())
+          .send({ sessionIds: [sessionId] });
+        expect(remove.status).toBe(200);
+        expect(remove.body.removed).toEqual([]);
+        expect(remove.body.errors).toEqual([
+          {
+            sessionId,
+            error: expect.stringContaining('is being archived or unarchived'),
+          },
+        ]);
+        await expect(
+          new SessionService(SECONDARY_CWD).getSessionLocation(sessionId),
+        ).resolves.toBe('archived');
+
+        releaseLoad();
+        const exported = await exportPromise;
+        expect(exported.status).toBe(200);
+        expect(exported.text).toContain('archived export lock marker');
+      } finally {
+        releaseLoad();
+        loadSpy.mockRestore();
+        await Promise.allSettled([exportPromise]);
+      }
+    });
+  });
+
+  it('returns session_archiving while unarchive holds the exclusive lease', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440290';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'exclusive transition marker',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      await archiveStoredSession(SECONDARY_CWD, sessionId);
+      let unarchiveStarted!: () => void;
+      let releaseUnarchive!: () => void;
+      const unarchiveStartedPromise = new Promise<void>((resolve) => {
+        unarchiveStarted = resolve;
+      });
+      const unarchiveReleasedPromise = new Promise<void>((resolve) => {
+        releaseUnarchive = resolve;
+      });
+      const originalUnarchive = SessionService.prototype.unarchiveSessions;
+      const unarchiveSpy = vi
+        .spyOn(SessionService.prototype, 'unarchiveSessions')
+        .mockImplementation(async function (this: SessionService, ids, opts) {
+          if (ids.includes(sessionId)) {
+            unarchiveStarted();
+            await unarchiveReleasedPromise;
+          }
+          return originalUnarchive.call(this, ids, opts);
+        });
+      const { app } = makeHarness({ secondarySummaries: [] });
+      const unarchivePromise = request(app)
+        .post('/workspaces/secondary-id/sessions/unarchive')
+        .set('Host', host())
+        .send({ sessionIds: [sessionId] })
+        .then((response) => response);
+
+      try {
+        await unarchiveStartedPromise;
+        const exported = await request(app)
+          .get(`/workspaces/secondary-id/session/${sessionId}/archive/export`)
+          .set('Host', host());
+        expect(exported.status).toBe(409);
+        expect(exported.headers['retry-after']).toBe('5');
+        expect(exported.body).toMatchObject({
+          code: 'session_archiving',
+          sessionId,
+        });
+
+        releaseUnarchive();
+        const unarchived = await unarchivePromise;
+        expect(unarchived.status).toBe(200);
+        expect(unarchived.body.unarchived).toEqual([sessionId]);
+      } finally {
+        releaseUnarchive();
+        unarchiveSpy.mockRestore();
+        await Promise.allSettled([unarchivePromise]);
       }
     });
   });
