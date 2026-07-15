@@ -456,6 +456,12 @@ export interface DaemonSession {
   createdAt?: string;
   /** True while the live session has an in-flight prompt. */
   hasActivePrompt?: boolean;
+  /** Immutable creator attribution, absent on legacy/unattributed sessions. */
+  sourceType?: string;
+  /** Optional source-specific identifier paired with `sourceType`. */
+  sourceId?: string;
+  /** True iff supplied source metadata was durably written to the transcript. */
+  sourcePersisted?: boolean;
 }
 
 /**
@@ -573,6 +579,10 @@ export interface DaemonSessionSummary {
    * absent for a top-level session. Lets a UI link a sub-session back to its
    * parent. */
   parentSessionId?: string;
+  /** Immutable creator attribution, absent on legacy/unattributed sessions. */
+  sourceType?: string;
+  /** Optional source-specific identifier paired with `sourceType`. */
+  sourceId?: string;
   clientCount?: number;
   hasActivePrompt?: boolean;
   isWaitingForPermission?: boolean;
@@ -701,6 +711,10 @@ export interface DaemonSessionListPageOptions {
    * opaque and activity-based.
    */
   parentSessionId?: string;
+  /** Restrict the page to sessions attributed to this source type. */
+  sourceType?: string;
+  /** Restrict the page to this source identifier. Requires `sourceType`. */
+  sourceId?: string;
 }
 
 export interface DaemonSessionListPage {
