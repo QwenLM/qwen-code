@@ -20,3 +20,303 @@ diff --git a/node_modules/ink/package.json b/node_modules/ink/package.json
  	},
  	"engines": {
  		"node": ">=22"
+diff --git a/node_modules/ink/build/frame-controller.d.ts b/node_modules/ink/build/frame-controller.d.ts
+new file mode 100644
+index 0000000..fe4821e
+--- /dev/null
++++ b/node_modules/ink/build/frame-controller.d.ts
+@@ -0,0 +1,27 @@
++/// <reference types="node" />
++export type ScreenSelection = {
++    sx: number;
++    sy: number;
++    ex: number;
++    ey: number;
++};
++export type FrameCell = {
++    type: 'char';
++    value: string;
++    fullWidth: boolean;
++    styles: unknown[];
++};
++export type ReadonlyFrame = {
++    width: number;
++    height: number;
++    cells: ReadonlyArray<ReadonlyArray<FrameCell>>;
++};
++export type FrameController = {
++    getFrame(): ReadonlyFrame | null;
++    getSelection(): ScreenSelection | null;
++    setSelection(selection: ScreenSelection | null): void;
++    subscribe(listener: (frame: ReadonlyFrame) => void): () => void;
++    publishFrame(frame: ReadonlyFrame): void;
++};
++export declare const createFrameController: (requestRender: () => void) => FrameController;
++export declare const getFrameController: (stdout: NodeJS.WriteStream) => FrameController | undefined;
+diff --git a/node_modules/ink/build/frame-controller.js b/node_modules/ink/build/frame-controller.js
+new file mode 100644
+index 0000000..745a4ba
+--- /dev/null
++++ b/node_modules/ink/build/frame-controller.js
+@@ -0,0 +1,45 @@
++import instances from './instances.js';
++const sameSelection = (a, b) => {
++    if (a === b) {
++        return true;
++    }
++    if (!a || !b) {
++        return false;
++    }
++    return a.sx === b.sx && a.sy === b.sy && a.ex === b.ex && a.ey === b.ey;
++};
++// Creates the bidirectional bridge between the application and the renderer:
++// the app reads the latest composited frame (getFrame) and pushes a selection
++// (setSelection) that the renderer highlights before serialization. setSelection
++// deduplicates and schedules exactly one repaint through Ink's own throttle via
++// the requestRender callback, so it never mutates already-committed frame state.
++export const createFrameController = (requestRender) => {
++    let currentSelection = null;
++    let lastFrame = null;
++    const listeners = new Set();
++    return {
++        getFrame: () => lastFrame,
++        getSelection: () => currentSelection,
++        setSelection(selection) {
++            if (sameSelection(currentSelection, selection)) {
++                return;
++            }
++            currentSelection = selection;
++            requestRender();
++        },
++        subscribe(listener) {
++            listeners.add(listener);
++            return () => {
++                listeners.delete(listener);
++            };
++        },
++        publishFrame(frame) {
++            lastFrame = frame;
++            for (const listener of listeners) {
++                listener(frame);
++            }
++        },
++    };
++};
++export const getFrameController = (stdout) => instances.get(stdout)?.frameController;
++//# sourceMappingURL=frame-controller.js.map
+diff --git a/node_modules/ink/build/index.d.ts b/node_modules/ink/build/index.d.ts
+index f3e7349..6107fd2 100644
+--- a/node_modules/ink/build/index.d.ts
++++ b/node_modules/ink/build/index.d.ts
+@@ -39,3 +39,5 @@ export { default as measureElement } from './measure-element.js';
+ export type { DOMElement } from './dom.js';
+ export { kittyFlags, kittyModifiers } from './kitty-keyboard.js';
+ export type { KittyKeyboardOptions, KittyFlagName } from './kitty-keyboard.js';
++export { getFrameController } from './frame-controller.js';
++export type { FrameController, ReadonlyFrame, ScreenSelection, FrameCell, } from './frame-controller.js';
+diff --git a/node_modules/ink/build/index.js b/node_modules/ink/build/index.js
+index cc849f0..25d6b33 100644
+--- a/node_modules/ink/build/index.js
++++ b/node_modules/ink/build/index.js
+@@ -21,4 +21,5 @@ export { default as useWindowSize } from './hooks/use-window-size.js';
+ export { default as useBoxMetrics } from './hooks/use-box-metrics.js';
+ export { default as measureElement } from './measure-element.js';
+ export { kittyFlags, kittyModifiers } from './kitty-keyboard.js';
++export { getFrameController } from './frame-controller.js';
+ //# sourceMappingURL=index.js.map
+\ No newline at end of file
+diff --git a/node_modules/ink/build/ink.js b/node_modules/ink/build/ink.js
+index ef659f3..cbdb068 100644
+--- a/node_modules/ink/build/ink.js
++++ b/node_modules/ink/build/ink.js
+@@ -17,6 +17,7 @@ import { hideCursorEscape, showCursorEscape } from './cursor-helpers.js';
+ import logUpdate from './log-update.js';
+ import { bsu, esu, shouldSynchronize } from './write-synchronized.js';
+ import instances from './instances.js';
++import { createFrameController } from './frame-controller.js';
+ import App from './components/App.js';
+ import { accessibilityContext as AccessibilityContext } from './components/AccessibilityContext.js';
+ import { resolveFlags, } from './kitty-keyboard.js';
+@@ -160,6 +161,7 @@ export default class Ink {
+     kittyProtocolEnabled = false;
+     cancelKittyDetection;
+     nextRenderCommit;
++    frameController;
+     constructor(options) {
+         autoBind(this);
+         this.options = options;
+@@ -196,6 +198,12 @@ export default class Ink {
+             this.throttledOnRender = throttled;
+         }
+         this.rootNode.onImmediateRender = this.onRender;
++        // Bridge for application-level text selection: setSelection schedules a
++        // throttled repaint via the same path as a normal render, and each frame
++        // publishes its composited cells (see onRender).
++        this.frameController = createFrameController(() => {
++            this.rootNode.onRender?.();
++        });
+         this.rootNode.onStaticChange = this.handleStaticChange;
+         this.log = logUpdate.create(options.stdout, {
+             incremental: options.incrementalRendering,
+@@ -317,7 +325,15 @@ export default class Ink {
+             this.nextRenderCommit = undefined;
+         }
+         const startTime = performance.now();
+-        const { output, outputHeight, staticOutput } = render(this.rootNode, this.isScreenReaderEnabled);
++        const selection = this.frameController?.getSelection() ?? null;
++        const { output, outputHeight, staticOutput, cells } = render(this.rootNode, this.isScreenReaderEnabled, selection);
++        if (cells && this.frameController) {
++            this.frameController.publishFrame({
++                width: cells[0]?.length ?? 0,
++                height: cells.length,
++                cells,
++            });
++        }
+         this.options.onRender?.({ renderTime: performance.now() - startTime });
+         // If <Static> output isn't empty, it means new children have been added to it
+         const hasStaticOutput = staticOutput && staticOutput !== '\n';
+diff --git a/node_modules/ink/build/output.d.ts b/node_modules/ink/build/output.d.ts
+index 0f4523f..1ceda6a 100644
+--- a/node_modules/ink/build/output.d.ts
++++ b/node_modules/ink/build/output.d.ts
+@@ -1,4 +1,5 @@
+ import { type OutputTransformer } from './render-node-to-output.js';
++import { type ScreenSelection, type FrameCell } from './frame-controller.js';
+ /**
+ "Virtual" output class
+ 
+@@ -27,9 +28,10 @@ export default class Output {
+     }): void;
+     clip(clip: Clip): void;
+     unclip(): void;
+-    get(): {
++    get(selection?: ScreenSelection | null): {
+         output: string;
+         height: number;
++        cells: FrameCell[][];
+     };
+ }
+ export {};
+diff --git a/node_modules/ink/build/output.js b/node_modules/ink/build/output.js
+index c763b77..608f529 100644
+--- a/node_modules/ink/build/output.js
++++ b/node_modules/ink/build/output.js
+@@ -1,6 +1,26 @@
+ import sliceAnsi from 'slice-ansi';
+ import stringWidth from 'string-width';
+ import { styledCharsFromTokens, styledCharsToString, tokenize, } from '@alcalzone/ansi-tokenize';
++// Background applied to selected cells. Appended after a cell's existing styles
++// so the foreground is preserved and this background wins at the terminal.
++const SELECTION_BG = { code: '\x1b[48;5;240m', endCode: '\x1b[49m' };
++// Linear reading-order selection: whole rows between the first and last, partial
++// on the first/last row. Coordinates are screen cells in the composited frame.
++const isCellSelected = (x, y, sel) => {
++    if (y < sel.sy || y > sel.ey) {
++        return false;
++    }
++    if (sel.sy === sel.ey) {
++        return x >= sel.sx && x <= sel.ex;
++    }
++    if (y === sel.sy) {
++        return x >= sel.sx;
++    }
++    if (y === sel.ey) {
++        return x <= sel.ex;
++    }
++    return true;
++};
+ class OutputCaches {
+     widths = new Map();
+     blockWidths = new Map();
+@@ -68,7 +88,7 @@ export default class Output {
+             type: 'unclip',
+         });
+     }
+-    get() {
++    get(selection) {
+         // Initialize output array with a specific set of rows, so that margin/padding at the bottom is preserved
+         const output = [];
+         for (let y = 0; y < this.height; y++) {
+@@ -192,6 +212,30 @@ export default class Output {
+                 }
+             }
+         }
++        // Apply the selection highlight before serialization. Selected slots are
++        // replaced with new cell objects (never mutated in place) because cells
++        // reference StyledChar objects cached and shared across identical lines,
++        // so mutating one would leak the highlight onto other on-screen text.
++        if (selection) {
++            for (let y = 0; y < output.length; y++) {
++                const row = output[y];
++                if (!row) {
++                    continue;
++                }
++                for (let x = 0; x < row.length; x++) {
++                    if (!isCellSelected(x, y, selection)) {
++                        continue;
++                    }
++                    const cell = row[x];
++                    if (cell) {
++                        row[x] = {
++                            ...cell,
++                            styles: [...(cell.styles ?? []), SELECTION_BG],
++                        };
++                    }
++                }
++            }
++        }
+         const generatedOutput = output
+             .map(line => {
+             // See https://github.com/vadimdemedes/ink/pull/564#issuecomment-1637022742
+@@ -202,6 +246,7 @@ export default class Output {
+         return {
+             output: generatedOutput,
+             height: output.length,
++            cells: output,
+         };
+     }
+ }
+diff --git a/node_modules/ink/build/renderer.d.ts b/node_modules/ink/build/renderer.d.ts
+index 8c35aea..10d2f54 100644
+--- a/node_modules/ink/build/renderer.d.ts
++++ b/node_modules/ink/build/renderer.d.ts
+@@ -1,8 +1,10 @@
+ import { type DOMElement } from './dom.js';
++import { type ScreenSelection, type FrameCell } from './frame-controller.js';
+ type Result = {
+     output: string;
+     outputHeight: number;
+     staticOutput: string;
++    cells?: FrameCell[][];
+ };
+-declare const renderer: (node: DOMElement, isScreenReaderEnabled: boolean) => Result;
++declare const renderer: (node: DOMElement, isScreenReaderEnabled: boolean, selection?: ScreenSelection | null) => Result;
+ export default renderer;
+diff --git a/node_modules/ink/build/renderer.js b/node_modules/ink/build/renderer.js
+index bf23246..dd0565d 100644
+--- a/node_modules/ink/build/renderer.js
++++ b/node_modules/ink/build/renderer.js
+@@ -1,6 +1,6 @@
+ import renderNodeToOutput, { renderNodeToScreenReaderOutput, } from './render-node-to-output.js';
+ import Output from './output.js';
+-const renderer = (node, isScreenReaderEnabled) => {
++const renderer = (node, isScreenReaderEnabled, selection) => {
+     if (node.yogaNode) {
+         if (isScreenReaderEnabled) {
+             const output = renderNodeToScreenReaderOutput(node, {
+@@ -36,13 +36,14 @@ const renderer = (node, isScreenReaderEnabled) => {
+                 skipStaticElements: false,
+             });
+         }
+-        const { output: generatedOutput, height: outputHeight } = output.get();
++        const { output: generatedOutput, height: outputHeight, cells, } = output.get(selection);
+         return {
+             output: generatedOutput,
+             outputHeight,
+             // Newline at the end is needed, because static output doesn't have one, so
+             // interactive output will override last line of static output
+             staticOutput: staticOutput ? `${staticOutput.get().output}\n` : '',
++            cells,
+         };
+     }
+     return {
