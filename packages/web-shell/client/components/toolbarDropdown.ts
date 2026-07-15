@@ -46,6 +46,40 @@ export function getToolbarItemVisibility({
   return visibility;
 }
 
+export function getToolbarItemVisibilityWithHysteresis({
+  availableWidth,
+  items,
+  currentVisibility,
+  expansionMargin,
+}: {
+  availableWidth: number;
+  items: ReadonlyArray<{
+    id: string;
+    expansionWidth: number;
+    ready?: boolean;
+  }>;
+  currentVisibility: Readonly<Record<string, boolean>>;
+  expansionMargin: number;
+}): Record<string, boolean> {
+  const collapseVisibility = getToolbarItemVisibility({
+    availableWidth,
+    items,
+  });
+  const expansionVisibility = getToolbarItemVisibility({
+    availableWidth: Math.max(0, availableWidth - expansionMargin),
+    items,
+  });
+
+  return Object.fromEntries(
+    items.map((item) => [
+      item.id,
+      currentVisibility[item.id]
+        ? collapseVisibility[item.id]
+        : expansionVisibility[item.id],
+    ]),
+  );
+}
+
 export function getToolbarExpansionBudget({
   toolbarWidth,
   leadingWidth,

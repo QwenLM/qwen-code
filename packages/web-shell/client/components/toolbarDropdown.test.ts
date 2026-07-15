@@ -3,6 +3,7 @@ import {
   filterToolbarDropdownItems,
   getToolbarExpansionBudget,
   getToolbarItemVisibility,
+  getToolbarItemVisibilityWithHysteresis,
   resolveToolbarModelLabel,
 } from './toolbarDropdown';
 
@@ -88,6 +89,24 @@ describe('toolbarDropdown', () => {
         rightWidth: base.rightWidth + 40,
       }),
     ).toBe(252);
+  });
+
+  it('does not oscillate when aggregate rounding changes the budget by one pixel', () => {
+    const items = [{ id: 'workspace', expansionWidth: 60 }];
+    let visibility = { workspace: false };
+    const states: boolean[] = [];
+
+    for (let index = 0; index < 4; index += 1) {
+      visibility = getToolbarItemVisibilityWithHysteresis({
+        availableWidth: visibility.workspace ? 60 : 61,
+        items,
+        currentVisibility: visibility,
+        expansionMargin: items.length,
+      });
+      states.push(visibility.workspace);
+    }
+
+    expect(states).toEqual([true, true, true, true]);
   });
 
   it('keeps the confirmed model through a transient empty update', () => {

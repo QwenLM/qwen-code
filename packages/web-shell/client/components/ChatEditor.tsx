@@ -70,7 +70,7 @@ import {
 import {
   filterToolbarDropdownItems,
   getToolbarExpansionBudget,
-  getToolbarItemVisibility,
+  getToolbarItemVisibilityWithHysteresis,
   resolveToolbarModelLabel,
   type ToolbarDropdownItem,
 } from './toolbarDropdown';
@@ -1693,12 +1693,14 @@ export const ChatEditor = memo(
           currentExpansionWidth,
           gap,
         });
-        const itemVisibility = getToolbarItemVisibility({
-          // Individual replica widths and aggregate scrollWidth can differ by
-          // at most one rounded pixel per item. Keep that margin collapsed so
-          // the measured state cannot oscillate at a fractional boundary.
-          availableWidth: Math.max(0, availableWidth - items.length),
+        const itemVisibility = getToolbarItemVisibilityWithHysteresis({
+          availableWidth,
           items,
+          currentVisibility: toolbarLabelVisibility,
+          // Aggregate scrollWidth can differ from the sum of individually
+          // rounded replicas by one pixel per item. Apply that slack only when
+          // expanding so a collapsed/expanded pair cannot form a two-cycle.
+          expansionMargin: items.length,
         });
         const next = {
           workspaceSelect: itemVisibility.workspaceSelect ?? false,
