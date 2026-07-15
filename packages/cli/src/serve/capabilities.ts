@@ -190,6 +190,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // may be `null` for too-short histories or transient model failures
   // (best-effort, never throws). SDK helper: `DaemonClient.recapSession`.
   session_recap: { since: 'v1' },
+  // `POST /session/:id/generate` streams a stateless, tool-free model call.
+  // The ACP child prefers fastModel and falls back to the main session model.
+  session_generation: { since: 'v1' },
   // Side question (/btw) against the session's conversation context.
   // Single-turn, tool-free LLM call via runForkedAgent (cache path).
   session_btw: { since: 'v1' },

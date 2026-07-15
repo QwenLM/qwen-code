@@ -447,6 +447,11 @@ export function ChatPane({
               : undefined
           }
           onTurnOutputOpen={handleRightPanelOpen}
+          generateContent={
+            connection.capabilities?.features.includes('session_generation')
+              ? actions.generateSessionContent
+              : undefined
+          }
         />
       </div>
 

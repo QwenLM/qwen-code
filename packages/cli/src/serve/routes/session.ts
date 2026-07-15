@@ -74,6 +74,7 @@ import {
 } from '../server/session-export.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
+import { GENERATION_MAX_PROMPT_BYTES } from '../../acp-integration/generation.js';
 import { requireSessionRuntime } from './session-runtime.js';
 import {
   resolveWorkspaceRuntimeFromParam,
@@ -102,6 +103,51 @@ const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
 const WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES = 64 * 1024;
 const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
   'Transcript pagination state exceeds the safe limit';
+const GENERATION_HEARTBEAT_MS = 15_000;
+
+function formatGenerationSse(
+  event: string,
+  data: Record<string, unknown>,
+): string {
+  return `event: ${event}\ndata: ${JSON.stringify({ v: 1, ...data })}\n\n`;
+}
+
+function writeGenerationSseChunk(res: Response, chunk: string): Promise<void> {
+  if (res.destroyed) {
+    return Promise.reject(new Error('Generation SSE connection destroyed'));
+  }
+  const writable = res.write(chunk);
+  const flush = (res as Response & { flush?: () => void }).flush;
+  flush?.call(res);
+  if (writable) {
+    return res.destroyed
+      ? Promise.reject(new Error('Generation SSE connection destroyed'))
+      : Promise.resolve();
+  }
+  return new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      res.off('drain', onDrain);
+      res.off('close', onClose);
+      res.off('error', onError);
+    };
+    const onDrain = () => {
+      cleanup();
+      resolve();
+    };
+    const onClose = () => {
+      cleanup();
+      reject(new Error('Generation SSE connection closed'));
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    res.once('drain', onDrain);
+    res.once('close', onClose);
+    res.once('error', onError);
+    if (res.destroyed) onClose();
+  });
+}
 
 function isReadOnlyWorkspaceInspection(runtime: WorkspaceRuntime): boolean {
   return !runtime.primary && !runtime.trusted;
@@ -1970,6 +2016,92 @@ export function registerSessionRoutes(
           daemonLog.info('prompt enqueued', { sessionId, promptId, clientId });
         }
         res.status(202).json({ promptId, lastEventId });
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/generate',
+    mutate(),
+    withOwnerReadSession(
+      'POST /session/:id/generate',
+      async (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        const prompt = body['prompt'];
+        if (
+          typeof prompt !== 'string' ||
+          prompt.trim().length === 0 ||
+          Buffer.byteLength(prompt, 'utf8') > GENERATION_MAX_PROMPT_BYTES
+        ) {
+          res.status(400).json({
+            error: `\`prompt\` must be a non-empty string no larger than ${GENERATION_MAX_PROMPT_BYTES} UTF-8 bytes`,
+            code: 'invalid_prompt',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        if (!runtime.bridge.generateSessionContent) {
+          res.status(501).json({
+            error: 'Stateless generation is not supported by this bridge',
+            code: 'generation_not_supported',
+          });
+          return;
+        }
+
+        const abort = new AbortController();
+        let completed = false;
+        const onClose = () => {
+          if (!completed) abort.abort();
+        };
+        res.once('close', onClose);
+
+        const stream = runtime.bridge.generateSessionContent(
+          sessionId,
+          prompt,
+          abort.signal,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+
+        res.status(200);
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders();
+
+        let writeChain = Promise.resolve();
+        const write = (chunk: string): Promise<void> => {
+          writeChain = writeChain.then(() =>
+            writeGenerationSseChunk(res, chunk),
+          );
+          return writeChain;
+        };
+        await write(': connected\n\n');
+        const heartbeat = setInterval(() => {
+          void write(': heartbeat\n\n').catch(() => abort.abort());
+        }, GENERATION_HEARTBEAT_MS);
+        heartbeat.unref();
+
+        try {
+          for await (const event of stream) {
+            await write(formatGenerationSse(event.type, event));
+          }
+        } catch {
+          if (!abort.signal.aborted && !res.destroyed) {
+            await write(
+              formatGenerationSse('error', {
+                code: 'generation_failed',
+                message: 'Generation failed',
+              }),
+            ).catch(() => undefined);
+          }
+        } finally {
+          completed = true;
+          clearInterval(heartbeat);
+          res.off('close', onClose);
+          if (!res.destroyed) res.end();
+        }
       },
     ),
   );
