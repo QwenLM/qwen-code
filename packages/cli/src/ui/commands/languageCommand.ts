@@ -189,7 +189,7 @@ async function setOutputLanguage(
       }
     }
 
-    const displayLang = isAuto ? 'Auto (follow user input)' : resolved;
+    const displayLang = isAuto ? t('Auto (follow user input)') : resolved;
 
     return {
       type: 'message',
@@ -276,7 +276,7 @@ export const languageCommand: SlashCommand = {
 
     // Format output language display: show auto mode or the fixed language.
     const outputLangDisplay = isAutoLanguage(outputSetting)
-      ? 'Auto (follow user input)'
+      ? t('Auto (follow user input)')
       : outputResolved;
 
     return {

@@ -69,7 +69,8 @@ export function normalizeOutputLanguage(language: string): string {
 }
 
 /**
- * Resolves the output language, converting 'auto' to the detected system language.
+ * Resolves the output language for legacy/fixed-language callers.
+ * Callers that need dynamic auto behavior should preserve 'auto'.
  */
 export function resolveOutputLanguage(
   value: string | undefined | null,
@@ -113,6 +114,9 @@ function generateOutputLanguageFileContent(language: string): string {
 
 ## Rule
 Respond in the same language as the user's input.
+
+## Exception
+If the user **explicitly** requests a response in a specific language (e.g., "please reply in English"), switch to the user's requested language for the remainder of the conversation.
 
 ## Mixed-language input
 If the user mixes languages, use the language that best matches the user's main request.

@@ -518,6 +518,7 @@ export default {
   'Folder Trust': 'Confiança de carpeta',
   'Tool Schema Compliance': 'Compliment de Tool Schema',
   'Auto (detect from system)': 'Automàtic (detectar del sistema)',
+  'Auto (follow user input)': "Automàtic (seguir l'entrada de l'usuari)",
   'Auto (detect terminal theme)': 'Automàtic (detectar el tema del terminal)',
   Auto: 'Automàtic',
   Text: 'Text',

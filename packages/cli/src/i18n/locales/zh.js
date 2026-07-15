@@ -758,6 +758,7 @@ export default {
   'Tool Schema Compliance': 'Tool Schema 兼容性',
   // Settings enum options
   'Auto (detect from system)': '自动（从系统检测）',
+  'Auto (follow user input)': '自动（跟随用户输入）',
   'Auto (detect terminal theme)': '自动（检测终端主题）',
   Auto: '自动',
   Text: '文本',

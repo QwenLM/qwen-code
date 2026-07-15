@@ -449,6 +449,7 @@ export default {
   'Tool Schema Compliance': 'Tool Schema-Konformität',
   // Settings enum options
   'Auto (detect from system)': 'Automatisch (vom System erkennen)',
+  'Auto (follow user input)': 'Automatisch (Benutzereingabe folgen)',
   'Auto (detect terminal theme)': 'Automatisch (Terminal-Theme erkennen)',
   Auto: 'Automatisch',
   Text: 'Text',

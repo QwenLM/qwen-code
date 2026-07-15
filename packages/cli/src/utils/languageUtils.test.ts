@@ -266,6 +266,10 @@ describe('languageUtils', () => {
       expect(writtenContent).toContain(
         "Respond in the same language as the user's input.",
       );
+      expect(writtenContent).toContain('## Exception');
+      expect(writtenContent).toContain(
+        "switch to the user's requested language for the remainder of the conversation",
+      );
       expect(writtenContent).not.toContain('You MUST always respond in');
     });
 
