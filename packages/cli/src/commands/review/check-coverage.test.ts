@@ -776,6 +776,22 @@ describe('the roster — who should have been here', () => {
     expect(r.ok).toBe(false);
   });
 
+  it('does not credit a brief opened as a `.bak` sibling', () => {
+    // The brief-open check matches the whole quoted path, not a bare substring, so
+    // an agent that opened `<brief>.bak` — a real path with the brief as a strict
+    // prefix — is not credited with opening the brief. A bare `includes(brief)`
+    // would have counted it and cleared the gap.
+    const p = plan3a();
+    const brief = briefPath(p, '2'); // Agent 2 (Security), a roster whole-diff role
+    const prompt = readFileSync(join(promptRecordDir(p), '2.txt'), 'utf8');
+    // Relaunch it opening the `.bak` sibling instead of the brief itself.
+    transcript('r-2', prompt, { calls: 2, opens: [`${brief}.bak`] });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.unreadBriefs.some((s) => s.includes('Security'))).toBe(true);
+    expect(r.ok).toBe(false);
+  });
+
   it('does not demand a build-and-test agent from a diff with no tree to build', () => {
     // A cross-repo lightweight review has the diff and nothing else. Requiring
     // Agent 7 or the cross-file tracer of it would fail every such review for not

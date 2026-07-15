@@ -536,13 +536,13 @@ export function verificationGaps(
     );
   }
 
-  // Step 4: verify. Required when the review posts findings — an unverified finding
-  // must not become a public blocker (the false "this PR now leaks tokens" Critical
-  // is the exact harm). Keyed to INLINE findings, the ones a verifier rules on: a
-  // review that confirmed nothing has nothing to verify, and deterministic
-  // `[build]` / `[test]` findings are pre-confirmed and skip verification by design
-  // — a review whose only inline findings are those (rare) is the known edge this
-  // floor does not distinguish.
+  // Step 4: verify. Required when the review posts a finding a verifier rules on —
+  // an unverified finding must not become a public blocker (the false "this PR now
+  // leaks tokens" Critical is the exact harm). Whether it does is `opts.postsFindings`,
+  // decided by the caller: `compose-review` counts the anchored findings and the
+  // non-deterministic body Criticals, and excludes deterministic `[build]`/`[test]`
+  // findings, which are pre-confirmed and skip verification by design. A review that
+  // confirmed nothing has nothing to verify.
   if (opts.postsFindings && !ranAndReadBrief('verify')) {
     gaps.push(
       built.has('verify')
