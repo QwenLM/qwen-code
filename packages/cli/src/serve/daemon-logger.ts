@@ -1261,11 +1261,7 @@ function createConcreteLogger(input: {
   const submitFileRecord = (record: string): void => {
     if (!acceptingFileRecords) return;
     const bytes = Buffer.byteLength(record, 'utf8');
-    if (
-      input.state.poisoned ||
-      input.family.lease.compromised ||
-      input.family.lease.released
-    ) {
+    if (!fileMutationAllowed()) {
       markDropped(bytes);
       return;
     }

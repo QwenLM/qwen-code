@@ -1002,6 +1002,51 @@ describe('initDaemonLogger fallback retention', () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
+  it('releases fallback ownership when close cannot acquire maintenance', async () => {
+    let rejectMaintenance = false;
+    let rejectedMaintenanceCalls = 0;
+    const ownerRelease = vi.fn(async () => {});
+    const acquireLock = vi.fn(async (_target: string, options: unknown) => {
+      const lockPath =
+        (options as { lockfilePath?: string }).lockfilePath ?? '';
+      if (lockPath.endsWith('.stable-writer.lock')) {
+        throw Object.assign(new Error('stable busy'), { code: 'ELOCKED' });
+      }
+      if (lockPath.endsWith('.maintenance.lock')) {
+        if (rejectMaintenance) {
+          rejectedMaintenanceCalls += 1;
+          throw Object.assign(new Error('maintenance busy'), {
+            code: 'ELOCKED',
+          });
+        }
+        return async () => {};
+      }
+      if (lockPath.endsWith('.owner.lock')) return ownerRelease;
+      throw new Error(`Unexpected lock path: ${lockPath}`);
+    });
+    const logger = await createLogger({
+      boundWorkspace: '/w',
+      baseDir: tmp,
+      runId: '11111111111111111111111111111111',
+      stderr: () => {},
+      acquireLock: acquireLock as never,
+      fs: { ...fsPromises, chmod: async () => {} },
+      policy: { stableAcquireBudgetMs: 0 },
+    });
+    const familyDir = path.dirname(logger.getLogPath());
+
+    expect(logger.getStatus()).toMatchObject({
+      mode: 'fallback',
+      health: 'ok',
+    });
+    rejectMaintenance = true;
+    await expect(logger.close()).resolves.toBeUndefined();
+
+    expect(rejectedMaintenanceCalls).toBe(1);
+    expect(ownerRelease).toHaveBeenCalledOnce();
+    expect(existsSync(familyDir)).toBe(true);
+  });
+
   it('keeps all live fallback families and only the latest cleanly closed family', async () => {
     const stable = await createLogger({
       boundWorkspace: '/w',
