@@ -145,7 +145,11 @@ impl Tool for SetConfigTool {
         }
         let persisted_global = if !updates.is_empty() {
             match write_driver_config_updates(&updates, || {
-                if session_id.is_some() {
+                if let Some(sid) = session_id.as_deref() {
+                    self.state.session_config.set(sid, ConfigOverrides {
+                        max_image_dimension: max_dim,
+                        capture_scope: scope_arg.clone(),
+                    });
                     return None;
                 }
                 let mut cfg = self.state.config.write().unwrap();
@@ -171,15 +175,17 @@ impl Tool for SetConfigTool {
         let (effective_dim, effective_scope) = if let Some(sid) = session_id.as_deref() {
             // These session-scoped fields are in-memory only; PiP settings above
             // remain global because the backend reads them once at daemon startup.
-            self.state.session_config.set(sid, ConfigOverrides {
-                max_image_dimension: max_dim,
-                capture_scope: scope_arg.clone(),
-            });
+            // When PiP persistence was part of this call, the override committed
+            // inside the same config transaction above; otherwise no disk state
+            // changed and this single registry write is already atomic.
+            if updates.is_empty() {
+                self.state.session_config.set(sid, ConfigOverrides {
+                    max_image_dimension: max_dim,
+                    capture_scope: scope_arg.clone(),
+                });
+            }
             let cfg = self.state.config.read().unwrap();
-            (
-                self.state.session_config.effective_max_image_dimension(Some(sid), &cfg),
-                self.state.session_config.effective_capture_scope(Some(sid), &cfg),
-            )
+            self.state.session_config.effective_config(Some(sid), &cfg)
         } else if let Some(applied) = persisted_global {
             applied
         } else {
