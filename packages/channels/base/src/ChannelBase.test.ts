@@ -2115,6 +2115,57 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('does not retry or invalidate session context after a natural update CAS conflict', async () => {
+      const channelMemory = createChannelMemory([
+        { id: 'm-a31f0d82c7e4', text: 'Use staging.' },
+      ]);
+      channelMemory.readChannelMemory.mockResolvedValue('Use staging.');
+      channelMemory.updateChannelMemoryEntry.mockRejectedValue(
+        new Error('Channel memory entry changed'),
+      );
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'update',
+          targetIds: ['m-a31f0d82c7e4'],
+          memory: 'Use production.',
+          confidence: 0.92,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(envelope({ text: 'first', senderId: 'alice' }));
+      ch.sent = [];
+      await ch.handleInbound(
+        envelope({
+          text: '把刚才那条记忆改成 Use production.',
+          senderId: 'alice',
+        }),
+      );
+
+      expect(channelMemory.updateChannelMemoryEntry).toHaveBeenCalledTimes(1);
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: 'Failed to update channel memory: An error occurred while accessing channel memory.',
+        },
+      ]);
+
+      ch.sent = [];
+      await ch.handleInbound(envelope({ text: 'second', senderId: 'alice' }));
+
+      expect(channelMemory.readChannelMemory).toHaveBeenCalledTimes(1);
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Channel memory entry changed'),
+      );
+      stderrSpy.mockRestore();
+    });
+
     it('plans a natural removal against current entries and uses the selected text for CAS', async () => {
       const target = {
         channelName: 'test-chan',
@@ -2417,6 +2468,69 @@ describe('ChannelBase', () => {
       expect(channelMemory.addChannelMemoryEntries).not.toHaveBeenCalled();
       expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
       expect(bridge.prompt).toHaveBeenCalled();
+    });
+
+    it.each([
+      { label: 'NaN', confidence: Number.NaN },
+      { label: 'Infinity', confidence: Number.POSITIVE_INFINITY },
+      { label: 'above one', confidence: 999 },
+      { label: 'below zero', confidence: -1 },
+    ])(
+      'llm memory classifier $label confidence falls through without mutation',
+      async ({ confidence }) => {
+        const channelMemory = createChannelMemory([
+          { id: 'm-a31f0d82c7e4', text: 'Use staging.' },
+        ]);
+        const memoryIntentClassifier = {
+          classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+            intent: 'update',
+            targetIds: ['m-a31f0d82c7e4'],
+            memory: 'Use production.',
+            confidence,
+          }),
+        };
+        const ch = createChannel(
+          { allowedUsers: ['alice'] },
+          { channelMemory, memoryIntentClassifier },
+        );
+
+        await ch.handleInbound(
+          envelope({
+            text: '把刚才那条记忆更新为 production',
+            senderId: 'alice',
+          }),
+        );
+
+        expect(channelMemory.addChannelMemoryEntries).not.toHaveBeenCalled();
+        expect(channelMemory.updateChannelMemoryEntry).not.toHaveBeenCalled();
+        expect(channelMemory.removeChannelMemoryEntries).not.toHaveBeenCalled();
+        expect(channelMemory.clearChannelMemory).not.toHaveBeenCalled();
+        expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
+        expect(bridge.prompt).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each([
+      'explain the exchange rate',
+      'read the changelog',
+      'keep this unchanged',
+    ])('does not invoke the memory planner for %s', async (text) => {
+      const channelMemory = createChannelMemory();
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn(),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(envelope({ text, senderId: 'alice' }));
+
+      expect(channelMemory.listChannelMemoryEntries).not.toHaveBeenCalled();
+      expect(
+        memoryIntentClassifier.classifyChannelMemoryIntent,
+      ).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
     });
 
     it('llm memory classifier none intent falls through to agent', async () => {
@@ -3149,6 +3263,51 @@ describe('ChannelBase', () => {
           text: 'Channel memory m-b82c4e190a6f removed.',
         },
       ]);
+    });
+
+    it.each([
+      { operation: 'remove', text: '删除 m-a31f0d82c7e4' },
+      { operation: 'remove', text: '删掉 m-a31f0d82c7e4' },
+      { operation: 'remove', text: 'delete m-a31f0d82c7e4' },
+      { operation: 'remove', text: 'remove m-a31f0d82c7e4' },
+      {
+        operation: 'update',
+        text: '更新 m-a31f0d82c7e4 为Use production.',
+      },
+      {
+        operation: 'update',
+        text: 'change m-a31f0d82c7e4 to Use production.',
+      },
+    ])('$text stays on the exact-ID fast path', async ({ operation, text }) => {
+      const channelMemory = createChannelMemory();
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn(),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(envelope({ text, senderId: 'alice' }));
+
+      if (operation === 'update') {
+        expect(channelMemory.updateChannelMemoryEntry).toHaveBeenCalledWith(
+          { channelName: 'test-chan', chatId: 'chat1', threadId: undefined },
+          { id: 'm-a31f0d82c7e4', text: 'Use production.' },
+        );
+        expect(channelMemory.removeChannelMemoryEntries).not.toHaveBeenCalled();
+      } else {
+        expect(channelMemory.removeChannelMemoryEntries).toHaveBeenCalledWith(
+          { channelName: 'test-chan', chatId: 'chat1', threadId: undefined },
+          { ids: ['m-a31f0d82c7e4'] },
+        );
+        expect(channelMemory.updateChannelMemoryEntry).not.toHaveBeenCalled();
+      }
+      expect(channelMemory.listChannelMemoryEntries).not.toHaveBeenCalled();
+      expect(
+        memoryIntentClassifier.classifyChannelMemoryIntent,
+      ).not.toHaveBeenCalled();
+      expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
     it.each([

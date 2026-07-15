@@ -78,7 +78,7 @@ const CHANNEL_MEMORY_PAGE_SIZE = 20;
 const CHANNEL_MEMORY_PREVIEW_CODE_POINT_LIMIT = 160;
 const CHANNEL_MEMORY_CLASSIFIER_MIN_CONFIDENCE = 0.7;
 const CHANNEL_MEMORY_CLASSIFIER_TRIGGER_RE =
-  /(记住|记得|记一下|记忆|忘掉|忘记|清空|清除|删除|删掉|改成|更新|刚才那条|保存|remember|memory|forget|delete|remove|update|change)/iu;
+  /(?:记住|记得|记一下|记忆|忘掉|忘记|清空|清除|删除|删掉|改成|更新|刚才那条|保存|\b(?:remember|memory|forget|delete|remove|update|change)\b)/iu;
 /** Sentinel message for the loop-prompt timeout rejection; matched by identity below. */
 const LOOP_TIMED_OUT_MESSAGE = 'loop timed out';
 const DEBUG_PAYLOAD_ENV = 'QWEN_CHANNEL_DEBUG_PAYLOAD';
@@ -3101,12 +3101,16 @@ export abstract class ChannelBase {
       return null;
     }
 
+    const confidence =
+      classified && typeof classified === 'object'
+        ? (classified as { confidence?: unknown }).confidence
+        : undefined;
     if (
-      !classified ||
-      typeof classified !== 'object' ||
-      typeof (classified as { confidence?: unknown }).confidence !== 'number' ||
-      (classified as { confidence: number }).confidence <
-        CHANNEL_MEMORY_CLASSIFIER_MIN_CONFIDENCE
+      typeof confidence !== 'number' ||
+      !Number.isFinite(confidence) ||
+      confidence < 0 ||
+      confidence > 1 ||
+      confidence < CHANNEL_MEMORY_CLASSIFIER_MIN_CONFIDENCE
     ) {
       return null;
     }
