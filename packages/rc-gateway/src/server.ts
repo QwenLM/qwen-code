@@ -52,6 +52,16 @@ import {
 import { createPermissionVoteRoute } from './routes/permission.js';
 import { createPromptRoute, type PromptAcceptedHook } from './routes/prompt.js';
 import { PromptEventBroadcaster } from './routes/promptEventBroadcaster.js';
+import { PromptQueue } from './routes/promptQueue.js';
+import type { AgentRegistry } from './agents/agentRegistry.js';
+import { AgentLifecycle } from './agents/agentLifecycle.js';
+import {
+  createSpawnAgentRoute,
+  createListAgentsRoute,
+  createGetAgentRoute,
+  createAgentMessageRoute,
+  createAgentCancelRoute,
+} from './routes/agents.js';
 import { createUsageRoute, type UsageReader } from './routes/usage.js';
 import { createCapabilityRoute } from './routes/capabilities.js';
 import { createClientsManifestRoute } from './routes/clientsManifest.js';
@@ -249,6 +259,14 @@ export interface GatewayDeps {
    * "own-UI-origin bypass" never fires.
    */
   ownUiOrigin?: string;
+  /** Agent observability (add-agent-observability). Routes mount only when set. */
+  agents?: {
+    registry: AgentRegistry;
+    /** Read-time cost rollup keyed by sessionId (UsageStore.sessionTotals). */
+    costFor?: (sessionId: string) => number | undefined;
+    /** Spawn accept window override (tests). */
+    promptAcceptWindowMs?: number;
+  };
 }
 
 export interface GatewayApp {
@@ -277,6 +295,10 @@ export interface GatewayApp {
    * tests that construct the app directly.
    */
   bridgeRegistry: BridgeRegistry;
+  /** Per-session gateway-event fan-out (exposed for the agent lifecycle). */
+  promptEvents: PromptEventBroadcaster;
+  /** Present only when deps.agents is supplied. */
+  agentLifecycle?: AgentLifecycle;
 }
 
 export function createGatewayApp(deps: GatewayDeps): GatewayApp {
@@ -289,6 +311,10 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // (emit) and the events relay (register/write). Created here so both routes
   // share the same instance without requiring the caller to instantiate it.
   const promptEventBroadcaster = new PromptEventBroadcaster();
+  // Shared per-session FIFO serialiser: both the prompt route and the agent
+  // routes' spawn/steer prompts must queue behind each other for the same
+  // session, so a single PromptQueue instance is injected into both.
+  const promptQueue = new PromptQueue();
 
   // Owner-level event bus (cycle 49): every durably-appended audit record is
   // fanned out to OWNER subscribers of GET /rc/events. Internal to the app — the
@@ -539,6 +565,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       queueWaitMs: deps.queueWaitMs,
       promptTimeoutMs: deps.promptTimeoutMs,
       promptEventBroadcaster,
+      queue: promptQueue,
     }),
   );
   // GET /rc/usage (add-cost-tracking) — any authenticated token; the route applies
@@ -941,5 +968,63 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     );
   }
 
-  return { app, notifier, audit, ownerEvents, idleToggles, bridgeRegistry };
+  // Agent observability control plane (add-agent-observability).
+  let agentLifecycle: AgentLifecycle | undefined;
+  if (deps.agents) {
+    agentLifecycle = new AgentLifecycle(
+      deps.agents.registry,
+      ownerEvents,
+      promptEventBroadcaster,
+      notifier,
+      deps.agents.costFor,
+    );
+    const agentDeps = {
+      daemon: deps.daemon,
+      registry: deps.agents.registry,
+      lifecycle: agentLifecycle,
+      audit,
+      costFor: deps.agents.costFor,
+      promptAcceptWindowMs: deps.agents.promptAcceptWindowMs,
+      promptQueue,
+    };
+    app.post(
+      '/rc/agents',
+      requireScope(WRITE, audit),
+      recordActivity(workingDevice),
+      createSpawnAgentRoute(agentDeps),
+    );
+    app.get(
+      '/rc/agents',
+      requireScope(SESSION_READ, audit),
+      createListAgentsRoute(agentDeps),
+    );
+    app.get(
+      '/rc/agents/:id',
+      requireScope(SESSION_READ, audit),
+      createGetAgentRoute(agentDeps),
+    );
+    app.post(
+      '/rc/agents/:id/message',
+      requireScope(WRITE, audit),
+      recordActivity(workingDevice),
+      createAgentMessageRoute(agentDeps),
+    );
+    app.post(
+      '/rc/agents/:id/cancel',
+      requireScope(WRITE, audit),
+      recordActivity(workingDevice),
+      createAgentCancelRoute(agentDeps),
+    );
+  }
+
+  return {
+    app,
+    notifier,
+    audit,
+    ownerEvents,
+    idleToggles,
+    bridgeRegistry,
+    promptEvents: promptEventBroadcaster,
+    agentLifecycle,
+  };
 }
