@@ -47,6 +47,11 @@ tool-set mutation caused by deferred-tool reveal in the main session.
 
 ## Benefit
 
+The following is the expected architectural benefit. Automated tests can prove
+that declarations remain byte-stable, but they cannot prove a provider-level
+cache-hit or latency improvement. Those outcomes must be measured during a
+controlled rollout and are not merge-time claims.
+
 After implementation, discovering a deferred tool no longer changes the main
 session's API tools block. Providers can keep reusing the stable prefix that
 contains `tools/functionDeclarations`, the system instruction, and early
@@ -612,7 +617,7 @@ Provider response:
 functionResponse({ name: "deferred_tool_call", id: originalCallId, ... })
 ```
 
-## Costs and Acceptance Metrics
+## Costs and Validation Gates
 
 - The stable proxy and directly visible `exit_plan_mode` add fixed tokens to
   every normal main-session request.
@@ -624,7 +629,32 @@ functionResponse({ name: "deferred_tool_call", id: originalCallId, ... })
 - Compression and resume may re-append schemas as tail context.
 - The scheduler request identity model becomes slightly richer.
 
-This change should ship only after an A/B report compares:
+### Merge gates
+
+Merging the implementation requires correctness evidence that can be verified
+deterministically in CI:
+
+- byte-level declaration stability tests pass before and after repeated
+  `tool_search` presentations;
+- normalization, authorization, provider response pairing, lifecycle, resume,
+  compression, Core scheduler, and ACP regression tests pass;
+- build, typecheck, formatting, and lint checks pass.
+
+These gates establish implementation correctness and declaration stability.
+They do not establish that any provider will produce more cache hits, lower
+latency, or better end-to-end quality. An A/B performance report is therefore
+not a merge gate.
+
+### Rollout and activation gates
+
+Merging the code does not imply broad activation. Environments that have not
+completed provider/model validation should keep `deferred_tool_call` disabled
+or denied through the existing tool configuration. That path unregisters
+`tool_search` and retains the direct deferred-declaration fallback.
+
+Before expanding activation for a provider/model combination, the rollout owner
+must define acceptable regression thresholds, run a representative baseline
+and proxy-enabled comparison, and review raw measurements for:
 
 - serialized declaration bytes before and after repeated searches;
 - cached input tokens or cache-read ratio;
@@ -634,9 +664,14 @@ This change should ship only after an A/B report compares:
 - target validation retry rate;
 - behavior after compression and resume.
 
-Byte stability is a hard acceptance requirement. Cache and quality metrics
-depend on the provider/model, so the report should include raw measurements
-instead of assuming that stable schema necessarily yields a net benefit.
+Activation should expand only when declaration stability is preserved and the
+report shows an acceptable cache/latency benefit without a material regression
+in tool-call success, validation retries, compression, or resume behavior. If
+the comparison is neutral, inconclusive, or regressive, keep the proxy disabled
+for that provider/model and use the direct fallback. Because cache and quality
+metrics depend on the provider, model, and workload, the report must identify
+those dimensions and include raw measurements rather than assuming that stable
+schema necessarily yields a net benefit.
 
 ## Security Analysis
 
@@ -699,7 +734,9 @@ instead of assuming that stable schema necessarily yields a net benefit.
    clear, and MCP lifecycle.
 9. Run provider conversion tests, scheduler tests, ACP targeted tests, build,
    and typecheck.
-10. Collect cache/quality A/B reports before rollout.
+10. Keep the proxy disabled in unvalidated rollout environments; collect and
+    review provider/model-specific cache and quality A/B reports before broader
+    activation.
 
 ## Test Plan
 
