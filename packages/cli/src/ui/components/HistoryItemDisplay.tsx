@@ -63,7 +63,11 @@ import { useSettings } from '../contexts/SettingsContext.js';
 import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import type { MouseEvent } from '../utils/mouse.js';
-import { measureElementPosition } from '../utils/measure-element-position.js';
+import {
+  measureElementPosition,
+  layoutRowForEvent,
+} from '../utils/measure-element-position.js';
+import { useTerminalSize } from '../hooks/useTerminalSize.js';
 
 interface HistoryItemDisplayProps {
   item: HistoryItem;
@@ -117,12 +121,7 @@ const ClickableThinkMessage: React.FC<{
   onToggle,
 }) => {
   const ref = useRef<DOMElement>(null);
-  // Click toggles the thought's inline expansion in place (it then scrolls
-  // with the conversation). Click needs SGR mouse tracking; useMouseEvents
-  // enables it only in VP mode (no `bypassVpGate`), so in non-VP the handler
-  // stays dormant and native scrollback is preserved — the block still toggles
-  // via Alt+T. Advertise "click" in the collapsed hint only in VP, where the
-  // click actually does something.
+  const { rows: terminalHeight } = useTerminalSize();
   const settings = useSettings();
   const clickable = !!settings.merged.ui?.useTerminalBuffer;
   const isActive = !isPending;
@@ -133,7 +132,7 @@ const ClickableThinkMessage: React.FC<{
         if (event.name !== 'left-press' || !ref.current) return;
         const metrics = measureElementPosition(ref.current);
         const col = event.col - 1;
-        const row = event.row - 1;
+        const row = layoutRowForEvent(ref.current, event.row, terminalHeight);
         if (
           col >= metrics.x &&
           col < metrics.x + metrics.width &&
@@ -143,7 +142,7 @@ const ClickableThinkMessage: React.FC<{
           onToggle();
         }
       },
-      [onToggle],
+      [onToggle, terminalHeight],
     ),
     { isActive },
   );

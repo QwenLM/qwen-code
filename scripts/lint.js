@@ -10,7 +10,7 @@ import { execSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 
 const ACTIONLINT_VERSION = '1.7.12';
 const SHELLCHECK_VERSION = '0.11.0';
@@ -87,7 +87,7 @@ const platformArch = getPlatformArch();
  */
 const LINTERS = {
   actionlint: {
-    check: 'command -v actionlint',
+    check: `test "$(actionlint -version 2>/dev/null)" = "${ACTIONLINT_VERSION}"`,
     installer: `
       mkdir -p "${TEMP_DIR}/actionlint"
       curl -sSLo "${TEMP_DIR}/.actionlint.tgz" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_${platformArch.actionlint}.tar.gz"
@@ -106,7 +106,7 @@ const LINTERS = {
     `,
   },
   shellcheck: {
-    check: 'command -v shellcheck',
+    check: `test "$(shellcheck --version 2>/dev/null | awk '/^version:/ { print $2 }')" = "${SHELLCHECK_VERSION}"`,
     installer: `
       mkdir -p "${TEMP_DIR}/shellcheck"
       curl -sSLo "${TEMP_DIR}/.shellcheck.txz" "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.${platformArch.shellcheck}.tar.xz"
@@ -125,23 +125,42 @@ const LINTERS = {
     `,
   },
   yamllint: {
-    check: 'command -v yamllint',
-    installer: `pip3 install --user "yamllint==${YAMLLINT_VERSION}"`,
+    check: `test "$(yamllint --version 2>/dev/null)" = "yamllint ${YAMLLINT_VERSION}"`,
+    installer: `python3 -m pip install --target "${TEMP_DIR}/yamllint" "yamllint==${YAMLLINT_VERSION}"`,
     run: "git ls-files | grep -E '\\.(yaml|yml)' | xargs yamllint --format github",
   },
 };
 
+export function createLinterEnvironment({
+  cwd = process.cwd(),
+  env = process.env,
+  tempDir = TEMP_DIR,
+} = {}) {
+  const yamllintTarget = join(tempDir, 'yamllint');
+  return {
+    ...env,
+    PIP_CONFIG_FILE: '/dev/null',
+    PIP_REQUIRE_VIRTUALENV: 'false',
+    PIP_USER: 'false',
+    PATH: [
+      join(cwd, 'node_modules', '.bin'),
+      join(tempDir, 'actionlint'),
+      join(tempDir, 'shellcheck'),
+      join(yamllintTarget, 'bin'),
+      env.PATH,
+    ]
+      .filter(Boolean)
+      .join(delimiter),
+    PYTHONPATH: [yamllintTarget, env.PYTHONPATH]
+      .filter(Boolean)
+      .join(delimiter),
+    PYTHONNOUSERSITE: '1',
+  };
+}
+
 function runCommand(command, stdio = 'inherit') {
   try {
-    const env = { ...process.env };
-    const nodeBin = join(process.cwd(), 'node_modules', '.bin');
-    env.PATH = `${nodeBin}:${TEMP_DIR}/actionlint:${TEMP_DIR}/shellcheck:${env.PATH}`;
-    if (process.platform === 'darwin') {
-      env.PATH = `${env.PATH}:${process.env.HOME}/Library/Python/3.12/bin`;
-    } else if (process.platform === 'linux') {
-      env.PATH = `${env.PATH}:${process.env.HOME}/.local/bin`;
-    }
-    execSync(command, { stdio, env });
+    execSync(command, { stdio, env: createLinterEnvironment() });
     return true;
   } catch (_e) {
     return false;

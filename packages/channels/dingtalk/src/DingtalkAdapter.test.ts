@@ -843,6 +843,110 @@ describe('DingtalkChannel prompt reactions', () => {
   });
 });
 
+describe('DingtalkChannel inbound media', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  function attachImage(
+    channel: DingtalkChannelInstance,
+    envelope: Envelope,
+    downloadCode: string,
+  ): Promise<void> {
+    return (
+      channel as unknown as {
+        attachMedia(
+          envelope: Envelope,
+          downloadCode: string,
+          mediaType: 'image',
+        ): Promise<void>;
+      }
+    ).attachMedia(envelope, downloadCode, 'image');
+  }
+
+  it('refreshes the app access token after its TTL while the stream stays connected', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-14T00:00:00Z'));
+    const channel = createChannel();
+    let tokenCall = 0;
+    const mediaTokens: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+          tokenCall++;
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                errcode: 0,
+                access_token: `app-token-${tokenCall}`,
+                expires_in: 60,
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        if (
+          url === 'https://api.dingtalk.com/v1.0/robot/messageFiles/download'
+        ) {
+          mediaTokens.push(
+            (init?.headers as Record<string, string>)[
+              'x-acs-dingtalk-access-token'
+            ],
+          );
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ downloadUrl: 'https://example.com/image' }),
+              { status: 200 },
+            ),
+          );
+        }
+        return Promise.resolve(
+          new Response(new Uint8Array([1, 2, 3]), {
+            status: 200,
+            headers: { 'content-type': 'image/png' },
+          }),
+        );
+      },
+    );
+    const firstEnvelope = {} as Envelope;
+    const secondEnvelope = {} as Envelope;
+    await attachImage(channel, firstEnvelope, 'download-code-1');
+    vi.advanceTimersByTime(61_000);
+    await attachImage(channel, secondEnvelope, 'download-code-2');
+
+    expect(tokenCall).toBe(2);
+    expect(mediaTokens).toEqual(['app-token-1', 'app-token-2']);
+    expect(firstEnvelope.attachments).toHaveLength(1);
+    expect(secondEnvelope.attachments).toHaveLength(1);
+  });
+
+  it('keeps media attachment best-effort when app token refresh fails', async () => {
+    const channel = createChannel();
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+      new Error(
+        'request failed for https://oapi.dingtalk.com/gettoken?appkey=client-id&appsecret=client-secret',
+      ),
+    );
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    await expect(
+      attachImage(channel, {} as Envelope, 'download-code'),
+    ).resolves.toBeUndefined();
+    expect(stderrSpy).toHaveBeenCalledWith(
+      '[DingTalk:test-dingtalk] Cannot download media: access token refresh failed.\n',
+    );
+    const logged = stderrSpy.mock.calls.map((call) => String(call[0])).join('');
+    expect(logged).toContain(
+      '[DingTalk:test-dingtalk] access token fetch failed.\n',
+    );
+    expect(logged).not.toContain('client-secret');
+  });
+});
+
 describe('DingtalkChannel.isUnroutableGroupMessage', () => {
   it('drops group messages with no conversationId', () => {
     expect(DingtalkChannel.isUnroutableGroupMessage(true, undefined)).toBe(

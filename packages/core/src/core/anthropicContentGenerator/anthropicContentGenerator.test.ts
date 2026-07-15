@@ -2954,6 +2954,272 @@ describe('AnthropicContentGenerator', () => {
   });
 
   describe('generateContentStream', () => {
+    it('emits tool preparation metadata before the complete function call', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      const { getToolCallPreparations } = await import(
+        '../tool-call-preparation.js'
+      );
+      let stopEventReached = false;
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* toolUseStream() {
+          yield {
+            type: 'message_start',
+            message: {
+              id: 'msg-1',
+              model: 'claude-test',
+              usage: { input_tokens: 1 },
+            },
+          };
+          yield {
+            type: 'content_block_start',
+            index: 0,
+            content_block: {
+              type: 'tool_use',
+              id: 'call-1',
+              name: 'read_file',
+              input: {},
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: '{"file_path":',
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: '"a.sql"}',
+            },
+          };
+          yield {
+            get type() {
+              stopEventReached = true;
+              return 'content_block_stop' as const;
+            },
+            index: 0,
+          };
+          yield {
+            type: 'message_delta',
+            delta: { stop_reason: 'tool_use' },
+            usage: { output_tokens: 5 },
+          };
+          yield { type: 'message_stop' };
+        })(),
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+      const chunks: GenerateContentResponse[] = [];
+      let stopReachedWhenFunctionCallEmitted: boolean | undefined;
+      for await (const chunk of stream) {
+        chunks.push(chunk);
+        if (chunk.functionCalls) {
+          stopReachedWhenFunctionCallEmitted = stopEventReached;
+        }
+      }
+
+      expect(getToolCallPreparations(chunks[0]!)).toEqual([
+        { callId: 'call-1', toolName: 'read_file' },
+      ]);
+      const functionCallChunks = chunks.filter((chunk) => chunk.functionCalls);
+      expect(functionCallChunks).toHaveLength(1);
+      expect(stopReachedWhenFunctionCallEmitted).toBe(true);
+      expect(functionCallChunks[0]!.functionCalls).toEqual([
+        {
+          id: 'call-1',
+          name: 'read_file',
+          args: { file_path: 'a.sql' },
+        },
+      ]);
+    });
+
+    it('emits preparations before both function calls in a multi-tool stream', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      const { getToolCallPreparations } = await import(
+        '../tool-call-preparation.js'
+      );
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* multiToolStream() {
+          yield {
+            type: 'content_block_start',
+            index: 0,
+            content_block: {
+              type: 'tool_use',
+              id: 'call-1',
+              name: 'read_file',
+              input: {},
+            },
+          };
+          yield {
+            type: 'content_block_start',
+            index: 1,
+            content_block: {
+              type: 'tool_use',
+              id: 'call-2',
+              name: 'run_shell_command',
+              input: {},
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: '{"file_path":"a.sql"}',
+            },
+          };
+          yield { type: 'content_block_stop', index: 0 };
+          yield {
+            type: 'content_block_delta',
+            index: 1,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: '{"command":"pwd"}',
+            },
+          };
+          yield { type: 'content_block_stop', index: 1 };
+        })(),
+      );
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+      const chunks: GenerateContentResponse[] = [];
+      for await (const chunk of stream) {
+        chunks.push(chunk);
+      }
+
+      const preparations = chunks.flatMap((chunk, index) =>
+        getToolCallPreparations(chunk).map((preparation) => ({
+          ...preparation,
+          index,
+        })),
+      );
+      const functionCalls = chunks.flatMap((chunk, index) =>
+        (chunk.functionCalls ?? []).map((functionCall) => ({
+          ...functionCall,
+          index,
+        })),
+      );
+      expect(preparations).toEqual([
+        { callId: 'call-1', toolName: 'read_file', index: 0 },
+        { callId: 'call-2', toolName: 'run_shell_command', index: 1 },
+      ]);
+      expect(functionCalls).toEqual([
+        {
+          id: 'call-1',
+          name: 'read_file',
+          args: { file_path: 'a.sql' },
+          index: 2,
+        },
+        {
+          id: 'call-2',
+          name: 'run_shell_command',
+          args: { command: 'pwd' },
+          index: 3,
+        },
+      ]);
+    });
+
+    it.each([
+      { label: 'id is missing', contentBlock: { name: 'read_file' } },
+      { label: 'name is missing', contentBlock: { id: 'call-1' } },
+      {
+        label: 'id is empty',
+        contentBlock: { id: '', name: 'read_file' },
+      },
+      {
+        label: 'name is empty',
+        contentBlock: { id: 'call-1', name: '' },
+      },
+      {
+        label: 'id is not a string',
+        contentBlock: { id: 42, name: 'read_file' },
+      },
+      {
+        label: 'name is not a string',
+        contentBlock: { id: 'call-1', name: 42 },
+      },
+    ])(
+      'does not emit tool preparation metadata when $label',
+      async ({ contentBlock }) => {
+        const { AnthropicContentGenerator } = await importGenerator();
+        const { getToolCallPreparations } = await import(
+          '../tool-call-preparation.js'
+        );
+        anthropicState.createImpl.mockResolvedValue(
+          (async function* toolUseStream() {
+            yield {
+              type: 'content_block_start',
+              index: 0,
+              content_block: {
+                type: 'tool_use',
+                ...contentBlock,
+                input: {},
+              },
+            };
+            yield { type: 'content_block_stop', index: 0 };
+          })(),
+        );
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'claude-test',
+            apiKey: 'test-key',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: { max_tokens: 100 },
+            schemaCompliance: 'auto',
+          },
+          mockConfig,
+        );
+
+        const stream = await generator.generateContentStream({
+          model: 'models/ignored',
+          contents: 'Hello',
+        } as unknown as GenerateContentParameters);
+        const chunks: GenerateContentResponse[] = [];
+        for await (const chunk of stream) {
+          chunks.push(chunk);
+        }
+
+        expect(
+          chunks.every((chunk) => getToolCallPreparations(chunk).length === 0),
+        ).toBe(true);
+      },
+    );
+
     it('redacts proxy credentials from stream creation errors', async () => {
       const { AnthropicContentGenerator } = await importGenerator();
       anthropicState.createImpl.mockRejectedValue(
@@ -3203,8 +3469,9 @@ describe('AnthropicContentGenerator', () => {
         thoughtSignature: 'abc',
       });
 
-      // Tool call chunk.
-      expect(chunks[3]?.candidates?.[0]?.content?.parts?.[0]).toEqual({
+      // The preparation-only chunk precedes the complete tool call chunk.
+      expect(chunks[3]?.functionCalls).toBeUndefined();
+      expect(chunks[4]?.candidates?.[0]?.content?.parts?.[0]).toEqual({
         functionCall: { id: 't1', name: 'tool', args: { x: 1 } },
       });
 

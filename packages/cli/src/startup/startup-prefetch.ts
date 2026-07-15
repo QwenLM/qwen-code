@@ -14,6 +14,12 @@ import type { LoadedSettings } from '../config/settings.js';
 import { preconnectApi } from '../utils/apiPreconnect.js';
 import { AppEvent, appEvents } from '../utils/events.js';
 import { recordStartupEvent } from '../utils/startupProfiler.js';
+import {
+  CUSTOM_SANDBOX_IMAGE_ENV_VAR,
+  HOST_UPDATE_RELAUNCH_ENV_VAR,
+  SKIP_UPDATE_CHECK_ENV_VAR,
+  requestUpdateOnExit,
+} from '../utils/processUtils.js';
 
 const debugLogger = createDebugLogger('STARTUP_PREFETCH');
 
@@ -146,16 +152,22 @@ export function startPostRenderPrefetches(
   if (postRenderStarted.has(config)) return;
   postRenderStarted.add(config);
 
-  if (settings.merged.general?.enableAutoUpdate !== false) {
+  if (
+    settings.merged.general?.enableAutoUpdate !== false &&
+    process.env[SKIP_UPDATE_CHECK_ENV_VAR] !== 'true' &&
+    !process.env[CUSTOM_SANDBOX_IMAGE_ENV_VAR]
+  ) {
     runDeferredTask('update_check', async () => {
       const [
         { checkForUpdatesDetailed },
         { handleAutoUpdate },
+        { getInstallationInfo },
         { updateEventEmitter },
         { t },
       ] = await Promise.all([
         import('../ui/utils/updateCheck.js'),
         import('../utils/handleAutoUpdate.js'),
+        import('../utils/installationInfo.js'),
         import('../utils/updateEventEmitter.js'),
         import('../i18n/index.js'),
       ]);
@@ -165,7 +177,45 @@ export function startPostRenderPrefetches(
       try {
         const result = await checkForUpdatesDetailed();
         if (result.status === 'update') {
-          handleAutoUpdate(result.info, settings, config.getProjectRoot());
+          const projectRoot = config.getProjectRoot();
+          const hostUpdateRelaunch = process.env[HOST_UPDATE_RELAUNCH_ENV_VAR];
+          if (hostUpdateRelaunch === 'true') {
+            updateEventEmitter.emit('update-info', {
+              message: `${result.info.message}\n${t(
+                'Run /update to install the update on the host.',
+              )}`,
+            });
+            return;
+          }
+          if (hostUpdateRelaunch === 'false') {
+            updateEventEmitter.emit('update-info', {
+              message: `${result.info.message}\n${t(
+                'Update Qwen Code on the host, then restart the sandbox.',
+              )}`,
+            });
+            return;
+          }
+          const installationInfo = getInstallationInfo(projectRoot, true);
+          if (
+            installationInfo.updateCommand ||
+            (installationInfo.isStandalone && installationInfo.standaloneDir)
+          ) {
+            if (requestUpdateOnExit()) {
+              updateEventEmitter.emit('update-info', {
+                message: `${result.info.message}\n${t(
+                  'The update will be installed after you exit this session.',
+                )}`,
+              });
+            } else {
+              updateEventEmitter.emit('update-info', {
+                message: `${result.info.message}\n${t(
+                  'Run /update to install the update.',
+                )}`,
+              });
+            }
+          } else {
+            void handleAutoUpdate(result.info, settings, projectRoot);
+          }
         } else if (result.status === 'error') {
           updateEventEmitter.emit('update-failed', {
             message: updateFailedMessage,

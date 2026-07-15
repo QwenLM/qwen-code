@@ -13,6 +13,7 @@ import { ToolMessage } from './ToolMessage.js';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import {
   CompactToolGroupDisplay,
+  estimateCompactToolGroupHeight,
   isCollapsibleTool,
 } from './CompactToolGroupDisplay.js';
 import { InlineParallelAgentsDisplay } from './InlineParallelAgentsDisplay.js';
@@ -432,7 +433,10 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   }
 
   // Full expanded view for non-collapsible tools
-  const collapsibleSummaryHeight = collapsibleTools.length > 0 ? 1 : 0;
+  const collapsibleSummaryHeight = estimateCompactToolGroupHeight(
+    collapsibleTools,
+    contentWidth,
+  );
   const memoryBadgeHeight = hasMemoryBadge ? 1 : 0;
   const staticHeight =
     /* marginBottom */ 1 + collapsibleSummaryHeight + memoryBadgeHeight;

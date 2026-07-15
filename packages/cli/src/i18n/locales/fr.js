@@ -2187,6 +2187,16 @@ export default {
     'Impossible de mettre à jour automatiquement cette installation autonome. Veuillez réinstaller depuis :',
   'Manual update required. Please reinstall Qwen Code.':
     'Mise à jour manuelle requise. Veuillez réinstaller Qwen Code.',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    'Cette session utilise l’image de bac à sable personnalisée {{image}}. Mettez à jour l’image et redémarrez Qwen Code.',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    'Mettez à jour Qwen Code sur l’hôte, puis redémarrez le bac à sable.',
+  'The update will be installed after you exit this session.':
+    'La mise à jour sera installée après la fermeture de cette session.',
+  'Run /update to install the update on the host.':
+    'Exécutez /update pour installer la mise à jour sur l’hôte.',
+  'Run /update to install the update.':
+    'Exécutez /update pour installer la mise à jour.',
 
   // ============================================================================
   // reload-plugins command

@@ -89,20 +89,41 @@ Controls how conversation sessions are managed:
 
 ### Channel Memory
 
-Channel memory lets accepted channel senders save stable context for one chat or thread. Qwen Code injects that memory when a fresh channel session starts, including after `/clear`.
+Channel memory stores durable context for one chat or thread. Entries have stable
+IDs, so a list response can be used for deterministic follow-up operations.
 
-Natural-language examples:
+- `记住：默认使用 staging 环境` saves a new entry for the current chat or
+  thread.
+- `查看记忆` lists entries and their stable IDs. Use `查看第 2 页记忆` to view
+  a later page, or `查看记忆 <id>` to view one entry.
+- `把 <id> 改成默认使用 production` updates that entry immediately, and
+  `忘掉 <id>` removes it immediately. Neither operation needs confirmation.
+- `清空记忆` starts the clear-all confirmation flow; `确认清空记忆` completes
+  it.
 
-- `记住：默认使用 staging 环境` saves memory for the current chat or thread.
-- `你记一下以后回复前要说 1122` saves the extracted durable memory.
-- `你现在都记住了什么` shows saved memory for the current chat or thread.
-- `把这个聊天的记忆清空` starts the clear flow; `确认清空记忆` confirms it.
+Update and removal requests must include an entry ID. Natural-language
+references without an ID, such as "忘掉刚才那条", are deferred to a later phase
+and are not treated as deterministic channel-memory operations.
 
-Channel memory follows the channel access gates. Any message accepted by `senderPolicy`, `dmPolicy`, `groupPolicy`, group settings, pairing, and mention requirements can read, write, or clear memory for that chat or thread.
+The legacy slash aliases `/remember-channel`, `/channel-memory`, and
+`/forget-channel` have been removed. They are no longer channel-memory
+commands.
 
-In open groups, any accepted member can update shared channel memory for that group. Use `allowlist` or `pairing` policies when memory should be limited to trusted senders.
+Channel memory follows the channel access gates. Any message accepted by
+`senderPolicy`, `dmPolicy`, `groupPolicy`, group settings, pairing, and mention
+requirements can read, write, update, or clear memory for that chat or thread.
+Accepted members of the same group share that group's target store. Use
+`allowlist` or `pairing` policies when group memory should be limited to trusted
+senders.
 
-Memory is keyed to the current chat or thread, so it is not injected into `single` session scope, where every chat shares one channel-wide agent session.
+Existing legacy `CHANNEL.md` memory is migrated automatically to structured
+`CHANNEL.json` storage on the first mutation. Structured memory persists across
+standalone channel and daemon-managed channel restarts, and is injected when a
+fresh target-scoped session starts, including after `/clear`.
+
+Memory remains keyed to the current chat or thread. It is not injected into a
+`sessionScope: single` session, because that session is shared across the whole
+channel rather than scoped to one target.
 
 ### Token Security
 

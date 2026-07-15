@@ -33,6 +33,8 @@ const mockHandleListExtensions = vi.hoisted(() => vi.fn());
 const mockStartEarlyStartupPrefetches = vi.hoisted(() => vi.fn());
 const mockStartPostRenderPrefetches = vi.hoisted(() => vi.fn());
 const mockRunAcpAgent = vi.hoisted(() => vi.fn());
+const mockUpdateBeforeRelaunch = vi.hoisted(() => vi.fn());
+const mockGetInstallationInfo = vi.hoisted(() => vi.fn());
 const lspConfigWatcherMock = vi.hoisted(() => ({
   instances: [] as Array<{
     listener?: (event: unknown) => void | Promise<void>;
@@ -159,6 +161,15 @@ vi.mock('./startup/startup-prefetch.js', () => ({
     mockStartPostRenderPrefetches(...args),
 }));
 
+vi.mock('./utils/update-relaunch.js', () => ({
+  updateBeforeRelaunch: (...args: unknown[]) =>
+    mockUpdateBeforeRelaunch(...args),
+}));
+
+vi.mock('./utils/installationInfo.js', () => ({
+  getInstallationInfo: (...args: unknown[]) => mockGetInstallationInfo(...args),
+}));
+
 vi.mock('./acp-integration/acpAgent.js', () => ({
   runAcpAgent: (...args: unknown[]) => mockRunAcpAgent(...args),
 }));
@@ -231,6 +242,10 @@ describe('gemini.tsx main function', () => {
 
   beforeEach(() => {
     lspConfigWatcherMock.instances.length = 0;
+    mockUpdateBeforeRelaunch.mockResolvedValue(true);
+    mockGetInstallationInfo.mockReturnValue({
+      updateCommand: 'npm install -g @qwen-code/qwen-code@latest',
+    });
     // Store and clear sandbox-related env variables to ensure a consistent test environment
     originalEnvGeminiSandbox = process.env['QWEN_SANDBOX'];
     originalEnvSandbox = process.env['SANDBOX'];
@@ -341,6 +356,11 @@ describe('gemini.tsx main function', () => {
     // For the sandbox case we still have to load a partial cli config.
     // we can authorize outside the sandbox.
     expect(callOrder).toEqual(['relaunch', 'loadCliConfig']);
+    expect(relaunchAppInChildProcess).toHaveBeenCalledWith(
+      expect.any(Array),
+      [],
+      expect.objectContaining({ onUpdateRelaunch: expect.any(Function) }),
+    );
     processExitSpy.mockRestore();
   });
 
@@ -388,6 +408,45 @@ describe('gemini.tsx main function', () => {
     expect(loadCliConfig).not.toHaveBeenCalled();
 
     processExitSpy.mockRestore();
+  });
+
+  it('scrubs Electron node bootstrap env before ACP startup', async () => {
+    const originalElectronRunAsNode = process.env['ELECTRON_RUN_AS_NODE'];
+    const originalScrubMarker =
+      process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'];
+    process.env['ELECTRON_RUN_AS_NODE'] = '1';
+    process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] = '1';
+
+    const { parseArguments } = await import('./config/config.js');
+    const { loadSettings } = await import('./config/settings.js');
+
+    vi.mocked(parseArguments).mockResolvedValue({
+      acp: true,
+      experimentalAcp: undefined,
+    } as unknown as CliArgs);
+    vi.mocked(loadSettings).mockImplementation(() => {
+      expect(process.env['ELECTRON_RUN_AS_NODE']).toBeUndefined();
+      expect(
+        process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'],
+      ).toBeUndefined();
+      throw new Error('stop after scrub');
+    });
+
+    try {
+      await expect(main()).rejects.toThrow('stop after scrub');
+    } finally {
+      if (originalElectronRunAsNode === undefined) {
+        delete process.env['ELECTRON_RUN_AS_NODE'];
+      } else {
+        process.env['ELECTRON_RUN_AS_NODE'] = originalElectronRunAsNode;
+      }
+      if (originalScrubMarker === undefined) {
+        delete process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'];
+      } else {
+        process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] =
+          originalScrubMarker;
+      }
+    }
   });
 
   it('should skip full settings discovery in bare mode', async () => {
@@ -793,6 +852,7 @@ describe('gemini.tsx main function', () => {
   const runSandboxRelaunch = async (
     argv: string[],
     sessionId = '123e4567-e89b-12d3-a456-426614174000',
+    command: 'docker' | 'podman' | 'sandbox-exec' = 'sandbox-exec',
     acp = false,
   ): Promise<string[]> => {
     const originalArgv = process.argv;
@@ -809,8 +869,10 @@ describe('gemini.tsx main function', () => {
     const { loadSettings } = await import('./config/settings.js');
     const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
     const { start_sandbox } = await import('./utils/sandbox.js');
+    const { relaunchOnExitCode } = await import('./utils/relaunch.js');
 
     vi.mocked(start_sandbox).mockClear();
+    vi.mocked(relaunchOnExitCode).mockClear();
     vi.mocked(parseArguments).mockResolvedValue({
       debug: true,
       prompt: 'hello',
@@ -831,8 +893,8 @@ describe('gemini.tsx main function', () => {
       getProjectHooks: () => undefined,
     } as never);
     vi.mocked(loadSandboxConfig).mockResolvedValue({
-      command: 'sandbox-exec',
-      image: '',
+      command,
+      image: 'ghcr.io/qwenlm/qwen-code:1.0.0',
     });
     vi.mocked(loadCliConfig).mockResolvedValue({
       getModelsConfig: () => ({ getCurrentAuthType: () => null }),
@@ -851,6 +913,9 @@ describe('gemini.tsx main function', () => {
     }
 
     expect(start_sandbox).toHaveBeenCalledOnce();
+    expect(relaunchOnExitCode).toHaveBeenCalledWith(expect.any(Function), {
+      onUpdateRelaunch: expect.any(Function),
+    });
     return vi.mocked(start_sandbox).mock.calls[0]![3]!;
   };
 
@@ -876,6 +941,7 @@ describe('gemini.tsx main function', () => {
       await runSandboxRelaunch(
         ['node', 'script.js', '--acp'],
         '123e4567-e89b-12d3-a456-426614174000',
+        'sandbox-exec',
         true,
       );
       const { start_sandbox } = await import('./utils/sandbox.js');
@@ -888,6 +954,40 @@ describe('gemini.tsx main function', () => {
         delete process.env[envName];
       } else {
         process.env[envName] = originalCapability;
+      }
+    }
+  });
+
+  it('starts a fresh CLI after the host update completes', async () => {
+    await runSandboxRelaunch(['node', 'script.js', '--debug', '-p', 'hello']);
+    const { relaunchOnExitCode } = await import('./utils/relaunch.js');
+    const [, options] = vi.mocked(relaunchOnExitCode).mock.calls[0]!;
+
+    await expect(options?.onUpdateRelaunch?.()).resolves.toBe(44);
+
+    expect(mockUpdateBeforeRelaunch).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes host update capability into a container sandbox', async () => {
+    const originalCapability = process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH'];
+
+    try {
+      await runSandboxRelaunch(
+        ['node', 'script.js', '--debug', '-p', 'hello'],
+        '',
+        'docker',
+      );
+
+      expect(mockGetInstallationInfo).toHaveBeenCalledWith(
+        expect.any(String),
+        true,
+      );
+      expect(process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH']).toBe('true');
+    } finally {
+      if (originalCapability === undefined) {
+        delete process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH'];
+      } else {
+        process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH'] = originalCapability;
       }
     }
   });
