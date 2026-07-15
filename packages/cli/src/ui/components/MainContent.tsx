@@ -5,7 +5,15 @@
  */
 
 import { Box, Static } from 'ink';
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  memo,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 import { isHistoryItemVisibleAfterRestore } from '../types.js';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
@@ -13,6 +21,7 @@ import { ShowMoreLines } from './ShowMoreLines.js';
 import { Notifications } from './Notifications.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
+import { SettingsContext } from '../contexts/SettingsContext.js';
 import { useAppContext } from '../contexts/AppContext.js';
 import { AppHeader } from './AppHeader.js';
 import { DebugModeNotification } from './DebugModeNotification.js';
@@ -136,6 +145,11 @@ export const MainContent = () => {
   // useMemo keeps it cheap when nothing changes.
   const useVirtualScroll = uiState.useTerminalBuffer;
   const scrollRef = useRef<ScrollableListRef<VpItem>>(null);
+  const settings = useContext(SettingsContext);
+  const textSelectionEnabled =
+    settings?.merged.ui?.textSelection?.enabled ?? true;
+  const textSelectionCopyOnSelect =
+    settings?.merged.ui?.textSelection?.copyOnSelect ?? true;
 
   const { historyItemsWithSourceCopyOffsets, pendingStartSourceCopyOffsets } =
     useMemo(() => {
@@ -429,8 +443,8 @@ export const MainContent = () => {
           showScrollbar={showScrollbar}
         />
         <TextSelectionController
-          isActive={!uiState.dialogsVisible}
-          copyOnSelect={true}
+          isActive={!uiState.dialogsVisible && textSelectionEnabled}
+          copyOnSelect={textSelectionCopyOnSelect}
           getViewportRect={() => scrollRef.current?.getViewportRect() ?? null}
           getScrollState={() =>
             scrollRef.current?.getScrollState() ?? {

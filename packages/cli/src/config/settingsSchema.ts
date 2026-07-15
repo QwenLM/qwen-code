@@ -1021,6 +1021,38 @@ const SETTINGS_SCHEMA = {
           'Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled; for native text selection, hold Shift (or Option on macOS) while dragging.',
         showInDialog: true,
       },
+      textSelection: {
+        type: 'object',
+        label: 'Mouse Text Selection (Virtualized History)',
+        category: 'UI',
+        requiresRestart: false,
+        default: {},
+        description:
+          'Mouse text selection in the virtualized-history viewport: drag to select, double/triple click to select a word/line, and copy. Only applies when Virtualized History is enabled.',
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: 'boolean',
+            label: 'Enable Mouse Text Selection',
+            category: 'UI',
+            requiresRestart: false,
+            default: true,
+            description:
+              'Select text with the mouse in the virtualized-history viewport. Disable to leave the mouse to the terminal.',
+            showInDialog: true,
+          },
+          copyOnSelect: {
+            type: 'boolean',
+            label: 'Copy on Select',
+            category: 'UI',
+            requiresRestart: false,
+            default: true,
+            description:
+              'Copy the selection to the clipboard automatically when the mouse is released.',
+            showInDialog: true,
+          },
+        },
+      },
       showScrollbar: {
         type: 'boolean',
         label: 'Show Scrollbar (Virtualized History)',
