@@ -43,6 +43,10 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     model: 'test-model',
     usageStatisticsEnabled: false,
     bareMode: true,
+    // Pin a DEFAULT baseline: these tests exercise override isolation and the
+    // DEFAULT→AUTO rule strip/restore transitions, so they must not depend on
+    // the constructor's default approval mode (which is now AUTO).
+    approvalMode: ApprovalMode.DEFAULT,
   };
 
   async function createParentWithRegistry(): Promise<Config> {

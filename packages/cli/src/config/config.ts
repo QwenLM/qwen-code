@@ -1607,8 +1607,13 @@ export async function loadCliConfig(
     approvalMode = ApprovalMode.YOLO;
   } else if (!bareMode && !safeMode && settings.tools?.approvalMode) {
     approvalMode = parseApprovalModeValue(settings.tools.approvalMode);
-  } else {
+  } else if (bareMode || safeMode) {
+    // Restricted modes strip permissions/allowlists and are meant to be
+    // maximally restrictive, so they keep manual approval rather than the
+    // AUTO default that normal sessions now get.
     approvalMode = ApprovalMode.DEFAULT;
+  } else {
+    approvalMode = ApprovalMode.AUTO;
   }
 
   // Force approval mode to default if the folder is not trusted.

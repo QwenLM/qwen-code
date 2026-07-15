@@ -1101,7 +1101,7 @@
             "auto",
             "yolo"
           ],
-          "default": "default"
+          "default": "auto"
         },
         "autoAccept": {
           "description": "Automatically accept and execute tool calls that are considered safe (e.g., read-only operations) without explicit user confirmation.",
