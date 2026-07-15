@@ -20,6 +20,8 @@ import {
   mkdtempSync,
   rmSync,
   writeFileSync,
+  readFileSync,
+  existsSync,
   mkdirSync,
   utimesSync,
 } from 'node:fs';
@@ -29,6 +31,8 @@ import {
   coverageFromTranscripts,
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
+import { promptRecordDir, briefPath } from './lib/prompt-record.js';
+import { requiredAgents, type RosterPlan } from './lib/roster.js';
 
 let dir: string;
 let ENV: NodeJS.ProcessEnv;
@@ -42,13 +46,30 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-/** A plan with `n` chunks, backdated so every transcript counts as newer. */
-function plan(n = 2): string {
+/**
+ * A plan with `n` chunks, backdated so every transcript counts as newer.
+ *
+ * It also lays down the prompt record `agent-prompt` would have written for each
+ * chunk, because that is the state of a run that used the command it was told to
+ * use. Pass `{ record: false }` for a run that hand-wrote its prompts instead.
+ */
+function plan(
+  n = 2,
+  opts: { record?: boolean; roster?: boolean } = {},
+): string {
   const p = join(dir, 'plan.json');
   writeFileSync(
     p,
     JSON.stringify({
       diffPathAbsolute: DIFF,
+      // A territory fan-out, captured cross-repo, with no deletions: the smallest
+      // plan whose roster is exactly the chunks plus the test matrix. The fixtures
+      // below are about chunk agents, so this keeps the roster out of their way
+      // without switching it off — a plan that requires nothing is not a plan any
+      // capture command writes.
+      srcDiffLines: 5000,
+      diffLines: 5000,
+      files: [{ path: 'a.ts', kind: 'source', removedLines: 0, heavy: false }],
       chunks: Array.from({ length: n }, (_, i) => ({
         id: i + 1,
         startLine: i * 100 + 1,
@@ -56,18 +77,80 @@ function plan(n = 2): string {
       })),
     }),
   );
+  if (opts.record !== false) {
+    for (let c = 1; c <= n; c++) built(p, c);
+  }
+  if (opts.roster !== false) satisfyRoster(p);
   const old = new Date(2020, 0, 1);
   utimesSync(p, old, old);
   return p;
+}
+
+/**
+ * Build and launch every agent this plan's roster requires that the test has not
+ * already set up itself.
+ *
+ * A run that launched only its chunk agents is a run that skipped the whole-diff
+ * half of the fan-out, and the roster check is right to fail it — so the fixtures
+ * have to look like real runs. These stand-ins name no line ranges, so they grant
+ * no coverage: a review may not certify lines on the strength of "somebody had the
+ * file open".
+ */
+function satisfyRoster(planPath: string): void {
+  const p = JSON.parse(readFileSync(planPath, 'utf8')) as RosterPlan;
+  const d = promptRecordDir(planPath);
+  mkdirSync(d, { recursive: true });
+  for (const req of requiredAgents(p)) {
+    // Not the chunk agents: their prompts are what most of these tests are ABOUT,
+    // and writing one here would quietly satisfy the check a test is trying to fail.
+    if (req.role === 'chunk') continue;
+    const f = join(d, `${encodeURIComponent(req.key)}.txt`);
+    if (existsSync(f)) continue;
+    // The launch prompt POINTS at the brief; the brief is what the agent reads.
+    // Both are written by the CLI, and the agent opening the second is what proves
+    // the instructions arrived — a 4 652-character prompt is not something an
+    // orchestrator pastes twelve times, and the run asked to do so delivered 2 893.
+    const brief = briefPath(planPath, req.key);
+    writeFileSync(brief, `The ${req.key} brief.`);
+    const prompt =
+      `You are ${req.key}.\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    writeFileSync(f, prompt);
+    transcript(`r-${req.key.replace(/[^a-z0-9]/gi, '_')}`, prompt, {
+      calls: 2,
+      opens: [brief],
+    });
+  }
 }
 
 /** Write a transcript the way the harness writes one. */
 function transcript(
   id: string,
   launchPrompt: string,
-  opts: { calls?: number; failed?: boolean; text?: string } = {},
+  opts: {
+    calls?: number;
+    failed?: boolean;
+    text?: string;
+    /**
+     * Paths this agent successfully opened, beyond the diff.
+     *
+     * Defaults to every brief its launch prompt points at — which is what a
+     * compliant agent does, and what the launch prompt exists to make it do. A test
+     * that wants an agent which ignored its brief passes `opens: []`.
+     */
+    opens?: string[];
+  } = {},
 ): void {
   const base = { agentId: id, agentName: 'general-purpose', sessionId: 'S1' };
+  const pointedAtBriefs = [
+    ...launchPrompt.matchAll(/read_file\(file_path="([^"]*\.brief\.md)"\)/g),
+  ].map((m) => m[1]);
+  // An agent that did nothing opened nothing — not even its brief. The default
+  // models a *working* agent, which is the only kind that reads what it is pointed
+  // at; a whiff and a failed run leave the briefs unread, as they do the diff.
+  const working = (opts.calls ?? 0) > 0 && !opts.failed;
+  const opens = opts.opens ?? (working ? pointedAtBriefs : []);
   const lines = [
     JSON.stringify({
       ...base,
@@ -106,6 +189,35 @@ function transcript(
       }),
     );
   }
+  for (const path of opens) {
+    lines.push(
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            { functionCall: { name: 'read_file', args: { file_path: path } } },
+          ],
+        },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: 'brief' },
+              },
+            },
+          ],
+        },
+      }),
+    );
+  }
   lines.push(
     JSON.stringify({
       ...base,
@@ -122,13 +234,93 @@ function transcript(
   );
 }
 
-/** What `agent-prompt` builds: the diff and the read are in it. */
+/**
+ * What `agent-prompt` builds: the diff, and the read of *this* chunk's lines.
+ *
+ * The offsets are the chunk's own, as the real command emits them. The first
+ * version of this helper gave every chunk `offset=0, limit=100` and coverage still
+ * passed, because coverage was attributed from the words `chunk N of 2` and never
+ * looked at the range. That is the same blindness the Step 3A topology walked into
+ * for real: no agent's prompt says `chunk N of M` there, so no chunk was ever
+ * attributed to anyone.
+ */
 const good = (c: number) =>
-  `You are reviewing chunk ${c} of 2.\nread_file(file_path="${DIFF}", offset=0, limit=100)`;
+  `You are reviewing chunk ${c} of 2.\n` +
+  `read_file(file_path="${chunkBrief(c)}")\n` +
+  `read_file(file_path="${DIFF}", offset=${(c - 1) * 100}, limit=100)`;
+
+/** Every plan fixture here writes to the same path, so the brief's is derivable. */
+const chunkBrief = (c: number) =>
+  briefPath(join(dir, 'plan.json'), `chunk-${c}`);
+
+/** What Step 3A hands every dimension agent: the whole diff, chunk by chunk. */
+const wholeDiff = () =>
+  'Security review of the whole diff.\n' +
+  `read_file(file_path="${DIFF}", offset=0, limit=100)\n` +
+  `read_file(file_path="${DIFF}", offset=100, limit=100)`;
 
 /** What the orchestrator actually sent, 23 times: no diff anywhere in it. */
 const blind = (c: number) =>
   `The changes are in chunk ${c} of 2, covering lines 1-100 of the diff.`;
+
+/**
+ * The CLI's own record of the prompt it built — what `agent-prompt` writes and
+ * what the rewrite check reads back. Without it every chunk agent reads as
+ * hand-prompted, which is exactly what the check is for.
+ */
+function built(planPath: string, c: number, prompt = good(c)): void {
+  const d = promptRecordDir(planPath);
+  mkdirSync(d, { recursive: true });
+  writeFileSync(join(d, `chunk-${c}.txt`), prompt);
+  writeFileSync(chunkBrief(c), `The chunk-${c} brief.`);
+}
+
+/** A genuine Step 3A plan: a small source change, every dimension walking it all. */
+function plan3a(): string {
+  const p = join(dir, 'plan.json');
+  writeFileSync(
+    p,
+    JSON.stringify({
+      diffPathAbsolute: DIFF,
+      srcDiffLines: 200,
+      diffLines: 300,
+      files: [{ path: 'a.ts', kind: 'source', removedLines: 0, heavy: false }],
+      chunks: [
+        { id: 1, startLine: 1, endLine: 100 },
+        { id: 2, startLine: 101, endLine: 200 },
+      ],
+    }),
+  );
+  satisfyRoster(p);
+  const old = new Date(2020, 0, 1);
+  utimesSync(p, old, old);
+  return p;
+}
+
+/** A same-repo PR: there is a tree to grep and build, and an issue to check against. */
+function planPr(): string {
+  const p = join(dir, 'plan.json');
+  writeFileSync(
+    p,
+    JSON.stringify({
+      diffPathAbsolute: DIFF,
+      srcDiffLines: 200,
+      diffLines: 300,
+      prNumber: '6766',
+      ownerRepo: 'QwenLM/qwen-code',
+      worktreePath: '.qwen/tmp/review-pr-6766',
+      files: [{ path: 'a.ts', kind: 'source', removedLines: 0, heavy: false }],
+      chunks: [
+        { id: 1, startLine: 1, endLine: 100 },
+        { id: 2, startLine: 101, endLine: 200 },
+      ],
+    }),
+  );
+  satisfyRoster(p);
+  const old = new Date(2020, 0, 1);
+  utimesSync(p, old, old);
+  return p;
+}
 
 describe('coverage — from the harness, not from the caller', () => {
   it('passes when every chunk was read by an agent that opened the diff', () => {
@@ -298,7 +490,14 @@ describe('coverage — from the harness, not from the caller', () => {
         type: 'assistant',
         message: {
           role: 'model',
-          parts: [{ functionCall: { name: 'read_file', args: {} } }],
+          parts: [
+            {
+              functionCall: {
+                name: 'read_file',
+                args: { file_path: DIFF, offset: 0, limit: 100 },
+              },
+            },
+          ],
         },
       }),
       JSON.stringify({
@@ -432,5 +631,303 @@ describe('coverage — from the harness, not from the caller', () => {
     const p = join(dir, 'bad.json');
     writeFileSync(p, JSON.stringify({}));
     expect(() => coverageFromTranscripts(p, ENV)).toThrow(/diffPathAbsolute/);
+  });
+});
+
+// The topology most pull requests get, and the one this file could not see at all.
+describe('Step 3A — dimension agents, no territory, no receipts', () => {
+  it('credits the chunks a whole-diff agent was pointed at and opened', () => {
+    // Not one Step 3A prompt says `chunk N of M` — every dimension agent walks the
+    // whole diff. Attributing coverage from that phrase meant attributing none:
+    // against a real 3A review whose fifteen agents each opened the diff and filed
+    // findings, this returned `0/2 chunk(s) reviewed … Nobody read those lines`,
+    // in the same breath as `16 agent(s) ran; 16 did work`. `compose-review` runs
+    // the same computation, so the verdict was capped away from Approve and the
+    // body it would have POSTED to the PR said nobody had read it.
+    transcript('sec', wholeDiff(), { calls: 8 });
+    transcript('perf', wholeDiff(), { calls: 5 });
+
+    const r = coverageFromTranscripts(plan3a(), ENV);
+    expect(r.coveredChunks).toEqual([1, 2]);
+    expect(r.missingChunks).toEqual([]);
+    expect(r.ok).toBe(true);
+  });
+
+  it('does not credit a chunk to an agent that was never pointed at it', () => {
+    // Half the diff delivered is half the diff reviewed. An agent given only the
+    // first chunk's read does not cover the second by having the file open.
+    transcript(
+      'half',
+      `Security review.\nread_file(file_path="${DIFF}", offset=0, limit=100)`,
+      { calls: 4 },
+    );
+
+    const r = coverageFromTranscripts(plan3a(), ENV);
+    expect(r.coveredChunks).toEqual([1]);
+    expect(r.missingChunks).toEqual([2]);
+    expect(r.ok).toBe(false);
+  });
+});
+
+describe('worked, but not on the diff', () => {
+  it('catches the agent that was pointed at the diff and never opened it', () => {
+    // The old bar was one successful tool call, and a `glob` for test files is a
+    // successful tool call. This agent read the post-change source instead — which
+    // on a diff with deletions shows it precisely nothing: the removed line is not
+    // in that file, and nothing marks where it was.
+    const base = {
+      agentId: 'a1',
+      agentName: 'general-purpose',
+      sessionId: 'S1',
+    };
+    writeFileSync(
+      join(dir, 'subagents', 'S1', 'agent-a1.jsonl'),
+      [
+        JSON.stringify({
+          ...base,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: good(1) }] },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'c1',
+                  name: 'read_file',
+                  args: { file_path: '/src/pay.ts' }, // the source, not the diff
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'c1',
+                  name: 'read_file',
+                  response: { output: 'source bytes' },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'Reviewed chunk 1.' }] },
+        }),
+      ].join('\n') + '\n',
+    );
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.idleAgents).toEqual([]); // it made a successful call
+    expect(r.unopenedAgents).toEqual(['chunk 1']);
+    expect(r.coveredChunks).toEqual([2]);
+    expect(r.ok).toBe(false);
+  });
+});
+
+// The failure no other check in this file can see. Every other question is asked of
+// an agent that ran; an agent that never ran leaves no transcript to ask.
+describe('the roster — who should have been here', () => {
+  it('catches the agent that was never launched at all', () => {
+    // Dogfooded, a real PR review simply never launched Agent 0 — issue fidelity —
+    // and nothing in the run could tell. The other eight dimensions ran and did
+    // real work, so every check passed, and the review certified a diff whose
+    // "does this even fix the thing it claims to" question nobody asked.
+    const p = planPr();
+    // Un-launch one of them: delete its record and its transcript.
+    rmSync(join(promptRecordDir(p), '1c.txt'), { force: true });
+    rmSync(join(dir, 'subagents', 'S1', 'agent-r-1c.jsonl'), { force: true });
+    transcript('sec', wholeDiff(), { calls: 8 }); // somebody covered the chunks
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.missingRoles).toHaveLength(1);
+    expect(r.missingRoles[0]).toContain('Cross-file tracer');
+    expect(r.missingRoles[0]).toContain('--role 1c');
+    expect(r.ok).toBe(false);
+    // And it is not confused with the agents that *did* run.
+    expect(r.idleAgents).toEqual([]);
+    expect(r.coveredChunks).toEqual([1, 2]);
+  });
+
+  it('catches a prompt that was built and then never used', () => {
+    // Half of the failure: the command was called, so the record exists — but the
+    // agent was launched with something else, or not launched at all.
+    const p = plan3a();
+    rmSync(join(dir, 'subagents', 'S1', 'agent-r-2.jsonl'), { force: true });
+    transcript('sec', wholeDiff(), { calls: 8 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.missingRoles).toEqual([
+      'Agent 2: Security — its prompt was built, but no agent was launched with it',
+    ]);
+    expect(r.ok).toBe(false);
+  });
+
+  it('does not demand a build-and-test agent from a diff with no tree to build', () => {
+    // A cross-repo lightweight review has the diff and nothing else. Requiring
+    // Agent 7 or the cross-file tracer of it would fail every such review for not
+    // doing something it cannot do.
+    const p = plan3a();
+    transcript('sec', wholeDiff(), { calls: 8 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.missingRoles).toEqual([]);
+    expect(r.ok).toBe(true);
+    // The same plan WITH a worktree does demand them.
+    expect(
+      requiredAgents(
+        JSON.parse(readFileSync(planPr(), 'utf8')) as RosterPlan,
+      ).map((a) => a.key),
+    ).toEqual(expect.arrayContaining(['0', '1c', '7']));
+  });
+});
+
+describe('the prompt the CLI built, against the prompt the agent got', () => {
+  it('catches a paraphrase — the diff path survives it, so nothing else can', () => {
+    // Dogfooded: the orchestrator called `agent-prompt` for all five chunks and
+    // then rewrote what it printed. The delivered prompt dropped the rule against
+    // reciting a stock sentence, dropped the half-read warning, and replaced the
+    // project's review rules with three sentences of its own — while keeping the
+    // `read_file` line, so every other check in this file passed it.
+    const p = plan();
+    // What the CLI built, in miniature: the read, the rule the whole command
+    // exists to deliver, and the project's rules.
+    built(
+      p,
+      1,
+      `You are reviewing chunk 1 of 2.\n` +
+        `read_file(file_path="${DIFF}", offset=0, limit=100)\n` +
+        `Do not recite a stock sentence: a return that names nothing you read is ` +
+        `indistinguishable from never having read anything.\n` +
+        `## Project rules\nEvery added field must have its read sites grepped.`,
+    );
+    // What the agent got: the read survived, the rules became a summary, and the
+    // sentence that stops a whiff is gone — replaced by a receipt to recite.
+    transcript(
+      'a1',
+      `You are reviewing chunk 1 of 2.\n` +
+        `read_file(file_path="${DIFF}", offset=0, limit=100)\n` +
+        `Project rules: grep read sites. Match house style.\n` +
+        `If you find no issues, say "No issues found — reviewed chunk 1".`,
+      { calls: 3 },
+    );
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.rewrittenPrompts).toEqual([
+      'chunk 1 — launched with a prompt that is not the one the CLI built',
+    ]);
+    // It still read the diff, so the chunk is covered — the review is not blind,
+    // it is unfaithful. Both facts are reported, and the run does not certify.
+    expect(r.coveredChunks).toEqual([1, 2]);
+    expect(r.ok).toBe(false);
+  });
+
+  it('catches a chunk prompt the CLI was never asked to build', () => {
+    const p = plan(2, { record: false });
+    transcript('a1', good(1), { calls: 3 });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.rewrittenPrompts).toHaveLength(2);
+    expect(r.rewrittenPrompts[0]).toContain('`agent-prompt` never ran');
+    expect(r.ok).toBe(false);
+  });
+
+  it('allows a wrapper around the built prompt, but not an edit of it', () => {
+    // Containment, not equality: prefixing "You are reviewing PR #6766." is
+    // harmless, and failing a run over trailing whitespace would teach the reader
+    // to distrust the check.
+    const p = plan();
+    transcript('a1', `Context: PR #6766.\n\n${good(1)}  \n\nGo.`, { calls: 3 });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.rewrittenPrompts).toEqual([]);
+    expect(r.ok).toBe(true);
+  });
+});
+
+describe('an agent that paged its chunk still read it', () => {
+  it('merges paged reads before asking whether a chunk was covered', () => {
+    // The prompt tells an agent to page when a read comes back `isTruncated` — and
+    // an oversized chunk gives it no choice. Two reads of 1-100 and 101-200 are one
+    // walk of 1-200; requiring a single range to contain the chunk would have
+    // contradicted the instruction the same review had just given.
+    const p = plan3a();
+    const brief = briefPath(p, '2');
+    writeFileSync(brief, 'brief');
+    const launch =
+      `Security review.\n` + `read_file(file_path="${brief}")\n` + DIFF;
+    writeFileSync(join(promptRecordDir(p), '2.txt'), launch);
+    // No offsets in the prompt: this agent is credited only by what it READ.
+    const base = {
+      agentId: 'pg',
+      agentName: 'general-purpose',
+      sessionId: 'S1',
+    };
+    const call = (id: string, args: Record<string, unknown>) => [
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [{ functionCall: { id, name: 'read_file', args } }],
+        },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id,
+                name: 'read_file',
+                response: { output: 'bytes' },
+              },
+            },
+          ],
+        },
+      }),
+    ];
+    writeFileSync(
+      join(dir, 'subagents', 'S1', 'agent-pg.jsonl'),
+      [
+        JSON.stringify({
+          ...base,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: launch }] },
+        }),
+        ...call('c0', { file_path: brief }),
+        // chunk 1 is lines 1-100 — read in two pages, neither of which contains it.
+        ...call('c1', { file_path: DIFF, offset: 0, limit: 50 }),
+        ...call('c2', { file_path: DIFF, offset: 50, limit: 50 }),
+        // and chunk 2 (101-200) whole, so the run is complete.
+        ...call('c3', { file_path: DIFF, offset: 100, limit: 100 }),
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'Reviewed.' }] },
+        }),
+      ].join('\n') + '\n',
+    );
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.coveredChunks).toEqual([1, 2]);
+    expect(r.missingChunks).toEqual([]);
   });
 });

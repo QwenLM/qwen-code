@@ -2870,7 +2870,7 @@ describe('loadCliConfig with includeDirectories', () => {
 
     expect(config.getManagedAutoMemoryEnabled()).toBe(true);
     expect(config.getManagedAutoDreamEnabled()).toBe(true);
-    expect(config.getAutoSkillEnabled()).toBe(true);
+    expect(config.getAutoSkillEnabled()).toBe(false);
   });
 
   it('autoSkillConfirm: defaults to true when unset', async () => {

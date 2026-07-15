@@ -114,6 +114,58 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         `--chunk <id>\` and pass it verbatim.`,
     );
   }
+  // The prompt was built in code and then edited on the way to the agent. Nothing
+  // else in the run can see this: a paraphrase keeps the diff path, so every other
+  // check passes.
+  if (report.rewrittenPrompts.length > 0) {
+    writeStderrLine(
+      `ERROR: ${report.rewrittenPrompts.length} agent(s) were not launched with ` +
+        `the prompt this CLI built for them — ${report.rewrittenPrompts.join('; ')}. ` +
+        `\`agent-prompt\` prints a prompt to be passed VERBATIM; a summary of it is ` +
+        `not it. The last run to paraphrase one dropped the rule against reciting a ` +
+        `stock sentence and replaced the project's review rules with three sentences ` +
+        `of its own. Re-run \`qwen review agent-prompt\` and pass its output ` +
+        `unedited — copy it, do not retype it.`,
+    );
+  }
+  // The one failure no other check in this file can see. Every other question is
+  // asked of an agent that ran; an agent that never ran leaves nothing to ask.
+  if (report.missingRoles.length > 0) {
+    writeStderrLine(
+      `ERROR: ${report.missingRoles.length} required agent(s) never ran — ` +
+        `${report.missingRoles.join('; ')}. The roster comes from the plan, not ` +
+        `from anything this run wrote. A dimension nobody reviewed cannot be ` +
+        `certified clean: build each prompt with the call named above and launch ` +
+        `an agent with it, verbatim.`,
+    );
+  }
+  if (report.unreadBriefs.length > 0) {
+    writeStderrLine(
+      `ERROR: ${report.unreadBriefs.length} agent(s) never opened their brief — ` +
+        `${report.unreadBriefs.join('; ')}. The launch prompt points at the brief ` +
+        `instead of containing it, so an agent that did not read it reviewed with ` +
+        `no dimension, no severity definitions and no project rules. Relaunch each ` +
+        `once, with the prompt \`agent-prompt\` printed.`,
+    );
+  }
+  if (report.unopenedAgents.length > 0) {
+    writeStderrLine(
+      `ERROR: ${report.unopenedAgents.length} agent(s) were pointed at diff lines ` +
+        `and never opened the diff — ${report.unopenedAgents.join(', ')}. They made ` +
+        `tool calls, so they are not idle; they simply worked on something else. ` +
+        `Reviewing the post-change source instead of the diff cannot see a deletion ` +
+        `at all. Relaunch each once.`,
+    );
+  }
+  if (report.missingChunks.length > 0) {
+    writeStderrLine(
+      'NOTE: a chunk counts as read when an agent was pointed at its lines AND ' +
+        'the harness recorded that agent opening the diff. An agent handed the ' +
+        'diff with no line ranges covers nothing. Build every whole-diff ' +
+        "agent's prompt with `qwen review agent-prompt --plan <plan> " +
+        '--whole-diff` and paste it verbatim ahead of its brief.',
+    );
+  }
   if (report.idleAgents.length > 0) {
     writeStderrLine(
       `ERROR: ${report.idleAgents.length} agent(s) made no tool call — ` +

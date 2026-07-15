@@ -2202,7 +2202,9 @@ export async function loadCliConfig(
         ? false
         : (settings.memory?.enableTeamMemorySync ?? false),
     enableAutoSkill:
-      bareMode || safeMode ? false : (settings.memory?.enableAutoSkill ?? true),
+      bareMode || safeMode
+        ? false
+        : (settings.memory?.enableAutoSkill ?? false),
     autoSkillConfirm:
       bareMode || safeMode
         ? false

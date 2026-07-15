@@ -1,0 +1,34 @@
+name: 'Web-shell Visuals Cleanup'
+
+# When a PR closes, delete its per-PR visuals asset branch so the `pr-assets/*`
+# refs (one per PR that ever produced a preview) don't accumulate without bound
+# in the base repository. Runs in the base context (pull_request_target) but
+# never checks out or runs PR code — it only deletes one ref by name.
+on:
+  pull_request_target:
+    types:
+      - 'closed'
+
+permissions:
+  contents: 'read'
+
+jobs:
+  delete-asset-branch:
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    steps:
+      - name: 'Delete the PR asset branch'
+        env:
+          # Deleting a ref needs contents:write, which the CI_BOT_PAT carries.
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
+        run: |-
+          set -euo pipefail
+          branch="pr-assets/web-shell-visuals-${PR_NUMBER}"
+          if gh api "repos/${GITHUB_REPOSITORY}/git/refs/heads/${branch}" >/dev/null 2>&1; then
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${branch}"
+            echo "Deleted ${branch}."
+          else
+            echo "No asset branch ${branch}; nothing to delete."
+          fi

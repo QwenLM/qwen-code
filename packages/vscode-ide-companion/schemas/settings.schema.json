@@ -835,7 +835,7 @@
         "enableAutoSkill": {
           "description": "Enable background review for reusable project skills after tool-heavy sessions.",
           "type": "boolean",
-          "default": true
+          "default": false
         },
         "autoSkillConfirm": {
           "description": "Ask for confirmation before auto-generated skills are added to the skill library. When off, auto-skills are saved immediately.",
