@@ -255,4 +255,77 @@ describe('steer + cancel', () => {
     });
     expect(res.status).toBe(409);
   });
+
+  it('concurrent double-cancel: exactly one 200, one 409, one audit row', async () => {
+    const { url, registry, audit } = await setup({ promptDelayMs: 500 });
+    const spawn = await fetch(`${url}/rc/agents`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task: 't' }),
+    });
+    const { agentId } = (await spawn.json()) as { agentId: string };
+
+    const [a, b] = await Promise.all([
+      fetch(`${url}/rc/agents/${agentId}/cancel`, { method: 'POST' }),
+      fetch(`${url}/rc/agents/${agentId}/cancel`, { method: 'POST' }),
+    ]);
+    const statuses = [a.status, b.status].sort();
+    expect(statuses).toEqual([200, 409]);
+
+    const winner = a.status === 200 ? a : b;
+    expect(((await winner.json()) as { status: string }).status).toBe(
+      'cancelled',
+    );
+    const loser = a.status === 200 ? b : a;
+    expect(((await loser.json()) as { code: string }).code).toBe(
+      'agent_not_running',
+    );
+
+    expect(registry.get(agentId)?.status).toBe('cancelled');
+    await waitFor(() =>
+      audit.calls.some((c) => c.action === 'agent_cancelled'),
+    );
+    expect(
+      audit.calls.filter((c) => c.action === 'agent_cancelled'),
+    ).toHaveLength(1);
+  });
+
+  it('steer serialization: two rapid messages hit the daemon sequentially, not overlapping', async () => {
+    const { url } = await setup({ promptDelayMs: 150 });
+    const spawn = await fetch(`${url}/rc/agents`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task: 't' }),
+    });
+    const { agentId, sessionId } = (await spawn.json()) as {
+      agentId: string;
+      sessionId: string;
+    };
+
+    const [m1, m2] = await Promise.all([
+      fetch(`${url}/rc/agents/${agentId}/message`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: 'first' }),
+      }),
+      fetch(`${url}/rc/agents/${agentId}/message`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: 'second' }),
+      }),
+    ]);
+    expect(m1.status).toBe(202);
+    expect(m2.status).toBe(202);
+
+    // Spawn's own prompt + two steers = 3 daemon prompt calls total, all
+    // serialized against the same session.
+    await waitFor(() => (stub!.promptCallLog.length ?? 0) >= 3, 5000);
+    const calls = stub!.promptCallLog
+      .filter((c) => c.sessionId === sessionId)
+      .sort((x, y) => x.startedAt - y.startedAt);
+    expect(calls).toHaveLength(3);
+    for (let i = 1; i < calls.length; i++) {
+      expect(calls[i].startedAt).toBeGreaterThanOrEqual(calls[i - 1].endedAt);
+    }
+  });
 });
