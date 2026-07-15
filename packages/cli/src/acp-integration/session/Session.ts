@@ -131,6 +131,7 @@ import {
   normalizeParts,
   runVisionBridge,
   shouldRunVisionBridge,
+  formatVisionBridgeNotice,
   splitImageParts,
   approxBase64Bytes,
   INVOCATION_CONTEXT_META_KEY,
@@ -6194,7 +6195,7 @@ export class Session implements SessionContext {
     if (bridgeResult.status !== 'skipped' || bridgeResult.egressOccurred) {
       try {
         await this.messageEmitter.emitAgentMessage(
-          this.#formatVisionBridgeNotice(bridgeResult),
+          formatVisionBridgeNotice(bridgeResult),
         );
       } catch (error) {
         debugLogger.debug(
@@ -6334,34 +6335,6 @@ export class Session implements SessionContext {
 
   #formatVoiceBridgeEgressNotice(modelId: string, audioCount: number): string {
     return `Sent ${audioCount} audio file(s) to ${modelId} for transcription, but no transcript was produced.`;
-  }
-
-  #formatVisionBridgeNotice(result: VisionBridgeResult): string {
-    const modelName = result.modelId ?? 'vision model';
-    const target = result.modelEndpoint
-      ? `${modelName} (${result.modelEndpoint})`
-      : modelName;
-    const egressNote = result.egressOccurred
-      ? ` Your image and prompt/context were sent to ${target}.`
-      : '';
-
-    if (result.status === 'failed') {
-      const reason = result.egressOccurred
-        ? 'the vision model request failed'
-        : 'the vision bridge could not run';
-      return `Vision bridge (${modelName}) failed: ${reason}.${egressNote} The image was not interpreted.`;
-    }
-
-    if (result.status === 'skipped') {
-      return `Vision bridge cancelled.${egressNote}`;
-    }
-
-    // On success the image was always sent, so disclose egress unconditionally.
-    const omitted =
-      result.omittedCount > 0
-        ? ` (${result.omittedCount} image(s) omitted)`
-        : '';
-    return `Converted ${result.convertedCount} image(s)${omitted} to text via ${target}. Your image and prompt/context were sent to that model.`;
   }
 
   async #resolveExtensionMentionParts(

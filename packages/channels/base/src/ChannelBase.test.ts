@@ -34,6 +34,7 @@ class TestChannel extends ChannelBase {
   proactiveTargets: SessionTarget[] = [];
   proactiveSupported = false;
   proactiveTargetSupported: boolean | undefined;
+  proactiveWebhookTargetSupported: boolean | undefined;
   sendMessageError?: Error;
   connected = false;
   toolCalls: Array<{ chatId: string; event: unknown }> = [];
@@ -92,6 +93,15 @@ class TestChannel extends ChannelBase {
   protected override supportsProactiveTarget(target: SessionTarget): boolean {
     return (
       this.proactiveTargetSupported ?? super.supportsProactiveTarget(target)
+    );
+  }
+
+  protected override supportsProactiveWebhookTarget(
+    target: SessionTarget,
+  ): boolean {
+    return (
+      this.proactiveWebhookTargetSupported ??
+      super.supportsProactiveWebhookTarget(target)
     );
   }
 
@@ -11142,6 +11152,35 @@ describe('ChannelBase', () => {
         const ch = createChannel({ approvalMode: 'yolo', webhooks });
         ch.proactiveSupported = true;
         ch.proactiveTargetSupported = false;
+
+        await expect(ch.runWebhookTask(webhookTask)).rejects.toThrow(
+          'Channel does not support proactive webhook messages for this chat target.',
+        );
+        expect(bridge.prompt).not.toHaveBeenCalled();
+      });
+
+      it('uses webhook-specific target support independently', async () => {
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValue(
+          'Webhook response.',
+        );
+        const ch = createChannel({ approvalMode: 'yolo', webhooks });
+        ch.proactiveSupported = true;
+        ch.proactiveTargetSupported = false;
+        ch.proactiveWebhookTargetSupported = true;
+
+        await expect(ch.runWebhookTask(webhookTask)).resolves.toBe(
+          'Webhook response.',
+        );
+        expect(ch.proactive).toEqual([
+          { chatId: 'group-1', text: 'Webhook response.' },
+        ]);
+      });
+
+      it('rejects webhook targets when webhook support is more restrictive', async () => {
+        const ch = createChannel({ approvalMode: 'yolo', webhooks });
+        ch.proactiveSupported = true;
+        ch.proactiveTargetSupported = true;
+        ch.proactiveWebhookTargetSupported = false;
 
         await expect(ch.runWebhookTask(webhookTask)).rejects.toThrow(
           'Channel does not support proactive webhook messages for this chat target.',

@@ -153,19 +153,14 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * MCP tool default permission based on trust and annotations:
+   * MCP tool default permission based on trust:
    * - trust: true in a trusted folder → 'allow' (server explicitly trusted by user config)
-   * - readOnlyHint → 'allow'
    * - All other MCP tools → 'ask'
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
     // MCP servers explicitly marked as trusted bypass confirmation,
     // but only when the workspace folder is also trusted (security gate).
     if (this.trust === true && this.cliConfig?.isTrustedFolder()) {
-      return 'allow';
-    }
-    // MCP tools annotated with readOnlyHint: true are safe
-    if (this.annotations?.readOnlyHint === true) {
       return 'allow';
     }
     return 'ask';

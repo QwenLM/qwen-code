@@ -168,6 +168,14 @@
           "type": "boolean",
           "default": true
         },
+        "notificationMode": {
+          "description": "Which unfocused-terminal events fire a bell/OS notification. \"all\" fires on every tool approval prompt AND on task completion (current behavior). \"task-complete\" suppresses the per-approval notification and only fires when a long task returns to idle. Requires `terminalBell` to be enabled; otherwise no notifications fire regardless of mode. Options: all, task-complete",
+          "enum": [
+            "all",
+            "task-complete"
+          ],
+          "default": "all"
+        },
         "preventSystemSleep": {
           "description": "Prevent the system from sleeping while Qwen Code is streaming a model response or executing tools. Idle prompt time and permission prompts do not inhibit sleep.",
           "type": "boolean",

@@ -825,6 +825,54 @@ describe('DiscoveredMCPTool', () => {
       isTrustedFolder: () => isTrusted,
     });
 
+    it.each([
+      {
+        name: 'an untrusted server with readOnlyHint',
+        trust: undefined,
+        isTrustedFolder: true,
+        readOnlyHint: true,
+        expected: 'ask',
+      },
+      {
+        name: 'a trusted server with readOnlyHint in an untrusted folder',
+        trust: true,
+        isTrustedFolder: false,
+        readOnlyHint: true,
+        expected: 'ask',
+      },
+      {
+        name: 'a trusted server with readOnlyHint in a trusted folder',
+        trust: true,
+        isTrustedFolder: true,
+        readOnlyHint: true,
+        expected: 'allow',
+      },
+      {
+        name: 'an untrusted server with readOnlyHint disabled',
+        trust: undefined,
+        isTrustedFolder: true,
+        readOnlyHint: false,
+        expected: 'ask',
+      },
+    ])('should return $expected for $name', async (testCase) => {
+      const annotatedTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        testCase.trust,
+        undefined,
+        mockConfig(testCase.isTrustedFolder) as any,
+        undefined,
+        undefined,
+        undefined,
+        { readOnlyHint: testCase.readOnlyHint },
+      );
+      const invocation = annotatedTool.build({ param: 'mock' });
+      expect(await invocation.getDefaultPermission()).toBe(testCase.expected);
+    });
+
     it('should return allow when trust is true and folder is trusted', async () => {
       const trustedTool = new DiscoveredMCPTool(
         mockCallableToolInstance,
