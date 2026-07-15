@@ -118,10 +118,7 @@ test('renderTable: change table has a row per field, escapes paths in code spans
 
 test('renderTable: empty diff → explicit no-change note (not a blank table)', () => {
   const md = renderTable('health', []);
-  assert.match(
-    md,
-    /No response change against `main`|No response change vs `main`/,
-  );
+  assert.match(md, /No response change vs the PR base/);
   assert.doesNotMatch(md, /\| field \|/);
 });
 

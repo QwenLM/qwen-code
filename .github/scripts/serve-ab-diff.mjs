@@ -124,11 +124,11 @@ export function renderTable(scenario, changes) {
   out.push(`#### \`${scenario}\``);
   out.push('');
   if (changes.length === 0) {
-    out.push('_No response change vs `main`._');
+    out.push('_No response change vs the PR base._');
     out.push('');
     return out.join('\n');
   }
-  out.push('| field | main (before) | this PR (after) |');
+  out.push('| field | PR base (before) | this PR (after) |');
   out.push('| --- | --- | --- |');
   for (const c of changes) {
     const before = c.kind === 'added' ? '—' : fmt(c.before);
