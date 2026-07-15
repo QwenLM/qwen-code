@@ -17,6 +17,7 @@ import { PairingService } from '../pairing.js';
 import { AgentRegistry } from './agentRegistry.js';
 import { startStubDaemon, type StubDaemon } from '../testing/stubDaemon.js';
 import type { OwnerEvent } from '../ownerEvents.js';
+import type { GatewayEvent } from '../routes/promptEventBroadcaster.js';
 
 let server: Server | undefined;
 let stub: StubDaemon | undefined;
@@ -49,6 +50,11 @@ describe('agent observability end-to-end (spawn → frames → cancel)', () => {
     });
     const frames: OwnerEvent[] = [];
     gw.ownerEvents.subscribe((e) => frames.push(e));
+    // The parent session ('parent-1') has its own SSE stream: lifecycle
+    // frames must reach it too, not just the owner bus (agentLifecycle.ts
+    // emit() fans out to both surfaces).
+    const parentFrames: GatewayEvent[] = [];
+    gw.promptEvents.register('parent-1', (e) => parentFrames.push(e));
 
     server = await new Promise((resolve) => {
       const s = gw.app.listen(0, '127.0.0.1', () => resolve(s));
@@ -85,6 +91,22 @@ describe('agent observability end-to-end (spawn → frames → cancel)', () => {
       costMicrocents: 4242,
     });
 
+    // 2b. Same frame must also reach the PARENT SESSION's own SSE stream
+    // (agentLifecycle.ts emit() publishes to ownerEvents AND
+    // promptEvents.emit(parentSessionId, ...) — both surfaces are load
+    // bearing, not just the owner bus).
+    const parentSpawned = parentFrames.find((f) => f.type === 'agent_spawned');
+    expect(parentSpawned).toBeDefined();
+    expect((parentSpawned as { data: { agentId: string } }).data).toMatchObject(
+      {
+        agentId,
+        sessionId,
+        parentSessionId: 'parent-1',
+        status: 'running',
+        costMicrocents: 4242,
+      },
+    );
+
     // 3. Listing shows it running.
     const list = await fetch(`${url}/rc/agents?status=running`, {
       headers: auth,
@@ -93,7 +115,23 @@ describe('agent observability end-to-end (spawn → frames → cancel)', () => {
       ((await list.json()) as { agents: Array<{ agentId: string }> }).agents,
     ).toHaveLength(1);
 
-    // 4. Cancel: daemon session ended, record cancelled, frame emitted.
+    // 3b. Steer while running: message route accepts (202) before any
+    // cancel — the stub's promptDelayMs (2000ms) keeps the agent 'running'
+    // well past the spawn's 25ms accept window, so this exercises the
+    // success path, not the terminal guard.
+    const steerWhileRunning = await fetch(
+      `${url}/rc/agents/${agentId}/message`,
+      {
+        method: 'POST',
+        headers: { ...auth, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: 'keep going' }),
+      },
+    );
+    expect(steerWhileRunning.status).toBe(202);
+    expect(registry.get(agentId)?.status).toBe('running');
+
+    // 4. Cancel: daemon session ended, record cancelled, frame emitted on
+    // both the owner bus and the parent session's stream.
     const cancel = await fetch(`${url}/rc/agents/${agentId}/cancel`, {
       method: 'POST',
       headers: auth,
@@ -103,14 +141,33 @@ describe('agent observability end-to-end (spawn → frames → cancel)', () => {
     expect(registry.get(agentId)?.status).toBe('cancelled');
     const cancelled = frames.find((f) => f.type === 'agent_cancelled');
     expect(cancelled).toBeDefined();
+    const parentCancelled = parentFrames.find(
+      (f) => f.type === 'agent_cancelled',
+    );
+    expect(parentCancelled).toBeDefined();
 
-    // 5. Terminal: steer + re-cancel both 409.
+    // 5. Terminal: steer + re-cancel both 409 agent_not_running.
     const steer = await fetch(`${url}/rc/agents/${agentId}/message`, {
       method: 'POST',
       headers: { ...auth, 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: 'x' }),
     });
     expect(steer.status).toBe(409);
+    expect((await steer.json()) as { code: string }).toMatchObject({
+      code: 'agent_not_running',
+    });
+
+    // 5b. Double-cancel: a second cancel on an already-terminal agent must
+    // also 409 (the route's post-daemon-call CAS guard, not just the
+    // pre-check — see createAgentCancelRoute's "loser gets 409" comment).
+    const secondCancel = await fetch(`${url}/rc/agents/${agentId}/cancel`, {
+      method: 'POST',
+      headers: auth,
+    });
+    expect(secondCancel.status).toBe(409);
+    expect((await secondCancel.json()) as { code: string }).toMatchObject({
+      code: 'agent_not_running',
+    });
 
     // 6. Audit trail: agent_spawned + agent_cancelled rows on the owner bus
     //    (the audit sink publishes every durable row as an `audit` frame).
