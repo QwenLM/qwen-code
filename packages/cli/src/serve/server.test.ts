@@ -232,6 +232,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_resume',
   'unstable_session_resume',
   'session_list',
+  'session_source_metadata',
   'session_prompt',
   'session_cancel',
   'session_events',
@@ -1840,6 +1841,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     },
     async killSession(sessionId, opts) {
       killCalls.push({ sessionId, opts });
+      return true;
     },
     async detachClient(sessionId, clientId) {
       detachCalls.push({
@@ -7589,6 +7591,42 @@ describe('createServeApp', () => {
       expect(bridge.calls[0]?.workspaceCwd).toBe(WS_BOUND);
     });
 
+    it('forwards valid session source metadata to the bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sourceType: 'scheduled_task', sourceId: 'task-123' });
+
+      expect(res.status).toBe(200);
+      expect(bridge.calls[0]).toMatchObject({
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      });
+    });
+
+    it('rejects sourceId without sourceType', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sourceId: 'task-123' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_session_source');
+      expect(bridge.calls).toHaveLength(0);
+    });
+
     it('400 when cwd is relative', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
@@ -8664,6 +8702,8 @@ describe('createServeApp', () => {
       mtime: Date;
       state?: 'active' | 'archived';
       parentSessionId?: string;
+      sourceType?: string;
+      sourceId?: string;
     }): Promise<void> {
       const chatsDir = path.join(
         new Storage(input.cwd).getProjectDir(),
@@ -8697,6 +8737,27 @@ describe('createServeApp', () => {
           cwd: input.cwd,
         };
         lines.push(JSON.stringify(parentRecord));
+      }
+      if (input.sourceType !== undefined) {
+        const sourceRecord = {
+          uuid: `${input.sessionId}-source-1`,
+          parentUuid:
+            input.parentSessionId === undefined
+              ? `${input.sessionId}-user-1`
+              : `${input.sessionId}-parent-1`,
+          sessionId: input.sessionId,
+          timestamp: input.timestamp,
+          type: 'system',
+          subtype: 'session_source',
+          systemPayload: {
+            sourceType: input.sourceType,
+            ...(input.sourceId !== undefined
+              ? { sourceId: input.sourceId }
+              : {}),
+          },
+          cwd: input.cwd,
+        };
+        lines.push(JSON.stringify(sourceRecord));
       }
       await fsp.writeFile(filePath, `${lines.join('\n')}\n`, 'utf8');
       await fsp.utimes(filePath, input.mtime, input.mtime);
@@ -8978,6 +9039,46 @@ describe('createServeApp', () => {
           hasActivePrompt: false,
         }),
       ]);
+    });
+
+    it('keeps persisted source metadata paired during a live merge', async () => {
+      const sessionId = 'f47ac10b-58cc-4372-a567-0e02b2c3d480';
+      await writeStoredSession({
+        sessionId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:01:00.000Z',
+        prompt: 'stored source',
+        mtime: new Date('2026-05-17T12:11:00.000Z'),
+        sourceType: 'scheduled_task',
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:30:00.000Z',
+            sourceType: 'api',
+            sourceId: 'request-456',
+            clientCount: 1,
+            hasActivePrompt: false,
+          },
+        ],
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+
+      const res = await request(app)
+        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.sessions[0]).toMatchObject({
+        sourceType: 'scheduled_task',
+      });
+      expect(res.body.sessions[0]).not.toHaveProperty('sourceId');
     });
 
     it('returns an empty array when no sessions exist for the workspace', async () => {
@@ -10296,6 +10397,65 @@ describe('createServeApp', () => {
         expect(res.body.code).toBe('invalid_parent_session_id');
       });
     });
+
+    describe('session source filter', () => {
+      it('returns persisted sessions matching sourceType and sourceId', async () => {
+        await writeStoredSession({
+          sessionId: '550e8400-e29b-41d4-a716-446655440101',
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:00:00.000Z',
+          prompt: 'matching source',
+          mtime: new Date('2026-05-17T12:00:00.000Z'),
+          sourceType: 'scheduled_task',
+          sourceId: 'task-123',
+        });
+        await writeStoredSession({
+          sessionId: '550e8400-e29b-41d4-a716-446655440102',
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:01:00.000Z',
+          prompt: 'different source',
+          mtime: new Date('2026-05-17T12:01:00.000Z'),
+          sourceType: 'scheduled_task',
+          sourceId: 'task-456',
+        });
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge(), boundWorkspace: WS_BOUND },
+        );
+
+        const res = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?sourceType=scheduled_task&sourceId=task-123`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(res.status).toBe(200);
+        expect(res.body.sessions).toEqual([
+          expect.objectContaining({
+            sessionId: '550e8400-e29b-41d4-a716-446655440101',
+            sourceType: 'scheduled_task',
+            sourceId: 'task-123',
+          }),
+        ]);
+      });
+
+      it('rejects sourceId without sourceType', async () => {
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge(), boundWorkspace: WS_BOUND },
+        );
+        const res = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?sourceId=task-123`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_session_source');
+      });
+    });
   });
 
   describe('GET /session/:id/status', () => {
@@ -10305,6 +10465,8 @@ describe('createServeApp', () => {
         workspaceCwd: WS_BOUND,
         createdAt: '2026-05-17T12:00:00.000Z',
         displayName: 'demo',
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
         clientCount: 2,
         hasActivePrompt: true,
       };

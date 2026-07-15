@@ -53,6 +53,8 @@ export class StreamingToolCallParser {
   private pendingIndexRemaps: Map<number, number> = new Map();
   /** Counter for generating new indices when collisions occur */
   private nextAvailableIndex: number = 0;
+  private conflictingToolCallIdentity = false;
+  private invalidToolCallIndex = false;
 
   /**
    * Processes a new chunk of tool call data and attempts to parse complete JSON objects
@@ -76,7 +78,16 @@ export class StreamingToolCallParser {
     id?: string,
     name?: string,
   ): ToolCallParseResult {
-    if (!id && !name && !chunk.trim()) {
+    const validName = name?.trim() || undefined;
+    if (!Number.isSafeInteger(index) || index < 0) {
+      this.conflictingToolCallIdentity = true;
+      this.invalidToolCallIndex = true;
+      return {
+        complete: false,
+        error: new Error(`Invalid tool call index: ${index}`),
+      };
+    }
+    if (!id && !validName && !chunk.trim()) {
       const depth = this.depths.get(index) ?? 0;
       const inString = this.inStrings.get(index) ?? false;
       if (!this.buffers.has(index) || (depth === 0 && !inString)) {
@@ -88,7 +99,9 @@ export class StreamingToolCallParser {
     const isKnownId = Boolean(id && this.idToIndexMap.has(id));
     const existingName = this.toolCallMeta.get(index)?.name;
     const isNameOnlyDelta = Boolean(
-      name && chunk.length === 0 && (!existingName || existingName === name),
+      validName &&
+        chunk.length === 0 &&
+        (!existingName || existingName === validName),
     );
 
     // Handle tool call ID mapping for collision detection
@@ -110,28 +123,23 @@ export class StreamingToolCallParser {
           const existingDepth = this.depths.get(index)!;
           const existingMeta = this.toolCallMeta.get(index);
 
-          // Check if we have a complete tool call at this index. Occupancy
-          // is signaled by the name metadata, not the buffer: an empty
-          // buffer with a name is a complete no-argument call.
-          if (
-            existingMeta?.name &&
-            existingDepth === 0 &&
-            existingMeta?.id &&
-            existingMeta.id !== id
-          ) {
-            let existingComplete = true;
-            if (existingBuffer.trim()) {
+          if (existingMeta?.id && existingMeta.id !== id) {
+            let existingComplete = existingDepth === 0;
+            if (existingComplete && existingBuffer.trim()) {
               try {
                 JSON.parse(existingBuffer);
               } catch {
-                // Existing buffer is not complete JSON, we can reuse this index
                 existingComplete = false;
               }
             }
             if (existingComplete) {
-              // We have a complete tool call with a different ID at this index
-              // Find a new index for this tool call
-              actualIndex = this.findNextAvailableIndex();
+              actualIndex = 0;
+              while (this.buffers.has(actualIndex)) actualIndex += 1;
+              if (!existingMeta.name) {
+                this.conflictingToolCallIdentity = true;
+              }
+            } else {
+              this.conflictingToolCallIdentity = true;
             }
           }
         }
@@ -190,9 +198,9 @@ export class StreamingToolCallParser {
     const currentBuffer = this.buffers.get(actualIndex)!;
     const currentDepth = this.depths.get(actualIndex)!;
     const meta = this.toolCallMeta.get(actualIndex)!;
-    if (chunk.length === 0 && (id || name)) {
+    if (chunk.length === 0 && (id || validName)) {
       if (id) meta.id = id;
-      if (name && !meta.name) meta.name = name;
+      if (validName && !meta.name) meta.name = validName;
       if (!meta.name && meta.id) {
         this.namelessToolCallIndices.add(actualIndex);
       } else {
@@ -219,8 +227,15 @@ export class StreamingToolCallParser {
     }
 
     // Update metadata
+    const identityChanged = Boolean(id && meta.id && meta.id !== id);
     if (id) meta.id = id;
-    if (name) meta.name = name;
+    if (validName) {
+      if (!identityChanged && meta.name && meta.name !== validName) {
+        this.conflictingToolCallIdentity = true;
+      } else {
+        meta.name = validName;
+      }
+    }
     if (!meta.id && actualIndex !== index) {
       this.pendingIndexRemaps.set(index, actualIndex);
     }
@@ -307,6 +322,30 @@ export class StreamingToolCallParser {
 
   hasNamelessToolCall(): boolean {
     return this.namelessToolCallIndices.size > 0;
+  }
+
+  hasConflictingToolCallIdentity(): boolean {
+    return this.conflictingToolCallIdentity;
+  }
+
+  hasInvalidToolCallIndex(): boolean {
+    return this.invalidToolCallIndex;
+  }
+
+  hasInvalidToolCallArguments(): boolean {
+    for (const [index, buffer] of this.buffers.entries()) {
+      if (!this.toolCallMeta.get(index)?.name || buffer.length === 0) continue;
+
+      try {
+        const args: unknown = JSON.parse(buffer);
+        if (typeof args !== 'object' || args === null || Array.isArray(args)) {
+          return true;
+        }
+      } catch {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -517,6 +556,8 @@ export class StreamingToolCallParser {
     this.idToIndexMap.clear();
     this.pendingIndexRemaps.clear();
     this.nextAvailableIndex = 0;
+    this.conflictingToolCallIdentity = false;
+    this.invalidToolCallIndex = false;
   }
 
   /**

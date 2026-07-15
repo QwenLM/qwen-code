@@ -16,7 +16,9 @@ import type {
   ShellProgressData,
 } from '@qwen-code/qwen-code-core';
 import {
+  formatVisionBridgeNoticeDisplay,
   GeminiEventType,
+  isVisionBridgeNoticeDisplay,
   ToolErrorType,
   parseAndFormatApiError,
 } from '@qwen-code/qwen-code-core';
@@ -1401,13 +1403,29 @@ function checkResponsePartsForError(
 export function toolResultContent(
   response: ToolCallResponseInfo,
 ): string | undefined {
-  if (response.error) {
-    return response.error.message;
+  if (isVisionBridgeNoticeDisplay(response.resultDisplay)) {
+    const notice = formatVisionBridgeNoticeDisplay(response.resultDisplay);
+    if (response.error) {
+      return `${notice}\n${response.error.message}`;
+    }
+    const responsePartsError = checkResponsePartsForError(
+      response.responseParts,
+    );
+    if (responsePartsError) {
+      return `${notice}\n${responsePartsError}`;
+    }
+    if (response.responseParts && response.responseParts.length > 0) {
+      return `${notice}\n${functionResponsePartsToString(response.responseParts)}`;
+    }
+    return notice;
   }
-  // Check for errors in responseParts (e.g., cancelled responses)
+  // Prefer model-facing detail over the short operational error summary.
   const responsePartsError = checkResponsePartsForError(response.responseParts);
   if (responsePartsError) {
     return responsePartsError;
+  }
+  if (response.error) {
+    return response.error.message;
   }
   if (
     typeof response.resultDisplay === 'string' &&

@@ -2487,6 +2487,111 @@ describe('AnthropicContentGenerator', () => {
     });
   });
 
+  describe('Anthropic-compatible proxy thinking history', () => {
+    const unsignedThinkingConversation = [
+      { role: 'user' as const, parts: [{ text: 'First' }] },
+      {
+        role: 'model' as const,
+        parts: [
+          { text: 'unsigned reasoning', thought: true },
+          { text: 'Visible answer' },
+        ],
+      },
+      { role: 'user' as const, parts: [{ text: 'Second' }] },
+    ];
+
+    async function sendWithBaseUrl(
+      baseUrl: string,
+      contents: GenerateContentParameters['contents'] = unsignedThinkingConversation,
+    ) {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model: 'claude-opus-4-6',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-6',
+          apiKey: 'test-key',
+          baseUrl,
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents,
+      } as unknown as GenerateContentParameters);
+
+      return anthropicState.lastCreateArgs?.[0] as {
+        thinking?: unknown;
+        messages: Array<{ role: string; content: unknown[] }>;
+      };
+    }
+
+    it('drops unsigned thinking for Claude 4.6 through a non-native proxy', async () => {
+      const request = await sendWithBaseUrl(
+        'https://internal-proxy.example/anthropic',
+      );
+
+      expect(request.thinking).toEqual({ type: 'adaptive' });
+      expect(request.messages[1]).toEqual({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Visible answer' }],
+      });
+    });
+
+    it('does not rewrite unsigned history for the native Anthropic API', async () => {
+      const request = await sendWithBaseUrl('https://api.anthropic.com');
+
+      expect(request.messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'unsigned reasoning' },
+          { type: 'text', text: 'Visible answer' },
+        ],
+      });
+    });
+
+    it('fails before sending an unsigned tool-use turn through a proxy', async () => {
+      const toolUseConversation = [
+        { role: 'user' as const, parts: [{ text: 'Run tool' }] },
+        {
+          role: 'model' as const,
+          parts: [
+            { text: 'unsigned reasoning', thought: true },
+            { functionCall: { id: 't1', name: 'tool', args: {} } },
+          ],
+        },
+        {
+          role: 'user' as const,
+          parts: [
+            {
+              functionResponse: {
+                id: 't1',
+                name: 'tool',
+                response: { output: 'ok' },
+              },
+            },
+          ],
+        },
+      ];
+
+      await expect(
+        sendWithBaseUrl(
+          'https://internal-proxy.example/anthropic',
+          toolUseConversation,
+        ),
+      ).rejects.toThrow('proxy omitted the thinking signature');
+      expect(anthropicState.createImpl).not.toHaveBeenCalled();
+    });
+  });
+
   // https://github.com/QwenLM/qwen-code/issues/3786 — DeepSeek's
   // anthropic-compatible API rejects requests in thinking mode when a prior
   // assistant turn carrying `tool_use` omits a thinking block. Plain-text

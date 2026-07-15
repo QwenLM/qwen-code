@@ -594,39 +594,11 @@ export function functionResponsePartsToString(parts: Part[]): string {
   return parts
     .map((part) => {
       if ('functionResponse' in part) {
-        const content = part.functionResponse?.response?.['output'] ?? '';
+        const response = part.functionResponse?.response;
+        const content = response?.['output'] ?? response?.['error'] ?? '';
         return content;
       }
       return JSON.stringify(part);
     })
     .join('');
-}
-
-/**
- * Extracts content from a tool call response for inclusion in tool_result blocks.
- * Uses functionResponsePartsToString to properly handle functionResponse parts,
- * which correctly extracts output content from functionResponse objects rather
- * than simply concatenating text or JSON.stringify.
- *
- * @param response - Tool call response information
- * @returns String content for the tool_result block, or undefined if no content available
- */
-export function toolResultContent(
-  response: ToolCallResponseInfo,
-): string | undefined {
-  if (
-    typeof response.resultDisplay === 'string' &&
-    response.resultDisplay.trim().length > 0
-  ) {
-    return response.resultDisplay;
-  }
-  if (response.responseParts && response.responseParts.length > 0) {
-    // Always use functionResponsePartsToString to properly handle
-    // functionResponse parts that contain output content
-    return functionResponsePartsToString(response.responseParts);
-  }
-  if (response.error) {
-    return response.error.message;
-  }
-  return undefined;
 }

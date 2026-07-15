@@ -223,8 +223,11 @@ export function estimatePartChars(
   if (part.functionResponse) {
     let total = 0;
     const output = part.functionResponse.response?.['output'];
+    const error = part.functionResponse.response?.['error'];
     if (typeof output === 'string') {
       total += output.length;
+    } else if (typeof error === 'string') {
+      total += error.length;
     }
     const nested = getFunctionResponseParts(part);
     if (nested) {

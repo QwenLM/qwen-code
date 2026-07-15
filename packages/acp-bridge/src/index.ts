@@ -14,6 +14,7 @@ export * from './status.js';
 export * from './bridgeErrors.js';
 export * from './sessionArtifacts.js';
 export * from './bridgeTypes.js';
+export * from './session-source.js';
 export * from './bridgeOptions.js';
 export * from './replayWindowLimits.js';
 export * from './spawnChannel.js';

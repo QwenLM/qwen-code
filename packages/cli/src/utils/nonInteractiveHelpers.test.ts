@@ -9,7 +9,6 @@ import type {
   Config,
   SessionMetrics,
   AgentResultDisplay,
-  ToolCallResponseInfo,
 } from '@qwen-code/qwen-code-core';
 import {
   ToolErrorType,
@@ -32,7 +31,6 @@ import {
   createAgentToolProgressHandler,
   functionResponsePartsToString,
   insertAfterFunctionResponses,
-  toolResultContent,
 } from './nonInteractiveHelpers.js';
 
 // Mock dependencies
@@ -1180,109 +1178,6 @@ describe('functionResponsePartsToString', () => {
       },
     ];
     expect(functionResponsePartsToString(parts)).toBe('');
-  });
-});
-
-describe('toolResultContent', () => {
-  it('should return resultDisplay string when available', () => {
-    const response: ToolCallResponseInfo = {
-      callId: 'test-call',
-      resultDisplay: 'Result content',
-      responseParts: [],
-      error: undefined,
-      errorType: undefined,
-    };
-    expect(toolResultContent(response)).toBe('Result content');
-  });
-
-  it('should return undefined for empty resultDisplay string', () => {
-    const response: ToolCallResponseInfo = {
-      callId: 'test-call',
-      resultDisplay: '   ',
-      responseParts: [],
-      error: undefined,
-      errorType: undefined,
-    };
-    expect(toolResultContent(response)).toBeUndefined();
-  });
-
-  it('should use functionResponsePartsToString for responseParts', () => {
-    const response: ToolCallResponseInfo = {
-      callId: 'test-call',
-      resultDisplay: undefined,
-      responseParts: [
-        {
-          functionResponse: {
-            response: {
-              output: 'function output',
-            },
-          },
-        },
-      ],
-      error: undefined,
-      errorType: undefined,
-    };
-    expect(toolResultContent(response)).toBe('function output');
-  });
-
-  it('should return error message when error is present', () => {
-    const response: ToolCallResponseInfo = {
-      callId: 'test-call',
-      resultDisplay: undefined,
-      responseParts: [],
-      error: new Error('Test error message'),
-      errorType: undefined,
-    };
-    expect(toolResultContent(response)).toBe('Test error message');
-  });
-
-  it('should prefer resultDisplay over responseParts', () => {
-    const response: ToolCallResponseInfo = {
-      callId: 'test-call',
-      resultDisplay: 'Direct result',
-      responseParts: [
-        {
-          functionResponse: {
-            response: {
-              output: 'function output',
-            },
-          },
-        },
-      ],
-      error: undefined,
-      errorType: undefined,
-    };
-    expect(toolResultContent(response)).toBe('Direct result');
-  });
-
-  it('should prefer responseParts over error', () => {
-    const response: ToolCallResponseInfo = {
-      callId: 'test-call',
-      resultDisplay: undefined,
-      error: new Error('Error message'),
-      responseParts: [
-        {
-          functionResponse: {
-            response: {
-              output: 'function output',
-            },
-          },
-        },
-      ],
-      errorType: undefined,
-    };
-    expect(toolResultContent(response)).toBe('function output');
-  });
-
-  it('should return undefined when no content is available', () => {
-    const response: ToolCallResponseInfo = {
-      callId: 'test-call',
-      resultDisplay: undefined,
-      responseParts: [],
-      error: undefined,
-      errorType: undefined,
-    };
-    expect(toolResultContent(response)).toBeUndefined();
   });
 });
 

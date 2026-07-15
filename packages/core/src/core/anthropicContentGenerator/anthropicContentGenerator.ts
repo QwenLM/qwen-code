@@ -655,6 +655,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
     //                    ArenaManager / forkedAgent).
     const deepseekThinkingOn = isDeepSeek && !!thinking;
     const stripAssistantThinking = isDeepSeek && !thinking;
+    const dropUnsignedAssistantThinking =
+      !isDeepSeek &&
+      !!thinking &&
+      this.modelSupportsAdaptiveThinking() &&
+      !isAnthropicNativeBaseUrl(this.contentGeneratorConfig);
 
     // Sample the live cache-control flags once per request and forward
     // them to the converter (body-side `cache_control`). The converter's
@@ -679,11 +684,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const { system, messages } = this.converter.convertGeminiRequestToAnthropic(
       request,
       {
-        // Both run together: normalization fills missing signatures so the
-        // injection pass treats those blocks as already-present, and the
-        // injection adds a synthetic block on tool_use turns lacking one.
+        // DeepSeek normalization and injection run together. Proxy-hosted
+        // Claude uses the separate unsigned-thinking cleanup below because an
+        // empty string cannot replace Claude's opaque signature.
         normalizeAssistantThinkingSignature: deepseekThinkingOn,
         injectThinkingOnToolUseTurns: deepseekThinkingOn,
+        dropUnsignedAssistantThinking,
         stripAssistantThinking,
         enableCacheControl,
         useGlobalCacheScope,
