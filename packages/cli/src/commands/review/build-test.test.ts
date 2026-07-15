@@ -627,8 +627,13 @@ describe('runBuildTest', () => {
     // the exec counter is what proves the loop is bounded.)
     expect(builds).toBe(4);
     expect(rep.ok).toBe(false);
-    expect(rep.widenedWith.length).toBeGreaterThanOrEqual(3);
+    // Exactly three widenings (attempts 0-2 each add one package; attempt 3 is
+    // terminal) — a tight bound catches an over-widening regression the loose one
+    // would miss.
+    expect(rep.widenedWith.length).toBe(3);
     expect(rep.note).toContain('Correlate');
+    // The exhaustion branch returns before the test loop, so no test ran.
+    expect(rep.test).toEqual([]);
   });
 
   it('does not widen — or re-time-out — when a build TIMES OUT mid-widening', () => {
