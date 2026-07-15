@@ -403,7 +403,12 @@ export function coverageFromTranscripts(
     // Every role, territory agents included. Their brief is where the severity
     // definitions, the paging rule, the uncoverable rule and the project rules live.
     const brief = briefPath(planPath, req.key);
-    const opened = agent.successfulCallArgs.some((a) => a.includes(brief));
+    // The brief as a whole JSON string value (`successfulCallArgs` are already
+    // serialized args): a bare substring would credit `${brief}.bak` for the brief,
+    // the same trap `parseTranscript` avoids for the diff path.
+    const opened = agent.successfulCallArgs.some((a) =>
+      a.includes(JSON.stringify(brief)),
+    );
     if (!opened) {
       unreadBriefs.push(
         `${roleLabel(req)} — never opened its brief (${brief}), so it reviewed ` +
@@ -441,6 +446,115 @@ export function coverageFromTranscripts(
     uncoverableChunks: [...uncoverable].sort((a, b) => a - b),
     coveredChunks: [...covered].sort((a, b) => a - b),
   };
+}
+
+export interface VerificationReport {
+  /** True when every required Step 4/5 agent ran and read its brief. */
+  ok: boolean;
+  /**
+   * Self-explanatory gap lines, shaped to drop straight into
+   * `unreviewedDimensions` — each carries its own ` — ` reason, so
+   * `compose-review` renders it verbatim rather than appending the whiff sentence.
+   */
+  gaps: string[];
+}
+
+/**
+ * Did Step 4 (verify) and Step 5 (reverse audit) actually run, and read their
+ * briefs?
+ *
+ * `check-coverage` proves Step 3 was done — but it runs at Step 3D, *before* these
+ * two, so its roster (`requiredAgents`) cannot reach them. And their count is not
+ * in the plan: verify shards on the finding count (`ceil(N/8)`), reverse audit
+ * loops until it goes dry. So this is not an exact roster — it is a floor, and it
+ * is asked only by `compose-review`, which runs only at high effort. A low/medium
+ * quick pass has no verify and no reverse audit, and never reaches here (it emits
+ * no verdict, so it calls no `compose-review`).
+ *
+ * The floor is deliberately one agent per step, for the failure it exists to catch:
+ * the step skipped **wholesale**, or run with agents that never opened their brief —
+ * the same silent omission the rest of this file is a response to. Per-chunk
+ * completeness of a Step 3B reverse audit is the orchestrator's Step 5 loop
+ * contract, disclosed through `unreviewedDimensions` when a scope is left
+ * outstanding; this does not re-litigate it.
+ *
+ * Like everything here, nothing is supplied by the caller but the plan path. The
+ * proof is the intersection of two artifacts with different authors: the prompt the
+ * CLI recorded building (`reverse-audit` / `reverse-audit--chunk-N` / `verify`) and
+ * the harness's transcript of an agent launched with it that opened its brief.
+ */
+export function verificationGaps(
+  planPath: string,
+  opts: { postsFindings: boolean },
+  env: NodeJS.ProcessEnv = process.env,
+): VerificationReport {
+  const { plan, mtimeMs } = readPlan(planPath);
+  const records = readTranscripts(mtimeMs, env, plan.diffPathAbsolute);
+  const built = readRecordedPrompts(planPath);
+  const gaps: string[] = [];
+
+  // A role whose prompt the CLI recorded, and which an agent was then launched with
+  // verbatim AND opened the brief it points at. The same two-author proof the
+  // roster check uses — a delivered launch prompt and a successful call naming the
+  // brief file — asked of a key rather than a plan-derived role.
+  const ranAndReadBrief = (key: string): boolean => {
+    const b = built.get(key);
+    if (b === undefined || b.trim() === '') return false;
+    const brief = briefPath(planPath, key);
+    // Match the brief as a whole JSON string value, quotes included — the same
+    // lesson `parseTranscript` learned for the diff path: a bare substring credits
+    // `…/x.brief.md.bak` for `…/x.brief.md`. `successfulCallArgs` are already
+    // `JSON.stringify(args)`, so the quoted path is what a real read of the brief
+    // leaves in them.
+    const needle = JSON.stringify(brief);
+    return records.some(
+      (r) =>
+        wasDeliveredVerbatim(r.launchPrompt, b) &&
+        r.successfulCallArgs.some((a) => a.includes(needle)),
+    );
+  };
+
+  // Step 5: reverse audit. Required on EVERY high-effort review — it is the pass
+  // that hunts what Step 3 missed, and a verdict that never ran it cannot certify
+  // the diff complete, least of all a clean one (a zero-finding review is exactly
+  // when a second look matters most). 3A records it under `reverse-audit`; 3B under
+  // `reverse-audit--chunk-N`, one per chunk. The floor is one: at least one auditor
+  // ran and read its brief. Matched on the role name and the universal `--` key
+  // separator rather than the exact `--chunk-<n>` shape, so a change to how the
+  // chunk suffix is spelled does not silently drop every per-chunk key here.
+  const reverseKeys = [...built.keys()].filter(
+    (k) => k === 'reverse-audit' || k.startsWith('reverse-audit--'),
+  );
+  if (!reverseKeys.some(ranAndReadBrief)) {
+    gaps.push(
+      reverseKeys.length === 0
+        ? 'reverse audit — no auditor ran (Step 5 builds its prompt with ' +
+            '`agent-prompt --role reverse-audit`; none was recorded, so the pass ' +
+            'that looks for what Step 3 missed was skipped)'
+        : 'reverse audit — its prompt was built, but no agent was launched with ' +
+            'it that opened its brief, so the reverse-audit pass did not run',
+    );
+  }
+
+  // Step 4: verify. Required when the review posts a finding a verifier rules on —
+  // an unverified finding must not become a public blocker (the false "this PR now
+  // leaks tokens" Critical is the exact harm). Whether it does is `opts.postsFindings`,
+  // decided by the caller: `compose-review` counts the anchored findings and the
+  // non-deterministic body Criticals, and excludes deterministic `[build]`/`[test]`
+  // findings, which are pre-confirmed and skip verification by design. A review that
+  // confirmed nothing has nothing to verify.
+  if (opts.postsFindings && !ranAndReadBrief('verify')) {
+    gaps.push(
+      built.has('verify')
+        ? 'verification — its prompt was built, but no agent was launched with it ' +
+            'that opened its brief, so the posted findings were not verified'
+        : 'verification — the review posts findings, but no verifier ran (Step 4 ' +
+            'builds its prompt with `agent-prompt --role verify`; none was ' +
+            'recorded, so the findings were not verified)',
+    );
+  }
+
+  return { ok: gaps.length === 0, gaps };
 }
 
 export { TranscriptsUnavailableError };
