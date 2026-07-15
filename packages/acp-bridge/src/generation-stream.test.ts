@@ -27,6 +27,17 @@ describe('GenerationStreamQueue', () => {
     await expect(next).rejects.toThrow('failed');
   });
 
+  it('delivers undefined values', async () => {
+    const queue = new GenerationStreamQueue<number | undefined>(1);
+    expect(queue.push(undefined)).toBe(true);
+    queue.close();
+
+    await expect(queue[Symbol.asyncIterator]().next()).resolves.toEqual({
+      value: undefined,
+      done: false,
+    });
+  });
+
   it('rejects a second concurrent reader without orphaning the first', async () => {
     const queue = new GenerationStreamQueue<number>(1);
     const iterator = queue[Symbol.asyncIterator]();

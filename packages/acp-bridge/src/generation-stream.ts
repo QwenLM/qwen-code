@@ -57,9 +57,8 @@ export class GenerationStreamQueue<T> implements AsyncIterable<T> {
   }
 
   private next(): Promise<IteratorResult<T>> {
-    const value = this.values.shift();
-    if (value !== undefined) {
-      return Promise.resolve({ value, done: false });
+    if (this.values.length > 0) {
+      return Promise.resolve({ value: this.values.shift() as T, done: false });
     }
     if (this.failure !== undefined) return Promise.reject(this.failure);
     if (this.closed) {
