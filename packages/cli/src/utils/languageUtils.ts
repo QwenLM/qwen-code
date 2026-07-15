@@ -22,7 +22,7 @@ import { SUPPORTED_LANGUAGES } from '../i18n/languages.js';
 const LLM_OUTPUT_LANGUAGE_RULE_FILENAME = 'output-language.md';
 const LLM_OUTPUT_LANGUAGE_MARKER_PREFIX = 'qwen-code:llm-output-language:';
 
-/** Special value meaning "detect from system settings" */
+/** Special value meaning "follow the user's input language" */
 export const OUTPUT_LANGUAGE_AUTO = 'auto';
 
 /**
@@ -107,6 +107,26 @@ function sanitizeForMarker(language: string): string {
  */
 function generateOutputLanguageFileContent(language: string): string {
   const safeLanguage = sanitizeForMarker(language);
+  if (isAutoLanguage(language)) {
+    return `# Output language preference: ${OUTPUT_LANGUAGE_AUTO}
+<!-- ${LLM_OUTPUT_LANGUAGE_MARKER_PREFIX} ${OUTPUT_LANGUAGE_AUTO} -->
+
+## Rule
+Respond in the same language as the user's input.
+
+## Mixed-language input
+If the user mixes languages, use the language that best matches the user's main request.
+
+## Keep technical artifacts unchanged
+Do **not** translate or rewrite:
+- Code blocks, CLI commands, file paths, stack traces, logs, JSON keys, identifiers
+- Exact quoted text from the user (keep quotes verbatim)
+
+## Tool / system outputs
+Raw tool/system outputs may contain fixed-format English. Preserve them verbatim, and if needed, add a short explanation in the user's language below.
+`;
+  }
+
   return `# Output language preference: ${language}
 <!-- ${LLM_OUTPUT_LANGUAGE_MARKER_PREFIX} ${safeLanguage} -->
 
@@ -190,7 +210,8 @@ export function writeOutputLanguageFile(
 
 /**
  * Updates the LLM output language rule file based on the setting value.
- * Resolves 'auto' to the detected system language before writing.
+ * Preserves 'auto' as a dynamic same-language rule, and resolves explicit
+ * languages before writing.
  *
  * @param targetPath - Forwarded to {@link writeOutputLanguageFile}.
  */
@@ -198,7 +219,9 @@ export function updateOutputLanguageFile(
   settingValue: string,
   targetPath?: string,
 ): void {
-  const resolved = resolveOutputLanguage(settingValue);
+  const resolved = isAutoLanguage(settingValue)
+    ? OUTPUT_LANGUAGE_AUTO
+    : resolveOutputLanguage(settingValue);
   writeOutputLanguageFile(resolved, targetPath);
 }
 
@@ -232,7 +255,7 @@ export function writeOutputLanguageAndRegisterPath(
  *
  * Behavior:
  * - If the rule file already exists and contains a valid language setting, do nothing (preserve user modifications)
- * - If the rule file doesn't exist, create it with the resolved language ('auto' -> detected system language, or use as-is)
+ * - If the rule file doesn't exist, create it with the configured rule ('auto' -> same-language rule, explicit language -> fixed-language rule)
  */
 export function initializeLlmOutputLanguage(outputLanguage?: string): void {
   // Check if the file already exists and has valid content
@@ -243,7 +266,9 @@ export function initializeLlmOutputLanguage(outputLanguage?: string): void {
     return;
   }
 
-  // File doesn't exist or has invalid content, create it with resolved language
-  const resolved = resolveOutputLanguage(outputLanguage);
+  // File doesn't exist or has invalid content, create it with configured language behavior
+  const resolved = isAutoLanguage(outputLanguage)
+    ? OUTPUT_LANGUAGE_AUTO
+    : resolveOutputLanguage(outputLanguage);
   writeOutputLanguageFile(resolved);
 }
