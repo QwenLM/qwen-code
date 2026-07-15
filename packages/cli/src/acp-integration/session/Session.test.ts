@@ -277,6 +277,8 @@ describe('Session', () => {
     getChat: ReturnType<typeof vi.fn>;
     isInitialized: ReturnType<typeof vi.fn>;
     tryCompressChat: ReturnType<typeof vi.fn>;
+    setHistory: ReturnType<typeof vi.fn>;
+    truncateHistory: ReturnType<typeof vi.fn>;
   };
   let mockBackgroundTaskRegistry: {
     setNotificationCallback: ReturnType<typeof vi.fn>;
@@ -420,6 +422,8 @@ describe('Session', () => {
         newTokenCount: 0,
         compressionStatus: core.CompressionStatus.NOOP,
       }),
+      setHistory: vi.fn(),
+      truncateHistory: vi.fn(),
     };
     mockBackgroundTaskRegistry = {
       setNotificationCallback: vi.fn(),
@@ -868,7 +872,8 @@ describe('Session', () => {
       const result = session.rewindToTurn(1);
 
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
-      expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
+      expect(mockGeminiClient.truncateHistory).toHaveBeenCalledWith(2);
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
       expect(mockChat.stripThoughtsFromHistory).toHaveBeenCalled();
       expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
         1,
@@ -897,7 +902,7 @@ describe('Session', () => {
       const result = session.rewindToTurn(1, { rewindFiles: false });
 
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
-      expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
+      expect(mockGeminiClient.truncateHistory).toHaveBeenCalledWith(2);
       expect(
         mockFileHistoryService.restoreFromSnapshots,
       ).not.toHaveBeenCalled();
@@ -927,7 +932,7 @@ describe('Session', () => {
       const result = session.rewindToTurn(0);
 
       expect(result).toEqual({ targetTurnIndex: 0, apiTruncateIndex: 1 });
-      expect(mockChat.truncateHistory).toHaveBeenCalledWith(1);
+      expect(mockGeminiClient.truncateHistory).toHaveBeenCalledWith(1);
     });
 
     it('counts only real user prompts as rewindable turns', () => {
@@ -991,7 +996,7 @@ describe('Session', () => {
       // Keep startup + turn 1 + the MCP reminder (indices 0–3); truncate at
       // the second prompt (index 4). Counting the reminder would return 3.
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 4 });
-      expect(mockChat.truncateHistory).toHaveBeenCalledWith(4);
+      expect(mockGeminiClient.truncateHistory).toHaveBeenCalledWith(4);
     });
 
     it('rejects unreachable user turns', () => {
@@ -1002,7 +1007,7 @@ describe('Session', () => {
       expect(() => session.rewindToTurn(2)).toThrow(
         'Cannot rewind to the requested turn',
       );
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.truncateHistory).not.toHaveBeenCalled();
     });
 
     it('rejects rewinds while a cron prompt is mutating history', () => {
@@ -1011,14 +1016,14 @@ describe('Session', () => {
       expect(() => session.rewindToTurn(0)).toThrow(
         'Cannot rewind while a prompt is running',
       );
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.truncateHistory).not.toHaveBeenCalled();
     });
 
     it('rejects invalid target turn indexes', () => {
       expect(() => session.rewindToTurn(-1)).toThrow(
         'targetTurnIndex must be a non-negative integer',
       );
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.truncateHistory).not.toHaveBeenCalled();
     });
 
     it('rejects rewinds while a prompt is running', () => {
@@ -1028,7 +1033,7 @@ describe('Session', () => {
       expect(() => session.rewindToTurn(0)).toThrow(
         'Cannot rewind while a prompt is running',
       );
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.truncateHistory).not.toHaveBeenCalled();
     });
 
     it('rejects rewinds while a cron abort is active', () => {
@@ -1039,7 +1044,7 @@ describe('Session', () => {
       expect(() => session.rewindToTurn(0)).toThrow(
         'Cannot rewind while a prompt is running',
       );
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.truncateHistory).not.toHaveBeenCalled();
     });
 
     it('rejects rewinds while a notification prompt is processing', () => {
@@ -1050,7 +1055,7 @@ describe('Session', () => {
       expect(() => session.rewindToTurn(0)).toThrow(
         'Cannot rewind while a prompt is running',
       );
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.truncateHistory).not.toHaveBeenCalled();
     });
 
     it('rejects rewinds while a notification abort controller is active', () => {
@@ -1061,7 +1066,7 @@ describe('Session', () => {
       expect(() => session.rewindToTurn(0)).toThrow(
         'Cannot rewind while a prompt is running',
       );
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.truncateHistory).not.toHaveBeenCalled();
     });
 
     it('restores a captured history snapshot', () => {
@@ -1075,7 +1080,8 @@ describe('Session', () => {
       session.restoreHistory(snapshot);
 
       expect(snapshot).toEqual(history);
-      expect(mockChat.setHistory).toHaveBeenCalledWith(history);
+      expect(mockGeminiClient.setHistory).toHaveBeenCalledWith(history);
+      expect(mockChat.setHistory).not.toHaveBeenCalled();
       expect(mockChat.getHistory).not.toHaveBeenCalled();
     });
 
@@ -1086,7 +1092,7 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockChat.setHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history restore while a cron prompt is mutating history', () => {
@@ -1095,7 +1101,7 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockChat.setHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history restore while a cron abort is active', () => {
@@ -1106,7 +1112,7 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockChat.setHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history restore while a notification prompt is processing', () => {
@@ -1117,7 +1123,7 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockChat.setHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history restore while a notification abort controller is active', () => {
@@ -1128,7 +1134,7 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockChat.setHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
     });
   });
 

@@ -1243,7 +1243,9 @@ describe('CoreToolScheduler', () => {
         }),
       ],
     ]);
-    const onAllToolCallsComplete = vi.fn().mockResolvedValue(undefined);
+    const onAllToolCallsComplete = vi.fn().mockImplementation(async () => {
+      expect(presentedProxySchemas.has(ToolNames.CRON_CREATE)).toBe(false);
+    });
     const { scheduler } = createSchedulerForLegacyToolTests({
       toolsByName,
       presentedProxySchemas,
@@ -1265,7 +1267,7 @@ describe('CoreToolScheduler', () => {
     expect(presentedProxySchemas.has(ToolNames.CRON_CREATE)).toBe(true);
   });
 
-  it('commits deferred tool presentations even when completion callback throws', async () => {
+  it('does not commit deferred tool presentations when completion callback throws', async () => {
     const presentedProxySchemas = new Set<string>();
     const toolsByName = new Map<string, MockTool>([
       [
@@ -1301,7 +1303,46 @@ describe('CoreToolScheduler', () => {
     );
 
     expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
-    expect(presentedProxySchemas.has(ToolNames.CRON_CREATE)).toBe(true);
+    expect(presentedProxySchemas.has(ToolNames.CRON_CREATE)).toBe(false);
+  });
+
+  it('does not commit deferred tool presentations when the consumer declines them', async () => {
+    const presentedProxySchemas = new Set<string>();
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.TOOL_SEARCH,
+        new MockTool({
+          name: ToolNames.TOOL_SEARCH,
+          execute: vi.fn().mockResolvedValue({
+            llmContent: '<functions>...</functions>',
+            returnDisplay: 'Loaded 1 tool(s)',
+            deferredToolPresentations: [
+              { name: ToolNames.CRON_CREATE, schemaFingerprint: 'schema' },
+            ],
+          }),
+        }),
+      ],
+    ]);
+    const onAllToolCallsComplete = vi.fn().mockResolvedValue(false);
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName,
+      presentedProxySchemas,
+      onAllToolCallsComplete,
+    });
+
+    await scheduler.schedule(
+      {
+        callId: 'tool-search-declined',
+        name: ToolNames.TOOL_SEARCH,
+        args: { query: 'cron' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-search',
+      },
+      new AbortController().signal,
+    );
+
+    expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    expect(presentedProxySchemas.has(ToolNames.CRON_CREATE)).toBe(false);
   });
 
   it('does not commit deferred tool presentations when the schema block is truncated', async () => {

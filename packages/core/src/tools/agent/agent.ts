@@ -1538,15 +1538,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
     const generationConfig = geminiClient?.getChat().getGenerationConfig();
     if (generationConfig?.systemInstruction) {
-      // Inline FunctionDeclaration[] from the parent — passed verbatim
-      // (including `agent` and cron tools) so the fork's system prompt,
-      // tools, and history exactly match the parent's and share its
-      // DashScope cache prefix. A fork is a context-sharing extension of
-      // the parent, not an isolated subagent, so the general subagent
-      // exclusion list does not apply. Recursive forks are blocked by the
-      // ALS-based `isInForkExecution()` guard.
-      // However, we still exclude tools that must never be available to
-      // any subagent (agent, cron tools).
+      // Preserve the parent's inline declaration order and shape for cache
+      // parity, while removing main-session control tools that no subagent
+      // may execute. Recursive forks are also blocked by the ALS-based
+      // `isInForkExecution()` guard.
       const parentToolDecls: FunctionDeclaration[] =
         (
           generationConfig.tools as Array<{

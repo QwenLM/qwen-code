@@ -9,6 +9,7 @@ import type {
   Config,
   CronJob,
   CronScheduler,
+  DeferredToolPresentation,
   ToolCallRequestInfo,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
@@ -1127,6 +1128,7 @@ export async function runNonInteractive(
         const executedRequests = new Set<ToolCallRequestInfo>(
           respondedRequests,
         );
+        const deferredToolPresentations: DeferredToolPresentation[] = [];
 
         for (const requestInfo of requestsToExecute) {
           executedRequests.add(requestInfo);
@@ -1187,6 +1189,7 @@ export async function runNonInteractive(
             abortController.signal,
             {
               outputUpdateHandler,
+              deferDeferredToolPresentationCommit: true,
               ...(toolCallUpdateCallback && {
                 onToolCallsUpdate: toolCallUpdateCallback,
               }),
@@ -1220,6 +1223,11 @@ export async function runNonInteractive(
 
           if (toolResponse.responseParts) {
             toolResponseParts.push(...toolResponse.responseParts);
+          }
+          if (!toolResponse.error && toolResponse.deferredToolPresentations) {
+            deferredToolPresentations.push(
+              ...toolResponse.deferredToolPresentations,
+            );
           }
 
           // Capture model override from skill tool results.
@@ -1293,6 +1301,10 @@ export async function runNonInteractive(
             createDuplicateProviderToolCallResponse(requestInfo);
           adapter.emitToolResult(requestInfo, toolResponse);
           toolResponseParts.push(...toolResponse.responseParts);
+        }
+
+        for (const presentation of deferredToolPresentations) {
+          config.getToolRegistry().markProxySchemaPresented(presentation);
         }
 
         return {

@@ -20,6 +20,8 @@ export interface ExecuteToolCallOptions {
   outputUpdateHandler?: OutputUpdateHandler;
   onAllToolCallsComplete?: AllToolCallsCompleteHandler;
   onToolCallsUpdate?: ToolCallsUpdateHandler;
+  /** Lets a larger provider batch commit presentation metadata atomically. */
+  deferDeferredToolPresentationCommit?: boolean;
 }
 
 /**
@@ -37,12 +39,16 @@ export async function executeToolCall(
       chatRecordingService: config.getChatRecordingService(),
       outputUpdateHandler: options.outputUpdateHandler,
       onAllToolCallsComplete: async (completedToolCalls) => {
+        let accepted: boolean | void = undefined;
         if (options.onAllToolCallsComplete) {
-          await options.onAllToolCallsComplete(completedToolCalls);
+          accepted = await options.onAllToolCallsComplete(completedToolCalls);
         }
         resolve(completedToolCalls[0].response);
+        return accepted;
       },
       onToolCallsUpdate: options.onToolCallsUpdate,
+      deferDeferredToolPresentationCommit:
+        options.deferDeferredToolPresentationCommit,
       getPreferredEditor: () => undefined,
       onEditorClose: () => {},
     })

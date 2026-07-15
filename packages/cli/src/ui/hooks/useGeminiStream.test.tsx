@@ -1013,7 +1013,7 @@ describe('useGeminiStream', () => {
 
     // Capture the onComplete callback
     let capturedOnComplete:
-      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | ((completedTools: TrackedToolCall[]) => Promise<boolean | void>)
       | null = null;
 
     mockUseReactToolScheduler.mockImplementation((onComplete) => {
@@ -2892,11 +2892,13 @@ describe('useGeminiStream', () => {
       ),
     );
 
+    let completionAccepted: boolean | void;
     await act(async () => {
       if (capturedOnComplete) {
-        await capturedOnComplete([lateRealResult]);
+        completionAccepted = await capturedOnComplete([lateRealResult]);
       }
     });
+    expect(completionAccepted).toBe(false);
 
     await waitFor(() => {
       // The dedup hit must `markToolsAsSubmitted` so the UI/scheduler is
@@ -3191,11 +3193,15 @@ describe('useGeminiStream', () => {
     expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
 
     // Now fire the deduped completion while isResponding=true.
+    let activeStreamCompletionAccepted: boolean | void;
     await act(async () => {
       if (capturedOnComplete) {
-        await capturedOnComplete([lateRealResult]);
+        activeStreamCompletionAccepted = await capturedOnComplete([
+          lateRealResult,
+        ]);
       }
     });
+    expect(activeStreamCompletionAccepted).toBe(false);
 
     // The dedup MUST still fire — markToolsAsSubmitted called with the
     // deduped callId — even though the active-stream guard would
@@ -3316,11 +3322,17 @@ describe('useGeminiStream', () => {
     });
 
     const staleCompletedOnComplete = staleOnComplete as
-      | ((completedTools: TrackedCompletedToolCall[]) => Promise<void>)
+      | ((
+          completedTools: TrackedCompletedToolCall[],
+        ) => Promise<boolean | void>)
       | null;
+    let staleCompletionAccepted: boolean | void;
     await act(async () => {
-      await staleCompletedOnComplete?.([fastFailedTool]);
+      staleCompletionAccepted = await staleCompletedOnComplete?.([
+        fastFailedTool,
+      ]);
     });
+    expect(staleCompletionAccepted).toBe(true);
 
     await waitFor(() => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(2);

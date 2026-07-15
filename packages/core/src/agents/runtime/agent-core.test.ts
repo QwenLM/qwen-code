@@ -36,6 +36,7 @@ import type {
   ContentGenerator,
   ContentGeneratorConfig,
 } from '../../core/contentGenerator.js';
+import { CoreToolScheduler } from '../../core/coreToolScheduler.js';
 
 describe('AgentCore.runInAgentFrames', () => {
   // The deferred-approval `respond` callback that AgentCore hands to the
@@ -545,6 +546,87 @@ describe('AgentCore.prepareTools', () => {
     expect(debugSpy).toHaveBeenCalledWith(
       `[prepareTools] Filtered inline declaration "${ToolNames.EXIT_PLAN_MODE}" from subagent tool list`,
     );
+  });
+
+  it('filters deferred_tool_call from inline subagent declarations', async () => {
+    const inlineWrapper = {
+      name: ToolNames.DEFERRED_TOOL_CALL,
+      description: 'stable deferred tool proxy',
+    } as FunctionDeclaration;
+    const { core, debugSpy } = buildAgentForTools(
+      { tools: [inlineWrapper] },
+      [],
+    );
+
+    const tools = await core.prepareTools();
+
+    expect(tools).toEqual([]);
+    expect(debugSpy).toHaveBeenCalledWith(
+      `[prepareTools] Filtered inline declaration "${ToolNames.DEFERRED_TOOL_CALL}" from subagent tool list`,
+    );
+
+    let teammateTools: FunctionDeclaration[] = [];
+    await runWithTeammateIdentity(
+      {
+        agentId: 'worker@test',
+        agentName: 'worker',
+        teamName: 'test',
+        isTeamLead: false,
+      },
+      async () => {
+        teammateTools = await core.prepareTools();
+      },
+    );
+    expect(teammateTools).toEqual([]);
+  });
+
+  it('rejects a subagent wrapper call before scheduler normalization', async () => {
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockRejectedValue(new Error('scheduler must not receive wrapper calls'));
+    try {
+      const { core } = buildAgentForTools(
+        {
+          tools: [
+            {
+              name: ToolNames.DEFERRED_TOOL_CALL,
+              description: 'stable deferred tool proxy',
+            } as FunctionDeclaration,
+          ],
+        },
+        [],
+      );
+      const tools = await runWithAgentContext('test-subagent', () =>
+        core.prepareTools(),
+      );
+
+      const result = await runWithAgentContext('test-subagent', () =>
+        core.runInAgentFrames(() =>
+          core.processFunctionCalls(
+            [
+              {
+                name: ToolNames.DEFERRED_TOOL_CALL,
+                args: { name: ToolNames.CRON_CREATE, arguments: {} },
+                id: 'proxy-call-1',
+              },
+            ],
+            new AbortController(),
+            'prompt-filtered-deferred-wrapper',
+            1,
+            tools,
+          ),
+        ),
+      );
+
+      const response = result.messages[0]?.parts?.[0]?.functionResponse
+        ?.response as { error?: string } | undefined;
+      expect(response?.error).toContain(
+        `Tool "${ToolNames.DEFERRED_TOOL_CALL}" not found`,
+      );
+      expect(scheduleSpy).not.toHaveBeenCalled();
+    } finally {
+      scheduleSpy.mockRestore();
+    }
   });
 
   it('keeps teammate coordination tools but excludes plan lifecycle tools', async () => {

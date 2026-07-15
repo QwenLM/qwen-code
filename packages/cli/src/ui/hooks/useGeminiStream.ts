@@ -615,10 +615,11 @@ export const useGeminiStream = (
           addItem(toolGroupDisplay, Date.now());
 
           // Handle tool response submission immediately when tools complete
-          await handleCompletedTools(
+          return handleCompletedTools(
             completedToolCallsFromScheduler as TrackedToolCall[],
           );
         }
+        return false;
       },
       config,
       getPreferredEditor,
@@ -2334,6 +2335,8 @@ export const useGeminiStream = (
       prompt_id?: string,
       metadata?: {
         notificationDisplayText?: string;
+        /** Fires after the next model request accepts the prepared context. */
+        onContextAccepted?: () => void;
         onDelivered?: () => void;
         onDeliveryFailed?: () => void;
       },
@@ -2574,9 +2577,27 @@ export const useGeminiStream = (
               modelOverride: modelOverrideRef.current,
             },
           );
+          const acknowledgedStream = (async function* () {
+            let accepted = false;
+            let sawEvent = false;
+            for await (const event of stream) {
+              sawEvent = true;
+              const rejected =
+                event.type === ServerGeminiEventType.Error ||
+                event.type === ServerGeminiEventType.UserCancelled;
+              if (!accepted && !rejected) {
+                accepted = true;
+                metadata?.onContextAccepted?.();
+              }
+              yield event;
+            }
+            if (!accepted && !sawEvent) {
+              metadata?.onContextAccepted?.();
+            }
+          })();
 
           const processingStatus = await processGeminiStreamEvents(
-            stream,
+            acknowledgedStream,
             userMessageTimestamp,
             abortSignal,
           );
@@ -2901,7 +2922,7 @@ export const useGeminiStream = (
       }
 
       if (activeModelStreamsRef.current > 0) {
-        return;
+        return false;
       }
 
       // Finalize any client-initiated tools as soon as they are done.
@@ -2985,7 +3006,7 @@ export const useGeminiStream = (
         geminiTools.length === 0 &&
         pendingDuplicateResponseParts.length === 0
       ) {
-        return;
+        return false;
       }
 
       if (
@@ -2995,7 +3016,7 @@ export const useGeminiStream = (
         markToolsAsSubmitted(
           geminiTools.map((toolCall) => toolCall.request.callId),
         );
-        return;
+        return false;
       }
 
       // If all the tools were cancelled, don't submit a response to Gemini.
@@ -3023,7 +3044,7 @@ export const useGeminiStream = (
           (toolCall) => toolCall.request.callId,
         );
         markToolsAsSubmitted(callIdsToMarkAsSubmitted);
-        return;
+        return false;
       }
 
       const responsesToSend: Part[] = geminiTools.flatMap(
@@ -3165,7 +3186,7 @@ export const useGeminiStream = (
 
       // Don't continue if model was switched due to quota error
       if (modelSwitchedFromQuotaError) {
-        return;
+        return false;
       }
 
       // Mid-turn queue drain: inject queued user messages alongside tool
@@ -3310,10 +3331,26 @@ export const useGeminiStream = (
         turnCancelledRef.current ||
         abortControllerRef.current?.signal.aborted
       ) {
-        return;
+        return false;
       }
 
-      submitQuery(responsesToSend, SendMessageType.ToolResult, promptId);
+      let settled = false;
+      let settleAcceptance: (accepted: boolean) => void = () => {};
+      const acceptance = new Promise<boolean>((resolve) => {
+        settleAcceptance = (accepted) => {
+          if (settled) return;
+          settled = true;
+          resolve(accepted);
+        };
+      });
+      void submitQuery(responsesToSend, SendMessageType.ToolResult, promptId, {
+        onContextAccepted: () => settleAcceptance(true),
+        onDeliveryFailed: () => settleAcceptance(false),
+      }).then(
+        () => settleAcceptance(false),
+        () => settleAcceptance(false),
+      );
+      return acceptance;
     },
     [
       submitQuery,

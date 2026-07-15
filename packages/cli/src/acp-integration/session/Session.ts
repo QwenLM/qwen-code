@@ -1247,7 +1247,8 @@ export class Session implements SessionContext {
       );
     }
 
-    const chat = this.config.getGeminiClient()!.getChat();
+    const geminiClient = this.config.getGeminiClient()!;
+    const chat = geminiClient.getChat();
     const apiHistory = chat.getHistoryShallow();
     const apiTruncateIndex = this.#computeApiTruncationIndexForUserTurn(
       apiHistory,
@@ -1261,7 +1262,7 @@ export class Session implements SessionContext {
       );
     }
 
-    chat.truncateHistory(apiTruncateIndex);
+    geminiClient.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
 
     const rewindFiles = opts?.rewindFiles !== false;
@@ -1319,10 +1320,7 @@ export class Session implements SessionContext {
       );
     }
 
-    this.config
-      .getGeminiClient()!
-      .getChat()
-      .setHistory(structuredClone(history));
+    this.config.getGeminiClient()!.setHistory(structuredClone(history));
   }
 
   #computeApiTruncationIndexForUserTurn(

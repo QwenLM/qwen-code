@@ -4551,7 +4551,15 @@ describe('AgentTool', () => {
           role: 'system',
           parts: [{ text: 'parent system' }],
         },
-        tools: [{ functionDeclarations: [{ name: 'Bash' }, { name: 'Read' }] }],
+        tools: [
+          {
+            functionDeclarations: [
+              { name: 'Bash' },
+              { name: ToolNames.DEFERRED_TOOL_CALL },
+              { name: 'Read' },
+            ],
+          },
+        ],
       };
       const geminiClient = {
         getHistory: vi
@@ -4580,7 +4588,7 @@ describe('AgentTool', () => {
         expect.any(String),
         expect.objectContaining({
           bootstrapSystemInstruction: generationConfig.systemInstruction,
-          bootstrapTools: generationConfig.tools[0].functionDeclarations,
+          bootstrapTools: [{ name: 'Bash' }, { name: 'Read' }],
         }),
       );
 

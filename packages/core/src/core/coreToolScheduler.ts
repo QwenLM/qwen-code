@@ -684,9 +684,10 @@ export type OutputUpdateHandler = (
   outputChunk: ToolResultDisplay,
 ) => void;
 
+/** Return false when the consumer did not accept the results into model context. */
 export type AllToolCallsCompleteHandler = (
   completedToolCalls: CompletedToolCall[],
-) => Promise<void>;
+) => Promise<boolean | void>;
 
 export type ToolCallsUpdateHandler = (toolCalls: ToolCall[]) => void;
 
@@ -1104,6 +1105,7 @@ interface CoreToolSchedulerOptions {
   outputUpdateHandler?: OutputUpdateHandler;
   onAllToolCallsComplete?: AllToolCallsCompleteHandler;
   onToolCallsUpdate?: ToolCallsUpdateHandler;
+  deferDeferredToolPresentationCommit?: boolean;
   getPreferredEditor: () => EditorType | undefined;
   onEditorClose: () => void;
   /**
@@ -1187,6 +1189,7 @@ export class CoreToolScheduler {
   private config: Config;
   private onEditorClose: () => void;
   private chatRecordingService?: ChatRecordingService;
+  private deferDeferredToolPresentationCommit: boolean;
   private isFinalizingToolCalls = false;
   private isScheduling = false;
   private validationRetryCounts = new Map<string, number>();
@@ -1247,6 +1250,8 @@ export class CoreToolScheduler {
     this.getPreferredEditor = options.getPreferredEditor;
     this.onEditorClose = options.onEditorClose;
     this.chatRecordingService = options.chatRecordingService;
+    this.deferDeferredToolPresentationCommit =
+      options.deferDeferredToolPresentationCommit ?? false;
   }
 
   private get memoryMonitor(): MemoryPressureMonitor | undefined {
@@ -4576,10 +4581,12 @@ export class CoreToolScheduler {
 
         // Record tool results before notifying completion
         this.recordToolResults(completedCalls);
-        this.commitDeferredToolPresentations(completedCalls);
 
-        if (this.onAllToolCallsComplete) {
-          await this.onAllToolCallsComplete(completedCalls);
+        const completionAccepted = this.onAllToolCallsComplete
+          ? (await this.onAllToolCallsComplete(completedCalls)) !== false
+          : true;
+        if (completionAccepted && !this.deferDeferredToolPresentationCommit) {
+          this.commitDeferredToolPresentations(completedCalls);
         }
       } finally {
         try {
