@@ -58,7 +58,7 @@ import {
   getScheduledTasksByTurn,
 } from './artifacts/turnOutputSelectors';
 import styles from './ChatPane.module.css';
-import accentStyles from './workspaceAccent.module.css';
+import accentStyles from './WorkspaceAccent.module.css';
 
 // Split-view panes get the same interactive composer controls as the main chat,
 // each scoped to the pane's own session: the approval-mode and model pickers,
@@ -428,6 +428,10 @@ export function ChatPane({
       >
         {workspaceLabel && (
           <span
+            // role="img" so the whole dot+name badge is announced as its
+            // aria-label ("Workspace: <name>"); aria-label on a bare <span>
+            // (generic role) isn't reliably surfaced by screen readers.
+            role="img"
             className={styles.workspaceTag}
             title={paneWorkspaceCwd}
             aria-label={t('workspace.paneLabel', { name: workspaceLabel })}

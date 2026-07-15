@@ -6,7 +6,7 @@
 
 import type { DaemonSessionGroupPresetColor } from '@qwen-code/sdk/daemon';
 import styles from './ChatEditor.module.css';
-import accentStyles from './workspaceAccent.module.css';
+import accentStyles from './WorkspaceAccent.module.css';
 import {
   Tooltip,
   TooltipContent,
