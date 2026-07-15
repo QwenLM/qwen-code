@@ -472,6 +472,68 @@ describe('serve-bridge', () => {
       });
     });
 
+    describe.each([
+      {
+        toolName: 'session_load',
+        path: '/load',
+      },
+      {
+        toolName: 'session_resume',
+        path: '/resume',
+      },
+    ])('$toolName invalid binding recovery', ({ toolName, path }) => {
+      it('should invalidate a rejected binding before retrying', async () => {
+        let attempts = 0;
+        const { state, calls } = makeMockState({
+          defaultSessionId: 'session-a',
+          fetchReply: (req) => {
+            if (req.url.endsWith(path)) {
+              attempts++;
+              return attempts === 1
+                ? jsonResponse(400, { code: 'invalid_client_id' })
+                : jsonResponse(200, {
+                    sessionId: 'session-a',
+                    clientId: 'client-new',
+                    workspaceCwd: '/tmp',
+                  });
+            }
+            return new Response(null, { status: 204 });
+          },
+        });
+        const old = bindSession(state, 'session-a', 'client-old');
+        const { sessionTools } = await import(
+          '../../src/daemon-mcp/serve-bridge/tools/session.js'
+        );
+        const lifecycleTool = sessionTools(state).find(
+          (tool: { name: string }) => tool.name === toolName,
+        );
+
+        const rejected = await lifecycleTool.handler(
+          { session_id: 'session-a' },
+          {},
+        );
+
+        expect(rejected.isError).toBe(true);
+        expect(rejected.content[0].text).toContain('Call session_resume');
+        expect(state.bindings.has('session-a')).toBe(false);
+        expect(old.stream.abortCtrl.signal.aborted).toBe(true);
+
+        const retried = await lifecycleTool.handler(
+          { session_id: 'session-a' },
+          {},
+        );
+
+        expect(retried.isError).toBeUndefined();
+        const lifecycleCalls = calls.filter((call) => call.url.endsWith(path));
+        expect(lifecycleCalls).toHaveLength(2);
+        expect(lifecycleCalls[0]?.headers['x-qwen-client-id']).toBe(
+          'client-old',
+        );
+        expect(lifecycleCalls[1]?.headers['x-qwen-client-id']).toBeUndefined();
+        expect(state.bindings.get('session-a')?.clientId).toBe('client-new');
+      });
+    });
+
     describe('session_close', () => {
       it('should clear defaultSessionId when closing the default session', async () => {
         const { state } = makeMockState({

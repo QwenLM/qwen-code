@@ -76,13 +76,20 @@ export function sessionTools(state: BridgeState): any[] {
                   'Cannot replace a session binding while a prompt is in progress.',
                 );
               }
-              const loaded = await state.client.loadSession(
-                args.session_id,
-                {
-                  workspaceCwd: args.workspace_cwd ?? state.workspaceCwd,
-                },
-                current?.clientId,
-              );
+              const loaded = await state.client
+                .loadSession(
+                  args.session_id,
+                  {
+                    workspaceCwd: args.workspace_cwd ?? state.workspaceCwd,
+                  },
+                  current?.clientId,
+                )
+                .catch(async (err: unknown) => {
+                  if (current) {
+                    return rethrowBindingError(state, current, err);
+                  }
+                  throw err;
+                });
               await replaceBinding(
                 state,
                 createBinding(loaded.sessionId, loaded.clientId),
@@ -114,13 +121,20 @@ export function sessionTools(state: BridgeState): any[] {
                   'Cannot replace a session binding while a prompt is in progress.',
                 );
               }
-              const resumed = await state.client.resumeSession(
-                args.session_id,
-                {
-                  workspaceCwd: args.workspace_cwd ?? state.workspaceCwd,
-                },
-                current?.clientId,
-              );
+              const resumed = await state.client
+                .resumeSession(
+                  args.session_id,
+                  {
+                    workspaceCwd: args.workspace_cwd ?? state.workspaceCwd,
+                  },
+                  current?.clientId,
+                )
+                .catch(async (err: unknown) => {
+                  if (current) {
+                    return rethrowBindingError(state, current, err);
+                  }
+                  throw err;
+                });
               await replaceBinding(
                 state,
                 createBinding(resumed.sessionId, resumed.clientId),
