@@ -169,6 +169,37 @@
   display: none;
 }
 
+/* Hosts can embed WebShell in a narrow side pane while the browser viewport
+ * remains wide. The public drawer API must still show a usable overlay inside
+ * that container instead of relying exclusively on the viewport media query. */
+.mobileDrawerForced {
+  display: block;
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  pointer-events: auto;
+  visibility: visible;
+  padding-top: env(safe-area-inset-top);
+  padding-right: env(safe-area-inset-right);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+}
+
+.mobileDrawerForced .mobileBackdrop {
+  display: block;
+  position: absolute;
+  inset: 0;
+  z-index: 49;
+  background: rgba(0, 0, 0, 0.5);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.mobileDrawerForced > aside {
+  position: relative;
+  z-index: 50;
+}
+
 .hamburgerButton {
   display: none;
   align-items: center;
