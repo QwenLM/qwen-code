@@ -14,6 +14,7 @@ import {
 } from '../utils/mockDaemon';
 import {
   captureScreenshot,
+  completeReplay,
   fillComposer,
   gotoSession,
   installScenario,
@@ -97,6 +98,53 @@ for (const theme of THEMES) {
         page.locator('[data-web-shell-message-list] svg[id^="mermaid-"]'),
       ).toBeVisible();
       await captureScreenshot(page, `mermaid-diagram-${theme}`);
+    });
+
+    test(`split view`, async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        events: [
+          userTextEvent('Review two sessions side by side.', { id: 1 }),
+          assistantTextEvent('Here is the first pane of the split.', { id: 2 }),
+          turnCompleteEvent('prompt-split', { id: 3 }),
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      // Load the primary session (this also primes the theme), then enter the
+      // split via the `?split=a,b` deep link so two panes render side by side.
+      await gotoSession(page, scenario, daemon, theme);
+      await page.goto(
+        `/session/${encodeURIComponent(scenario.sessionId)}` +
+          `?split=${encodeURIComponent(scenario.sessionId)},previous-session` +
+          `&theme=${theme}`,
+      );
+      await expect(page.locator('[data-testid="split-view"]')).toBeVisible();
+      // Both panes reconnect on the split navigation; settle each replay so
+      // neither pane is stuck on the loading state.
+      await completeReplay(
+        page,
+        daemon,
+        scenario.sessionId,
+        scenario.events.length,
+      );
+      await completeReplay(page, daemon, 'previous-session', 0);
+      // The maximize control only appears with 2+ panes (#6951); waiting on it
+      // confirms the split actually rendered both panes.
+      await expect(
+        page.getByRole('button', { name: 'Maximize pane' }).first(),
+      ).toBeVisible();
+      await captureScreenshot(page, `split-view-${theme}`);
+
+      // Maximize the first pane (#6951): it fills the split and the other pane
+      // hides; the button flips to "Restore pane".
+      await page.getByRole('button', { name: 'Maximize pane' }).first().click();
+      await expect(
+        page.getByRole('button', { name: 'Restore pane' }),
+      ).toBeVisible();
+      await captureScreenshot(page, `split-view-maximized-${theme}`);
     });
 
     test(`slash menu`, async ({ page }, testInfo) => {
