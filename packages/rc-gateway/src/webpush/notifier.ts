@@ -33,7 +33,13 @@ import type { OwnerEventBus } from '../ownerEvents.js';
  * Event kinds that are considered "critical" and bypass the snooze floor.
  * These events MUST always be deliverable regardless of snooze state.
  */
-const SNOOZE_BYPASS_KINDS = new Set(['session.died', 'policy.deny']);
+export const SNOOZE_BYPASS_KINDS = new Set([
+  'session.died',
+  'policy.deny',
+  // A blocked agent needs a human — quiet-hours/snooze bypass (design:
+  // "agent_blocked is a candidate critical kind").
+  'agent.blocked',
+]);
 
 /**
  * The APNs send seam the notifier drives (satisfied by `ApnsSender`). Kept
@@ -49,9 +55,14 @@ export interface ApnsNotifier {
  * token holds the mapped scope; scope mismatches are silently skipped (no audit
  * noise, per the design).
  */
-const KIND_SCOPE: Record<string, RcScope> = {
+export const KIND_SCOPE: Record<string, RcScope> = {
   'permission.required': APPROVE,
   'task.completed': SESSION_READ,
+  'agent.spawned': SESSION_READ,
+  'agent.completed': SESSION_READ,
+  'agent.failed': SESSION_READ,
+  'agent.blocked': SESSION_READ,
+  'agent.cancelled': SESSION_READ,
 };
 
 /**

@@ -10,6 +10,7 @@ import {
   buildDigestPayload,
   enforcePayloadBudget,
   MAX_PAYLOAD_BYTES,
+  AGENT_EVENT_KINDS,
 } from './payload.js';
 
 describe('buildDigestPayload', () => {
@@ -202,5 +203,41 @@ describe('enforcePayloadBudget', () => {
     const payload = makePayload('Permission needed: run_shell_command');
     const result = enforcePayloadBudget(payload);
     expect(result.truncated).toBe(false);
+  });
+});
+
+describe('agent lifecycle payloads', () => {
+  it('maps each lifecycle event type to its dot-kind with a metadata-only summary', () => {
+    const data = {
+      agentId: 'a1',
+      sessionId: 's1',
+      parentSessionId: null,
+      agentType: 'general',
+      task: 'sekrit task text',
+      status: 'completed',
+      costMicrocents: 5000,
+    };
+    const p = buildPayload(
+      { type: 'agent_completed', data },
+      { sessionId: 's1', sessionName: 'agent run' },
+    );
+    expect(p).not.toBeNull();
+    expect(p!.kind).toBe('agent.completed');
+    expect(p!.sessionId).toBe('s1');
+    // Metadata only — the task text must NEVER reach a push payload.
+    expect(JSON.stringify(p)).not.toContain('sekrit task text');
+    expect(AGENT_EVENT_KINDS['agent_blocked']).toBe('agent.blocked');
+    for (const t of [
+      'agent_spawned',
+      'agent_failed',
+      'agent_blocked',
+      'agent_cancelled',
+    ]) {
+      const built = buildPayload(
+        { type: t, data: { ...data, status: t.slice(6) } },
+        { sessionId: 's1' },
+      );
+      expect(built?.kind).toBe(AGENT_EVENT_KINDS[t]);
+    }
   });
 });

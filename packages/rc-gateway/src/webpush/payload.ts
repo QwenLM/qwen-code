@@ -42,6 +42,18 @@ function sessionUrl(sessionId: string): string {
 }
 
 /**
+ * Lifecycle SSE event type → routable notification kind (dot convention,
+ * matching 'permission.required'). Exported so wiring/tests share one map.
+ */
+export const AGENT_EVENT_KINDS: Record<string, string> = {
+  agent_spawned: 'agent.spawned',
+  agent_completed: 'agent.completed',
+  agent_failed: 'agent.failed',
+  agent_blocked: 'agent.blocked',
+  agent_cancelled: 'agent.cancelled',
+};
+
+/**
  * Map a daemon event to a metadata-only push payload, or null if the event is
  * not notifiable this cycle. `data` is read defensively with optional chaining;
  * only whitelisted, non-sensitive fields ever reach the payload.
@@ -51,6 +63,26 @@ export function buildPayload(
   ctx: { sessionId: string; sessionName?: string },
 ): PushPayload | null {
   const data = (event.data ?? {}) as Record<string, unknown>;
+
+  // Agent lifecycle events (add-agent-observability). Metadata only: the
+  // agent's TASK TEXT never reaches a push payload — only type + status.
+  const agentKind = AGENT_EVENT_KINDS[event.type];
+  if (agentKind !== undefined) {
+    const agentType =
+      typeof data.agentType === 'string' && data.agentType.length > 0
+        ? data.agentType
+        : 'agent';
+    const status =
+      typeof data.status === 'string' ? data.status : event.type.slice(6);
+    return {
+      v: 1,
+      kind: agentKind,
+      sessionId: ctx.sessionId,
+      ...(ctx.sessionName ? { sessionName: ctx.sessionName } : {}),
+      summary: truncate(`Agent ${status}: ${agentType}`),
+      url: sessionUrl(ctx.sessionId),
+    };
+  }
 
   switch (event.type) {
     case 'permission_request': {
