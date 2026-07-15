@@ -6411,7 +6411,7 @@ export class Config {
       },
     );
     if (toolSearchRegistered && !options?.forSubAgent) {
-      await registerLazy(
+      const deferredToolCallRegistered = await registerLazy(
         ToolNames.DEFERRED_TOOL_CALL,
         async () => {
           const { DeferredToolCallTool } = await import(
@@ -6421,6 +6421,9 @@ export class Config {
         },
         { allowReservedName: true },
       );
+      if (!deferredToolCallRegistered) {
+        registry.unregisterFactory(ToolNames.TOOL_SEARCH);
+      }
     }
     await registerLazy(ToolNames.READ_MCP_RESOURCE, async () => {
       const { ReadMcpResourceTool } = await import(

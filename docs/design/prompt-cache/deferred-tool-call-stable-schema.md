@@ -491,11 +491,13 @@ Calling it outside plan mode still uses the existing runtime validation. The
 cost is one additional tool in every stable schema; that cost is acceptable so
 plan-mode exit does not depend on a special proxy/reveal exception.
 
-### Disabled `tool_search`
+### Unavailable discovery/proxy pair
 
-If `tool_search` is unavailable because of configuration or permission policy:
+In the main session, `tool_search` and `deferred_tool_call` form one capability.
+If either tool is unavailable because of configuration or permission policy:
 
-- omit `deferred_tool_call`, because its presentation gate cannot be satisfied;
+- omit both tools, rolling back a pending `tool_search` factory when proxy
+  registration fails;
 - build initial main-session declarations with
   `getFunctionDeclarations({ includeDeferred: true })`;
 - do not advertise on-demand discovery.
@@ -644,7 +646,7 @@ instead of assuming that stable schema necessarily yields a net benefit.
 | Source area                                                      | Required change                                                                                                                                                                                                                                           |
 | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `packages/core/src/tools/tool-names.ts`                          | Add the reserved proxy name and display name.                                                                                                                                                                                                             |
-| `packages/core/src/config/config.ts`                             | Register the proxy only for the main registry when `tool_search` is available; keep it out of `forSubAgent` registries.                                                                                                                                   |
+| `packages/core/src/config/config.ts`                             | Register `tool_search` and the proxy atomically for the main registry, rolling search back if proxy registration fails; keep the proxy out of `forSubAgent` registries.                                                                                   |
 | `packages/core/src/tools/tool-registry.ts`                       | Separate committed proxy presentations from direct declaration visibility, compare pending and current schema fingerprints at commit, preserve `includeDeferred` behavior, reserve the proxy name, and invalidate fingerprints on tool lifecycle changes. |
 | `packages/core/src/tools/tool-search.ts`                         | Render a captured schema and return its name plus fingerprint as pending presentation metadata without calling `setTools()`.                                                                                                                              |
 | `packages/core/src/core/deferred-tool-call-normalization.ts`     | Provide the shared normalization helper for proxy envelope validation, target resolution, presentation gating, and provider-facing response naming.                                                                                                       |
@@ -731,6 +733,8 @@ instead of assuming that stable schema necessarily yields a net benefit.
   directly callable.
 - When `tool_search` is disabled, deferred tools are exposed directly and the
   proxy is omitted.
+- When `deferred_tool_call` is disabled or denied, `tool_search` registration is
+  rolled back and deferred tools use the same direct-exposure fallback.
 - ACP unlocks the proxy only after a successful `tool_search` result is returned
   to the model; failure, cancellation, PostToolUse stop, or non-delivery does
   not unlock it.

@@ -453,6 +453,17 @@ describe('ToolRegistry', () => {
       expect(names).toContain('loaded-tool');
       expect(names).toContain('lazy-tool');
     });
+
+    it('removes a lazy factory before it is loaded', async () => {
+      const factory = vi.fn(async () => new MockTool({ name: 'lazy-tool' }));
+      toolRegistry.registerFactory('lazy-tool', factory);
+
+      toolRegistry.unregisterFactory('lazy-tool');
+      await toolRegistry.warmAll();
+
+      expect(factory).not.toHaveBeenCalled();
+      expect(toolRegistry.getAllToolNames()).not.toContain('lazy-tool');
+    });
   });
 
   describe('deferred tool filtering', () => {

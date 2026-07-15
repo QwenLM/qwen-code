@@ -338,6 +338,11 @@ export class ToolRegistry {
     this.factories.set(name, factory);
   }
 
+  /** Removes a lazy factory before it has been instantiated. */
+  unregisterFactory(name: string): void {
+    this.factories.delete(name);
+  }
+
   /**
    * Ensures a specific tool is loaded. Returns the cached instance if already
    * loaded, otherwise invokes the factory, caches the result, and returns it.
