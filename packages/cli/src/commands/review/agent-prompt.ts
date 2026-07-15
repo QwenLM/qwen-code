@@ -321,6 +321,19 @@ export function buildChunkAgentPrompt(
 }
 
 /**
+ * A diff line range as a `read_file` window. The `-1` / `+1` is the single place a
+ * 1-based inclusive `[startLine, endLine]` becomes a 0-based `offset` and a `limit`.
+ * It used to be spelled out at five sites; an off-by-one fix, or a change in how
+ * `read_file` windows, now lands here once instead of in five that could drift apart.
+ */
+function diffWindow(
+  startLine: number,
+  endLine: number,
+): { offset: number; limit: number } {
+  return { offset: startLine - 1, limit: endLine - startLine + 1 };
+}
+
+/**
  * The launch prompt for a territory agent: short, and it points at the brief.
  *
  * The same arithmetic that moved the dimension agents' briefs onto disk applies
@@ -342,8 +355,7 @@ export function buildChunkLaunchPrompt(
   briefFile: string,
 ): string {
   const { diffPath, chunk, total } = chunkFrom(report, id);
-  const offset = chunk.startLine - 1;
-  const limit = chunk.endLine - chunk.startLine + 1;
+  const { offset, limit } = diffWindow(chunk.startLine, chunk.endLine);
 
   return [
     `You are review agent \`chunk ${chunk.id} of ${total}\` — the territory agent for ` +
@@ -457,8 +469,7 @@ function diffReadingBlock(
             `(startLine=${c?.startLine}, endLine=${c?.endLine}).`,
         );
       }
-      const offset = c.startLine - 1;
-      const limit = c.endLine - c.startLine + 1;
+      const { offset, limit } = diffWindow(c.startLine, c.endLine);
       return `read_file(file_path="${diffPath}", offset=${offset}, limit=${limit})`;
     })
     .join('\n');
@@ -597,8 +608,10 @@ function invariantFileBlock(
       : '**This file records no added ranges.** Judge only what the diff below shows changed.',
   ];
   if (f.diffRange) {
-    const offset = f.diffRange.startLine - 1;
-    const limit = f.diffRange.endLine - f.diffRange.startLine + 1;
+    const { offset, limit } = diffWindow(
+      f.diffRange.startLine,
+      f.diffRange.endLine,
+    );
     parts.push(
       '',
       "**Then read this file's own slice of the diff** — it is the only place the removed " +
@@ -807,7 +820,7 @@ function invariantDiffRange(
   const f = files.find((x) => x?.path === file);
   const r = f?.diffRange;
   if (!r) return [];
-  return [{ offset: r.startLine - 1, limit: r.endLine - r.startLine + 1 }];
+  return [diffWindow(r.startLine, r.endLine)];
 }
 
 /**
@@ -860,10 +873,7 @@ export function buildRoleLaunchPrompt(
     const allChunks = (
       Array.isArray(report.chunks) ? report.chunks : []
     ) as DiffChunk[];
-    const rangeOf = (c: DiffChunk) => ({
-      offset: c.startLine - 1,
-      limit: c.endLine - c.startLine + 1,
-    });
+    const rangeOf = (c: DiffChunk) => diffWindow(c.startLine, c.endLine);
     let ranges: Array<{ offset: number; limit: number }>;
     if (role.startsWith('invariant-')) {
       ranges = invariantDiffRange(report, opts.file);
@@ -918,26 +928,42 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   // — an error about the plan, for a mistake in the call.
   const hasChunk = typeof args.chunk === 'number';
   const hasRole = typeof args.role === 'string' && args.role.length > 0;
+  const hasFile = typeof args.file === 'string' && args.file.length > 0;
   const hasWhole = !!args.wholeDiff;
   const bad = (msg: string): never => {
     throw new Error(`agent-prompt: ${msg}`);
   };
   if (hasWhole) {
-    if (hasChunk || hasRole) {
+    if (hasChunk || hasRole || hasFile) {
       bad(
-        '--whole-diff builds the diff-reading block alone; it takes no --chunk or --role.',
+        '--whole-diff builds the diff-reading block alone; it takes no --chunk, --role or --file.',
       );
     }
   } else if (hasRole) {
+    const role = args.role as RoleId;
     // `--chunk` combines with a role only when that role owns one chunk's territory
     // — a Step 3B reverse auditor. Which roles those are is declared on the brief
     // (`acceptsChunk`), not hardcoded here, so a new per-chunk role is a data change
-    // in agent-briefs, not an edit to this guard. Any other role + chunk is a mistake
-    // (a dimension agent walks the whole diff; a chunk agent is `--chunk` alone).
-    if (hasChunk && !BRIEFS[args.role as RoleId]?.acceptsChunk) {
+    // in agent-briefs, not an edit to this guard — and the message names the set it
+    // read, so it can never claim "only reverse-audit" while allowing another role.
+    if (hasChunk && !BRIEFS[role]?.acceptsChunk) {
+      const chunkRoles = (Object.keys(BRIEFS) as RoleId[]).filter(
+        (r) => BRIEFS[r].acceptsChunk,
+      );
       bad(
-        `--chunk combines with --role only for reverse-audit (a Step 3B per-chunk ` +
-          `auditor); role "${args.role}" does not take --chunk.`,
+        `--chunk combines with --role only for a per-chunk role ` +
+          `(${chunkRoles.join(', ')}); role "${role}" does not take --chunk.`,
+      );
+    }
+    // `--file` is the invariant agent's one scoping input, and the record key is
+    // derived from it. A stray --file on any other role would key that role's record
+    // by a file it never reads — colliding with, and masking, a real file-keyed
+    // record. Invariant roles are the only ones that take a file; they require it,
+    // and `buildRoleBrief` throws if one is launched without it.
+    if (hasFile && !role.startsWith('invariant-')) {
+      bad(
+        `--file scopes an invariant agent to one heavily-rewritten file; ` +
+          `role "${role}" does not take --file.`,
       );
     }
   } else if (!hasChunk) {

@@ -370,6 +370,31 @@ describe('agent-prompt (command boundary)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('drives the verify role end-to-end through the handler', () => {
+    // verify is covered via buildRoleBrief / buildRoleLaunchPrompt directly; this is
+    // the one new role whose full handler path — brief write, record key, and the
+    // `output: 'verdicts'` branch of tail() — was not driven end-to-end.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-verify-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      expect(() =>
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan,
+          role: 'verify',
+        }),
+      ).not.toThrow();
+      const recorded = readRecordedPrompts(plan);
+      expect([...recorded.keys()]).toEqual(['verify']);
+      const briefText = readFileSync(briefPath(plan, 'verify'), 'utf8');
+      // The verdict branch: Exclusion Criteria yes, finding format no.
+      expect(briefText).toContain('What is NOT a finding');
+      expect(briefText).not.toContain('**Anchor:**');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 // The half of the fan-out this command did not cover. Measured against one real
@@ -427,12 +452,25 @@ describe('buildWholeDiffBlock — the agents that walk the whole diff', () => {
     [
       'a non-reverse role + chunk',
       { chunk: 13, role: '2' },
-      /combines with --role only for reverse-audit/,
+      // The message names the set it read from `acceptsChunk`, not a hardcoded role.
+      /only for a per-chunk role \(reverse-audit\); role "2" does not take --chunk/,
     ],
     [
       'whole-diff + role',
       { 'whole-diff': true, role: '2' },
       /--whole-diff builds the diff-reading block alone/,
+    ],
+    [
+      'whole-diff + file',
+      { 'whole-diff': true, file: 'foo.ts' },
+      /--whole-diff builds the diff-reading block alone/,
+    ],
+    [
+      // A stray --file on a role that does not read a file would key its record by
+      // that file, colliding with — and masking — a real file-keyed record.
+      'reverse-audit + chunk + a stray file',
+      { role: 'reverse-audit', chunk: 14, file: 'foo.ts' },
+      /role "reverse-audit" does not take --file/,
     ],
     [
       'all three',
