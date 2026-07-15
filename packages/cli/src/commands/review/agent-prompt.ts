@@ -421,6 +421,20 @@ function diffReadingBlock(report: PlanReport, diffPath: string): string[] {
 
   const reads = chunks
     .map((c) => {
+      // Same guard `chunkFrom` applies element by element: a corrupted chunk with
+      // a non-integer `startLine` would otherwise emit `offset=NaN, limit=NaN`
+      // rather than a legible error the caller can act on.
+      if (
+        !Number.isSafeInteger(c?.startLine) ||
+        !Number.isSafeInteger(c?.endLine) ||
+        c.startLine < 1 ||
+        c.endLine < c.startLine
+      ) {
+        throw new Error(
+          `agent-prompt: chunk ${c?.id} has no usable line range ` +
+            `(startLine=${c?.startLine}, endLine=${c?.endLine}).`,
+        );
+      }
       const offset = c.startLine - 1;
       const limit = c.endLine - c.startLine + 1;
       return `read_file(file_path="${diffPath}", offset=${offset}, limit=${limit})`;
@@ -719,8 +733,14 @@ export function buildRoleBrief(
     )
       .map((f) => f?.path)
       .filter((p): p is string => typeof p === 'string');
-    // An invariant agent owns one file, and nothing else in the diff is its problem.
-    const scoped = opts.file ? paths.filter((p) => p === opts.file) : paths;
+    // An invariant agent owns one file, and nothing else in the diff is its
+    // problem. Gate on the role, not just `opts.file`: only invariant agents are
+    // file-scoped, and narrowing a whole-diff reviewsCode agent to one file would
+    // silently drop the path rules for every other file it is supposed to cover.
+    const scoped =
+      role.startsWith('invariant-') && opts.file
+        ? paths.filter((p) => p === opts.file)
+        : paths;
     const pathRules = pathRulesFor(scoped);
     if (pathRules) parts.push('', pathRules);
   }

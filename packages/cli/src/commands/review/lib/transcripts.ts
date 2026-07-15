@@ -239,8 +239,10 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
       // to open; a tool *result* that quotes it (a grep over `.qwen/tmp`, this
       // file in a diff) says nothing about what the agent opened.
       const args = (fc.args ?? {}) as Record<string, unknown>;
+      // Match the path as a whole JSON string value, quotes included: a bare
+      // substring credits `…/diff.txt.bak` for `…/diff.txt`.
       const namedTheDiff = diffPath
-        ? JSON.stringify(args).includes(diffPath)
+        ? JSON.stringify(args).includes(JSON.stringify(diffPath))
         : false;
       const pending: Pending = {
         namedTheDiff,
@@ -259,6 +261,8 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
         pending = byId.get(fr.id) as Pending;
         byId.delete(fr.id);
       } else if (anonymous.length > 0) {
+        // FIFO, not LIFO: a JSONL transcript is chronological, so the oldest
+        // un-paired call is the one this earliest un-paired result belongs to.
         pending = anonymous.shift() as Pending;
       } else {
         // A result with no call before it is not evidence of a call.

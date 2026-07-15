@@ -249,17 +249,18 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       // The prompt was built in code and edited on the way to the agent. This caps
       // for the same reason the others do: what the agent was actually asked is not
       // what this skill's guarantees are written against.
+      // `coverage.ts` already writes these self-explanatory (`… — launched with a
+      // prompt that is not the one the CLI built`), so push the label as-is —
+      // wrapping it in a second ` — ` clause read as one run-on sentence with two
+      // dashes. Same for `missingRoles` below; `unreadBriefs` already did this.
       for (const label of cov.rewrittenPrompts) {
-        unreviewed.push(
-          `${label} — not launched with the prompt the CLI built (pass ` +
-            '`agent-prompt` output verbatim)',
-        );
+        unreviewed.push(label);
       }
       // A dimension nobody reviewed. This is exactly what `unreviewedDimensions`
       // has always meant, arrived at from the plan instead of from the orchestrator
       // noticing — which, on the run that never launched Agent 0, it did not.
       for (const label of cov.missingRoles) {
-        unreviewed.push(`${label} — this agent never ran`);
+        unreviewed.push(label);
       }
       // Launched, but never read the brief it was pointed at: it reviewed with no
       // dimension, no severity definitions and no project rules.

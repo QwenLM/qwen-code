@@ -612,7 +612,15 @@ describe('buildRoleLaunchPrompt — small enough to actually be carried', () => 
   it('stays under a kilobyte, where the full brief does not', () => {
     // The number is the point. Twelve of these is a few kilobytes the orchestrator
     // copies without editing; twelve of the briefs is fifty-five, which it does not.
-    for (const role of ['0', '1a', '1c', '2', '6a', '7'] as const) {
+    for (const role of [
+      '0',
+      '1a',
+      '1c',
+      '2',
+      '6a',
+      '7',
+      'test-matrix',
+    ] as const) {
       const launch = buildRoleLaunchPrompt(PLAN, role, '/tmp/x.brief.md');
       expect(launch.length).toBeLessThan(1024);
     }

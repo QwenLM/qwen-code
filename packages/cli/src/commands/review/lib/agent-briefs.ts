@@ -67,7 +67,7 @@ export interface Brief {
   /**
    * Does this agent read the diff?
    *
-   * Two do not, and they are not defects: Build & Test runs commands, and its
+   * One does not, and it is not a defect: Build & Test runs commands, and its
    * evidence is their output. Everyone else who does not read the diff is a bug.
    */
   readsDiff: boolean;

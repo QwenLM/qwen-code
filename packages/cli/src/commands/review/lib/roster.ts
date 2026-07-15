@@ -103,6 +103,15 @@ function hasDeletions(plan: RosterPlan): boolean {
   return files.some((f) => Number(f?.removedLines ?? 0) > 0);
 }
 
+/** A PR number the plan actually resolved: a positive integer, as a number or the
+ *  string `fetch-pr` writes. `null`, `0`, `''` and non-numeric junk are 'no PR'. */
+function isPositivePrNumber(value: unknown): boolean {
+  if (typeof value === 'number') return Number.isInteger(value) && value > 0;
+  if (typeof value === 'string')
+    return /^\d+$/.test(value) && Number(value) > 0;
+  return false;
+}
+
 /** Source files rewritten heavily enough that the diff is the wrong frame. */
 function heavyFiles(plan: RosterPlan): string[] {
   const files = Array.isArray(plan.files) ? plan.files : [];
@@ -129,7 +138,13 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
   // plan when the review resolved one locally. A cross-repo lightweight review does
   // run Agent 0 — it is pure GitHub API — but its plan does not carry the number,
   // so this cannot require it, and says so rather than pretending.
-  if (mode === 'pr-worktree' && plan.prNumber !== undefined) add('0');
+  // A positive PR number, not merely `!== undefined`: a plan carrying
+  // `prNumber: null`, `0` or `''` is 'no PR resolved', and requiring Agent 0 for
+  // it would block a review over an issue agent that had nothing to fetch.
+  // `fetch-pr` writes the number as a STRING (`"6766"`), so accept a numeric
+  // string as well as a number — checking `typeof === 'number'` alone would drop
+  // Agent 0 from every real PR review.
+  if (mode === 'pr-worktree' && isPositivePrNumber(plan.prNumber)) add('0');
 
   if (isTerritoryFanOut(plan)) {
     // Step 3B: one agent per territory, plus the agents no territory can see. A

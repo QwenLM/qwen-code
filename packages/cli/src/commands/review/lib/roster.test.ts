@@ -109,6 +109,23 @@ describe('requiredAgents — Step 3A', () => {
     expect(keys(light)).toContain('2');
   });
 
+  it.each([
+    ['6766', true], // fetch-pr writes the number as a string
+    [6766, true], // …a number is fine too
+    [undefined, false],
+    [null, false],
+    [0, false],
+    ['0', false],
+    ['', false],
+    ['not-a-number', false],
+  ])('requires Agent 0 for prNumber %o → %s', (prNumber, expected) => {
+    // The number arrives from a plan file, so a corrupted or absent value must
+    // fail closed to "no PR" rather than demanding an issue agent that has nothing
+    // to fetch — but a legitimate numeric string must still count, or every real
+    // PR review loses Agent 0.
+    expect(keys({ ...PR, prNumber }).includes('0')).toBe(expected);
+  });
+
   it('asks for no issue-fidelity agent on a local review — there is no issue', () => {
     const local = {
       ...PR,
