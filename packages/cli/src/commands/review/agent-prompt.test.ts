@@ -479,6 +479,29 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain('--out /abs/tmp/qwen-review-pr-6766-efficacy.json');
   });
 
+  it('hands Agent 7 the build-test command with absolute --plan/--worktree/--out', () => {
+    const p = buildRoleBrief(PR_PLAN, '7', { planPath: '/abs/tmp/plan.json' });
+    expect(p).toContain('qwen review build-test');
+    expect(p).toContain('--plan /abs/tmp/plan.json');
+    expect(p).toMatch(/--worktree \/[^\s]*review-pr-6766/);
+    expect(p).not.toMatch(/--plan \.qwen/);
+    expect(p).toContain('--out /abs/tmp/qwen-review-pr-6766-build-test.json');
+  });
+
+  it('never emits a literal "undefined" in the build-test --out filename', () => {
+    // `prNumber` is typed `unknown` and can be absent. Without the guard, the
+    // filename resolves to `qwen-review-pr-undefined-build-test.json` — a report
+    // the agent writes and downstream never finds.
+    const noPr = { ...PR_PLAN };
+    delete (noPr as { prNumber?: unknown }).prNumber;
+    const p = buildRoleBrief(noPr, '7', { planPath: '/abs/tmp/plan.json' });
+    expect(p).not.toContain('pr-undefined-build-test');
+    // The brief PROSE still names the command; what must be absent is the concrete
+    // command BLOCK — the `--plan` invocation (unique to the build-test block here).
+    expect(p).not.toContain('--plan /abs/tmp/plan.json');
+    expect(p).not.toMatch(/--out \S*build-test\.json/);
+  });
+
   it('welds the PR into Agent 0 — a bare `gh pr view` judges the wrong issue', () => {
     const p = buildRoleBrief(PR_PLAN, '0', {
       planPath: '/x/qwen-review-pr-6766-fetch.json',

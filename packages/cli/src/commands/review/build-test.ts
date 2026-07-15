@@ -278,16 +278,30 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   // the exit code, it is whether the tree we need is there — and the scoped build
   // below is the authoritative answer anyway. Report the install failure, and
   // carry on to ask the question the review actually came to ask.
+  //
+  // A **timeout** is the exception, and it is not the same case. A `prepare` hook
+  // that fails leaves a *complete* `node_modules` and only the post-install build
+  // broken; a timeout kills `npm ci` mid-download and leaves a **partial** tree.
+  // Building against that produces "module not found" errors that look like defects
+  // in the diff and are not — so a timed-out install aborts, exactly like an install
+  // that left no tree at all.
   if (args.install && !existsSync(join(root, 'node_modules'))) {
     const install = exec('npm ci --no-audit --no-fund', root, perCommandMs);
     results.install = install;
     if (install.timedOut) results.timedOut.push(install.command);
-    if (install.exitCode !== 0 && !existsSync(join(root, 'node_modules'))) {
+    if (
+      install.timedOut ||
+      (install.exitCode !== 0 && !existsSync(join(root, 'node_modules')))
+    ) {
       results.ok = false;
-      results.note =
-        'The install failed and left no `node_modules`, so nothing could be built ' +
-        'or tested. This is an environment failure, not a defect in the diff — ' +
-        'report it as informational, never as a Critical.';
+      results.note = install.timedOut
+        ? `\`${install.command}\` ran out of time (${args.timeout}s) and left an ` +
+          'incomplete `node_modules`, so nothing could be built or tested against it. ' +
+          'This is an infrastructure result, not a defect in the diff — report it as ' +
+          'informational.'
+        : 'The install failed and left no `node_modules`, so nothing could be built ' +
+          'or tested. This is an environment failure, not a defect in the diff — ' +
+          'report it as informational.';
       return results;
     }
   }
@@ -384,15 +398,33 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     const failed = [...results.build, ...results.test].filter(
       (r) => r.exitCode !== 0,
     );
-    results.note = results.ok
-      ? `Built ${results.buildSet.length} of ${packages.length} workspaces (the ${affected.length} the ` +
+    // A timeout is a failure (its exitCode is null), but it is NOT a defect in the
+    // diff, and the note must not tell the agent to correlate it with one — the
+    // brief says timeouts are infrastructure, and an agent trusts the data over its
+    // instructions. So a test that runs out of time gets the same infrastructure
+    // framing the build-timeout path already gives, not the "a failure is a Critical"
+    // message meant for a real compile/assertion failure.
+    const realFailures = failed.filter((r) => !r.timedOut);
+    if (results.ok) {
+      results.note =
+        `Built ${results.buildSet.length} of ${packages.length} workspaces (the ${affected.length} the ` +
         `diff changes, plus what they compile against${
           widened.size
             ? `, plus ${[...widened].join(', ')} the compiler asked for`
             : ''
-        }) and ran the tests of the changed ones. Everything passed.`
-      : `${failed.length} command(s) failed. Correlate each error with the diff: a failure in a ` +
-        'file the PR changed is a Critical; one in a file it did not touch is pre-existing.';
+        }) and ran the tests of the changed ones. Everything passed.`;
+    } else if (realFailures.length === 0) {
+      results.note =
+        `${failed.length} command(s) ran out of time (${args.timeout}s). A timeout is an ` +
+        'infrastructure result, not a defect in the diff — report it as informational.';
+    } else {
+      results.note =
+        `${realFailures.length} command(s) failed. Correlate each error with the diff: a failure in a ` +
+        'file the PR changed is a Critical; one in a file it did not touch is pre-existing.' +
+        (failed.length > realFailures.length
+          ? ' (Commands that timed out are infrastructure, not findings.)'
+          : '');
+    }
   }
 
   // The install exited non-zero but left a usable tree, so the run went ahead. Say
@@ -445,12 +477,10 @@ export const buildTestCommand: CommandModule = {
         describe: 'Run `npm ci` first when node_modules is absent',
       }),
   handler: (argv) => {
-    const report = runBuildTest(argv as unknown as BuildTestArgs);
-    if ((argv as unknown as BuildTestArgs).out) {
-      writeFileSync(
-        (argv as unknown as BuildTestArgs).out as string,
-        JSON.stringify(report, null, 2),
-      );
+    const args = argv as unknown as BuildTestArgs;
+    const report = runBuildTest(args);
+    if (args.out) {
+      writeFileSync(args.out, JSON.stringify(report, null, 2));
     }
     writeStdoutLine(JSON.stringify(report, null, 2));
   },

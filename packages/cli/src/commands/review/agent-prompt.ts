@@ -689,7 +689,11 @@ export function buildRoleBrief(
     // `build-test`; this is the invocation, so the agent does not have to guess the
     // plan path (its working directory is the worktree, where a relative plan path
     // does not resolve — the same trap the test-efficacy block below documents).
-    if (typeof wt === 'string' && wt && opts.planPath) {
+    if (typeof wt === 'string' && wt && pr !== undefined && opts.planPath) {
+      // `pr !== undefined` matters: without it the `--out` filename becomes
+      // `qwen-review-pr-undefined-build-test.json`, a literal "undefined" the agent
+      // writes and downstream never finds. The test-efficacy block below guards the
+      // same way for the same reason.
       parts.push(
         '',
         '**Build and test what the diff changed:**',

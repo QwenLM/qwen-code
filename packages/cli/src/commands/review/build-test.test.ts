@@ -349,4 +349,90 @@ describe('runBuildTest', () => {
     expect(rep.note).toContain('infrastructure');
     expect(rep.note).not.toContain('Critical');
   });
+
+  it('aborts when the install times out, rather than building an incomplete tree', () => {
+    // A timeout kills `npm ci` mid-download and leaves a PARTIAL node_modules.
+    // Building against it produces "module not found" errors that look like defects
+    // in the diff and are not. Unlike a `prepare` failure (which leaves a complete
+    // tree), a timeout must abort even though node_modules exists.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/a', {
+      name: '@x/a',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writePlan(['packages/a/src/x.ts']);
+    rmSync(join(root, 'node_modules'), { recursive: true, force: true });
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: true,
+      exec: (command, cwd) => {
+        calls.push(command);
+        if (command.startsWith('npm ci')) {
+          // Timed out mid-download: a partial tree exists, exitCode is null.
+          mkdirSync(join(cwd, 'node_modules'), { recursive: true });
+          return {
+            command,
+            exitCode: null,
+            seconds: 60,
+            timedOut: true,
+            output: '',
+          };
+        }
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+
+    expect(rep.install?.timedOut).toBe(true);
+    expect(rep.ok).toBe(false);
+    // It must NOT have gone on to build against the half-installed tree.
+    expect(calls.some((c) => c.startsWith('npm run build'))).toBe(false);
+    expect(rep.note).toContain('infrastructure');
+    expect(rep.note).not.toContain('Critical');
+  });
+
+  it('frames a TEST timeout as infrastructure, not a defect to correlate', () => {
+    // A test that runs out of time fails (exitCode null), but the note must not tell
+    // the agent to "correlate it with the diff — a failure is a Critical"; the brief
+    // says timeouts are infrastructure, and the agent trusts the data over its
+    // instructions.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/a', {
+      name: '@x/a',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writePlan(['packages/a/src/x.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: (command) =>
+        command.startsWith('npm test')
+          ? { command, exitCode: null, seconds: 60, timedOut: true, output: '' }
+          : { command, exitCode: 0, seconds: 1, timedOut: false, output: '' },
+    });
+
+    expect(rep.ok).toBe(false);
+    expect(rep.timedOut).toEqual(['npm test --workspace=packages/a']);
+    expect(rep.note).toContain('infrastructure');
+    expect(rep.note).not.toContain('Critical');
+    expect(rep.note).not.toContain('Correlate');
+  });
 });
