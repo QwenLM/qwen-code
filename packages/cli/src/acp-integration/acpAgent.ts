@@ -556,6 +556,7 @@ type QwenCoreSettingKey =
   | 'general.showSessionRecap'
   | 'general.sessionRecapAwayThresholdMinutes'
   | 'general.terminalBell'
+  | 'general.notificationMode'
   | 'general.gitCoAuthor.commit'
   | 'general.gitCoAuthor.pr'
   | 'general.defaultFileEncoding'
@@ -623,6 +624,10 @@ const QWEN_CORE_SETTING_DEFINITIONS = {
   'general.showSessionRecap': { type: 'boolean' },
   'general.sessionRecapAwayThresholdMinutes': { type: 'number', min: 1 },
   'general.terminalBell': { type: 'boolean' },
+  'general.notificationMode': {
+    type: 'enum',
+    values: ['all', 'task-complete'],
+  },
   'general.gitCoAuthor.commit': { type: 'boolean' },
   'general.gitCoAuthor.pr': { type: 'boolean' },
   'general.defaultFileEncoding': {
