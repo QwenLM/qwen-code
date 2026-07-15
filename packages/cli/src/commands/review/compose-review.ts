@@ -94,6 +94,17 @@ export interface ComposeReviewResult {
   cappedBy: string[];
   /** True when a presubmit flag actually changed the event. */
   downgraded: boolean;
+  /**
+   * What the presubmit downgrade moved the event *from*, when it moved one.
+   *
+   * `baseEvent` cannot answer this: it is the row before caps AND downgrades, so a
+   * `REQUEST_CHANGES` that a cap already softened to `COMMENT` before the downgrade
+   * ran would look the same as one the downgrade itself moved. This names the
+   * transition the downgrade made, so the terminal verdict can say a Request
+   * changes — a review with confirmed Criticals — was downgraded, and not let it
+   * read as "Comment, nothing blocking".
+   */
+  downgradedFrom: 'Approve' | 'Request changes' | null;
 }
 
 const CRITICAL_MARKER = '**[Critical]**';
@@ -411,6 +422,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       baseEvent,
       cappedBy,
       downgraded,
+      downgradedFrom,
     };
   }
 
@@ -421,6 +433,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       baseEvent,
       cappedBy,
       downgraded,
+      downgradedFrom,
     };
   }
 
@@ -493,6 +506,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     baseEvent,
     cappedBy,
     downgraded,
+    downgradedFrom,
   };
 }
 
@@ -576,10 +590,19 @@ export function verdictLine(r: ComposeReviewResult): string {
     const reasons = r.cappedBy.map((c) => why[c] ?? c);
     if (r.downgraded) reasons.push('a presubmit check failed');
     line += ` — an Approve was NOT available: ${reasons.join('; ')}`;
+  } else if (r.downgradedFrom === 'Request changes') {
+    // The decisive case, and the one a review caught. A presubmit downgrade can
+    // move a REQUEST_CHANGES — a review with **confirmed Criticals** — down to
+    // COMMENT (a self-PR, failing CI). Printed as a bare "Comment — downgraded",
+    // that reads to an operator as "minor issues, nothing blocking", while the
+    // review has just posted blockers inline. Say what it was.
+    line +=
+      ' — Request changes, downgraded to Comment by a presubmit check ' +
+      '(the blockers are still posted)';
   } else if (r.downgraded) {
-    // The base was not an Approve (a Suggestion-only Comment, say), so there was no
-    // Approve to lose — but a presubmit downgrade still moved the event, and the
-    // user should see that it did.
+    // A Suggestion-only Comment the presubmit still moved: there was no Approve to
+    // lose and no blocker to hide, but the event did change and the user should see
+    // it did.
     line += ' — downgraded by a presubmit check';
   }
   return line;

@@ -783,24 +783,24 @@ Rationale: an inline comment is the only place GitHub renders a ` ```suggestion 
 
 **Build the review JSON** with `write_file` to create `.qwen/tmp/qwen-review-{target}-review.json`. It carries three things and **no verdict** — `submit` computes the event and body itself, from the `state` you hand it and the comments you attach, and **refuses a payload that carries `event` or `body`** (a run that skipped the computation and typed its own Approve is exactly what that refusal stops). Every high-confidence Critical or Suggestion finding that maps to a diff line is an entry in `comments`:
 
-````json
+````jsonc
 {
   "commit_id": "{the fetchedSha from Step 1}",
   "comments": [
     {
       "path": "src/file.ts",
       "line": 42,
-      "body": "**[Critical]** issue description — Failure scenario: <trigger> → <wrong outcome>\n\n```suggestion\nfix code\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review_"
+      "body": "**[Critical]** issue description — Failure scenario: <trigger> → <wrong outcome>\n\n```suggestion\nfix code\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review_",
     },
     {
       "path": "src/other.ts",
       "line": 88,
-      "body": "**[Suggestion]** recommended improvement — Concrete cost: <what is duplicated/wasted/fragile>\n\n```suggestion\nimproved code\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review_"
-    }
+      "body": "**[Suggestion]** recommended improvement — Concrete cost: <what is duplicated/wasted/fragile>\n\n```suggestion\nimproved code\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review_",
+    },
   ],
   "state": {
-    /* the compose-review state below */
-  }
+    // the compose-review state below
+  },
 }
 ````
 

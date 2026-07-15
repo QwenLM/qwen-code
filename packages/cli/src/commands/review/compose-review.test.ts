@@ -915,6 +915,7 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       baseEvent: 'COMMENT',
       cappedBy: [],
       downgraded: false,
+      downgradedFrom: null,
       ...over,
     });
 
@@ -939,6 +940,7 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       baseEvent: 'APPROVE',
       cappedBy: [],
       downgraded: true,
+      downgradedFrom: 'Approve',
     });
     expect(out).toBe(
       'Verdict: Comment — an Approve was NOT available: a presubmit check failed',
@@ -954,6 +956,7 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
         baseEvent: 'APPROVE',
         cappedBy: ['uncoverable-chunk'],
         downgraded: true,
+        downgradedFrom: 'Approve',
       }),
     ).toBe(
       'Verdict: Comment — an Approve was NOT available: part of the diff cannot be read at all; a presubmit check failed',
@@ -964,8 +967,31 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
     // baseEvent COMMENT: there was no Approve to lose, but the presubmit still
     // moved the event and the user should see it.
     expect(
-      line({ event: 'COMMENT', baseEvent: 'COMMENT', downgraded: true }),
+      line({
+        event: 'COMMENT',
+        baseEvent: 'COMMENT',
+        downgraded: true,
+        downgradedFrom: null,
+      }),
     ).toBe('Verdict: Comment — downgraded by a presubmit check');
+  });
+
+  it('says a Request changes downgraded to Comment still has blockers', () => {
+    // The case a review caught: a presubmit downgrade (self-PR, failing CI) moves a
+    // REQUEST_CHANGES — a review with confirmed Criticals — down to COMMENT. Printed
+    // as a bare "Comment — downgraded", an operator reads "nothing blocking" while
+    // blockers were posted inline. `downgradedFrom` distinguishes it from a
+    // Suggestion-only Comment; `baseEvent` cannot (a cap may already have softened
+    // the RC before the downgrade ran).
+    const out = line({
+      event: 'COMMENT',
+      baseEvent: 'REQUEST_CHANGES',
+      downgraded: true,
+      downgradedFrom: 'Request changes',
+    });
+    expect(out).toContain('Request changes');
+    expect(out).toContain('blockers are still posted');
+    expect(out).not.toBe('Verdict: Comment — downgraded by a presubmit check');
   });
 
   it('never names a cap on a Request changes — the blocker earned it, no cap softens it', () => {

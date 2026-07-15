@@ -388,19 +388,24 @@ describe('buildWholeDiffBlock — the agents that walk the whole diff', () => {
   });
 
   it.each([
-    ['neither', {}],
-    ['both', { chunk: 13, 'whole-diff': true }],
-  ])('rejects a call that names %s of the two modes', (_, extra) => {
-    // A run that named neither used to fall through to the chunk builder with
-    // `undefined`, and the plan would then report that it "has no chunk undefined"
-    // — an error about the plan, for a mistake in the call. It is checked before
-    // the plan is read, so the message is about the call.
+    ['none of the three', {}],
+    ['chunk + whole-diff', { chunk: 13, 'whole-diff': true }],
+    ['chunk + role', { chunk: 13, role: '2' }],
+    ['whole-diff + role', { 'whole-diff': true, role: '2' }],
+    ['all three', { chunk: 13, 'whole-diff': true, role: '2' }],
+  ])('rejects a call that names %s', (_, extra) => {
+    // Three mutually exclusive modes: a territory chunk, a named role, or the
+    // bare whole-diff block. A run that named none used to fall through to the
+    // chunk builder with `undefined` and blame the plan for "no chunk undefined";
+    // a run that named two would silently pick one. The guard runs before the plan
+    // is read, so the message is about the call, and it covers every bad shape —
+    // not just the two the first version tested.
     expect(() =>
       (agentPromptCommand.handler as (a: unknown) => void)({
         plan: '/nonexistent/plan.json',
         ...extra,
       }),
-    ).toThrow(/exactly one of --chunk/);
+    ).toThrow(/exactly one of/);
   });
 });
 
@@ -408,7 +413,7 @@ describe('buildWholeDiffBlock — the agents that walk the whole diff', () => {
 // half that was not got launched with no diff path at all, and the one that was
 // never launched at all could not be seen by anything that inspects the agents
 // that ran.
-describe('buildRolePrompt — every agent, not just the territory ones', () => {
+describe('buildRoleBrief — every agent, not just the territory ones', () => {
   const PR_PLAN = {
     ...PLAN,
     prNumber: '6766',
