@@ -433,7 +433,12 @@ impl Tool for GetWindowStateTool {
 }
 
 fn has_ax_content(result: &crate::ax::tree::TreeWalkResult) -> bool {
-    !result.nodes.is_empty() || !result.tree_markdown.trim().is_empty()
+    result.nodes.iter().any(|node| {
+        node.element_index.is_some()
+            || node.title.as_deref().is_some_and(|value| !value.trim().is_empty())
+            || node.value.as_deref().is_some_and(|value| !value.trim().is_empty())
+            || node.description.as_deref().is_some_and(|value| !value.trim().is_empty())
+    })
 }
 
 /// Render the actionable nodes from the AX walk into the
@@ -571,6 +576,19 @@ mod tests {
         };
         assert!(has_ax_content(&result));
         assert_eq!(result.nodes.iter().filter(|node| node.element_index.is_some()).count(), 0);
+    }
+
+    #[test]
+    fn role_only_window_or_sheet_is_not_usable_perception() {
+        let result = crate::ax::tree::TreeWalkResult {
+            tree_markdown: "- AXWindow\n  - AXSheet\n".into(),
+            nodes: vec![
+                node(None, "AXWindow", None, 0, None, None),
+                node(None, "AXSheet", None, 1, None, None),
+            ],
+            truncated: false,
+        };
+        assert!(!has_ax_content(&result));
     }
 
     #[test]
