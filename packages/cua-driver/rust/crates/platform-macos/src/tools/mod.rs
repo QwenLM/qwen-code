@@ -241,34 +241,49 @@ pub fn load_driver_config() -> DriverConfig {
 
 /// Persist config updates to `~/.cua-driver/config.json`.
 /// Merges with any existing file contents so other keys are preserved.
+/// Runs `apply_in_memory` after the atomic rename but before releasing the
+/// process-wide write lock, keeping concurrent disk and memory commits ordered.
 /// Returns `Err` if the directory cannot be created or the file cannot be written.
-pub fn write_driver_config_updates(updates: &[(&str, serde_json::Value)]) -> Result<(), String> {
-    static WRITE_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    let _guard = WRITE_LOCK
+static DRIVER_CONFIG_WRITE_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
+fn with_driver_config_write_lock<T>(
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _guard = DRIVER_CONFIG_WRITE_LOCK
         .get_or_init(|| std::sync::Mutex::new(()))
         .lock()
         .map_err(|e| e.to_string())?;
-    let path = config_file_path();
-    let mut json: serde_json::Value = path
-        .exists()
-        .then(|| std::fs::read_to_string(&path).ok())
-        .flatten()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    for (key, value) in updates {
-        json[*key] = value.clone();
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let body = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
-    let temp_path = path.with_extension(format!("json.tmp-{}", std::process::id()));
-    std::fs::write(&temp_path, body).map_err(|e| e.to_string())?;
-    if let Err(e) = std::fs::rename(&temp_path, &path) {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(e.to_string());
-    }
-    Ok(())
+    operation()
+}
+
+pub fn write_driver_config_updates<T>(
+    updates: &[(&str, serde_json::Value)],
+    apply_in_memory: impl FnOnce() -> T,
+) -> Result<T, String> {
+    with_driver_config_write_lock(|| {
+        let path = config_file_path();
+        let mut json: serde_json::Value = path
+            .exists()
+            .then(|| std::fs::read_to_string(&path).ok())
+            .flatten()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        for (key, value) in updates {
+            json[*key] = value.clone();
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let body = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
+        let temp_path = path.with_extension(format!("json.tmp-{}", std::process::id()));
+        std::fs::write(&temp_path, body).map_err(|e| e.to_string())?;
+        if let Err(e) = std::fs::rename(&temp_path, &path) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(e.to_string());
+        }
+        Ok(apply_in_memory())
+    })
 }
 
 /// Per-session config overrides layered over the global persisted `DriverConfig`.
@@ -385,6 +400,11 @@ impl Default for ToolState {
 /// variant — same name, stricter args, window-scoped JPEG @ 85% + a text
 /// note telling the caller to use pixel-addressed tools.
 pub fn register_all(registry: &mut ToolRegistry, compat: bool) {
+    if let Err(error) = crate::ax::bindings::set_global_messaging_timeout(
+        crate::ax::bindings::AX_MESSAGING_TIMEOUT_SECS as f32,
+    ) {
+        tracing::warn!(error, "failed to configure process-wide AX messaging timeout");
+    }
     let state = Arc::new(ToolState::default());
     // Share the element cache with the recording-hook layer so it can
     // resolve element_index → window-local screenshot coords for click.png.
@@ -477,6 +497,7 @@ pub fn register_all(registry: &mut ToolRegistry, compat: bool) {
 mod session_config_guard_tests {
     use super::*;
     use cua_driver_core::session::fire_session_end;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn overrides(max_dim: u32) -> ConfigOverrides {
         ConfigOverrides { max_image_dimension: Some(max_dim), capture_scope: None }
@@ -527,6 +548,35 @@ mod session_config_guard_tests {
         assert_eq!(reg.effective_capture_scope(Some(desktop), &global), "desktop");
         assert_eq!(reg.effective_capture_scope(Some(window), &global), "window");
         assert_eq!(reg.effective_capture_scope(None, &global), "window");
+    }
+
+    #[test]
+    fn config_commit_callbacks_are_serialized_with_disk_writes() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let active = active.clone();
+                let max_active = max_active.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    with_driver_config_write_lock(|| {
+                        let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        max_active.fetch_max(now, Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        Ok(())
+                    })
+                    .unwrap();
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
     }
 }
 

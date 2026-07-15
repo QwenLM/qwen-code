@@ -17,14 +17,37 @@ use std::{
 };
 
 const SCREENSHOT_TIMEOUT_SECS_DEFAULT: u64 = 15;
+const TOOL_TIMEOUT_SECS_DEFAULT: u64 = 90;
+const TOOL_DEADLINE_MARGIN: Duration = Duration::from_millis(250);
+
+fn tool_timeout() -> Duration {
+    let seconds = std::env::var("CUA_DRIVER_RS_TOOL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0 && *value < 120)
+        .unwrap_or(TOOL_TIMEOUT_SECS_DEFAULT);
+    Duration::from_secs(seconds)
+}
+
+pub(crate) fn remaining_tool_budget(started: Instant) -> Duration {
+    tool_timeout()
+        .saturating_sub(started.elapsed())
+        .saturating_sub(TOOL_DEADLINE_MARGIN)
+}
 
 fn screenshot_timeout() -> Duration {
-    let seconds = std::env::var("CUA_DRIVER_RS_SCREENSHOT_TIMEOUT_SECS")
+    let requested = std::env::var("CUA_DRIVER_RS_SCREENSHOT_TIMEOUT_SECS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(SCREENSHOT_TIMEOUT_SECS_DEFAULT);
-    Duration::from_secs(seconds)
+    bounded_screenshot_timeout(requested, tool_timeout().as_secs())
+}
+
+fn bounded_screenshot_timeout(requested_seconds: u64, tool_timeout_seconds: u64) -> Duration {
+    let native_budget =
+        Duration::from_secs(tool_timeout_seconds).saturating_sub(TOOL_DEADLINE_MARGIN);
+    Duration::from_secs(requested_seconds).min(native_budget)
 }
 
 struct CaptureFile(PathBuf);
@@ -47,21 +70,34 @@ impl Drop for CaptureFile {
     }
 }
 
-fn run_screencapture(args: &[String], target: &str) -> anyhow::Result<()> {
+fn run_screencapture(args: &[String], target: &str, timeout: Duration) -> anyhow::Result<()> {
+    if timeout.is_zero() {
+        anyhow::bail!("no tool deadline remains for screencapture of {target}");
+    }
     let mut child = Command::new("screencapture").args(args).spawn()?;
-    let timeout = screenshot_timeout();
-    let deadline = Instant::now() + timeout;
+    let Some(deadline) = Instant::now().checked_add(timeout) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        anyhow::bail!("invalid screencapture timeout for {target}");
+    };
     let status = loop {
-        match child.try_wait()? {
-            Some(status) => break status,
-            None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            None => {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
                 anyhow::bail!(
-                    "screencapture timed out after {}s for {target}; process terminated",
-                    timeout.as_secs()
+                    "screencapture timed out after {} ms for {target}; process terminated",
+                    timeout.as_millis()
                 );
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.into());
             }
         }
     };
@@ -74,13 +110,24 @@ fn run_screencapture(args: &[String], target: &str) -> anyhow::Result<()> {
 /// Capture a window by its `window_id` (CGWindowID).
 /// Returns raw PNG bytes or an error.
 pub fn screenshot_window_bytes(window_id: u32) -> anyhow::Result<Vec<u8>> {
+    screenshot_window_bytes_with_budget(window_id, screenshot_timeout())
+}
+
+pub(crate) fn screenshot_window_bytes_with_budget(
+    window_id: u32,
+    remaining_budget: Duration,
+) -> anyhow::Result<Vec<u8>> {
     let capture = CaptureFile::new(&format!("window-{window_id}"));
     let args = vec![
         "-l".to_owned(), window_id.to_string(),
         "-x".to_owned(), "-o".to_owned(),
         capture.path().to_string_lossy().into_owned(),
     ];
-    run_screencapture(&args, &format!("window {window_id}"))?;
+    run_screencapture(
+        &args,
+        &format!("window {window_id}"),
+        screenshot_timeout().min(remaining_budget),
+    )?;
     let bytes = std::fs::read(capture.path())?;
 
     if bytes.is_empty() {
@@ -103,7 +150,7 @@ pub fn screenshot_window(window_id: u32) -> anyhow::Result<(String, u32, u32)> {
 pub fn screenshot_display_bytes() -> anyhow::Result<Vec<u8>> {
     let capture = CaptureFile::new("display");
     let args = vec!["-x".to_owned(), capture.path().to_string_lossy().into_owned()];
-    run_screencapture(&args, "main display")?;
+    run_screencapture(&args, "main display", screenshot_timeout())?;
     let bytes = std::fs::read(capture.path())?;
 
     if bytes.is_empty() {
@@ -161,4 +208,21 @@ pub fn crosshair_png_bytes(png_bytes: &[u8], cx: f64, cy: f64) -> anyhow::Result
 /// Parse width and height from a PNG file's IHDR chunk.
 pub fn png_dimensions(data: &[u8]) -> anyhow::Result<(u32, u32)> {
     cua_driver_core::image_utils::png_dimensions(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn screenshot_timeout_stays_inside_tool_deadline() {
+        assert_eq!(
+            bounded_screenshot_timeout(u64::MAX, 90),
+            Duration::from_millis(89_750),
+        );
+        assert_eq!(
+            bounded_screenshot_timeout(15, 5),
+            Duration::from_millis(4_750),
+        );
+    }
 }

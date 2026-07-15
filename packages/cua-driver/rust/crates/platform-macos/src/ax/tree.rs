@@ -13,7 +13,10 @@
 use super::bindings::*;
 use core_foundation::base::{CFRelease, CFRetain, CFTypeRef};
 use std::collections::HashSet;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex, OnceLock,
+};
 
 /// Default maximum depth for AX tree walks. Deep menus and complex web views
 /// can nest deeply; 25 covers realistic app chrome without exploding on
@@ -88,6 +91,19 @@ pub struct TreeWalkResult {
     pub truncated: bool,
 }
 
+impl TreeWalkResult {
+    /// Release the retains that a completed walk would otherwise transfer to
+    /// the element cache. Used when a cancelled background walk finishes after
+    /// its caller has already returned a timeout response.
+    pub(crate) fn release_retained_elements(self) {
+        for node in self.nodes {
+            if node.element_index.is_some() && node.element_ptr != 0 {
+                unsafe { CFRelease(node.element_ptr as AXUIElementRef as CFTypeRef) };
+            }
+        }
+    }
+}
+
 /// Walk the AX tree of `pid`, optionally filtered to a specific window.
 ///
 /// `window_id` — when Some, only the AXWindow matching that CGWindowID is
@@ -121,6 +137,42 @@ pub fn walk_tree_bounded(
     max_elements: usize,
     max_depth: usize,
 ) -> TreeWalkResult {
+    walk_tree_bounded_impl(
+        pid,
+        window_id,
+        query,
+        max_elements,
+        max_depth,
+        None,
+    )
+}
+
+pub(crate) fn walk_tree_bounded_cancellable(
+    pid: i32,
+    window_id: Option<u32>,
+    query: Option<&str>,
+    max_elements: usize,
+    max_depth: usize,
+    cancelled: &AtomicBool,
+) -> TreeWalkResult {
+    walk_tree_bounded_impl(
+        pid,
+        window_id,
+        query,
+        max_elements,
+        max_depth,
+        Some(cancelled),
+    )
+}
+
+fn walk_tree_bounded_impl(
+    pid: i32,
+    window_id: Option<u32>,
+    query: Option<&str>,
+    max_elements: usize,
+    max_depth: usize,
+    cancelled: Option<&AtomicBool>,
+) -> TreeWalkResult {
     let mut nodes: Vec<AXNode> = Vec::new();
     let mut lines: Vec<(usize, String)> = Vec::new(); // (depth, line)
     let mut index_counter = 0usize;
@@ -135,8 +187,6 @@ pub fn walk_tree_bounded(
         if app_elem.is_null() {
             return TreeWalkResult { tree_markdown: String::new(), nodes, truncated: false };
         }
-        let _ = set_messaging_timeout(app_elem, 5.0);
-
         // Chromium/Electron apps (Arc, VS Code, Electron shells) ship their
         // web-content AX tree OFF and only build it once an assistive client
         // asks for it. Without this, the first walk of such an app returns an
@@ -157,8 +207,30 @@ pub fn walk_tree_bounded(
         // Union AXChildren + AXWindows — the only way to see background windows.
         // AXChildren omits windows when the app isn't frontmost (AppKit limitation).
         // AXWindows returns the window list regardless of activation state.
+        if is_cancelled(cancelled) {
+            CFRelease(app_elem as CFTypeRef);
+            return TreeWalkResult { tree_markdown: String::new(), nodes, truncated: false };
+        }
         let from_children = copy_children(app_elem);
+        if is_cancelled(cancelled) {
+            for child in from_children {
+                CFRelease(child as CFTypeRef);
+            }
+            CFRelease(app_elem as CFTypeRef);
+            return TreeWalkResult { tree_markdown: String::new(), nodes, truncated: false };
+        }
         let from_windows = copy_ax_windows(app_elem);
+        if is_cancelled(cancelled) {
+            for child in from_children.into_iter().chain(from_windows) {
+                CFRelease(child as CFTypeRef);
+            }
+            CFRelease(app_elem as CFTypeRef);
+            return TreeWalkResult {
+                tree_markdown: String::new(),
+                nodes,
+                truncated: false,
+            };
+        }
 
         let mut top_level = from_children;
         for w in from_windows {
@@ -174,7 +246,13 @@ pub fn walk_tree_bounded(
         // Filter: keep non-window children (menu bar) + the target window.
         let walk_these: Vec<AXUIElementRef> = if let Some(wid) = window_id {
             top_level.iter().copied().filter(|&child| {
+                if is_cancelled(cancelled) {
+                    return false;
+                }
                 let role = copy_string_attr(child, "AXRole").unwrap_or_default();
+                if is_cancelled(cancelled) {
+                    return false;
+                }
                 if role != "AXWindow" {
                     return true; // always keep menu bar and other non-window items
                 }
@@ -187,6 +265,9 @@ pub fn walk_tree_bounded(
 
         // Walk each top-level child at depth 0.
         for child in walk_these {
+            if is_cancelled(cancelled) {
+                break;
+            }
             walk_element(
                 child,
                 0,
@@ -198,6 +279,7 @@ pub fn walk_tree_bounded(
                 &mut truncated,
                 max_elements,
                 max_depth,
+                cancelled,
             );
         }
 
@@ -241,7 +323,9 @@ unsafe fn walk_element(
     truncated: &mut bool,
     max_elements: usize,
     max_depth: usize,
+    cancelled: Option<&AtomicBool>,
 ) {
+    if is_cancelled(cancelled) { return; }
     if depth > max_depth { return; }
     // Enforce total-node cap — mirrors Swift's maxElements guard.
     // Set the truncated flag only when we actually stop early.
@@ -253,6 +337,7 @@ unsafe fn walk_element(
 
     let role = copy_string_attr(element, "AXRole")
         .unwrap_or_else(|| "AXUnknown".into());
+    if is_cancelled(cancelled) { return; }
 
     // Skip pure layout containers that have no interesting content.
     if role == "AXScrollArea" || role == "AXGroup" {
@@ -272,6 +357,7 @@ unsafe fn walk_element(
                 truncated,
                 max_elements,
                 max_depth,
+                cancelled,
             );
             CFRelease(child as CFTypeRef);
         }
@@ -284,14 +370,21 @@ unsafe fn walk_element(
     // (digit buttons). Merging them would produce "2" (quoted) instead of (2)
     // (parens), breaking _find_calc_button which searches for "(2)".
     let title = copy_string_attr(element, "AXTitle");
+    if is_cancelled(cancelled) { return; }
     let value = copy_string_attr(element, "AXValue");
+    if is_cancelled(cancelled) { return; }
     // AXPlaceholderValue as fallback for empty text fields.
     let value = value.filter(|v| !v.trim().is_empty())
         .or_else(|| copy_string_attr(element, "AXPlaceholderValue"));
+    if is_cancelled(cancelled) { return; }
     let description = copy_string_attr(element, "AXDescription");
+    if is_cancelled(cancelled) { return; }
     let identifier = copy_string_attr(element, "AXIdentifier");
+    if is_cancelled(cancelled) { return; }
     let help = copy_string_attr(element, "AXHelp").filter(|h| !h.trim().is_empty());
+    if is_cancelled(cancelled) { return; }
     let actions = copy_action_names(element);
+    if is_cancelled(cancelled) { return; }
 
     let visible_title = title.as_deref().unwrap_or("").trim().to_owned();
     let visible_description = description.as_deref().unwrap_or("").trim().to_owned();
@@ -316,6 +409,7 @@ unsafe fn walk_element(
                 truncated,
                 max_elements,
                 max_depth,
+                cancelled,
             );
             CFRelease(child as CFTypeRef);
         }
@@ -324,6 +418,7 @@ unsafe fn walk_element(
 
     let element_ptr = element as usize;
     let frame = element_screen_rect(element);
+    if is_cancelled(cancelled) { return; }
     let node = if is_actionable {
         let idx = *counter;
         *counter += 1;
@@ -383,9 +478,14 @@ unsafe fn walk_element(
             truncated,
             max_elements,
             max_depth,
+            cancelled,
         );
         CFRelease(child as CFTypeRef);
     }
+}
+
+fn is_cancelled(cancelled: Option<&AtomicBool>) -> bool {
+    cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed))
 }
 
 fn format_node_line(node: &AXNode) -> String {
@@ -448,6 +548,43 @@ fn render_lines(lines: &[(usize, String)]) -> String {
         out.push('\n');
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core_foundation::base::{CFGetRetainCount, CFRetain, TCFType};
+    use core_foundation::string::CFString;
+
+    #[test]
+    fn cancelled_result_releases_untransferred_element_retains() {
+        let value = CFString::new("cua-driver-cancelled-tree-retain-test");
+        let ptr = value.as_concrete_TypeRef() as usize;
+        let base = unsafe { CFGetRetainCount(ptr as CFTypeRef) };
+        unsafe { CFRetain(ptr as CFTypeRef) };
+
+        TreeWalkResult {
+            tree_markdown: String::new(),
+            nodes: vec![AXNode {
+                element_index: Some(0),
+                role: "AXButton".into(),
+                title: None,
+                value: None,
+                description: None,
+                identifier: None,
+                help: None,
+                actions: vec!["press".into()],
+                element_ptr: ptr,
+                depth: 0,
+                parent_element_index: None,
+                frame: None,
+            }],
+            truncated: false,
+        }
+        .release_retained_elements();
+
+        assert_eq!(unsafe { CFGetRetainCount(ptr as CFTypeRef) }, base);
+    }
 }
 
 /// Filter the tree markdown to lines matching `query` plus their ancestor chain.

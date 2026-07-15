@@ -46,8 +46,9 @@ fn def() -> &'static ToolDef {
                     "type": "string",
                     "enum": ["window", "desktop"],
                     "description": "Capture scope: \"window\" (default) or \"desktop\". Desktop \
-                        scope enables get_desktop_state (full-display capture) and window-less \
-                        screen-absolute click/scroll. Session-scoped for MCP; takes effect immediately."
+                        scope enables get_desktop_state (full-display capture). A window-less \
+                        screen-absolute click still requires per-call scope=desktop; scroll remains \
+                        window-targeted. Session-scoped for MCP; takes effect immediately."
                 },
                 "experimental_pip": {
                     "type": "boolean",
@@ -142,13 +143,30 @@ impl Tool for SetConfigTool {
         if let Some(ref geometry) = pip_geometry {
             updates.push(("experimental_pip_geometry", Value::String(geometry.clone())));
         }
-        if !updates.is_empty() {
-            if let Err(e) = write_driver_config_updates(&updates) {
-                return ToolResult::error(format!(
-                    "failed to persist cua-driver configuration: {e}"
-                ));
+        let persisted_global = if !updates.is_empty() {
+            match write_driver_config_updates(&updates, || {
+                if session_id.is_some() {
+                    return None;
+                }
+                let mut cfg = self.state.config.write().unwrap();
+                if let Some(dim32) = max_dim {
+                    cfg.max_image_dimension = dim32;
+                }
+                if let Some(ref scope) = scope_arg {
+                    cfg.capture_scope = scope.clone();
+                }
+                Some((cfg.max_image_dimension, cfg.capture_scope.clone()))
+            }) {
+                Ok(applied) => applied,
+                Err(e) => {
+                    return ToolResult::error(format!(
+                        "failed to persist cua-driver configuration: {e}"
+                    ));
+                }
             }
-        }
+        } else {
+            None
+        };
 
         let (effective_dim, effective_scope) = if let Some(sid) = session_id.as_deref() {
             // These session-scoped fields are in-memory only; PiP settings above
@@ -162,14 +180,10 @@ impl Tool for SetConfigTool {
                 self.state.session_config.effective_max_image_dimension(Some(sid), &cfg),
                 self.state.session_config.effective_capture_scope(Some(sid), &cfg),
             )
+        } else if let Some(applied) = persisted_global {
+            applied
         } else {
-            let mut cfg = self.state.config.write().unwrap();
-            if let Some(dim32) = max_dim {
-                cfg.max_image_dimension = dim32;
-            }
-            if let Some(ref scope) = scope_arg {
-                cfg.capture_scope = scope.clone();
-            }
+            let cfg = self.state.config.read().unwrap();
             (cfg.max_image_dimension, cfg.capture_scope.clone())
         };
         // PiP keys persist to the same config.json but take effect only on

@@ -45,7 +45,7 @@ fn list_running_apps_native() -> Vec<AppInfo> {
             .filter_map(|app| {
                 let pid = app.processIdentifier();
                 let name = app.localizedName()?.to_string();
-                if pid == 0 || name.is_empty() {
+                if pid <= 0 || name.is_empty() {
                     return None;
                 }
                 let launch_path = app

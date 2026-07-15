@@ -21,8 +21,10 @@ pub type AXUIElementRef = *mut __AXUIElement;
 // ── AXError ──────────────────────────────────────────────────────────────────
 
 pub type AXError = c_int;
+pub const AX_MESSAGING_TIMEOUT_SECS: u64 = 5;
 pub const kAXErrorSuccess: AXError = 0;
 pub const kAXErrorFailure: AXError = -25200;
+pub const kAXErrorIllegalArgument: AXError = -25201;
 pub const kAXErrorInvalidUIElement: AXError = -25202;
 pub const kAXErrorAttributeUnsupported: AXError = -25205;
 pub const kAXErrorNoValue: AXError = -25212;
@@ -44,6 +46,7 @@ pub const kAXValueIllegalType: AXValueType = 1_000;
 // ── Link to AXUIElement functions ────────────────────────────────────────────
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
+    pub fn AXUIElementCreateSystemWide() -> AXUIElementRef;
     pub fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
     pub fn AXUIElementCopyAttributeValue(
         element: AXUIElementRef,
@@ -301,6 +304,24 @@ pub unsafe fn set_messaging_timeout(element: AXUIElementRef, timeout_in_seconds:
     AXUIElementSetMessagingTimeout(element, timeout_in_seconds)
 }
 
+/// Apply the native AX messaging timeout to every accessibility object used by
+/// this process. Apple documents object-level timeouts as non-inheriting, so
+/// setting only an application element does not protect its descendants.
+pub fn set_global_messaging_timeout(timeout_in_seconds: f32) -> Result<(), AXError> {
+    if !timeout_in_seconds.is_finite() || timeout_in_seconds <= 0.0 {
+        return Err(kAXErrorIllegalArgument);
+    }
+    unsafe {
+        let system_wide = AXUIElementCreateSystemWide();
+        if system_wide.is_null() {
+            return Err(kAXErrorFailure);
+        }
+        let status = AXUIElementSetMessagingTimeout(system_wide, timeout_in_seconds);
+        CFRelease(system_wide as CFTypeRef);
+        if status == kAXErrorSuccess { Ok(()) } else { Err(status) }
+    }
+}
+
 /// Set an AX attribute to a CFString value.
 pub unsafe fn set_string_attr(element: AXUIElementRef, attr_name: &str, value: &str) -> AXError {
     let attr = CFStr::new(attr_name);
@@ -391,4 +412,23 @@ pub unsafe fn copy_ax_windows(element: AXUIElementRef) -> Vec<AXUIElementRef> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn global_messaging_timeout_accepts_production_value() {
+        assert_eq!(
+            set_global_messaging_timeout(AX_MESSAGING_TIMEOUT_SECS as f32),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn global_messaging_timeout_rejects_invalid_values() {
+        assert_eq!(set_global_messaging_timeout(0.0), Err(kAXErrorIllegalArgument));
+        assert_eq!(set_global_messaging_timeout(f32::NAN), Err(kAXErrorIllegalArgument));
+    }
 }

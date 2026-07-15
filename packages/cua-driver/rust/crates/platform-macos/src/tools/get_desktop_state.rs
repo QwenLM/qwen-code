@@ -68,8 +68,9 @@ impl Tool for GetDesktopStateTool {
             return ToolResult::error(format!(
                 "get_desktop_state requires capture_scope=\"desktop\" (current scope is \
                  \"{scope}\"). Full-display capture is a desktop-scope operation; call \
-                 set_config with capture_scope=desktop first (it also enables window-less \
-                 screen-absolute click/scroll). For a single window, use \
+                 set_config with capture_scope=desktop first. Window-less screen-absolute \
+                 click additionally requires per-call scope=desktop; scroll remains \
+                 window-targeted. For a single window, use \
                  get_window_state(pid, window_id) instead."
             ))
             .with_structured(serde_json::json!({
