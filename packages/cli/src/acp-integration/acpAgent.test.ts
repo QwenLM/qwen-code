@@ -1649,8 +1649,16 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     vi.mocked(AcpFileSystemService).mockImplementationOnce(() => {
       throw fileSystemError;
     });
+    const innerConfig = {
+      ...makeInnerConfig(),
+      storage: {
+        getProjectTempDir: vi.fn().mockReturnValue('/tmp/project'),
+        getProjectDir: vi.fn().mockReturnValue('/tmp'),
+        getUserSkillsDirs: vi.fn().mockReturnValue([]),
+      },
+    };
     vi.mocked(loadCliConfig).mockResolvedValue(
-      makeInnerConfig() as unknown as Config,
+      innerConfig as unknown as Config,
     );
     const agentPromise = runAcpAgent(
       mockConfig,
@@ -1669,16 +1677,18 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
     });
 
-    await expect(
-      agent.newSession({ cwd: '/tmp', mcpServers: [] }),
-    ).rejects.toBe(fileSystemError);
-    expect(mockSessionStartSpan.setAttribute).toHaveBeenCalledWith(
-      'qwen-code.daemon.session_start.failed_stage',
-      'file_system_setup',
-    );
-
-    mockConnectionState.resolve();
-    await agentPromise;
+    try {
+      await expect(
+        agent.newSession({ cwd: '/tmp', mcpServers: [] }),
+      ).rejects.toBe(fileSystemError);
+      expect(mockSessionStartSpan.setAttribute).toHaveBeenCalledWith(
+        'qwen-code.daemon.session_start.failed_stage',
+        'file_system_setup',
+      );
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
 
   it('does not return discontinued qwen-oauth as the only ACP auth option', async () => {
