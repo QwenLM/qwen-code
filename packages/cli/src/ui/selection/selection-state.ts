@@ -46,10 +46,14 @@ export class SelectionState {
     }
   }
 
-  /** Extend to a whole span (word/line), keeping the original anchor span. */
-  extendSpan(anchor: Point, focus: Point, mode: SelectionMode): void {
-    this.anchor = anchor;
-    this.focus = focus;
+  /** Select a resolved word/line span from a multi-click (not a drag). */
+  selectSpan(
+    span: { sx: number; sy: number; ex: number; ey: number },
+    mode: SelectionMode,
+  ): void {
+    this.anchor = { x: span.sx, y: span.sy };
+    this.focus = { x: span.ex, y: span.ey };
+    this.dragging = false;
     this.mode = mode;
   }
 

@@ -81,7 +81,7 @@ Active only when `ui.useTerminalBuffer` is enabled (Settings → UI → Virtuali
 | `Ctrl+End`      | Jump to the bottom (and re-engage live auto-follow). |
 | **Mouse wheel** | Scroll history (3 lines per tick).                   |
 
-When `ui.useTerminalBuffer` is on, the terminal forwards mouse events to qwen-code so the wheel can drive the in-app viewport. As a side effect, **native click-and-drag text selection is consumed by the program** — hold `Shift` (or `Option` on macOS Terminal / iTerm) while dragging to bypass mouse capture and select text the usual way.
+When `ui.useTerminalBuffer` is on, the terminal forwards mouse events to qwen-code so the wheel can drive the in-app viewport. As a side effect, native click-and-drag text selection is consumed by the program, so qwen-code provides its own: **drag to select text in the history viewport, double-click to select a word, triple-click to select a line.** The selection is highlighted and, by default, copied to the clipboard when you release the mouse (works locally, over SSH via OSC 52, and inside tmux). A single click clears the selection; scrolling or new output clears it too. Toggle this under Settings → UI (`ui.textSelection.enabled` and `ui.textSelection.copyOnSelect`). Selection is limited to the visible viewport for now. You can still fall back to the terminal's own selection by holding `Shift` (or `Option` on macOS Terminal / iTerm) while dragging, or by disabling `ui.textSelection.enabled`.
 
 ### tmux trackpad scrolling
 

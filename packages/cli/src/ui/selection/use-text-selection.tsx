@@ -12,6 +12,7 @@ import { copyToClipboard } from '../utils/commandUtils.js';
 import { getScreenBuffer, type ScreenBuffer } from './screen-buffer.js';
 import { SelectionState } from './selection-state.js';
 import { getSelectedText } from './selection-text.js';
+import { wordSpanAt, lineSpanAt } from './selection-span.js';
 import {
   terminalToGrid,
   pointInViewport,
@@ -36,12 +37,23 @@ export interface TextSelectionControllerProps {
   hitTestScrollbar: (location: { col: number; row: number }) => boolean;
 }
 
+/** Max gap between clicks (ms) to count as a double/triple click. */
+const MULTI_CLICK_MS = 400;
+
+interface ClickRecord {
+  x: number;
+  y: number;
+  time: number;
+  count: number;
+}
+
 /**
  * Headless controller that turns mouse press/drag/release in the VP history
  * viewport into a text selection: it maps terminal coordinates to the
  * composited frame, drives the {@link SelectionState}, highlights the range
- * through the frame controller, and copies on release. B1 scope: visible-region
- * only, cleared on any scroll.
+ * through the frame controller, and copies on release. Double/triple click
+ * select a word/line. B1 scope: visible-region only, cleared on any scroll,
+ * resize, or streaming content change.
  */
 export function TextSelectionController(
   props: TextSelectionControllerProps,
@@ -49,6 +61,9 @@ export function TextSelectionController(
   const { stdout } = useStdout();
   const selectionRef = useRef(new SelectionState());
   const dragScrollTopRef = useRef<number | null>(null);
+  const baselineScrollHeightRef = useRef<number>(0);
+  const baselineFrameHeightRef = useRef<number>(0);
+  const lastClickRef = useRef<ClickRecord | null>(null);
   const bufferRef = useRef<ScreenBuffer | undefined>(undefined);
   const propsRef = useRef(props);
   propsRef.current = props;
@@ -72,9 +87,32 @@ export function TextSelectionController(
   const applyHighlight = useCallback(() => {
     const selection = selectionRef.current;
     const normalized = selection.normalized();
-    getBuffer()?.setSelection(
-      normalized && !selection.isCollapsed ? normalized : null,
-    );
+    // Highlight whenever there is a real range; a word/line span of a single
+    // cell still highlights, but a bare char-mode click (collapsed) does not.
+    const shouldHighlight =
+      normalized && (!selection.isCollapsed || selection.mode !== 'char');
+    getBuffer()?.setSelection(shouldHighlight ? normalized : null);
+  }, [getBuffer]);
+
+  const recordBaseline = useCallback(() => {
+    baselineScrollHeightRef.current =
+      propsRef.current.getScrollState().scrollHeight;
+    baselineFrameHeightRef.current = getBuffer()?.dimensions.height ?? 0;
+  }, [getBuffer]);
+
+  const copyIfEnabled = useCallback(() => {
+    if (!propsRef.current.copyOnSelect) {
+      return;
+    }
+    const normalized = selectionRef.current.normalized();
+    const text = normalized
+      ? getSelectedText(getBuffer()?.frame ?? null, normalized)
+      : '';
+    if (text) {
+      void copyToClipboard(text).catch(() => {
+        // Copy-failure feedback is a follow-up.
+      });
+    }
   }, [getBuffer]);
 
   const mapEvent = useCallback(
@@ -125,8 +163,37 @@ export function TextSelectionController(
           clearSelection();
           return;
         }
-        selection.start(mapped.point);
+        const { point } = mapped;
+
+        // Multi-click detection (double = word, triple = line).
+        const now = Date.now();
+        const prev = lastClickRef.current;
+        const near =
+          prev != null &&
+          prev.y === point.y &&
+          Math.abs(prev.x - point.x) <= 1 &&
+          now - prev.time < MULTI_CLICK_MS;
+        const count = near ? Math.min(prev!.count + 1, 3) : 1;
+        lastClickRef.current = { x: point.x, y: point.y, time: now, count };
+
+        if (count >= 2) {
+          const frame = getBuffer()?.frame ?? null;
+          const span =
+            count === 2
+              ? wordSpanAt(frame, point.x, point.y)
+              : lineSpanAt(frame, point.y);
+          if (span) {
+            selection.selectSpan(span, count === 2 ? 'word' : 'line');
+            recordBaseline();
+            applyHighlight();
+            copyIfEnabled();
+            return;
+          }
+        }
+
+        selection.start(point);
         dragScrollTopRef.current = propsRef.current.getScrollState().scrollTop;
+        recordBaseline();
         applyHighlight();
         return;
       }
@@ -153,6 +220,7 @@ export function TextSelectionController(
       }
 
       if (event.name === 'left-release') {
+        // Word/line click-selects are not drags; leave them intact.
         if (!selection.dragging) {
           return;
         }
@@ -162,27 +230,55 @@ export function TextSelectionController(
           return;
         }
         applyHighlight();
-        if (propsRef.current.copyOnSelect) {
-          const normalized = selection.normalized();
-          const text = normalized
-            ? getSelectedText(getBuffer()?.frame ?? null, normalized)
-            : '';
-          if (text) {
-            void copyToClipboard(text).catch(() => {
-              // Copy failure feedback is handled in M3.
-            });
-          }
-        }
+        copyIfEnabled();
         return;
       }
     },
-    [clearSelection, applyHighlight, mapEvent, getBuffer],
+    [
+      clearSelection,
+      applyHighlight,
+      copyIfEnabled,
+      recordBaseline,
+      mapEvent,
+      getBuffer,
+    ],
   );
 
   useMouseEvents(handleMouse, {
     isActive: props.isActive,
     tracking: 'button',
   });
+
+  // Invalidate the selection when the content scrolls, streams, or the terminal
+  // resizes — anything that moves the composited frame under a fixed selection.
+  // Our own highlight renders keep scrollHeight/frameHeight unchanged, so this
+  // does not feed back into a render loop.
+  useEffect(() => {
+    const buffer = getBuffer();
+    if (!buffer) {
+      return;
+    }
+    const check = () => {
+      if (selectionRef.current.isEmpty) {
+        return;
+      }
+      const scrollHeight = propsRef.current.getScrollState().scrollHeight;
+      const frameHeight = buffer.frame?.height ?? 0;
+      if (
+        scrollHeight !== baselineScrollHeightRef.current ||
+        frameHeight !== baselineFrameHeightRef.current
+      ) {
+        clearSelection();
+      }
+    };
+    const unsubscribe = buffer.subscribe(check);
+    const onResize = () => clearSelection();
+    stdout.on('resize', onResize);
+    return () => {
+      unsubscribe();
+      stdout.off('resize', onResize);
+    };
+  }, [getBuffer, clearSelection, stdout]);
 
   useEffect(() => {
     if (!props.isActive) {
