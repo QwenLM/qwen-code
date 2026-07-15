@@ -26,7 +26,10 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
 }));
 
 import { daemonTelemetryMiddleware } from './telemetry.js';
-import { setDeferredRuntimeRequestTiming } from './request-helpers.js';
+import {
+  getDeferredRuntimeRequestTiming,
+  setDeferredRuntimeRequestTiming,
+} from './request-helpers.js';
 
 function mockReq(method: string, path: string): Request {
   return { method, path, get: () => undefined } as unknown as Request;
@@ -41,6 +44,12 @@ function mockRes(statusCode: number): Response & EventEmitter {
 describe('daemonTelemetryMiddleware — recordRequest seam', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('has no deferred timing for ordinary requests', () => {
+    expect(getDeferredRuntimeRequestTiming(mockReq('GET', '/health'))).toBe(
+      undefined,
+    );
   });
 
   it('calls recordRequest with (durationMs, statusCode) once the response finishes on a matched route', () => {
