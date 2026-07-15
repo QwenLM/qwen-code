@@ -1136,12 +1136,13 @@ export class SessionService {
       return undefined;
     }
     const filePath = this.getSessionFilePath(sessionId, 'archived');
+    let stats: fs.Stats;
     try {
-      const size = fs.statSync(filePath).size;
-      if (size > options.maxBytes) {
+      stats = fs.statSync(filePath);
+      if (stats.size > options.maxBytes) {
         throw new SessionTranscriptTooLargeError(
           sessionId,
-          size,
+          stats.size,
           options.maxBytes,
         );
       }
@@ -1151,12 +1152,13 @@ export class SessionService {
       }
       return undefined;
     }
-    return this.loadSessionFromState(sessionId, 'archived');
+    return this.loadSessionFromState(sessionId, 'archived', stats);
   }
 
   private async loadSessionFromState(
     sessionId: string,
     state: SessionArchiveState,
+    stats?: fs.Stats,
   ): Promise<ResumedSessionData | undefined> {
     const filePath = this.getSessionFilePath(sessionId, state);
 
@@ -1203,7 +1205,7 @@ export class SessionService {
     }
 
     const lastMessage = messages[messages.length - 1];
-    const stats = fs.statSync(filePath);
+    stats ??= fs.statSync(filePath);
 
     const conversation: ConversationRecord = {
       sessionId: firstRecord.sessionId,

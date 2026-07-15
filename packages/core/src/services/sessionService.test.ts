@@ -494,6 +494,7 @@ describe('SessionService', () => {
       expect(vi.mocked(jsonl.read)).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/archive/${sessionIdB}.jsonl`),
       );
+      expect(statSyncSpy).toHaveBeenCalledTimes(1);
     });
 
     it('accepts an archived session exactly at the requested size limit', async () => {
