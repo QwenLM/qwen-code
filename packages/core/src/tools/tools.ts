@@ -11,6 +11,7 @@ import { SchemaValidator } from '../utils/schemaValidator.js';
 import { type AgentStatsSummary } from '../agents/runtime/agent-statistics.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
 import type { PermissionDecision } from '../permissions/types.js';
+import type { VisionBridgeNoticeDisplay } from '../services/visionBridge/vision-bridge-service.js';
 
 /**
  * Represents a validated and ready-to-execute tool call.
@@ -694,6 +695,7 @@ export type ToolResultDisplay =
   | TaskListResultDisplay
   | AnsiOutputDisplay
   | McpToolProgressData
+  | VisionBridgeNoticeDisplay
   | ShellProgressData;
 
 export interface TeamResultDisplay {

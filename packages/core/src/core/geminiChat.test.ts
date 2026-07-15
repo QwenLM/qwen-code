@@ -85,14 +85,20 @@ vi.mock('../utils/retry.js', async (importOriginal) => {
   };
 });
 
-const { mockLogContentRetry, mockLogContentRetryFailure } = vi.hoisted(() => ({
+const {
+  mockLogContentRetry,
+  mockLogContentRetryFailure,
+  mockLogProtocolTagSanitized,
+} = vi.hoisted(() => ({
   mockLogContentRetry: vi.fn(),
   mockLogContentRetryFailure: vi.fn(),
+  mockLogProtocolTagSanitized: vi.fn(),
 }));
 
 vi.mock('../telemetry/loggers.js', () => ({
   logContentRetry: mockLogContentRetry,
   logContentRetryFailure: mockLogContentRetryFailure,
+  logProtocolTagSanitized: mockLogProtocolTagSanitized,
   // Real ChatCompressionService.compress() calls logChatCompression on
   // every attempt; the R3.4 integration test exercises that path, so the
   // mock has to expose it (no-op).
@@ -1970,6 +1976,103 @@ describe('GeminiChat', async () => {
         }
       },
     );
+
+    it('sanitizes a standalone closing thinking tag without retrying valid tool calls', async () => {
+      const recordAssistantTurn = vi.fn();
+      const chatWithRecording = new GeminiChat(
+        mockConfig,
+        config,
+        [],
+        {
+          recordAssistantTurn,
+          recordChatCompression: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      const create = vi.fn().mockImplementation(async () =>
+        (async function* () {
+          yield {
+            id: 'sanitized-protocol-tag',
+            created: 1,
+            model: 'test-model',
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  reasoning_content: 'hidden reasoning',
+                  content: '\n</think>\n',
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: 'call_read',
+                      type: 'function',
+                      function: { name: 'read_file', arguments: '{}' },
+                    },
+                  ],
+                },
+                finish_reason: 'tool_calls',
+              },
+            ],
+          } as unknown as OpenAI.Chat.ChatCompletionChunk;
+        })(),
+      );
+      const provider = {
+        buildClient: () =>
+          ({ chat: { completions: { create } } }) as unknown as OpenAI,
+        buildRequest: (request: OpenAI.Chat.ChatCompletionCreateParams) =>
+          request,
+        buildHeaders: () => ({}),
+        getDefaultGenerationConfig: () => ({}),
+      } as OpenAICompatibleProvider;
+      const generator = new OpenAIContentGenerator(
+        { model: 'test-model', authType: AuthType.USE_OPENAI },
+        mockConfig,
+        provider,
+      );
+      vi.mocked(mockConfig.getContentGenerator).mockReturnValue(generator);
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+      });
+
+      const stream = await chatWithRecording.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-sanitized-protocol-tag',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) events.push(event);
+      const parts = events.flatMap((event) =>
+        event.type === StreamEventType.CHUNK
+          ? (event.value.candidates?.[0]?.content?.parts ?? [])
+          : [],
+      );
+
+      expect(create).toHaveBeenCalledTimes(1);
+      expect(mockLogContentRetry).not.toHaveBeenCalled();
+      expect(mockLogProtocolTagSanitized).toHaveBeenCalledTimes(1);
+      expect(mockLogProtocolTagSanitized).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          model: 'test-model',
+          prompt_id: 'prompt-id-sanitized-protocol-tag',
+          response_id: 'sanitized-protocol-tag',
+          tag_name: 'think',
+          tool_call_count: 1,
+        }),
+      );
+      expect(parts).toContainEqual({
+        functionCall: { id: 'call_read', name: 'read_file', args: {} },
+      });
+      expect(parts.some((part) => part.text?.includes('</think>'))).toBe(false);
+      expect(JSON.stringify(chatWithRecording.getHistory())).not.toContain(
+        '</think>',
+      );
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(
+        JSON.stringify(recordAssistantTurn.mock.calls[0]?.[0].message),
+      ).not.toContain('</think>');
+    });
 
     it('falls back to coerced totalTokenCount when promptTokenCount is hostile', async () => {
       const response = (async function* () {
@@ -10516,26 +10619,11 @@ describe('GeminiChat', async () => {
       expect(mergedText).toBe('BCD');
     });
 
-    it('flushes the JSONL record when escalated stream throws mid-tool_use', async () => {
-      // Critical regression for the max-tokens escalation path:
-      // 1) initial stream succeeds with text + MAX_TOKENS → triggers
-      //    escalation, no partial set, deferred record clean.
-      // 2) escalated stream throws AFTER yielding a functionCall chunk
-      //    → processStreamResponse pushes a partial model[fc] into
-      //    `this.history` and stashes a NEW `pendingPartialAssistantRecord`.
-      // 3) The throw escapes through the for-await on the escalated
-      //    stream, propagates past the (now-passed) retry loop, and
-      //    lands in the outer `finally` block.
-      //
-      // BEFORE the fix: the flush only ran BEFORE the escalation block,
-      // so the new record set in step 2 was never appended to JSONL —
-      // live history disagreed with disk; `--resume` rehydrated a
-      // truncated transcript and `repairOrphanedToolUseTurnsInHistory`
-      // had nothing to repair, leaving the React scheduler's late real
-      // result as a permanent orphan.
-      //
-      // AFTER the fix: the flush is in `finally`, so the record lands
-      // on disk regardless of which stream raised.
+    it('rolls back an escalated partial tool call when the stream fails', async () => {
+      // The escalated attempt pushes a partial model[functionCall] and
+      // stages its recording before the stream failure surfaces. Both must
+      // be rolled back so later sends and resumed sessions do not repair an
+      // incomplete call with a synthetic result.
       const recordAssistantTurn = vi.fn();
       const chatWithRecording = new GeminiChat(
         mockConfig,
@@ -10595,20 +10683,10 @@ describe('GeminiChat', async () => {
         })(),
       ).rejects.toThrow(/synthetic mid-tool_use cut/);
 
-      // In-memory: the partial functionCall pushed by the escalated
-      // processStreamResponse must be in history.
-      const history = chatWithRecording.getHistory();
-      const partialModel = history.findLast((h) => h.role === 'model');
-      expect(
-        partialModel?.parts?.some(
-          (p) => p.functionCall?.id === 'call_escalation_throw',
-        ),
-      ).toBe(true);
+      expect(chatWithRecording.getHistory()).toEqual([
+        { role: 'user', parts: [{ text: 'kick off' }] },
+      ]);
 
-      // JSONL: at least one record must mention the partial functionCall
-      // (the escalation throw flushed it). Without the finally-block
-      // flush, this assertion would fail and the durable transcript
-      // would silently lose a tool_use that's still live in memory.
       const recordedHasPartial = recordAssistantTurn.mock.calls.some((call) => {
         const message = (
           call[0] as {
@@ -10619,7 +10697,7 @@ describe('GeminiChat', async () => {
           (p) => p.functionCall?.id === 'call_escalation_throw',
         );
       });
-      expect(recordedHasPartial).toBe(true);
+      expect(recordedHasPartial).toBe(false);
     });
   });
 

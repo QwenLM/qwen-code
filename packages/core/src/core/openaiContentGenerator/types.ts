@@ -86,6 +86,14 @@ export interface RequestContext {
   hasThinkingTagInReasoning?: boolean;
   hasVisibleContent?: boolean;
   atVisibleLineStart?: boolean;
+  pendingThinkingTagCandidate?: {
+    text: string;
+    closingTagName?: 'think' | 'thinking';
+  };
+  protocolTagSanitized?: {
+    tagName: 'think' | 'thinking';
+    toolCallCount: number;
+  };
 }
 
 export interface ErrorHandler {

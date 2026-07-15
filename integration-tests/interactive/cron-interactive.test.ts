@@ -31,6 +31,11 @@ function makeEnv(): NodeJS.ProcessEnv {
     QWEN_CODE_LANG: 'en',
     TERM: 'xterm-256color',
     NODE_NO_WARNINGS: '1',
+    // Enable the CronScheduler test seam: newly created session-only
+    // jobs auto-fire after 5s instead of waiting for the wall-clock
+    // minute boundary. Removes the timing-flakiness from these tests
+    // (see #6982).
+    QWEN_CODE_TEST_CRON_FAST: '1',
   };
 }
 
@@ -58,7 +63,7 @@ function makeEnv(): NodeJS.ProcessEnv {
     await session.waitForScreen(
       (scr) => scr.includes('Cron: PONG7742'),
       'cron notification "Cron: PONG7742"',
-      90_000,
+      30_000,
     );
 
     await session.idle(5000);
@@ -82,7 +87,7 @@ function makeEnv(): NodeJS.ProcessEnv {
     await session.waitForScreen(
       (scr) => scr.includes('Cron: CRONTICK99'),
       'first cron fire "Cron: CRONTICK99"',
-      90_000,
+      30_000,
     );
 
     await session.idle(5000);
@@ -113,7 +118,7 @@ function makeEnv(): NodeJS.ProcessEnv {
       await session.waitForScreen(
         (scr) => scr.includes('FILEERR88'),
         'model reporting FILEERR88 from cron prompt',
-        90_000,
+        30_000,
       );
 
       await session.idle(5000);

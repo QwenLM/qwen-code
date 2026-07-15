@@ -25,6 +25,7 @@ import {
   type SessionArchiveState,
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
+import { parseSessionSource } from '@qwen-code/acp-bridge';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
@@ -60,6 +61,7 @@ import {
 } from '../server/session-list.js';
 import {
   archiveDaemonSessions,
+  assertSessionArchived,
   assertSessionLoadable,
   deleteDaemonSessions,
   logSessionArchiveWarning,
@@ -520,6 +522,7 @@ export function registerSessionRoutes(
       route: string;
       workspaceCwd: string;
       workspaceQualified?: boolean;
+      archiveState?: SessionArchiveState;
     },
   ): Promise<void> => {
     const sessionId = requireSessionId(req, res);
@@ -539,11 +542,16 @@ export function registerSessionRoutes(
       const result = await archiveCoordinator.runSharedMany(
         [sessionId],
         async () => {
-          await assertSessionLoadable(target.workspaceCwd, sessionId);
+          if (target.archiveState === 'archived') {
+            await assertSessionArchived(target.workspaceCwd, sessionId);
+          } else {
+            await assertSessionLoadable(target.workspaceCwd, sessionId);
+          }
           return exportSessionTranscript({
             workspaceCwd: target.workspaceCwd,
             sessionId,
             format,
+            archiveState: target.archiveState,
             config: { getChannel: () => 'daemon' },
           });
         },
@@ -1056,6 +1064,14 @@ export function registerSessionRoutes(
     }
     const approvalMode = parseOptionalApprovalMode(body, res);
     if (approvalMode === null) return;
+    const source = parseSessionSource(body['sourceType'], body['sourceId']);
+    if ('error' in source) {
+      res.status(400).json({
+        error: source.error,
+        code: 'invalid_session_source',
+      });
+      return;
+    }
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     try {
@@ -1065,6 +1081,10 @@ export function registerSessionRoutes(
         ...(clientId !== undefined ? { clientId } : {}),
         ...(sessionScope !== undefined ? { sessionScope } : {}),
         ...(approvalMode !== undefined ? { approvalMode } : {}),
+        ...(source.sourceType !== undefined
+          ? { sourceType: source.sourceType }
+          : {}),
+        ...(source.sourceId !== undefined ? { sourceId: source.sourceId } : {}),
       });
       // Client may have disconnected during the 1–3s spawn window. If
       // so, the response can't be delivered. The session is otherwise
@@ -1111,11 +1131,18 @@ export function registerSessionRoutes(
           // dispatching, the bridge will see `attachCount > 0` and
           // skip the kill. Without the flag, that second client's
           // session would die mid-prompt.
-          runtime.bridge
-            .killSession(session.sessionId, { requireZeroAttaches: true })
-            .catch(() => {
-              // Best-effort cleanup; channel.exited will eventually reap.
+          try {
+            const killed = await runtime.bridge.killSession(session.sessionId, {
+              requireZeroAttaches: true,
             });
+            if (killed) {
+              await new SessionService(runtime.workspaceCwd).removeSession(
+                session.sessionId,
+              );
+            }
+          } catch {
+            // Best-effort cleanup; channel.exited will eventually reap.
+          }
         } else {
           // When an attaching client disconnects
           // before its 200 response can be written, the
@@ -1187,9 +1214,9 @@ export function registerSessionRoutes(
             // Recover the persisted parent lineage so the restored live entry
             // reports it (the bridge otherwise creates the entry without it, and
             // status calls would show a restored sub-session as top-level).
-            const parentSessionId = await new SessionService(
+            const metadata = await new SessionService(
               workspaceCwd,
-            ).readParentSessionId(sessionId);
+            ).readCreationMetadata(sessionId);
             return action === 'load'
               ? await runtime.bridge.loadSession({
                   sessionId,
@@ -1197,14 +1224,14 @@ export function registerSessionRoutes(
                   historyReplay: 'response',
                   ...(clientId !== undefined ? { clientId } : {}),
                   ...(approvalMode !== undefined ? { approvalMode } : {}),
-                  ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+                  ...metadata,
                 })
               : await runtime.bridge.resumeSession({
                   sessionId,
                   workspaceCwd,
                   ...(clientId !== undefined ? { clientId } : {}),
                   ...(approvalMode !== undefined ? { approvalMode } : {}),
-                  ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+                  ...metadata,
                 });
           },
         );
@@ -1385,6 +1412,21 @@ export function registerSessionRoutes(
       workspaceQualified: true,
     });
   });
+
+  app.get(
+    '/workspaces/:workspace/session/:id/archive/export',
+    async (req, res) => {
+      const route = 'GET /workspaces/:workspace/session/:id/archive/export';
+      const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+      if (!runtime) return;
+      await handleSessionExport(req, res, {
+        route,
+        workspaceCwd: runtime.workspaceCwd,
+        workspaceQualified: true,
+        archiveState: 'archived',
+      });
+    },
+  );
 
   app.get('/session/:id/transcript', async (req, res) => {
     const route = 'GET /session/:id/transcript';
@@ -2618,6 +2660,24 @@ export function registerSessionRoutes(
           }
           parentSessionId = rawParentSessionId;
         }
+        const parsedSource = parseSessionSource(
+          req.query['sourceType'],
+          req.query['sourceId'],
+        );
+        if ('error' in parsedSource) {
+          res.status(400).json({
+            error: parsedSource.error,
+            code: 'invalid_session_source',
+          });
+          return;
+        }
+        if (parsedSource.sourceType !== undefined && view === 'organized') {
+          res.status(400).json({
+            error: '`sourceType` is not supported with `view=organized`',
+            code: 'invalid_session_source_filter',
+          });
+          return;
+        }
         const options = {
           ...(cursor !== undefined ? { cursor } : {}),
           ...(size !== undefined ? { size } : {}),
@@ -2625,11 +2685,12 @@ export function registerSessionRoutes(
           ...(view !== undefined ? { view } : {}),
           ...(group !== undefined ? { group } : {}),
           ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+          ...parsedSource,
         };
         // Organized/archived views always need the persisted store: organized
         // cursors are opaque (non-numeric) and archived-only workspaces have no
         // active persisted sessions, so the live-only fallback would drop them.
-        // A parentSessionId filter joins them: it gathers the whole workspace
+        // Metadata filters gather the whole workspace
         // (persisted + live) to filter completely and paginates with an opaque
         // activity cursor, so the numeric-cursor live fallback can't serve it.
         const usePersisted =
@@ -2638,6 +2699,7 @@ export function registerSessionRoutes(
           view === 'organized' ||
           archiveState === 'archived' ||
           parentSessionId !== undefined ||
+          parsedSource.sourceType !== undefined ||
           (cursor !== undefined && cursor !== ''
             ? isNumericSessionCursor(cursor)
             : await hasActivePersistedSessions(key));
@@ -2647,7 +2709,10 @@ export function registerSessionRoutes(
         // a future option added to validation but not to that gate fails loudly.
         if (
           !usePersisted &&
-          (view !== undefined || archiveState === 'archived')
+          (view !== undefined ||
+            archiveState === 'archived' ||
+            parentSessionId !== undefined ||
+            parsedSource.sourceType !== undefined)
         ) {
           throw new Error(
             'session list live path received persisted-only options',

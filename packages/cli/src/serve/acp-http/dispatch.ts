@@ -42,6 +42,7 @@ import {
   UpstreamDeviceFlowError,
 } from '../auth/device-flow.js';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
+import { parseSessionSource } from '@qwen-code/acp-bridge';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   SessionShellClientRequiredError,
@@ -679,9 +680,19 @@ export class AcpDispatcher {
     this.agentManager = createDaemonSubagentManager(boundWorkspace);
   }
 
-  private killOrphanSession(sessionId: string): void {
+  private killOrphanSession(
+    sessionId: string,
+    removePersistedSession = false,
+  ): void {
     void this.bridge
       .killSession(sessionId, { requireZeroAttaches: true })
+      .then(async (killed) => {
+        if (killed && removePersistedSession) {
+          await new SessionService(this.boundWorkspace).removeSession(
+            sessionId,
+          );
+        }
+      })
       .catch((err) =>
         writeStderrLine(
           `qwen serve: /acp orphan killSession(${logSafe(sessionId)}) failed: ${logSafe(errMsg(err))}`,
@@ -1078,6 +1089,16 @@ export class AcpDispatcher {
 
         case 'session/new': {
           const cwd = parseOptionalWorkspaceCwd(params, this.boundWorkspace);
+          const source = parseSessionSource(
+            params['sourceType'],
+            params['sourceId'],
+          );
+          if ('error' in source) {
+            if (id !== undefined) {
+              conn.sendConn(error(id, RPC.INVALID_PARAMS, source.error));
+            }
+            return;
+          }
           // ACP standard: session/new MUST create a new isolated session.
           // Always use sessionScope 'thread' regardless of client params.
           // The REST surface (POST /session) supports 'single' for
@@ -1086,12 +1107,13 @@ export class AcpDispatcher {
             workspaceCwd: cwd,
             clientId: conn.clientId,
             sessionScope: 'thread',
+            ...source,
           });
           // Teardown raced the spawn: the connection was destroyed while the
           // bridge call was in flight, so nothing will tear this session down.
           // Kill the orphan (no other client could have attached yet).
           if (conn.destroyed) {
-            this.killOrphanSession(session.sessionId);
+            this.killOrphanSession(session.sessionId, true);
             return;
           }
           conn.getOrCreateSession(session.sessionId).clientId =
@@ -1099,7 +1121,7 @@ export class AcpDispatcher {
           conn.ownSession(session.sessionId);
           const configOptions = await this.configOptionsFor(session.sessionId);
           if (conn.destroyed) {
-            this.killOrphanSession(session.sessionId);
+            this.killOrphanSession(session.sessionId, true);
             return;
           }
           // Build ACP-standard models/modes from configOptions.
@@ -1109,6 +1131,13 @@ export class AcpDispatcher {
           const modes = this.extractModeState(configOptions);
           this.replyConn(conn, id, {
             sessionId: session.sessionId,
+            ...(session.sourceType ? { sourceType: session.sourceType } : {}),
+            ...(session.sourceId !== undefined
+              ? { sourceId: session.sourceId }
+              : {}),
+            ...(session.sourcePersisted !== undefined
+              ? { sourcePersisted: session.sourcePersisted }
+              : {}),
             ...(configOptions ? { configOptions } : {}),
             ...(models ? { models } : {}),
             ...(modes ? { modes } : {}),
@@ -1154,26 +1183,22 @@ export class AcpDispatcher {
               // Re-seed the persisted parent lineage so a restored sub-session
               // still reports its parent over the ACP transport (parity with the
               // REST restore handler); the bridge creates the entry without it.
-              const parentSessionId = await new SessionService(
+              const metadata = await new SessionService(
                 cwd,
-              ).readParentSessionId(sessionId);
+              ).readCreationMetadata(sessionId);
               return method === 'session/load'
                 ? await this.bridge.loadSession({
                     sessionId,
                     workspaceCwd: cwd,
                     clientId: conn.clientId,
                     historyReplay: 'response',
-                    ...(parentSessionId !== undefined
-                      ? { parentSessionId }
-                      : {}),
+                    ...metadata,
                   })
                 : await this.bridge.resumeSession({
                     sessionId,
                     workspaceCwd: cwd,
                     clientId: conn.clientId,
-                    ...(parentSessionId !== undefined
-                      ? { parentSessionId }
-                      : {}),
+                    ...metadata,
                   });
             },
           );
@@ -1317,6 +1342,18 @@ export class AcpDispatcher {
               );
             }
           }
+          const parsedSource = parseSessionSource(
+            params['sourceType'],
+            params['sourceId'],
+          );
+          if ('error' in parsedSource) {
+            throw new AcpParamError(parsedSource.error);
+          }
+          if (parsedSource.sourceType !== undefined && view === 'organized') {
+            throw new AcpParamError(
+              '`sourceType` is not supported with `view` "organized"',
+            );
+          }
           const result = await listWorkspaceSessionsForResponse(
             this.bridge,
             workspaceCwd,
@@ -1327,6 +1364,7 @@ export class AcpDispatcher {
               view,
               group,
               parentSessionId,
+              ...parsedSource,
             },
           );
           this.replyConn(conn, id, {
@@ -1341,6 +1379,10 @@ export class AcpDispatcher {
               ...(s.parentSessionId !== undefined
                 ? { parentSessionId: s.parentSessionId }
                 : {}),
+              ...(s.sourceType !== undefined
+                ? { sourceType: s.sourceType }
+                : {}),
+              ...(s.sourceId !== undefined ? { sourceId: s.sourceId } : {}),
               clientCount: s.clientCount,
               hasActivePrompt: s.hasActivePrompt,
               isArchived: s.isArchived === true,

@@ -264,6 +264,7 @@ import {
   type ServeWorkspaceExtensionsStatus,
   IDLE_HOOK_EVENTS,
 } from '@qwen-code/acp-bridge/status';
+import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
   LOAD_REPLAY_BULK_MODE,
@@ -556,6 +557,7 @@ type QwenCoreSettingKey =
   | 'general.showSessionRecap'
   | 'general.sessionRecapAwayThresholdMinutes'
   | 'general.terminalBell'
+  | 'general.notificationMode'
   | 'general.gitCoAuthor.commit'
   | 'general.gitCoAuthor.pr'
   | 'general.defaultFileEncoding'
@@ -623,6 +625,10 @@ const QWEN_CORE_SETTING_DEFINITIONS = {
   'general.showSessionRecap': { type: 'boolean' },
   'general.sessionRecapAwayThresholdMinutes': { type: 'number', min: 1 },
   'general.terminalBell': { type: 'boolean' },
+  'general.notificationMode': {
+    type: 'enum',
+    values: ['all', 'task-complete'],
+  },
   'general.gitCoAuthor.commit': { type: 'boolean' },
   'general.gitCoAuthor.pr': { type: 'boolean' },
   'general.defaultFileEncoding': {
@@ -657,7 +663,7 @@ const QWEN_HOOK_EVENTS = Object.values(HookEventName) as QwenHookEvent[];
 const DEFAULT_QWEN_MEMORY_SETTINGS: QwenMemorySettings = {
   enableManagedAutoMemory: true,
   enableManagedAutoDream: true,
-  enableAutoSkill: true,
+  enableAutoSkill: false,
   autoSkillConfirm: true,
   enableTeamMemory: false,
   enableTeamMemorySync: false,
@@ -6724,6 +6730,41 @@ class QwenAgent implements Agent {
           ok = await recording.recordParentSession(parentSessionId);
         }
         return { sessionId, parentSessionId, persisted: ok };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionSource: {
+        const sessionId = params['sessionId'];
+        const sourceType = params['sourceType'];
+        const sourceId = params['sourceId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const source = parseSessionSource(sourceType, sourceId);
+        if ('error' in source || source.sourceType === undefined) {
+          throw RequestError.invalidParams(
+            undefined,
+            'error' in source ? source.error : 'Invalid or missing sourceType',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const recording = session.getConfig().getChatRecordingService();
+        let ok = false;
+        if (recording) {
+          ok = await recording.recordSessionSource(
+            source.sourceType,
+            source.sourceId,
+          );
+        }
+        return {
+          sessionId,
+          sourceType: source.sourceType,
+          ...(source.sourceId !== undefined
+            ? { sourceId: source.sourceId }
+            : {}),
+          persisted: ok,
+        };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionClose: {
         const sessionId = params['sessionId'];

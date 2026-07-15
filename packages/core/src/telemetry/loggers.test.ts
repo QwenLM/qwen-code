@@ -39,6 +39,7 @@ import {
   EVENT_EXTENSION_INSTALL,
   EVENT_EXTENSION_UNINSTALL,
   EVENT_TOOL_OUTPUT_TRUNCATED,
+  EVENT_PROTOCOL_TAG_SANITIZED,
 } from './constants.js';
 import {
   logApiRequest,
@@ -60,6 +61,7 @@ import {
   logHookCall,
   logApiError,
   logApiRetry,
+  logProtocolTagSanitized,
 } from './loggers.js';
 import * as metrics from './metrics.js';
 import { apiActivityTracker } from './api-activity-tracker.js';
@@ -87,6 +89,7 @@ import {
   HookCallEvent,
   ApiErrorEvent,
   ApiRetryEvent,
+  ProtocolTagSanitizedEvent,
 } from './types.js';
 import { FileOperation } from './metrics.js';
 import type {
@@ -156,6 +159,42 @@ describe('loggers', () => {
       expect(metrics.recordChatCompressionMetrics).toHaveBeenCalledWith(
         mockConfig,
         { tokens_before: 9001, tokens_after: 9000 },
+      );
+    });
+  });
+
+  describe('logProtocolTagSanitized', () => {
+    it('emits a privacy-safe handled event to QwenLogger and OpenTelemetry', () => {
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+      vi.spyOn(QwenLogger.prototype, 'logProtocolTagSanitizedEvent');
+      const event = new ProtocolTagSanitizedEvent({
+        model: 'test-model',
+        promptId: 'prompt-id',
+        responseId: 'response-id',
+        tagName: 'think',
+        toolCallCount: 2,
+      });
+
+      logProtocolTagSanitized(config, event);
+
+      expect(
+        QwenLogger.prototype.logProtocolTagSanitizedEvent,
+      ).toHaveBeenCalledWith(event);
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Suppressed a standalone closing think tag and preserved 2 tool call(s).',
+        attributes: {
+          'session.id': 'test-session-id',
+          'event.name': EVENT_PROTOCOL_TAG_SANITIZED,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+          model: 'test-model',
+          prompt_id: 'prompt-id',
+          response_id: 'response-id',
+          tag_name: 'think',
+          tool_call_count: 2,
+        },
+      });
+      expect(JSON.stringify(mockLogger.emit.mock.calls[0])).not.toMatch(
+        /response_text|reasoning|tool_name|arguments/,
       );
     });
   });

@@ -29,6 +29,7 @@ import type { WorkspaceRegistry } from '../workspace-registry.js';
 const TUI_ONLY_SETTINGS = new Set([
   'general.vimMode',
   'general.terminalBell',
+  'general.notificationMode',
   'general.preferredEditor',
   'general.outputLanguage',
   'ide.enabled',

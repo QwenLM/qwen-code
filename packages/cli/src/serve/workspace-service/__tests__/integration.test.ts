@@ -112,7 +112,7 @@ function minimalBridge(
       .fn()
       .mockImplementation((_method: string, idle: () => unknown) => idle()),
     invokeWorkspaceCommand: vi.fn().mockResolvedValue({}),
-    killSession: vi.fn().mockResolvedValue(undefined),
+    killSession: vi.fn().mockResolvedValue(true),
     detachClient: vi.fn().mockResolvedValue(undefined),
     shutdown: vi.fn().mockResolvedValue(undefined),
     killAllSync: vi.fn(),

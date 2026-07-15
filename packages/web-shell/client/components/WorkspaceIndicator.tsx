@@ -5,6 +5,12 @@
  */
 
 import styles from './ChatEditor.module.css';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from './ui/tooltip';
 
 function WorkspaceFolderIcon() {
   return (
@@ -24,30 +30,41 @@ function WorkspaceFolderIcon() {
  * session belongs to. Mirrors {@link GitBranchIndicator}; both sit in the
  * composer toolbar. Shown only on a multi-workspace daemon (the pane composer
  * opts into the `workspace` toolbar action) so it's clear which workspace a
- * message goes to. Unlike the toolbar action buttons, the name stays visible as
- * the pane narrows — it's the pane's identity — and only tightens and ellipsizes
- * (the full cwd stays in the tooltip).
+ * message goes to. The full cwd stays in a hover tooltip — matching the git
+ * branch chip — so it's still discoverable once the name ellipsizes or
+ * collapses to an icon on a narrow (split-screen / mobile) composer.
  */
 export function WorkspaceIndicator({
   name,
   title,
   ariaLabel,
+  compact = false,
 }: {
   name: string;
   title: string;
   ariaLabel: string;
+  compact?: boolean;
 }) {
   return (
-    <output
-      className={styles.workspaceChip}
-      title={title}
-      aria-label={ariaLabel}
-      data-web-shell-workspace
-    >
-      <span className={styles.workspaceChipIcon}>
-        <WorkspaceFolderIcon />
-      </span>
-      <span className={styles.workspaceChipText}>{name}</span>
-    </output>
+    <TooltipProvider delayDuration={300}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <output
+            className={`${styles.workspaceChip} ${
+              compact ? styles.workspaceChipCompact : ''
+            }`}
+            aria-label={ariaLabel}
+            data-web-shell-workspace
+            data-web-shell-workspace-title={title}
+          >
+            <span className={styles.workspaceChipIcon}>
+              <WorkspaceFolderIcon />
+            </span>
+            <span className={styles.workspaceChipText}>{name}</span>
+          </output>
+        </TooltipTrigger>
+        <TooltipContent side="top">{title}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }

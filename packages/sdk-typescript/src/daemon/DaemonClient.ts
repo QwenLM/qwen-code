@@ -13,6 +13,7 @@ import { DaemonAuthFlow } from './DaemonAuthFlow.js';
 import { DaemonHttpError } from './DaemonHttpError.js';
 import type { DaemonTransport } from './DaemonTransport.js';
 import { RestSseTransport } from './RestSseTransport.js';
+import { DaemonCapabilityMissingError } from './types.js';
 import type {
   DaemonAgentMutationResult,
   DaemonAuthProviderId,
@@ -375,6 +376,10 @@ export interface CreateSessionRequest {
    */
   sessionScope?: 'single' | 'thread';
   approvalMode?: string;
+  /** Immutable creator attribution stored with a newly created session. */
+  sourceType?: string;
+  /** Optional source-specific identifier. Requires `sourceType`. */
+  sourceId?: string;
 }
 
 export interface RestoreSessionRequest {
@@ -828,6 +833,16 @@ export class DaemonClient {
         return (await res.json()) as DaemonCapabilities;
       },
     );
+  }
+
+  async requireCapability(capability: string): Promise<void> {
+    const caps = await this.capabilities();
+    if (!caps.features.includes(capability)) {
+      throw new DaemonCapabilityMissingError(
+        capability,
+        `daemon does not advertise the ${capability} feature`,
+      );
+    }
   }
 
   /**
@@ -1783,6 +1798,9 @@ export class DaemonClient {
     req: CreateSessionRequest,
     clientId?: string,
   ): Promise<DaemonSession> {
+    if (req.sourceType !== undefined || req.sourceId !== undefined) {
+      await this.requireCapability('session_source_metadata');
+    }
     // Omitting `cwd` lets the daemon fall back to its
     // primary workspace. JSON.stringify strips `undefined` values, so
     // `cwd: undefined` becomes "no `cwd` key" on the wire — and the
@@ -1815,6 +1833,10 @@ export class DaemonClient {
           ...(req.approvalMode !== undefined
             ? { approvalMode: req.approvalMode }
             : {}),
+          ...(req.sourceType !== undefined
+            ? { sourceType: req.sourceType }
+            : {}),
+          ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
         }),
       },
       async (res) => {
@@ -1834,6 +1856,8 @@ export class DaemonClient {
       pageSize?: number;
       archiveState?: DaemonSessionArchiveState;
       parentSessionId?: string;
+      sourceType?: string;
+      sourceId?: string;
     },
   ): Promise<DaemonSessionSummary[]> {
     const page = await this.listWorkspaceSessionsPage(workspaceCwd, options);
@@ -1844,6 +1868,9 @@ export class DaemonClient {
     workspaceCwd: string,
     options?: DaemonSessionListPageOptions,
   ): Promise<DaemonSessionListPage> {
+    if (options?.sourceType !== undefined || options?.sourceId !== undefined) {
+      await this.requireCapability('session_source_metadata');
+    }
     const requestedPageSize =
       options?.pageSize ?? DEFAULT_SESSION_LIST_PAGE_SIZE;
     const pageSize = Math.max(
@@ -1872,6 +1899,12 @@ export class DaemonClient {
     }
     if (options?.parentSessionId !== undefined) {
       query.set('parentSessionId', options.parentSessionId);
+    }
+    if (options?.sourceType !== undefined) {
+      query.set('sourceType', options.sourceType);
+    }
+    if (options?.sourceId !== undefined) {
+      query.set('sourceId', options.sourceId);
     }
     return await this.jsonRequest<DaemonSessionListPage>(
       `/workspace/${urlEncode(workspaceCwd)}/sessions?${query.toString()}`,
@@ -4061,9 +4094,12 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  listWorkspaceSessionsPage(
+  async listWorkspaceSessionsPage(
     options?: DaemonSessionListPageOptions,
   ): Promise<DaemonSessionListPage> {
+    if (options?.sourceType !== undefined || options?.sourceId !== undefined) {
+      await this.client.requireCapability('session_source_metadata');
+    }
     const requestedPageSize =
       options?.pageSize ?? DEFAULT_SESSION_LIST_PAGE_SIZE;
     const pageSize = Math.max(
@@ -4087,7 +4123,13 @@ export class WorkspaceDaemonClient {
     if (options?.parentSessionId !== undefined) {
       query.set('parentSessionId', options.parentSessionId);
     }
-    return this.get(
+    if (options?.sourceType !== undefined) {
+      query.set('sourceType', options.sourceType);
+    }
+    if (options?.sourceId !== undefined) {
+      query.set('sourceId', options.sourceId);
+    }
+    return await this.get(
       `/sessions?${query.toString()}`,
       'GET /workspaces/:workspace/sessions',
     );
@@ -4133,6 +4175,21 @@ export class WorkspaceDaemonClient {
     return this.client.sessionExportRequest(
       `/workspaces/${this.workspaceSelector}/session/${urlEncode(sessionId)}/export`,
       'GET /workspaces/:workspace/session/:id/export',
+      opts,
+    );
+  }
+
+  /** Export an archived persisted session from this registered workspace. */
+  exportArchivedSession(
+    sessionId: string,
+    opts: {
+      format?: DaemonSessionExportFormat;
+      clientId?: string;
+    } = {},
+  ): Promise<DaemonSessionExportResult> {
+    return this.client.sessionExportRequest(
+      `/workspaces/${this.workspaceSelector}/session/${urlEncode(sessionId)}/archive/export`,
+      'GET /workspaces/:workspace/session/:id/archive/export',
       opts,
     );
   }

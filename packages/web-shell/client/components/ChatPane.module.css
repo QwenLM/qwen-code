@@ -48,7 +48,8 @@
   color: var(--foreground);
 }
 
-.closeButton {
+.closeButton,
+.maximizeButton {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
@@ -62,9 +63,17 @@
   cursor: pointer;
 }
 
-.closeButton:hover {
+.closeButton:hover,
+.maximizeButton:hover {
   color: var(--foreground);
   background: color-mix(in srgb, var(--foreground) 8%, transparent);
+}
+
+/* The maximized pane keeps its toggle visually "active" so it's clear which
+   control returns to the tiled layout. */
+.maximizeButton[aria-pressed='true'] {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 10%, transparent);
 }
 
 /* The transcript takes the remaining height and scrolls independently per pane. */

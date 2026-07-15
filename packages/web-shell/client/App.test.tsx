@@ -2041,6 +2041,299 @@ describe('App session callbacks', () => {
     expect(panel?.getAttribute('aria-label')).toBe('Session Overview');
   });
 
+  it('forces the compact session drawer from the external shell ref', async () => {
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+
+    const drawer = container.querySelector(
+      '[data-sidebar-shell][role="dialog"]',
+    );
+    expect(drawer).not.toBeNull();
+    expect(drawer?.className).toContain('mobileDrawerForced');
+  });
+
+  it('does not open or lock scrolling when the sidebar is disabled', async () => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'auto';
+
+    try {
+      const shellRef = createRef<WebShellApi>();
+      const { container } = renderApp({ sidebar: false, shellRef });
+      await flush();
+
+      await act(async () => {
+        shellRef.current?.openSessionDrawer();
+        await Promise.resolve();
+      });
+
+      expect(container.querySelector('[data-sidebar-shell]')).toBeNull();
+      expect(container.querySelector('[role="dialog"]')).toBeNull();
+      expect(document.body.style.overflow).toBe('auto');
+    } finally {
+      document.body.style.overflow = previousOverflow;
+    }
+  });
+
+  it('closes a forced compact drawer when the sidebar becomes disabled', async () => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'auto';
+    const shellRef = createRef<WebShellApi>();
+    const { container, rerender, unmount } = renderApp({
+      sidebar: true,
+      shellRef,
+    });
+
+    try {
+      await flush();
+      await act(async () => {
+        shellRef.current?.openSessionDrawer();
+        await Promise.resolve();
+      });
+
+      expect(
+        container.querySelector('[data-sidebar-shell][role="dialog"]'),
+      ).not.toBeNull();
+      expect(document.body.style.overflow).toBe('hidden');
+
+      rerender({ sidebar: false, shellRef });
+      await flush();
+
+      expect(container.querySelector('[data-sidebar-shell]')).toBeNull();
+      expect(container.querySelector('[role="dialog"]')).toBeNull();
+      expect(document.body.style.overflow).toBe('auto');
+    } finally {
+      unmount();
+      document.body.style.overflow = previousOverflow;
+    }
+  });
+
+  it('dismisses a forced compact drawer before opening split view', async () => {
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-sidebar-shell][role="dialog"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      shellRef.current?.openSplitView();
+      await Promise.resolve();
+    });
+
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-sidebar-shell][role="dialog"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-sidebar-shell]')?.className,
+    ).not.toContain('mobileDrawerForced');
+    expect(document.body.style.overflow).not.toBe('hidden');
+  });
+
+  it('dismisses a forced compact drawer before opening the Session Overview', async () => {
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-sidebar-shell][role="dialog"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      shellRef.current?.openSessionOverview();
+      await Promise.resolve();
+    });
+
+    const panel = container.querySelector('[data-testid="inline-panel"]');
+    expect(panel).not.toBeNull();
+    expect(panel?.getAttribute('aria-label')).toBe('Session Overview');
+    expect(
+      container.querySelector('[data-sidebar-shell][role="dialog"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-sidebar-shell]')?.className,
+    ).not.toContain('mobileDrawerForced');
+    expect(document.body.style.overflow).not.toBe('hidden');
+  });
+
+  it('returns a forced compact drawer to viewport control when dismissed', async () => {
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-sidebar-shell]')?.className,
+    ).toContain('mobileDrawerForced');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLElement>(
+          '[data-sidebar-shell] > div[aria-hidden="true"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(
+      container.querySelector('[data-sidebar-shell]')?.className,
+    ).not.toContain('mobileDrawerForced');
+    expect(
+      container.querySelector('[data-sidebar-shell][role="dialog"]'),
+    ).toBeNull();
+  });
+
+  it('returns to chat and clears the current page when opening the compact drawer', async () => {
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSessionOverview();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+
+    await act(async () => {
+      shellRef.current?.openSplitView();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-sidebar-shell][role="dialog"]'),
+    ).not.toBeNull();
+  });
+
+  it('clears a forced compact drawer after crossing to a wide viewport', async () => {
+    let mobileChangeHandler:
+      | ((event: { matches: boolean }) => void)
+      | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: query.includes('min-width'),
+        media: query,
+        addEventListener: (
+          _type: string,
+          handler: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('max-width')) mobileChangeHandler = handler;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-sidebar-shell]')?.className,
+    ).toContain('mobileDrawerForced');
+
+    await act(async () => {
+      mobileChangeHandler?.({ matches: false });
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-sidebar-shell]')?.className,
+    ).not.toContain('mobileDrawerForced');
+    expect(
+      container.querySelector('[data-sidebar-shell][role="dialog"]'),
+    ).toBeNull();
+  });
+
+  it('starts a new session from the external shell ref and returns to chat', async () => {
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSplitView();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+
+    vi.useFakeTimers();
+    let created: boolean | undefined;
+    await act(async () => {
+      created = await shellRef.current?.createNewSession();
+      vi.runOnlyPendingTimers();
+    });
+
+    expect(created).toBe(true);
+    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+  });
+
+  it('reports a failed external new-session attempt through its boolean result', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockSessionActions.clearSession.mockRejectedValueOnce(new Error('boom'));
+    const shellRef = createRef<WebShellApi>();
+    renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    vi.useFakeTimers();
+    let created: boolean | undefined;
+    await act(async () => {
+      created = await shellRef.current?.createNewSession();
+      vi.runOnlyPendingTimers();
+    });
+
+    expect(created).toBe(false);
+    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[web-shell]',
+      'boom',
+      expect.any(Error),
+    );
+  });
+
   it('returns to the Session Overview when leaving the split view', async () => {
     const { container } = renderApp();
     await flush();

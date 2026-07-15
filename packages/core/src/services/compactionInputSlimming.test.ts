@@ -248,6 +248,21 @@ describe('compactionInputSlimming', () => {
       };
       expect(estimatePartChars(call, 1600)).toBe(JSON.stringify(call).length);
     });
+
+    it('counts model-facing function response errors', () => {
+      const error = 'x'.repeat(10_000);
+      expect(
+        estimatePartChars(
+          {
+            functionResponse: {
+              name: 'shell',
+              response: { error },
+            },
+          },
+          1600,
+        ),
+      ).toBe(error.length + 64);
+    });
   });
 
   describe('estimateContentChars', () => {

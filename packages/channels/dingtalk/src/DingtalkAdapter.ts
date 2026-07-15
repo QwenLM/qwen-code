@@ -88,7 +88,9 @@ const ACK_EMOTION_ID = '2659900';
 const ACK_EMOTION_BG_ID = 'im_bg_1';
 const EMOTION_API = 'https://api.dingtalk.com/v1.0/robot/emotion';
 const GROUP_MSG_API = 'https://api.dingtalk.com/v1.0/robot/groupMessages/send';
-const GROUP_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text} markdown template key
+const DIRECT_MSG_API =
+  'https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend';
+const PROACTIVE_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text} markdown template key
 const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
 const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
 const TEXT_MESSAGE_LIMIT = 3800;
@@ -103,6 +105,11 @@ interface DingTalkTokenResponse {
   errmsg?: string;
   access_token?: string;
   expires_in?: number;
+}
+
+interface DingTalkDirectMessageResponse {
+  flowControlledStaffIdList?: string[];
+  invalidStaffIdList?: string[];
 }
 
 function splitTextChunks(text: string, firstChunkLimit: number): string[] {
@@ -482,15 +489,23 @@ export class DingtalkChannel extends ChannelBase {
     return true;
   }
 
-  /**
-   * The group-message API needs a real openConversationId — reject DMs
-   * (a different API) and webhook-URL fallback chatIds.
-   */
+  // Regular proactive paths accept only group targets; webhook tasks may use
+  // DMs through the one-to-one API.
   protected override supportsProactiveTarget(target: SessionTarget): boolean {
     return (
       target.isGroup === true &&
       target.threadId === undefined &&
-      this.isConversationId(target.chatId)
+      this.isStableTargetId(target.chatId)
+    );
+  }
+
+  protected override supportsProactiveWebhookTarget(
+    target: SessionTarget,
+  ): boolean {
+    return (
+      typeof target.isGroup === 'boolean' &&
+      target.threadId === undefined &&
+      this.isStableTargetId(target.chatId)
     );
   }
 
@@ -509,7 +524,7 @@ export class DingtalkChannel extends ChannelBase {
 
     for (let i = 0; i < chunks.length; i++) {
       await this.sendProactiveChunk(
-        target.chatId,
+        target,
         i === 0 ? title : `${title} (cont.)`,
         chunks[i]!,
         `chunk ${i + 1}/${chunks.length}`,
@@ -555,33 +570,41 @@ export class DingtalkChannel extends ChannelBase {
   }
 
   private async sendProactiveChunk(
-    conversationId: string,
+    target: SessionTarget,
     title: string,
     text: string,
     chunkLabel: string,
   ): Promise<void> {
+    const targetKind = target.isGroup === true ? 'group' : 'dm';
     for (let attempt = 0; ; attempt++) {
       const token = await this.getProactiveToken();
       let resp: Response;
       try {
-        resp = await fetch(GROUP_MSG_API, {
-          method: 'POST',
-          headers: {
-            'x-acs-dingtalk-access-token': token,
-            'Content-Type': 'application/json',
+        const targetBody =
+          target.isGroup === true
+            ? { openConversationId: target.chatId }
+            : { userIds: [target.chatId] };
+        resp = await fetch(
+          target.isGroup === true ? GROUP_MSG_API : DIRECT_MSG_API,
+          {
+            method: 'POST',
+            headers: {
+              'x-acs-dingtalk-access-token': token,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              robotCode: this.config.clientId!,
+              ...targetBody,
+              msgKey: PROACTIVE_MSG_KEY,
+              msgParam: JSON.stringify({ title, text }),
+            }),
+            signal: AbortSignal.timeout(PROACTIVE_FETCH_TIMEOUT_MS),
           },
-          body: JSON.stringify({
-            robotCode: this.config.clientId!,
-            openConversationId: conversationId,
-            msgKey: GROUP_MSG_KEY,
-            msgParam: JSON.stringify({ title, text }),
-          }),
-          signal: AbortSignal.timeout(PROACTIVE_FETCH_TIMEOUT_MS),
-        });
+        );
       } catch (err) {
         const cause = (err as { cause?: unknown }).cause;
         process.stderr.write(
-          `[DingTalk:${this.name}] proactive send error (${chunkLabel}): ${err}${cause ? ` (${cause})` : ''}\n`,
+          `[DingTalk:${this.name}] proactive send error (${targetKind}, ${chunkLabel}): ${err}${cause ? ` (${cause})` : ''}\n`,
         );
         throw new Error(
           `DingTalk proactive send failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -596,11 +619,41 @@ export class DingtalkChannel extends ChannelBase {
       if (!resp.ok) {
         const detail = sanitizeLogText(await resp.text().catch(() => ''), 300);
         process.stderr.write(
-          `[DingTalk:${this.name}] proactive send failed (${chunkLabel}): HTTP ${resp.status} ${detail}\n`,
+          `[DingTalk:${this.name}] proactive send failed (${targetKind}, ${chunkLabel}): HTTP ${resp.status} ${detail}\n`,
         );
         throw new Error(
           `DingTalk proactive send failed: HTTP ${resp.status}${detail ? ` ${detail}` : ''}`,
         );
+      }
+      if (target.isGroup === false) {
+        let data: DingTalkDirectMessageResponse;
+        try {
+          data = (await resp.json()) as DingTalkDirectMessageResponse;
+        } catch {
+          process.stderr.write(
+            `[DingTalk:${this.name}] proactive send failed (${targetKind}, ${chunkLabel}): invalid JSON response\n`,
+          );
+          throw new Error(
+            'DingTalk proactive send failed: invalid JSON response',
+          );
+        }
+        if (data.invalidStaffIdList?.includes(target.chatId)) {
+          process.stderr.write(
+            `[DingTalk:${this.name}] proactive send failed (${targetKind}, ${chunkLabel}): invalid direct recipient\n`,
+          );
+          throw new Error(
+            'DingTalk proactive send failed: invalid direct recipient',
+          );
+        }
+        if (data.flowControlledStaffIdList?.includes(target.chatId)) {
+          process.stderr.write(
+            `[DingTalk:${this.name}] proactive send failed (${targetKind}, ${chunkLabel}): direct recipient rate limited\n`,
+          );
+          throw new Error(
+            'DingTalk proactive send failed: direct recipient rate limited',
+          );
+        }
+        return;
       }
       await resp.body?.cancel();
       return;
@@ -682,12 +735,8 @@ export class DingtalkChannel extends ChannelBase {
     process.stderr.write(`[DingTalk:${this.name}] Disconnected.\n`);
   }
 
-  /**
-   * The chatId passed to onPromptStart/onPromptEnd is `conversationId ||
-   * sessionWebhook` (see message handler below). Reactions and proactive
-   * sends require a real conversation ID — skip the webhook-URL fallback case.
-   */
-  private isConversationId(chatId: string): boolean {
+  /** Stable API targets are conversation or user IDs, never webhook URLs. */
+  private isStableTargetId(chatId: string): boolean {
     return !!chatId && !/^https?:\/\//i.test(chatId);
   }
 
@@ -715,7 +764,7 @@ export class DingtalkChannel extends ChannelBase {
     messageId?: string,
     sessionId?: string,
   ): void {
-    if (!messageId || !this.isConversationId(chatId)) return;
+    if (!messageId || !this.isStableTargetId(chatId)) return;
     // Loop lifecycle events carry the internal job id as messageId; the
     // emotion API only accepts ids of real inbound messages, so skip anything
     // we never saw arrive.
@@ -750,7 +799,7 @@ export class DingtalkChannel extends ChannelBase {
     messageId?: string,
     sessionId?: string,
   ): void {
-    if (!messageId || !this.isConversationId(chatId)) return;
+    if (!messageId || !this.isStableTargetId(chatId)) return;
     const key = this.reactionKey(messageId, chatId);
     if (sessionId) {
       const keys = this.sessionReactionKeys.get(sessionId);

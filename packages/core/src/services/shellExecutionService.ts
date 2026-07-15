@@ -200,6 +200,22 @@ export interface ShellExecutionHandle {
   result: Promise<ShellExecutionResult>;
 }
 
+function createPreSpawnAbortedHandle(): ShellExecutionHandle {
+  return {
+    pid: undefined,
+    result: Promise.resolve({
+      rawOutput: Buffer.alloc(0),
+      output: '',
+      exitCode: null,
+      signal: null,
+      error: null,
+      aborted: true,
+      pid: undefined,
+      executionMethod: 'none',
+    }),
+  };
+}
+
 export interface ShellExecutionConfig {
   terminalWidth?: number;
   terminalHeight?: number;
@@ -662,8 +678,37 @@ export class ShellExecutionService {
     shellExecutionConfig: ShellExecutionConfig,
     options: ShellExecuteOptions = {},
   ): Promise<ShellExecutionHandle> {
+    if (abortSignal.aborted) {
+      return createPreSpawnAbortedHandle();
+    }
+
     if (shouldUseNodePty) {
-      const ptyInfo = await getPty();
+      let removeAbortListener: (() => void) | undefined;
+      const ptyResult = Promise.resolve(getPty()).then(
+        (value) => ({ kind: 'resolved' as const, value }),
+        (error: unknown) => ({ kind: 'rejected' as const, error }),
+      );
+      const aborted = new Promise<{ kind: 'aborted' }>((resolve) => {
+        const onAbort = () => resolve({ kind: 'aborted' });
+        abortSignal.addEventListener('abort', onAbort, { once: true });
+        removeAbortListener = () =>
+          abortSignal.removeEventListener('abort', onAbort);
+        if (abortSignal.aborted) onAbort();
+      });
+      const ptyOutcome = await Promise.race([ptyResult, aborted]);
+      removeAbortListener?.();
+
+      if (ptyOutcome.kind === 'aborted') {
+        return createPreSpawnAbortedHandle();
+      }
+      if (ptyOutcome.kind === 'rejected') {
+        throw ptyOutcome.error;
+      }
+      if (abortSignal.aborted) {
+        return createPreSpawnAbortedHandle();
+      }
+
+      const ptyInfo = ptyOutcome.value;
       if (ptyInfo) {
         try {
           return this.executeWithPty(

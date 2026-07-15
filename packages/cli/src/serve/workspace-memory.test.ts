@@ -106,7 +106,7 @@ function buildBridgeStub(
     setSessionModel: async () => {
       throw new Error('not implemented');
     },
-    killSession: async () => {},
+    killSession: async () => true,
     detachClient: async () => {},
     sessionCount: 0,
     pendingPermissionCount: 0,

@@ -225,7 +225,7 @@ function buildWorkspaceProvidersStatus(
 
 function resolveApprovalMode(settings: Settings): ApprovalMode {
   const value = settings.tools?.approvalMode;
-  if (typeof value !== 'string') return ApprovalMode.DEFAULT;
+  if (typeof value !== 'string') return ApprovalMode.AUTO;
 
   const normalized = value.trim().toLowerCase().replaceAll('_', '-');
   const mode = normalized === 'autoedit' ? ApprovalMode.AUTO_EDIT : normalized;
@@ -235,10 +235,10 @@ function resolveApprovalMode(settings: Settings): ApprovalMode {
 
   if (value.trim().length > 0) {
     debugLogger.warn(
-      `[workspace-providers-status] unrecognized approvalMode "${value}", falling back to default`,
+      `[workspace-providers-status] unrecognized approvalMode "${value}", falling back to auto`,
     );
   }
-  return ApprovalMode.DEFAULT;
+  return ApprovalMode.AUTO;
 }
 
 function isMainSelectableModel(model: {

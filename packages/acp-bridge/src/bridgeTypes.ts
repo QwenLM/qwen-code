@@ -89,6 +89,10 @@ export interface BridgeSpawnRequest {
    * top-level session that no other session spawned.
    */
   parentSessionId?: string;
+  /** Immutable attribution supplied by the creator of a fresh session. */
+  sourceType?: string;
+  /** Optional source-specific identifier. Valid only with `sourceType`. */
+  sourceId?: string;
   approvalMode?: ApprovalMode;
 }
 
@@ -116,6 +120,12 @@ export interface BridgeSession {
    * treating every spawn as an equally successful link.
    */
   parentSessionPersisted?: boolean;
+  /** Immutable creator attribution for this session, when supplied. */
+  sourceType?: string;
+  /** Optional source-specific identifier paired with `sourceType`. */
+  sourceId?: string;
+  /** True iff the source metadata was durably written to the transcript. */
+  sourcePersisted?: boolean;
 }
 
 export interface BridgeRestoreSessionRequest {
@@ -136,6 +146,10 @@ export interface BridgeRestoreSessionRequest {
    * for a top-level session.
    */
   parentSessionId?: string;
+  /** Persisted creator attribution recovered from the transcript. */
+  sourceType?: string;
+  /** Optional persisted identifier paired with `sourceType`. */
+  sourceId?: string;
 }
 
 export const LOAD_REPLAY_MODE_META_KEY = 'qwen.session.loadReplayMode';
@@ -319,6 +333,10 @@ export interface BridgeSessionSummary {
    * absent for a top-level session. Lets a UI link a sub-session back to its
    * parent. Immutable — set when the session is created. */
   parentSessionId?: string;
+  /** Immutable creator attribution, absent on legacy/unattributed sessions. */
+  sourceType?: string;
+  /** Optional source-specific identifier paired with `sourceType`. */
+  sourceId?: string;
   clientCount: number;
   hasActivePrompt: boolean;
   /** True while a non-question permission request awaits a response. */
@@ -1169,11 +1187,13 @@ export interface AcpSessionBridge {
    * `requireZeroAttaches: true` makes the call a no-op when at
    * least one other client has called `spawnOrAttach` for this
    * entry and got `attached: true`.
+   *
+   * Returns true only when this call removed the live session.
    */
   killSession(
     sessionId: string,
     opts?: { requireZeroAttaches?: boolean },
-  ): Promise<void>;
+  ): Promise<boolean>;
 
   /**
    * Roll back a prior attach: decrement `attachCount` and reap if the

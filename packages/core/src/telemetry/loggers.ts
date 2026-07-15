@@ -30,6 +30,7 @@ import {
   EVENT_CHAT_COMPRESSION,
   EVENT_CONTENT_RETRY,
   EVENT_CONTENT_RETRY_FAILURE,
+  EVENT_PROTOCOL_TAG_SANITIZED,
   EVENT_API_RETRY,
   EVENT_FILE_OPERATION,
   EVENT_RIPGREP_FALLBACK,
@@ -98,6 +99,7 @@ import type {
   ChatCompressionEvent,
   ContentRetryEvent,
   ContentRetryFailureEvent,
+  ProtocolTagSanitizedEvent,
   ApiRetryEvent,
   RipgrepFallbackEvent,
   ToolOutputTruncatedEvent,
@@ -760,6 +762,25 @@ export function logContentRetry(
   };
   logger.emit(logRecord);
   recordContentRetry(config);
+}
+
+export function logProtocolTagSanitized(
+  config: Config,
+  event: ProtocolTagSanitizedEvent,
+): void {
+  QwenLogger.getInstance(config)?.logProtocolTagSanitizedEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': EVENT_PROTOCOL_TAG_SANITIZED,
+  };
+
+  logs.getLogger(SERVICE_NAME).emit({
+    body: `Suppressed a standalone closing ${event.tag_name} tag and preserved ${event.tool_call_count} tool call(s).`,
+    attributes,
+  });
 }
 
 export function logContentRetryFailure(

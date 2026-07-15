@@ -43,6 +43,10 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     model: 'test-model',
     usageStatisticsEnabled: false,
     bareMode: true,
+    // Pin a DEFAULT baseline: these tests exercise override isolation and the
+    // DEFAULT→AUTO rule strip/restore transitions, so they must not depend on
+    // the constructor's default approval mode (which is now AUTO).
+    approvalMode: ApprovalMode.DEFAULT,
   };
 
   async function createParentWithRegistry(): Promise<Config> {
@@ -492,6 +496,16 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     expect(child.getToolRegistry().getAllToolNames()).not.toContain(
       ToolNames.WRITE_FILE,
     );
+  });
+
+  it('rejects fractional maxSessionTurns from persisted launch flags', async () => {
+    const parent = await createParentWithRegistry();
+
+    await expect(
+      createApprovalModeOverride(parent, ApprovalMode.DEFAULT, {
+        persistedCliFlags: { maxSessionTurns: 0.5 },
+      }),
+    ).rejects.toThrow(/maxSessionTurns: must be an integer/);
   });
 
   describe('TOOL_REGISTRY_REBUILT marker propagation', () => {

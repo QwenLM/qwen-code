@@ -48,6 +48,35 @@ export interface AgentRecord {
   launchPrompt: string;
   /** Tool calls that came back without an error. */
   successfulToolCalls: number;
+  /**
+   * Successful tool calls whose arguments named the diff file.
+   *
+   * The difference between this and `successfulToolCalls` is the difference
+   * between an agent that did *something* and one that opened *the diff*. The old
+   * check could not tell them apart: it credited a chunk to any agent that made
+   * one successful call, and a `glob` for test files is a successful call. What a
+   * review has to be able to say is that someone opened the lines it is about to
+   * certify.
+   */
+  diffToolCalls: number;
+  /**
+   * Diff line ranges this agent demonstrably read, 1-based and inclusive.
+   *
+   * Taken from the `offset`/`limit` of its successful `read_file` calls on the
+   * diff. This is what it *did*, next to what it was *told* to do — an agent
+   * handed the bare diff path with no territory (a reverse-audit pass, a
+   * verifier) can still show which lines it opened.
+   */
+  diffReads: Array<[number, number]>;
+  /**
+   * The arguments of every successful tool call, serialized.
+   *
+   * So a check can ask "did this agent open *that* file" of any path, not only the
+   * diff. The one that matters is the agent's own brief: the launch prompt now
+   * points at it rather than containing it, and whether the agent read it is a fact
+   * the harness wrote down, not a hope.
+   */
+  successfulCallArgs: string[];
   /** The agent's own final text, as the harness saw it. */
   finalText: string;
   /** When the transcript was last written. */
@@ -97,28 +126,55 @@ function textOf(rec: Record<string, unknown>): string {
  * it writes one for a hallucinated tool name too. So a single invented or denied
  * call would otherwise clear a bar set at "made a tool call" while having read
  * precisely nothing.
+ *
+ * Read the response object itself, not the stringified record. A tool whose
+ * *output* happens to contain the text `"error":` — a JSON payload with an
+ * `error: null` field, a log line, this very file quoted in a diff — is not a
+ * failed call, and treating it as one would mark a working agent idle.
  */
-function isErrorResponse(rec: Record<string, unknown>): boolean {
-  // Look at the response object itself, not the stringified record. A tool whose
-  // *output* happens to contain the text `"error":` — a JSON payload with an
-  // `error: null` field, a log line, this very file quoted in a diff — is not a
-  // failed call, and treating it as one would mark a working agent idle.
-  const msg = rec['message'] as { parts?: unknown } | undefined;
-  const parts = Array.isArray(msg?.parts) ? msg.parts : [];
-  for (const part of parts) {
-    const fr = (part as { functionResponse?: { response?: unknown } })
-      .functionResponse;
-    if (!fr) continue;
-    const resp = fr.response as Record<string, unknown> | undefined;
-    if (resp && resp['error'] !== undefined && resp['error'] !== null) {
-      return true;
-    }
-  }
-  return false;
+function isErrorPart(part: FunctionResponsePart): boolean {
+  const resp = part.functionResponse?.response as
+    | Record<string, unknown>
+    | undefined;
+  return !!resp && resp['error'] !== undefined && resp['error'] !== null;
 }
 
-/** Parse one transcript. Returns null for a file that is not one. */
-function parseTranscript(file: string): AgentRecord | null {
+interface FunctionCallPart {
+  functionCall?: { id?: unknown; name?: unknown; args?: unknown };
+}
+interface FunctionResponsePart {
+  functionResponse?: { id?: unknown; response?: unknown };
+}
+
+/**
+ * The diff lines a `read_file` call asked for, 1-based and inclusive.
+ *
+ * `read_file`'s `offset` is a 0-based line offset. A call with no `limit` asks
+ * for as much as one read returns, which is a character budget, not a line count
+ * — so it is not a range, and this returns null rather than guessing one. That is
+ * deliberate: a guess here would credit a chunk to an agent that read the first
+ * screenful of a diff and stopped.
+ */
+function rangeOf(args: Record<string, unknown>): [number, number] | null {
+  const offset = args['offset'];
+  const limit = args['limit'];
+  if (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0) {
+    return null;
+  }
+  const off =
+    typeof offset === 'number' && Number.isInteger(offset) && offset >= 0
+      ? offset
+      : 0;
+  return [off + 1, off + limit];
+}
+
+/**
+ * Parse one transcript. Returns null for a file that is not one.
+ *
+ * `diffPath` is what makes a call "a read of the diff" rather than "a call". Pass
+ * it and `diffToolCalls` is populated; omit it and the field stays 0.
+ */
+function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
   let raw: string;
   try {
     raw = readFileSync(file, 'utf8');
@@ -133,7 +189,22 @@ function parseTranscript(file: string): AgentRecord | null {
   let launchPrompt = '';
   let finalText = '';
   let successfulToolCalls = 0;
-  const pendingCalls: string[] = [];
+  let diffToolCalls = 0;
+
+  // Calls awaiting their result, carrying what we need from them: did the call
+  // name the diff, and over which lines? The harness stamps a matching `id` on
+  // both halves, so the pairing is exact rather than positional — a turn that
+  // issues three calls at once used to be counted as one, and its results
+  // attributed by a stack.
+  interface Pending {
+    namedTheDiff: boolean;
+    range: [number, number] | null;
+    args: string;
+  }
+  const diffReads: Array<[number, number]> = [];
+  const successfulCallArgs: string[] = [];
+  const byId = new Map<string, Pending>();
+  const anonymous: Pending[] = [];
 
   for (const line of lines) {
     let rec: Record<string, unknown>;
@@ -160,22 +231,53 @@ function parseTranscript(file: string): AgentRecord | null {
     // and a substring match would count that as a tool call the agent never made.
     const msg = rec['message'] as { parts?: unknown } | undefined;
     const parts = Array.isArray(msg?.parts) ? msg.parts : [];
-    const hasCall = parts.some(
-      (p) => (p as { functionCall?: unknown }).functionCall,
-    );
-    const hasResponse = parts.some(
-      (p) => (p as { functionResponse?: unknown }).functionResponse,
-    );
 
-    if (hasCall) {
-      pendingCalls.push('call');
+    for (const part of parts) {
+      const fc = (part as FunctionCallPart).functionCall;
+      if (!fc) continue;
+      // Serialize only the ARGUMENTS. The diff path is a path the agent was told
+      // to open; a tool *result* that quotes it (a grep over `.qwen/tmp`, this
+      // file in a diff) says nothing about what the agent opened.
+      const args = (fc.args ?? {}) as Record<string, unknown>;
+      // Match the path as a whole JSON string value, quotes included: a bare
+      // substring credits `…/diff.txt.bak` for `…/diff.txt`.
+      const namedTheDiff = diffPath
+        ? JSON.stringify(args).includes(JSON.stringify(diffPath))
+        : false;
+      const pending: Pending = {
+        namedTheDiff,
+        range: namedTheDiff ? rangeOf(args) : null,
+        args: JSON.stringify(args),
+      };
+      if (typeof fc.id === 'string' && fc.id) byId.set(fc.id, pending);
+      else anonymous.push(pending);
     }
-    if (hasResponse) {
-      if (!isErrorResponse(rec) && pendingCalls.length > 0) {
-        successfulToolCalls++;
+
+    for (const part of parts) {
+      const fr = (part as FunctionResponsePart).functionResponse;
+      if (!fr) continue;
+      let pending: Pending;
+      if (typeof fr.id === 'string' && byId.has(fr.id)) {
+        pending = byId.get(fr.id) as Pending;
+        byId.delete(fr.id);
+      } else if (anonymous.length > 0) {
+        // FIFO, not LIFO: a JSONL transcript is chronological, so the oldest
+        // un-paired call is the one this earliest un-paired result belongs to.
+        pending = anonymous.shift() as Pending;
+      } else {
+        // A result with no call before it is not evidence of a call.
+        continue;
       }
-      pendingCalls.pop();
+      if (!isErrorPart(part as FunctionResponsePart)) {
+        successfulToolCalls++;
+        successfulCallArgs.push(pending.args);
+        if (pending.namedTheDiff) {
+          diffToolCalls++;
+          if (pending.range) diffReads.push(pending.range);
+        }
+      }
     }
+
     if (type === 'assistant') {
       const t = textOf(rec);
       if (t) finalText = t;
@@ -196,6 +298,9 @@ function parseTranscript(file: string): AgentRecord | null {
     agentName,
     launchPrompt,
     successfulToolCalls,
+    diffToolCalls,
+    diffReads,
+    successfulCallArgs,
     finalText,
     mtimeMs,
   };
@@ -213,6 +318,7 @@ function parseTranscript(file: string): AgentRecord | null {
 export function readTranscripts(
   since?: number,
   env: NodeJS.ProcessEnv = process.env,
+  diffPath?: string,
 ): AgentRecord[] {
   const dir = transcriptDir(env);
   let names: string[];
@@ -232,7 +338,7 @@ export function readTranscripts(
   const out: AgentRecord[] = [];
   for (const name of names) {
     if (!name.endsWith('.jsonl')) continue;
-    const rec = parseTranscript(join(dir, name));
+    const rec = parseTranscript(join(dir, name), diffPath);
     if (!rec) continue;
     if (since !== undefined && rec.mtimeMs < since) continue;
     out.push(rec);
