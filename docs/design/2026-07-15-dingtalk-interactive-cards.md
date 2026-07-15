@@ -41,16 +41,22 @@ The design follows one rule: Qwen Code expresses a semantic request for user inp
 ```ts
 protected presentUserInputRequest(
   context: ChannelUserInputRequestContext,
-): Promise<'presented' | 'unsupported'>;
+): Promise<
+  | { kind: 'presented' }
+  | { kind: 'handled' }
+  | { kind: 'unsupported' }
+>;
 ```
 
 The context contains normalized questions, the routed target, session and request identities, an abort signal, and a one-shot responder for either submitted answers or cancellation. It contains no card template ID, DingTalk action ID, or DingTalk callback payload.
 
-`ChannelBase` remains responsible for request ownership and the eventual permission response. An adapter only presents the interaction and calls the supplied responder.
+`ChannelBase` remains responsible for request ownership and the eventual permission response. An adapter only presents the interaction and calls the supplied responder. The result makes ownership of the next action explicit:
 
-When an adapter does not override the hook, or presentation fails, `ChannelBase` formats the normalized questions as readable Markdown. It never serializes raw ACP input as fallback output.
+- `presented` means the adapter created an interactive surface and the permission remains pending until the responder is called.
+- `handled` means the adapter already completed a channel-local fallback and resolved or cancelled the request, so the base does nothing further.
+- `unsupported` means the adapter does not implement semantic user-input presentation, so the base preserves the existing permission message and command behavior.
 
-This fallback is an explicit text handoff, not a second form protocol: the current `ask_user_question` is cancelled, the user is told that interactive input is unavailable, and the next normal message continues in the same session. `/approve` remains unchanged for ordinary permissions but is not used to answer questions because it cannot carry answer values.
+The default implementation returns `unsupported`. This is intentionally compatibility-preserving: adapters other than DingTalk are not opted into a new cancellation or text-handoff policy. The existing permission formatter does not serialize the raw ACP input, so those clients do not display question JSON today.
 
 ## DingTalk-local implementation
 
@@ -61,6 +67,8 @@ Only the DingTalk adapter reads `interactiveCards` and registers the card callba
 The shared card client owns DingTalk authentication and card create/update operations. Template IDs remain private constants in the DingTalk package.
 
 The callback router validates the action owner, card identity, session, and run generation before dispatch. Repeated, stale, and foreign-user actions are rejected without changing state. It reuses the existing Stream transport while adding handling for the card callback topic.
+
+The DingTalk override owns both of its outcomes. If a question card is created, it returns `presented`. If question cards are disabled or card creation fails, DingTalk sends readable semantic Markdown, cancels the current question request, and returns `handled`. This is a text handoff, not a second form protocol: the user is told that interactive input is unavailable and the next normal message continues in the same session. `/approve` is not used for this fallback because it cannot carry answer values.
 
 ### Status-card state machine
 
@@ -83,6 +91,8 @@ pending -> submitted | cancelled | expired | externally_resolved | presentation_
 ```
 
 Submitting maps card fields back to the semantic answer keys and responds to the original permission request. Cancelling or expiring responds with cancellation. An abort signal closes the card if the host resolves or destroys the request first.
+
+Permission resolution remains first-responder-wins. If a native Web or IDE surface attached to the same daemon session answers first, the permission abort signal moves the DingTalk card to `externally_resolved` and disables its actions. If DingTalk answers first, the native surface receives the same resolution and closes. No second answer is accepted.
 
 While a question is pending, the status card moves from `running` to `waiting_input`. Successful submission returns it to `running`; cancellation, expiration, or task termination moves it to the corresponding terminal state.
 
@@ -119,11 +129,24 @@ The initial implementation uses the existing template IDs from `soimy/openclaw-c
 | Status cards are disabled or fail        | Continue the same turn with the existing Markdown delivery.                                   |
 | A question card is available             | Submit or cancel through the card and resolve the original request.                           |
 | A question card is disabled or fails     | Render semantic Markdown, cancel the current question, and hand off to the next user message. |
-| Another IM adapter owns the session      | Use the channel-neutral semantic text handoff without exposing JSON.                          |
+| Another IM adapter owns the session      | Return `unsupported` and preserve the existing permission message and command behavior.       |
 | An ordinary tool permission is requested | Keep `/approve`, `/approve-always`, and `/deny` unchanged.                                    |
+
+## Client impact
+
+| Client or surface                      | Behavior after this proposal                                                                                      |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| DingTalk with question cards enabled   | Render the native question card and return answers to the original request.                                       |
+| DingTalk with cards disabled or failed | Send semantic Markdown, cancel the current question, and continue from the user's next normal message.            |
+| Other IM adapters                      | No direct code or behavior change; the default hook returns `unsupported` and keeps the existing permission flow. |
+| CLI/TUI                                | No change; continue using the native question dialog outside `ChannelBase`.                                       |
+| VS Code / IDE companion                | No change; continue using the native ACP question UI.                                                             |
+| Web Shell / desktop                    | No change; continue using the native question component and existing action transport.                            |
+| SDK and custom ACP clients             | No protocol change; the existing permission request and response schema remains intact.                           |
+| Ordinary permissions on every client   | No change; existing approval and denial controls remain available.                                                |
 
 ## Scope boundaries
 
 This proposal does not add a channel text-answer command, parse free-form replies into form fields, inject synthetic user messages, or introduce a general cross-channel card framework. Those would add a second pending-input state machine and are not required to deliver the DingTalk interaction requested by #6443.
 
-Implementation should remain a small channel-neutral seam plus DingTalk-local state and transport code.
+Implementation should remain a small channel-neutral seam plus DingTalk-local state and transport code. Improving question handling for every IM would require a separately designed cross-channel text-answer protocol and is explicitly deferred to a follow-up change.
