@@ -12147,7 +12147,7 @@ describe('createServeApp', () => {
         setChannelWorkerSelection: vi.fn(async () => {
           throw new ChannelWorkerControlError(
             'channel_worker_start_failed',
-            'token=start-secret',
+            '\u001b[31mtoken=start-secret\tfailed\u001b[0m',
             {
               rolledBack: false,
               rollbackError: 'token=rollback-secret',
@@ -12181,6 +12181,7 @@ describe('createServeApp', () => {
 
       expect(response.status).toBe(502);
       expect(response.body).toMatchObject({
+        error: 'token=<redacted>',
         code: 'channel_worker_start_failed',
         rolledBack: false,
         startupFailuresTruncated: true,

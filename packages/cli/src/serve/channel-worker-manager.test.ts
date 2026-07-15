@@ -574,20 +574,19 @@ describe('createChannelWorkerManager', () => {
 
   it('returns attempted startup failures while current state reflects successful rollback', async () => {
     const group = fakeGroup();
-    vi.mocked(group.start).mockRejectedValueOnce(
-      new ChannelWorkerStartupError('worker failed', {
-        workspaceCwd: PRIMARY,
-        startupFailures: [
-          {
-            channel: 'telegram',
-            phase: 'connect',
-            code: 'ECONNREFUSED',
-            message: 'connection refused',
-          },
-        ],
-        startupFailuresTruncated: true,
-      }),
-    );
+    const startupError = new ChannelWorkerStartupError('worker failed', {
+      workspaceCwd: PRIMARY,
+      startupFailures: [
+        {
+          channel: 'telegram',
+          phase: 'connect',
+          code: 'ECONNREFUSED',
+          message: 'connection refused',
+        },
+      ],
+      startupFailuresTruncated: true,
+    });
+    vi.mocked(group.start).mockRejectedValueOnce(startupError);
     const test = setup(group);
 
     const error = await test.manager
@@ -616,7 +615,9 @@ describe('createChannelWorkerManager', () => {
     });
     (error as ChannelWorkerControlError).startupFailures![0]!.message =
       'mutated';
-    expect(test.manager.state().workers).toEqual([]);
+    expect(startupError.startupFailures![0]!.message).toBe(
+      'connection refused',
+    );
   });
 
   it('does not replace attempted failures with a reconcile rollback error', async () => {

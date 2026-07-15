@@ -30,6 +30,7 @@ describe('channel worker diagnostics', () => {
         DATABASE_DSN: 'dsn-value',
         DATABASE_CONNECTION_STRING: 'connection-value',
         MULTILINE_PASSWORD: 'first.line\nsecond+line',
+        TABBED_SECRET: 'tabbed\tvalue',
         SHORT_TOKEN: 'abc',
         PUBLIC_VALUE: 'public-value',
       },
@@ -37,10 +38,10 @@ describe('channel worker diagnostics', () => {
 
     expect(
       redact(
-        'daemon.+token token-value secret-value api-value dsn-value connection-value first.line second+line abc public-value',
+        'daemon.+token token-value secret-value api-value dsn-value connection-value first.line second+line tabbed value tabbedvalue abc public-value',
       ),
     ).toBe(
-      '<redacted> <redacted> <redacted> <redacted> <redacted> <redacted> <redacted> <redacted> abc public-value',
+      '<redacted> <redacted> <redacted> <redacted> <redacted> <redacted> <redacted> <redacted> <redacted> <redacted> abc public-value',
     );
   });
 

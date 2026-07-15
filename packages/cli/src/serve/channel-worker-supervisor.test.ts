@@ -1743,7 +1743,7 @@ describe('createChannelWorkerSupervisor', () => {
     ).not.toContain('ssword');
   });
 
-  it('decodes Uint8Array worker log chunks and preserves indentation', async () => {
+  it('decodes Uint8Array worker log chunks and preserves separation', async () => {
     const child = new FakeChild();
     child.stdout = new EventEmitter();
     const onLog = vi.fn();
@@ -1759,7 +1759,7 @@ describe('createChannelWorkerSupervisor', () => {
     const started = supervisor.start();
     child.stdout.emit(
       'data',
-      new Uint8Array(Buffer.from('\tat stack frame\n')),
+      new Uint8Array(Buffer.from('\tat stack frame\nmetric\tvalue\t42\n')),
     );
     child.emit('message', {
       type: 'ready',
@@ -1772,6 +1772,10 @@ describe('createChannelWorkerSupervisor', () => {
     expect(onLog).toHaveBeenCalledWith({
       stream: 'stdout',
       line: ' at stack frame',
+    });
+    expect(onLog).toHaveBeenCalledWith({
+      stream: 'stdout',
+      line: 'metric value 42',
     });
   });
 

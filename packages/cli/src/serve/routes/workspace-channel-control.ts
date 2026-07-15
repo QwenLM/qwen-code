@@ -200,9 +200,14 @@ function sendChannelControlError(
     error && typeof error === 'object' && 'code' in error
       ? (error as { code?: unknown }).code
       : undefined;
-  const message = redactLogCredentials(
-    error instanceof Error ? error.message : String(error),
-  );
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  const message =
+    code === 'channel_worker_start_failed'
+      ? sanitizeControlDiagnostic(
+          rawMessage,
+          MAX_CHANNEL_STARTUP_FAILURE_MESSAGE_LENGTH,
+        )
+      : redactLogCredentials(rawMessage);
   if (
     code === 'channel_workspace_mismatch' ||
     code === 'ambiguous_channel_workspace'

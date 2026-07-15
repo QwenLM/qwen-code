@@ -371,9 +371,7 @@ function attachWorkerLogStream(
     workerEnv: opts.workerEnv,
   });
   const flushLine = (line: string) => {
-    const displayLine = line.replace(/^\t+/u, (indent) =>
-      ' '.repeat(indent.length),
-    );
+    const displayLine = line.replace(/\t/gu, ' ');
     const redacted = redactWorkerLogLineForStream(
       normalizeWorkerDiagnostic(displayLine),
     );

@@ -48,7 +48,10 @@ export function createWorkerDiagnosticRedactor(
         ...(opts.daemonToken ? [opts.daemonToken] : []),
         ...sensitiveEnvValues(opts.workerEnv),
       ]
-        .map(normalizeWorkerDiagnostic)
+        .flatMap((secret) => [
+          normalizeWorkerDiagnostic(secret),
+          normalizeWorkerDiagnostic(secret.replace(/\t/gu, ' ')),
+        ])
         .filter((secret) => secret.length >= 4),
     ),
   ]
