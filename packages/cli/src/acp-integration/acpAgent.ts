@@ -2982,7 +2982,11 @@ class QwenAgent implements Agent {
         }
       }
       if (!discoveryConfig) {
-        await this.createWorkspaceMcpDiscoveryConfig(settings);
+        try {
+          await this.createWorkspaceMcpDiscoveryConfig(settings);
+        } catch (error) {
+          syncErrors.push(error);
+        }
       }
       if (syncErrors.length > 0) {
         throw new AggregateError(

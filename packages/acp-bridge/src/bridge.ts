@@ -2884,6 +2884,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     );
     if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
       const rawStatus = response as unknown as ServeWorkspaceMcpStatus;
+      if (!Array.isArray(rawStatus.servers)) {
+        return response as unknown as T;
+      }
+      const rawServers = rawStatus.servers;
       const effectiveManagedServerNames = new Set([
         ...info.workspaceMcpAuthenticationServerNames,
         ...(managedServerNames ?? []),
@@ -2892,7 +2896,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         effectiveManagedServerNames.size > 0 ||
         (workspaceMcpStatusCache?.discoveryState === 'completed' &&
           rawStatus.discoveryState === 'not_started' &&
-          rawStatus.servers.length === 0)
+          rawServers.length === 0)
       ) {
         response = mergeManagedWorkspaceMcpStatus(
           effectiveManagedServerNames,
@@ -2910,11 +2914,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           info,
           effectiveManagedServerNames.size > 0
             ? {
-                servers: Array.isArray(rawStatus.servers)
-                  ? rawStatus.servers.filter((server) =>
-                      effectiveManagedServerNames.has(server.name),
-                    )
-                  : [],
+                servers: rawServers.filter((server) =>
+                  effectiveManagedServerNames.has(server.name),
+                ),
               }
             : status,
         );
@@ -2938,7 +2940,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
       let authenticationCompleted = false;
       for (const serverName of info.workspaceMcpAuthenticationServerNames) {
-        const server = rawStatus.servers.find(
+        const server = rawServers.find(
           (candidate) => candidate.name === serverName,
         );
         if (

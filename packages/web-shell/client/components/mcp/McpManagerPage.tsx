@@ -951,7 +951,11 @@ export function McpManagerPage({
             (nextStatus.discoveryState === undefined ||
               nextStatus.discoveryState === 'completed')
           ) {
-            await loadServerData(nextServer);
+            try {
+              await loadServerData(nextServer);
+            } catch {
+              // Tool and resource refresh errors are recorded by loadServerData.
+            }
             if (!mountedRef.current) return;
           }
         }
