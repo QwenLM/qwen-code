@@ -57,7 +57,7 @@ const DIFF = '/abs/diff.txt';
  * satisfies that one. A plan that requires nothing is not a plan any capture
  * command writes, and coverage now reads the roster out of it.
  */
-function plan(): string {
+function plan(opts: { step45?: boolean } = {}): string {
   const p = join(dir, 'plan.json');
   writeFileSync(
     p,
@@ -72,6 +72,11 @@ function plan(): string {
       ],
     }),
   );
+  // Every high-effort review runs Step 4 (verify) and Step 5 (reverse audit), and
+  // `composeReview` now proves they did — so a fixture meaning "a review that did
+  // everything right" includes them, exactly as it includes the roster. Pass
+  // `{ step45: false }` for a run that skipped one or both (the gap tests).
+  if (opts.step45 !== false) recordStep45(p);
   // Backdate it. The transcripts are written first and the stale-transcript
   // filter is `mtime < planMtime`; on a filesystem with millisecond granularity
   // both land in the same tick and the comparison flips at random. An explicit
@@ -79,6 +84,34 @@ function plan(): string {
   const old = new Date(2020, 0, 1);
   utimesSync(p, old, old);
   return p;
+}
+
+/**
+ * Lay down the Step 4 verifier and Step 5 reverse auditor a complete high-effort
+ * review runs: each one's recorded prompt, its brief, and the harness's transcript
+ * of an agent launched with it that opened the brief. Neither names a line range,
+ * so neither grants chunk coverage — they answer only "did the step run", which is
+ * what `verificationGaps` asks. Pass a subset of `keys` to model a skipped step.
+ */
+function recordStep45(
+  planPath: string,
+  keys: string[] = ['verify', 'reverse-audit'],
+): void {
+  const d = promptRecordDir(planPath);
+  mkdirSync(d, { recursive: true });
+  for (const key of keys) {
+    const brief = briefPath(planPath, key);
+    writeFileSync(brief, `The ${key} brief.`);
+    const launch =
+      `You are review agent \`${key}\`.\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    writeFileSync(join(d, `${key}.txt`), launch);
+    transcript(`v-${key.replace(/[^a-z0-9]/gi, '_')}`, launch, {
+      toolCalls: 2,
+      opens: [brief],
+    });
+  }
 }
 
 /** Write one agent transcript, as the harness would. */
@@ -218,14 +251,22 @@ function blindPrompt(chunk: number): string {
   return `The changes are in chunk ${chunk} of 2, covering lines 1-100 of the diff.`;
 }
 
-/** Both chunks reviewed by agents that opened the diff. */
-function coveredPlan(): string {
+/**
+ * Both chunks reviewed by agents that opened the diff, and Step 4/5 ran — a
+ * complete high-effort review. Pass a subset of keys to model a run that skipped a
+ * step (what the (B) gap tests are about); `plan({ step45: false })` suppresses the
+ * default pair so this controls them exactly.
+ */
+function coveredPlan(
+  step45Keys: string[] = ['verify', 'reverse-audit'],
+): string {
   transcript('a1', goodPrompt(1), { toolCalls: 3 });
   transcript('a2', goodPrompt(2), { toolCalls: 2 });
-  const p = plan();
+  const p = plan({ step45: false });
   recordBuilt(p, 1);
   recordBuilt(p, 2);
   recordMatrix(p);
+  recordStep45(p, step45Keys);
   return p;
 }
 
@@ -898,6 +939,62 @@ describe('coverage is recomputed, never accepted', () => {
       criticalsInline: 0,
       suggestionsInline: 0,
       planPath: coveredPlan(),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('APPROVE');
+  });
+});
+
+describe('the Step 4/5 gate — verify and reverse audit must have run (high effort)', () => {
+  it('caps a clean APPROVE to COMMENT when the reverse audit never ran', () => {
+    // The high-value catch: a zero-finding high-effort review that skipped the pass
+    // meant to find what Step 3 missed cannot certify the diff clean. compose-review
+    // runs only at high effort, so reverse audit is always owed here.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify']), // reverse audit absent
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.body).toMatch(/reverse audit — no auditor ran/);
+  });
+
+  it('discloses that posted findings were not verified when Step 4 was skipped', () => {
+    // A confirmed Critical still blocks — a cap never softens a REQUEST_CHANGES —
+    // but the body says the posted findings were not verified.
+    const r = composeReview({
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['reverse-audit']), // verifier absent
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toMatch(/verification — the review posts findings/);
+  });
+
+  it('does not require a verifier on a review that confirmed nothing', () => {
+    // C=0, S=0: nothing to verify. The reverse audit ran, so this approves.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['reverse-audit']), // verifier absent, none needed
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).not.toMatch(/verification/);
+  });
+
+  it('approves a review that ran both verify and the reverse audit', () => {
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(), // both present
       env: ENV,
       modelId: MODEL,
     });

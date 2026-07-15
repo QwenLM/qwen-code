@@ -29,6 +29,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   coverageFromTranscripts,
+  verificationGaps,
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
@@ -929,5 +930,104 @@ describe('an agent that paged its chunk still read it', () => {
     const r = coverageFromTranscripts(p, ENV);
     expect(r.coveredChunks).toEqual([1, 2]);
     expect(r.missingChunks).toEqual([]);
+  });
+});
+
+describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', () => {
+  // A Step 4/5 agent as a real run leaves it: the CLI's record of the prompt it
+  // built (`agent-prompt --role <role>`), the brief that prompt points at, and the
+  // harness's transcript of an agent launched with it. `launch: false` models a
+  // prompt built but never handed to an agent; `opensBrief: false` an agent that
+  // ran but never opened the brief. To model a step skipped wholesale, do not set
+  // the key up at all — there is then no record and no transcript.
+  function step45(
+    planPath: string,
+    key: string,
+    opts: { launch?: boolean; opensBrief?: boolean } = {},
+  ): void {
+    const d = promptRecordDir(planPath);
+    mkdirSync(d, { recursive: true });
+    const brief = briefPath(planPath, key);
+    writeFileSync(brief, `The ${key} brief.`);
+    const prompt =
+      `You are review agent \`${key}\`.\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    writeFileSync(join(d, `${encodeURIComponent(key)}.txt`), prompt);
+    if (opts.launch === false) return;
+    transcript(`v-${key.replace(/[^a-z0-9]/gi, '_')}`, prompt, {
+      calls: 2,
+      opens: opts.opensBrief === false ? [] : [brief],
+    });
+  }
+
+  it('passes when the reverse audit ran on a review with nothing to verify', () => {
+    const p = plan();
+    step45(p, 'reverse-audit');
+    const r = verificationGaps(p, { postsFindings: false }, ENV);
+    expect(r.ok).toBe(true);
+    expect(r.gaps).toEqual([]);
+  });
+
+  it('passes when both verify and reverse audit ran on a review with findings', () => {
+    const p = plan();
+    step45(p, 'reverse-audit');
+    step45(p, 'verify');
+    expect(verificationGaps(p, { postsFindings: true }, ENV).ok).toBe(true);
+  });
+
+  it('flags a review that never ran the reverse audit', () => {
+    const p = plan(); // no reverse-audit fixture: the step was skipped
+    const r = verificationGaps(p, { postsFindings: false }, ENV);
+    expect(r.ok).toBe(false);
+    expect(r.gaps.join(' ')).toMatch(/reverse audit — no auditor ran/);
+  });
+
+  it('flags a reverse audit built but whose agent never opened its brief', () => {
+    const p = plan();
+    step45(p, 'reverse-audit', { opensBrief: false });
+    const r = verificationGaps(p, { postsFindings: false }, ENV);
+    expect(r.ok).toBe(false);
+    expect(r.gaps.join(' ')).toMatch(/reverse audit — its prompt was built/);
+  });
+
+  it('flags a reverse audit whose prompt was built but never launched', () => {
+    const p = plan();
+    step45(p, 'reverse-audit', { launch: false });
+    const r = verificationGaps(p, { postsFindings: false }, ENV);
+    expect(r.ok).toBe(false);
+    expect(r.gaps.join(' ')).toMatch(/reverse audit — its prompt was built/);
+  });
+
+  it('counts a Step 3B per-chunk reverse auditor (reverse-audit--chunk-N)', () => {
+    const p = plan();
+    step45(p, 'reverse-audit--chunk-1');
+    const r = verificationGaps(p, { postsFindings: false }, ENV);
+    expect(r.gaps.join(' ')).not.toMatch(/reverse audit/);
+  });
+
+  it('requires a verifier when the review posts findings', () => {
+    const p = plan();
+    step45(p, 'reverse-audit'); // isolate the verify gap
+    const r = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(r.ok).toBe(false);
+    expect(r.gaps.join(' ')).toMatch(
+      /verification — the review posts findings/,
+    );
+  });
+
+  it('does not require a verifier when the review confirmed nothing', () => {
+    const p = plan();
+    step45(p, 'reverse-audit');
+    const r = verificationGaps(p, { postsFindings: false }, ENV);
+    expect(r.gaps.join(' ')).not.toMatch(/verification/);
+  });
+
+  it('flags a verifier built but whose agent never opened its brief', () => {
+    const p = plan();
+    step45(p, 'reverse-audit');
+    step45(p, 'verify', { opensBrief: false });
+    const r = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(r.gaps.join(' ')).toMatch(/verification — its prompt was built/);
   });
 });

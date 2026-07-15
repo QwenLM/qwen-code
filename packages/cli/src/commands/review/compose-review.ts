@@ -25,6 +25,7 @@ import { dirname } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   coverageFromTranscripts,
+  verificationGaps,
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
 
@@ -267,6 +268,19 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       for (const label of cov.unreadBriefs) {
         unreviewed.push(label);
       }
+      // Step 4 (verify) and Step 5 (reverse audit) ran, and read their briefs?
+      // `check-coverage` proves Step 3, but it runs at Step 3D — before these exist
+      // — and their count is not in the plan, so its roster cannot reach them. This
+      // is the floor that does: only `compose-review` asks it, and `compose-review`
+      // runs only at high effort, which is the only effort at which verify and
+      // reverse audit run at all. Reverse audit is required on every high-effort
+      // review; verify is required once the review has findings to verify.
+      const verification = verificationGaps(
+        input.planPath,
+        { postsFindings: criticalsInline + suggestionsInline > 0 },
+        input.env,
+      );
+      for (const gap of verification.gaps) unreviewed.push(gap);
     } catch (err) {
       // Two different failures, and they must not wear each other's message. A
       // malformed plan is the caller's mistake and says so; missing transcripts
