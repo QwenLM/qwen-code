@@ -2079,6 +2079,36 @@ describe('Session', () => {
       );
     });
 
+    it('rejects an invalid trusted invocation context', async () => {
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'invalid context' }],
+          _meta: { 'qwen-code/invocation': { version: '1' } },
+        }),
+      ).rejects.toMatchObject({
+        code: -32602,
+        message: 'Invalid params: Invalid trusted ACP invocation context',
+      });
+
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    });
+
+    it('rejects an invalid trusted invocation ingress', async () => {
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'invalid ingress' }],
+          _meta: { 'qwen-code/invocation-ingress': 'daemon' },
+        }),
+      ).rejects.toMatchObject({
+        code: -32602,
+        message: 'Invalid params: Invalid trusted ACP invocation ingress',
+      });
+
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    });
+
     it('records the latest file history snapshot after makeSnapshot', async () => {
       const latestSnapshot = {
         promptId: 'test-session-id########1',
