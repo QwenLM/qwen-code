@@ -118,7 +118,7 @@ Only fixed attribute names and bounded values are emitted:
 - `qwen-code.daemon.channel.path` = `reused | joined | spawned_on_request`;
 - `qwen-code.daemon.runtime.path` = `started_on_request | joined` when the request crossed the deferred-runtime gate;
 - `qwen-code.daemon.runtime.wait_ms` = finite non-negative remaining runtime wait;
-- HTTP request duration histogram `runtime_path` = `started_on_request | joined` for requests that crossed the deferred-runtime gate;
+- HTTP request duration histogram `runtime_path` = `started_on_request | joined` for requests that crossed the deferred-runtime gate, otherwise `none`;
 - `qwen-code.daemon.acp_channel.id` = daemon-generated UUID;
 - `qwen-code.daemon.session_start.<stage>_ms` = finite non-negative duration;
 - `qwen-code.daemon.session_start.failed_stage` = one fixed stage name;

@@ -176,6 +176,7 @@ describe('Daemon Metrics', () => {
       });
       expect(mockHistogramRecordFn).toHaveBeenCalledWith(42, {
         route: 'POST /session/:id/prompt',
+        runtime_path: 'none',
       });
     });
 

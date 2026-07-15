@@ -211,7 +211,7 @@ export function recordDaemonHttpRequest(
   httpRequestCounter?.add(1, { route, status_class: statusClass });
   httpRequestDurationHistogram?.record(durationMs, {
     route,
-    ...(deferredRuntimePath ? { runtime_path: deferredRuntimePath } : {}),
+    runtime_path: deferredRuntimePath ?? 'none',
   });
 }
 
