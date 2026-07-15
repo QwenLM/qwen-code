@@ -108,6 +108,18 @@ for (const theme of THEMES) {
           turnCompleteEvent('prompt-split', { id: 3 }),
         ],
       });
+      // Derive the second pane's session from the scenario's OWN sessions list
+      // rather than hardcoding an id: a rename/removal of the default entry
+      // would otherwise surface here as a confusing SSE connection timeout
+      // instead of a clear, self-explaining error.
+      const secondSessionId = scenario.sessions.find(
+        (s) => s.sessionId !== scenario.sessionId,
+      )?.sessionId;
+      if (!secondSessionId) {
+        throw new Error(
+          'split view scenario expects a second session in the list',
+        );
+      }
       const daemon = await installScenario(
         page,
         scenario,
@@ -118,7 +130,7 @@ for (const theme of THEMES) {
       await gotoSession(page, scenario, daemon, theme);
       await page.goto(
         `/session/${encodeURIComponent(scenario.sessionId)}` +
-          `?split=${encodeURIComponent(scenario.sessionId)},previous-session` +
+          `?split=${encodeURIComponent(scenario.sessionId)},${encodeURIComponent(secondSessionId)}` +
           `&theme=${theme}`,
       );
       await expect(page.locator('[data-testid="split-view"]')).toBeVisible();
@@ -130,7 +142,7 @@ for (const theme of THEMES) {
         scenario.sessionId,
         scenario.events.length,
       );
-      await completeReplay(page, daemon, 'previous-session', 0);
+      await completeReplay(page, daemon, secondSessionId, 0);
       // The maximize control only appears with 2+ panes (#6951); waiting on it
       // confirms the split actually rendered both panes.
       await expect(
