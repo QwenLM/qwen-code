@@ -4,936 +4,320 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { ExitPlanModeTool, type ExitPlanModeParams } from './exitPlanMode.js';
-import {
-  ApprovalMode,
-  Config,
-  type ConfigParameters,
-} from '../config/config.js';
-import { ToolConfirmationOutcome } from './tools.js';
-import { runPlanApprovalGate } from '../plan-gate/planApprovalGate.js';
-import type { GateDecision, MergedGateFinding } from '../plan-gate/types.js';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApprovalMode, type Config } from '../config/config.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
-
-vi.mock('../plan-gate/planApprovalGate.js', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('../plan-gate/planApprovalGate.js')>();
-
-  return {
-    ...actual,
-    runPlanApprovalGate: vi.fn(),
-  };
-});
+import { ExitPlanModeTool, type ExitPlanModeParams } from './exitPlanMode.js';
+import { ToolConfirmationOutcome } from './tools.js';
 
 describe('ExitPlanModeTool', () => {
   let tool: ExitPlanModeTool;
-  let mockConfig: Config;
+  let config: Config;
   let approvalMode: ApprovalMode;
-  const mockedRunPlanApprovalGate = vi.mocked(runPlanApprovalGate);
+  let approvalModeRevision: number;
+  let prePlanMode: ApprovalMode;
+  let transitionError: Error | undefined;
 
   beforeEach(() => {
-    mockedRunPlanApprovalGate.mockReset();
     approvalMode = ApprovalMode.PLAN;
-    mockConfig = {
+    approvalModeRevision = 7;
+    prePlanMode = ApprovalMode.DEFAULT;
+    transitionError = undefined;
+    config = {
       getApprovalMode: vi.fn(() => approvalMode),
-      getPrePlanMode: vi.fn(() => ApprovalMode.DEFAULT),
+      getApprovalModeRevision: vi.fn(() => approvalModeRevision),
+      getPrePlanMode: vi.fn(() => prePlanMode),
       setApprovalMode: vi.fn((mode: ApprovalMode) => {
+        if (transitionError) throw transitionError;
+        if (approvalMode !== mode) approvalModeRevision++;
         approvalMode = mode;
       }),
       savePlan: vi.fn(),
-      getPlanGateState: vi.fn(() => undefined),
       getTeamManager: vi.fn(() => undefined),
     } as unknown as Config;
-
-    tool = new ExitPlanModeTool(mockConfig);
+    tool = new ExitPlanModeTool(config);
   });
 
-  describe('constructor and metadata', () => {
-    it('should have correct tool name', () => {
-      expect(tool.name).toBe('exit_plan_mode');
-      expect(ExitPlanModeTool.Name).toBe('exit_plan_mode');
+  it('exposes the plan schema without the removed gate fields', () => {
+    expect(tool.name).toBe('exit_plan_mode');
+    expect(tool.kind).toBe('think');
+    expect(tool.shouldDefer).toBe(true);
+    expect(tool.alwaysLoad).toBe(true);
+    expect(tool.schema.parametersJsonSchema).toMatchObject({
+      properties: {
+        plan: { type: 'string' },
+        originalRequest: { type: 'string' },
+        researchSummary: { type: 'string' },
+      },
+      required: ['plan'],
+      additionalProperties: false,
     });
-
-    it('should have correct display name', () => {
-      expect(tool.displayName).toBe('ExitPlanMode');
-    });
-
-    it('should have correct kind', () => {
-      expect(tool.kind).toBe('think');
-    });
-
-    // Regression for #5210: must stay declared so the model can call it
-    // directly in plan mode.
-    it('is always declared even though categorised as deferred (#5210)', () => {
-      expect(tool.shouldDefer).toBe(true);
-      expect(tool.alwaysLoad).toBe(true);
-    });
-
-    it('should have correct schema', () => {
-      expect(tool.schema).toEqual({
-        name: 'exit_plan_mode',
-        description: expect.stringContaining(
-          'Use this tool when you are in plan mode',
-        ),
-        parametersJsonSchema: {
-          type: 'object',
-          properties: {
-            plan: {
-              type: 'string',
-              description: expect.stringContaining('The plan you came up with'),
-            },
-            originalRequest: {
-              type: 'string',
-              description: expect.stringContaining('original user request'),
-            },
-            researchSummary: {
-              type: 'string',
-              description: expect.stringContaining('investigation'),
-            },
-            resolutionSummary: {
-              type: 'string',
-              description: expect.stringContaining('gate review'),
-            },
-          },
-          required: ['plan'],
-          additionalProperties: false,
-          $schema: 'http://json-schema.org/draft-07/schema#',
-        },
-      });
-    });
+    expect(
+      (tool.schema.parametersJsonSchema as { properties: object }).properties,
+    ).not.toHaveProperty('resolutionSummary');
   });
 
-  describe('non-empty plan constraint in descriptions', () => {
-    it('should mention non-empty constraint in plan parameter description', () => {
-      const schema = tool.schema as {
-        parametersJsonSchema: {
-          properties: { plan: { description: string } };
-        };
-      };
-      expect(schema.parametersJsonSchema.properties.plan.description).toContain(
-        'empty strings will be rejected',
-      );
-    });
-
-    it('should mention non-empty constraint in tool description', () => {
-      expect(tool.schema.description).toContain(
-        'empty strings will be rejected',
-      );
-    });
+  it.each([undefined, '', '  \n'])('rejects an empty plan (%j)', (plan) => {
+    expect(
+      tool.validateToolParams({ plan } as unknown as ExitPlanModeParams),
+    ).toBe('Parameter "plan" must be a non-empty string.');
   });
 
-  describe('validateToolParams', () => {
-    it('should accept valid parameters', () => {
-      const params: ExitPlanModeParams = {
-        plan: 'This is a comprehensive plan for the implementation.',
-      };
+  it('always requires explicit interaction in the main session', async () => {
+    const invocation = tool.build({ plan: 'Plan' });
 
-      const result = tool.validateToolParams(params);
-      expect(result).toBeNull();
-    });
-
-    it('should reject missing plan parameter', () => {
-      const params = {} as ExitPlanModeParams;
-
-      const result = tool.validateToolParams(params);
-      expect(result).toBe('Parameter "plan" must be a non-empty string.');
-    });
-
-    it('should reject empty plan parameter', () => {
-      const params: ExitPlanModeParams = {
-        plan: '',
-      };
-
-      const result = tool.validateToolParams(params);
-      expect(result).toBe('Parameter "plan" must be a non-empty string.');
-    });
-
-    it('should reject whitespace-only plan parameter', () => {
-      const params: ExitPlanModeParams = {
-        plan: '   \n\t  ',
-      };
-
-      const result = tool.validateToolParams(params);
-      expect(result).toBe('Parameter "plan" must be a non-empty string.');
-    });
-
-    it('should reject non-string plan parameter', () => {
-      const params = {
-        plan: 123,
-      } as unknown as ExitPlanModeParams;
-
-      const result = tool.validateToolParams(params);
-      expect(result).toBe('Parameter "plan" must be a non-empty string.');
-    });
+    expect(invocation.requiresUserInteraction?.()).toBe(true);
+    await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
   });
 
-  describe('tool execution', () => {
-    it('should execute successfully through tool interface after approval', async () => {
-      const params: ExitPlanModeParams = {
-        plan: 'This is my implementation plan:\n1. Step 1\n2. Step 2\n3. Step 3',
-      };
-      const signal = new AbortController().signal;
+  it('denies outside plan mode without constructing a misleading prompt', async () => {
+    approvalMode = ApprovalMode.DEFAULT;
+    const invocation = tool.build({ plan: 'Plan' });
 
-      // Use the tool's public build method
-      const invocation = tool.build(params);
-      expect(invocation).toBeDefined();
-      expect(invocation.params).toEqual(params);
+    await expect(invocation.getDefaultPermission()).resolves.toBe('deny');
+    await expect(
+      invocation.getConfirmationDetails(new AbortController().signal),
+    ).rejects.toThrow('outside plan mode');
+  });
 
-      expect(await invocation.getDefaultPermission()).toBe('ask');
-
-      const confirmation = await invocation.getConfirmationDetails(signal);
-      expect(confirmation).toMatchObject({
-        type: 'plan',
-        title: 'Would you like to proceed?',
-        plan: params.plan,
-      });
-
-      if (confirmation) {
-        await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
-      }
-
-      const result = await invocation.execute(signal);
-
-      expect(result.llmContent).toContain('You can now start coding');
-      expect(result.returnDisplay).toEqual({
-        type: 'plan_summary',
-        message: expect.stringContaining('User approved'),
-        plan: params.plan,
-      });
-
-      expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
-        ApprovalMode.DEFAULT,
+  it.each([
+    [ToolConfirmationOutcome.ProceedOnce, ApprovalMode.DEFAULT],
+    [ToolConfirmationOutcome.ProceedAlways, ApprovalMode.AUTO_EDIT],
+    [ToolConfirmationOutcome.RestorePrevious, ApprovalMode.YOLO],
+  ])(
+    'records %s and changes mode only during execute',
+    async (outcome, targetMode) => {
+      prePlanMode = ApprovalMode.YOLO;
+      const invocation = tool.build({ plan: 'Approved plan' });
+      const confirmation = await invocation.getConfirmationDetails(
+        new AbortController().signal,
       );
-      expect(approvalMode).toBe(ApprovalMode.DEFAULT);
-
-      // Plan should be saved to disk
-      expect(mockConfig.savePlan).toHaveBeenCalledWith(params.plan);
-    });
-
-    it('should request confirmation with plan details', async () => {
-      const params: ExitPlanModeParams = {
-        plan: 'Simple plan',
-      };
-      const signal = new AbortController().signal;
-
-      const invocation = tool.build(params);
-      const confirmation = await invocation.getConfirmationDetails(signal);
-
-      if (confirmation) {
-        expect(confirmation.type).toBe('plan');
-        if (confirmation.type === 'plan') {
-          expect(confirmation.plan).toBe(params.plan);
-        }
-
-        await confirmation.onConfirm(ToolConfirmationOutcome.ProceedAlways);
-      }
-
-      expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
-        ApprovalMode.AUTO_EDIT,
-      );
-      expect(approvalMode).toBe(ApprovalMode.AUTO_EDIT);
-    });
-
-    it('should set DEFAULT mode on ProceedOnce regardless of pre-plan mode', async () => {
-      // Even if pre-plan mode was AUTO_EDIT, ProceedOnce ("manually approve
-      // edits") should always set DEFAULT to match the option label semantics.
-      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
-        ApprovalMode.AUTO_EDIT,
-      );
-
-      const params: ExitPlanModeParams = { plan: 'Restore test' };
-      const signal = new AbortController().signal;
-
-      const invocation = tool.build(params);
-      const confirmation = await invocation.getConfirmationDetails(signal);
-
-      if (confirmation) {
-        await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
-      }
-
-      expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
-        ApprovalMode.DEFAULT,
-      );
-      expect(approvalMode).toBe(ApprovalMode.DEFAULT);
-    });
-
-    it('should restore pre-plan mode on RestorePrevious', async () => {
-      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
-        ApprovalMode.YOLO,
-      );
-
-      const params: ExitPlanModeParams = { plan: 'Restore previous test' };
-      const signal = new AbortController().signal;
-
-      const invocation = tool.build(params);
-      const confirmation = await invocation.getConfirmationDetails(signal);
-
-      if (confirmation) {
-        await confirmation.onConfirm(ToolConfirmationOutcome.RestorePrevious);
-      }
-
-      expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
-        ApprovalMode.YOLO,
-      );
-      expect(approvalMode).toBe(ApprovalMode.YOLO);
-    });
-
-    it('should include prePlanMode in confirmation details', async () => {
-      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
-        ApprovalMode.AUTO_EDIT,
-      );
-
-      const params: ExitPlanModeParams = { plan: 'Test plan' };
-      const signal = new AbortController().signal;
-
-      const invocation = tool.build(params);
-      const confirmation = await invocation.getConfirmationDetails(signal);
 
       expect(confirmation).toMatchObject({
         type: 'plan',
-        prePlanMode: ApprovalMode.AUTO_EDIT,
+        plan: 'Approved plan',
+        prePlanMode: ApprovalMode.YOLO,
+        hideAlwaysAllow: true,
       });
-    });
-
-    it('should fall back to DEFAULT on RestorePrevious when no prePlanMode recorded', async () => {
-      // getPrePlanMode() defaults to DEFAULT when prePlanMode is undefined
-      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
-        ApprovalMode.DEFAULT,
-      );
-
-      const params: ExitPlanModeParams = { plan: 'Fallback test' };
-      const signal = new AbortController().signal;
-
-      const invocation = tool.build(params);
-      const confirmation = await invocation.getConfirmationDetails(signal);
-
-      if (confirmation) {
-        await confirmation.onConfirm(ToolConfirmationOutcome.RestorePrevious);
-      }
-
-      expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
-        ApprovalMode.DEFAULT,
-      );
-      expect(approvalMode).toBe(ApprovalMode.DEFAULT);
-    });
-
-    it('should remain in plan mode when confirmation is rejected', async () => {
-      const params: ExitPlanModeParams = {
-        plan: 'Remain in planning',
-      };
-      const signal = new AbortController().signal;
-
-      const invocation = tool.build(params);
-      const confirmation = await invocation.getConfirmationDetails(signal);
-
-      if (confirmation) {
-        await confirmation.onConfirm(ToolConfirmationOutcome.Cancel);
-      }
-
-      const result = await invocation.execute(signal);
-
-      expect(result.llmContent).toBe(
-        'Plan execution was not approved. Remaining in plan mode.',
-      );
-      expect(result.returnDisplay).toBe(
-        'Plan execution was not approved. Remaining in plan mode.',
-      );
-
-      expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
-        ApprovalMode.PLAN,
-      );
+      await confirmation.onConfirm(outcome);
       expect(approvalMode).toBe(ApprovalMode.PLAN);
+      expect(config.setApprovalMode).not.toHaveBeenCalled();
 
-      // Plan should NOT be saved when rejected
-      expect(mockConfig.savePlan).not.toHaveBeenCalled();
-    });
+      const result = await invocation.execute(new AbortController().signal);
 
-    it('should have correct description', () => {
-      const params: ExitPlanModeParams = {
-        plan: 'Test plan',
-      };
+      expect(result.error).toBeUndefined();
+      expect(approvalMode).toBe(targetMode);
+      expect(config.setApprovalMode).toHaveBeenCalledWith(targetMode);
+      expect(config.savePlan).toHaveBeenCalledWith('Approved plan');
+    },
+  );
 
-      const invocation = tool.build(params);
-      expect(invocation.getDescription()).toBe('Plan:');
-    });
+  it('freezes the plan and pre-plan mode when confirmation is created', async () => {
+    const params = { plan: 'Original plan' };
+    prePlanMode = ApprovalMode.YOLO;
+    const invocation = tool.build(params);
+    const confirmation = await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    );
+    params.plan = 'Mutated plan';
+    prePlanMode = ApprovalMode.AUTO;
 
-    it('should return empty tool locations', () => {
-      const params: ExitPlanModeParams = {
-        plan: 'Test plan',
-      };
+    await confirmation.onConfirm(ToolConfirmationOutcome.RestorePrevious);
+    const result = await invocation.execute(new AbortController().signal);
 
-      const invocation = tool.build(params);
-      expect(invocation.toolLocations()).toEqual([]);
-    });
-
-    it('allows by default inside subagent context to avoid approval UI', async () => {
-      const invocation = tool.build({ plan: 'Subagent plan' });
-
-      const permission = await runWithAgentContext('agent-1', () =>
-        invocation.getDefaultPermission(),
-      );
-
-      expect(permission).toBe('allow');
-    });
-
-    it('allows by default inside teammate context to avoid approval UI', async () => {
-      const invocation = tool.build({ plan: 'Teammate plan' });
-
-      const permission = runWithTeammateIdentity(
-        {
-          agentId: 'agent@test',
-          agentName: 'agent',
-          teamName: 'test',
-          isTeamLead: false,
-        },
-        () => invocation.getDefaultPermission(),
-      );
-
-      await expect(permission).resolves.toBe('allow');
-    });
-
-    it('falls back to generic confirmation inside subagent context', async () => {
-      const invocation = tool.build({ plan: 'Subagent plan' });
-
-      const confirmation = await runWithAgentContext('agent-1', () =>
-        invocation.getConfirmationDetails(new AbortController().signal),
-      );
-
-      expect(confirmation.type).toBe('info');
-      await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
-      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
-      expect(approvalMode).toBe(ApprovalMode.PLAN);
-    });
-
-    it('rejects inside subagent context without saving or changing mode', async () => {
-      approvalMode = ApprovalMode.PLAN;
-      const invocation = tool.build({ plan: 'Subagent plan' });
-
-      const result = await runWithAgentContext('agent-1', () =>
-        invocation.execute(new AbortController().signal),
-      );
-
-      expect(result.llmContent).toContain('not available inside subagents');
-      expect(result.llmContent).toContain('return your plan');
-      expect(result.error?.message).toBe(result.llmContent);
-      expect(mockConfig.savePlan).not.toHaveBeenCalled();
-      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
-      expect(mockedRunPlanApprovalGate).not.toHaveBeenCalled();
-      expect(approvalMode).toBe(ApprovalMode.PLAN);
-    });
-
-    it('rejects inside teammate context without saving or changing mode', async () => {
-      approvalMode = ApprovalMode.PLAN;
-      const invocation = tool.build({ plan: 'Teammate plan' });
-
-      const result = await runWithTeammateIdentity(
-        {
-          agentId: 'agent@test',
-          agentName: 'agent',
-          teamName: 'test',
-          isTeamLead: false,
-        },
-        () => invocation.execute(new AbortController().signal),
-      );
-
-      expect(result.llmContent).toContain('not available inside subagents');
-      expect(result.llmContent).toContain('return your plan');
-      expect(result.error?.message).toBe(result.llmContent);
-      expect(mockConfig.savePlan).not.toHaveBeenCalled();
-      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
-      expect(mockedRunPlanApprovalGate).not.toHaveBeenCalled();
-      expect(approvalMode).toBe(ApprovalMode.PLAN);
-    });
-
-    it('requests leader approval for a plan-required teammate and restores mode on approval', async () => {
-      approvalMode = ApprovalMode.PLAN;
-      const requestPlanApproval = vi.fn().mockResolvedValue({
-        action: 'approve',
-        targetMode: ApprovalMode.DEFAULT,
-        message: 'Looks good.',
-      });
-      (mockConfig.getTeamManager as ReturnType<typeof vi.fn>).mockReturnValue({
-        requestPlanApproval,
-      });
-      const invocation = tool.build({
-        plan: 'Teammate implementation plan',
-        originalRequest: 'Implement feature',
-        researchSummary: 'Read relevant files',
-      });
-      const signal = new AbortController().signal;
-
-      const result = await runWithTeammateIdentity(
-        {
-          agentId: 'planner@test',
-          agentName: 'planner',
-          teamName: 'test',
-          isTeamLead: false,
-          planModeRequired: true,
-        },
-        () => invocation.execute(signal),
-      );
-
-      expect(requestPlanApproval).toHaveBeenCalledWith(
-        expect.objectContaining({
-          teammateName: 'planner',
-          plan: 'Teammate implementation plan',
-          originalRequest: 'Implement feature',
-          researchSummary: 'Read relevant files',
-          signal,
-        }),
-      );
-      expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
-        ApprovalMode.DEFAULT,
-      );
-      expect(mockConfig.savePlan).toHaveBeenCalledWith(
-        'Teammate implementation plan',
-      );
-      expect(result.llmContent).toContain('Leader approved');
-      expect(result.returnDisplay).toEqual({
-        type: 'plan_summary',
-        message: 'Leader approved.',
-        plan: 'Teammate implementation plan',
-      });
-    });
-
-    it('reports an error when approval succeeds but mode restoration fails', async () => {
-      approvalMode = ApprovalMode.PLAN;
-      (
-        mockConfig.setApprovalMode as ReturnType<typeof vi.fn>
-      ).mockImplementationOnce(() => {
-        throw new Error('mode locked');
-      });
-      const requestPlanApproval = vi.fn().mockResolvedValue({
-        action: 'approve',
-        targetMode: ApprovalMode.DEFAULT,
-      });
-      (mockConfig.getTeamManager as ReturnType<typeof vi.fn>).mockReturnValue({
-        requestPlanApproval,
-      });
-      const invocation = tool.build({ plan: 'Teammate implementation plan' });
-
-      const result = await runWithTeammateIdentity(
-        {
-          agentId: 'planner@test',
-          agentName: 'planner',
-          teamName: 'test',
-          isTeamLead: false,
-          planModeRequired: true,
-        },
-        () => invocation.execute(new AbortController().signal),
-      );
-
-      expect(result.error?.message).toContain('failed to switch');
-      expect(result.error?.message).toContain('mode locked');
-      expect(result.llmContent).toContain('Stay in plan mode');
-      expect(mockConfig.savePlan).not.toHaveBeenCalled();
-      expect(approvalMode).toBe(ApprovalMode.PLAN);
-    });
-
-    it('keeps a plan-required teammate in plan mode when leader rejects', async () => {
-      approvalMode = ApprovalMode.PLAN;
-      const requestPlanApproval = vi.fn().mockResolvedValue({
-        action: 'reject',
-        message: 'Add rollback details.',
-      });
-      (mockConfig.getTeamManager as ReturnType<typeof vi.fn>).mockReturnValue({
-        requestPlanApproval,
-      });
-      const invocation = tool.build({ plan: 'Incomplete teammate plan' });
-
-      const result = await runWithTeammateIdentity(
-        {
-          agentId: 'planner@test',
-          agentName: 'planner',
-          teamName: 'test',
-          isTeamLead: false,
-          planModeRequired: true,
-        },
-        () => invocation.execute(new AbortController().signal),
-      );
-
-      expect(result.llmContent).toContain('Leader rejected');
-      expect(result.llmContent).toContain('Add rollback details.');
-      expect(result.returnDisplay).toEqual({
-        type: 'plan_summary',
-        message: 'Leader rejected the plan.',
-        plan: expect.stringContaining('Add rollback details.'),
-        rejected: true,
-      });
-      expect(mockConfig.savePlan).not.toHaveBeenCalled();
-      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
-      expect(approvalMode).toBe(ApprovalMode.PLAN);
-    });
+    expect(result.returnDisplay).toMatchObject({ plan: 'Original plan' });
+    expect(config.savePlan).toHaveBeenCalledWith('Original plan');
+    expect(approvalMode).toBe(ApprovalMode.YOLO);
   });
 
-  describe('tool description', () => {
-    it('should contain usage guidelines', () => {
-      expect(tool.description).toContain(
-        'Only use this tool when the task requires planning',
-      );
-      expect(tool.description).toContain(
-        'Do not use the exit plan mode tool because you are not planning',
-      );
-      expect(tool.description).toContain(
-        'Use the exit plan mode tool after you have finished planning',
-      );
-    });
+  it('executes the snapshot belonging to the confirmation that was approved', async () => {
+    const params = { plan: 'First plan' };
+    const invocation = tool.build(params);
+    const firstConfirmation = await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    );
+    params.plan = 'Second plan';
+    await invocation.getConfirmationDetails(new AbortController().signal);
 
-    it('should contain examples', () => {
-      expect(tool.description).toContain(
-        'Search for and understand the implementation of vim mode',
-      );
-      expect(tool.description).toContain('Help me implement yank mode for vim');
-    });
+    await firstConfirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.returnDisplay).toMatchObject({ plan: 'First plan' });
+    expect(config.savePlan).toHaveBeenCalledWith('First plan');
   });
 
-  describe('YOLO mode', () => {
-    const finding: MergedGateFinding = {
-      id: 'GF-1',
-      severity: 'P2',
-      issue: 'The plan omits the rollback path.',
-      rationale: 'Autonomous execution would not know how to recover safely.',
-      suggestedFix: 'Add rollback steps before exiting plan mode.',
-    };
-
-    it('should restore YOLO via user_override gate path', async () => {
-      // With the gate, YOLO exit goes through the autonomous path.
-      // user_override skips the gate and restores prePlanMode.
-      approvalMode = ApprovalMode.PLAN;
-      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
-        ApprovalMode.YOLO,
-      );
-      (mockConfig.getPlanGateState as ReturnType<typeof vi.fn>).mockReturnValue(
-        {
-          entryId: 1,
-          reviewCount: 0,
-          gateMode: 'user_override',
-          enteredByModel: true,
-          lastFindings: [],
-          capEscalationPending: false,
-          needsUserPending: false,
-        },
-      );
-
-      const params: ExitPlanModeParams = { plan: 'YOLO test plan' };
-      const signal = new AbortController().signal;
-
-      const invocation = tool.build(params);
-      const result = await invocation.execute(signal);
-
-      expect(result.llmContent).toContain('You can now start coding');
-      expect(result.llmContent).not.toContain('not approved');
-      // Should restore YOLO, not downgrade
-      expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
-        ApprovalMode.YOLO,
-      );
-    });
-
-    it('should return allow from getDefaultPermission when model entered plan mode in YOLO', async () => {
-      approvalMode = ApprovalMode.PLAN;
-      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
-        ApprovalMode.YOLO,
-      );
-      (mockConfig.getPlanGateState as ReturnType<typeof vi.fn>).mockReturnValue(
-        {
-          entryId: 1,
-          reviewCount: 0,
-          gateMode: 'capped',
-          enteredByModel: true,
-          lastFindings: [],
-          capEscalationPending: false,
-          needsUserPending: false,
-        },
-      );
-
-      const params: ExitPlanModeParams = { plan: 'YOLO test plan' };
-      const invocation = tool.build(params);
-      const permission = await invocation.getDefaultPermission();
-      expect(permission).toBe('allow');
-    });
-
-    // Regression for #5574: cycling Shift+Tab to PLAN always lands with
-    // prePlanMode === 'yolo' (it is the mode right before PLAN in the cycle).
-    // A user-initiated entry must NOT auto-approve via the gate — it must show
-    // the confirmation dialog so the user can review the plan.
-    it('should return ask when the user entered plan mode in YOLO (not via the model)', async () => {
-      approvalMode = ApprovalMode.PLAN;
-      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
-        ApprovalMode.YOLO,
-      );
-      (mockConfig.getPlanGateState as ReturnType<typeof vi.fn>).mockReturnValue(
-        {
-          entryId: 1,
-          reviewCount: 0,
-          gateMode: 'capped',
-          enteredByModel: false,
-          lastFindings: [],
-          capEscalationPending: false,
-          needsUserPending: false,
-        },
-      );
-
-      const params: ExitPlanModeParams = { plan: 'User Shift+Tab YOLO plan' };
-      const invocation = tool.build(params);
-      const permission = await invocation.getDefaultPermission();
-      expect(permission).toBe('ask');
-    });
-
-    it('should fall back to ask when no gateState even with YOLO prePlanMode', async () => {
-      approvalMode = ApprovalMode.PLAN;
-      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
-        ApprovalMode.YOLO,
-      );
-      (mockConfig.getPlanGateState as ReturnType<typeof vi.fn>).mockReturnValue(
-        undefined,
-      );
-
-      const params: ExitPlanModeParams = { plan: 'YOLO no gate' };
-      const invocation = tool.build(params);
-      const permission = await invocation.getDefaultPermission();
-      expect(permission).toBe('ask');
-    });
-
-    it.each<{
-      name: string;
-      decision: GateDecision;
-      expectedMessage: string;
-      expectedDetail: string;
-      expectedNeedsUserPending?: boolean;
-      expectedCapEscalationPending?: boolean;
-    }>([
-      {
-        name: 'blocked',
-        decision: { kind: 'blocked', findings: [finding] },
-        expectedMessage: 'Plan gate: blocked (1 finding(s))',
-        expectedDetail: 'GF-1',
-      },
-      {
-        name: 'needs_user',
-        decision: {
-          kind: 'needs_user',
-          findings: [finding],
-          questions: ['Which migration path should be used?'],
-        },
-        expectedMessage: 'Plan gate: needs user input (1 question(s))',
-        expectedDetail: 'Which migration path should be used?',
-        expectedNeedsUserPending: true,
-      },
-      {
-        name: 'cap_escalation',
-        decision: { kind: 'cap_escalation', blockingFindings: [finding] },
-        expectedMessage: 'Plan gate: cap reached with 1 blocking finding(s)',
-        expectedDetail: 'Approve execution',
-        expectedCapEscalationPending: true,
-      },
-    ])(
-      'should keep the submitted plan visible when the gate returns $name',
-      async ({
-        decision,
-        expectedMessage,
-        expectedDetail,
-        expectedNeedsUserPending,
-        expectedCapEscalationPending,
-      }) => {
-        approvalMode = ApprovalMode.PLAN;
-        const gateState = {
-          entryId: 1,
-          reviewCount: 0,
-          gateMode: 'capped' as const,
-          enteredByModel: true,
-          lastFindings: [],
-          capEscalationPending: false,
-          needsUserPending: false,
-        };
-        (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
-          ApprovalMode.YOLO,
-        );
-        (
-          mockConfig.getPlanGateState as ReturnType<typeof vi.fn>
-        ).mockReturnValue(gateState);
-        mockedRunPlanApprovalGate.mockResolvedValue(decision);
-
-        const params: ExitPlanModeParams = {
-          plan: '1. Update the parser.\n2. Add regression tests.',
-          originalRequest: 'Fix plan mode display',
-        };
-        const signal = new AbortController().signal;
-
-        const result = await tool.build(params).execute(signal);
-
-        expect(result.llmContent).toContain(expectedDetail);
-        expect(result.returnDisplay).toEqual({
-          type: 'plan_summary',
-          message: expectedMessage,
-          plan: expect.stringContaining(params.plan),
-          rejected: true,
-        });
-        expect(result.returnDisplay).toEqual(
-          expect.objectContaining({
-            plan: expect.stringContaining(expectedDetail),
-          }),
-        );
-        expect(gateState.needsUserPending).toBe(
-          Boolean(expectedNeedsUserPending),
-        );
-        expect(gateState.capEscalationPending).toBe(
-          Boolean(expectedCapEscalationPending),
-        );
-        expect(mockConfig.savePlan).not.toHaveBeenCalled();
-        expect(approvalMode).toBe(ApprovalMode.PLAN);
-      },
+  it('keeps plan mode on cancellation', async () => {
+    const invocation = tool.build({ plan: 'Plan' });
+    const confirmation = await invocation.getConfirmationDetails(
+      new AbortController().signal,
     );
 
-    it('should ask user to confirm when gate is unavailable', async () => {
-      approvalMode = ApprovalMode.PLAN;
-      const gateState = {
-        entryId: 1,
-        reviewCount: 0,
-        gateMode: 'capped' as const,
-        enteredByModel: true,
-        lastFindings: [],
-        capEscalationPending: false,
-        needsUserPending: false,
-      };
-      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
-        ApprovalMode.YOLO,
-      );
-      (mockConfig.getPlanGateState as ReturnType<typeof vi.fn>).mockReturnValue(
-        gateState,
-      );
-      mockedRunPlanApprovalGate.mockResolvedValue({
-        kind: 'unavailable',
-        reason: 'review model timed out',
-      });
+    await confirmation.onConfirm(ToolConfirmationOutcome.Cancel);
+    const result = await invocation.execute(new AbortController().signal);
 
-      const params: ExitPlanModeParams = {
-        plan: 'Fallback test plan',
-        originalRequest: 'Test fallback',
-      };
-      const signal = new AbortController().signal;
-
-      const result = await tool.build(params).execute(signal);
-
-      // Should return plan_summary (NOT rejected) while staying in plan mode.
-      expect(result.returnDisplay).toEqual({
-        type: 'plan_summary',
-        message: expect.stringContaining('plan mode remains active'),
-        plan: params.plan,
-      });
-      expect(result.returnDisplay).not.toEqual(
-        expect.objectContaining({ rejected: true }),
-      );
-      expect(result.llmContent).toContain('Ask the user');
-      // Should NOT set gate pending flags
-      expect(gateState.needsUserPending).toBe(false);
-      expect(gateState.capEscalationPending).toBe(false);
-      expect(gateState.gateMode).toBe('user_takeover');
-      // Should stay in PLAN mode until the user explicitly approves.
-      expect(mockConfig.setApprovalMode).not.toHaveBeenCalledWith(
-        ApprovalMode.DEFAULT,
-      );
-      expect(approvalMode).toBe(ApprovalMode.PLAN);
-      expect(mockConfig.savePlan).toHaveBeenCalledWith(params.plan);
-    });
-
-    it('should preserve plan mode when gate is unavailable for a minimal plan', async () => {
-      approvalMode = ApprovalMode.PLAN;
-      const gateState = {
-        entryId: 1,
-        reviewCount: 0,
-        gateMode: 'capped' as const,
-        enteredByModel: true,
-        lastFindings: [],
-        capEscalationPending: false,
-        needsUserPending: false,
-      };
-      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
-        ApprovalMode.YOLO,
-      );
-      (mockConfig.getPlanGateState as ReturnType<typeof vi.fn>).mockReturnValue(
-        gateState,
-      );
-      mockedRunPlanApprovalGate.mockResolvedValue({
-        kind: 'unavailable',
-        reason: 'review model timed out',
-      });
-
-      const params: ExitPlanModeParams = {
-        plan: 'x',
-        originalRequest: 'Test minimal fallback',
-      };
-      const signal = new AbortController().signal;
-
-      const result = await tool.build(params).execute(signal);
-
-      expect(result.returnDisplay).toEqual({
-        type: 'plan_summary',
-        message: expect.stringContaining('plan mode remains active'),
-        plan: params.plan,
-      });
-      expect(mockConfig.setApprovalMode).not.toHaveBeenCalledWith(
-        ApprovalMode.DEFAULT,
-      );
-      expect(gateState.gateMode).toBe('user_takeover');
-      expect(approvalMode).toBe(ApprovalMode.PLAN);
-      expect(mockConfig.savePlan).toHaveBeenCalledWith(params.plan);
-    });
+    expect(result.error?.message).toContain('not approved');
+    expect(approvalMode).toBe(ApprovalMode.PLAN);
+    expect(config.setApprovalMode).not.toHaveBeenCalled();
+    expect(config.savePlan).not.toHaveBeenCalled();
   });
 
-  // End-to-end regression for #5574 using a REAL Config (no mocks) wired to a
-  // REAL ExitPlanModeTool, exercising the exact production decision point the
-  // CoreToolScheduler consults (getDefaultPermission → needsConfirmation).
-  describe('issue #5574 — real Config + real tool, no mocks', () => {
-    const baseParams: ConfigParameters = {
-      targetDir: '.',
-      debugMode: false,
-      model: 'test-model',
-      cwd: '.',
-    };
+  it.each([
+    ToolConfirmationOutcome.ProceedAlwaysProject,
+    ToolConfirmationOutcome.ProceedAlwaysUser,
+    ToolConfirmationOutcome.ModifyWithEditor,
+  ])('fails closed for invalid plan outcome %s', async (outcome) => {
+    const invocation = tool.build({ plan: 'Plan' });
+    const confirmation = await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    );
 
-    function makeTrustedConfig(): Config {
-      const config = new Config(baseParams);
-      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
-      return config;
-    }
+    await expect(confirmation.onConfirm(outcome)).rejects.toThrow(
+      'Invalid plan approval outcome',
+    );
+    expect(approvalMode).toBe(ApprovalMode.PLAN);
+    expect(config.setApprovalMode).not.toHaveBeenCalled();
+  });
 
-    it('user cycling Shift+Tab into plan mode (…→auto→yolo→plan) gets the confirmation dialog', async () => {
-      const config = makeTrustedConfig();
+  it('keeps plan mode when aborted after approval', async () => {
+    const controller = new AbortController();
+    const invocation = tool.build({ plan: 'Plan' });
+    const confirmation = await invocation.getConfirmationDetails(
+      controller.signal,
+    );
+    await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+    controller.abort();
 
-      // Exact reproduction of the issue: the user presses Shift+Tab four times
-      // from DEFAULT, walking the real APPROVAL_MODES cycle into plan mode.
-      config.setApprovalMode(ApprovalMode.AUTO_EDIT);
-      config.setApprovalMode(ApprovalMode.AUTO);
-      config.setApprovalMode(ApprovalMode.YOLO);
-      config.setApprovalMode(ApprovalMode.PLAN);
+    const result = await invocation.execute(controller.signal);
 
-      // prePlanMode is yolo purely due to cycle order — NOT user intent.
-      expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
-      expect(config.getPlanGateState()?.enteredByModel).toBe(false);
+    expect(result.error?.message).toContain('cancelled');
+    expect(approvalMode).toBe(ApprovalMode.PLAN);
+    expect(config.setApprovalMode).not.toHaveBeenCalled();
+  });
 
-      const tool = new ExitPlanModeTool(config);
-      const invocation = tool.build({ plan: 'Refactor the parser.' });
+  it('rejects approval after leaving and re-entering plan mode', async () => {
+    const invocation = tool.build({ plan: 'Plan' });
+    const confirmation = await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    );
+    await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+    approvalMode = ApprovalMode.DEFAULT;
+    approvalModeRevision++;
+    approvalMode = ApprovalMode.PLAN;
+    approvalModeRevision++;
 
-      // 'ask' → CoreToolScheduler shows the plan confirmation dialog.
-      await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error?.message).toContain('stale');
+    expect(approvalMode).toBe(ApprovalMode.PLAN);
+    expect(config.setApprovalMode).not.toHaveBeenCalled();
+  });
+
+  it('allows only the first of two concurrent approved exits', async () => {
+    const first = tool.build({ plan: 'First' });
+    const second = tool.build({ plan: 'Second' });
+    const signal = new AbortController().signal;
+    const [firstConfirmation, secondConfirmation] = await Promise.all([
+      first.getConfirmationDetails(signal),
+      second.getConfirmationDetails(signal),
+    ]);
+    await firstConfirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+    await secondConfirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+
+    const firstResult = await first.execute(signal);
+    const secondResult = await second.execute(signal);
+
+    expect(firstResult.error).toBeUndefined();
+    expect(secondResult.error?.message).toContain('stale');
+    expect(config.savePlan).toHaveBeenCalledTimes(1);
+  });
+
+  it('supports a config initialized directly in plan mode at revision zero', async () => {
+    approvalModeRevision = 0;
+    const invocation = tool.build({ plan: 'Initial plan' });
+    const confirmation = await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    );
+    await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    expect(approvalMode).toBe(ApprovalMode.DEFAULT);
+  });
+
+  it('returns an error and stays in plan mode when transition fails', async () => {
+    transitionError = new Error('mode locked');
+    const invocation = tool.build({ plan: 'Plan' });
+    const confirmation = await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    );
+    await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error?.message).toContain('mode locked');
+    expect(approvalMode).toBe(ApprovalMode.PLAN);
+    expect(config.savePlan).not.toHaveBeenCalled();
+  });
+
+  it('treats plan persistence failure as advisory after a successful exit', async () => {
+    vi.mocked(config.savePlan).mockImplementation(() => {
+      throw new Error('disk full');
+    });
+    const invocation = tool.build({ plan: 'Plan' });
+    const confirmation = await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    );
+    await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(approvalMode).toBe(ApprovalMode.DEFAULT);
+  });
+
+  it('retains the subagent lifecycle policy', async () => {
+    const invocation = tool.build({ plan: 'Subagent plan' });
+
+    const result = await runWithAgentContext('agent-1', () =>
+      invocation.execute(new AbortController().signal),
+    );
+
+    expect(result.error?.message).toContain('not available inside subagents');
+    expect(config.setApprovalMode).not.toHaveBeenCalled();
+  });
+
+  it('rechecks the revision after asynchronous teammate leader approval', async () => {
+    let resolveDecision: ((value: object) => void) | undefined;
+    const requestPlanApproval = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveDecision = resolve;
+        }),
+    );
+    vi.mocked(config.getTeamManager).mockReturnValue({
+      requestPlanApproval,
+    } as never);
+    const invocation = tool.build({ plan: 'Teammate plan' });
+    const execution = runWithTeammateIdentity(
+      {
+        agentId: 'planner@test',
+        agentName: 'planner',
+        teamName: 'test',
+        isTeamLead: false,
+        planModeRequired: true,
+      },
+      () => invocation.execute(new AbortController().signal),
+    );
+    approvalModeRevision++;
+    resolveDecision?.({
+      action: 'approve',
+      targetMode: ApprovalMode.DEFAULT,
     });
 
-    it('model self-entering plan mode in a YOLO session still auto-runs the gate', async () => {
-      const config = makeTrustedConfig();
-      config.setApprovalMode(ApprovalMode.YOLO);
-      // This is what enter_plan_mode does under the hood.
-      config.setApprovalMode(ApprovalMode.PLAN, { enteredByModel: true });
+    const result = await execution;
 
-      expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
-      expect(config.getPlanGateState()?.enteredByModel).toBe(true);
-
-      const tool = new ExitPlanModeTool(config);
-      const invocation = tool.build({ plan: 'Autonomous plan.' });
-
-      // 'allow' → no user prompt; the gate runs inside execute() as designed.
-      await expect(invocation.getDefaultPermission()).resolves.toBe('allow');
-    });
+    expect(result.error?.message).toContain('stale');
+    expect(config.setApprovalMode).not.toHaveBeenCalled();
   });
 });

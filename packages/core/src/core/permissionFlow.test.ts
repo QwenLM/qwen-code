@@ -128,6 +128,44 @@ describe('evaluatePermissionFlow', () => {
     expect(result.finalPermission).toBe('ask');
     expect(result.pmForcedAsk).toBe(true);
   });
+
+  it('forces interaction even when PM allows the tool', async () => {
+    const mockPm = {
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      evaluate: vi.fn().mockResolvedValue('allow'),
+      hasMatchingAskRule: vi.fn().mockReturnValue(false),
+    };
+    const invocation = mockInvocation({
+      getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+      requiresUserInteraction: vi.fn().mockReturnValue(true),
+    });
+
+    const result = await evaluatePermissionFlow(
+      mockConfig({ getPermissionManager: vi.fn().mockReturnValue(mockPm) }),
+      invocation,
+      ToolNames.EXIT_PLAN_MODE,
+      { plan: 'Plan' },
+    );
+
+    expect(result.finalPermission).toBe('ask');
+    expect(result.requiresUserInteraction).toBe(true);
+  });
+
+  it('preserves an intrinsic deny for an interaction-required tool', async () => {
+    const invocation = mockInvocation({
+      getDefaultPermission: vi.fn().mockResolvedValue('deny'),
+      requiresUserInteraction: vi.fn().mockReturnValue(true),
+    });
+
+    const result = await evaluatePermissionFlow(
+      mockConfig(),
+      invocation,
+      ToolNames.EXIT_PLAN_MODE,
+      { plan: 'Plan' },
+    );
+
+    expect(result.finalPermission).toBe('deny');
+  });
 });
 
 describe('needsConfirmation', () => {
@@ -142,6 +180,18 @@ describe('needsConfirmation', () => {
     expect(
       needsConfirmation('ask', ApprovalMode.YOLO, ToolNames.ASK_USER_QUESTION),
     ).toBe(true);
+  });
+
+  it('requires confirmation in YOLO when the invocation requires interaction', () => {
+    expect(needsConfirmation('ask', ApprovalMode.YOLO, 'shell', true)).toBe(
+      true,
+    );
+  });
+
+  it('never requests confirmation for a hard deny', () => {
+    expect(needsConfirmation('deny', ApprovalMode.YOLO, 'shell', true)).toBe(
+      false,
+    );
   });
 
   it('should return true when finalPermission is ask or default', () => {
