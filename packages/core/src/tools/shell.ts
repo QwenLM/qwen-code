@@ -920,6 +920,7 @@ export function parseNumstat(numstatOutput: string): Map<string, number> {
 }
 
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
+export const DEFAULT_SHELL_HEARTBEAT_INTERVAL_MS = 10_000;
 const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
 
 /**
@@ -2188,6 +2189,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
     let trailingFlushTimer: ReturnType<typeof setTimeout> | null = null;
     let timeoutWarningTimer: ReturnType<typeof setTimeout> | null = null;
     let showTimeoutWarning = false;
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let lastOutputPerfTime: number | null = null;
 
     const cancelTrailingFlush = () => {
       if (trailingFlushTimer !== null) {
@@ -2200,6 +2203,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
       if (timeoutWarningTimer !== null) {
         clearTimeout(timeoutWarningTimer);
         timeoutWarningTimer = null;
+      }
+    };
+
+    const cancelHeartbeat = () => {
+      if (heartbeatTimer !== null) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
       }
     };
 
@@ -2231,9 +2241,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // If the command is aborted (user cancel or timeout) while a trailing
     // flush is pending, cancel the timer so we don't emit a stale frame
     // between the abort signal firing and the result promise settling.
+    // The heartbeat stops here too: after abort, a "still running" signal
+    // during the kill-to-settle window would be a lie.
     const onAbort = () => {
       cancelTrailingFlush();
       cancelTimeoutWarning();
+      cancelHeartbeat();
     };
     combinedSignal.addEventListener('abort', onAbort, { once: true });
 
@@ -2270,6 +2283,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
       switch (event.type) {
         case 'data':
+          lastOutputPerfTime = performance.now();
           if (isBinaryStream) break;
           cumulativeOutput = event.chunk;
           // Stats are only consumed by the ANSI-output branch below,
@@ -2316,6 +2330,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
           shouldUpdate = true;
           break;
         case 'binary_progress':
+          lastOutputPerfTime = performance.now();
           isBinaryStream = true;
           cumulativeOutput = `[Receiving binary output... ${formatMemoryUsage(
             event.bytesReceived,
@@ -2423,6 +2438,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // re-throw to the caller.
       cancelTrailingFlush();
       cancelTimeoutWarning();
+      cancelHeartbeat();
       combinedSignal.removeEventListener('abort', onAbort);
       throw err;
     }
@@ -2456,6 +2472,39 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // difference matters here.
     const executionStartTime = performance.now();
 
+    // Liveness heartbeat for silent commands: while no output has arrived
+    // for a full interval, emit a small structured ShellProgressData through
+    // the same updateOutput channel so headless consumers (ACP, stream-json)
+    // can distinguish "still running" from a dead execution chain. Display
+    // consumers ignore it. Both the idle gate and the reported durations use
+    // the monotonic `performance.now()` clock (via `lastOutputPerfTime`,
+    // falling back to spawn time before any output), so an NTP step can
+    // neither skew the payload nor misfire the heartbeat. Started only
+    // post-spawn so PTY init can't produce a heartbeat for a process that
+    // doesn't exist yet.
+    const heartbeatIntervalMs =
+      this.config.getShellHeartbeatIntervalMs() ??
+      DEFAULT_SHELL_HEARTBEAT_INTERVAL_MS;
+    if (updateOutput && heartbeatIntervalMs > 0 && !combinedSignal.aborted) {
+      heartbeatTimer = setInterval(() => {
+        const now = performance.now();
+        const idleSince = lastOutputPerfTime ?? executionStartTime;
+        if (now - idleSince < heartbeatIntervalMs) return;
+        updateOutput({
+          type: 'shell_progress',
+          elapsedMs: Math.round(now - executionStartTime),
+          ...(lastOutputPerfTime !== null && {
+            lastOutputAgeMs: Math.round(now - lastOutputPerfTime),
+          }),
+          // Stats are only maintained on the PTY/AnsiOutput path; omit
+          // rather than report a misleading 0 on the plain-string path.
+          ...(totalLines > 0 && { totalLines }),
+          ...(totalBytes > 0 && { totalBytes }),
+          ...(effectiveTimeout > 0 && { timeoutMs: effectiveTimeout }),
+        });
+      }, heartbeatIntervalMs);
+    }
+
     let result;
     try {
       result = await resultPromise;
@@ -2467,6 +2516,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // happy path and the (theoretical) reject path so no timer leaks.
       cancelTrailingFlush();
       cancelTimeoutWarning();
+      cancelHeartbeat();
       combinedSignal.removeEventListener('abort', onAbort);
     }
 

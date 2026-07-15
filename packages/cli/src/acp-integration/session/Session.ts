@@ -18,6 +18,8 @@ import type {
   GeminiChat,
   ToolCallConfirmationDetails,
   ToolResult,
+  ToolResultDisplay,
+  ShellProgressData,
   ChatRecord,
   HistoryGap,
   AgentEventEmitter,
@@ -111,6 +113,7 @@ import {
   runInToolSpanContext,
   startToolExecutionSpan,
   endToolExecutionSpan,
+  isShellProgressData,
   logConversationFinishedEvent,
   ConversationFinishedEvent,
   logLoopDetected,
@@ -5266,14 +5269,55 @@ export class Session implements SessionContext {
           let toolResult: ToolResult;
           let isExecutionTimeout = false;
           let aborted = false;
+          // Shell liveness heartbeats: forwarded to the client as meta-only
+          // tool_call_update frames so a headless gateway can tell a silent
+          // command from a dead session. `toolSettled` gates out a heartbeat
+          // tick that lands between the result settling and execute()
+          // returning — without it the client could see in_progress after
+          // completed and regress the tool call's status.
+          let toolSettled = false;
+          let heartbeatCount = 0;
+          let lastHeartbeat: ShellProgressData | undefined;
+          const onToolProgress = (chunk: ToolResultDisplay) => {
+            if (toolSettled || !isShellProgressData(chunk)) {
+              return;
+            }
+            heartbeatCount++;
+            lastHeartbeat = chunk;
+            void this.sendUpdate({
+              sessionUpdate: 'tool_call_update',
+              toolCallId: callId,
+              status: 'in_progress',
+              _meta: { toolName, shellProgress: chunk },
+            }).catch((err) => {
+              debugLogger.debug(
+                `[Session.runTool] heartbeat update failed for ${callId}: ${err}`,
+              );
+            });
+          };
+          const heartbeatSpanAttributes = () =>
+            heartbeatCount > 0
+              ? {
+                  attributes: {
+                    'shell.heartbeat_count': heartbeatCount,
+                    ...(lastHeartbeat?.lastOutputAgeMs !== undefined && {
+                      'shell.last_output_age_ms': lastHeartbeat.lastOutputAgeMs,
+                    }),
+                  },
+                }
+              : undefined;
           try {
             const sleepInhibitorHandle = acquireSleepInhibitor(
               this.config,
               `Qwen Code is executing tool ${toolName}`,
             );
             try {
-              toolResult = await invocation.execute(activeToolAbortSignal);
+              toolResult = await invocation.execute(
+                activeToolAbortSignal,
+                onToolProgress,
+              );
             } finally {
+              toolSettled = true;
               sleepInhibitorHandle.release();
             }
             isExecutionTimeout =
@@ -5289,6 +5333,7 @@ export class Session implements SessionContext {
                     ? 'tool_error'
                     : undefined,
               cancelled: aborted,
+              ...heartbeatSpanAttributes(),
             });
           } catch (execError) {
             endToolExecutionSpan(execSpan, {
@@ -5297,6 +5342,7 @@ export class Session implements SessionContext {
                 ? 'tool_cancelled'
                 : 'tool_exception',
               cancelled: activeToolAbortSignal.aborted,
+              ...heartbeatSpanAttributes(),
             });
             throw execError;
           }

@@ -150,6 +150,7 @@ describe('ShellTool', () => {
       setApprovalMode: vi.fn(),
       getShouldUseNodePtyShell: vi.fn().mockReturnValue(false),
       getShellDefaultTimeoutMs: vi.fn().mockReturnValue(undefined),
+      getShellHeartbeatIntervalMs: vi.fn().mockReturnValue(undefined),
       getBackgroundShellRegistry: vi.fn().mockReturnValue({
         register: vi.fn(),
         get: vi.fn(),
@@ -1581,6 +1582,230 @@ describe('ShellTool', () => {
           is_background: false,
         }),
       ).toThrow('Directory must be an absolute path.');
+    });
+
+    describe('Silent-command heartbeat', () => {
+      let updateOutputMock: Mock;
+      beforeEach(() => {
+        vi.useFakeTimers({
+          toFake: [
+            'Date',
+            'performance',
+            'setTimeout',
+            'clearTimeout',
+            'setInterval',
+            'clearInterval',
+          ],
+        });
+        updateOutputMock = vi.fn();
+      });
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      const heartbeats = () =>
+        updateOutputMock.mock.calls
+          .map(([arg]) => arg)
+          .filter(
+            (arg) =>
+              typeof arg === 'object' &&
+              arg !== null &&
+              (arg as { type?: string }).type === 'shell_progress',
+          );
+
+      const settle = async () => {
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+      };
+
+      it('emits a heartbeat per silent interval with elapsed and effective timeout', async () => {
+        const invocation = shellTool.build({
+          command: 'quiet-soak-test',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        // Let execute() reach the post-spawn heartbeat setup.
+        await vi.advanceTimersByTimeAsync(0);
+
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(heartbeats()).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(heartbeats()).toHaveLength(2);
+
+        const [first, second] = heartbeats() as Array<Record<string, unknown>>;
+        expect(first).toMatchObject({
+          type: 'shell_progress',
+          elapsedMs: 10_000,
+          timeoutMs: 120_000,
+        });
+        // No output yet → no lastOutputAgeMs, no stats.
+        expect(first).not.toHaveProperty('lastOutputAgeMs');
+        expect(first).not.toHaveProperty('totalLines');
+        expect(first).not.toHaveProperty('totalBytes');
+        expect(second['elapsedMs']).toBe(20_000);
+
+        await settle();
+        await promise;
+      });
+
+      it('stays silent while output keeps the display fresh', async () => {
+        const invocation = shellTool.build({
+          command: 'npm test',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        await vi.advanceTimersByTimeAsync(0);
+
+        for (let i = 0; i < 4; i++) {
+          await vi.advanceTimersByTimeAsync(5_000);
+          mockShellOutputCallback({ type: 'data', chunk: `line ${i}` });
+        }
+
+        expect(heartbeats()).toHaveLength(0);
+
+        await settle();
+        await promise;
+      });
+
+      it('reports lastOutputAgeMs once output has been seen', async () => {
+        const invocation = shellTool.build({
+          command: 'npm test',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        await vi.advanceTimersByTimeAsync(0);
+
+        mockShellOutputCallback({ type: 'data', chunk: 'starting...' });
+        await vi.advanceTimersByTimeAsync(20_000);
+
+        const beats = heartbeats() as Array<Record<string, unknown>>;
+        expect(beats.length).toBeGreaterThan(0);
+        expect(beats.at(-1)!['lastOutputAgeMs']).toBe(20_000);
+
+        await settle();
+        await promise;
+      });
+
+      it('is disabled by heartbeatIntervalMs: 0', async () => {
+        (mockConfig.getShellHeartbeatIntervalMs as Mock).mockReturnValue(0);
+        const invocation = shellTool.build({
+          command: 'quiet-soak-test',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        await vi.advanceTimersByTimeAsync(30_000);
+
+        expect(heartbeats()).toHaveLength(0);
+
+        await settle();
+        await promise;
+      });
+
+      it('honours a configured interval', async () => {
+        (mockConfig.getShellHeartbeatIntervalMs as Mock).mockReturnValue(5_000);
+        const invocation = shellTool.build({
+          command: 'quiet-soak-test',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        await vi.advanceTimersByTimeAsync(0);
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(heartbeats()).toHaveLength(1);
+
+        await settle();
+        await promise;
+      });
+
+      it('stops on abort before the process settles', async () => {
+        const abortController = new AbortController();
+        const invocation = shellTool.build({
+          command: 'quiet-soak-test',
+          is_background: false,
+        });
+        const promise = invocation.execute(
+          abortController.signal,
+          updateOutputMock,
+        );
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(heartbeats()).toHaveLength(1);
+
+        abortController.abort();
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(heartbeats()).toHaveLength(1);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: null,
+          signal: 15,
+          error: null,
+          aborted: true,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+      });
+
+      it('stops once the command settles', async () => {
+        const invocation = shellTool.build({
+          command: 'quiet-soak-test',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(heartbeats()).toHaveLength(1);
+
+        await settle();
+        await promise;
+
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(heartbeats()).toHaveLength(1);
+      });
+
+      it('carries output stats on the AnsiOutput path', async () => {
+        const invocation = shellTool.build({
+          command: 'ansi-soak-test',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        await vi.advanceTimersByTimeAsync(0);
+
+        const ansiChunk: import('../utils/terminalSerializer.js').AnsiOutput = [
+          [
+            {
+              text: 'hello',
+              bold: false,
+              italic: false,
+              dim: false,
+              underline: false,
+              inverse: false,
+              fg: '',
+              bg: '',
+            },
+          ],
+        ];
+        mockShellOutputCallback({ type: 'data', chunk: ansiChunk });
+        await vi.advanceTimersByTimeAsync(20_000);
+
+        const beats = heartbeats() as Array<Record<string, unknown>>;
+        expect(beats.length).toBeGreaterThan(0);
+        expect(beats.at(-1)).toMatchObject({
+          totalLines: 1,
+          totalBytes: 5,
+        });
+
+        await settle();
+        await promise;
+      });
     });
 
     describe('Streaming to `updateOutput`', () => {
