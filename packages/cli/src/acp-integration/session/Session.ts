@@ -2713,6 +2713,7 @@ export class Session implements SessionContext {
 
       let externalReason: string | null = null;
       let stopHookCount = 1;
+      let queuedPromptArrivedDuringStopHook = false;
       if (
         allowExternalHooks &&
         hooksEnabled &&
@@ -2764,6 +2765,7 @@ export class Session implements SessionContext {
           });
           const waitsForQueuedPrompt =
             this.#finishTodoStopGuardQueuedPromptCheck(drained.hasQueuedPrompt);
+          queuedPromptArrivedDuringStopHook = waitsForQueuedPrompt;
           if (drained.parts.length > 0) {
             this.todoStopGuard.acceptMidTurnUserInput();
             const continuation = await this.#runStopContinuation(
@@ -2780,12 +2782,8 @@ export class Session implements SessionContext {
             if (continuation.kind === 'terminal') {
               return { stopReason: continuation.stopReason };
             }
-            // The hook decision targeted the pre-input assistant response.
-            // Let user input supersede it; the next natural stop re-evaluates.
-            continue;
-          }
-          if (waitsForQueuedPrompt) {
-            return { stopReason: 'end_turn' };
+            // The hook already completed. Process its output below so its
+            // message and cap accounting survive the mid-turn continuation.
           }
         }
 
@@ -2809,15 +2807,17 @@ export class Session implements SessionContext {
         }
       }
 
-      const guardDecision = this.todoStopGuard.decide(
-        this.todoStopGuard.needsStopInspection
-          ? this.#hasRelevantTodoStopGuardBackgroundInput()
-          : false,
-      );
+      const guardDecision = queuedPromptArrivedDuringStopHook
+        ? null
+        : this.todoStopGuard.decide(
+            this.todoStopGuard.needsStopInspection
+              ? this.#hasRelevantTodoStopGuardBackgroundInput()
+              : false,
+          );
       const guardContinuation =
-        guardDecision.kind === 'continue' ? guardDecision : null;
+        guardDecision?.kind === 'continue' ? guardDecision : null;
 
-      if (guardDecision.kind === 'exhausted') {
+      if (guardDecision?.kind === 'exhausted') {
         await this.#emitTodoStopGuardExhausted(guardDecision);
         if (!externalReason) return { stopReason: 'end_turn' };
       }
@@ -2835,6 +2835,10 @@ export class Session implements SessionContext {
         this.todoStopGuard.suspend();
         await this.messageEmitter.emitAgentMessage(warning);
         debugLogger.warn(warning);
+        return { stopReason: 'end_turn' };
+      }
+
+      if (queuedPromptArrivedDuringStopHook) {
         return { stopReason: 'end_turn' };
       }
 

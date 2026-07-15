@@ -18280,6 +18280,73 @@ describe('Session', () => {
       expect(guardAttempts).toEqual([1, 2, 2]);
     });
 
+    it('accounts for a slow blocking Stop hook after handling mid-turn input', async () => {
+      rebuildSessionWithGuard();
+      installPendingTodoTool();
+      queuePendingTodoThenNaturalStops();
+      mockConfig.getStopHookBlockingCap = vi.fn().mockReturnValue(1);
+      vi.mocked(mockClient.extMethod)
+        .mockResolvedValueOnce({ messages: [], hasQueuedPrompt: false })
+        .mockResolvedValueOnce({ messages: [], hasQueuedPrompt: false })
+        .mockResolvedValueOnce({
+          messages: ['direction queued while the Stop hook was running'],
+          hasQueuedPrompt: false,
+        })
+        .mockResolvedValue({ messages: [], hasQueuedPrompt: false });
+
+      let hookStarted!: () => void;
+      const hookStartedPromise = new Promise<void>((resolve) => {
+        hookStarted = resolve;
+      });
+      let releaseHook!: () => void;
+      const hookGate = new Promise<void>((resolve) => {
+        releaseHook = resolve;
+      });
+      let stopCalls = 0;
+      const messageBus = {
+        request: vi.fn().mockImplementation(async (request) => {
+          if (request.eventName !== 'Stop') {
+            return { success: true, output: {} };
+          }
+          if (++stopCalls === 1) {
+            hookStarted();
+            await hookGate;
+            return {
+              success: true,
+              output: {
+                decision: 'block',
+                reason: 'continue after the slow Stop hook',
+                systemMessage: 'slow Stop hook system message',
+              },
+            };
+          }
+          return { success: true, output: {} };
+        }),
+      };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.hasHooksForEvent = vi
+        .fn()
+        .mockImplementation((name: string) => name === 'Stop');
+
+      const prompt = runGuardPrompt();
+      await hookStartedPromise;
+      releaseHook();
+
+      await expect(prompt).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(stopCalls).toBe(1);
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+      const userContinuation = vi.mocked(mockChat.sendMessageStream).mock
+        .calls[2]?.[1] as { message: Part[] };
+      expect(textParts(userContinuation.message).join('\n')).toContain(
+        'direction queued while the Stop hook was running',
+      );
+      expect(agentMessageChunks()).toContain('slow Stop hook system message');
+      expect(agentMessageChunks()).toContain(
+        'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',
+      );
+    });
+
     it('lets an independent background notification arm its own guard', async () => {
       rebuildSessionWithGuard();
       installPendingTodoTool();
