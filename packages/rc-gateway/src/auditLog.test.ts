@@ -16,7 +16,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { AuditLog } from './auditLog.js';
+import { AuditLog, AUDIT_ACTIONS } from './auditLog.js';
 
 function freshDir(): string {
   return mkdtempSync(join(tmpdir(), 'rc-audit-'));
@@ -506,5 +506,18 @@ describe('AuditLog directory mode', () => {
     });
     await audit.record({ action: 'auth_failed' });
     expect(statSync(nestedDir).mode & 0o777).toBe(0o700);
+  });
+});
+
+describe('agent-observability audit actions', () => {
+  it('registers the four new actions in AUDIT_ACTIONS', () => {
+    for (const a of [
+      'agent_spawned',
+      'agent_message_sent',
+      'agent_cancelled',
+      'hook_ingest_rejected',
+    ] as const) {
+      expect(AUDIT_ACTIONS).toContain(a);
+    }
   });
 });

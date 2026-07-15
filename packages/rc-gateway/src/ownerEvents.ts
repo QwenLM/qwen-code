@@ -46,6 +46,29 @@ export interface IdleRateLimitState {
   max: number;
 }
 
+/** The five lifecycle SSE event types (wire-protocol SSE registry rows). */
+export type AgentLifecycleEventType =
+  | 'agent_spawned'
+  | 'agent_completed'
+  | 'agent_failed'
+  | 'agent_blocked'
+  | 'agent_cancelled';
+
+/**
+ * Payload of a lifecycle frame (design: `{ agentId, sessionId,
+ * parentSessionId, agentType, task, status, costMicrocents? }`). Also the
+ * `data` of the same frames on the parent session's stream.
+ */
+export interface AgentLifecyclePayload {
+  agentId: string;
+  sessionId: string;
+  parentSessionId: string | null;
+  agentType: string;
+  task: string;
+  status: string;
+  costMicrocents?: number;
+}
+
 /**
  * A frame broadcast on the owner-level event stream. A discriminated union so
  * producers can add variants without breaking consumers (clients switch on
@@ -83,6 +106,25 @@ export type OwnerEvent =
       type: 'session_event';
       sessionId: string;
       event: WalFrame;
+    }
+  | {
+      /** Agent lifecycle frame (add-agent-observability). */
+      type: AgentLifecycleEventType;
+      agent: AgentLifecyclePayload;
+    }
+  | {
+      /**
+       * Read-only mirror of a local hook firing (POST /rc/hooks/ingest).
+       * OWNER stream only — hook payloads carry tool arguments. `dropped`
+       * surfaces how many frames the ingest rate limiter dropped since the
+       * previously mirrored frame.
+       */
+      type: 'hook_event';
+      event: string;
+      sessionId?: string;
+      toolName?: string;
+      payload: unknown;
+      dropped?: number;
     };
 
 export type OwnerEventHandler = (event: OwnerEvent) => void;

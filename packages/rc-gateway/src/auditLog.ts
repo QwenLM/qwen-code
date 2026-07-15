@@ -107,7 +107,11 @@ export type AuditAction =
   | 'apns_registered'
   | 'apns_subscription_removed'
   | 'push_routed'
-  | 'session_ended';
+  | 'session_ended'
+  | 'agent_spawned'
+  | 'agent_message_sent'
+  | 'agent_cancelled'
+  | 'hook_ingest_rejected';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -168,6 +172,10 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'apns_subscription_removed',
   'push_routed',
   'session_ended',
+  'agent_spawned',
+  'agent_message_sent',
+  'agent_cancelled',
+  'hook_ingest_rejected',
 ];
 
 export interface AuditEntry {

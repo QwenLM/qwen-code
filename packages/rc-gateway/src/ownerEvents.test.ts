@@ -76,3 +76,31 @@ describe('OwnerEventBus', () => {
     expect(bus.subscribe(() => {})).not.toBeNull();
   });
 });
+
+describe('agent + hook OwnerEvent variants', () => {
+  it('fans agent lifecycle and hook_event frames to subscribers', () => {
+    const bus = new OwnerEventBus();
+    const seen: OwnerEvent[] = [];
+    bus.subscribe((e) => seen.push(e));
+    const agent = {
+      agentId: 'a1',
+      sessionId: 's1',
+      parentSessionId: null,
+      agentType: 'general',
+      task: 't',
+      status: 'running',
+    };
+    bus.publish({ type: 'agent_spawned', agent });
+    bus.publish({
+      type: 'hook_event',
+      event: 'PreToolUse',
+      sessionId: 's1',
+      toolName: 'Bash',
+      payload: { command: 'ls' },
+      dropped: 2,
+    });
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toMatchObject({ type: 'agent_spawned' });
+    expect(seen[1]).toMatchObject({ type: 'hook_event', dropped: 2 });
+  });
+});
