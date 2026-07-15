@@ -174,3 +174,32 @@ describe('requiredAgents — Step 3B', () => {
     expect(keys(heavy)).not.toContain('invariant-a--src/small.ts');
   });
 });
+
+describe('a heavy file in a Step-3A-sized diff', () => {
+  it('does NOT demand invariant agents — Step 3A never launches them', () => {
+    // `heavy` is decided independently of topology: a 300-line source file with
+    // ~120 changed lines clears the rewrite-ratio branch while `srcDiffLines` stays
+    // under 500 — a Step 3A review. Requiring invariant agents there demanded agents
+    // the review never launches, and `check-coverage` then exit-3'd an otherwise
+    // complete small PR. (A real finding from a human review of this change.)
+    const smallButHeavy = {
+      ...PR, // srcDiffLines 200, diffLines 300 → Step 3A
+      files: [
+        {
+          path: 'src/rewritten.ts',
+          kind: 'source',
+          removedLines: 40,
+          heavy: true,
+        },
+      ],
+    };
+    expect(isTerritoryFanOut(smallButHeavy)).toBe(false);
+    const k = keys(smallButHeavy);
+    expect(k).not.toContain('invariant-a--src/rewritten.ts');
+    expect(k).not.toContain('invariant-b--src/rewritten.ts');
+    expect(k).not.toContain('invariant-c--src/rewritten.ts');
+    // It is still a normal 3A review: the dimension agents each walk the whole diff,
+    // and one that walks the whole diff already sees both ends of the file.
+    expect(k).toEqual(expect.arrayContaining(['1a', '2', '6a']));
+  });
+});

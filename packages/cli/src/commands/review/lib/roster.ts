@@ -171,10 +171,21 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
   // invariant sit two thousand lines apart. Three agents, one checklist slice each
   // — measured, one agent holding all eight checks found one of five defects and
   // the same model split three ways found all five.
-  for (const file of heavyFiles(plan)) {
-    add('invariant-a', file);
-    add('invariant-b', file);
-    add('invariant-c', file);
+  //
+  // **Step 3B only.** `heavy` is decided independently of topology (`lib/heavy.ts`):
+  // a 300-line source file with ~120 changed lines clears the rewrite-ratio branch
+  // while `srcDiffLines` stays under 500 — a Step 3A review. Step 3A launches no
+  // invariant agents (its dimension agents each walk the whole diff, so they
+  // already see both ends of a file), and the skill's 3A section never mentions
+  // them. Requiring them there demanded agents the review was never meant to launch,
+  // and `check-coverage` then exit-3'd an otherwise-complete small PR. Gate the loop
+  // on the topology that actually runs them.
+  if (isTerritoryFanOut(plan)) {
+    for (const file of heavyFiles(plan)) {
+      add('invariant-a', file);
+      add('invariant-b', file);
+      add('invariant-c', file);
+    }
   }
 
   return out;

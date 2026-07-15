@@ -215,7 +215,12 @@ function pointedAt(prompt: string, plan: Plan): Array<[number, number]> {
 function merge(ranges: Array<[number, number]>): Array<[number, number]> {
   if (ranges.length < 2) return ranges;
   const sorted = [...ranges].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  const out: Array<[number, number]> = [sorted[0]];
+  // Start with a COPY of the first tuple, and push copies. `sorted` shares its
+  // element references with the caller's array — which includes `rec.diffReads` —
+  // so writing `last[1] = …` below would mutate a tuple the record owns. Harmless
+  // today (the record is not read again after this), but a pure function here is
+  // one fewer latent foot-gun for the next caller.
+  const out: Array<[number, number]> = [[...sorted[0]]];
   for (const [s, e] of sorted.slice(1)) {
     const last = out[out.length - 1];
     // `s <= last[1] + 1` — abutting counts. Lines 1-200 then 201-400 is one walk of
