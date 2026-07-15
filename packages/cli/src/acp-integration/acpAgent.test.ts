@@ -76,7 +76,7 @@ const {
       async (
         _name: string,
         _attributes: Record<string, unknown>,
-        fn: (span: typeof mockSessionStartSpan) => Promise<unknown>,
+        fn: (span: typeof mockSessionStartSpan | undefined) => Promise<unknown>,
       ) => await fn(mockSessionStartSpan),
     ),
   };
@@ -1615,6 +1615,49 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it('creates a session when OpenTelemetry is disabled', async () => {
+    mockWithDaemonSpan.mockImplementationOnce(
+      async (_name, _attributes, fn) => await fn(undefined),
+    );
+    const innerConfig = makeInnerConfig();
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+    vi.mocked(Session).mockImplementation(
+      (sessionId: string) =>
+        ({
+          getId: vi.fn().mockReturnValue(sessionId),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          replayHistory: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    try {
+      await expect(
+        agent.newSession({ cwd: '/tmp', mcpServers: [] }),
+      ).resolves.toMatchObject({ sessionId: 'test-session-id' });
+      expect(mockSessionStartSpan.setAttribute).not.toHaveBeenCalled();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
 
   it('records the failed newSession stage without changing the error', async () => {

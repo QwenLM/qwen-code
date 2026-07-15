@@ -106,6 +106,12 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
       }),
       expect.any(Function),
     );
+    expect(coreMocks.recordDaemonHttpRequest).toHaveBeenCalledWith(
+      expect.any(Number),
+      'POST /session',
+      200,
+      'joined',
+    );
   });
 
   it('fires exactly once even if both finish and close emit', () => {

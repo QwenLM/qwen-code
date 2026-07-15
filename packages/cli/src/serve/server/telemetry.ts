@@ -388,7 +388,12 @@ export function daemonTelemetryMiddleware(
             done = true;
             recordDaemonHttpResponse(span, res.statusCode);
             const durationMs = Date.now() - startMs;
-            recordDaemonHttpRequest(durationMs, route.route, res.statusCode);
+            recordDaemonHttpRequest(
+              durationMs,
+              route.route,
+              res.statusCode,
+              deferredRuntime?.path,
+            );
             // Exclude the dashboard's own status poll from the metrics-ring
             // request rate/latency, or the Requests chart shows a baseline of
             // ≥1/window with no external traffic (the dashboard counting itself)
