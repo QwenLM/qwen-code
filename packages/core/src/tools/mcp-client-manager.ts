@@ -2399,6 +2399,11 @@ export class McpClientManager {
                       'Remaining processes may leak.',
                   );
                 }
+                    `Partial signal for timed-out server '${serverName}': ` +
+                      `${signaled}/${descendants.length} descendants of pid ${rootPid} signaled. ` +
+                      'Remaining processes may leak.',
+                  );
+                }
               }
             } else {
               debugLogger.debug(
