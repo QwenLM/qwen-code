@@ -1839,6 +1839,7 @@ describe('App session callbacks', () => {
           disabled: false,
           mcpStatus: 'disconnected',
           resourceCount: 1,
+          removable: true,
         },
       ],
     });
@@ -1879,7 +1880,7 @@ describe('App session callbacks', () => {
     expect(document.body.textContent).not.toContain('View tools');
     expect(document.body.textContent).not.toContain('View resources');
     expect(document.body.textContent).toContain('Reconnect');
-    expect(document.body.textContent).toContain('Authenticate');
+    expect(document.body.textContent).not.toContain('Authenticate');
     expect(document.body.textContent).toContain('Disable');
     expect(document.body.textContent).toContain('Delete');
 
