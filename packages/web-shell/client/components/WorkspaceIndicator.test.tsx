@@ -78,15 +78,15 @@ describe('WorkspaceIndicator', () => {
     const chip = container.querySelector<HTMLElement>(
       '[data-web-shell-workspace]',
     );
+    if (!chip) throw new Error('workspace chip was not rendered');
     // Compact must actually apply the icon-only class...
-    expect(chip?.className).toContain('workspaceChipCompact');
-    expect(chip?.getAttribute('data-web-shell-workspace-title')).toBe(
+    expect(chip.className).toContain('workspaceChipCompact');
+    expect(chip.getAttribute('data-web-shell-workspace-title')).toBe(
       '/work/api',
     );
 
     // ...and the tooltip must still reveal the cwd once the name is hidden, so a
     // narrow / mobile composer can tell which workspace the pane targets.
-    if (!chip) throw new Error('workspace chip was not rendered');
     openTooltip(chip);
     expect(document.querySelector('[role="tooltip"]')?.textContent).toBe(
       '/work/api',
