@@ -685,6 +685,23 @@ export function buildRoleBrief(
     }
     const base = report.mergeBaseSha;
     const pr = report.prNumber;
+    // The build/test command, welded in with absolute paths. The brief names
+    // `build-test`; this is the invocation, so the agent does not have to guess the
+    // plan path (its working directory is the worktree, where a relative plan path
+    // does not resolve — the same trap the test-efficacy block below documents).
+    if (typeof wt === 'string' && wt && opts.planPath) {
+      parts.push(
+        '',
+        '**Build and test what the diff changed:**',
+        '',
+        '```bash',
+        `qwen review build-test \\`,
+        `  --plan ${resolve(opts.planPath)} \\`,
+        `  --worktree ${resolve(wt)} \\`,
+        `  --out ${resolve(dirname(opts.planPath), `qwen-review-pr-${pr}-build-test.json`)}`,
+        '```',
+      );
+    }
     if (typeof base === 'string' && base && pr !== undefined && opts.planPath) {
       // Absolute, both of them. `worktreePath` and the plan path are repo-relative
       // in the report, and this agent's working directory IS the worktree — so a
