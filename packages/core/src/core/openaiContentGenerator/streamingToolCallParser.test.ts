@@ -1035,6 +1035,26 @@ describe('StreamingToolCallParser', () => {
       });
     });
 
+    it('does not let a brand-new tool-call id adopt a remap slot that already has an id', () => {
+      // Exercises the added `!toolCallMeta.get(remap)?.id` guard on pending-remap
+      // adoption: after call_2 claims the 0->1 remap (with its own id), a third
+      // tool call that reuses index 0 with a fresh id must NOT hijack call_2's
+      // slot via that remap — it has to fall through to collision handling and
+      // get its own slot.
+      parser.addChunk(0, '{"a":1}', 'call_1', 'function1');
+      parser.addChunk(0, '', 'call_2', 'function2');
+      parser.addChunk(0, '{"b":2}');
+
+      const third = parser.addChunk(0, '{"c":3}', 'call_3', 'function3');
+      expect(third.actualIndex).not.toBe(1);
+
+      const completed = parser.getCompletedToolCalls();
+      const call2 = completed.find((tc) => tc.id === 'call_2');
+      const call3 = completed.find((tc) => tc.id === 'call_3');
+      expect(call2?.args).toEqual({ b: 2 });
+      expect(call3?.args).toEqual({ c: 3 });
+    });
+
     it('should handle rapid tool call switching at same index', () => {
       // Rapid switching between different tool calls at index 0
       parser.addChunk(0, '{"step1":', 'call_1', 'function1');
