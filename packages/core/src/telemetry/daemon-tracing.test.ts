@@ -317,6 +317,8 @@ describe('daemon-tracing', () => {
     ).attributes;
     expect(attrs).not.toHaveProperty('qwen-code.client_id');
     expect(attrs).not.toHaveProperty('qwen-code.daemon.permission.request_id');
+    expect(attrs).not.toHaveProperty('qwen-code.daemon.runtime.wait_ms');
+    expect(attrs).not.toHaveProperty('qwen-code.daemon.runtime.path');
   });
 
   it('addDaemonRequestAttribute sets attribute on the active span', () => {
