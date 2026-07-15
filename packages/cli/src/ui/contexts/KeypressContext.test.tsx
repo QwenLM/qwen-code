@@ -428,6 +428,33 @@ describe('KeypressContext - Kitty Protocol', () => {
       expect(zSeen).toBe(true);
     });
 
+    it('does not drop paste content that ends with a partial paste-end marker on idle flush', async () => {
+      // Regression: when a paste ends with bytes that partially match the
+      // paste-end marker (\x1b[201~) and paste-end never actually arrives,
+      // those held-back tail bytes are legitimate content and must be
+      // included when the idle timeout flushes — not silently dropped.
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: true }),
+      });
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      // paste-start + content that ends with a partial paste-end prefix
+      // (\x1b[20), and NO real paste-end.
+      act(() => {
+        stdin.emit('data', Buffer.from('\x1b[200~hi\x1b[20'));
+      });
+
+      await new Promise((r) => setTimeout(r, PASTE_IDLE_TIMEOUT_MS + 200));
+
+      const pasteEvent = keyHandler.mock.calls.find((c) => c[0]?.paste);
+      expect(pasteEvent?.[0]?.sequence).toBe('hi\x1b[20');
+    });
+
     it('should not process kitty sequences when kitty protocol is disabled', async () => {
       const keyHandler = vi.fn();
 

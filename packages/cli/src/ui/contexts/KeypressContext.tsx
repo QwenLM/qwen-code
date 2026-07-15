@@ -1290,13 +1290,21 @@ export function KeypressProvider({
 
     const forceFlushRawPaste = () => {
       clearRawPasteIdleTimeout();
-      if (!rawPasteAccumulating && rawPasteChunks.length === 0) return;
+      if (
+        !rawPasteAccumulating &&
+        rawPasteChunks.length === 0 &&
+        rawStdinTail.length === 0
+      )
+        return;
+      // Append any held-back partial paste-end marker: since paste-end never
+      // arrived, those bytes are legitimate paste content, not a marker.
+      if (rawStdinTail.length > 0) {
+        rawPasteChunks.push(rawStdinTail);
+        rawStdinTail = Buffer.alloc(0);
+      }
       const content = Buffer.concat(rawPasteChunks);
       rawPasteChunks = [];
       rawPasteAccumulating = false;
-      // Drop any buffered partial paste-end marker; otherwise those bytes
-      // would leak into the next chunk as regular input after this flush.
-      rawStdinTail = Buffer.alloc(0);
       // pasteAlreadyFlushed is set inside broadcastPasteFromRaw.
       broadcastPasteFromRaw(content);
     };
@@ -1523,10 +1531,10 @@ export function KeypressProvider({
       }
 
       // Flush any pending paste data to avoid data loss on exit.
-      if (rawPasteAccumulating && rawPasteChunks.length > 0) {
-        broadcastPasteFromRaw(Buffer.concat(rawPasteChunks));
-        rawPasteChunks = [];
-        rawPasteAccumulating = false;
+      if (rawPasteAccumulating || rawPasteChunks.length > 0) {
+        // Reuses the tail-append + broadcast logic so held-back partial
+        // paste-end bytes aren't dropped on teardown.
+        forceFlushRawPaste();
       } else if (isPaste) {
         const buffered = pasteChunks.join('');
         if (buffered.length > 0) {
