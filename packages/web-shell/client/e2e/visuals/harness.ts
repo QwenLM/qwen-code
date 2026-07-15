@@ -179,9 +179,15 @@ export async function recordFlow(
   } finally {
     try {
       await context.close();
-    } catch {
-      // Best-effort close (the browser may have crashed mid-drive); preserve
-      // the drive failure for the re-throw below instead of masking it here.
+    } catch (closeError) {
+      // If the drive already failed, keep that original error (the close error
+      // is secondary). But if the drive SUCCEEDED, a close failure is a real
+      // problem (it can also leave the video unfinalized) — promote it so the
+      // flow fails instead of masking it.
+      if (!driveFailed) {
+        driveFailed = true;
+        driveError = closeError;
+      }
     }
   }
 
@@ -190,21 +196,20 @@ export async function recordFlow(
     // The flow errored — discard the partial recording rather than publishing a
     // meaningless "failed flow" video into the artifact.
     await video?.delete().catch(() => {});
-  } else if (video) {
-    try {
-      await video.saveAs(join(VIDEO_DIR, `${name}.webm`));
-      await video.delete(); // drop the hash-named raw copy; keep only the named one
-    } catch (videoError) {
-      // Drive succeeded but the video failed to finalize — surface it so a
-      // missing recording isn't swallowed silently.
-      console.warn(`video.saveAs failed for flow "${name}":`, videoError);
-    }
-  } else {
-    console.warn(
-      `No video recorded for flow "${name}" — recording may not have started.`,
+    throw driveError;
+  }
+
+  // Drive succeeded, so the recording IS the deliverable: let a save failure or
+  // a missing recording FAIL the flow (a silent pass with no .webm makes the
+  // downstream GIF-conversion step fail confusingly). Deleting the raw copy is
+  // best-effort.
+  if (!video) {
+    throw new Error(
+      `No video recorded for flow "${name}" — recording did not start.`,
     );
   }
-  if (driveFailed) throw driveError;
+  await video.saveAs(join(VIDEO_DIR, `${name}.webm`));
+  await video.delete().catch(() => {});
 }
 
 /** A short, human-readable pause so a recorded flow is legible as a GIF. */

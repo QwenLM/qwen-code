@@ -109,10 +109,18 @@ jobs:
           # number to the real run, and is re-checked right before the comment
           # write to close the validate->write TOCTOU window (a push/close during
           # asset upload must not let a stale run post).
+          # Returns 0 = valid, 1 = genuinely invalid (closed / head mismatch),
+          # 2 = TRANSIENT API failure (empty after retries) — distinguished so a
+          # blip fails loudly (re-triggerable) instead of silently skipping.
           validate_pr() {
-            local j st hd rr rf
-            j="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" 2>/dev/null || true)"
-            [ -n "${j}" ] || { echo "::warning::Empty response fetching PR #${PR}."; return 1; }
+            local j st hd rr rf attempt
+            j=''
+            for attempt in 1 2 3; do
+              j="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" 2>/dev/null || true)"
+              [ -n "${j}" ] && break
+              sleep 2
+            done
+            [ -n "${j}" ] || { echo "::warning::Could not fetch PR #${PR} after retries."; return 2; }
             st="$(jq -r '.state // empty' <<< "${j}")"
             hd="$(jq -r '.head.sha // empty' <<< "${j}")"
             rr="$(jq -r '.head.repo.full_name // empty' <<< "${j}")"
@@ -130,7 +138,20 @@ jobs:
             }
             return 0
           }
-          validate_pr || exit 0
+          # Gate: proceed when valid; a genuine invalid state SKIPS quietly, but a
+          # transient failure EXITS 1 so the publish surfaces as re-triggerable.
+          gate() {
+            local rc
+            if validate_pr; then rc=0; else rc=$?; fi
+            [ "${rc}" -eq 0 ] && return 0
+            if [ "${rc}" -eq 2 ]; then
+              echo "::error::Transient API failure validating PR #${PR}; failing so the publish can be re-triggered."
+              exit 1
+            fi
+            echo "::notice::PR #${PR} no longer valid for publishing; skipping."
+            exit 0
+          }
+          gate
           SHORT_SHA="${RUN_HEAD_SHA:0:7}"
 
           # --- Stage + validate the images ----------------------------------
@@ -150,7 +171,7 @@ jobs:
           # Re-validate right before the force-push too: a close/new-head during
           # download+staging must not force-push a stale snapshot (which would
           # orphan the commit the existing comment still points at).
-          validate_pr || { echo "::notice::PR #${PR} changed before hosting; not publishing."; exit 0; }
+          gate
 
           # --- Host on the PR's own pr-assets branch (bounded) --------------
           # Replace the branch with a SINGLE orphan snapshot each run and
@@ -218,6 +239,7 @@ jobs:
               break
             fi
             echo "::notice::comment lookup attempt ${attempt} failed; retrying."
+            sleep 2
           done
           if [ "${listed}" -ne 1 ]; then
             echo "::error::Could not list PR comments after retries; not posting (avoids duplicates)."
@@ -227,7 +249,7 @@ jobs:
           # Final TOCTOU gate: re-validate (open + head SHA + repo/branch) AFTER
           # the paginated/retried lookup, immediately before the write — a
           # close or new head during validation/lookup must not post a stale one.
-          validate_pr || { echo "::notice::PR #${PR} changed during publish; not posting."; exit 0; }
+          gate
 
           if [ -n "${EXISTING}" ]; then
             gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING}" -F body=@"${BODY_FILE}" >/dev/null
