@@ -213,13 +213,13 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
 
     const approval = this.approval;
     if (!approval) {
-      return this.errorResult(
+      return this.noActionResult(
         'Plan execution was not approved. Remaining in plan mode.',
       );
     }
     const { snapshot, targetMode } = approval;
     if (signal.aborted) {
-      return this.errorResult(
+      return this.noActionResult(
         'Plan exit was cancelled. Remaining in plan mode.',
       );
     }
@@ -227,11 +227,12 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
       this.config.getApprovalMode() !== ApprovalMode.PLAN ||
       this.config.getApprovalModeRevision() !== snapshot.approvalModeRevision
     ) {
-      return this.errorResult(
+      return this.noActionResult(
         'Plan approval is stale because the approval mode changed. No action was taken.',
       );
     }
 
+    this.savePlanBestEffort(snapshot.plan);
     try {
       this.config.setApprovalMode(targetMode);
     } catch (error) {
@@ -244,7 +245,6 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
       );
     }
 
-    this.savePlanBestEffort(snapshot.plan);
     return {
       llmContent:
         'User approved. You can now start coding. Start with updating your todo list if applicable.',
@@ -292,7 +292,7 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
     }
 
     if (signal.aborted) {
-      return this.errorResult(
+      return this.noActionResult(
         'Leader plan approval was cancelled. Remaining in plan mode.',
       );
     }
@@ -300,7 +300,7 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
       this.config.getApprovalMode() !== ApprovalMode.PLAN ||
       this.config.getApprovalModeRevision() !== approvalModeRevision
     ) {
-      return this.errorResult(
+      return this.noActionResult(
         'Leader plan approval is stale because the approval mode changed. No action was taken.',
       );
     }
@@ -367,6 +367,13 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
       llmContent: message,
       returnDisplay: message,
       error: { message },
+    };
+  }
+
+  private noActionResult(message: string): ToolResult {
+    return {
+      llmContent: message,
+      returnDisplay: message,
     };
   }
 }

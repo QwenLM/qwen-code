@@ -156,7 +156,8 @@ describe('ExitPlanModeTool', () => {
     await confirmation.onConfirm(ToolConfirmationOutcome.Cancel);
     const result = await invocation.execute(new AbortController().signal);
 
-    expect(result.error?.message).toContain('not approved');
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('not approved');
     expect(approvalMode).toBe(ApprovalMode.PLAN);
     expect(config.setApprovalMode).not.toHaveBeenCalled();
     expect(config.savePlan).not.toHaveBeenCalled();
@@ -190,7 +191,8 @@ describe('ExitPlanModeTool', () => {
 
     const result = await invocation.execute(controller.signal);
 
-    expect(result.error?.message).toContain('cancelled');
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('cancelled');
     expect(approvalMode).toBe(ApprovalMode.PLAN);
     expect(config.setApprovalMode).not.toHaveBeenCalled();
   });
@@ -208,7 +210,8 @@ describe('ExitPlanModeTool', () => {
 
     const result = await invocation.execute(new AbortController().signal);
 
-    expect(result.error?.message).toContain('stale');
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('stale');
     expect(approvalMode).toBe(ApprovalMode.PLAN);
     expect(config.setApprovalMode).not.toHaveBeenCalled();
   });
@@ -228,7 +231,8 @@ describe('ExitPlanModeTool', () => {
     const secondResult = await second.execute(signal);
 
     expect(firstResult.error).toBeUndefined();
-    expect(secondResult.error?.message).toContain('stale');
+    expect(secondResult.error).toBeUndefined();
+    expect(secondResult.llmContent).toContain('stale');
     expect(config.savePlan).toHaveBeenCalledTimes(1);
   });
 
@@ -257,7 +261,7 @@ describe('ExitPlanModeTool', () => {
 
     expect(result.error?.message).toContain('mode locked');
     expect(approvalMode).toBe(ApprovalMode.PLAN);
-    expect(config.savePlan).not.toHaveBeenCalled();
+    expect(config.savePlan).toHaveBeenCalledWith('Plan');
   });
 
   it('treats plan persistence failure as advisory after a successful exit', async () => {
@@ -326,7 +330,37 @@ describe('ExitPlanModeTool', () => {
 
     const result = await execution;
 
-    expect(result.error?.message).toContain('stale');
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('stale');
+    expect(config.setApprovalMode).not.toHaveBeenCalled();
+  });
+
+  it('treats cancelled teammate approval as control flow', async () => {
+    const controller = new AbortController();
+    vi.mocked(config.getTeamManager).mockReturnValue({
+      requestPlanApproval: vi.fn(async () => {
+        controller.abort();
+        return {
+          action: 'approve',
+          targetMode: ApprovalMode.DEFAULT,
+        };
+      }),
+    } as never);
+    const invocation = tool.build({ plan: 'Teammate plan' });
+
+    const result = await runWithTeammateIdentity(
+      {
+        agentId: 'planner@test',
+        agentName: 'planner',
+        teamName: 'test',
+        isTeamLead: false,
+        planModeRequired: true,
+      },
+      () => invocation.execute(controller.signal),
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('cancelled');
     expect(config.setApprovalMode).not.toHaveBeenCalled();
   });
 });
