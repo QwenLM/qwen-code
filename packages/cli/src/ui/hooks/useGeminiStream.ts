@@ -113,6 +113,7 @@ import { t } from '../../i18n/index.js';
 import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
 import { recordGoalStatusItem } from '../utils/restoreGoal.js';
 import { sanitizeDisplayText } from '../../utils/extension-mention.js';
+import { getAsyncInvocationIngress } from '../../utils/invocation-ingress.js';
 import process from 'node:process';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
@@ -2480,13 +2481,7 @@ export const useGeminiStream = (
       }
 
       const inheritedInvocation = getInvocationContext();
-      const asyncIngress =
-        submitType === SendMessageType.Cron
-          ? ('scheduler' as const)
-          : submitType === SendMessageType.Notification ||
-              submitType === SendMessageType.Teammate
-            ? ('internal' as const)
-            : undefined;
+      const asyncIngress = getAsyncInvocationIngress(submitType);
       const invocation =
         asyncIngress !== undefined
           ? {

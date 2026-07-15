@@ -66,6 +66,7 @@ import {
   settleChatRecording,
   subscribeToHeadlessChatRecordingFailures,
 } from './utils/chat-recording-failure.js';
+import { getAsyncInvocationIngress } from './utils/invocation-ingress.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
@@ -336,13 +337,7 @@ export async function runNonInteractive(
   prompt_id: string,
   options: RunNonInteractiveOptions = {},
 ): Promise<number> {
-  const ingress =
-    options.sendMessageType === SendMessageType.Cron
-      ? ('scheduler' as const)
-      : options.sendMessageType === SendMessageType.Notification ||
-          options.sendMessageType === SendMessageType.Teammate
-        ? ('internal' as const)
-        : ('cli' as const);
+  const ingress = getAsyncInvocationIngress(options.sendMessageType) ?? 'cli';
   return runWithInvocationContext(
     {
       version: 1,
@@ -1640,8 +1635,7 @@ async function runNonInteractiveWithContext(
             };
             const itemInvocationContext: InvocationContextV1 = {
               version: 1,
-              ingress:
-                targetType === SendMessageType.Cron ? 'scheduler' : 'internal',
+              ingress: getAsyncInvocationIngress(targetType) ?? 'internal',
               sessionId: config.getSessionId(),
               promptId: randomUUID(),
             };
