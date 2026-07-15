@@ -93,6 +93,7 @@ impl Tool for GetWindowStateTool {
 
     async fn invoke(&self, args: Value) -> ToolResult {
         use cua_driver_core::tool_args::ArgsExt;
+        let operation_started = std::time::Instant::now();
         let pid = match args.require_i32("pid") { Ok(v) => v, Err(e) => return e };
         let window_id = match args.require_u32("window_id") { Ok(v) => v, Err(e) => return e };
         let query = args.opt_str("query");
@@ -142,33 +143,60 @@ impl Tool for GetWindowStateTool {
             .unwrap_or(crate::ax::tree::DEFAULT_MAX_DEPTH);
 
         // Always walk the AX tree (perception returns both tree + screenshot).
-        let tree_result = {
-            let q = query.clone();
-            // Wrap the blocking AX walk in a 30-second timeout. Heavy webview apps
-            // (Arc, Safari with many tabs, Electron) can block
-            // AXUIElementCopyAttributeValue indefinitely via XPC — without a
-            // deadline the MCP server hangs forever (issue #1537).
-            let walk_future = tokio::task::spawn_blocking(move || {
-                crate::ax::tree::walk_tree_bounded(
-                    pid,
-                    Some(window_id),
-                    q.as_deref(),
-                    max_elements,
-                    max_depth,
+        let (tree_result, ax_error) = {
+            const AX_WALK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+            const AX_NATIVE_CALL_RESERVE: std::time::Duration = std::time::Duration::from_secs(
+                crate::ax::bindings::AX_MESSAGING_TIMEOUT_SECS,
+            );
+            let ax_budget = crate::capture::remaining_tool_budget(operation_started)
+                .saturating_sub(AX_NATIVE_CALL_RESERVE)
+                .min(AX_WALK_TIMEOUT);
+            if ax_budget.is_zero() {
+                (
+                    None,
+                    Some(
+                        "AX tree walk skipped because the daemon response deadline is too close"
+                            .into(),
+                    ),
                 )
-            });
-            match tokio::time::timeout(std::time::Duration::from_secs(30), walk_future).await {
-                Ok(Ok(r)) => Some(r),
-                Ok(Err(e)) => return ToolResult::error(format!("AX tree walk failed: {e}")),
-                Err(_elapsed) => {
-                    return ToolResult::error(format!(
-                        "AX tree walk for pid={pid} timed out after 30 s. \
-                         The app (likely Arc, Electron, or Safari with many tabs) has a \
-                         pathologically large accessibility tree. \
-                         Workaround: re-call with a depth-limited scan \
-                         (max_elements / max_depth), then act by pixel (x,y) off \
-                         the screenshot if the tree stays unusable."
-                    ));
+            } else {
+                let q = query.clone();
+                let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let worker_cancelled = cancelled.clone();
+                // Stop before the daemon deadline and reserve one native AX timeout
+                // for the cancelled worker to leave its current call and clean up.
+                let mut walk_task = tokio::task::spawn_blocking(move || {
+                    crate::ax::tree::walk_tree_bounded_cancellable(
+                        pid,
+                        Some(window_id),
+                        q.as_deref(),
+                        max_elements,
+                        max_depth,
+                        &worker_cancelled,
+                    )
+                });
+                match tokio::time::timeout(ax_budget, &mut walk_task).await {
+                    Ok(Ok(r)) => (Some(r), None),
+                    Ok(Err(e)) => (None, Some(format!("AX tree task failed: {e}"))),
+                    Err(_elapsed) => {
+                        cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                        tokio::spawn(async move {
+                            match walk_task.await {
+                                Ok(result) => result.release_retained_elements(),
+                                Err(error) => {
+                                    tracing::warn!(%error, "cancelled AX tree task failed during cleanup");
+                                }
+                            }
+                        });
+                        (None, Some(format!(
+                            "AX tree walk for pid={pid} timed out after {} ms. \
+                             The app (likely Arc, Electron, or Safari with many tabs) has a \
+                             pathologically large accessibility tree. \
+                             The screenshot path was still attempted; re-call with lower \
+                             max_elements / max_depth if the AX tree remains unavailable.",
+                            ax_budget.as_millis()
+                        )))
+                    }
                 }
             }
         };
@@ -176,6 +204,8 @@ impl Tool for GetWindowStateTool {
         // Update element cache.
         if let Some(ref r) = tree_result {
             self.state.element_cache.update(pid, window_id, &r.nodes);
+        } else {
+            self.state.element_cache.update(pid, window_id, &[]);
         }
 
         // Capture the screenshot and deliver it alongside the tree — the
@@ -185,11 +215,15 @@ impl Tool for GetWindowStateTool {
         // surface the path instead of embedding base64; otherwise embed base64.
         let max_dim = effective_max_dim;
         // Returns (b64_or_path, final_w, final_h, Option<original_w>, is_file_path)
-        let screenshot = if should_capture {
+        let (screenshot, screenshot_error) = if should_capture {
             let out_file = screenshot_out_file.clone();
+            let screenshot_budget = crate::capture::remaining_tool_budget(operation_started);
             let res = tokio::task::spawn_blocking(move || -> anyhow::Result<(Option<String>, Option<String>, u32, u32, Option<u32>)> {
                 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-                let raw = crate::capture::screenshot_window_bytes(window_id)?;
+                let raw = crate::capture::screenshot_window_bytes_with_budget(
+                    window_id,
+                    screenshot_budget,
+                )?;
                 let (orig_w, _orig_h) = crate::capture::png_dimensions(&raw)?;
                 let png = crate::capture::resize_png_if_needed(&raw, max_dim)?;
                 let (w, h) = crate::capture::png_dimensions(&png)?;
@@ -211,20 +245,43 @@ impl Tool for GetWindowStateTool {
                     } else {
                         self.state.resize_registry.clear_ratio(pid);
                     }
-                    Some((b64, file_path, w, h))
+                    (Some((b64, file_path, w, h)), None)
                 }
                 Ok(Err(e)) => {
                     tracing::warn!("Screenshot failed for window {window_id}: {e}");
-                    None
+                    (None, Some(e.to_string()))
                 }
                 Err(e) => {
                     tracing::warn!("Screenshot task error for window {window_id}: {e}");
-                    None
+                    (None, Some(format!("screenshot task failed: {e}")))
                 }
             }
         } else {
-            None
+            (None, None)
         };
+
+        let element_count = tree_result
+            .as_ref()
+            .map(|result| result.nodes.iter().filter(|node| node.element_index.is_some()).count())
+            .unwrap_or(0);
+        let has_ax_perception = tree_result.as_ref().is_some_and(has_ax_content);
+        if should_capture && screenshot.is_none() && !has_ax_perception {
+            let error = screenshot_error.as_deref().unwrap_or("unknown screenshot failure");
+            return ToolResult::error(format!(
+                "get_window_state could not produce usable perception for pid={pid} \
+                 window_id={window_id}: screenshot failed ({error}) and the AX tree \
+                 produced no content{}",
+                ax_error.as_deref().map(|error| format!(" ({error})")).unwrap_or_default()
+            ))
+            .with_structured(serde_json::json!({
+                "code": "perception_unavailable",
+                "pid": pid,
+                "window_id": window_id,
+                "element_count": element_count,
+                "screenshot_error": error,
+                "ax_error": ax_error,
+            }));
+        }
 
         // Capture screenshot dimensions before consuming.
         let screenshot_dims = screenshot.as_ref().map(|(_, _, w, h)| (*w, *h));
@@ -239,29 +296,37 @@ impl Tool for GetWindowStateTool {
             }
 
             // Summary text line (matching Swift reference format).
-            let element_count = self.state.element_cache.element_count(pid, window_id);
             let summary = if let Some(ref r) = tree_result {
                 format!(
                     "window_id={window_id} pid={pid} size={}x{} elements={element_count}\n\n{}",
                     w, h, r.tree_markdown
                 )
             } else {
-                format!("window_id={window_id} pid={pid} size={}x{}", w, h)
+                let ax_note = ax_error
+                    .as_deref()
+                    .map(|error| format!(" ax_error={error}"))
+                    .unwrap_or_default();
+                format!("window_id={window_id} pid={pid} size={}x{}{ax_note}", w, h)
             };
             content.push(Content::text(summary));
         } else if let Some(ref r) = tree_result {
-            let element_count = self.state.element_cache.element_count(pid, window_id);
+            let screenshot_note = screenshot_error
+                .as_deref()
+                .map(|error| format!(" screenshot_error={error}"))
+                .unwrap_or_default();
             content.push(Content::text(format!(
-                "window_id={window_id} pid={pid} elements={element_count}\n\n{}",
+                "window_id={window_id} pid={pid} elements={element_count}{screenshot_note}\n\n{}",
                 r.tree_markdown
             )));
         }
 
         if content.is_empty() {
-            return ToolResult::error("No content produced (neither AX tree nor screenshot succeeded)");
+            let detail = ax_error
+                .as_deref()
+                .unwrap_or("neither AX tree nor screenshot produced content");
+            return ToolResult::error(format!("No content produced: {detail}"));
         }
 
-        let element_count = self.state.element_cache.element_count(pid, window_id);
         let tree_md = tree_result.as_ref().map(|r| r.tree_markdown.clone()).unwrap_or_default();
 
         // Surface 6: register a snapshot in the global token registry so
@@ -307,17 +372,15 @@ impl Tool for GetWindowStateTool {
                 Issue #22865: use `max_elements` / `max_depth` to bound the \
                 AX walk on apps with very large trees."
         });
-        // Best-effort-background ladder, rung (2): an AX walk that ran but found
-        // zero actionable elements is NOT a clean snapshot — the window may be a
-        // non-AX surface (canvas/WebGL) or its tree wasn't ready (Chromium needs
-        // an enable+settle). Mark it degraded so callers don't read `elements: []`
-        // as "this window has no controls". Only applies when a walk was actually
-        // attempted (tree_result is None in capture_mode=vision, where empty is
-        // expected, not degraded).
-        if tree_result.is_some() && element_count == 0 {
+        // Best-effort-background ladder, rung (2): an AX walk that produced no
+        // content is NOT a clean snapshot — the window may be a non-AX surface
+        // (canvas/WebGL) or its tree wasn't ready (Chromium needs an
+        // enable+settle). Mark it degraded so callers don't read `elements: []`
+        // as "this window has no controls".
+        if tree_result.is_some() && !has_ax_perception {
             structured["degraded"] = serde_json::json!(true);
             structured["degraded_reason"] = serde_json::json!(
-                "ax_tree_empty: the AX walk returned no actionable elements. The \
+                "ax_tree_empty: the AX walk returned no content. The \
                  window may be a non-AX surface (canvas/WebGL/custom-drawn) or its \
                  accessibility tree was not ready (Chromium/Electron require an \
                  AX-enable + settle). Do not treat element data as authoritative — \
@@ -349,8 +412,33 @@ impl Tool for GetWindowStateTool {
         if let Some(ref fp) = screenshot_file_path {
             structured["screenshot_file_path"] = serde_json::json!(fp);
         }
+        if let Some(error) = screenshot_error {
+            structured["degraded"] = serde_json::json!(true);
+            structured["degraded_reason"] = serde_json::json!(
+                "screenshot_unavailable: the AX elements remain usable, but visual \
+                 cross-checking is unavailable for this response."
+            );
+            structured["screenshot_error"] = serde_json::json!(error);
+        }
+        if let Some(error) = ax_error {
+            structured["degraded"] = serde_json::json!(true);
+            structured["degraded_reason"] = serde_json::json!(
+                "ax_tree_unavailable: the screenshot remains usable, but element-indexed \
+                 actions are unavailable for this response."
+            );
+            structured["ax_error"] = serde_json::json!(error);
+        }
         ToolResult { content, is_error: None, structured_content: Some(structured) }
     }
+}
+
+fn has_ax_content(result: &crate::ax::tree::TreeWalkResult) -> bool {
+    result.nodes.iter().any(|node| {
+        node.element_index.is_some()
+            || node.title.as_deref().is_some_and(|value| !value.trim().is_empty())
+            || node.value.as_deref().is_some_and(|value| !value.trim().is_empty())
+            || node.description.as_deref().is_some_and(|value| !value.trim().is_empty())
+    })
 }
 
 /// Render the actionable nodes from the AX walk into the
@@ -477,6 +565,30 @@ mod tests {
             .map(|e| e["element_index"].as_u64().unwrap())
             .collect();
         assert_eq!(indices, vec![0, 1, 2], "ordering must match DFS / element_index assignment");
+    }
+
+    #[test]
+    fn static_ax_text_is_still_usable_perception() {
+        let result = crate::ax::tree::TreeWalkResult {
+            tree_markdown: "- AXStaticText = \"read only\"".into(),
+            nodes: vec![node(None, "AXStaticText", Some("read only"), 0, None, None)],
+            truncated: false,
+        };
+        assert!(has_ax_content(&result));
+        assert_eq!(result.nodes.iter().filter(|node| node.element_index.is_some()).count(), 0);
+    }
+
+    #[test]
+    fn role_only_window_or_sheet_is_not_usable_perception() {
+        let result = crate::ax::tree::TreeWalkResult {
+            tree_markdown: "- AXWindow\n  - AXSheet\n".into(),
+            nodes: vec![
+                node(None, "AXWindow", None, 0, None, None),
+                node(None, "AXSheet", None, 1, None, None),
+            ],
+            truncated: false,
+        };
+        assert!(!has_ax_content(&result));
     }
 
     #[test]
