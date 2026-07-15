@@ -281,6 +281,40 @@ describe('StreamingToolCallParser', () => {
   });
 
   describe('Tool call metadata handling', () => {
+    it('tracks real nameless calls but ignores phantom chunks', () => {
+      parser.addChunk(0, '');
+      expect(parser.hasNamelessToolCall()).toBe(false);
+
+      parser.addChunk(0, '', 'call_1');
+      expect(parser.hasNamelessToolCall()).toBe(true);
+
+      parser.resetIndex(0);
+      parser.addChunk(0, '{"path":"a.ts"}');
+      expect(parser.hasNamelessToolCall()).toBe(true);
+    });
+
+    it.each([
+      { index: 1, id: undefined },
+      { index: 2, id: 'call_2' },
+    ])(
+      'accepts and deduplicates a name after complete arguments at index $index',
+      ({ index, id }) => {
+        parser.addChunk(index, '{"path":"a.ts"}', id);
+        parser.addChunk(index, '', id, 'read_file');
+        parser.addChunk(index, '', id, 'read_file');
+
+        expect(parser.hasNamelessToolCall()).toBe(false);
+        expect(parser.getCompletedToolCalls()).toEqual([
+          {
+            id,
+            name: 'read_file',
+            args: { path: 'a.ts' },
+            index,
+          },
+        ]);
+      },
+    );
+
     it('should store and retrieve tool call metadata', () => {
       parser.addChunk(0, '{"param": "value"}', 'call_123', 'my_function');
 
@@ -698,11 +732,18 @@ describe('StreamingToolCallParser', () => {
       // known-ID chunk carrying argument content is a continuation, not a
       // replay, and must not be swallowed by the replay guard.
       parser.addChunk(0, '', 'call_1', 'function1');
-      const result = parser.addChunk(0, '{"x":1}', 'call_1');
+      parser.addChunk(0, '{"text":"hello', 'call_1');
+      parser.addChunk(0, ' ', 'call_1');
+      const result = parser.addChunk(0, 'world"}', 'call_1');
 
       expect(result.complete).toBe(true);
       expect(parser.getCompletedToolCalls()).toEqual([
-        { id: 'call_1', name: 'function1', args: { x: 1 }, index: 0 },
+        {
+          id: 'call_1',
+          name: 'function1',
+          args: { text: 'hello world' },
+          index: 0,
+        },
       ]);
     });
 
@@ -903,6 +944,44 @@ describe('StreamingToolCallParser', () => {
   });
 
   describe('Complex collision scenarios', () => {
+    it('does not append continuation fragments to a completed remapped slot', () => {
+      parser.addChunk(0, '{"first":true}', 'call_1', 'function1');
+      const remapped = parser.addChunk(
+        0,
+        '{"second":true}',
+        undefined,
+        'function2',
+      );
+
+      expect(remapped.actualIndex).toBe(1);
+      expect(remapped.complete).toBe(true);
+
+      const continuation = parser.addChunk(0, '{"third":true}');
+
+      expect(continuation.actualIndex).not.toBe(remapped.actualIndex);
+      expect(parser.getBuffer(remapped.actualIndex!)).toBe('{"second":true}');
+    });
+
+    it('associates a late stable ID with its completed remapped slot', () => {
+      parser.addChunk(0, '{"first":true}', 'call_1', 'function1');
+      const remapped = parser.addChunk(
+        0,
+        '{"second":true}',
+        undefined,
+        'function2',
+      );
+
+      const identified = parser.addChunk(0, '', 'call_2');
+
+      expect(identified.actualIndex).toBe(remapped.actualIndex);
+      expect(parser.getCompletedToolCalls()).toContainEqual({
+        id: 'call_2',
+        name: 'function2',
+        args: { second: true },
+        index: remapped.actualIndex,
+      });
+    });
+
     it('should handle rapid tool call switching at same index', () => {
       // Rapid switching between different tool calls at index 0
       parser.addChunk(0, '{"step1":', 'call_1', 'function1');

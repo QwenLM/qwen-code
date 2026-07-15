@@ -1002,6 +1002,40 @@ describe('<ToolGroupMessage />', () => {
       );
       expect(lastFrame()).toMatchSnapshot();
     });
+
+    it('reserves wrapped compact summary height before sizing tool results', () => {
+      vi.mocked(ToolMessage).mockClear();
+      const toolCalls = [
+        createToolCall({
+          callId: 'read-long',
+          name: 'ReadFile',
+          description:
+            'packages/cli/src/ui/components/messages/CompactToolGroupDisplay.tsx',
+          status: ToolCallStatus.Success,
+        }),
+        createToolCall({
+          callId: 'shell-result',
+          name: 'Shell',
+          description: 'npm test',
+          status: ToolCallStatus.Success,
+          resultDisplay: 'shell output',
+        }),
+      ];
+
+      renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          contentWidth={30}
+          toolCalls={toolCalls}
+          availableTerminalHeight={12}
+        />,
+      );
+
+      const call = vi
+        .mocked(ToolMessage)
+        .mock.calls.find((c) => c[0].callId === 'shell-result');
+      expect(call?.[0].availableTerminalHeight).toBe(8);
+    });
   });
 
   describe('Confirmation Handling', () => {

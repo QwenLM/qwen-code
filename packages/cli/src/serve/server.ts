@@ -116,6 +116,7 @@ import {
 import {
   createDaemonWorkspaceService,
   type DaemonWorkspaceService,
+  type DaemonWorkspaceServiceDeps,
 } from './workspace-service/index.js';
 import { registerCapabilitiesRoutes } from './routes/capabilities.js';
 import {
@@ -131,10 +132,12 @@ import {
   registerSseEventsRoutes,
 } from './routes/sse-events.js';
 import {
+  registerWorkspaceQualifiedVoiceRoutes,
   registerWorkspaceVoiceRoutes,
   type WorkspaceVoiceRouteDeps,
 } from './routes/workspace-voice.js';
 import { registerWorkspaceModelsRoutes } from './routes/workspace-models.js';
+import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
 import { setRateLimiter } from './rate-limit.js';
 import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
@@ -200,6 +203,10 @@ import {
   registerWorkspaceQualifiedToolsRoutes,
   registerWorkspaceToolsRoutes,
 } from './routes/workspace-tools.js';
+import {
+  registerWorkspaceQualifiedSkillsRoutes,
+  registerWorkspaceSkillsRoutes,
+} from './routes/workspace-skills.js';
 import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
 import {
   parseChannelWebhookConfigLenient,
@@ -311,7 +318,10 @@ function describeRegistryPrimaryForConflict(
 function getRuntimeEffectiveEnv(
   metadata: WorkspaceRuntimeEnvMetadata | undefined,
 ): Readonly<Record<string, string | undefined>> | undefined {
-  return metadata?.effectiveEnv;
+  if (!metadata || metadata.mode === 'parent-process') {
+    return metadata?.effectiveEnv;
+  }
+  return metadata.effectiveEnv ?? {};
 }
 
 /**
@@ -443,6 +453,7 @@ export interface ServeAppDeps {
     toolName: string,
     enabled: boolean,
   ) => Promise<void>;
+  persistDisabledSkills?: DaemonWorkspaceServiceDeps['persistDisabledSkills'];
   contextFilename?: string;
   persistSetting?: (
     workspace: string,
@@ -485,6 +496,7 @@ export interface ServeAppDeps {
    * after daemon scrub).
    */
   credentialStore?: CredentialStore;
+  voiceCoordinator?: WorkspaceVoiceCoordinator;
 }
 
 /**
@@ -548,6 +560,11 @@ export function createServeApp(
   getPort: () => number = () => opts.port,
   deps: ServeAppDeps = {},
 ): Application {
+  if (deps.workspaceRuntimeRemoval && !deps.voiceCoordinator) {
+    throw new Error(
+      'createServeApp: deps.workspaceRuntimeRemoval requires the matching deps.voiceCoordinator.',
+    );
+  }
   const app = express();
   // Forward `maxSessions` into the default-constructed bridge so
   // direct callers of `createServeApp` (tests, embeds) get the same
@@ -717,6 +734,11 @@ export function createServeApp(
       ...(primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {}),
       credentialStore: deps.credentialStore,
     });
+  (
+    app.locals as {
+      invalidateServeFeaturesCache?: () => void;
+    }
+  ).invalidateServeFeaturesCache = invalidateServeFeaturesCache;
   const statusProvider =
     deps.statusProvider ??
     createDaemonStatusProvider(
@@ -823,12 +845,20 @@ export function createServeApp(
         primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {},
       ),
       workspaceSkillsStatusProvider: createWorkspaceSkillsStatusProvider(),
+      ...(primaryEffectiveEnv ? { voiceEnv: primaryEffectiveEnv } : {}),
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools:
         deps.persistDisabledTools ??
         (async () => {
           throw new Error(
             'setWorkspaceToolEnabled requires persistDisabledTools in ServeAppDeps',
+          );
+        }),
+      persistDisabledSkills:
+        deps.persistDisabledSkills ??
+        (async () => {
+          throw new Error(
+            'setWorkspaceSkillEnabled requires persistDisabledSkills in ServeAppDeps',
           );
         }),
       queryWorkspaceStatus: (method, idle) =>
@@ -876,6 +906,8 @@ export function createServeApp(
   (app.locals as { workspaceRegistry?: WorkspaceRegistry }).workspaceRegistry =
     workspaceRegistry;
   const primaryRuntime = workspaceRegistry.primary;
+  const voiceCoordinator =
+    deps.voiceCoordinator ?? new WorkspaceVoiceCoordinator();
   const primaryBoundWorkspace = primaryRuntime.workspaceCwd;
   const primaryBridge = primaryRuntime.bridge;
   const primaryWorkspace = primaryRuntime.workspaceService;
@@ -1203,6 +1235,7 @@ export function createServeApp(
     safeBody,
     sendBridgeError,
     credentialStore: deps.credentialStore,
+    workspaceRegistry,
     ...(deps.maxExtensionOperationHistory === undefined
       ? {}
       : { maxExtensionOperationHistory: deps.maxExtensionOperationHistory }),
@@ -1330,6 +1363,7 @@ export function createServeApp(
     persistSetting: deps.persistSetting,
     persistSettings: deps.persistSettings,
     transcribe: deps.voiceTranscriber,
+    acquireVoiceLease: () => voiceCoordinator.acquire(primaryRuntime),
     broadcastSettingsChanged,
     parseAndValidateClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
@@ -1338,6 +1372,18 @@ export function createServeApp(
       deps.credentialStore,
     ),
     credentialStore: deps.credentialStore,
+  });
+  registerWorkspaceQualifiedVoiceRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    persistSetting: deps.persistSetting,
+    persistSettings: deps.persistSettings,
+    transcribe: deps.voiceTranscriber,
+    acquireVoiceLease: (runtime) => voiceCoordinator.acquire(runtime),
+    parseAndValidateClientId: (req, res, runtime) =>
+      parseAndValidateWorkspaceClientId(req, res, runtime.bridge),
+    invalidateServeFeaturesCache,
   });
   if (deps.persistSettings) {
     registerWorkspaceModelsRoutes(app, {
@@ -1485,6 +1531,20 @@ export function createServeApp(
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
   registerWorkspaceQualifiedToolsRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    sendBridgeError,
+  });
+  registerWorkspaceSkillsRoutes(app, {
+    workspaceRuntime: primaryRuntime,
+    mutate,
+    safeBody,
+    sendBridgeError,
+    parseAndValidateClientId: (req, res) =>
+      parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+  });
+  registerWorkspaceQualifiedSkillsRoutes(app, {
     workspaceRegistry,
     mutate,
     safeBody,
@@ -1691,9 +1751,15 @@ export function createServeApp(
         onConnection: createVoiceWsConnectionHandler(primaryBoundWorkspace, {
           env: getRuntimeEffectiveEnv(primaryRuntime.env),
           credentialStore: deps.credentialStore,
+          acquireVoiceLease: () => voiceCoordinator.acquire(primaryRuntime),
         }),
       },
     ],
+    workspaceVoiceConnection: (runtime, ws, req) =>
+      createVoiceWsConnectionHandler(runtime.workspaceCwd, {
+        env: getRuntimeEffectiveEnv(runtime.env),
+        acquireVoiceLease: () => voiceCoordinator.acquire(runtime),
+      })(ws, req),
   });
   if (acpHandleRef.current) {
     app.locals['acpHandle'] = acpHandleRef.current;

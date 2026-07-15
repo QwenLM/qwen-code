@@ -85,7 +85,12 @@ export function createServeFeatures(
   };
   const getCachedVoiceTranscriptionAvailable = () => {
     cachedVoiceTranscriptionAvailable ??=
-      isWorkspaceVoiceTranscriptionAvailable(boundWorkspace, credentialStore);
+      isWorkspaceVoiceTranscriptionAvailable(
+        boundWorkspace,
+        credentialStore,
+        env,
+        deps.env !== undefined,
+      );
     return cachedVoiceTranscriptionAvailable;
   };
 
@@ -133,11 +138,14 @@ export function createServeFeatures(
 
 function isWorkspaceVoiceTranscriptionAvailable(
   boundWorkspace: string,
-  credentialStore?: CredentialStore,
+  credentialStore: CredentialStore | undefined,
+  env: Readonly<Record<string, string | undefined>>,
+  skipLoadEnvironment: boolean,
 ): boolean {
   try {
     return hasConfiguredBatchVoiceTranscriptionModel(
-      loadSettings(boundWorkspace, { credentialStore }),
+      loadSettings(boundWorkspace, { credentialStore, skipLoadEnvironment }),
+      { env },
     );
   } catch (err) {
     writeStderrLine(

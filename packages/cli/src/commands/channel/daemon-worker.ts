@@ -1,9 +1,12 @@
 import type { CommandModule } from 'yargs';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import {
-  appendChannelMemory,
+  addChannelMemoryEntries,
   clearChannelMemory,
+  listChannelMemoryEntries,
   readChannelMemory,
+  removeChannelMemoryEntries,
+  updateChannelMemoryEntry,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
 import {
@@ -302,7 +305,7 @@ export async function runChannelDaemonWorker(
   );
   const requestedWorkspace = canonicalizeWorkspace(opts.workspace);
   let daemonWorkspace: string;
-  if (capabilities.workspaces && capabilities.workspaces.length > 0) {
+  if (capabilities.workspaces && capabilities.workspaces.length > 1) {
     // Multi-workspace daemon: the worker must target one of the registered
     // workspaces (matched on canonical cwd), and that workspace must be trusted
     // before it can create sessions.
@@ -415,7 +418,10 @@ export async function runChannelDaemonWorker(
             router: createdRouter,
             channelMemory: {
               readChannelMemory,
-              appendChannelMemory,
+              listChannelMemoryEntries,
+              addChannelMemoryEntries,
+              updateChannelMemoryEntry,
+              removeChannelMemoryEntries,
               clearChannelMemory,
             },
             memoryIntentClassifier: new BridgeChannelMemoryIntentClassifier(

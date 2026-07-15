@@ -451,7 +451,10 @@ export function convertClaudeToQwenConfig(
 export async function convertClaudePluginPackage(
   extensionDir: string,
   pluginName: string,
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
+  signal?: AbortSignal,
 ): Promise<{ config: ExtensionConfig; convertedDir: string }> {
+  signal?.throwIfAborted();
   // Step 1: Load marketplace.json
   const marketplaceJsonPath = path.join(
     extensionDir,
@@ -494,6 +497,8 @@ export async function convertClaudePluginPackage(
     marketplacePlugin,
     extensionDir,
     pluginDir,
+    networkPolicy,
+    signal,
   );
 
   if (!fs.existsSync(pluginSource)) {
@@ -1015,7 +1020,10 @@ async function resolvePluginSource(
   pluginConfig: ClaudeMarketplacePluginConfig,
   marketplaceDir: string,
   pluginDir: string,
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
+  signal?: AbortSignal,
 ): Promise<string> {
+  signal?.throwIfAborted();
   const source = pluginConfig.source;
 
   // Handle string source (relative path or URL)
@@ -1031,11 +1039,13 @@ async function resolvePluginSource(
         source,
         type: 'git',
         originSource: 'Claude',
+        networkPolicy,
       };
       try {
-        await downloadFromGitHubRelease(installMetadata, pluginDir);
+        await downloadFromGitHubRelease(installMetadata, pluginDir, signal);
       } catch {
-        await cloneFromGit(installMetadata, pluginDir);
+        signal?.throwIfAborted();
+        await cloneFromGit(installMetadata, pluginDir, signal);
       }
       return pluginDir;
     }
@@ -1085,11 +1095,13 @@ async function resolvePluginSource(
     const installMetadata: ExtensionInstallMetadata = {
       source: `https://github.com/${source.repo}`,
       type: 'git',
+      networkPolicy,
     };
     try {
-      await downloadFromGitHubRelease(installMetadata, pluginDir);
+      await downloadFromGitHubRelease(installMetadata, pluginDir, signal);
     } catch {
-      await cloneFromGit(installMetadata, pluginDir);
+      signal?.throwIfAborted();
+      await cloneFromGit(installMetadata, pluginDir, signal);
     }
     return pluginDir;
   }
@@ -1098,11 +1110,13 @@ async function resolvePluginSource(
     const installMetadata: ExtensionInstallMetadata = {
       source: source.url,
       type: 'git',
+      networkPolicy,
     };
     try {
-      await downloadFromGitHubRelease(installMetadata, pluginDir);
+      await downloadFromGitHubRelease(installMetadata, pluginDir, signal);
     } catch {
-      await cloneFromGit(installMetadata, pluginDir);
+      signal?.throwIfAborted();
+      await cloneFromGit(installMetadata, pluginDir, signal);
     }
     return pluginDir;
   }
@@ -1116,8 +1130,9 @@ async function resolvePluginSource(
       // Prefer the immutable SHA pin when present; fall back to a named ref.
       ref: source.sha || source.ref,
       originSource: 'Claude',
+      networkPolicy,
     };
-    await cloneFromGit(installMetadata, pluginDir);
+    await cloneFromGit(installMetadata, pluginDir, signal);
     // `source.path` comes from an untrusted manifest. Confine it to the cloned
     // repo so a value like "../../.ssh" (or an absolute path) cannot escape.
     if (!source.path || source.path === '.' || path.isAbsolute(source.path)) {

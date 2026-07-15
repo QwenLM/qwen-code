@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 
 const checkForUpdatesDetailed = vi.fn();
-const handleAutoUpdate = vi.fn();
+const relaunchForUpdate = vi.fn();
 const performStandaloneUpdate = vi.fn();
 const getInstallationInfo = vi.fn();
 const resolveUpdateCommand = vi.fn(
@@ -37,7 +37,11 @@ const formatUpdateInstructions = vi.fn(
   },
 );
 vi.mock('../utils/updateCheck.js', () => ({ checkForUpdatesDetailed }));
-vi.mock('../../utils/handleAutoUpdate.js', () => ({ handleAutoUpdate }));
+vi.mock('../../utils/processUtils.js', () => ({
+  CUSTOM_SANDBOX_IMAGE_ENV_VAR: 'QWEN_CODE_CUSTOM_SANDBOX_IMAGE',
+  HOST_UPDATE_RELAUNCH_ENV_VAR: 'QWEN_CODE_HOST_UPDATE_RELAUNCH',
+  relaunchForUpdate,
+}));
 vi.mock('../../utils/standalone-update.js', () => ({
   performStandaloneUpdate,
 }));
@@ -68,6 +72,9 @@ function context(
 describe('updateCommand', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    relaunchForUpdate.mockReset();
+    delete process.env['QWEN_CODE_CUSTOM_SANDBOX_IMAGE'];
+    delete process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH'];
     checkForUpdatesDetailed.mockResolvedValue({
       status: 'update',
       info: {
@@ -81,20 +88,13 @@ describe('updateCommand', () => {
     });
   });
 
-  it('delegates to handleAutoUpdate in interactive mode', async () => {
+  it('hands an interactive update off to the parent process', async () => {
     const commandContext = context('interactive');
-    handleAutoUpdate.mockImplementation((_info, settings) => {
-      expect(settings.merged.general?.enableAutoUpdate).toBeUndefined();
-    });
 
     const result = await updateCommand.action!(commandContext, '');
 
     expect(result).toBeUndefined();
-    expect(handleAutoUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({ message: 'Update available: 1.2.3' }),
-      commandContext.services.settings,
-      '/repo',
-    );
+    expect(relaunchForUpdate).toHaveBeenCalledTimes(1);
     expect(
       commandContext.services.settings.merged.general?.enableAutoUpdate,
     ).toBeUndefined();
@@ -110,7 +110,7 @@ describe('updateCommand', () => {
       content:
         'Update available: 1.2.3\nRun the following to update:\n  npm install -g @qwen-code/qwen-code@1.2.3',
     });
-    expect(handleAutoUpdate).not.toHaveBeenCalled();
+    expect(relaunchForUpdate).not.toHaveBeenCalled();
   });
 
   it('returns manual instructions in interactive mode when auto-update is disabled', async () => {
@@ -124,7 +124,7 @@ describe('updateCommand', () => {
       content:
         'Update available: 1.2.3\nRun the following to update:\n  npm install -g @qwen-code/qwen-code@1.2.3',
     });
-    expect(handleAutoUpdate).not.toHaveBeenCalled();
+    expect(relaunchForUpdate).not.toHaveBeenCalled();
     expect(
       commandContext.services.settings.merged.general?.enableAutoUpdate,
     ).toBe(false);
@@ -147,13 +147,26 @@ describe('updateCommand', () => {
       content:
         'Update available: 1.2.3\nManual update required. Please reinstall Qwen Code.',
     });
-    expect(handleAutoUpdate).not.toHaveBeenCalled();
+    expect(relaunchForUpdate).not.toHaveBeenCalled();
     expect(performStandaloneUpdate).not.toHaveBeenCalled();
   });
 
-  it('does not mutate enableAutoUpdate when handleAutoUpdate throws', async () => {
+  it('hands standalone updates off to the parent process', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: '/tmp/qwen-code',
+    });
     const commandContext = context('interactive');
-    handleAutoUpdate.mockImplementation(() => {
+
+    const result = await updateCommand.action!(commandContext, '');
+
+    expect(result).toBeUndefined();
+    expect(relaunchForUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not mutate enableAutoUpdate when relaunching throws', async () => {
+    const commandContext = context('interactive');
+    relaunchForUpdate.mockImplementation(() => {
       throw new Error('spawn failed');
     });
 
@@ -178,7 +191,7 @@ describe('updateCommand', () => {
       content:
         'Update available: 1.2.3\nManual update required. Please reinstall Qwen Code.',
     });
-    expect(handleAutoUpdate).not.toHaveBeenCalled();
+    expect(relaunchForUpdate).not.toHaveBeenCalled();
   });
 
   it('returns the manual update command in ACP mode', async () => {
@@ -190,6 +203,65 @@ describe('updateCommand', () => {
       content:
         'Update available: 1.2.3\nRun the following to update:\n  npm install -g @qwen-code/qwen-code@1.2.3',
     });
+  });
+
+  it('keeps explicitly configured sandbox images user-managed', async () => {
+    process.env['QWEN_CODE_CUSTOM_SANDBOX_IMAGE'] =
+      'example.com/custom-qwen:1.0.0';
+
+    try {
+      const result = await updateCommand.action!(context('interactive'), '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'Update available: 1.2.3\nThis session uses the custom sandbox image example.com/custom-qwen:1.0.0. Update that image and restart Qwen Code.',
+      });
+      expect(relaunchForUpdate).not.toHaveBeenCalled();
+    } finally {
+      delete process.env['QWEN_CODE_CUSTOM_SANDBOX_IMAGE'];
+    }
+  });
+
+  it('uses the host update capability inside a container', async () => {
+    process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH'] = 'true';
+
+    const result = await updateCommand.action!(context('interactive'), '');
+
+    expect(result).toBeUndefined();
+    expect(relaunchForUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it('respects disabled auto-update for a supported host installation', async () => {
+    process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH'] = 'true';
+
+    const result = await updateCommand.action!(
+      context('interactive', false),
+      '',
+    );
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Update available: 1.2.3\nUpdate Qwen Code on the host, then restart the sandbox.',
+    });
+    expect(relaunchForUpdate).not.toHaveBeenCalled();
+  });
+
+  it('shows manual guidance for an unsupported host installation', async () => {
+    process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH'] = 'false';
+
+    const result = await updateCommand.action!(context('interactive'), '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Update available: 1.2.3\nUpdate Qwen Code on the host, then restart the sandbox.',
+    });
+    expect(relaunchForUpdate).not.toHaveBeenCalled();
   });
 
   it('does not append generic fallback when installation info has updateMessage', async () => {

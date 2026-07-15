@@ -2257,6 +2257,18 @@ const SETTINGS_SCHEMA = {
               'Default timeout, in milliseconds, for foreground shell commands started by the agent. A per-call timeout on the shell tool overrides this. When unset, foreground commands time out after 120000 ms (2 minutes). Set to 0 to disable the timeout.',
             showInDialog: false,
           },
+          heartbeatIntervalMs: {
+            type: 'integer',
+            minimum: 0,
+            maximum: 600000,
+            label: 'Silent Command Heartbeat Interval (ms)',
+            category: 'Tools',
+            requiresRestart: true,
+            default: undefined as number | undefined,
+            description:
+              'Interval, in milliseconds, between liveness heartbeats emitted while a foreground shell command produces no output. Heartbeats are forwarded to ACP clients and stream-json consumers so they can tell a silent command from a dead session. When unset, heartbeats fire every 10000 ms (10 seconds). Set to 0 to disable heartbeats.',
+            showInDialog: false,
+          },
         },
       },
       // Legacy tool permission fields – kept for backward compatibility.

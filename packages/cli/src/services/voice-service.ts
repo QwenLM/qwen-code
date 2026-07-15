@@ -106,16 +106,15 @@ export function voiceSettingsScopeToWire(
 export function buildWorkspaceVoiceSettingsWrites(
   settings: LoadedSettings,
   update: WorkspaceVoiceStateUpdate,
-  opts: { workspaceTrusted?: boolean } = {},
+  opts: { workspaceTrusted?: boolean; scopeOverride?: SettingScope } = {},
 ): WorkspaceVoiceSettingsWrite[] {
-  const voiceSettingsScope = getVoiceSettingsScope(
-    settings,
-    opts.workspaceTrusted,
-  );
+  const voiceSettingsScope =
+    opts.scopeOverride ??
+    getVoiceSettingsScope(settings, opts.workspaceTrusted);
   const writes: WorkspaceVoiceSettingsWrite[] = [];
   if (update.voiceModel !== undefined) {
     writes.push({
-      scope: getPersistScopeForModelSelection(settings),
+      scope: opts.scopeOverride ?? getPersistScopeForModelSelection(settings),
       key: 'voiceModel',
       value: update.voiceModel,
     });
@@ -186,13 +185,14 @@ export function listAvailableVoiceModels(
 
 export function hasConfiguredBatchVoiceTranscriptionModel(
   settings: LoadedSettings,
+  opts: { env?: Readonly<Record<string, string | undefined>> } = {},
 ): boolean {
   for (const model of listAvailableVoiceModels(settings)) {
     if (model.transport !== 'qwen-asr-chat') {
       continue;
     }
     try {
-      validateWorkspaceVoiceConfig(settings, model.id);
+      validateWorkspaceVoiceConfig(settings, model.id, opts);
       return true;
     } catch (err) {
       debugLogger.debug(
@@ -262,14 +262,25 @@ export function validateWorkspaceVoiceModel(
 export function validateWorkspaceVoiceConfig(
   settings: LoadedSettings,
   voiceModel: string,
+  opts: { env?: Readonly<Record<string, string | undefined>> } = {},
 ): WorkspaceVoiceModelDescriptor {
   const descriptor = validateWorkspaceVoiceModel(settings, voiceModel);
   try {
     const config = createVoiceModelSource(settings);
     if (descriptor.transport === 'qwen-asr-chat') {
-      resolveVoiceTranscriptionConfig({ config, settings, voiceModel });
+      resolveVoiceTranscriptionConfig({
+        config,
+        settings,
+        voiceModel,
+        env: opts.env,
+      });
     } else {
-      resolveVoiceStreamConfig({ config, settings, voiceModel });
+      resolveVoiceStreamConfig({
+        config,
+        settings,
+        voiceModel,
+        env: opts.env,
+      });
     }
   } catch (err) {
     throw new WorkspaceVoiceError(
@@ -286,6 +297,7 @@ export function validateWorkspaceVoiceConfig(
 export function validateWorkspaceVoiceState(
   settings: LoadedSettings,
   update: WorkspaceVoiceStateUpdate,
+  opts: { env?: Readonly<Record<string, string | undefined>> } = {},
 ): void {
   if (
     update.enabled === undefined &&
@@ -314,7 +326,7 @@ export function validateWorkspaceVoiceState(
       'A valid voiceModel is required before enabling voice.',
     );
   }
-  validateWorkspaceVoiceConfig(settings, nextVoiceModel);
+  validateWorkspaceVoiceConfig(settings, nextVoiceModel, opts);
 }
 
 export async function transcribeWorkspaceVoiceAudio(
@@ -337,8 +349,8 @@ export async function transcribeWorkspaceVoiceAudio(
       config: createVoiceModelSource(input.settings),
       settings: input.settings,
       voiceModel: input.voiceModel,
-      abortSignal: input.abortSignal,
       env: input.env,
+      abortSignal: input.abortSignal,
     },
   );
   return {

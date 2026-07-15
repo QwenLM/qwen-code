@@ -11,7 +11,16 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import type {
   ChannelAgentBridge,
   ChannelConfig,
@@ -368,7 +377,22 @@ function channelFileDirs(): string[] {
   return readdirSync(parent).map((entry) => join(parent, entry));
 }
 
+// Capture before tests stub TMPDIR; one assertion checks the host temp root.
+const realTmpDir = tmpdir();
+const suiteTmpDir = mkdtempSync(join(realTmpDir, 'qwen-wecom-test-'));
+
 describe('WeComChannel', () => {
+  beforeAll(() => {
+    vi.stubEnv('TMPDIR', suiteTmpDir);
+    vi.stubEnv('TMP', suiteTmpDir);
+    vi.stubEnv('TEMP', suiteTmpDir);
+  });
+
+  afterAll(() => {
+    vi.unstubAllEnvs();
+    rmSync(suiteTmpDir, { recursive: true, force: true });
+  });
+
   beforeEach(() => {
     mocks.instances.length = 0;
     mocks.httpCalls.length = 0;
@@ -4389,7 +4413,7 @@ describe('WeComChannel', () => {
   });
 
   it('does not allow a hardcoded /tmp channel-files fallback', async () => {
-    if (tmpdir() === '/tmp') return;
+    if (realTmpDir === '/tmp') return;
 
     const stderr = vi
       .spyOn(process.stderr, 'write')

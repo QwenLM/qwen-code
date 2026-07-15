@@ -36,6 +36,8 @@ type ChatEditorTestProps = {
   isPreparing?: boolean;
   dialogOpen?: boolean;
   placeholderText?: string;
+  workspaces?: Array<{ id: string; cwd: string }>;
+  atWorkspaceCwd?: string;
 };
 
 const {
@@ -132,6 +134,8 @@ const {
           sessionId: string | null,
         ) => Promise<void>;
         onCreateViaChat?: () => void;
+        workspaces?: Array<{ id: string; cwd: string }>;
+        lockedWorkspace?: { id: string; cwd: string; primary: boolean };
       } | null,
     },
     sidebarTokens: [] as Array<number | undefined>,
@@ -390,6 +394,8 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
       onOpenDaemonStatus?: () => void;
       onOpenSessions?: () => void;
       onOpenSplitView?: () => void;
+      onNewSession?: () => Promise<boolean> | boolean;
+      onLoadSession?: (sessionId: string) => Promise<void> | void;
     }) => {
       sidebarTokens.push(props.sessionListReloadToken);
       // Expose the Daemon Status / Session Overview openers so tests can
@@ -400,6 +406,24 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
           'data-testid': 'sidebar',
           'data-collapsed': String(Boolean(props.collapsed)),
         },
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'new-session',
+            type: 'button',
+            onClick: props.onNewSession,
+          },
+          'new session',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'load-session',
+            type: 'button',
+            onClick: () => props.onLoadSession?.('session-2'),
+          },
+          'load session',
+        ),
         React.createElement(
           'button',
           {
@@ -583,13 +607,40 @@ vi.doMock('./components/dialogs/ScheduledTasksDialog', async () => {
   return {
     ScheduledTasksDialog: (props: {
       onRunPrompt?: (prompt: string, sessionId: string | null) => Promise<void>;
+      workspaces?: Array<{ id: string; cwd: string }>;
+      lockedWorkspace?: { id: string; cwd: string; primary: boolean };
     }) => {
       testState.latestScheduledTasksProps = props;
       return React.createElement('div');
     },
   };
 });
-mockComponent('./components/dialogs/ExtensionsDialog', 'ExtensionsDialog');
+vi.doMock('./components/extensions/ExtensionsManagerPage', async () => {
+  const React = await import('react');
+  return {
+    ExtensionsManagerPage: (props: {
+      onClose: () => void;
+      initialFocusRef?: React.Ref<HTMLHeadingElement>;
+    }) =>
+      React.createElement(
+        'div',
+        { 'data-testid': 'extensions-manager-page' },
+        React.createElement(
+          'h1',
+          {
+            ref: props.initialFocusRef,
+            tabIndex: -1,
+            'data-testid': 'extensions-manager-heading',
+          },
+          'Manage extensions',
+        ),
+        React.createElement('button', {
+          'data-testid': 'extensions-manager-back',
+          onClick: props.onClose,
+        }),
+      ),
+  };
+});
 mockComponent('./components/dialogs/ThemeDialog', 'ThemeDialog');
 mockComponent(
   './components/dialogs/DeleteSessionDialog',
@@ -718,6 +769,7 @@ beforeEach(() => {
     })),
   });
   mockConnection.sessionId = 'session-1';
+  mockConnection.workspaceCwd = '/tmp/project';
   mockConnection.status = 'connected';
   mockConnection.displayName = 'Session One';
   mockConnection.error = undefined;
@@ -725,6 +777,9 @@ beforeEach(() => {
   mockConnection.missingSession = false;
   mockConnection.loadingTranscript = false;
   mockConnection.catchingUp = false;
+  mockWorkspace.capabilities = {
+    workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
+  };
   testState.prompt = 'hello';
   testState.inputAnnotations = undefined;
   testState.streamingState = 'idle';
@@ -784,6 +839,82 @@ afterEach(() => {
 });
 
 describe('App session callbacks', () => {
+  it('reports the current workspace id and path', async () => {
+    mockConnection.workspaceCwd = '/work/secondary';
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true },
+        { id: 'secondary', cwd: '/work/secondary', primary: false },
+      ],
+    };
+    const onSessionIdChange = vi.fn();
+
+    renderApp({ onSessionIdChange });
+    await flush();
+
+    expect(onSessionIdChange).toHaveBeenCalledWith(
+      'session-1',
+      'secondary',
+      '/work/secondary',
+    );
+  });
+
+  it('creates new sessions in the locked workspace without a selector', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true },
+        { id: 'secondary', cwd: '/work/secondary', primary: false },
+      ],
+    };
+    renderApp({ lockedWorkspaceCwd: '/work/secondary' });
+    await flush();
+
+    expect(testState.latestChatEditorProps?.workspaces).toBeUndefined();
+    expect(testState.latestChatEditorProps?.atWorkspaceCwd).toBe(
+      '/work/secondary',
+    );
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('locked prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceCwd: '/work/secondary' }),
+    );
+  });
+
+  it('uses a registered capability fallback while the workspace list is stale', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/workspace',
+      workspaces: undefined,
+    };
+    const lockedWorkspaceCapability = {
+      id: 'secondary',
+      cwd: '/work/secondary',
+      primary: false,
+      trusted: true,
+    };
+    testState.prompt = '/schedule';
+    const { container } = renderApp({
+      lockedWorkspaceCwd: '/work/secondary',
+      lockedWorkspaceCapability,
+    });
+    await flush();
+    await clickSubmit(container);
+    await flush();
+
+    expect(testState.latestScheduledTasksProps?.workspaces).toEqual([
+      lockedWorkspaceCapability,
+    ]);
+    expect(testState.latestScheduledTasksProps?.lockedWorkspace).toEqual(
+      lockedWorkspaceCapability,
+    );
+  });
+
   it('uses configured composer placeholders by state and falls back for blank values', async () => {
     const composerPlaceholders = {
       idle: 'Ask a question',
@@ -884,6 +1015,97 @@ describe('App session callbacks', () => {
       expect(onSessionIdChange).toHaveBeenCalledTimes(1);
     },
   );
+
+  it('focuses the composer after starting a new session', async () => {
+    const { container } = renderApp();
+    await flush();
+    editorFocus.mockClear();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(editorFocus).toHaveBeenCalledOnce();
+  });
+
+  it('focuses a cleared new session without waiting for detach', async () => {
+    const clear = deferred<void>();
+    mockSessionActions.clearSession.mockReturnValueOnce(clear.promise);
+    const { container } = renderApp();
+    await flush();
+    editorFocus.mockClear();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')
+        ?.click();
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(editorFocus).toHaveBeenCalledOnce();
+    await act(async () => clear.resolve());
+  });
+
+  it('focuses the composer after loading an existing session', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+    editorFocus.mockClear();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="load-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-2', {
+      workspaceCwd: undefined,
+    });
+
+    mockConnection.sessionId = 'session-2';
+    rerender();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(editorFocus).toHaveBeenCalledOnce();
+  });
+
+  it('does not steal focus when an approval appears before deferred session focus', async () => {
+    vi.useFakeTimers();
+    const { container, rerender } = renderApp();
+    await flush();
+    editorFocus.mockClear();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="load-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    mockConnection.sessionId = 'session-2';
+    rerender();
+
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+    editorFocus.mockClear();
+    act(() => vi.runOnlyPendingTimers());
+
+    expect(editorFocus).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(
+      document.querySelector('[data-testid="approval-overlay"]'),
+    );
+  });
 
   it('does not show missing-session state for non-404/410 errors', async () => {
     mockConnection.status = 'disconnected';
@@ -1455,6 +1677,53 @@ describe('App session callbacks', () => {
     });
 
     expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
+
+  it('does not open the extensions manager page with /extension manage', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/extension manage';
+    await clickSubmit(container);
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="extensions-manager-page"]'),
+    ).toBeNull();
+  });
+
+  it('opens the extensions manager page with /extensions manage', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/extensions manage';
+    await clickSubmit(container);
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="extensions-manager-page"]'),
+    ).not.toBeNull();
+    const backButton = container.querySelector(
+      '[data-testid="extensions-manager-back"]',
+    );
+    expect(document.activeElement).not.toBe(backButton);
+    expect(document.activeElement).toBe(
+      container.querySelector('[data-testid="extensions-manager-heading"]'),
+    );
+
+    editorFocus.mockClear();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="extensions-manager-back"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="extensions-manager-page"]'),
+    ).toBeNull();
+    expect(editorFocus).toHaveBeenCalled();
   });
 
   it('auto-closes an open panel when an AskUserQuestion approval becomes pending', async () => {

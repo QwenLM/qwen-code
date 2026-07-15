@@ -47,6 +47,7 @@ export {
   findProviderById,
   generateCustomEnvKey,
   getAllProviderBaseUrls,
+  grokProvider,
   idealabProvider,
   minimaxProvider,
   modelscopeProvider,
@@ -67,6 +68,7 @@ export {
   TOKEN_PLAN_BASE_URL,
   TOKEN_PLAN_ENV_KEY,
 } from './presets/alibaba-token-plan.js';
+export { GROK_BASE_URL, GROK_ENV_KEY } from './presets/grok.js';
 export {
   OPENROUTER_BASE_URL,
   OPENROUTER_ENV_KEY,

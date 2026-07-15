@@ -6,38 +6,161 @@
 
 import * as crypto from 'node:crypto';
 import {
-  ExtensionUpdateState,
-  ExtensionManager,
-  checkForExtensionUpdate,
   parseInstallSource,
   redactUrlCredentials,
   SettingScope,
   type CredentialStore,
   type Extension,
   type ExtensionInstallMetadata,
+  type ExtensionManager,
+  type ClaudeMarketplaceConfig,
   type ExtensionSetting,
 } from '@qwen-code/qwen-code-core';
 import type { Application, Request, RequestHandler, Response } from 'express';
-import { loadSettings } from '../../config/settings.js';
-import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import { createFifoTaskQueue } from '../extension-operation-scheduler.js';
 import { isBlockedAuthProviderHost } from '../server/auth-provider-helpers.js';
 import type { SendBridgeError } from '../server/error-response.js';
+import type { safeBody as safeBodyType } from '../server/request-helpers.js';
 import {
-  createBuildWorkspaceCtx,
-  parseAndValidateWorkspaceClientId,
-  type safeBody as safeBodyType,
-} from '../server/request-helpers.js';
-import {
-  STATUS_SCHEMA_VERSION,
-  type ServeExtensionCapabilities,
-  type ServeExtensionEntry,
-  type ServeWorkspaceExtensionsStatus,
-} from '@qwen-code/acp-bridge/status';
+  requireTrustedWorkspaceRuntime,
+  resolveWorkspaceRuntimeFromParam,
+} from '../workspace-route-runtime.js';
+import type {
+  WorkspaceRegistry,
+  WorkspaceRuntime,
+} from '../workspace-registry.js';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
+import {
+  createExtensionsController,
+  redactExtensionDisplaySource,
+  type ExtensionPendingInteraction,
+  type ExtensionOperationContext,
+  type ExtensionsController,
+  type RuntimeReconciliationReservation,
+} from './workspace-extensions-controller.js';
 
 type SafeBody = typeof safeBodyType;
+
+const EXTENSION_PREPARE_DEADLINE_MS = 10 * 60_000;
+const EXTENSION_INTERACTION_DEADLINE_MS = 10 * 60_000;
+const EXTENSION_INTERACTIVE_PREPARE_DEADLINE_MS =
+  EXTENSION_PREPARE_DEADLINE_MS + EXTENSION_INTERACTION_DEADLINE_MS;
+const EXTENSION_UPDATE_CHECK_DEADLINE_MS = 2 * 60_000;
+
+const parseExtensionScope = (
+  body: Record<string, unknown>,
+  res: Response,
+): SettingScope | null => {
+  const scope = body['scope'];
+  if (scope !== 'user' && scope !== 'workspace') {
+    res
+      .status(400)
+      .json({ error: '`scope` must be either "user" or "workspace"' });
+    return null;
+  }
+  return scope === 'user' ? SettingScope.User : SettingScope.Workspace;
+};
+
+const parseExtensionRegistryUrl = (
+  value: string,
+  res: Response,
+): string | null => {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    res.status(400).json({ error: '`registry` must be a valid URL' });
+    return null;
+  }
+  if (parsed.protocol !== 'https:') {
+    res.status(400).json({ error: '`registry` must use https' });
+    return null;
+  }
+  if (parsed.username || parsed.password) {
+    res.status(400).json({ error: '`registry` must not include credentials' });
+    return null;
+  }
+  if (isBlockedAuthProviderHost(parsed.hostname)) {
+    res.status(400).json({ error: '`registry` host is not allowed' });
+    return null;
+  }
+  return parsed.toString().replace(/\/$/, '');
+};
+
+const parsePotentialSourceUrl = (source: string): URL | null => {
+  if (/^[a-zA-Z]:[\\/]/.test(source)) return null;
+  try {
+    return new URL(source);
+  } catch {
+    const colonIndex = source.indexOf(':');
+    if (colonIndex >= 0 && source.slice(0, colonIndex).includes('/')) {
+      return null;
+    }
+    const sshMatch = /^(?:[^@]+@)?(\[[^\]]+\]|[^:]+):/.exec(source);
+    if (!sshMatch?.[1]) return null;
+    try {
+      return new URL(`ssh://${sshMatch[1]}`);
+    } catch {
+      return null;
+    }
+  }
+};
+
+const validateExtensionSourceHost = (
+  source: string,
+  res: Response,
+): boolean => {
+  const parsed = parsePotentialSourceUrl(source);
+  if (!parsed) return true;
+  if (parsed.username || parsed.password) {
+    res.status(400).json({ error: '`source` must not include credentials' });
+    return false;
+  }
+  if (isBlockedAuthProviderHost(parsed.hostname)) {
+    res.status(400).json({ error: '`source` host is not allowed' });
+    return false;
+  }
+  if (parsed.protocol !== 'https:') {
+    res.status(400).json({ error: '`source` must use https' });
+    return false;
+  }
+  return true;
+};
+
+const validateExtensionSourceMetadata = (
+  installMetadata: ExtensionInstallMetadata,
+): boolean => {
+  if (installMetadata.type !== 'git') return true;
+  const parsed = parsePotentialSourceUrl(installMetadata.source);
+  return (
+    !!parsed &&
+    (installMetadata.networkPolicy === 'public'
+      ? parsed.protocol === 'https:'
+      : parsed.protocol === 'https:' || parsed.protocol === 'ssh:') &&
+    !isBlockedAuthProviderHost(parsed.hostname)
+  );
+};
+
+const findLoadedExtension = (
+  extensionManager: ExtensionManager,
+  extensionName: string,
+): Extension | undefined => {
+  const requested = extensionName.toLowerCase();
+  const extensions = extensionManager.getLoadedExtensions();
+  const byName = extensions.find(
+    (extension) => extension.name.toLowerCase() === requested,
+  );
+  if (byName) return byName;
+  if (!extensionName.includes('://') && !extensionName.includes('@')) {
+    return undefined;
+  }
+  return extensions.find(
+    (extension) =>
+      extension.installMetadata?.source?.toLowerCase() === requested,
+  );
+};
 
 interface RegisterWorkspaceExtensionRoutesDeps {
   boundWorkspace: string;
@@ -48,7 +171,20 @@ interface RegisterWorkspaceExtensionRoutesDeps {
   sendBridgeError: SendBridgeError;
   maxExtensionOperationHistory?: number;
   credentialStore?: CredentialStore;
+  // Enables V2 workspace projection and targeted reconciliation routes.
+  workspaceRegistry?: WorkspaceRegistry;
 }
+
+/**
+ * Resolves the extensions controller for a request. Returns `null` (after
+ * emitting the appropriate error) when the workspace selector is unknown, or
+ * when a mutation targets an untrusted workspace.
+ */
+type ResolveController = (
+  req: Request,
+  res: Response,
+  requireTrust: boolean,
+) => ExtensionsController | null;
 
 export function registerWorkspaceExtensionRoutes(
   app: Application,
@@ -62,528 +198,456 @@ export function registerWorkspaceExtensionRoutes(
     safeBody,
     sendBridgeError,
     credentialStore,
+    workspaceRegistry,
   } = deps;
-  const maxExtensionOperationHistory = deps.maxExtensionOperationHistory ?? 100;
-  const buildWorkspaceCtx = createBuildWorkspaceCtx(boundWorkspace);
-
-  let extensionInstallQueue: Promise<unknown> = Promise.resolve();
-  let extensionInstallQueueDepth = 0;
-  const MAX_EXTENSION_INSTALL_QUEUE_DEPTH = 10;
-  const enqueueExtensionInstall = async <T>(run: () => Promise<T>) => {
-    if (extensionInstallQueueDepth >= MAX_EXTENSION_INSTALL_QUEUE_DEPTH) {
-      throw new Error('Extension operation queue is full');
-    }
-    extensionInstallQueueDepth += 1;
-    const next = extensionInstallQueue.then(run, run).finally(() => {
-      extensionInstallQueueDepth -= 1;
-    });
-    extensionInstallQueue = next.catch(() => undefined);
-    return next;
-  };
-  const EXTENSION_MUTATION_TIMEOUT_MS = 10 * 60_000;
-  const EXTENSION_REFRESH_TIMEOUT_MS = 30_000;
-  const isExtensionQueueFullError = (err: unknown): boolean =>
-    err instanceof Error && err.message === 'Extension operation queue is full';
-  const sendExtensionQueueFull = (res: Response) => {
-    res.status(429).json({
-      error: 'Extension operation queue is full',
-      code: 'extension_queue_full',
-    });
-  };
-  const withExtensionTimeout = async <T>(
-    promise: Promise<T>,
-    timeoutMs: number,
-    operation: string,
-  ): Promise<T> =>
-    await new Promise<T>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error(`${operation} timed out after ${timeoutMs}ms`));
-      }, timeoutMs);
-      promise.then(
-        (value) => {
-          clearTimeout(timeout);
-          resolve(value);
-        },
-        (err: unknown) => {
-          clearTimeout(timeout);
-          reject(err);
-        },
-      );
-    });
-  const createExtensionManager = () =>
-    new ExtensionManager({
-      workspaceDir: boundWorkspace,
-      isWorkspaceTrusted:
-        getWorkspaceTrustStatus(
-          loadSettings(boundWorkspace, { credentialStore }).merged,
-          boundWorkspace,
-        ).effective.state === 'trusted',
-      requestConsent: () => Promise.resolve(),
-      requestSetting: async (setting: ExtensionSetting) => {
-        throw new Error(
-          `Extension setting "${setting.envVar}" requires interactive configuration and is not supported over the daemon install endpoint.`,
-        );
-      },
-      requestChoicePlugin: async () => {
-        throw new Error(
-          'Marketplace plugin selection is not supported over the daemon install endpoint. Specify a plugin name in the source.',
-        );
-      },
-    });
-  const validateExtensionMutationClient = (
-    req: Request,
-    res: Response,
-    route: string,
-    opts: { requireClientId?: boolean } = {},
-  ): boolean => {
-    const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
-    if (clientId === null) return false;
-    if (clientId === undefined && opts.requireClientId !== false) {
-      res.status(400).json({
-        error: 'Missing X-Qwen-Client-Id header',
-        code: 'missing_client_id',
-      });
-      return false;
-    }
-    buildWorkspaceCtx(route, clientId);
-    return true;
-  };
-  const parseExtensionScope = (
-    body: Record<string, unknown>,
-    res: Response,
-  ): SettingScope | null => {
-    const scope = body['scope'];
-    if (scope !== 'user' && scope !== 'workspace') {
-      res
-        .status(400)
-        .json({ error: '`scope` must be either "user" or "workspace"' });
-      return null;
-    }
-    return scope === 'user' ? SettingScope.User : SettingScope.Workspace;
-  };
-  const parseExtensionRegistryUrl = (
-    value: string,
-    res: Response,
-  ): string | null => {
-    let parsed: URL;
-    try {
-      parsed = new URL(value);
-    } catch {
-      res.status(400).json({ error: '`registry` must be a valid URL' });
-      return null;
-    }
-    if (parsed.protocol !== 'https:') {
-      res.status(400).json({ error: '`registry` must use https' });
-      return null;
-    }
-    if (parsed.username || parsed.password) {
-      res
-        .status(400)
-        .json({ error: '`registry` must not include credentials' });
-      return null;
-    }
-    if (isBlockedAuthProviderHost(parsed.hostname)) {
-      res.status(400).json({ error: '`registry` host is not allowed' });
-      return null;
-    }
-    return parsed.toString().replace(/\/$/, '');
-  };
-  const parsePotentialSourceUrl = (source: string): URL | null => {
-    if (/^[a-zA-Z]:[\\/]/.test(source)) return null;
-    try {
-      return new URL(source);
-    } catch {
-      const sshMatch = /^(?:[^@]+@)?(\[[^\]]+\]|[^:]+):/.exec(source);
-      if (!sshMatch?.[1]) return null;
-      try {
-        return new URL(`ssh://${sshMatch[1]}`);
-      } catch {
-        return null;
-      }
-    }
-  };
-  const validateExtensionSourceHost = (
-    source: string,
-    res: Response,
-  ): boolean => {
-    const parsed = parsePotentialSourceUrl(source);
-    if (!parsed) return true;
-    if (parsed.username || parsed.password) {
-      res.status(400).json({ error: '`source` must not include credentials' });
-      return false;
-    }
-    if (isBlockedAuthProviderHost(parsed.hostname)) {
-      res.status(400).json({ error: '`source` host is not allowed' });
-      return false;
-    }
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'ssh:') {
-      res.status(400).json({ error: '`source` must use https or ssh' });
-      return false;
-    }
-    return true;
-  };
-  const validateExtensionSourceMetadata = (
-    installMetadata: ExtensionInstallMetadata,
-  ): boolean => {
-    if (installMetadata.type !== 'git') return true;
-    const parsed = parsePotentialSourceUrl(installMetadata.source);
-    return (
-      !!parsed &&
-      (parsed.protocol === 'https:' || parsed.protocol === 'ssh:') &&
-      !isBlockedAuthProviderHost(parsed.hostname)
-    );
-  };
-  const findLoadedExtension = (
-    extensionManager: ExtensionManager,
-    extensionName: string,
-  ): Extension | undefined => {
-    const requested = extensionName.toLowerCase();
-    const extensions = extensionManager.getLoadedExtensions();
-    const byName = extensions.find(
-      (extension) => extension.name.toLowerCase() === requested,
-    );
-    if (byName) return byName;
-    if (!extensionName.includes('://') && !extensionName.includes('@')) {
-      return undefined;
-    }
-    return extensions.find(
-      (extension) =>
-        extension.installMetadata?.source?.toLowerCase() === requested,
-    );
-  };
-  type ExtensionMutationEvent = {
-    status: 'installed' | 'enabled' | 'disabled' | 'updated' | 'uninstalled';
-    source?: string;
-    name?: string;
-    version?: string;
-  };
-  type ExtensionOperationStatus = {
-    v: 1;
-    operationId: string;
-    operation: string;
-    status:
-      | 'queued'
-      | 'running'
-      | 'succeeded'
-      | 'succeeded_with_refresh_error'
-      | 'failed';
-    createdAt: number;
-    updatedAt: number;
-    source?: string;
-    name?: string;
-    result?: ExtensionMutationEvent & {
-      refreshed?: number;
-      failed?: number;
-      error?: string;
-    };
-    error?: string;
-  };
-  const extensionOperations = new Map<string, ExtensionOperationStatus>();
-  const isTerminalExtensionOperation = (
-    operation: ExtensionOperationStatus,
-  ): boolean => operation.status !== 'queued' && operation.status !== 'running';
-  const redactExtensionOperationResult = (
-    event: ExtensionMutationEvent,
-  ): ExtensionMutationEvent => ({
-    ...event,
-    ...(event.source ? { source: redactUrlCredentials(event.source) } : {}),
+  const maxExtensionOperationHistory = deps.maxExtensionOperationHistory;
+  const controllerDeps = (
+    ws: string,
+    wsBridge: AcpSessionBridge,
+    wsService: DaemonWorkspaceService,
+  ) => ({
+    boundWorkspace: ws,
+    bridge: wsBridge,
+    workspace: wsService,
+    credentialStore,
+    ...(maxExtensionOperationHistory === undefined
+      ? {}
+      : { maxExtensionOperationHistory }),
   });
-  const rememberExtensionOperation = (
-    operation: ExtensionOperationStatus,
-  ): void => {
-    extensionOperations.set(operation.operationId, operation);
-    while (extensionOperations.size > maxExtensionOperationHistory) {
-      let evicted = false;
-      for (const [id, storedOperation] of extensionOperations) {
-        if (!isTerminalExtensionOperation(storedOperation)) continue;
-        extensionOperations.delete(id);
-        evicted = true;
-        break;
-      }
-      if (!evicted) break;
+
+  const primaryController = createExtensionsController(
+    controllerDeps(boundWorkspace, bridge, workspace),
+  );
+  type ExtensionInteractionRequest =
+    | Omit<
+        Extract<ExtensionPendingInteraction, { kind: 'marketplace_plugin' }>,
+        'id'
+      >
+    | Omit<Extract<ExtensionPendingInteraction, { kind: 'setting' }>, 'id'>;
+  const pendingExtensionInteractions = new Map<
+    string,
+    {
+      interaction: ExtensionPendingInteraction;
+      resolve: (value: string) => void;
+      reject: (reason: Error) => void;
+      timeout: ReturnType<typeof setTimeout>;
     }
-  };
-  const updateExtensionOperation = (
+  >();
+  const supersededInstallOperations = new Set<string>();
+  const cancelPendingExtensionInteraction = (
     operationId: string,
-    patch: Partial<Omit<ExtensionOperationStatus, 'operationId' | 'createdAt'>>,
+    reason: string,
   ): void => {
-    const current = extensionOperations.get(operationId);
-    if (!current) return;
-    extensionOperations.set(operationId, {
-      ...current,
-      ...patch,
-      updatedAt: Date.now(),
+    const pending = pendingExtensionInteractions.get(operationId);
+    if (!pending) return;
+    clearTimeout(pending.timeout);
+    pendingExtensionInteractions.delete(operationId);
+    pending.reject(new Error(reason));
+  };
+  const supersedeActiveInstallOperations = (
+    controller: ExtensionsController,
+    currentOperationId: string,
+  ): void => {
+    for (const operation of controller.getActiveOperations()) {
+      if (
+        operation.operation !== 'install' ||
+        operation.operationId === currentOperationId
+      ) {
+        continue;
+      }
+      supersededInstallOperations.add(operation.operationId);
+      cancelPendingExtensionInteraction(
+        operation.operationId,
+        'Extension installation cancelled by a new install request',
+      );
+    }
+  };
+  const waitForExtensionInteraction = (
+    controller: ExtensionsController,
+    operationId: string,
+    interaction: ExtensionInteractionRequest,
+  ): Promise<string> => {
+    if (supersededInstallOperations.delete(operationId)) {
+      return Promise.reject(
+        new Error('Extension installation superseded by a new install request'),
+      );
+    }
+    const operation = controller.getOperation(operationId);
+    if (
+      operation &&
+      operation.status !== 'queued' &&
+      operation.status !== 'running' &&
+      operation.status !== 'waiting_for_input'
+    ) {
+      return Promise.reject(new Error('Extension operation already completed'));
+    }
+    const pendingInteraction = {
+      ...interaction,
+      id: crypto.randomUUID(),
+    } as ExtensionPendingInteraction;
+    return new Promise<string>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        pendingExtensionInteractions.delete(operationId);
+        controller.updateOperation(operationId, {
+          status: 'failed',
+          phase: undefined,
+          interaction: undefined,
+          error: 'Extension interaction timed out',
+        });
+        reject(new Error('Extension interaction timed out'));
+      }, EXTENSION_INTERACTION_DEADLINE_MS);
+      timeout.unref?.();
+      pendingExtensionInteractions.set(operationId, {
+        interaction: pendingInteraction,
+        resolve,
+        reject,
+        timeout,
+      });
+      controller.updateOperation(operationId, {
+        status: 'waiting_for_input',
+        phase: undefined,
+        interaction: pendingInteraction,
+      });
     });
   };
-  const runQueuedExtensionMutation = (
-    operation: string,
-    failureContext: { source?: string; name?: string },
-    res: Response,
-    run: (
-      extensionManager: ExtensionManager,
-    ) => Promise<ExtensionMutationEvent>,
-  ): void => {
-    if (extensionInstallQueueDepth >= MAX_EXTENSION_INSTALL_QUEUE_DEPTH) {
-      sendExtensionQueueFull(res);
-      return;
-    }
-    const operationId = crypto.randomUUID();
-    const now = Date.now();
-    rememberExtensionOperation({
-      v: 1,
-      operationId,
-      operation,
-      status: 'queued',
-      createdAt: now,
-      updatedAt: now,
-      ...(failureContext.source
-        ? { source: redactUrlCredentials(failureContext.source) }
-        : {}),
-      ...(failureContext.name ? { name: failureContext.name } : {}),
-    });
-    res.status(202).json({ accepted: true, operationId });
-    void enqueueExtensionInstall(async () => {
-      try {
-        updateExtensionOperation(operationId, { status: 'running' });
-        const extensionManager = createExtensionManager();
-        await extensionManager.refreshCache();
-        const event = await withExtensionTimeout(
-          run(extensionManager),
-          EXTENSION_MUTATION_TIMEOUT_MS,
-          `extension ${operation}`,
+  const extensionInteractionHandlers = (
+    controller: ExtensionsController,
+    operationId: string,
+  ) => ({
+    requestSetting: (setting: ExtensionSetting) =>
+      waitForExtensionInteraction(controller, operationId, {
+        kind: 'setting',
+        setting: {
+          name: setting.name,
+          description: setting.description,
+          sensitive: setting.sensitive === true,
+        },
+      }),
+    requestChoicePlugin: (marketplace: ClaudeMarketplaceConfig) => {
+      if (marketplace.plugins.length === 0) {
+        return Promise.reject(
+          new Error(`Marketplace "${marketplace.name}" has no plugins`),
         );
-        extensionsStatusCache = undefined;
-        workspace.invalidateWorkspaceSkillsStatus();
-        try {
-          const result = await bridge.refreshExtensionsForAllSessions(event);
-          updateExtensionOperation(operationId, {
-            status: 'succeeded',
-            result: {
-              ...redactExtensionOperationResult(event),
-              refreshed: result.refreshed,
-              failed: result.failed,
-            },
-          });
-          writeStderrLine(
-            `qwen serve: extensions ${operation}: refreshed ${result.refreshed} session(s), ${result.failed} failed`,
+      }
+      return waitForExtensionInteraction(controller, operationId, {
+        kind: 'marketplace_plugin',
+        marketplace: { name: marketplace.name },
+        plugins: marketplace.plugins.map((plugin) => ({
+          name: plugin.name,
+          ...(plugin.description ? { description: plugin.description } : {}),
+          source: redactExtensionDisplaySource(
+            typeof plugin.source === 'string'
+              ? plugin.source
+              : plugin.source.source === 'github'
+                ? plugin.source.repo
+                : plugin.source.url,
+          ),
+          ...(plugin.category ? { category: plugin.category } : {}),
+          ...(plugin.tags ? { tags: plugin.tags } : {}),
+        })),
+      });
+    },
+  });
+  const runtimeReconciliationQueue = createFifoTaskQueue(1);
+  const reserveRuntimeReconciliation = (): RuntimeReconciliationReservation => {
+    let provideTask!: (task?: () => Promise<unknown>) => void;
+    const task = new Promise<(() => Promise<unknown>) | undefined>(
+      (resolve) => {
+        provideTask = resolve;
+      },
+    );
+    const queued = runtimeReconciliationQueue.run(async () => {
+      const run = await task;
+      return run ? await run() : undefined;
+    });
+    let used = false;
+    return {
+      run: async <T>(run: () => Promise<T>): Promise<T> => {
+        if (used) throw new Error('Runtime reconciliation already released');
+        used = true;
+        provideTask(run);
+        return (await queued) as T;
+      },
+      release: () => {
+        if (used) return;
+        used = true;
+        provideTask(undefined);
+      },
+    };
+  };
+  const appliedGenerationByWorkspaceId = new Map<string, number>();
+  const onRuntimeReconciled = (
+    runtime: WorkspaceRuntime,
+    generation: number,
+  ): void => {
+    appliedGenerationByWorkspaceId.set(runtime.workspaceId, generation);
+  };
+  const globalReconciliationOptions = () =>
+    workspaceRegistry
+      ? {
+          refreshRuntimes: () => workspaceRegistry.list(),
+          reserveRuntimeReconciliation,
+          onRuntimeReconciled,
+        }
+      : {};
+  const workspaceReconciliationOptions = () =>
+    workspaceRegistry
+      ? {
+          refreshRuntimes: [workspaceRegistry.primary],
+          reserveRuntimeReconciliation,
+          onRuntimeReconciled,
+        }
+      : {};
+  const mutationClientBridges = (
+    runtimes?:
+      | readonly WorkspaceRuntime[]
+      | (() => readonly WorkspaceRuntime[]),
+  ): readonly AcpSessionBridge[] =>
+    (typeof runtimes === 'function'
+      ? runtimes()
+      : (runtimes ?? workspaceRegistry?.list())
+    )?.map((runtime) => runtime.bridge) ?? [bridge];
+
+  if (workspaceRegistry) {
+    let observedGeneration: number | undefined;
+    let reconciling = false;
+    const reconcileExternalGeneration = async (): Promise<void> => {
+      if (reconciling) return;
+      reconciling = true;
+      try {
+        const manager = primaryController.createExtensionManager(
+          boundWorkspace,
+          true,
+        );
+        const generation = (await manager.getExtensionStoreSnapshot())
+          .generation;
+        const pendingRuntimes = workspaceRegistry
+          .list()
+          .filter(
+            (runtime) =>
+              (appliedGenerationByWorkspaceId.get(runtime.workspaceId) ?? 0) !==
+              generation,
           );
-        } catch (refreshErr) {
-          const message = redactUrlCredentials(
-            refreshErr instanceof Error
-              ? refreshErr.message
-              : String(refreshErr),
-          );
-          updateExtensionOperation(operationId, {
-            status: 'succeeded_with_refresh_error',
-            result: {
-              ...redactExtensionOperationResult(event),
-              refreshed: 0,
-              failed: 1,
-              error: message.slice(0, 500),
-            },
-          });
-          try {
-            bridge.broadcastExtensionsChanged({
-              ...event,
-              refreshed: 0,
-              failed: 1,
-              error: message.slice(0, 500),
-            });
-          } catch (broadcastErr) {
+        if (generation === observedGeneration && pendingRuntimes.length === 0)
+          return;
+        const runtimes = pendingRuntimes;
+        if (runtimes.length === 0) return;
+        const results = await runtimeReconciliationQueue.run(
+          async () =>
+            await Promise.allSettled(
+              runtimes.map(async (runtime) => {
+                runtime.workspaceService.invalidateWorkspaceSkillsStatus();
+                const result =
+                  await runtime.bridge.refreshExtensionsForAllSessions();
+                if (result.failed > 0) {
+                  throw new Error(
+                    `${result.failed} extension session refresh(es) failed`,
+                  );
+                }
+              }),
+            ),
+        );
+        results.forEach((result, index) => {
+          if (result.status === 'fulfilled') {
+            const workspaceId = runtimes[index]!.workspaceId;
+            appliedGenerationByWorkspaceId.set(workspaceId, generation);
+          } else {
             writeStderrLine(
-              `qwen serve: extensions ${operation}: failed to broadcast refresh failure: ${
-                broadcastErr instanceof Error
-                  ? redactUrlCredentials(broadcastErr.message)
-                  : String(broadcastErr)
-              }`,
+              `qwen serve: extension generation reconciliation failed for workspace ${runtimes[index]!.workspaceId}: ${redactUrlCredentials(
+                result.reason instanceof Error
+                  ? result.reason.message
+                  : String(result.reason),
+              )}`,
             );
           }
-          writeStderrLine(
-            `qwen serve: extensions ${operation}: mutation succeeded but refresh failed: ${message}`,
-          );
-        }
-      } catch (err) {
-        const message = redactUrlCredentials(
-          err instanceof Error ? err.message : String(err),
-        );
-        updateExtensionOperation(operationId, {
-          status: 'failed',
-          error: message.slice(0, 500),
         });
-        try {
-          bridge.broadcastExtensionsChanged({
-            status: 'failed',
-            ...(failureContext.source
-              ? { source: redactUrlCredentials(failureContext.source) }
-              : {}),
-            ...(failureContext.name ? { name: failureContext.name } : {}),
-            refreshed: 0,
-            failed: 0,
-            error: message.slice(0, 500),
-          });
-        } catch (broadcastErr) {
-          writeStderrLine(
-            `qwen serve: extensions ${operation}: failed to broadcast failure: ${
-              broadcastErr instanceof Error
-                ? redactUrlCredentials(broadcastErr.message)
-                : String(broadcastErr)
-            }`,
-          );
+        if (
+          runtimes.length === pendingRuntimes.length &&
+          results.every((result) => result.status === 'fulfilled')
+        ) {
+          observedGeneration = generation;
         }
-        try {
-          writeStderrLine(
-            `qwen serve: extensions ${operation}: background task failed: ${message}`,
-          );
-        } catch {
-          // Keep queued background work from surfacing as unhandledRejection.
-        }
-      }
-    }).catch((err) => {
-      const message = redactUrlCredentials(
-        err instanceof Error ? err.message : String(err),
-      );
-      updateExtensionOperation(operationId, {
-        status: 'failed',
-        error: message.slice(0, 500),
-      });
-      try {
+      } catch (error) {
         writeStderrLine(
-          `qwen serve: extensions ${operation}: queued task failed: ${message}`,
+          `qwen serve: extension generation reconciliation failed: ${redactUrlCredentials(
+            error instanceof Error ? error.message : String(error),
+          )}`,
         );
-      } catch {
-        // Last-resort guard for detached async work.
+      } finally {
+        reconciling = false;
+      }
+    };
+    const generationPoller = setInterval(
+      () => void reconcileExternalGeneration(),
+      30_000,
+    );
+    generationPoller.unref();
+    (
+      app.locals as { stopExtensionGenerationReconciler?: () => void }
+    ).stopExtensionGenerationReconciler = () => clearInterval(generationPoller);
+  }
+
+  const registerFor = (base: string, resolve: ResolveController): void => {
+    // GET {base} — read-only installed extension status.
+    app.get(base, async (req, res) => {
+      const ctrl = resolve(req, res, false);
+      if (!ctrl) return;
+      try {
+        res.status(200).json(await ctrl.buildLocalExtensionsStatus());
+      } catch (err) {
+        sendBridgeError(res, err, { route: `GET ${base}` });
       }
     });
-  };
-  let extensionsStatusCache:
-    | { expiresAt: number; value: ServeWorkspaceExtensionsStatus }
-    | undefined;
-  const buildLocalExtensionsStatus =
-    async (): Promise<ServeWorkspaceExtensionsStatus> => {
-      const now = Date.now();
-      if (extensionsStatusCache && extensionsStatusCache.expiresAt > now) {
-        return extensionsStatusCache.value;
-      }
-      const extensionManager = createExtensionManager();
-      await extensionManager.refreshCache();
-      const entries: ServeExtensionEntry[] = extensionManager
-        .getLoadedExtensions()
-        .map((ext): ServeExtensionEntry => {
-          const capabilities: ServeExtensionCapabilities = {
-            mcpServerCount: ext.mcpServers
-              ? Object.keys(ext.mcpServers).length
-              : 0,
-            skillCount: ext.skills?.length ?? 0,
-            agentCount: ext.agents?.length ?? 0,
-            hookCount: ext.hooks
-              ? Object.values(ext.hooks).reduce(
-                  (sum, defs) => sum + (defs?.length ?? 0),
-                  0,
-                )
-              : 0,
-            commandCount: ext.commands?.length ?? 0,
-            contextFileCount: ext.contextFiles.length,
-            channelCount: ext.channels ? Object.keys(ext.channels).length : 0,
-            hasSettings: (ext.settings?.length ?? 0) > 0,
-          };
-          return {
-            kind: 'extension',
-            id: ext.id,
-            name: ext.name,
-            ...(ext.displayName ? { displayName: ext.displayName } : {}),
-            ...(ext.config.description
-              ? { description: ext.config.description }
-              : {}),
-            version: ext.version,
-            isActive: ext.isActive,
-            path: ext.path,
-            ...(ext.installMetadata?.source
-              ? { source: redactUrlCredentials(ext.installMetadata.source) }
-              : {}),
-            ...(ext.installMetadata?.type
-              ? { installType: ext.installMetadata.type }
-              : {}),
-            ...(ext.installMetadata?.originSource
-              ? { originSource: ext.installMetadata.originSource }
-              : {}),
-            ...(ext.installMetadata?.ref
-              ? { ref: ext.installMetadata.ref }
-              : {}),
-            ...(ext.installMetadata?.autoUpdate !== undefined
-              ? { autoUpdate: ext.installMetadata.autoUpdate }
-              : {}),
-            updateState: ext.installMetadata ? 'unknown' : 'not updatable',
-            capabilities,
-            details: {
-              mcpServers: ext.mcpServers ? Object.keys(ext.mcpServers) : [],
-              commands: ext.commands ?? [],
-              skills: ext.skills?.map((skill) => skill.name) ?? [],
-              agents: ext.agents?.map((agent) => agent.name) ?? [],
-              contextFiles: ext.contextFiles,
-              settings:
-                ext.resolvedSettings?.map((setting) => setting.name) ?? [],
-            },
-          };
-        });
-      const status = {
-        v: STATUS_SCHEMA_VERSION,
-        workspaceCwd: boundWorkspace,
-        initialized: true,
-        extensions: entries,
-      };
-      extensionsStatusCache = {
-        expiresAt: now + 2_000,
-        value: status,
-      };
-      return status;
-    };
-  // GET /workspace/extensions — read-only installed extension status.
-  app.get('/workspace/extensions', async (_req, res) => {
-    try {
-      buildWorkspaceCtx('GET /workspace/extensions');
-      res.status(200).json(await buildLocalExtensionsStatus());
-    } catch (err) {
-      sendBridgeError(res, err, { route: 'GET /workspace/extensions' });
-    }
-  });
 
-  app.get('/workspace/extensions/operations/:operationId', async (req, res) => {
-    try {
-      buildWorkspaceCtx('GET /workspace/extensions/operations/:operationId');
-      const operationId = req.params['operationId'];
-      if (!operationId) {
-        res.status(400).json({ error: 'Missing extension operation id' });
-        return;
-      }
-      const operation = extensionOperations.get(operationId);
-      if (!operation) {
-        res.status(404).json({
-          error: `Extension operation "${operationId}" not found`,
-          code: 'extension_operation_not_found',
-        });
-        return;
-      }
-      res.status(200).json(operation);
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'GET /workspace/extensions/operations/:operationId',
-      });
-    }
-  });
+    app.get(`${base}/operations`, async (req, res) => {
+      const ctrl = resolve(req, res, false);
+      if (!ctrl) return;
+      res.status(200).json({ v: 1, operations: ctrl.getActiveOperations() });
+    });
 
-  // POST /workspace/extensions/install — install an extension and refresh
-  // all active sessions asynchronously.
-  app.post(
-    '/workspace/extensions/install',
-    mutate({ strict: true }),
-    async (req, res) => {
+    app.get(`${base}/operations/:operationId`, async (req, res) => {
+      const ctrl = resolve(req, res, false);
+      if (!ctrl) return;
+      try {
+        const operationId = req.params['operationId'];
+        if (!operationId) {
+          res.status(400).json({ error: 'Missing extension operation id' });
+          return;
+        }
+        const operation = ctrl.getOperation(operationId);
+        if (!operation) {
+          res.status(404).json({
+            error: `Extension operation "${operationId}" not found`,
+            code: 'extension_operation_not_found',
+          });
+          return;
+        }
+        if (
+          base === '/workspace/extensions' &&
+          operation.status === 'succeeded_with_warnings'
+        ) {
+          const warningError =
+            operation.warnings?.find((warning) => warning.code === undefined)
+              ?.error ??
+            operation.warnings?.[0]?.error ??
+            operation.result?.error;
+          const legacyOperation = {
+            ...operation,
+            status: 'succeeded_with_refresh_error' as const,
+          };
+          if (operation.result && warningError) {
+            legacyOperation.result = {
+              ...operation.result,
+              error: warningError,
+            };
+          } else if (warningError) {
+            legacyOperation.error = warningError;
+          }
+          res.status(200).json(legacyOperation);
+          return;
+        }
+        res.status(200).json(operation);
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: `GET ${base}/operations/:operationId`,
+        });
+      }
+    });
+
+    app.post(
+      `${base}/operations/:operationId/interactions/:interactionId`,
+      mutate({ strict: true }),
+      async (req, res) => {
+        const ctrl = resolve(req, res, false);
+        if (!ctrl) return;
+        try {
+          if (
+            !ctrl.validateExtensionMutationClient(req, res, {
+              requireClientId: false,
+            })
+          ) {
+            return;
+          }
+          const operationId = req.params['operationId'];
+          const interactionId = req.params['interactionId'];
+          const pending = operationId
+            ? pendingExtensionInteractions.get(operationId)
+            : undefined;
+          if (!operationId || !interactionId || !pending) {
+            res.status(404).json({ error: 'Extension interaction not found' });
+            return;
+          }
+          if (pending.interaction.id !== interactionId) {
+            res.status(404).json({ error: 'Extension interaction not found' });
+            return;
+          }
+          const body = safeBody(req);
+          let value: string;
+          if (body['cancelled'] === true) {
+            clearTimeout(pending.timeout);
+            pendingExtensionInteractions.delete(operationId);
+            ctrl.updateOperation(operationId, {
+              status: 'failed',
+              phase: undefined,
+              interaction: undefined,
+              error: 'Extension operation cancelled',
+            });
+            pending.reject(new Error('Extension operation cancelled'));
+            res.status(200).json({ accepted: true });
+            return;
+          }
+          if (pending.interaction.kind === 'marketplace_plugin') {
+            const pluginName = body['pluginName'];
+            if (
+              typeof pluginName !== 'string' ||
+              !pending.interaction.plugins.some(
+                (plugin) => plugin.name === pluginName,
+              )
+            ) {
+              res
+                .status(400)
+                .json({ error: 'Invalid marketplace plugin name' });
+              return;
+            }
+            value = pluginName;
+          } else {
+            const settingValue = body['value'];
+            if (typeof settingValue !== 'string') {
+              res
+                .status(400)
+                .json({ error: 'Extension setting value must be a string' });
+              return;
+            }
+            value = settingValue;
+          }
+          clearTimeout(pending.timeout);
+          pendingExtensionInteractions.delete(operationId);
+          ctrl.updateOperation(operationId, {
+            status: 'running',
+            phase: 'preparing',
+            interaction: undefined,
+            error: undefined,
+          });
+          pending.resolve(value);
+          res.status(200).json({ accepted: true });
+        } catch (err) {
+          sendBridgeError(res, err, {
+            route: `POST ${base}/operations/:operationId/interactions/:interactionId`,
+          });
+        }
+      },
+    );
+
+    // POST {base}/install — install an extension and refresh all active
+    // sessions asynchronously.
+    app.post(`${base}/install`, mutate({ strict: true }), async (req, res) => {
+      const ctrl = resolve(req, res, true);
+      if (!ctrl) return;
       try {
         if (
-          !validateExtensionMutationClient(
-            req,
-            res,
-            'POST /workspace/extensions/install',
-          )
+          !ctrl.validateExtensionMutationClient(req, res, {
+            requireClientId: false,
+          })
         ) {
           return;
         }
@@ -646,353 +710,1171 @@ export function registerWorkspaceExtensionRoutes(
         if (!validateExtensionSourceHost(sourceValue, res)) {
           return;
         }
+        const localSource =
+          /^[A-Za-z]:[\\/]/.test(sourceValue) ||
+          sourceValue.startsWith('/') ||
+          sourceValue.startsWith('.');
+        if (localSource) {
+          try {
+            const metadata = await parseInstallSource(sourceValue, {
+              networkPolicy: 'public',
+            });
+            if (
+              metadata.type !== 'git' &&
+              metadata.type !== 'github-release' &&
+              metadata.type !== 'npm'
+            ) {
+              res.status(400).json({
+                error:
+                  'Only GitHub, Git, and npm extension installs are supported over the daemon endpoint.',
+              });
+              return;
+            }
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : 'Invalid install source';
+            res.status(400).json({
+              error: redactUrlCredentials(
+                message.replaceAll(
+                  sourceValue,
+                  redactExtensionDisplaySource(sourceValue),
+                ),
+              ),
+            });
+            return;
+          }
+        }
+        const npmSource = sourceValue.startsWith('@');
+        const remoteSource =
+          npmSource ||
+          sourceValue.startsWith('https://') ||
+          /^[^/\s]+\/[^/\s]+/.test(sourceValue);
+        if (!localSource && !remoteSource) {
+          res.status(400).json({
+            error: `Install source not found: ${redactExtensionDisplaySource(
+              sourceValue,
+            )}`,
+          });
+          return;
+        }
+        if (npmSource && refValue) {
+          res
+            .status(400)
+            .json({ error: '--ref is not applicable for npm extensions.' });
+          return;
+        }
+        if (!npmSource && registryValue) {
+          res.status(400).json({
+            error: '--registry is only applicable for npm extensions.',
+          });
+          return;
+        }
 
-        runQueuedExtensionMutation(
+        ctrl.runQueuedExtensionMutation(
           'install',
           { source: sourceValue },
           res,
-          async (extensionManager) => {
-            const installMetadata = await parseInstallSource(sourceValue);
+          async (extensionManager, _signal, context, operationId) => {
+            const prepared = await context!.prepare(async (signal) => {
+              const installMetadata = await parseInstallSource(sourceValue, {
+                networkPolicy: 'public',
+              });
 
-            if (
-              installMetadata.type !== 'git' &&
-              installMetadata.type !== 'github-release' &&
-              installMetadata.type !== 'npm'
-            ) {
-              throw new Error(
-                'Only GitHub, Git, and npm extension installs are supported over the daemon endpoint.',
-              );
-            }
-            if (installMetadata.type === 'npm' && refValue) {
-              throw new Error('--ref is not applicable for npm extensions.');
-            }
-            if (installMetadata.type !== 'npm' && registryValue) {
-              throw new Error(
-                '--registry is only applicable for npm extensions.',
-              );
-            }
-            if (!validateExtensionSourceMetadata(installMetadata)) {
-              throw new Error('`source` host is not allowed');
-            }
-            if (installMetadata.type === 'npm' && registryUrl) {
-              installMetadata.registryUrl = registryUrl;
-            }
-            const extension = await extensionManager.installExtension(
-              {
-                ...installMetadata,
-                ref: refValue,
-                autoUpdate: autoUpdateValue,
-                allowPreRelease: allowPreReleaseValue,
-              },
-              () => Promise.resolve(),
-            );
-            return {
-              status: 'installed',
-              source: sourceValue,
-              name: extension.name,
-              version: extension.config.version,
-            };
-          },
-        );
-      } catch (err) {
-        sendBridgeError(res, err, {
-          route: 'POST /workspace/extensions/install',
-        });
-      }
-    },
-  );
-
-  app.post(
-    '/workspace/extensions/check-updates',
-    mutate({ strict: true }),
-    async (req, res) => {
-      try {
-        if (
-          !validateExtensionMutationClient(
-            req,
-            res,
-            'POST /workspace/extensions/check-updates',
-          )
-        ) {
-          return;
-        }
-        const states = await enqueueExtensionInstall(async () =>
-          withExtensionTimeout(
-            (async () => {
-              const extensionManager = createExtensionManager();
-              await extensionManager.refreshCache();
-              const updateStates: Record<string, string> = {};
-              await extensionManager.checkForAllExtensionUpdates(
-                (name, state) => {
-                  updateStates[name] = state;
+              if (
+                installMetadata.type !== 'git' &&
+                installMetadata.type !== 'github-release' &&
+                installMetadata.type !== 'npm'
+              ) {
+                throw new Error(
+                  'Only GitHub, Git, and npm extension installs are supported over the daemon endpoint.',
+                );
+              }
+              if (installMetadata.type === 'npm' && refValue) {
+                throw new Error('--ref is not applicable for npm extensions.');
+              }
+              if (installMetadata.type !== 'npm' && registryValue) {
+                throw new Error(
+                  '--registry is only applicable for npm extensions.',
+                );
+              }
+              if (!validateExtensionSourceMetadata(installMetadata)) {
+                throw new Error('`source` host is not allowed');
+              }
+              if (installMetadata.type === 'npm' && registryUrl) {
+                installMetadata.registryUrl = registryUrl;
+              }
+              supersedeActiveInstallOperations(ctrl, operationId!);
+              return await extensionManager.prepareExtensionInstall({
+                installMetadata: {
+                  ...installMetadata,
+                  ref: refValue,
+                  autoUpdate: autoUpdateValue,
+                  allowPreRelease: allowPreReleaseValue,
                 },
+                initialActivation: { scope: 'user' },
+                requestConsent: () => Promise.resolve(),
+                signal,
+              });
+            });
+            try {
+              const committed = await context!.commit(
+                async (onCommitted) =>
+                  await extensionManager.commitPreparedExtension(
+                    prepared,
+                    onCommitted,
+                  ),
               );
-              return updateStates;
-            })(),
-            EXTENSION_REFRESH_TIMEOUT_MS,
-            'extension update check',
-          ),
-        );
-        res.status(200).json({ states });
-      } catch (err) {
-        if (isExtensionQueueFullError(err)) {
-          sendExtensionQueueFull(res);
-          return;
-        }
-        sendBridgeError(res, err, {
-          route: 'POST /workspace/extensions/check-updates',
-        });
-      }
-    },
-  );
-
-  app.post(
-    '/workspace/extensions/refresh',
-    mutate({ strict: true }),
-    async (req, res) => {
-      try {
-        if (
-          !validateExtensionMutationClient(
-            req,
-            res,
-            'POST /workspace/extensions/refresh',
-          )
-        ) {
-          return;
-        }
-        const result = await enqueueExtensionInstall(async () =>
-          withExtensionTimeout(
-            workspace.refreshExtensionsForAllSessions(),
-            EXTENSION_REFRESH_TIMEOUT_MS,
-            'extension refresh',
-          ),
-        );
-        extensionsStatusCache = undefined;
-        res.status(200).json(result);
-      } catch (err) {
-        if (isExtensionQueueFullError(err)) {
-          sendExtensionQueueFull(res);
-          return;
-        }
-        sendBridgeError(res, err, {
-          route: 'POST /workspace/extensions/refresh',
-        });
-      }
-    },
-  );
-
-  app.post(
-    '/workspace/extensions/:name/enable',
-    mutate({ strict: true }),
-    async (req, res) => {
-      try {
-        if (
-          !validateExtensionMutationClient(
-            req,
-            res,
-            'POST /workspace/extensions/:name/enable',
-            { requireClientId: false },
-          )
-        ) {
-          return;
-        }
-        const name = req.params['name'];
-        if (!name) {
-          res.status(400).json({ error: 'Missing extension name' });
-          return;
-        }
-        const scope = parseExtensionScope(safeBody(req), res);
-        if (scope === null) return;
-        runQueuedExtensionMutation(
-          'enable',
-          { name },
-          res,
-          async (extensionManager) => {
-            const extension = findLoadedExtension(extensionManager, name);
-            if (!extension) {
-              throw new Error(`Extension "${name}" not found`);
+              return {
+                status: 'installed',
+                source: sourceValue,
+                name: committed.identity.name,
+                version: committed.version,
+              };
+            } finally {
+              await extensionManager.disposePreparedExtension(prepared);
             }
-            await extensionManager.enableExtension(
-              extension.name,
-              scope,
-              boundWorkspace,
-            );
-            return { status: 'enabled', name: extension.name };
           },
-        );
-      } catch (err) {
-        sendBridgeError(res, err, {
-          route: 'POST /workspace/extensions/:name/enable',
-        });
-      }
-    },
-  );
-
-  app.post(
-    '/workspace/extensions/:name/disable',
-    mutate({ strict: true }),
-    async (req, res) => {
-      try {
-        if (
-          !validateExtensionMutationClient(
-            req,
-            res,
-            'POST /workspace/extensions/:name/disable',
-            { requireClientId: false },
-          )
-        ) {
-          return;
-        }
-        const name = req.params['name'];
-        if (!name) {
-          res.status(400).json({ error: 'Missing extension name' });
-          return;
-        }
-        const scope = parseExtensionScope(safeBody(req), res);
-        if (scope === null) return;
-        runQueuedExtensionMutation(
-          'disable',
-          { name },
-          res,
-          async (extensionManager) => {
-            const extension = findLoadedExtension(extensionManager, name);
-            if (!extension) {
-              throw new Error(`Extension "${name}" not found`);
-            }
-            await extensionManager.disableExtension(
-              extension.name,
-              scope,
-              boundWorkspace,
-            );
-            return { status: 'disabled', name: extension.name };
-          },
-        );
-      } catch (err) {
-        sendBridgeError(res, err, {
-          route: 'POST /workspace/extensions/:name/disable',
-        });
-      }
-    },
-  );
-
-  app.post(
-    '/workspace/extensions/:name/update',
-    mutate({ strict: true }),
-    async (req, res) => {
-      try {
-        if (
-          !validateExtensionMutationClient(
-            req,
-            res,
-            'POST /workspace/extensions/:name/update',
-          )
-        ) {
-          return;
-        }
-        const name = req.params['name'];
-        if (!name) {
-          res.status(400).json({ error: 'Missing extension name' });
-          return;
-        }
-        runQueuedExtensionMutation(
-          'update',
-          { name },
-          res,
-          async (extensionManager) => {
-            const extension = findLoadedExtension(extensionManager, name);
-            if (!extension) {
-              throw new Error(`Extension "${name}" not found`);
-            }
-            let updateError: unknown;
-            const updateState = await withExtensionTimeout(
-              checkForExtensionUpdate(extension, extensionManager).catch(
-                (err: unknown) => {
-                  updateError = err;
-                  return ExtensionUpdateState.ERROR;
-                },
+          {
+            createManager: (operationId) =>
+              ctrl.createExtensionManager(
+                undefined,
+                undefined,
+                extensionInteractionHandlers(ctrl, operationId),
               ),
-              EXTENSION_REFRESH_TIMEOUT_MS,
-              'extension update check',
-            );
-            if (updateState === ExtensionUpdateState.ERROR) {
-              const message =
-                updateError === undefined
-                  ? undefined
-                  : redactUrlCredentials(
-                      updateError instanceof Error
-                        ? updateError.message
-                        : String(updateError),
-                    );
-              throw new Error(
-                `Update check failed for extension "${extension.name}"${
-                  message ? `: ${message}` : ''
-                }`,
+            onSettled: (operationId) => {
+              supersededInstallOperations.delete(operationId);
+              cancelPendingExtensionInteraction(
+                operationId,
+                'Extension operation ended',
+              );
+            },
+            deadlineMs: EXTENSION_INTERACTIVE_PREPARE_DEADLINE_MS,
+            ...globalReconciliationOptions(),
+          },
+        );
+      } catch (err) {
+        sendBridgeError(res, err, { route: `POST ${base}/install` });
+      }
+    });
+
+    app.post(
+      `${base}/check-updates`,
+      mutate({ strict: true }),
+      async (req, res) => {
+        const ctrl = resolve(req, res, true);
+        if (!ctrl) return;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let releaseOperationSlot: (() => void) | undefined;
+        try {
+          if (
+            !ctrl.validateExtensionMutationClient(req, res, {
+              requireClientId: false,
+            })
+          ) {
+            return;
+          }
+          releaseOperationSlot = ctrl.acquireOperationSlot(res);
+          if (!releaseOperationSlot) return;
+          const extensionManager = ctrl.createExtensionManager();
+          const updateStates: Record<string, string> = Object.create(null);
+          const deadline = new AbortController();
+          timer = setTimeout(() => {
+            const error = new Error(
+              'Extension update check exceeded its preparation deadline.',
+            ) as Error & { code: string };
+            error.code = 'extension_prepare_timeout';
+            deadline.abort(error);
+          }, EXTENSION_UPDATE_CHECK_DEADLINE_MS);
+          timer.unref();
+          let rejectRefreshOnAbort: (() => void) | undefined;
+          try {
+            await Promise.race([
+              extensionManager.refreshCache(),
+              new Promise<never>((_resolve, reject) => {
+                rejectRefreshOnAbort = () => reject(deadline.signal.reason);
+                deadline.signal.addEventListener(
+                  'abort',
+                  rejectRefreshOnAbort,
+                  { once: true },
+                );
+              }),
+            ]);
+          } finally {
+            if (rejectRefreshOnAbort) {
+              deadline.signal.removeEventListener(
+                'abort',
+                rejectRefreshOnAbort,
               );
             }
-            if (updateState !== ExtensionUpdateState.UPDATE_AVAILABLE) {
-              throw new Error(`Extension "${extension.name}" has no update`);
+          }
+          await extensionManager.checkForAllExtensionUpdates(
+            (name, state) => {
+              updateStates[name] = state;
+            },
+            deadline.signal,
+            async (task) =>
+              await ctrl.preparationQueue.run(task, {
+                signal: deadline.signal,
+              }),
+          );
+          const states = updateStates;
+          res.status(200).json({ states });
+        } catch (err) {
+          sendBridgeError(res, err, { route: `POST ${base}/check-updates` });
+        } finally {
+          if (timer) clearTimeout(timer);
+          releaseOperationSlot?.();
+        }
+      },
+    );
+
+    app.post(`${base}/refresh`, mutate({ strict: true }), async (req, res) => {
+      const ctrl = resolve(req, res, true);
+      if (!ctrl) return;
+      try {
+        if (
+          !ctrl.validateExtensionMutationClient(req, res, {
+            requireClientId: false,
+          })
+        ) {
+          return;
+        }
+        const releaseOperationSlot = ctrl.acquireOperationSlot(res);
+        if (!releaseOperationSlot) return;
+        try {
+          const result = await ctrl.refreshExtensionsForAllSessions();
+          res.status(200).json(result);
+        } finally {
+          releaseOperationSlot();
+        }
+      } catch (err) {
+        sendBridgeError(res, err, { route: `POST ${base}/refresh` });
+      }
+    });
+
+    app.post(
+      `${base}/:name/enable`,
+      mutate({ strict: true }),
+      async (req, res) => {
+        const ctrl = resolve(req, res, true);
+        if (!ctrl) return;
+        try {
+          if (
+            !ctrl.validateExtensionMutationClient(req, res, {
+              requireClientId: false,
+            })
+          ) {
+            return;
+          }
+          const name = req.params['name'];
+          if (!name) {
+            res.status(400).json({ error: 'Missing extension name' });
+            return;
+          }
+          const scope = parseExtensionScope(safeBody(req), res);
+          if (scope === null) return;
+          ctrl.runQueuedExtensionMutation(
+            'enable',
+            { name },
+            res,
+            async (extensionManager, _signal, context) => {
+              const extension = findLoadedExtension(extensionManager, name);
+              if (!extension) {
+                throw new Error(`Extension "${name}" not found`);
+              }
+              await context!.commit(
+                async (onCommitted) =>
+                  await extensionManager.enableExtension(
+                    extension.name,
+                    scope,
+                    ctrl.boundWorkspace,
+                    onCommitted,
+                  ),
+              );
+              return { status: 'enabled', name: extension.name };
+            },
+            {
+              ...(scope === SettingScope.User
+                ? globalReconciliationOptions()
+                : workspaceReconciliationOptions()),
+            },
+          );
+        } catch (err) {
+          sendBridgeError(res, err, { route: `POST ${base}/:name/enable` });
+        }
+      },
+    );
+
+    app.post(
+      `${base}/:name/disable`,
+      mutate({ strict: true }),
+      async (req, res) => {
+        const ctrl = resolve(req, res, true);
+        if (!ctrl) return;
+        try {
+          if (
+            !ctrl.validateExtensionMutationClient(req, res, {
+              requireClientId: false,
+            })
+          ) {
+            return;
+          }
+          const name = req.params['name'];
+          if (!name) {
+            res.status(400).json({ error: 'Missing extension name' });
+            return;
+          }
+          const scope = parseExtensionScope(safeBody(req), res);
+          if (scope === null) return;
+          ctrl.runQueuedExtensionMutation(
+            'disable',
+            { name },
+            res,
+            async (extensionManager, _signal, context) => {
+              const extension = findLoadedExtension(extensionManager, name);
+              if (!extension) {
+                throw new Error(`Extension "${name}" not found`);
+              }
+              await context!.commit(
+                async (onCommitted) =>
+                  await extensionManager.disableExtension(
+                    extension.name,
+                    scope,
+                    ctrl.boundWorkspace,
+                    onCommitted,
+                  ),
+              );
+              return { status: 'disabled', name: extension.name };
+            },
+            {
+              ...(scope === SettingScope.User
+                ? globalReconciliationOptions()
+                : workspaceReconciliationOptions()),
+            },
+          );
+        } catch (err) {
+          sendBridgeError(res, err, { route: `POST ${base}/:name/disable` });
+        }
+      },
+    );
+
+    app.post(
+      `${base}/:name/update`,
+      mutate({ strict: true }),
+      async (req, res) => {
+        const ctrl = resolve(req, res, true);
+        if (!ctrl) return;
+        try {
+          if (
+            !ctrl.validateExtensionMutationClient(req, res, {
+              requireClientId: false,
+            })
+          ) {
+            return;
+          }
+          const name = req.params['name'];
+          if (!name) {
+            res.status(400).json({ error: 'Missing extension name' });
+            return;
+          }
+          ctrl.runQueuedExtensionMutation(
+            'update',
+            { name },
+            res,
+            async (extensionManager, _signal, context) => {
+              const extension = findLoadedExtension(extensionManager, name);
+              if (!extension) {
+                throw new Error(`Extension "${name}" not found`);
+              }
+              let preparedResult: Awaited<
+                ReturnType<ExtensionManager['prepareExtensionUpdate']>
+              >;
+              try {
+                preparedResult = await context!.prepare(
+                  async (signal) =>
+                    await extensionManager.prepareExtensionUpdate({
+                      extension,
+                      signal,
+                    }),
+                );
+              } catch (error) {
+                const wrapped = new Error(
+                  `Update check failed for extension "${extension.name}": ${
+                    error instanceof Error ? error.message : String(error)
+                  }`,
+                  { cause: error },
+                ) as Error & { code?: string };
+                if (
+                  error &&
+                  typeof error === 'object' &&
+                  typeof (error as { code?: unknown }).code === 'string'
+                ) {
+                  wrapped.code = (error as { code: string }).code;
+                }
+                throw wrapped;
+              }
+              if (preparedResult.upToDate) {
+                throw new Error(`Extension "${extension.name}" has no update`);
+              }
+              try {
+                const committed = await context!.commit(
+                  async (onCommitted) =>
+                    await extensionManager.commitPreparedExtension(
+                      preparedResult.prepared,
+                      onCommitted,
+                    ),
+                );
+                return {
+                  status: 'updated',
+                  name: extension.name,
+                  version: committed.version,
+                };
+              } finally {
+                await extensionManager.disposePreparedExtension(
+                  preparedResult.prepared,
+                );
+              }
+            },
+            {
+              createManager: (operationId) =>
+                ctrl.createExtensionManager(
+                  undefined,
+                  undefined,
+                  extensionInteractionHandlers(ctrl, operationId),
+                ),
+              onSettled: (operationId) => {
+                cancelPendingExtensionInteraction(
+                  operationId,
+                  'Extension operation ended',
+                );
+              },
+              deadlineMs: EXTENSION_INTERACTIVE_PREPARE_DEADLINE_MS,
+              ...globalReconciliationOptions(),
+            },
+          );
+        } catch (err) {
+          sendBridgeError(res, err, { route: `POST ${base}/:name/update` });
+        }
+      },
+    );
+
+    app.delete(`${base}/:name`, mutate({ strict: true }), async (req, res) => {
+      const ctrl = resolve(req, res, true);
+      if (!ctrl) return;
+      try {
+        if (
+          !ctrl.validateExtensionMutationClient(req, res, {
+            requireClientId: false,
+          })
+        ) {
+          return;
+        }
+        const name = req.params['name'];
+        if (!name) {
+          res.status(400).json({ error: 'Missing extension name' });
+          return;
+        }
+        ctrl.runQueuedExtensionMutation(
+          'uninstall',
+          { name },
+          res,
+          async (extensionManager, _signal, context) => {
+            const extension = findLoadedExtension(extensionManager, name);
+            if (!extension) {
+              throw new Error(`Extension "${name}" not found`);
             }
-            const info = await extensionManager.updateExtension(
-              extension,
-              updateState,
-              () => undefined,
+            await context!.commit(
+              async (onCommitted) =>
+                await extensionManager.uninstallExtension(
+                  extension.name,
+                  false,
+                  ctrl.boundWorkspace,
+                  onCommitted,
+                ),
+            );
+            return { status: 'uninstalled', name: extension.name };
+          },
+          {
+            ...globalReconciliationOptions(),
+          },
+        );
+      } catch (err) {
+        sendBridgeError(res, err, { route: `DELETE ${base}/:name` });
+      }
+    });
+  };
+
+  // Legacy singular routes bound to the primary workspace (behavior unchanged).
+  registerFor('/workspace/extensions', () => primaryController);
+
+  const extensionById = (
+    manager: ExtensionManager,
+    extensionId: string,
+  ): Extension | undefined =>
+    manager
+      .getLoadedExtensions()
+      .find((extension) => extension.id === extensionId);
+
+  const parseExtensionId = (req: Request, res: Response): string | null => {
+    const extensionId = req.params['extensionId'];
+    if (!extensionId || !/^[a-f0-9]{64}$/.test(extensionId)) {
+      res.status(400).json({
+        error: 'Invalid extension id',
+        code: 'invalid_extension_id',
+      });
+      return null;
+    }
+    return extensionId;
+  };
+
+  const parseActivationState = (
+    req: Request,
+    res: Response,
+  ): 'enabled' | 'disabled' | null => {
+    const state = safeBody(req)['state'];
+    if (state !== 'enabled' && state !== 'disabled') {
+      res.status(400).json({
+        error: '`state` must be either "enabled" or "disabled"',
+        code: 'invalid_extension_activation',
+      });
+      return null;
+    }
+    return state;
+  };
+
+  const sendOperation = (
+    req: Request,
+    res: Response,
+    route: string,
+    manager: ExtensionManager,
+    operation: string,
+    failureContext: { source?: string; name?: string },
+    run: (
+      extensionManager: ExtensionManager,
+      signal?: AbortSignal,
+      context?: ExtensionOperationContext,
+    ) => Promise<{
+      status:
+        | 'installed'
+        | 'enabled'
+        | 'disabled'
+        | 'updated'
+        | 'uninstalled'
+        | 'checked'
+        | 'refreshed';
+      source?: string;
+      name?: string;
+      version?: string;
+      updated?: boolean;
+      reason?: string;
+      states?: Record<string, string>;
+    }>,
+    options: {
+      refreshRuntimes?:
+        | readonly WorkspaceRuntime[]
+        | (() => readonly WorkspaceRuntime[]);
+      skipRefresh?: boolean;
+      deadlineMs?: number;
+    } = {},
+  ): void => {
+    if (
+      !primaryController.validateExtensionMutationClient(req, res, {
+        requireClientId: false,
+        bridges: mutationClientBridges(options.refreshRuntimes),
+      })
+    ) {
+      return;
+    }
+    primaryController.runQueuedExtensionMutation(
+      operation,
+      failureContext,
+      res,
+      run,
+      {
+        manager,
+        operationBasePath: '/extensions/operations',
+        onRuntimeReconciled,
+        reserveRuntimeReconciliation,
+        ...options,
+      },
+    );
+  };
+
+  app.get('/extensions', async (_req, res) => {
+    try {
+      const manager = primaryController.createExtensionManager(
+        boundWorkspace,
+        true,
+      );
+      const snapshot = await manager.refreshCacheWithSnapshot();
+      res.status(200).json({
+        v: 1,
+        generation: snapshot.generation,
+        extensions: manager.getLoadedExtensions().map((extension) => {
+          const policy = snapshot.extensions[extension.id];
+          return {
+            id: extension.id,
+            name: extension.name,
+            version: extension.version,
+            ...(extension.installMetadata?.type
+              ? { installType: extension.installMetadata.type }
+              : {}),
+            defaultActivation: policy?.defaultActivation ?? 'enabled',
+            workspaceOverrideCount: Object.values(
+              policy?.workspaceOverrides ?? {},
+            ).filter((activation) => activation !== 'inherit').length,
+          };
+        }),
+      });
+    } catch (error) {
+      sendBridgeError(res, error, { route: 'GET /extensions' });
+    }
+  });
+
+  app.get('/extensions/operations/:operationId', (req, res) => {
+    const operationId = req.params['operationId'];
+    if (!operationId) {
+      res.status(400).json({ error: 'Missing extension operation id' });
+      return;
+    }
+    const operation = primaryController.getOperation(operationId);
+    if (!operation) {
+      res.status(404).json({
+        error: `Extension operation "${operationId}" not found`,
+        code: 'extension_operation_not_found',
+      });
+      return;
+    }
+    res.status(200).json(operation);
+  });
+
+  app.put(
+    '/extensions/:extensionId/activation',
+    mutate({ strict: true }),
+    async (req, res) => {
+      const extensionId = parseExtensionId(req, res);
+      if (!extensionId) return;
+      const state = parseActivationState(req, res);
+      if (!state) return;
+      const manager = primaryController.createExtensionManager(
+        boundWorkspace,
+        true,
+      );
+      sendOperation(
+        req,
+        res,
+        'PUT /extensions/:extensionId/activation',
+        manager,
+        'activation',
+        { name: extensionId },
+        async (extensionManager, _signal, context) => {
+          const extension = extensionById(extensionManager, extensionId);
+          if (!extension)
+            throw new Error(`Extension "${extensionId}" not found`);
+          await context!.commit(
+            async (onCommitted) =>
+              await extensionManager.setExtensionDefaultActivation(
+                extensionId,
+                state,
+                onCommitted,
+              ),
+          );
+          return {
+            status: state === 'enabled' ? 'enabled' : 'disabled',
+            name: extension.name,
+          };
+        },
+        {
+          ...(workspaceRegistry
+            ? { refreshRuntimes: () => workspaceRegistry.list() }
+            : {}),
+        },
+      );
+    },
+  );
+
+  app.post('/extensions/install', mutate({ strict: true }), (req, res) => {
+    const body = safeBody(req);
+    const source = body['source'];
+    const activation = body['activation'];
+    const ref = body['ref'];
+    const autoUpdate = body['autoUpdate'];
+    const allowPreRelease = body['allowPreRelease'];
+    const registry = body['registry'];
+    if (typeof source !== 'string' || !source) {
+      res.status(400).json({ error: 'Missing or invalid source' });
+      return;
+    }
+    if (ref !== undefined && (typeof ref !== 'string' || !ref)) {
+      res.status(400).json({ error: '`ref` must be a non-empty string' });
+      return;
+    }
+    if (typeof ref === 'string' && ref.startsWith('-')) {
+      res.status(400).json({ error: '`ref` must not start with "-"' });
+      return;
+    }
+    if (autoUpdate !== undefined && typeof autoUpdate !== 'boolean') {
+      res.status(400).json({ error: '`autoUpdate` must be a boolean' });
+      return;
+    }
+    if (allowPreRelease !== undefined && typeof allowPreRelease !== 'boolean') {
+      res.status(400).json({ error: '`allowPreRelease` must be a boolean' });
+      return;
+    }
+    if (registry !== undefined && typeof registry !== 'string') {
+      res.status(400).json({ error: '`registry` must be a string' });
+      return;
+    }
+    const registryUrl =
+      typeof registry === 'string'
+        ? parseExtensionRegistryUrl(registry, res)
+        : undefined;
+    if (registryUrl === null) return;
+    if (body['consent'] !== true) {
+      res.status(400).json({
+        error: 'Extension installation requires explicit consent',
+      });
+      return;
+    }
+    if (!validateExtensionSourceHost(source, res)) return;
+    if (!activation || typeof activation !== 'object') {
+      res.status(400).json({ error: 'Missing initial activation' });
+      return;
+    }
+    const activationRecord = activation as Record<string, unknown>;
+    let initialActivation:
+      | { scope: 'user' }
+      | { scope: 'workspace'; workspacePath: string };
+    if (activationRecord['scope'] === 'user') {
+      initialActivation = { scope: 'user' };
+    } else if (
+      activationRecord['scope'] === 'workspace' &&
+      typeof activationRecord['workspaceId'] === 'string' &&
+      workspaceRegistry
+    ) {
+      const runtime = workspaceRegistry.getByWorkspaceId(
+        activationRecord['workspaceId'],
+      );
+      if (!runtime) {
+        res.status(400).json({
+          error: 'Unknown activation workspace',
+          code: 'workspace_mismatch',
+        });
+        return;
+      }
+      if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
+      initialActivation = {
+        scope: 'workspace',
+        workspacePath: runtime.workspaceCwd,
+      };
+    } else {
+      res.status(400).json({ error: 'Invalid initial activation' });
+      return;
+    }
+    const manager = primaryController.createExtensionManager(
+      boundWorkspace,
+      true,
+    );
+    sendOperation(
+      req,
+      res,
+      'POST /extensions/install',
+      manager,
+      'install',
+      { source },
+      async (extensionManager, _signal, context) => {
+        const prepared = await context!.prepare(async (signal) => {
+          const metadata = await parseInstallSource(source, {
+            networkPolicy: 'public',
+          });
+          if (
+            metadata.type !== 'git' &&
+            metadata.type !== 'github-release' &&
+            metadata.type !== 'npm'
+          ) {
+            throw new Error(
+              'Only GitHub, Git, and npm extension installs are supported over the daemon endpoint.',
+            );
+          }
+          if (!validateExtensionSourceMetadata(metadata)) {
+            throw new Error('`source` host is not allowed');
+          }
+          if (metadata.type === 'npm' && ref !== undefined) {
+            throw new Error('--ref is not applicable for npm extensions.');
+          }
+          if (metadata.type !== 'npm' && registryUrl !== undefined) {
+            throw new Error(
+              '--registry is only applicable for npm extensions.',
+            );
+          }
+          if (metadata.type === 'npm' && registryUrl) {
+            metadata.registryUrl = registryUrl;
+          }
+          return await extensionManager.prepareExtensionInstall({
+            installMetadata: {
+              ...metadata,
+              ...(typeof ref === 'string' ? { ref } : {}),
+              ...(typeof autoUpdate === 'boolean' ? { autoUpdate } : {}),
+              ...(typeof allowPreRelease === 'boolean'
+                ? { allowPreRelease }
+                : {}),
+            },
+            requestConsent: () => Promise.resolve(),
+            cwd: boundWorkspace,
+            initialActivation,
+            signal,
+          });
+        });
+        try {
+          const committed = await context!.commit(
+            async (onCommitted) =>
+              await extensionManager.commitPreparedExtension(
+                prepared,
+                onCommitted,
+              ),
+          );
+          return {
+            status: 'installed',
+            source,
+            name: committed.identity.name,
+            version: committed.version,
+          };
+        } finally {
+          await extensionManager.disposePreparedExtension(prepared);
+        }
+      },
+      {
+        deadlineMs: EXTENSION_PREPARE_DEADLINE_MS,
+        ...(workspaceRegistry
+          ? { refreshRuntimes: () => workspaceRegistry.list() }
+          : {}),
+      },
+    );
+  });
+
+  app.post(
+    '/extensions/check-updates',
+    mutate({ strict: true }),
+    (req, res) => {
+      const manager = primaryController.createExtensionManager(
+        boundWorkspace,
+        true,
+      );
+      sendOperation(
+        req,
+        res,
+        'POST /extensions/check-updates',
+        manager,
+        'check-updates',
+        {},
+        async (extensionManager, signal, context) => {
+          const states: Record<string, string> = Object.create(null);
+          await extensionManager.checkForAllExtensionUpdates(
+            (name, state) => {
+              states[name] = state;
+            },
+            signal,
+            async (task) => await context!.prepare(async () => await task()),
+          );
+          return { status: 'checked', states };
+        },
+        {
+          skipRefresh: true,
+          deadlineMs: EXTENSION_UPDATE_CHECK_DEADLINE_MS,
+        },
+      );
+    },
+  );
+
+  app.post(
+    '/extensions/:extensionId/update',
+    mutate({ strict: true }),
+    (req, res) => {
+      const extensionId = parseExtensionId(req, res);
+      if (!extensionId) return;
+      const manager = primaryController.createExtensionManager(
+        boundWorkspace,
+        true,
+      );
+      sendOperation(
+        req,
+        res,
+        'POST /extensions/:extensionId/update',
+        manager,
+        'update',
+        { name: extensionId },
+        async (extensionManager, _signal, context) => {
+          const extension = extensionById(extensionManager, extensionId);
+          if (!extension)
+            throw new Error(`Extension "${extensionId}" not found`);
+          if (
+            extension.installMetadata?.type !== 'git' &&
+            extension.installMetadata?.type !== 'archive-url' &&
+            extension.installMetadata?.type !== 'github-release' &&
+            extension.installMetadata?.type !== 'npm'
+          ) {
+            throw new Error(
+              `Extension "${extension.name}" is not remotely updatable.`,
+            );
+          }
+          const preparedResult = await context!.prepare(
+            async (signal) =>
+              await extensionManager.prepareExtensionUpdate({
+                extension,
+                signal,
+              }),
+          );
+          if (preparedResult.upToDate) {
+            return {
+              status: 'checked',
+              name: extension.name,
+              updated: false,
+              reason: 'up_to_date',
+            };
+          }
+          try {
+            const committed = await context!.commit(
+              async (onCommitted) =>
+                await extensionManager.commitPreparedExtension(
+                  preparedResult.prepared,
+                  onCommitted,
+                ),
             );
             return {
               status: 'updated',
               name: extension.name,
-              ...(info?.updatedVersion ? { version: info.updatedVersion } : {}),
+              updated: true,
+              version: committed.version,
             };
-          },
-        );
-      } catch (err) {
-        sendBridgeError(res, err, {
-          route: 'POST /workspace/extensions/:name/update',
-        });
-      }
+          } finally {
+            await extensionManager.disposePreparedExtension(
+              preparedResult.prepared,
+            );
+          }
+        },
+        {
+          deadlineMs: EXTENSION_PREPARE_DEADLINE_MS,
+          ...(workspaceRegistry
+            ? { refreshRuntimes: () => workspaceRegistry.list() }
+            : {}),
+        },
+      );
     },
   );
 
   app.delete(
-    '/workspace/extensions/:name',
+    '/extensions/:extensionId',
     mutate({ strict: true }),
     async (req, res) => {
+      const extensionId = parseExtensionId(req, res);
+      if (!extensionId) return;
+      const route = 'DELETE /extensions/:extensionId';
+      if (
+        !primaryController.validateExtensionMutationClient(req, res, {
+          requireClientId: false,
+          bridges: mutationClientBridges(),
+        })
+      ) {
+        return;
+      }
       try {
-        if (
-          !validateExtensionMutationClient(
-            req,
-            res,
-            'DELETE /workspace/extensions/:name',
-          )
-        ) {
+        const manager = primaryController.createExtensionManager(
+          boundWorkspace,
+          true,
+        );
+        const snapshot = await manager.getExtensionStoreSnapshot();
+        const policy = snapshot.extensions[extensionId];
+        if (!policy) {
+          res.status(204).end();
           return;
         }
-        const name = req.params['name'];
-        if (!name) {
-          res.status(400).json({ error: 'Missing extension name' });
-          return;
-        }
-        runQueuedExtensionMutation(
-          'uninstall',
-          { name },
+        sendOperation(
+          req,
           res,
-          async (extensionManager) => {
-            const extension = findLoadedExtension(extensionManager, name);
-            if (!extension) {
-              throw new Error(`Extension "${name}" not found`);
-            }
-            await extensionManager.uninstallExtension(
-              extension.name,
-              false,
-              boundWorkspace,
+          route,
+          manager,
+          'uninstall',
+          { name: policy.name },
+          async (extensionManager, _signal, context) => {
+            await context!.commit(
+              async (onCommitted) =>
+                await extensionManager.uninstallExtensionById(
+                  extensionId,
+                  false,
+                  undefined,
+                  onCommitted,
+                ),
             );
-            return { status: 'uninstalled', name: extension.name };
+            return { status: 'uninstalled', name: policy.name };
+          },
+          {
+            ...(workspaceRegistry
+              ? { refreshRuntimes: () => workspaceRegistry.list() }
+              : {}),
           },
         );
-      } catch (err) {
-        sendBridgeError(res, err, {
-          route: 'DELETE /workspace/extensions/:name',
-        });
+      } catch (error) {
+        sendBridgeError(res, error, { route });
       }
     },
   );
+
+  if (workspaceRegistry) {
+    const registry = workspaceRegistry;
+    app.get('/workspaces/:workspace/extensions', async (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
+      if (!runtime) return;
+      try {
+        const manager = primaryController.createExtensionManager(
+          runtime.workspaceCwd,
+          runtime.trusted,
+        );
+        const snapshot = await manager.refreshCacheWithSnapshot();
+        const extensions = manager.getLoadedExtensions().map((extension) => {
+          const activation = manager.getExtensionActivationFromSnapshot(
+            extension.id,
+            snapshot,
+            runtime.workspaceCwd,
+          );
+          return {
+            extensionId: extension.id,
+            name: extension.name,
+            version: extension.version,
+            defaultActivation: activation.default,
+            workspaceActivation:
+              activation.workspace === 'inherit' ? null : activation.workspace,
+            effectiveActivation: activation.effective,
+            activationSource: activation.source,
+          };
+        });
+        res.status(200).json({
+          v: 1,
+          workspaceId: runtime.workspaceId,
+          workspaceCwd: runtime.workspaceCwd,
+          trusted: runtime.trusted,
+          desiredGeneration: snapshot.generation,
+          appliedGeneration:
+            appliedGenerationByWorkspaceId.get(runtime.workspaceId) ?? 0,
+          extensions,
+        });
+      } catch (error) {
+        sendBridgeError(res, error, {
+          route: 'GET /workspaces/:workspace/extensions',
+        });
+      }
+    });
+
+    app.put(
+      '/workspaces/:workspace/extensions/:extensionId/activation',
+      mutate({ strict: true }),
+      (req, res) => {
+        const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
+        if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+        const extensionId = parseExtensionId(req, res);
+        if (!extensionId) return;
+        const state = parseActivationState(req, res);
+        if (!state) return;
+        const manager = primaryController.createExtensionManager(
+          runtime.workspaceCwd,
+          true,
+        );
+        sendOperation(
+          req,
+          res,
+          'PUT /workspaces/:workspace/extensions/:extensionId/activation',
+          manager,
+          'activation',
+          { name: extensionId },
+          async (extensionManager, _signal, context) => {
+            const extension = extensionById(extensionManager, extensionId);
+            if (!extension) {
+              throw new Error(`Extension "${extensionId}" not found`);
+            }
+            await context!.commit(
+              async (onCommitted) =>
+                await extensionManager.setExtensionWorkspaceActivation(
+                  extensionId,
+                  runtime.workspaceCwd,
+                  state,
+                  onCommitted,
+                ),
+            );
+            return {
+              status: state === 'enabled' ? 'enabled' : 'disabled',
+              name: extension.name,
+            };
+          },
+          { refreshRuntimes: [runtime] },
+        );
+      },
+    );
+
+    app.delete(
+      '/workspaces/:workspace/extensions/:extensionId/activation',
+      mutate({ strict: true }),
+      (req, res) => {
+        const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
+        if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+        const extensionId = parseExtensionId(req, res);
+        if (!extensionId) return;
+        const manager = primaryController.createExtensionManager(
+          runtime.workspaceCwd,
+          true,
+        );
+        sendOperation(
+          req,
+          res,
+          'DELETE /workspaces/:workspace/extensions/:extensionId/activation',
+          manager,
+          'activation',
+          { name: extensionId },
+          async (extensionManager, _signal, context) => {
+            const extension = extensionById(extensionManager, extensionId);
+            if (!extension) {
+              throw new Error(`Extension "${extensionId}" not found`);
+            }
+            const snapshot = await context!.commit(
+              async (onCommitted) =>
+                await extensionManager.clearExtensionWorkspaceActivation(
+                  extensionId,
+                  runtime.workspaceCwd,
+                  onCommitted,
+                ),
+            );
+            const activation =
+              extensionManager.getExtensionActivationFromSnapshot(
+                extensionId,
+                snapshot,
+                runtime.workspaceCwd,
+              );
+            return { status: activation.effective, name: extension.name };
+          },
+          { refreshRuntimes: [runtime] },
+        );
+      },
+    );
+
+    app.post(
+      '/workspaces/:workspace/extensions/refresh',
+      mutate({ strict: true }),
+      (req, res) => {
+        const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
+        if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+        const manager = primaryController.createExtensionManager(
+          runtime.workspaceCwd,
+          true,
+        );
+        sendOperation(
+          req,
+          res,
+          'POST /workspaces/:workspace/extensions/refresh',
+          manager,
+          'refresh',
+          {},
+          async () => ({ status: 'refreshed' }),
+          { refreshRuntimes: [runtime] },
+        );
+      },
+    );
+  }
 }

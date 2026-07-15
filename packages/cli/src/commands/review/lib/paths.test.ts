@@ -5,7 +5,8 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { tmpFile } from './paths.js';
+import { resolve } from 'node:path';
+import { tmpFile, probeWorktreePath, worktreePath } from './paths.js';
 
 describe('tmpFile — target is a single safe component', () => {
   it('keeps ordinary labels intact', () => {
@@ -32,5 +33,30 @@ describe('tmpFile — target is a single safe component', () => {
     expect(p).toContain('.qwen/tmp/');
     expect(p).not.toContain('..');
     expect(p.split('.qwen/tmp/')[1]).not.toContain('/');
+  });
+});
+
+describe('probeWorktreePath', () => {
+  it('appends -probe to an absolute worktree path', () => {
+    expect(probeWorktreePath('/a/b/review-pr-1')).toBe(
+      '/a/b/review-pr-1-probe',
+    );
+  });
+
+  it('resolves a relative worktree to absolute so it never depends on cwd', () => {
+    // The probe drives `git worktree add` with the shared worktree as cwd, so a
+    // relative probe path would resolve against that worktree and nest the probe
+    // tree inside it. Absolute keeps it a sibling wherever it is called from.
+    expect(probeWorktreePath('.qwen/tmp/review-pr-1')).toBe(
+      `${resolve('.qwen/tmp/review-pr-1')}-probe`,
+    );
+  });
+
+  it('is the single source of the -probe suffix both call sites share', () => {
+    // cleanup.ts sweeps `probeWorktreePath(worktreePath(n))`; the probe creates
+    // `probeWorktreePath(worktree)`. One helper, one suffix — they cannot drift.
+    expect(probeWorktreePath(worktreePath(7))).toBe(
+      `${resolve(worktreePath(7))}-probe`,
+    );
   });
 });

@@ -10,6 +10,8 @@ import {
   planTestEfficacy,
   classifyProbeRun,
   safeRmWithin,
+  probeCreateFailureDetail,
+  probeCleanupFailureDetail,
 } from './test-efficacy.js';
 import {
   mkdtempSync,
@@ -153,6 +155,72 @@ describe('planTestEfficacy', () => {
     );
     expect(plan.probes).toEqual([]);
     expect(plan.revert).toEqual([]);
+  });
+});
+
+describe('probeCreateFailureDetail', () => {
+  // The branch this string is built on fires only when `git worktree add` fails,
+  // which no real-git test can force portably (the one lever — an unwritable
+  // `.git/worktrees` — is bypassed by root and differs under CI's unprivileged
+  // user). The composition is the part with logic in it, so it is pinned here.
+  it('names the add failure, and folds in the sweep stderr that explains it', () => {
+    const got = probeCreateFailureDetail(
+      new Error("fatal: '/w/wt-probe' already exists"),
+      "fatal: '/w/wt-probe' is not a working tree\n",
+    );
+    expect(got).toContain('probe worktree could not be created');
+    expect(got).toContain("fatal: '/w/wt-probe' already exists");
+    // The sweep is usually the explanation for the add failure — keep it.
+    expect(got).toContain(
+      "(stale-tree sweep also reported: fatal: '/w/wt-probe' is not a working tree)",
+    );
+  });
+
+  it('omits the sweep clause when the sweep said nothing', () => {
+    // The normal case: no stale tree, so the sweep is silent. A dangling empty
+    // "(stale-tree sweep also reported: )" would be noise in the report.
+    const got = probeCreateFailureDetail(new Error('disk full'), '   \n');
+    expect(got).toBe('probe worktree could not be created: disk full');
+  });
+
+  it('survives a non-Error throw', () => {
+    expect(probeCreateFailureDetail('boom', '')).toBe(
+      'probe worktree could not be created: boom',
+    );
+  });
+});
+
+describe('probeCleanupFailureDetail', () => {
+  // Sibling of probeCreateFailureDetail, and pure for the same reason: the path
+  // fires only when the tree outlives BOTH `worktree remove` and `rmSync`, which
+  // no portable test can force. The reason is the whole value of the message —
+  // it dropped out of an earlier cut of this code and a reviewer caught it.
+  it('keeps the exception reason — the rmSync error that explains the survival', () => {
+    const got = probeCleanupFailureDetail(
+      '/w/wt-probe',
+      new Error("EBUSY: resource busy, rmdir '/w/wt-probe'"),
+      "fatal: '/w/wt-probe' is not a working tree\n",
+    );
+    expect(got).toContain('could not remove probe worktree /w/wt-probe');
+    expect(got).toContain('EBUSY: resource busy');
+  });
+
+  it("falls back to git's refusal when rmSync itself did not throw", () => {
+    const got = probeCleanupFailureDetail(
+      '/w/wt-probe',
+      undefined,
+      "fatal: '/w/wt-probe' contains modified files\n",
+    );
+    expect(got).toBe(
+      "could not remove probe worktree /w/wt-probe: fatal: '/w/wt-probe' contains modified files",
+    );
+  });
+
+  it('says only what it knows when neither had anything to say', () => {
+    // No dangling ": " — the bare path is the honest message here.
+    expect(probeCleanupFailureDetail('/w/wt-probe', undefined, '  \n')).toBe(
+      'could not remove probe worktree /w/wt-probe',
+    );
   });
 });
 

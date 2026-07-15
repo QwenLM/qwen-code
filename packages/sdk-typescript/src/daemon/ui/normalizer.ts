@@ -713,8 +713,21 @@ function normalizeSessionUpdate(
       ];
     }
     case 'tool_call':
-    case 'tool_call_update':
+    case 'tool_call_update': {
+      // Silent-shell liveness heartbeat: a meta-only in_progress frame with
+      // no kind/title/content. Normalizing it would overwrite the tool
+      // block's human-readable title with the bare tool name from _meta;
+      // the web UI has its own activity indicator, so drop the frame.
+      const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+      if (
+        getString(update, 'status') === 'in_progress' &&
+        getString(update, 'kind') === undefined &&
+        meta?.['shellProgress'] !== undefined
+      ) {
+        return [];
+      }
       return [normalizeToolUpdate(update, base)];
+    }
     case 'shell_output':
     case 'tool_output': {
       const text = getOutputText(update);

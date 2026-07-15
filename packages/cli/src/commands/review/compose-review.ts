@@ -23,6 +23,10 @@ import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import {
+  coverageFromTranscripts,
+  TranscriptsUnavailableError,
+} from './lib/coverage.js';
 
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 
@@ -56,34 +60,20 @@ export interface ComposeReviewInput {
    */
   unreviewedDimensions?: string[];
   /**
-   * The `check-coverage` report for this run.
+   * The plan report from Step 1.
    *
-   * The cap lists above are numbers the caller supplies, and a caller that
-   * skipped Step 3's receipt check supplies empty ones — which is exactly what a
-   * clean review looks like. Dogfooding, an orchestrator launched 25 agents over
-   * an 18-chunk diff, 22 of them returned in under two seconds having made zero
-   * tool calls, and it passed `uncoverableChunks: []`, `unreviewedDimensions: []`
-   * and filed an **Approve** over 4 925 lines nobody had read.
-   *
-   * So the coverage is not asked for, it is **shown**: pass the report that
-   * `check-coverage` produced from the agents' verbatim returns. Its
-   * `missingChunks` and `whiffedAgents` are folded into the cap lists here, and
-   * they forbid an Approve exactly as a hand-supplied entry would. Omitting it is
-   * itself a cap — a run that cannot show what it covered has not shown that it
-   * covered anything.
+   * Coverage is derived from it plus the harness's transcripts — it is not an
+   * input. See the recomputation below for why a caller does not get to say
+   * whether the diff was read.
    */
-  coverage?: {
-    missingChunks?: number[];
-    whiffedAgents?: string[];
-    /**
-     * Chunks the diff itself made uncoverable (a line longer than one read).
-     * Read at runtime and folded into the uncoverable cap, but it was missing
-     * from this type — so it worked through JSON yet a TypeScript caller could
-     * not pass it, and no test exercised it.
-     */
-    uncoverableChunks?: number[];
-    ok?: boolean;
-  };
+  planPath?: string;
+  /**
+   * Where to look for the harness's records. Defaults to the environment the CLI
+   * exported. A test seam only — production never passes it, and a model cannot:
+   * `compose-review` reads its input as JSON, and this is not serialisable into
+   * anything that would change where the transcripts are found on a real run.
+   */
+  env?: NodeJS.ProcessEnv;
   /** Step 1's lightweight `pr-context` fetch failed. */
   contextUnavailable?: boolean;
   presubmit?: {
@@ -134,27 +124,10 @@ function toStringList(value: unknown, field: string): string[] {
       `compose-review: ${field} must be an array of strings, got ${JSON.stringify(value)}`,
     );
   }
-  return value as string[];
-}
-
-/**
- * A list of chunk ids. Same discipline as `toStringList`: refuse, don't coerce.
- *
- * `typeof v === 'number'` admits `NaN`, `Infinity`, `-1` and `2.5` — none of
- * which is a chunk id, and each of which would be rendered into the review body
- * as "chunk NaN". The sibling `toCount` has always checked this; this did not.
- */
-function toNumberList(value: unknown, field: string): number[] {
-  if (value === undefined || value === null) return [];
-  if (
-    !Array.isArray(value) ||
-    value.some((v) => !Number.isSafeInteger(v) || (v as number) < 1)
-  ) {
-    throw new TypeError(
-      `compose-review: ${field} must be an array of positive whole numbers, got ${JSON.stringify(value)}`,
-    );
-  }
-  return value as number[];
+  // A copy. The caller's array is not ours to push into, and coverage-derived
+  // entries are appended to these lists — a programmatic caller that reused one
+  // across two calls would find the first call's caps in the second.
+  return [...(value as string[])];
 }
 
 // Booleans get the same boundary treatment as the counts: the JSON is
@@ -204,64 +177,69 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // and a fabrication about a chunk nobody receipted. The public body would give
   // the author a false cause.
   const missingReceipts: number[] = [];
-  const coverageRaw: unknown = input.coverage ?? {};
-  if (typeof coverageRaw !== 'object' || Array.isArray(coverageRaw)) {
-    throw new TypeError(
-      `compose-review: coverage must be an object, got ${JSON.stringify(coverageRaw)}`,
-    );
-  }
-  const cov = coverageRaw as Record<string, unknown>;
 
-  // Omitting the report is itself a cap: a run that cannot show what it covered
-  // has not shown it covered anything, and the whole dogfood failure was an
-  // orchestrator that skipped the coverage step and got a rubber stamp. So an
-  // **absent** `coverage` caps, full stop.
+  // Coverage is NOT taken from the input. It is recomputed here, from the
+  // harness's own per-agent transcripts.
   //
-  // There is no opt-out field, and there was one for exactly one round: a
-  // `coverageNotApplicable` boolean. But that boolean came from the same
-  // model-authored JSON whose omissions this gate exists to distrust — a review
-  // that wanted an approval could set it and walk straight through, which is the
-  // unread-PR failure with one more keystroke. The lesson this whole PR keeps
-  // relearning is that no model-written field can be its own authorisation. A
-  // caller with genuinely no territory (a non-review use of this subcommand)
-  // passes a coverage report that says so — `{ ok: true }` with empty lists —
-  // rather than asserting inapplicability.
-  const covProvided = input.coverage !== undefined && input.coverage !== null;
-  if (!covProvided) {
+  // The previous shape accepted a `coverage` object inside this very JSON — a
+  // document the model writes. Hardening `check-coverage` while this still
+  // believed a hand-typed `{"ok": true}` would have moved the forgery one hop
+  // downstream and made it *cheaper*: one object, instead of the eighteen
+  // fabricated receipts it actually wrote the last time it wanted an approval.
+  // A caller cannot forge what it cannot supply, so it no longer supplies this.
+  //
+  // What it supplies is `planPath` — a path, whose contents the CLI wrote. The
+  // transcripts are found from the environment the CLI exported.
+  if (!input.planPath) {
     unreviewed.push(
-      'coverage — no `check-coverage` report was supplied, so this run cannot ' +
-        'show that any of the diff was read',
+      'coverage — no plan was given, so this run cannot show that any of the ' +
+        'diff was read',
     );
-  }
-  if (covProvided) {
-    // `ok !== true` caps — and an EMPTY report is the same statement made by
-    // saying nothing. `coverage: {}` used to fall between the two guards: it is
-    // "provided", so the absent-coverage cap above is skipped, and the
-    // `Object.keys(...) > 0` clause here excused it from the failed-coverage cap
-    // as well. Both gates open, and `{}` composed an APPROVE. A report with no
-    // `ok: true` in it has not shown coverage, however few keys it has.
-    if (cov['ok'] !== true) {
+  } else {
+    try {
+      const cov = coverageFromTranscripts(input.planPath, input.env);
+      for (const id of cov.missingChunks) missingReceipts.push(id);
+      for (const id of cov.uncoverableChunks) {
+        // The caller may already have named this chunk, but in a richer form:
+        // `chunk 5 (src/big.min.js)` vs the bare `chunk 5` here. A strict-equality
+        // dedup misses that and the body reads "Not reviewed: chunk 5, chunk 5".
+        // Compare by the `chunk <id>` prefix.
+        const prefix = `chunk ${id}`;
+        const already = uncoverable.some(
+          (e) => e === prefix || e.startsWith(`${prefix} `),
+        );
+        if (!already) uncoverable.push(prefix);
+      }
+      for (const label of cov.idleAgents) {
+        unreviewed.push(
+          `${label} — the agent made no tool call: it read nothing`,
+        );
+      }
+      // The defect that actually happened, named as itself. A blind agent was
+      // launched with a prompt that never mentioned the diff, so it could not
+      // have read it — and relaunching it would produce another agent that
+      // cannot either. Do not call this a whiff; the prompt is the bug.
+      for (const label of cov.blindAgents) {
+        unreviewed.push(
+          `${label} — launched with a prompt that never named the diff file, ` +
+            'so it could not have read it (build the prompt with `qwen review ' +
+            'agent-prompt`)',
+        );
+      }
+    } catch (err) {
+      // Two different failures, and they must not wear each other's message. A
+      // malformed plan is the caller's mistake and says so; missing transcripts
+      // are an environment fault (a read-only HOME, a sandbox) and say *that*.
+      // Both cap — a run that cannot show what it read has not shown it read
+      // anything — but a reader chasing "could not read the transcripts" over a
+      // plan with no `chunks[]` is chasing the wrong thing.
+      const why =
+        err instanceof TranscriptsUnavailableError
+          ? `could not read the agents' transcripts (${err.message})`
+          : `the plan could not be used (${(err as Error).message})`;
       unreviewed.push(
-        'coverage — the `check-coverage` report says the diff was not covered',
+        `coverage — ${why}, so this run cannot show that any of the diff was read`,
       );
-    }
-    for (const id of toNumberList(
-      cov['missingChunks'],
-      'coverage.missingChunks',
-    )) {
-      missingReceipts.push(id);
-    }
-    for (const id of toNumberList(
-      cov['uncoverableChunks'],
-      'coverage.uncoverableChunks',
-    )) {
-      uncoverable.push(`chunk ${id}`);
-    }
-    for (const label of toStringList(
-      cov['whiffedAgents'],
-      'coverage.whiffedAgents',
-    )) {
-      unreviewed.push(`${label} — the agent returned nothing substantive`);
     }
   }
   const contextUnavailable = toBool(
@@ -511,7 +489,15 @@ export const composeReviewCommand: CommandModule = {
   handler: (argv) => {
     const { input, out } = argv as unknown as ComposeReviewCliArgs;
     const raw = readFileSync(input ?? 0, 'utf8');
-    const result = composeReview(JSON.parse(raw) as ComposeReviewInput);
+    // The input is a JSON the model wrote. `env` decides where the harness
+    // transcripts are read from, and it must NOT come from that JSON: a model
+    // that wanted an approval could point it at a directory of transcripts it
+    // fabricated, which is the whole gate reopened through one extra key. It is a
+    // unit-test seam and nothing else, so it is stripped here — the real run
+    // always resolves the transcripts from the environment the CLI exported.
+    const parsed = JSON.parse(raw) as ComposeReviewInput;
+    delete parsed.env;
+    const result = composeReview(parsed);
     const json = JSON.stringify(result, null, 2);
     if (out) {
       mkdirSync(dirname(out), { recursive: true });

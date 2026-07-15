@@ -56,6 +56,9 @@ import {
   Storage,
   TrustGateError,
   type Extension,
+  type CommittedExtensionMutation,
+  type PrepareExtensionInstallOptions,
+  type PreparedExtensionMutation,
   type SessionListItem,
 } from '@qwen-code/qwen-code-core';
 import * as qwenCore from '@qwen-code/qwen-code-core';
@@ -121,7 +124,10 @@ import { CAPABILITIES_SCHEMA_VERSION, type ServeOptions } from './types.js';
 import type { DaemonLogger } from './daemon-logger.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
 import { getRateLimiter } from './rate-limit.js';
-import type { DaemonWorkspaceService } from './workspace-service/types.js';
+import {
+  WorkspaceSkillNotToggleableError,
+  type DaemonWorkspaceService,
+} from './workspace-service/types.js';
 import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
 import {
   createWorkspaceRegistry,
@@ -282,10 +288,11 @@ const EXPECTED_STAGE1_FEATURES = [
   // hash-aware text mutation routes behind the strict mutation gate.
   'workspace_file_bytes',
   'workspace_file_write',
-  // #4175 Wave 4 PR 17. Mutation control routes (approval mode toggle,
-  // workspace tool enable/disable, init scaffold, MCP server restart).
+  // Mutation control routes (approval mode, workspace tool/skill toggles,
+  // init scaffold, and MCP server restart).
   'session_approval_mode_control',
   'workspace_tool_toggle',
+  'workspace_skill_toggle',
   'workspace_permissions',
   'workspace_trust',
   'workspace_init',
@@ -315,7 +322,9 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_extensions',
   'session_branch',
   'workspace_qualified_rest_core',
+  'extension_management_v2',
   'workspace_persisted_transcript',
+  'workspace_session_export',
   // Baseline (always advertised) — presence means the `/voice/stream`
   // endpoint exists; the WS errors if no voice model is configured.
   'voice_transcribe',
@@ -361,7 +370,9 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_extensions' &&
       f !== 'session_branch' &&
       f !== 'workspace_qualified_rest_core' &&
+      f !== 'extension_management_v2' &&
       f !== 'workspace_persisted_transcript' &&
+      f !== 'workspace_session_export' &&
       f !== 'voice_transcribe',
   ),
   'workspace_settings',
@@ -400,7 +411,10 @@ const EXPECTED_REGISTERED_FEATURES = [
   'persistent_workspace_registration',
   'workspace_runtime_removal',
   'workspace_qualified_rest_core',
+  'workspace_qualified_voice',
+  'extension_management_v2',
   'workspace_persisted_transcript',
+  'workspace_session_export',
   'workspace_qualified_acp',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',
@@ -2355,6 +2369,34 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'workspace_qualified_voice') {
+          expect(
+            predicate({
+              multiWorkspaceSessionsEnabled: true,
+              acpHttpEnabled: true,
+            }),
+          ).toBe(true);
+          expect(
+            predicate({
+              multiWorkspaceSessionsEnabled: true,
+              acpHttpEnabled: false,
+            }),
+          ).toBe(false);
+          expect(predicate({ multiWorkspaceSessionsEnabled: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              multiWorkspaceSessionsEnabled: true,
+              acpHttpEnabled: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'client_mcp_over_ws') {
           expect(predicate({ clientMcpOverWsEnabled: true })).toBe(true);
           expect(predicate({ clientMcpOverWsEnabled: false })).toBe(false);
@@ -2815,7 +2857,14 @@ describe('createServeApp', () => {
         'persistent_workspace_registration',
       );
       expect(before.body.features).not.toContain('multi_workspace_sessions');
-      expect(before.body.workspaces).toBeUndefined();
+      expect(before.body.workspaces).toEqual([
+        {
+          id: 'primary-id',
+          cwd: WS_BOUND,
+          primary: true,
+          trusted: true,
+        },
+      ]);
 
       registry.add(
         makeWorkspaceRuntimeForTest({
@@ -2870,6 +2919,53 @@ describe('createServeApp', () => {
       } finally {
         await fsp.rm(tempHome, { recursive: true, force: true });
         restoreEnv('QWEN_HOME', previousQwenHome);
+        resetHomeEnvBootstrapForTesting();
+      }
+    });
+
+    it('loads workspace environment for direct-embed Voice capability checks', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const previousWorkspaceAsrKey = process.env['WORKSPACE_ASR_KEY'];
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-voice-capability-env-'),
+      );
+      const workspace = path.join(tempHome, 'workspace');
+      try {
+        await fsp.mkdir(workspace);
+        await fsp.writeFile(
+          path.join(workspace, '.env'),
+          'WORKSPACE_ASR_KEY=workspace-secret\n',
+          'utf8',
+        );
+        process.env['QWEN_HOME'] = tempHome;
+        resetHomeEnvBootstrapForTesting();
+        await fsp.writeFile(
+          path.join(tempHome, 'settings.json'),
+          JSON.stringify({
+            modelProviders: {
+              openai: [
+                {
+                  id: 'qwen3-asr-flash',
+                  baseUrl: 'https://asr.example/v1',
+                  envKey: 'WORKSPACE_ASR_KEY',
+                },
+              ],
+            },
+          }),
+          'utf8',
+        );
+
+        const app = createServeApp({ ...baseOpts, workspace });
+        const res = await request(app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(res.status).toBe(200);
+        expect(res.body.features).toContain('workspace_voice_transcription');
+      } finally {
+        await fsp.rm(tempHome, { recursive: true, force: true });
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        restoreEnv('WORKSPACE_ASR_KEY', previousWorkspaceAsrKey);
         resetHomeEnvBootstrapForTesting();
       }
     });
@@ -3640,16 +3736,47 @@ describe('createServeApp', () => {
 
     const mockExtensionManagerMethods = (overrides?: {
       refreshCache?: () => Promise<void>;
-      installExtension?: () => Promise<Extension>;
+      prepareExtensionInstall?: (
+        options: PrepareExtensionInstallOptions,
+      ) => Promise<Extension>;
+      prepareExtensionUpdate?: (extension: Extension) => Promise<Extension>;
+      commitPreparedExtension?: (
+        prepared: PreparedExtensionMutation,
+      ) => Promise<CommittedExtensionMutation>;
+      disposePreparedExtension?: (
+        prepared: PreparedExtensionMutation,
+      ) => Promise<void>;
       getLoadedExtensions?: () => Extension[];
-      enableExtension?: () => Promise<void>;
-      disableExtension?: () => Promise<void>;
-      uninstallExtension?: () => Promise<void>;
+      enableExtension?: () => Promise<unknown>;
+      disableExtension?: () => Promise<unknown>;
+      uninstallExtension?: () => Promise<unknown>;
       checkForAllExtensionUpdates?: (
         cb: (name: string, state: ExtensionUpdateState) => void,
+        signal?: AbortSignal,
+        schedule?: <T>(task: () => Promise<T>) => Promise<T>,
       ) => Promise<void>;
       updateExtension?: () => Promise<{ updatedVersion?: string } | undefined>;
     }) => {
+      const preparedExtensions = new Map<
+        PreparedExtensionMutation,
+        Extension
+      >();
+      let generation = 0;
+      const createPrepared = (
+        extension: Extension,
+        operation: 'install' | 'update',
+      ): PreparedExtensionMutation => {
+        const prepared = {
+          operation,
+          identity: {
+            id: extension.id ?? 'a'.repeat(64),
+            name: extension.name,
+          },
+          version: extension.version ?? extension.config.version ?? '1.0.0',
+        } as PreparedExtensionMutation;
+        preparedExtensions.set(prepared, extension);
+        return prepared;
+      };
       const spies = [
         vi
           .spyOn(ExtensionManager.prototype, 'refreshCache')
@@ -3657,10 +3784,57 @@ describe('createServeApp', () => {
             overrides?.refreshCache ?? (async () => undefined),
           ),
         vi
-          .spyOn(ExtensionManager.prototype, 'installExtension')
+          .spyOn(ExtensionManager.prototype, 'prepareExtensionInstall')
+          .mockImplementation(async function (options) {
+            const extension = overrides?.prepareExtensionInstall
+              ? await overrides.prepareExtensionInstall.call(this, options)
+              : testExtension('installed-ext');
+            return createPrepared(extension, 'install');
+          }),
+        vi
+          .spyOn(ExtensionManager.prototype, 'prepareExtensionUpdate')
+          .mockImplementation(async function ({ extension, signal }) {
+            const state = await qwenCore.checkForExtensionUpdate(
+              extension,
+              this,
+              signal,
+            );
+            if (state === ExtensionUpdateState.UP_TO_DATE) {
+              return { upToDate: true, extension };
+            }
+            if (state !== ExtensionUpdateState.UPDATE_AVAILABLE) {
+              throw new Error(
+                `Extension "${extension.name}" update check returned ${state}.`,
+              );
+            }
+            const updated = overrides?.prepareExtensionUpdate
+              ? await overrides.prepareExtensionUpdate.call(this, extension)
+              : ({
+                  ...extension,
+                  config: { ...extension.config, version: '1.2.4' },
+                  version: '1.2.4',
+                } as Extension);
+            return {
+              upToDate: false,
+              prepared: createPrepared(updated, 'update'),
+            };
+          }),
+        vi
+          .spyOn(ExtensionManager.prototype, 'commitPreparedExtension')
+          .mockImplementation(async (prepared) =>
+            overrides?.commitPreparedExtension
+              ? await overrides.commitPreparedExtension(prepared)
+              : {
+                  identity: prepared.identity,
+                  version: prepared.version,
+                  generation: ++generation,
+                  extension: preparedExtensions.get(prepared),
+                },
+          ),
+        vi
+          .spyOn(ExtensionManager.prototype, 'disposePreparedExtension')
           .mockImplementation(
-            overrides?.installExtension ??
-              (async () => testExtension('installed-ext')),
+            overrides?.disposePreparedExtension ?? (async () => undefined),
           ),
         vi
           .spyOn(ExtensionManager.prototype, 'getLoadedExtensions')
@@ -3671,17 +3845,20 @@ describe('createServeApp', () => {
         vi
           .spyOn(ExtensionManager.prototype, 'enableExtension')
           .mockImplementation(
-            overrides?.enableExtension ?? (async () => undefined),
+            (overrides?.enableExtension ??
+              (async () => ({ generation: ++generation }))) as never,
           ),
         vi
           .spyOn(ExtensionManager.prototype, 'disableExtension')
           .mockImplementation(
-            overrides?.disableExtension ?? (async () => undefined),
+            (overrides?.disableExtension ??
+              (async () => ({ generation: ++generation }))) as never,
           ),
         vi
           .spyOn(ExtensionManager.prototype, 'uninstallExtension')
           .mockImplementation(
-            overrides?.uninstallExtension ?? (async () => undefined),
+            (overrides?.uninstallExtension ??
+              (async () => ({ generation: ++generation }))) as never,
           ),
         vi
           .spyOn(ExtensionManager.prototype, 'checkForAllExtensionUpdates')
@@ -3709,7 +3886,8 @@ describe('createServeApp', () => {
       };
     };
 
-    it('rejects extension install without a registered workspace client id', async () => {
+    it('queues extension install without a workspace client id', async () => {
+      const restore = mockExtensionManagerMethods();
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
       const bridge = fakeBridge();
       const app = createServeApp(
@@ -3718,14 +3896,23 @@ describe('createServeApp', () => {
         { bridge },
       );
 
-      const res = await request(app)
-        .post('/workspace/extensions/install')
-        .set('Host', `127.0.0.1:${tokenOpts.port}`)
-        .set('Authorization', 'Bearer secret')
-        .send({ source: 'owner/repo', consent: true });
+      try {
+        const res = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send({ source: 'https://example.com/installed-ext', consent: true });
 
-      expect(res.status).toBe(400);
-      expect(res.body.code).toBe('missing_client_id');
+        expect(res.status).toBe(202);
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents.at(-1)).toMatchObject({
+            status: 'installed',
+            source: 'https://example.com/installed-ext',
+          });
+        });
+      } finally {
+        restore();
+      }
     });
 
     it('rejects extension install from an unknown workspace client id', async () => {
@@ -3757,7 +3944,7 @@ describe('createServeApp', () => {
       );
       let managerTrustedFlag: boolean | undefined;
       const restore = mockExtensionManagerMethods({
-        async installExtension() {
+        async prepareExtensionInstall() {
           managerTrustedFlag = (
             this as unknown as { isWorkspaceTrusted?: boolean }
           ).isWorkspaceTrusted;
@@ -3811,18 +3998,23 @@ describe('createServeApp', () => {
     });
 
     it('queues extension install and refreshes active sessions', async () => {
-      let requestSettingError: string | undefined;
+      let submittedSetting: string | undefined;
       const restore = mockExtensionManagerMethods({
-        async installExtension() {
+        async prepareExtensionInstall() {
           const manager = this as unknown as {
-            requestSetting?: (setting: { envVar: string }) => Promise<string>;
+            requestSetting?: (setting: {
+              name: string;
+              description: string;
+              envVar: string;
+              sensitive?: boolean;
+            }) => Promise<string>;
           };
-          try {
-            await manager.requestSetting?.({ envVar: 'API_KEY' });
-          } catch (error) {
-            requestSettingError =
-              error instanceof Error ? error.message : String(error);
-          }
+          submittedSetting = await manager.requestSetting?.({
+            name: 'API key',
+            description: 'API key used by this extension',
+            envVar: 'API_KEY',
+            sensitive: true,
+          });
           return testExtension('installed-ext');
         },
       });
@@ -3851,6 +4043,76 @@ describe('createServeApp', () => {
         expect(res.status).toBe(202);
         expect(res.body).toMatchObject({ accepted: true });
         expect(res.body.operationId).toEqual(expect.any(String));
+        let interactionId = '';
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(
+              `/workspace/extensions/operations/${encodeURIComponent(
+                res.body.operationId as string,
+              )}`,
+            )
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body).toMatchObject({
+            status: 'waiting_for_input',
+            interaction: {
+              kind: 'setting',
+              setting: {
+                name: 'API key',
+                sensitive: true,
+              },
+            },
+          });
+          interactionId = poll.body.interaction.id as string;
+        });
+        const invalidSetting = await request(app)
+          .post(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              res.body.operationId as string,
+            )}/interactions/${encodeURIComponent(interactionId)}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ value: 123 });
+        expect(invalidSetting.status).toBe(400);
+
+        const stillWaiting = await request(app)
+          .get(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              res.body.operationId as string,
+            )}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(stillWaiting.body).toMatchObject({
+          status: 'waiting_for_input',
+          interaction: { id: interactionId, kind: 'setting' },
+        });
+
+        const answer = await request(app)
+          .post(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              res.body.operationId as string,
+            )}/interactions/${encodeURIComponent(interactionId)}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ value: 'super-secret' });
+        expect(answer.status).toBe(200);
+        expect(answer.body).toEqual({ accepted: true });
+        const completedOperation = await request(app)
+          .get(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              res.body.operationId as string,
+            )}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(JSON.stringify(completedOperation.body)).not.toContain(
+          'super-secret',
+        );
         await vi.waitFor(() => {
           expect(bridge.extensionEvents.at(-1)).toMatchObject({
             status: 'installed',
@@ -3862,18 +4124,17 @@ describe('createServeApp', () => {
           });
         });
         expect(
-          vi.mocked(ExtensionManager.prototype.installExtension),
+          vi.mocked(ExtensionManager.prototype.prepareExtensionInstall),
         ).toHaveBeenCalledWith(
           expect.objectContaining({
-            ref: 'v1.2.3',
-            autoUpdate: true,
-            allowPreRelease: true,
+            installMetadata: expect.objectContaining({
+              ref: 'v1.2.3',
+              autoUpdate: true,
+              allowPreRelease: true,
+            }),
           }),
-          expect.any(Function),
         );
-        expect(requestSettingError).toContain(
-          'requires interactive configuration',
-        );
+        expect(submittedSetting).toBe('super-secret');
 
         const poll = await request(app)
           .get(
@@ -3899,7 +4160,557 @@ describe('createServeApp', () => {
             failed: 0,
           },
         });
+        expect(JSON.stringify(poll.body)).not.toContain('super-secret');
       } finally {
+        restore();
+      }
+    });
+
+    it('accepts a marketplace plugin selection while installing', async () => {
+      let submittedPlugin: string | undefined;
+      const restore = mockExtensionManagerMethods({
+        async prepareExtensionInstall() {
+          const manager = this as unknown as {
+            requestChoicePlugin?: (marketplace: {
+              name: string;
+              owner: { name: string; email: string };
+              plugins: Array<{
+                name: string;
+                source: string;
+                category?: string;
+                tags?: string[];
+              }>;
+            }) => Promise<string>;
+          };
+          submittedPlugin = await manager.requestChoicePlugin?.({
+            name: 'example-marketplace',
+            owner: { name: 'Example', email: 'example@example.com' },
+            plugins: [
+              {
+                name: 'example-plugin',
+                source:
+                  'https://user:token@example.com/plugin?token=secret#private',
+                category: 'tools',
+                tags: ['example'],
+              },
+            ],
+          });
+          return testExtension('example-plugin');
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+        const install = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source: 'https://example.com/marketplace', consent: true });
+
+        let interactionId = '';
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(
+              `/workspace/extensions/operations/${encodeURIComponent(
+                install.body.operationId as string,
+              )}`,
+            )
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body).toMatchObject({
+            status: 'waiting_for_input',
+            interaction: {
+              kind: 'marketplace_plugin',
+              marketplace: { name: 'example-marketplace' },
+              plugins: [
+                {
+                  name: 'example-plugin',
+                  source: 'https://***REDACTED***@example.com/plugin',
+                  category: 'tools',
+                  tags: ['example'],
+                },
+              ],
+            },
+          });
+          expect(JSON.stringify(poll.body)).not.toContain('user:token');
+          interactionId = poll.body.interaction.id as string;
+        });
+        const invalid = await request(app)
+          .post(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              install.body.operationId as string,
+            )}/interactions/${encodeURIComponent(interactionId)}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ pluginName: 'missing-plugin' });
+        expect(invalid.status).toBe(400);
+
+        const missing = await request(app)
+          .post(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              install.body.operationId as string,
+            )}/interactions/missing-interaction`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send({ pluginName: 'example-plugin' });
+        expect(missing.status).toBe(404);
+
+        const answer = await request(app)
+          .post(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              install.body.operationId as string,
+            )}/interactions/${encodeURIComponent(interactionId)}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ pluginName: 'example-plugin' });
+        expect(answer.status).toBe(200);
+        await vi.waitFor(() => {
+          expect(submittedPlugin).toBe('example-plugin');
+          expect(bridge.extensionEvents.at(-1)).toMatchObject({
+            status: 'installed',
+            name: 'example-plugin',
+          });
+        });
+      } finally {
+        restore();
+      }
+    });
+
+    it('fails an install when a marketplace has no plugins', async () => {
+      const restore = mockExtensionManagerMethods({
+        async prepareExtensionInstall() {
+          const manager = this as unknown as {
+            requestChoicePlugin?: (marketplace: {
+              name: string;
+              owner: { name: string; email: string };
+              plugins: [];
+            }) => Promise<string>;
+          };
+          await manager.requestChoicePlugin?.({
+            name: 'empty-marketplace',
+            owner: { name: 'Example', email: 'example@example.com' },
+            plugins: [],
+          });
+          return testExtension('unreachable');
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge() },
+        );
+        const install = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send({ source: 'https://example.com/marketplace', consent: true });
+
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(`/workspace/extensions/operations/${install.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body).toMatchObject({
+            status: 'failed',
+            error: expect.stringContaining('has no plugins'),
+          });
+        });
+      } finally {
+        restore();
+      }
+    });
+
+    it('cancels an extension interaction from the client', async () => {
+      const restore = mockExtensionManagerMethods({
+        async prepareExtensionInstall() {
+          const manager = this as unknown as {
+            requestSetting?: (setting: {
+              name: string;
+              description: string;
+              envVar: string;
+            }) => Promise<string>;
+          };
+          await manager.requestSetting?.({
+            name: 'API key',
+            description: 'API key used by this extension',
+            envVar: 'API_KEY',
+          });
+          return testExtension('installed-ext');
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge() },
+        );
+        const install = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send({ source: 'https://example.com/installed-ext', consent: true });
+
+        let interactionId = '';
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(`/workspace/extensions/operations/${install.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body.status).toBe('waiting_for_input');
+          interactionId = poll.body.interaction.id as string;
+        });
+
+        const cancel = await request(app)
+          .post(
+            `/workspace/extensions/operations/${install.body.operationId}/interactions/${interactionId}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send({ cancelled: true });
+        expect(cancel.status).toBe(200);
+
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(`/workspace/extensions/operations/${install.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body.status).toBe('failed');
+          expect(poll.body.error).toContain('cancelled');
+        });
+      } finally {
+        restore();
+      }
+    });
+
+    it('fails an extension operation when its interaction times out', async () => {
+      let expireInteraction: (() => void) | undefined;
+      const realSetTimeout = globalThis.setTimeout;
+      const timeoutSpy = vi
+        .spyOn(globalThis, 'setTimeout')
+        .mockImplementation(((handler, timeout, ...args) => {
+          if (
+            typeof timeout === 'number' &&
+            timeout > 9 * 60_000 &&
+            timeout <= 10 * 60_000 &&
+            typeof handler === 'function'
+          ) {
+            expireInteraction = () => handler(...args);
+            return -1 as unknown as ReturnType<typeof setTimeout>;
+          }
+          return realSetTimeout(handler, timeout, ...args);
+        }) as typeof setTimeout);
+      const restore = mockExtensionManagerMethods({
+        async prepareExtensionInstall() {
+          const manager = this as unknown as {
+            requestSetting?: (setting: {
+              name: string;
+              description: string;
+              envVar: string;
+            }) => Promise<string>;
+          };
+          await manager.requestSetting?.({
+            name: 'API key',
+            description: 'API key used by this extension',
+            envVar: 'API_KEY',
+          });
+          return testExtension('installed-ext');
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge() },
+        );
+        const install = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send({ source: 'https://example.com/installed-ext', consent: true });
+
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(`/workspace/extensions/operations/${install.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body.status).toBe('waiting_for_input');
+        });
+
+        expect(expireInteraction).toBeDefined();
+        expireInteraction?.();
+
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(`/workspace/extensions/operations/${install.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body.status).toBe('failed');
+          expect(poll.body.error).toContain('timed out');
+        });
+      } finally {
+        timeoutSpy.mockRestore();
+        restore();
+      }
+    });
+
+    it('cancels a pending install interaction before queuing a new install', async () => {
+      let installCount = 0;
+      const restore = mockExtensionManagerMethods({
+        async prepareExtensionInstall() {
+          installCount += 1;
+          if (installCount === 1) {
+            const manager = this as unknown as {
+              requestChoicePlugin?: (marketplace: {
+                name: string;
+                owner: { name: string; email: string };
+                plugins: Array<{ name: string; source: string }>;
+              }) => Promise<string>;
+            };
+            await manager.requestChoicePlugin?.({
+              name: 'example-marketplace',
+              owner: { name: 'Example', email: 'example@example.com' },
+              plugins: [
+                {
+                  name: 'example-plugin',
+                  source: 'https://example.com/plugin',
+                },
+              ],
+            });
+          }
+          return testExtension(`installed-${installCount}`);
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge({ knownClientIds: ['client-1'] }) },
+        );
+        const install = (source: string) =>
+          request(app)
+            .post('/workspace/extensions/install')
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret')
+            .send({ source, consent: true });
+
+        const first = await install('https://example.com/first');
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(`/workspace/extensions/operations/${first.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body.status).toBe('waiting_for_input');
+        });
+
+        const invalid = await install(
+          'C:\\Users\\test\\missing-qwen-extension',
+        );
+        expect(invalid.status).toBe(400);
+
+        const stillWaiting = await request(app)
+          .get(`/workspace/extensions/operations/${first.body.operationId}`)
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(stillWaiting.body.status).toBe('waiting_for_input');
+
+        const second = await install('https://example.com/second');
+        await vi.waitFor(async () => {
+          const firstPoll = await request(app)
+            .get(`/workspace/extensions/operations/${first.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          const secondPoll = await request(app)
+            .get(`/workspace/extensions/operations/${second.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(firstPoll.body.status).toBe('failed');
+          expect(secondPoll.body.status).toBe('succeeded');
+        });
+      } finally {
+        restore();
+      }
+    });
+
+    it('rejects a superseded install that requests input after replacement', async () => {
+      let releaseFirst: (() => void) | undefined;
+      const firstBlocked = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      let installCount = 0;
+      const restore = mockExtensionManagerMethods({
+        async prepareExtensionInstall() {
+          installCount += 1;
+          if (installCount === 1) {
+            await firstBlocked;
+            const manager = this as unknown as {
+              requestSetting?: (setting: {
+                name: string;
+                description: string;
+                envVar: string;
+              }) => Promise<string>;
+            };
+            await manager.requestSetting?.({
+              name: 'API key',
+              description: 'API key used by this extension',
+              envVar: 'API_KEY',
+            });
+          }
+          return testExtension(`installed-${installCount}`);
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge() },
+        );
+        const install = (source: string) =>
+          request(app)
+            .post('/workspace/extensions/install')
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret')
+            .send({ source, consent: true });
+
+        const first = await install('https://example.com/first');
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(`/workspace/extensions/operations/${first.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body.status).toBe('running');
+        });
+        const second = await install('https://example.com/second');
+        releaseFirst?.();
+
+        await vi.waitFor(async () => {
+          const firstPoll = await request(app)
+            .get(`/workspace/extensions/operations/${first.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          const secondPoll = await request(app)
+            .get(`/workspace/extensions/operations/${second.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(firstPoll.body.status).toBe('failed');
+          expect(secondPoll.body.status).toBe('succeeded');
+        });
+      } finally {
+        restore();
+      }
+    });
+
+    it('does not cancel a pending interaction when the queue is full', async () => {
+      let installCount = 0;
+      let releaseEnable: (() => void) | undefined;
+      const enableBlocked = new Promise<void>((resolve) => {
+        releaseEnable = resolve;
+      });
+      const restore = mockExtensionManagerMethods({
+        async prepareExtensionInstall() {
+          installCount += 1;
+          if (installCount === 1) {
+            const manager = this as unknown as {
+              requestChoicePlugin?: (marketplace: {
+                name: string;
+                owner: { name: string; email: string };
+                plugins: Array<{ name: string; source: string }>;
+              }) => Promise<string>;
+            };
+            await manager.requestChoicePlugin?.({
+              name: 'example-marketplace',
+              owner: { name: 'Example', email: 'example@example.com' },
+              plugins: [{ name: 'plugin', source: '.' }],
+            });
+          }
+          return testExtension(`installed-${installCount}`);
+        },
+        async enableExtension() {
+          await enableBlocked;
+          return { generation: 1 };
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+        const install = (index: number) =>
+          request(app)
+            .post('/workspace/extensions/install')
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret')
+            .send({
+              source: `https://example.com/extension-${index}`,
+              consent: true,
+            });
+
+        const first = await install(0);
+        let interactionId = '';
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(`/workspace/extensions/operations/${first.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body.status).toBe('waiting_for_input');
+          interactionId = poll.body.interaction.id as string;
+        });
+
+        const queued = await Promise.all(
+          Array.from({ length: 9 }, () =>
+            request(app)
+              .post('/workspace/extensions/TEST-EXT/enable')
+              .set('Host', `127.0.0.1:${tokenOpts.port}`)
+              .set('Authorization', 'Bearer secret')
+              .send({ scope: 'user' }),
+          ),
+        );
+        expect(queued.every((response) => response.status === 202)).toBe(true);
+        const rejected = await install(10);
+        expect(rejected.status).toBe(429);
+
+        const stillWaiting = await request(app)
+          .get(`/workspace/extensions/operations/${first.body.operationId}`)
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(stillWaiting.body.status).toBe('waiting_for_input');
+
+        await request(app)
+          .post(
+            `/workspace/extensions/operations/${first.body.operationId}/interactions/${interactionId}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send({ cancelled: true });
+        releaseEnable?.();
+        await vi.waitFor(() => {
+          expect(
+            bridge.extensionEvents.filter(
+              (event) => event.status === 'enabled',
+            ),
+          ).toHaveLength(9);
+        });
+      } finally {
+        releaseEnable?.();
         restore();
       }
     });
@@ -3910,7 +4721,7 @@ describe('createServeApp', () => {
         releaseInstall = resolve;
       });
       const restore = mockExtensionManagerMethods({
-        installExtension: async () => {
+        prepareExtensionInstall: async () => {
           await installBlocker;
           return testExtension('installed-ext');
         },
@@ -3952,35 +4763,233 @@ describe('createServeApp', () => {
           .send({ source: 'https://example.com/second-ext', consent: true });
         expect(second.status).toBe(202);
 
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(
+              `/workspace/extensions/operations/${encodeURIComponent(
+                second.body.operationId as string,
+              )}`,
+            )
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body.status).toBe('running');
+        });
+
+        const third = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source: 'https://example.com/third-ext', consent: true });
+        expect(third.status).toBe(202);
+
         const queued = await request(app)
           .get(
             `/workspace/extensions/operations/${encodeURIComponent(
-              second.body.operationId as string,
+              third.body.operationId as string,
             )}`,
           )
           .set('Host', `127.0.0.1:${tokenOpts.port}`)
           .set('Authorization', 'Bearer secret');
         expect(queued.status).toBe(200);
         expect(queued.body).toMatchObject({
-          operationId: second.body.operationId,
+          operationId: third.body.operationId,
           operation: 'install',
           status: 'queued',
-          source: 'https://example.com/second-ext',
+          source: 'https://example.com/third-ext',
         });
+
+        const active = await request(app)
+          .get('/workspace/extensions/operations')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(active.status).toBe(200);
+        expect(
+          active.body.operations.map(
+            (operation: { operationId: string; status: string }) => ({
+              operationId: operation.operationId,
+              status: operation.status,
+            }),
+          ),
+        ).toEqual([
+          { operationId: first.body.operationId, status: 'running' },
+          { operationId: second.body.operationId, status: 'running' },
+          { operationId: third.body.operationId, status: 'queued' },
+        ]);
 
         releaseInstall!();
         await vi.waitFor(() => {
-          expect(bridge.extensionEvents.length).toBeGreaterThanOrEqual(2);
+          expect(bridge.extensionEvents.length).toBeGreaterThanOrEqual(3);
         });
+        const activeAfterCompletion = await request(app)
+          .get('/workspace/extensions/operations')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(activeAfterCompletion.status).toBe(200);
+        expect(activeAfterCompletion.body.operations).toEqual([]);
       } finally {
         releaseInstall?.();
         restore();
       }
     });
 
+    it('commits in preparation completion order', async () => {
+      let releaseFirst: (() => void) | undefined;
+      let firstStarted = false;
+      const commits: string[] = [];
+      let generation = 0;
+      const restore = mockExtensionManagerMethods({
+        prepareExtensionInstall: async ({ installMetadata }) => {
+          const name = installMetadata.source.endsWith('/first-ext')
+            ? 'first-ext'
+            : 'second-ext';
+          if (name === 'first-ext') {
+            firstStarted = true;
+            await new Promise<void>((resolve) => {
+              releaseFirst = resolve;
+            });
+          }
+          return testExtension(name);
+        },
+        commitPreparedExtension: async (prepared) => {
+          commits.push(prepared.identity.name);
+          return {
+            identity: prepared.identity,
+            version: prepared.version,
+            generation: ++generation,
+          };
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source: 'https://example.com/first-ext', consent: true });
+        await vi.waitFor(() => expect(firstStarted).toBe(true));
+
+        await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source: 'https://example.com/second-ext', consent: true });
+        await vi.waitFor(() => expect(commits).toEqual(['second-ext']));
+
+        releaseFirst?.();
+        await vi.waitFor(() =>
+          expect(commits).toEqual(['second-ext', 'first-ext']),
+        );
+        await vi.waitFor(() => expect(bridge.extensionEvents).toHaveLength(2));
+      } finally {
+        releaseFirst?.();
+        restore();
+      }
+    });
+
+    it('maps coded commit warnings to the legacy refresh-error status', async () => {
+      const restore = mockExtensionManagerMethods({
+        commitPreparedExtension: async (prepared) => ({
+          identity: prepared.identity,
+          version: prepared.version,
+          generation: 3,
+          warnings: [
+            {
+              code: 'extension_temp_cleanup_failed',
+              error: 'cleanup denied',
+            },
+          ],
+        }),
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge({ knownClientIds: ['client-1'] }) },
+        );
+        const started = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source: 'https://example.com/warning-ext', consent: true });
+
+        await vi.waitFor(async () => {
+          const operation = await request(app)
+            .get(`/workspace/extensions/operations/${started.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(operation.body).toMatchObject({
+            status: 'succeeded_with_refresh_error',
+            result: { error: 'cleanup denied' },
+            warnings: [
+              {
+                code: 'extension_temp_cleanup_failed',
+                error: 'cleanup denied',
+              },
+            ],
+          });
+        });
+      } finally {
+        restore();
+      }
+    });
+
+    it('maps resultless committed warnings to a legacy top-level error', async () => {
+      const restore = mockExtensionManagerMethods({
+        commitPreparedExtension: async (prepared) => ({
+          identity: prepared.identity,
+          version: prepared.version,
+          generation: 3,
+        }),
+        disposePreparedExtension: async () => {
+          throw new Error('cleanup exploded');
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge({ knownClientIds: ['client-1'] }) },
+        );
+        const started = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source: 'https://example.com/warning-ext', consent: true });
+
+        await vi.waitFor(async () => {
+          const operation = await request(app)
+            .get(`/workspace/extensions/operations/${started.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(operation.body).toMatchObject({
+            status: 'succeeded_with_refresh_error',
+            error:
+              'Commit succeeded but post-commit work failed: cleanup exploded',
+          });
+          expect(operation.body).not.toHaveProperty('result');
+        });
+      } finally {
+        restore();
+      }
+    });
+
     it('evicts the oldest terminal extension operations', async () => {
       const restore = mockExtensionManagerMethods({
-        async installExtension() {
+        async prepareExtensionInstall() {
           return testExtension('installed-ext');
         },
       });
@@ -4045,6 +5054,96 @@ describe('createServeApp', () => {
       }
     }, 15_000);
 
+    it('preserves a waiting operation while evicting terminal history', async () => {
+      let installCount = 0;
+      const restore = mockExtensionManagerMethods({
+        async prepareExtensionInstall() {
+          installCount += 1;
+          if (installCount === 3) {
+            const manager = this as unknown as {
+              requestSetting?: (setting: {
+                name: string;
+                description: string;
+                envVar: string;
+              }) => Promise<string>;
+            };
+            await manager.requestSetting?.({
+              name: 'API key',
+              description: 'Enter an API key',
+              envVar: 'API_KEY',
+            });
+          }
+          return testExtension(`installed-${installCount}`);
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge(), maxExtensionOperationHistory: 1 },
+        );
+        const install = async (index: number) => {
+          const response = await request(app)
+            .post('/workspace/extensions/install')
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret')
+            .send({
+              source: `https://example.com/extension-${index}`,
+              consent: true,
+            });
+          return response.body.operationId as string;
+        };
+        const firstId = await install(1);
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(`/workspace/extensions/operations/${firstId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body.status).toBe('succeeded');
+        });
+        const secondId = await install(2);
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(`/workspace/extensions/operations/${secondId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body.status).toBe('succeeded');
+        });
+        const waitingId = await install(3);
+        let interactionId = '';
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(`/workspace/extensions/operations/${waitingId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body.status).toBe('waiting_for_input');
+          interactionId = poll.body.interaction.id as string;
+        });
+
+        const evicted = await request(app)
+          .get(`/workspace/extensions/operations/${firstId}`)
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(evicted.status).toBe(404);
+        const retained = await request(app)
+          .get(`/workspace/extensions/operations/${waitingId}`)
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(retained.body.status).toBe('waiting_for_input');
+
+        await request(app)
+          .post(
+            `/workspace/extensions/operations/${waitingId}/interactions/${interactionId}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send({ cancelled: true });
+      } finally {
+        restore();
+      }
+    });
+
     it('returns 404 for unknown extension operation ids', async () => {
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
       const bridge = fakeBridge({ knownClientIds: ['client-1'] });
@@ -4066,9 +5165,12 @@ describe('createServeApp', () => {
     });
 
     it('broadcasts a failed extension install with redacted error details', async () => {
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
       const restore = mockExtensionManagerMethods({
-        installExtension: async () => {
-          throw new Error('https://user:token@example.com/private-ext failed');
+        prepareExtensionInstall: async () => {
+          throw new Error(
+            'https://user:\n\tsecret@example.com/private-ext failed',
+          );
         },
       });
       try {
@@ -4101,7 +5203,7 @@ describe('createServeApp', () => {
             error: 'https://***REDACTED***@example.com/private-ext failed',
           });
         });
-        expect(bridge.extensionEvents.at(-1)?.error).not.toContain('token');
+        expect(bridge.extensionEvents.at(-1)?.error).not.toContain('secret');
 
         const poll = await request(app)
           .get(
@@ -4119,23 +5221,45 @@ describe('createServeApp', () => {
           source: 'https://example.com/private-ext',
           error: 'https://***REDACTED***@example.com/private-ext failed',
         });
-        expect(poll.body.error).not.toContain('token');
+        expect(poll.body.error).not.toContain('secret');
+        const logged = stderr.mock.calls
+          .map(([chunk]) => String(chunk))
+          .join('');
+        expect(logged).toContain(
+          'https://***REDACTED***@example.com/private-ext failed',
+        );
+        expect(logged).not.toContain('secret');
       } finally {
+        stderr.mockRestore();
         restore();
       }
     });
 
     it('does not report a successful extension install as failed when session refresh fails', async () => {
       const restore = mockExtensionManagerMethods({
-        async installExtension() {
+        async prepareExtensionInstall() {
           return testExtension('installed-ext');
+        },
+        async commitPreparedExtension(prepared) {
+          return {
+            identity: prepared.identity,
+            version: prepared.version,
+            generation: 3,
+            warnings: [
+              {
+                code: 'extension_temp_cleanup_failed',
+                error: 'cleanup denied',
+              },
+            ],
+          };
         },
       });
       try {
         const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
         const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const refreshError = 'x'.repeat(600);
         bridge.refreshExtensionsForAllSessions = async () => {
-          throw new Error('refresh broke');
+          throw new Error(refreshError);
         };
         const app = createServeApp(
           { ...tokenOpts, workspace: WS_BOUND },
@@ -4162,7 +5286,7 @@ describe('createServeApp', () => {
             name: 'installed-ext',
             refreshed: 0,
             failed: 1,
-            error: 'refresh broke',
+            error: refreshError.slice(0, 500),
           });
         });
 
@@ -4183,8 +5307,11 @@ describe('createServeApp', () => {
             status: 'installed',
             refreshed: 0,
             failed: 1,
-            error: 'refresh broke',
+            error: refreshError.slice(0, 500),
           },
+          warnings: expect.arrayContaining([
+            expect.objectContaining({ error: refreshError.slice(0, 500) }),
+          ]),
         });
       } finally {
         restore();
@@ -4197,7 +5324,7 @@ describe('createServeApp', () => {
         releaseInstall = resolve;
       });
       const restore = mockExtensionManagerMethods({
-        installExtension: async () => {
+        prepareExtensionInstall: async () => {
           await installBlocker;
           return testExtension('installed-ext');
         },
@@ -4226,13 +5353,39 @@ describe('createServeApp', () => {
           Array.from({ length: 10 }, () => install()),
         );
         const rejected = await install();
+        const legacyRequests = Promise.all([
+          request(app)
+            .post('/workspace/extensions/check-updates')
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret')
+            .set('X-Qwen-Client-Id', 'client-1')
+            .send({}),
+          request(app)
+            .post('/workspace/extensions/refresh')
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret')
+            .set('X-Qwen-Client-Id', 'client-1')
+            .send({}),
+        ]);
+        const releaseTimer = setTimeout(() => releaseInstall?.(), 100);
+        const [checkUpdatesResponse, refresh] = await legacyRequests;
+        clearTimeout(releaseTimer);
+
+        releaseInstall?.();
 
         expect(accepted.every((res) => res.status === 202)).toBe(true);
         expect(rejected.status).toBe(429);
         expect(rejected.body).toMatchObject({
           code: 'extension_queue_full',
         });
-        releaseInstall?.();
+        expect(checkUpdatesResponse.status).toBe(429);
+        expect(checkUpdatesResponse.body).toMatchObject({
+          code: 'extension_queue_full',
+        });
+        expect(refresh.status).toBe(429);
+        expect(refresh.body).toMatchObject({
+          code: 'extension_queue_full',
+        });
         await vi.waitFor(() => {
           expect(
             bridge.extensionEvents.filter(
@@ -4308,7 +5461,7 @@ describe('createServeApp', () => {
       expect(res.body.error).toBe('`ref` must be a string');
     });
 
-    it('broadcasts failed local extension installs over the daemon endpoint', async () => {
+    it('rejects unsupported local extension installs before queuing', async () => {
       const localExtensionDir = await fsp.mkdtemp(
         path.join(os.tmpdir(), 'qwen-local-extension-'),
       );
@@ -4327,18 +5480,14 @@ describe('createServeApp', () => {
         .set('X-Qwen-Client-Id', 'client-1')
         .send({ source: localExtensionDir, consent: true });
 
-      expect(res.status).toBe(202);
-      await vi.waitFor(() => {
-        expect(bridge.extensionEvents.at(-1)).toMatchObject({
-          status: 'failed',
-          source: localExtensionDir,
-          error:
-            'Only GitHub, Git, and npm extension installs are supported over the daemon endpoint.',
-        });
-      });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe(
+        'Only GitHub, Git, and npm extension installs are supported over the daemon endpoint.',
+      );
+      expect(bridge.extensionEvents).toEqual([]);
     });
 
-    it('treats Windows drive paths as local extension sources', async () => {
+    it('rejects missing Windows local extension sources before queuing', async () => {
       const restore = mockExtensionManagerMethods();
       try {
         const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
@@ -4357,14 +5506,9 @@ describe('createServeApp', () => {
           .set('X-Qwen-Client-Id', 'client-1')
           .send({ source, consent: true });
 
-        expect(res.status).toBe(202);
-        await vi.waitFor(() => {
-          expect(bridge.extensionEvents.at(-1)).toMatchObject({
-            status: 'failed',
-            source,
-            error: `Install source not found: ${source}`,
-          });
-        });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe(`Install source not found: ${source}`);
+        expect(bridge.extensionEvents).toEqual([]);
       } finally {
         restore();
       }
@@ -4406,6 +5550,7 @@ describe('createServeApp', () => {
         'http://example.com/repo',
         'ftp://example.com/repo',
         'file:///tmp/repo',
+        'git@github.com:owner/repo.git',
       ]) {
         const res = await request(app)
           .post('/workspace/extensions/install')
@@ -4418,7 +5563,7 @@ describe('createServeApp', () => {
           });
 
         expect(res.status).toBe(400);
-        expect(res.body.error).toBe('`source` must use https or ssh');
+        expect(res.body.error).toBe('`source` must use https');
       }
     });
 
@@ -4524,7 +5669,7 @@ describe('createServeApp', () => {
       expect(res.body.error).toBe('`source` must not include credentials');
     });
 
-    it('broadcasts failed npm extension install with ref', async () => {
+    it('rejects an npm extension install with ref before queuing', async () => {
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
       const bridge = fakeBridge({ knownClientIds: ['client-1'] });
       const app = createServeApp(
@@ -4540,17 +5685,14 @@ describe('createServeApp', () => {
         .set('X-Qwen-Client-Id', 'client-1')
         .send({ source: '@scope/ext', ref: 'v1', consent: true });
 
-      expect(res.status).toBe(202);
-      await vi.waitFor(() => {
-        expect(bridge.extensionEvents.at(-1)).toMatchObject({
-          status: 'failed',
-          source: '@scope/ext',
-          error: '--ref is not applicable for npm extensions.',
-        });
-      });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe(
+        '--ref is not applicable for npm extensions.',
+      );
+      expect(bridge.extensionEvents).toEqual([]);
     });
 
-    it('broadcasts failed registry use for non-npm extension installs', async () => {
+    it('rejects registry use for non-npm extension installs before queuing', async () => {
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
       const bridge = fakeBridge({ knownClientIds: ['client-1'] });
       const app = createServeApp(
@@ -4570,14 +5712,11 @@ describe('createServeApp', () => {
           consent: true,
         });
 
-      expect(res.status).toBe(202);
-      await vi.waitFor(() => {
-        expect(bridge.extensionEvents.at(-1)).toMatchObject({
-          status: 'failed',
-          source: 'https://example.com/repo',
-          error: '--registry is only applicable for npm extensions.',
-        });
-      });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe(
+        '--registry is only applicable for npm extensions.',
+      );
+      expect(bridge.extensionEvents).toEqual([]);
     });
 
     it('rejects non-https npm registries', async () => {
@@ -4696,7 +5835,6 @@ describe('createServeApp', () => {
           .post('/workspace/extensions/check-updates')
           .set('Host', `127.0.0.1:${tokenOpts.port}`)
           .set('Authorization', 'Bearer secret')
-          .set('X-Qwen-Client-Id', 'client-1')
           .send({});
 
         expect(res.status).toBe(200);
@@ -4711,21 +5849,24 @@ describe('createServeApp', () => {
       }
     });
 
-    it('serializes check-updates behind queued extension mutations', async () => {
-      let releaseInstall: (() => void) | undefined;
+    it('shares the two preparation slots with check-updates', async () => {
+      const releases: Array<() => void> = [];
       const calls: string[] = [];
       const restore = mockExtensionManagerMethods({
-        installExtension: async () => {
-          calls.push('install:start');
+        prepareExtensionInstall: async () => {
+          const index = releases.length + 1;
+          calls.push(`install-${index}:start`);
           await new Promise<void>((resolve) => {
-            releaseInstall = resolve;
+            releases.push(resolve);
           });
-          calls.push('install:end');
-          return testExtension('installed-ext');
+          calls.push(`install-${index}:end`);
+          return testExtension(`installed-ext-${index}`);
         },
-        checkForAllExtensionUpdates: async (cb) => {
-          calls.push('check-updates');
-          cb('test-ext', ExtensionUpdateState.UP_TO_DATE);
+        checkForAllExtensionUpdates: async (cb, _signal, schedule) => {
+          await schedule!(async () => {
+            calls.push('check-updates');
+            cb('test-ext', ExtensionUpdateState.UP_TO_DATE);
+          });
         },
       });
       try {
@@ -4737,17 +5878,19 @@ describe('createServeApp', () => {
           { bridge },
         );
 
-        await request(app)
-          .post('/workspace/extensions/install')
-          .set('Host', `127.0.0.1:${tokenOpts.port}`)
-          .set('Authorization', 'Bearer secret')
-          .set('X-Qwen-Client-Id', 'client-1')
-          .send({
-            source: 'https://example.com/installed-ext',
-            consent: true,
-          });
+        for (const name of ['first', 'second']) {
+          await request(app)
+            .post('/workspace/extensions/install')
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret')
+            .set('X-Qwen-Client-Id', 'client-1')
+            .send({
+              source: `https://example.com/${name}`,
+              consent: true,
+            });
+        }
         await vi.waitFor(() => {
-          expect(calls).toEqual(['install:start']);
+          expect(calls).toEqual(['install-1:start', 'install-2:start']);
         });
 
         const checkUpdates = request(app)
@@ -4757,19 +5900,28 @@ describe('createServeApp', () => {
           .set('X-Qwen-Client-Id', 'client-1')
           .send({})
           .then((response) => response);
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        expect(calls).toEqual(['install:start']);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(calls).toEqual(['install-1:start', 'install-2:start']);
 
-        releaseInstall?.();
+        releases[0]?.();
+        await vi.waitFor(() => expect(calls).toContain('check-updates'));
         const res = await checkUpdates;
         expect(res.status).toBe(200);
         expect(calls).toEqual([
-          'install:start',
-          'install:end',
+          'install-1:start',
+          'install-2:start',
+          'install-1:end',
           'check-updates',
         ]);
+        releases[1]?.();
+        await vi.waitFor(() =>
+          expect(bridge.extensionEvents).toEqual([
+            expect.objectContaining({ status: 'installed' }),
+            expect.objectContaining({ status: 'installed' }),
+          ]),
+        );
       } finally {
-        releaseInstall?.();
+        releases.forEach((release) => release());
         restore();
       }
     });
@@ -4843,10 +5995,20 @@ describe('createServeApp', () => {
         });
         expect(
           vi.mocked(ExtensionManager.prototype.enableExtension),
-        ).toHaveBeenCalledWith('test-ext', expect.anything(), WS_BOUND);
+        ).toHaveBeenCalledWith(
+          'test-ext',
+          expect.anything(),
+          WS_BOUND,
+          expect.any(Function),
+        );
         expect(
           vi.mocked(ExtensionManager.prototype.disableExtension),
-        ).toHaveBeenCalledWith('test-ext', expect.anything(), WS_BOUND);
+        ).toHaveBeenCalledWith(
+          'test-ext',
+          expect.anything(),
+          WS_BOUND,
+          expect.any(Function),
+        );
       } finally {
         restore();
       }
@@ -4880,10 +6042,20 @@ describe('createServeApp', () => {
         await vi.waitFor(() => {
           expect(
             vi.mocked(ExtensionManager.prototype.enableExtension),
-          ).toHaveBeenCalledWith('test-ext', expect.anything(), WS_BOUND);
+          ).toHaveBeenCalledWith(
+            'test-ext',
+            expect.anything(),
+            WS_BOUND,
+            expect.any(Function),
+          );
           expect(
             vi.mocked(ExtensionManager.prototype.disableExtension),
-          ).toHaveBeenCalledWith('test-ext', expect.anything(), WS_BOUND);
+          ).toHaveBeenCalledWith(
+            'test-ext',
+            expect.anything(),
+            WS_BOUND,
+            expect.any(Function),
+          );
         });
       } finally {
         restore();
@@ -4892,7 +6064,7 @@ describe('createServeApp', () => {
 
     it('refreshes extensions for all sessions on request', async () => {
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
-      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const bridge = fakeBridge();
       const app = createServeApp(
         { ...tokenOpts, workspace: WS_BOUND },
         undefined,
@@ -4903,7 +6075,6 @@ describe('createServeApp', () => {
         .post('/workspace/extensions/refresh')
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret')
-        .set('X-Qwen-Client-Id', 'client-1')
         .send({});
 
       expect(res.status).toBe(200);
@@ -4914,10 +6085,10 @@ describe('createServeApp', () => {
       });
     });
 
-    it('serializes extension refresh behind queued mutations', async () => {
+    it('does not block manual refresh behind preparation', async () => {
       let releaseInstall: (() => void) | undefined;
       const restore = mockExtensionManagerMethods({
-        installExtension: async () => {
+        prepareExtensionInstall: async () => {
           await new Promise<void>((resolve) => {
             releaseInstall = resolve;
           });
@@ -4944,7 +6115,7 @@ describe('createServeApp', () => {
           });
         await vi.waitFor(() => {
           expect(
-            vi.mocked(ExtensionManager.prototype.installExtension),
+            vi.mocked(ExtensionManager.prototype.prepareExtensionInstall),
           ).toHaveBeenCalled();
         });
 
@@ -4955,18 +6126,82 @@ describe('createServeApp', () => {
           .set('X-Qwen-Client-Id', 'client-1')
           .send({})
           .then((response) => response);
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        expect(bridge.extensionEvents).toEqual([]);
-
-        releaseInstall?.();
         const res = await refresh;
         expect(res.status).toBe(200);
         expect(bridge.extensionEvents).toEqual([
-          expect.objectContaining({ status: 'installed' }),
           expect.objectContaining({ refreshed: 1, failed: 0 }),
         ]);
+
+        releaseInstall?.();
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents).toEqual([
+            expect.objectContaining({ refreshed: 1, failed: 0 }),
+            expect.objectContaining({ status: 'installed' }),
+          ]);
+        });
       } finally {
         releaseInstall?.();
+        restore();
+      }
+    });
+
+    it('serializes manual refresh behind an extension commit', async () => {
+      let releaseEnable: (() => void) | undefined;
+      const restore = mockExtensionManagerMethods({
+        enableExtension: async () => {
+          await new Promise<void>((resolve) => {
+            releaseEnable = resolve;
+          });
+          return { generation: 1 };
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const enable = await request(app)
+          .post('/workspace/extensions/test-ext/enable')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ scope: 'workspace' });
+        expect(enable.status).toBe(202);
+        await vi.waitFor(() => {
+          expect(
+            vi.mocked(ExtensionManager.prototype.enableExtension),
+          ).toHaveBeenCalled();
+        });
+
+        const refreshRequest = request(app)
+          .post('/workspace/extensions/refresh')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({});
+        const requestStarted = new Promise<void>((resolve) => {
+          refreshRequest.on('request', () => resolve());
+        });
+        const refresh = refreshRequest.then((response) => response);
+        await requestStarted;
+        const state = await Promise.race([
+          refresh.then(() => 'settled'),
+          new Promise<'pending'>((resolve) =>
+            setTimeout(() => resolve('pending'), 50),
+          ),
+        ]);
+        expect(state).toBe('pending');
+
+        releaseEnable?.();
+        const res = await refresh;
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({ refreshed: 1, failed: 0 });
+      } finally {
+        releaseEnable?.();
         restore();
       }
     });
@@ -5009,7 +6244,6 @@ describe('createServeApp', () => {
           .post('/workspace/extensions/test-ext/update')
           .set('Host', `127.0.0.1:${tokenOpts.port}`)
           .set('Authorization', 'Bearer secret')
-          .set('X-Qwen-Client-Id', 'client-1')
           .send({});
 
         expect(res.status).toBe(202);
@@ -5026,6 +6260,106 @@ describe('createServeApp', () => {
         expect(
           vi.mocked(ExtensionManager.prototype.checkForAllExtensionUpdates),
         ).not.toHaveBeenCalled();
+      } finally {
+        checkForExtensionUpdate.mockRestore();
+        restore();
+      }
+    });
+
+    it('accepts a setting interaction while updating', async () => {
+      let submittedSetting: string | undefined;
+      const restore = mockExtensionManagerMethods({
+        async prepareExtensionUpdate(extension) {
+          const manager = this as unknown as {
+            requestSetting?: (setting: {
+              name: string;
+              description: string;
+              envVar: string;
+              sensitive?: boolean;
+            }) => Promise<string>;
+          };
+          submittedSetting = await manager.requestSetting?.({
+            name: 'Updated API key',
+            description: 'API key required by the new version',
+            envVar: 'UPDATED_API_KEY',
+            sensitive: true,
+          });
+          return {
+            ...extension,
+            config: { ...extension.config, version: '1.2.4' },
+            version: '1.2.4',
+          } as Extension;
+        },
+      });
+      const checkForExtensionUpdate = vi
+        .spyOn(qwenCore, 'checkForExtensionUpdate')
+        .mockResolvedValue(ExtensionUpdateState.UPDATE_AVAILABLE);
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const update = await request(app)
+          .post('/workspace/extensions/test-ext/update')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({});
+        expect(update.status).toBe(202);
+
+        let interactionId = '';
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(
+              `/workspace/extensions/operations/${encodeURIComponent(
+                update.body.operationId as string,
+              )}`,
+            )
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body).toMatchObject({
+            operation: 'update',
+            status: 'waiting_for_input',
+            interaction: {
+              kind: 'setting',
+              setting: { name: 'Updated API key', sensitive: true },
+            },
+          });
+          interactionId = poll.body.interaction.id as string;
+        });
+
+        const answer = await request(app)
+          .post(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              update.body.operationId as string,
+            )}/interactions/${encodeURIComponent(interactionId)}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ value: 'updated-secret' });
+        expect(answer.status).toBe(200);
+
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(
+              `/workspace/extensions/operations/${encodeURIComponent(
+                update.body.operationId as string,
+              )}`,
+            )
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body).toMatchObject({
+            operation: 'update',
+            status: 'succeeded',
+            result: { status: 'updated', name: 'test-ext' },
+          });
+        });
+        expect(submittedSetting).toBe('updated-secret');
       } finally {
         checkForExtensionUpdate.mockRestore();
         restore();
@@ -5140,22 +6474,32 @@ describe('createServeApp', () => {
       }
     });
 
-    it('rejects extension uninstall without a registered workspace client id', async () => {
-      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
-      const bridge = fakeBridge();
-      const app = createServeApp(
-        { ...tokenOpts, workspace: WS_BOUND },
-        undefined,
-        { bridge },
-      );
+    it('queues extension uninstall without a workspace client id', async () => {
+      const restore = mockExtensionManagerMethods();
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
 
-      const res = await request(app)
-        .delete('/workspace/extensions/test-ext')
-        .set('Host', `127.0.0.1:${tokenOpts.port}`)
-        .set('Authorization', 'Bearer secret');
+        const res = await request(app)
+          .delete('/workspace/extensions/test-ext')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
 
-      expect(res.status).toBe(400);
-      expect(res.body.code).toBe('missing_client_id');
+        expect(res.status).toBe(202);
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents.at(-1)).toMatchObject({
+            status: 'uninstalled',
+            name: 'test-ext',
+          });
+        });
+      } finally {
+        restore();
+      }
     });
 
     it('queues extension uninstall mutations', async () => {
@@ -5186,7 +6530,12 @@ describe('createServeApp', () => {
         });
         expect(
           vi.mocked(ExtensionManager.prototype.uninstallExtension),
-        ).toHaveBeenCalledWith('test-ext', false, WS_BOUND);
+        ).toHaveBeenCalledWith(
+          'test-ext',
+          false,
+          WS_BOUND,
+          expect.any(Function),
+        );
       } finally {
         restore();
       }
@@ -5220,7 +6569,12 @@ describe('createServeApp', () => {
         });
         expect(
           vi.mocked(ExtensionManager.prototype.uninstallExtension),
-        ).toHaveBeenCalledWith('test-ext', false, WS_BOUND);
+        ).toHaveBeenCalledWith(
+          'test-ext',
+          false,
+          WS_BOUND,
+          expect.any(Function),
+        );
       } finally {
         restore();
       }
@@ -11859,6 +13213,200 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('POST /workspace/skills/:name/enable', () => {
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+    const reviewSkill = {
+      kind: 'skill' as const,
+      status: 'ok' as const,
+      name: 'review',
+      description: 'Review changed code',
+      level: 'bundled' as const,
+      modelInvocable: true,
+    };
+
+    it('requires the strict bearer-auth mutation gate', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/workspace/skills/review/enable')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ enabled: false });
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+    });
+
+    it('validates skill names and the enabled body', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const empty = await auth(
+        request(app).post('/workspace/skills/%20%20/enable'),
+      ).send({ enabled: false });
+      expect(empty.status).toBe(400);
+      expect(empty.body.code).toBe('invalid_skill_name');
+
+      const tooLong = await auth(
+        request(app).post(`/workspace/skills/${'a'.repeat(257)}/enable`),
+      ).send({ enabled: false });
+      expect(tooLong.status).toBe(400);
+      expect(tooLong.body.code).toBe('invalid_skill_name');
+
+      const badBody = await auth(
+        request(app).post('/workspace/skills/review/enable'),
+      ).send({ enabled: 'no' });
+      expect(badBody.status).toBe(400);
+      expect(badBody.body.code).toBe('invalid_enabled_flag');
+    });
+
+    it('returns the canonical name and deferred activation without a child', async () => {
+      const bridge = fakeBridge({
+        workspaceSkillsImpl: async () => ({
+          v: 1,
+          workspaceCwd: WS_BOUND,
+          initialized: true,
+          skills: [reviewSkill],
+        }),
+      });
+      const persistDisabledSkills = vi.fn().mockResolvedValue({
+        changed: true,
+        disabled: ['review'],
+      });
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge,
+        boundWorkspace: WS_BOUND,
+        persistDisabledSkills,
+        primaryWorkspaceTrusted: true,
+      });
+      const res = await auth(
+        request(app).post('/workspace/skills/ReViEw/enable'),
+      ).send({ enabled: false });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        skillName: 'review',
+        enabled: false,
+        changed: true,
+        activation: 'deferred',
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+      });
+      expect(persistDisabledSkills).toHaveBeenCalledWith(
+        WS_BOUND,
+        'review',
+        false,
+      );
+    });
+
+    it('returns 404 for an unknown skill', async () => {
+      const persistDisabledSkills = vi.fn();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge({
+          workspaceSkillsImpl: async () => ({
+            v: 1,
+            workspaceCwd: WS_BOUND,
+            initialized: true,
+            skills: [reviewSkill],
+          }),
+        }),
+        persistDisabledSkills,
+        primaryWorkspaceTrusted: true,
+      });
+      const res = await auth(
+        request(app).post('/workspace/skills/missing/enable'),
+      ).send({ enabled: false });
+      expect(res.status).toBe(404);
+      expect(res.body.code).toBe('skill_not_found');
+      expect(persistDisabledSkills).not.toHaveBeenCalled();
+    });
+
+    it('rejects an unknown workspace client id before persistence', async () => {
+      const persistDisabledSkills = vi.fn();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        persistDisabledSkills,
+        primaryWorkspaceTrusted: true,
+      });
+      const res = await auth(
+        request(app).post('/workspace/skills/review/enable'),
+      )
+        .set('X-Qwen-Client-Id', 'forged-client')
+        .send({ enabled: false });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_client_id');
+      expect(persistDisabledSkills).not.toHaveBeenCalled();
+    });
+
+    it('returns 409 without persisting a non-user-invocable skill', async () => {
+      const persistDisabledSkills = vi.fn();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge({
+          workspaceSkillsImpl: async () => ({
+            v: 1,
+            workspaceCwd: WS_BOUND,
+            initialized: true,
+            skills: [{ ...reviewSkill, userInvocable: false }],
+          }),
+        }),
+        persistDisabledSkills,
+        primaryWorkspaceTrusted: true,
+      });
+      const res = await auth(
+        request(app).post('/workspace/skills/review/enable'),
+      ).send({ enabled: false });
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'skill_not_toggleable',
+        reason: 'not_user_invocable',
+      });
+      expect(persistDisabledSkills).not.toHaveBeenCalled();
+    });
+
+    it('returns the locked scope from persistence validation', async () => {
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge({
+          workspaceSkillsImpl: async () => ({
+            v: 1,
+            workspaceCwd: WS_BOUND,
+            initialized: true,
+            skills: [reviewSkill],
+          }),
+        }),
+        persistDisabledSkills: vi
+          .fn()
+          .mockRejectedValue(
+            new WorkspaceSkillNotToggleableError('review', 'locked', 'user'),
+          ),
+        primaryWorkspaceTrusted: true,
+      });
+      const res = await auth(
+        request(app).post('/workspace/skills/review/enable'),
+      ).send({ enabled: true });
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'skill_not_toggleable',
+        reason: 'locked',
+        lockedScope: 'user',
+      });
+    });
+
+    it('rejects writes to an untrusted primary workspace', async () => {
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+      });
+      const res = await auth(
+        request(app).post('/workspace/skills/review/enable'),
+      ).send({ enabled: false });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('untrusted_workspace');
+    });
+  });
+
   describe('POST /session/:id/permission/:requestId', () => {
     it('200 when bridge accepts the scoped vote', async () => {
       const bridge = fakeBridge();
@@ -12406,6 +13954,57 @@ describe('createServeApp', () => {
         code: 'session_archived',
         sessionId: sid,
       });
+    });
+
+    it('keeps archive blocked while a legacy export is in flight', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeef';
+      await writeExportSession(sid);
+      let loadStarted!: () => void;
+      let releaseLoad!: () => void;
+      const loadStartedPromise = new Promise<void>((resolve) => {
+        loadStarted = resolve;
+      });
+      const loadReleasedPromise = new Promise<void>((resolve) => {
+        releaseLoad = resolve;
+      });
+      const originalLoadSession = SessionService.prototype.loadSession;
+      const loadSpy = vi
+        .spyOn(SessionService.prototype, 'loadSession')
+        .mockImplementation(async function (this: SessionService, id) {
+          const result = await originalLoadSession.call(this, id);
+          if (id === sid) {
+            loadStarted();
+            await loadReleasedPromise;
+          }
+          return result;
+        });
+      const app = createExportApp();
+      const exportPromise = request(app)
+        .get(`/session/${sid}/export`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .then((response) => response);
+
+      try {
+        await loadStartedPromise;
+        const archive = await request(app)
+          .post('/sessions/archive')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sessionIds: [sid] });
+        expect(archive.status).toBe(409);
+        expect(archive.body).toMatchObject({
+          code: 'session_archiving',
+          sessionId: sid,
+        });
+
+        releaseLoad();
+        const exported = await exportPromise;
+        expect(exported.status).toBe(200);
+        expect(exported.text).toContain('hello export');
+      } finally {
+        releaseLoad();
+        loadSpy.mockRestore();
+        await Promise.allSettled([exportPromise]);
+      }
     });
   });
 
@@ -17536,6 +19135,24 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
         } as Parameters<typeof createServeApp>[2],
       ),
     ).not.toThrow();
+  });
+
+  it('requires the Voice coordinator paired with runtime removal', async () => {
+    const { createServeApp } = await import('./server.js');
+
+    expect(() =>
+      createServeApp(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          workspace: '/work/bound',
+        } as Parameters<typeof createServeApp>[0],
+        () => 0,
+        {
+          workspaceRuntimeRemoval: {},
+        } as Parameters<typeof createServeApp>[2],
+      ),
+    ).toThrow(/workspaceRuntimeRemoval requires.*voiceCoordinator/);
   });
 
   it('uses the injected registry sender when client-MCP over WS is enabled', async () => {

@@ -530,21 +530,19 @@ export class DingtalkChannel extends ChannelBase {
         signal: AbortSignal.timeout(PROACTIVE_FETCH_TIMEOUT_MS),
       });
       data = (await resp.json()) as DingTalkTokenResponse;
-    } catch (err) {
+    } catch {
       process.stderr.write(
-        `[DingTalk:${this.name}] proactive send failed: token fetch error ${err}\n`,
+        `[DingTalk:${this.name}] access token fetch failed.\n`,
       );
-      throw new Error(
-        'DingTalk proactive send failed: could not fetch access token',
-      );
+      throw new Error('DingTalk access token fetch failed');
     }
     if (!data.access_token) {
       const errmsg = sanitizeLogText(String(data.errmsg ?? ''), 200);
       process.stderr.write(
-        `[DingTalk:${this.name}] proactive send failed: gettoken errcode=${data.errcode} ${errmsg}\n`,
+        `[DingTalk:${this.name}] access token request failed: gettoken errcode=${data.errcode} ${errmsg}\n`,
       );
       throw new Error(
-        `DingTalk proactive send failed: gettoken errcode=${data.errcode}${errmsg ? ` ${errmsg}` : ''}`,
+        `DingTalk access token request failed: gettoken errcode=${data.errcode}${errmsg ? ` ${errmsg}` : ''}`,
       );
     }
     this.proactiveToken = {
@@ -1090,11 +1088,19 @@ export class DingtalkChannel extends ChannelBase {
     mediaType: 'image' | 'file' | 'audio' | 'video',
     fileName?: string,
   ): Promise<void> {
-    const token = this.getAccessToken();
-    const robotCode = this.config.clientId;
-    if (!token || !robotCode) {
+    let token: string;
+    try {
+      token = await this.getProactiveToken();
+    } catch {
       process.stderr.write(
-        `[DingTalk:${this.name}] Cannot download media: missing token or robotCode.\n`,
+        `[DingTalk:${this.name}] Cannot download media: access token refresh failed.\n`,
+      );
+      return;
+    }
+    const robotCode = this.config.clientId;
+    if (!robotCode) {
+      process.stderr.write(
+        `[DingTalk:${this.name}] Cannot download media: missing robotCode.\n`,
       );
       return;
     }
