@@ -71,12 +71,12 @@ for (const theme of THEMES) {
             'Here is the tool-approval flow:\n\n' +
               '```mermaid\n' +
               'flowchart LR\n' +
-              '  A[Tool call] --> B{Folder trusted?}\n' +
-              '  B -->|Yes| C[Run immediately]\n' +
-              '  B -->|No| D{Ask approval}\n' +
-              '  D -->|Approve| C\n' +
-              '  D -->|Reject| E[Cancel turn]\n' +
-              '  C --> F[Return result]\n' +
+              '  A[Tool call] --> B{Trusted?}\n' +
+              '  B -->|Yes| C[Run]\n' +
+              '  B -->|No| D{Approve?}\n' +
+              '  D -->|Yes| C\n' +
+              '  D -->|No| E[Cancel]\n' +
+              '  C --> F[Result]\n' +
               '```',
             { id: 2 },
           ),
@@ -104,7 +104,12 @@ for (const theme of THEMES) {
       const scenario = createWebShellDaemonScenario({
         events: [
           userTextEvent('Review two sessions side by side.', { id: 1 }),
-          assistantTextEvent('Here is the first pane of the split.', { id: 2 }),
+          // Pane-neutral copy: the mock replays these same events into *both*
+          // panes, so wording that names "the first pane" would read wrong in
+          // the second one.
+          assistantTextEvent('Here are the two sessions, side by side.', {
+            id: 2,
+          }),
           turnCompleteEvent('prompt-split', { id: 3 }),
         ],
       });
