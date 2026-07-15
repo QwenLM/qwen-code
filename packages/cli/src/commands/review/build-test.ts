@@ -41,7 +41,7 @@ import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   affectedWorkspaces,
   buildSetFor,
@@ -93,13 +93,23 @@ export interface BuildTestReport {
 const KEEP_HEAD = 2_000;
 const KEEP_TAIL = 6_000;
 
+/** The module-resolution errors the widening loop reads to grow the build set. */
+const MODULE_ERROR_RE = /Cannot find module '[^']+'|Could not resolve "[^"]+"/;
+
 function trimOutput(s: string): string {
   if (s.length <= KEEP_HEAD + KEEP_TAIL) return s;
-  return (
-    s.slice(0, KEEP_HEAD) +
-    `\n\n... [${s.length - KEEP_HEAD - KEEP_TAIL} characters omitted] ...\n\n` +
-    s.slice(-KEEP_TAIL)
-  );
+  const middle = s.slice(KEEP_HEAD, s.length - KEEP_TAIL);
+  // Rescue module-resolution errors from the omitted middle. The widening loop
+  // reads this trimmed output to decide what to add to the build set — a `Cannot
+  // find module` line lost to trimming (a long TypeScript log can push one past the
+  // head and before the tail) would end the widening early and surface a real
+  // graph gap as a false build error. Report stays bounded; the signal survives.
+  const rescued = middle.split('\n').filter((l) => MODULE_ERROR_RE.test(l));
+  const omitted = s.length - KEEP_HEAD - KEEP_TAIL;
+  const marker = rescued.length
+    ? `\n\n... [${omitted} characters omitted; module-resolution errors kept] ...\n${rescued.join('\n')}\n\n`
+    : `\n\n... [${omitted} characters omitted] ...\n\n`;
+  return s.slice(0, KEEP_HEAD) + marker + s.slice(-KEEP_TAIL);
 }
 
 /**
@@ -360,7 +370,9 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
         built.add(dir); // Nothing to build is not a failure to build.
         continue;
       }
-      const r = exec(`npm run build --workspace=${dir}`, root, perCommandMs);
+      // Quote the workspace: `shell: true` would split a dir containing a space or a
+      // shell metacharacter into separate tokens and target the wrong workspace.
+      const r = exec(`npm run build --workspace="${dir}"`, root, perCommandMs);
       results.build.push(r);
       if (r.timedOut) results.timedOut.push(r.command);
       if (r.exitCode !== 0) {
@@ -376,13 +388,19 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     // approximates whenever a package reaches into another's *sources* — a
     // tsconfig `paths` entry pointing at `../cli/src/...` compiles that package's
     // imports without ever declaring a dependency on them.
-    const missing = unresolvedWorkspaceDeps(failure.output, packages).filter(
-      (name) => {
-        const dir = packages.find((p) => p.name === name)?.dir;
-        return dir && !set.includes(dir);
-      },
-    );
-    if (missing.length === 0 || attempt === 3) {
+    //
+    // A **timeout** must not enter this path. A build killed at the deadline leaves
+    // partial output that can happen to contain a `Cannot find module` line, which
+    // would look like a too-small build set and trigger a retry — another full
+    // deadline, and another, up to the attempt cap. A timeout is infrastructure, not
+    // a graph gap: report it and stop, the same way the install path does.
+    const missing = failure.timedOut
+      ? []
+      : unresolvedWorkspaceDeps(failure.output, packages).filter((name) => {
+          const dir = packages.find((p) => p.name === name)?.dir;
+          return dir && !set.includes(dir);
+        });
+    if (missing.length === 0 || failure.timedOut || attempt === 3) {
       results.ok = false;
       results.note = failure.timedOut
         ? `\`${failure.command}\` ran out of time (${args.timeout}s). That is an ` +
@@ -428,7 +446,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   for (const dir of affected) {
     const pkg = byDir.get(dir);
     if (!pkg?.scripts.includes('test')) continue;
-    const r = exec(`npm test --workspace=${dir}`, root, perCommandMs);
+    const r = exec(`npm test --workspace="${dir}"`, root, perCommandMs);
     results.test.push(r);
     if (r.timedOut) results.timedOut.push(r.command);
     if (r.exitCode !== 0) results.ok = false;
@@ -518,10 +536,18 @@ export const buildTestCommand: CommandModule = {
       }),
   handler: (argv) => {
     const args = argv as unknown as BuildTestArgs;
-    const report = runBuildTest(args);
-    if (args.out) {
-      writeFileSync(args.out, JSON.stringify(report, null, 2));
+    try {
+      const report = runBuildTest(args);
+      if (args.out) {
+        writeFileSync(args.out, JSON.stringify(report, null, 2));
+      }
+      writeStdoutLine(JSON.stringify(report, null, 2));
+    } catch (err) {
+      // `changedFilesFrom` throws a descriptive message on a missing/unreadable/
+      // invalid plan. Surface that message and exit cleanly, rather than letting a
+      // raw stack trace reach the agent as the whole of Agent 7's result.
+      writeStderrLine((err as Error).message);
+      process.exitCode = 1;
     }
-    writeStdoutLine(JSON.stringify(report, null, 2));
   },
 };

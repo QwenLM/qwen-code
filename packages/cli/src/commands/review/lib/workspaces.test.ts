@@ -5,12 +5,16 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   workspaceDirFor,
   isWorkspaceMember,
   affectedWorkspaces,
   buildSetFor,
   hasUnmodeledWorkspaceGlob,
+  readWorkspaceGlobs,
   type WorkspacePackage,
 } from './workspaces.js';
 
@@ -69,6 +73,36 @@ describe('workspaceDirFor', () => {
     expect(workspaceDirFor('./packages/cli/src/a.ts', GLOBS)).toBe(
       'packages/cli',
     );
+  });
+});
+
+describe('readWorkspaceGlobs', () => {
+  it('reads the array form', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ws-'));
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*', 'apps/web'] }),
+    );
+    expect(readWorkspaceGlobs(root)).toEqual(['packages/*', 'apps/web']);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('reads the object form `{ workspaces: { packages: [...] } }` npm also accepts', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ws-'));
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: { packages: ['packages/*'] } }),
+    );
+    expect(readWorkspaceGlobs(root)).toEqual(['packages/*']);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('is empty for a package.json with no workspaces (and never throws)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ws-'));
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'r' }));
+    expect(readWorkspaceGlobs(root)).toEqual([]);
+    expect(readWorkspaceGlobs(join(root, 'nope'))).toEqual([]);
+    rmSync(root, { recursive: true, force: true });
   });
 });
 

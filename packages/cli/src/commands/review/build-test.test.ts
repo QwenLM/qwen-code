@@ -234,7 +234,7 @@ describe('runBuildTest', () => {
     expect(rep.buildSet).not.toContain('packages/island');
     // Only the changed workspace's tests run.
     expect(rep.test.map((t) => t.command)).toEqual([
-      'npm test --workspace=packages/core',
+      'npm test --workspace="packages/core"',
     ]);
     expect(rep.ok).toBe(true);
   }, 30_000);
@@ -308,6 +308,154 @@ describe('runBuildTest', () => {
     expect(rep.build.filter((r) => r.exitCode !== 0)).toEqual([]);
   }, 30_000);
 
+  it('stops widening at the attempt cap when the compiler keeps naming new packages', () => {
+    // The loop is bounded at `attempt <= 3` (four tries). A build that names a fresh
+    // missing workspace package on every attempt must exhaust the cap and report a
+    // failure, not spin. Uses the exec seam so it is deterministic and shell-free.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    for (const p of ['leaf', 'p1', 'p2', 'p3', 'p4']) {
+      pkg(`packages/${p}`, {
+        name: `@x/${p}`,
+        scripts: { build: 'x', test: 'x' },
+      });
+    }
+    writePlan(['packages/leaf/src/x.ts']);
+
+    // Each build attempt fails naming the *next* package, forever.
+    const order = ['@x/p1', '@x/p2', '@x/p3', '@x/p4', '@x/p5'];
+    let builds = 0;
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: (command) => {
+        if (command.startsWith('npm run build')) {
+          const name = order[Math.min(builds++, order.length - 1)];
+          return {
+            command,
+            exitCode: 2,
+            seconds: 1,
+            timedOut: false,
+            output: `error TS2307: Cannot find module '${name}'`,
+          };
+        }
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+
+    // Four attempts (0..3), then it stops rather than spinning. (rep.build holds
+    // only the last failure — the intermediate ones are filtered on each widen — so
+    // the exec counter is what proves the loop is bounded.)
+    expect(builds).toBe(4);
+    expect(rep.ok).toBe(false);
+    expect(rep.widenedWith.length).toBeGreaterThanOrEqual(3);
+    expect(rep.note).toContain('Correlate');
+  });
+
+  it('does not widen — or re-time-out — when a build TIMES OUT mid-widening', () => {
+    // A timeout leaves partial output that can contain a `Cannot find module` line.
+    // That must not be read as a too-small build set and retried under another full
+    // deadline; a timeout is infrastructure, so it aborts at once.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/webui', { name: '@x/webui', scripts: { build: 'x' } });
+    pkg('packages/leaf', {
+      name: '@x/leaf',
+      scripts: { build: 'x', test: 'x' },
+    });
+    writePlan(['packages/leaf/src/x.ts']);
+
+    const builds: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: (command) => {
+        if (command.startsWith('npm run build')) {
+          builds.push(command);
+          // Times out, and its partial output happens to name a real workspace pkg.
+          return {
+            command,
+            exitCode: null,
+            seconds: 60,
+            timedOut: true,
+            output: "error TS2307: Cannot find module '@x/webui'",
+          };
+        }
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+
+    expect(rep.widenedWith).toEqual([]); // did not treat the timeout as a graph gap
+    expect(builds.length).toBe(1); // aborted after the first, did not retry
+    expect(rep.ok).toBe(false);
+    expect(rep.note).toContain('infrastructure');
+    expect(rep.note).not.toContain('Critical');
+  });
+
+  it('excludes a negated workspace from the build set (integration)', () => {
+    // `!packages/excluded` must keep that package out — building it could fail on a
+    // repo where it is a separate toolchain (e.g. packages/desktop, its own lockfile).
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*', '!packages/excluded'],
+      }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/excluded', {
+      name: '@x/excluded',
+      dependencies: { '@x/core': '*' },
+      scripts: { build: 'exit 1' },
+    });
+    writePlan(['packages/core/src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+    });
+    // core changed; excluded depends on it but is negated out, so it is not built.
+    expect(rep.buildSet).toContain('packages/core');
+    expect(rep.buildSet).not.toContain('packages/excluded');
+    expect(rep.ok).toBe(true);
+  }, 30_000);
+
+  it('throws a descriptive error for a missing plan file', () => {
+    expect(() =>
+      runBuildTest({
+        plan: join(root, 'does-not-exist.json'),
+        worktree: root,
+        timeout: 5,
+        install: false,
+      }),
+    ).toThrow(/cannot read the plan/);
+  });
+
   it('carries on when the install exits non-zero but leaves a usable tree', () => {
     // The live failure this pins. `npm ci` runs the project's `prepare` script, and
     // this repo's runs `npm run build` + `npm run bundle` over the WHOLE monorepo.
@@ -364,8 +512,8 @@ describe('runBuildTest', () => {
 
     expect(rep.install?.exitCode).toBe(1);
     // It went on to answer the question the review actually came to ask.
-    expect(calls).toContain('npm run build --workspace=packages/a');
-    expect(calls).toContain('npm test --workspace=packages/a');
+    expect(calls).toContain('npm run build --workspace="packages/a"');
+    expect(calls).toContain('npm test --workspace="packages/a"');
     expect(rep.build.length).toBeGreaterThan(0);
     expect(rep.test.length).toBeGreaterThan(0);
     // And it says what happened, in the terms the agent must report it in.
@@ -421,7 +569,7 @@ describe('runBuildTest', () => {
       timeout: 1,
       install: false,
     });
-    expect(rep.timedOut).toEqual(['npm run build --workspace=packages/a']);
+    expect(rep.timedOut).toEqual(['npm run build --workspace="packages/a"']);
     expect(rep.ok).toBe(false);
     // The whole point of the field: the agent must not file this as a Critical.
     expect(rep.note).toContain('infrastructure');
@@ -508,7 +656,7 @@ describe('runBuildTest', () => {
     });
 
     expect(rep.ok).toBe(false);
-    expect(rep.timedOut).toEqual(['npm test --workspace=packages/a']);
+    expect(rep.timedOut).toEqual(['npm test --workspace="packages/a"']);
     expect(rep.note).toContain('infrastructure');
     expect(rep.note).not.toContain('Critical');
     expect(rep.note).not.toContain('Correlate');
