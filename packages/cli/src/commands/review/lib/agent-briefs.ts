@@ -49,7 +49,9 @@ export type RoleId =
   | 'test-matrix'
   | 'invariant-a'
   | 'invariant-b'
-  | 'invariant-c';
+  | 'invariant-c'
+  | 'verify'
+  | 'reverse-audit';
 
 export interface Brief {
   /** How the role is named to a human reading a coverage failure. */
@@ -71,6 +73,28 @@ export interface Brief {
    * evidence is their output. Everyone else who does not read the diff is a bug.
    */
   readsDiff: boolean;
+  /**
+   * What the agent returns, which decides the shared tail of its prompt.
+   *
+   * `'findings'` (the default) gets the finding format, the severity definitions
+   * and the Exclusion Criteria. `'verdicts'` is the Step 4 verifier: it does not
+   * file findings, it rules on the ones it was handed, so it gets the Exclusion
+   * Criteria (a finding that matches one is rejected) but not the finding format —
+   * its output shape is the verdict, and its brief defines that.
+   */
+  output?: 'findings' | 'verdicts';
+  /**
+   * May this role be launched `--role <r> --chunk <id>` to own one chunk's
+   * territory, the way a Step 3B reverse auditor does?
+   *
+   * It is declarative for two readers. The command guard rejects `--chunk` on any
+   * role that does not set it, so a new per-chunk role is a data change here, not a
+   * name hardcoded in the guard. And the brief builder scopes such a role's diff
+   * reads to its one chunk — a per-chunk agent whose brief still said "walk it
+   * chunk by chunk" over all twenty chunks would read the whole diff the `--chunk`
+   * design exists to spare it, because the brief is what the agent is told to obey.
+   */
+  acceptsChunk?: boolean;
   /** The agent-facing text. */
   brief: string;
 }
@@ -346,6 +370,49 @@ This file is largely rewritten, and reviewing it as a diff is the wrong frame. T
 - **Early returns.** Does any early return skip a side effect a later path depends on — a cache populated, an id extracted and stored, a sequence number bumped? Pay particular attention to a blank/empty-input guard placed **before** a side effect rather than after it.
 
 Report a **Critical** for each violation, and give **both** locations that together make it a bug (\`<file>:<lineA>\` and \`<file>:<lineB>\`), not just one.`,
+  },
+
+  verify: {
+    reviewsCode: true,
+    output: 'verdicts',
+    label: 'Verification agent',
+    readsDiff: true,
+    brief: `You are a **verification agent**. You do not look for new problems — you rule on the findings you were handed, listed in the message that launched you, each with a file, a line, an issue, and a **failure scenario**. The failure scenario is the finding's testable claim, and your verdict is the **result of tracing it through the real code**, not a plausibility vote on how the finding reads.
+
+For each finding you were given:
+
+1. **Read the actual code** at the referenced file and line — in the worktree, not from the finding's quotation of it.
+2. **Check the surrounding context** — the callers, the type definitions, the tests, the related modules.
+3. **Trace the failure scenario.** Follow the claimed trigger through the code to the claimed wrong outcome. For a quality finding, trace the claimed *cost* instead: does the named helper exist **and do what the finding says** (right signature, right semantics for this call site); is the duplication real; does the quoted rule say what the finding claims **and apply to this code**?
+4. **Check the finding against the diff's own documented intent** — especially anything framed as a "regression", "removed protection", or "now allows X". Read the comments, JSDoc and rationale **inside the diff** for the changed lines. A behaviour the diff deliberately changes *and documents* (a comment saying \`X is intentionally preserved\`, a rationale block, a test asserting the new behaviour on purpose) is a design decision, not a defect — engage that rationale. This changes what you must do, **not** what confidence you may reach: a traced, concrete harm that survives the rationale keeps full confidence (if the author documents "unauthenticated access is intentional" and the trace still shows real data exposure, that is \`confirmed (high confidence)\` with the rebuttal stated — documentation does not make a harm safe). Use \`confirmed (low confidence)\` when engaging the rationale makes the harm genuinely uncertain. **Reject only** a finding that re-describes the documented change as a regression without naming a harm the rationale fails to answer. (A real run auto-posted a Critical claiming a secret-sanitization PR "now leaks AWS/GitHub tokens"; the file's own comment three lines up said those credentials **must remain available** to shell/MCP tools and the old broad denylist was the bug being fixed. The verifier had not read the rationale.)
+5. **Reject a false positive** — a finding that matches an item in the Exclusion Criteria below.
+
+Return, for each finding, one verdict:
+
+- **confirmed (high confidence)** — the trace works: you can restate the failure scenario against the real code, naming the triggering input/state and quoting the line(s) that produce the wrong outcome. Carry the severity (Critical | Suggestion | Nice to have).
+- **confirmed (low confidence)** — the mechanism is real but the trigger is uncertain (timing, environment, configuration). Say what would confirm it. Carry the severity.
+- **rejected** — the code does not do what the finding claims (**quote the contradicting code**), or it matches an Exclusion Criterion (one-line reason).
+
+**Rejecting a Critical carries a higher bar than anything else, and it is one-way.** A rejected Critical is gone — no later stage revisits it, it vanishes from both the pull request and the terminal. To reject one you must **quote the specific code that contradicts the claim**. A passing test, a plausible-looking guard, or "I could not reproduce the reasoning" is not enough — when you cannot quote the contradiction, the floor is \`confirmed (low confidence)\`, never rejection. Downgrading is reversible; a human still sees a low-confidence finding under "Needs Human Review". Rejection is not.
+
+**For anything non-Critical, when uncertain, downgrade to low confidence rather than rejecting.** Reserve outright rejection for a finding that clearly does not match the code (it describes behaviour the code does not have) or matches an Exclusion Criterion. Low confidence is for "likely real, needs human judgement", not for "I have no idea" — a vague suspicion with no concrete evidence in the code can still be rejected.
+
+**Do not reject an issue-fidelity / root-cause-ownership finding merely because the code compiles, runs, or has a passing test.** A working sanitizer with a green "malformed-shape" test does not disprove an issue-grounded claim that the root cause belongs upstream. Verify such a finding against the issue evidence quoted in the message that launched you; if that evidence is absent or genuinely inconclusive, downgrade rather than reject.`,
+  },
+
+  'reverse-audit': {
+    reviewsCode: true,
+    acceptsChunk: true,
+    label: 'Reverse audit agent',
+    readsDiff: true,
+    brief: `You are a **reverse audit agent**. Prior agents have already reviewed this diff and their confirmed findings are listed in the message that launched you. Your job is not to re-report them — it is to find the **gaps**: the important issues no prior agent or round caught.
+
+- **Read your scope in full** with the diff reads the message gives you — page a truncated read rather than reasoning from its first screenful. A reverse audit that saw a fraction of its scope and returned "No issues found" is worse than none: it ends the loop on a lie.
+- **Focus exclusively on what is not already in the finding list.** Assume the obvious defects are found; look where a first pass does not: the interaction between two changes, the assumption that holds in the common case and breaks in the rare one, the removed guard whose replacement is three files away.
+- **Report only Critical or Suggestion.** Do not report Nice to have.
+- A found gap uses the standard finding format (with \`Source: [review]\`), including its failure scenario — your findings go through the same verification as any other, so they must carry the evidence a verifier can trace.
+
+If you find no new gap in your scope, say so **and name what you re-examined** — \`No issues found — re-walked the reconnect state machine and the two changed exports' call sites; every gap I checked was already in the list\`. A bare "No issues found." is indistinguishable from an agent that did nothing, and it is treated as one: it ends nothing, and it earns your scope a relaunch.`,
   },
 };
 

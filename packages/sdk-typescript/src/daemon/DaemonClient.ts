@@ -4179,6 +4179,21 @@ export class WorkspaceDaemonClient {
     );
   }
 
+  /** Export an archived persisted session from this registered workspace. */
+  exportArchivedSession(
+    sessionId: string,
+    opts: {
+      format?: DaemonSessionExportFormat;
+      clientId?: string;
+    } = {},
+  ): Promise<DaemonSessionExportResult> {
+    return this.client.sessionExportRequest(
+      `/workspaces/${this.workspaceSelector}/session/${urlEncode(sessionId)}/archive/export`,
+      'GET /workspaces/:workspace/session/:id/archive/export',
+      opts,
+    );
+  }
+
   listSessionGroups(): Promise<DaemonSessionGroupCatalog> {
     return this.get(
       '/session-groups',
