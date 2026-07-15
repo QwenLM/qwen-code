@@ -543,7 +543,7 @@ type MockPendingToolCall = {
 const { mockHistoryPendingToolCalls } = vi.hoisted(() => ({
   mockHistoryPendingToolCalls: vi.fn((): MockPendingToolCall[] => []),
 }));
-vi.mock('./session/HistoryReplayer.js', () => ({
+vi.mock('./session/history-replayer.js', () => ({
   HistoryReplayer: vi.fn().mockImplementation((context: unknown) => ({
     replay: (messages: unknown, gaps: unknown) =>
       mockHistoryReplay(context, messages, gaps),
@@ -2572,6 +2572,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           level: 'project',
           argumentHint: '[path]',
           modelInvocable: true,
+          installedPath: '/secret/SKILL.md',
         }),
         expect.objectContaining({
           kind: 'skill',
@@ -2589,6 +2590,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           description: 'Disabled by settings',
           level: 'project',
           modelInvocable: true,
+          installedPath: '/disabled/SKILL.md',
         }),
         expect.objectContaining({
           kind: 'skill',
@@ -2607,6 +2609,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           level: 'extension',
           extensionName: 'GSD Core',
           modelInvocable: true,
+          installedPath: '/ext/gsd-core/skills/gsd-display-stale/SKILL.md',
         }),
         expect.objectContaining({
           kind: 'skill',
@@ -2616,6 +2619,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           level: 'extension',
           extensionName: 'GSD Core',
           modelInvocable: true,
+          installedPath: '/ext/gsd-core/skills/gsd-config-only/SKILL.md',
         }),
       ]),
     });
@@ -2634,7 +2638,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(JSON.stringify(skills)).not.toContain('extension secret body');
     expect(JSON.stringify(skills)).not.toContain('display stale body');
     expect(JSON.stringify(skills)).not.toContain('config only body');
-    expect(JSON.stringify(skills)).not.toContain('/secret');
+    expect(JSON.stringify(skills)).not.toContain('"skillRoot"');
     expect(JSON.stringify(skills)).not.toContain('secret-hook');
 
     expect(providers).toMatchObject({
@@ -7129,7 +7133,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('qwen/status/session/transcript preserves hasMore on replay errors', async () => {
+  it('qwen/status/session/transcript terminates pagination on replay errors', async () => {
     const settings = makeCoreSettings();
     vi.mocked(loadCliConfig).mockResolvedValue({
       ...makeInnerConfig(),
@@ -7182,7 +7186,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       replayError?: string;
     };
 
-    expect(result.hasMore).toBe(true);
+    expect(result.hasMore).toBe(false);
     // On a replay error the page is partial and must NOT hand back a cursor:
     // continuing would drop the un-replayed records and carry corrupted
     // pendingToolCalls forward into the next page.
@@ -8779,6 +8783,46 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('marks the artifact snapshot unavailable when rewind flush fails', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const privateError =
+      "EACCES: permission denied, open '/private/transcripts/session.jsonl'";
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      flush: vi.fn().mockRejectedValue(new Error(privateError)),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const response = await agent.extMethod('rewindSession', {
+      sessionId,
+      targetTurnIndex: 1,
+      cwd: '/tmp',
+    });
+
+    expect(response).toMatchObject({
+      success: true,
+      artifactSnapshotUnavailable: 'artifact snapshot unavailable after rewind',
+    });
+    expect(response).not.toHaveProperty('artifactSnapshot');
+    expect(JSON.stringify(response)).not.toContain('/private/transcripts');
+    expect(JSON.stringify(response)).not.toContain('EACCES');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('rewindSession extension method marks artifact snapshot unavailable when session reload is missing', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     await setupSessionMocks(sessionId);
@@ -9530,7 +9574,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
 
   function makeRecordingService() {
     return {
-      recordCustomTitle: vi.fn().mockReturnValue(true),
+      recordCustomTitle: vi.fn().mockResolvedValue(true),
       flush: vi.fn().mockResolvedValue(undefined),
     };
   }
@@ -9630,9 +9674,9 @@ describe('QwenAgent extMethod renameSession routing', () => {
       'New Title',
       'manual',
     );
-    // Awaited so the rename is durable before the response returns —
-    // a follow-up listSessions can't race the queued write.
-    expect(recording.flush).toHaveBeenCalledOnce();
+    // The strict title promise itself is the durability boundary. A later,
+    // unrelated queued record must not be allowed to change this result.
+    expect(recording.flush).not.toHaveBeenCalled();
     // The disk-only fallback must NOT fire when a live session exists,
     // otherwise we'd double-write (and the second writer would be the
     // SessionService that lacks the in-memory cache update).
@@ -9679,7 +9723,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
 
   it('returns success=false when the live ChatRecordingService rejects the title (I/O error)', async () => {
     const recording = makeRecordingService();
-    recording.recordCustomTitle.mockReturnValue(false);
+    recording.recordCustomTitle.mockResolvedValue(false);
     const innerConfig = makeLiveSessionInnerConfig(recording);
     const { agent, agentPromise } = await bootAgent(innerConfig);
 
@@ -9691,11 +9735,103 @@ describe('QwenAgent extMethod renameSession routing', () => {
       title: 'New Title',
     });
 
-    // Even on failure we still flush so the writeChain settles before
-    // responding — keeps subsequent reads consistent and surfaces any
-    // queued earlier failure to the caller.
-    expect(recording.flush).toHaveBeenCalledOnce();
+    expect(recording.flush).not.toHaveBeenCalled();
     expect(result).toEqual({ success: false });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('waits for the live title write itself and ignores unrelated flush state', async () => {
+    const recording = makeRecordingService();
+    let resolveTitle!: (value: boolean) => void;
+    recording.recordCustomTitle.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveTitle = resolve;
+        }),
+    );
+    recording.flush.mockRejectedValue(new Error('flush failed'));
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    let settled = false;
+    const renamePromise = agent
+      .extMethod('renameSession', {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+        title: 'New Title',
+      })
+      .finally(() => {
+        settled = true;
+      });
+    await vi.waitFor(() =>
+      expect(recording.recordCustomTitle).toHaveBeenCalled(),
+    );
+    expect(settled).toBe(false);
+    resolveTitle(true);
+    await expect(renamePromise).resolves.toEqual({ success: true });
+    expect(recording.recordCustomTitle).toHaveBeenCalledWith(
+      'New Title',
+      'manual',
+    );
+    expect(recording.flush).not.toHaveBeenCalled();
+    expect(SessionService).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('returns the durable result from qwen/control/session/title without an extra flush', async () => {
+    const recording = makeRecordingService();
+    recording.recordCustomTitle.mockResolvedValue(false);
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const result = await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.sessionTitle,
+      {
+        sessionId: liveSessionId,
+        displayName: 'Remote Title',
+        titleSource: 'auto',
+      },
+    );
+
+    expect(recording.recordCustomTitle).toHaveBeenCalledWith(
+      'Remote Title',
+      'auto',
+    );
+    expect(recording.flush).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      sessionId: liveSessionId,
+      displayName: 'Remote Title',
+      titleSource: 'auto',
+      persisted: false,
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not branch a live session when its recording flush fails', async () => {
+    const recording = makeRecordingService();
+    recording.flush.mockRejectedValue(new Error('flush failed'));
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+      }),
+    ).rejects.toThrow('flush failed');
+    expect(SessionService).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -9703,7 +9839,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
 
   it('keeps the live session open when strict session close flush fails', async () => {
     const recording = makeRecordingService();
-    recording.flush.mockRejectedValueOnce(new Error('flush failed'));
+    recording.flush.mockRejectedValue(new Error('flush failed'));
     const innerConfig = makeLiveSessionInnerConfig(recording);
     const toolRegistry = { stop: vi.fn().mockResolvedValue(undefined) };
     innerConfig.getToolRegistry.mockReturnValue(toolRegistry);
@@ -9734,6 +9870,16 @@ describe('QwenAgent extMethod renameSession routing', () => {
       agent.extMethod('qwen/control/session/close', {
         sessionId: liveSessionId,
         requireFlush: true,
+      }),
+    ).rejects.toThrow('flush failed');
+    expect(recording.flush).toHaveBeenCalledTimes(2);
+    expect(liveCancelPendingPrompt).not.toHaveBeenCalled();
+    expect(toolRegistry.stop).not.toHaveBeenCalled();
+
+    await expect(
+      agent.extMethod('qwen/control/session/close', {
+        sessionId: liveSessionId,
+        requireFlush: false,
       }),
     ).resolves.toEqual({ sessionId: liveSessionId, closed: true });
     expect(recording.flush).toHaveBeenCalledTimes(3);
@@ -11721,9 +11867,151 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
-  it('refreshes extension commands for the live session', async () => {
+  it('refreshes busy skill sessions and reports per-session failures', async () => {
+    const bootstrapSettings = {
+      merged: {},
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    const cfg1 = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('skill-1'),
+    });
+    const cfg2 = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('skill-2'),
+    });
+    const refresh1 = vi.fn().mockResolvedValue(undefined);
+    const refresh2 = vi.fn().mockRejectedValue(new Error('client closed'));
+
+    vi.mocked(loadSettings).mockReturnValue(bootstrapSettings);
+    vi.mocked(loadCliConfig)
+      .mockResolvedValueOnce(cfg1 as unknown as Config)
+      .mockResolvedValueOnce(cfg2 as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      (id) =>
+        ({
+          getId: vi.fn().mockReturnValue(id),
+          getConfig: vi.fn().mockReturnValue(id === 'skill-1' ? cfg1 : cfg2),
+          isIdle: vi.fn().mockReturnValue(false),
+          refreshSkillsFromSettings: id === 'skill-1' ? refresh1 : refresh2,
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      bootstrapSettings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/skills', mcpServers: [] });
+    await agent.newSession({ cwd: '/skills', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh, {}),
+    ).resolves.toEqual({ sessionsRefreshed: 1, sessionsFailed: 1 });
+
+    expect(bootstrapSettings.reloadScopeFromDisk).toHaveBeenCalledWith(
+      SettingScope.Workspace,
+    );
+    expect(refresh1).toHaveBeenCalledOnce();
+    expect(refresh2).toHaveBeenCalledOnce();
+    expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+      'Session skill-2 skill refresh failed: Error: client closed',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('refreshes extension state without a duplicate direct skill refresh', async () => {
     const extensionManager = {
       refreshCache: vi.fn().mockResolvedValue(undefined),
+      refreshTools: vi.fn().mockResolvedValue(undefined),
+    };
+    const skillManager = {
+      refreshCache: vi
+        .fn()
+        .mockRejectedValue(new Error('direct skill refresh should not run')),
+    };
+    const refreshHierarchicalMemory = vi.fn().mockResolvedValue(undefined);
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-ext'),
+      getExtensionManager: vi.fn().mockReturnValue(extensionManager),
+      getSkillManager: vi.fn().mockReturnValue(skillManager),
+      refreshHierarchicalMemory,
+    });
+    const refreshSystemInstruction = vi.mocked(
+      cfg.getGeminiClient().refreshSystemInstruction,
+    );
+    const sendAvailableCommandsUpdate = vi.fn().mockResolvedValue(undefined);
+
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: { mcpServers: {} },
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-ext'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          sendAvailableCommandsUpdate,
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      { merged: { mcpServers: {} } } as unknown as LoadedSettings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/ext', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh, {
+        sessionId: 's-ext',
+      }),
+    ).resolves.toEqual({ ok: true });
+
+    expect(extensionManager.refreshCache).toHaveBeenCalledOnce();
+    expect(skillManager.refreshCache).not.toHaveBeenCalled();
+    expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
+    expect(refreshHierarchicalMemory).not.toHaveBeenCalled();
+    expect(refreshSystemInstruction).toHaveBeenCalledOnce();
+    expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
+    expect(
+      extensionManager.refreshTools.mock.invocationCallOrder[0],
+    ).toBeLessThan(refreshSystemInstruction.mock.invocationCallOrder[0]!);
+    expect(refreshSystemInstruction.mock.invocationCallOrder[0]).toBeLessThan(
+      sendAvailableCommandsUpdate.mock.invocationCallOrder[0]!,
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('propagates extension cache refresh failures', async () => {
+    const cacheError = new Error('bad extension cache');
+    const extensionManager = {
+      refreshCache: vi.fn().mockRejectedValue(cacheError),
       refreshTools: vi.fn().mockResolvedValue(undefined),
     };
     const skillManager = {
@@ -11768,22 +12056,39 @@ describe('sessionLanguage multi-session propagation', () => {
     });
 
     await agent.newSession({ cwd: '/ext', mcpServers: [] });
-    await expect(
-      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh, {
-        sessionId: 's-ext',
+    let thrown: unknown;
+    try {
+      await agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+        {
+          sessionId: 's-ext',
+        },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(AggregateError);
+    expect((thrown as AggregateError).errors).toEqual([cacheError]);
+    expect(thrown).toEqual(
+      expect.objectContaining({
+        message: expect.stringContaining('bad extension cache'),
       }),
-    ).resolves.toEqual({ ok: true });
+    );
 
     expect(extensionManager.refreshCache).toHaveBeenCalledOnce();
-    expect(skillManager.refreshCache).toHaveBeenCalledOnce();
+    expect(skillManager.refreshCache).not.toHaveBeenCalled();
     expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
+    expect(cfg.refreshHierarchicalMemory).not.toHaveBeenCalled();
+    expect(
+      cfg.getGeminiClient().refreshSystemInstruction,
+    ).toHaveBeenCalledOnce();
     expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
     await agentPromise;
   });
 
-  it('still sends available commands update when extension tool refresh fails', async () => {
+  it('propagates extension tool refresh failures', async () => {
     const extensionManager = {
       refreshCache: vi.fn().mockResolvedValue(undefined),
       refreshTools: vi.fn().mockRejectedValue(new Error('bad tool schema')),
@@ -11834,11 +12139,15 @@ describe('sessionLanguage multi-session propagation', () => {
       agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh, {
         sessionId: 's-ext',
       }),
-    ).resolves.toEqual({ ok: true });
+    ).rejects.toThrow('bad tool schema');
 
     expect(extensionManager.refreshCache).toHaveBeenCalledOnce();
-    expect(skillManager.refreshCache).toHaveBeenCalledOnce();
+    expect(skillManager.refreshCache).not.toHaveBeenCalled();
     expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
+    expect(cfg.refreshHierarchicalMemory).not.toHaveBeenCalled();
+    expect(
+      cfg.getGeminiClient().refreshSystemInstruction,
+    ).toHaveBeenCalledOnce();
     expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();

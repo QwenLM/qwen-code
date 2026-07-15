@@ -1169,6 +1169,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(result.agentCapabilities._meta.qwen.methods).toContain(
       '_qwen/session/shell',
     );
+    expect(result.agentCapabilities._meta.qwen.methods).not.toContain(
+      '_qwen/session/rewind',
+    );
   });
 
   it('initialize advertises _qwen/session/lsp', async () => {
@@ -6529,13 +6532,20 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           jsonrpc: '2.0',
           id: 70,
           method: '_qwen/workspace/session_groups/create',
-          params: { workspaceCwd: '/ws', name: 'Frontend', color: 'blue' },
+          params: {
+            workspaceCwd: '/ws',
+            name: 'Frontend',
+            color: '#12ABEF',
+          },
         });
         const createFrame = (await reader.next()) as {
           result: { group: { id: string; name: string; color: string } };
         };
         const group = createFrame.result.group;
-        expect(group).toMatchObject({ name: 'Frontend', color: 'blue' });
+        expect(group).toMatchObject({
+          name: 'Frontend',
+          color: '#12abef',
+        });
 
         await post(connId, {
           jsonrpc: '2.0',

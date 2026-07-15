@@ -2184,6 +2184,16 @@ export default {
     'Diese Standalone-Installation kann nicht automatisch aktualisiert werden. Bitte neu installieren von:',
   'Manual update required. Please reinstall Qwen Code.':
     'Manuelles Update erforderlich. Bitte installieren Sie Qwen Code neu.',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    'Diese Sitzung verwendet das benutzerdefinierte Sandbox-Image {{image}}. Aktualisieren Sie das Image und starten Sie Qwen Code neu.',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    'Aktualisieren Sie Qwen Code auf dem Host und starten Sie anschließend die Sandbox neu.',
+  'The update will be installed after you exit this session.':
+    'Das Update wird nach dem Beenden dieser Sitzung installiert.',
+  'Run /update to install the update on the host.':
+    'Führen Sie /update aus, um das Update auf dem Host zu installieren.',
+  'Run /update to install the update.':
+    'Führen Sie /update aus, um das Update zu installieren.',
 
   // ============================================================================
   // reload-plugins command
@@ -2214,4 +2224,8 @@ export default {
     'Failed to refresh extension content. Run /reload-plugins to apply updates.',
   'Extension reload did not complete. Run /reload-plugins to try again.':
     'Extension reload did not complete. Run /reload-plugins to try again.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.':
+    'Die Sitzungsaufzeichnung wurde nach einem Schreibfehler beendet. Neue Nachrichten der betroffenen Sitzung werden nicht gespeichert. Prüfen Sie Speicherplatz und Berechtigungen und starten Sie anschließend eine neue Sitzung, um die Aufzeichnung fortzusetzen. Weitere Details finden Sie im Debug-Protokoll.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
+    'Die Sitzungsaufzeichnung wurde nach einem Schreibfehler beendet. Neue Nachrichten der betroffenen Sitzung werden nicht gespeichert. Prüfen Sie Speicherplatz und Berechtigungen und führen Sie anschließend `/clear` aus, um eine neue aufgezeichnete Sitzung zu starten. Weitere Details finden Sie im Debug-Protokoll.',
 };

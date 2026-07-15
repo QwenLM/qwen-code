@@ -2158,6 +2158,16 @@ export default {
     'Невозможно автоматически обновить эту автономную установку. Переустановите с:',
   'Manual update required. Please reinstall Qwen Code.':
     'Требуется ручное обновление. Переустановите Qwen Code.',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    'В этом сеансе используется пользовательский образ песочницы {{image}}. Обновите образ и перезапустите Qwen Code.',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    'Обновите Qwen Code на хосте, затем перезапустите песочницу.',
+  'The update will be installed after you exit this session.':
+    'Обновление будет установлено после выхода из этого сеанса.',
+  'Run /update to install the update on the host.':
+    'Запустите /update, чтобы установить обновление на хосте.',
+  'Run /update to install the update.':
+    'Запустите /update, чтобы установить обновление.',
 
   // ============================================================================
   // reload-plugins command
@@ -2188,4 +2198,8 @@ export default {
     'Failed to refresh extension content. Run /reload-plugins to apply updates.',
   'Extension reload did not complete. Run /reload-plugins to try again.':
     'Extension reload did not complete. Run /reload-plugins to try again.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.':
+    'Запись сеанса остановлена после ошибки записи. Новые сообщения затронутого сеанса не будут сохранены. Проверьте свободное место и разрешения, затем начните новый сеанс, чтобы возобновить запись. Подробности см. в журнале отладки.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
+    'Запись сеанса остановлена после ошибки записи. Новые сообщения затронутого сеанса не будут сохранены. Проверьте свободное место и разрешения, затем выполните `/clear`, чтобы начать новый записываемый сеанс. Подробности см. в журнале отладки.',
 };

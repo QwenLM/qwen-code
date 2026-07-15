@@ -2635,6 +2635,15 @@ export default {
     'Unable to auto-update this standalone installation. Please reinstall from:',
   'Manual update required. Please reinstall Qwen Code.':
     'Manual update required. Please reinstall Qwen Code.',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    'Update Qwen Code on the host, then restart the sandbox.',
+  'The update will be installed after you exit this session.':
+    'The update will be installed after you exit this session.',
+  'Run /update to install the update on the host.':
+    'Run /update to install the update on the host.',
+  'Run /update to install the update.': 'Run /update to install the update.',
   '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
     '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.',
 
@@ -2680,4 +2689,8 @@ export default {
     'Running this scheduled task in a new session: {{link}}',
   'This scheduled run could not be started: {{error}}':
     'This scheduled run could not be started: {{error}}',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.':
+    'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
+    'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.',
 };

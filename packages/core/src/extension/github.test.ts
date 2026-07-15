@@ -24,7 +24,9 @@ import type { IncomingMessage } from 'node:http';
 import * as fs from 'node:fs/promises';
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { Readable } from 'node:stream';
+import { promises as dns } from 'node:dns';
 import * as tar from 'tar';
 import * as archiver from 'archiver';
 import {
@@ -34,6 +36,8 @@ import {
 } from './extensionManager.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { EXTENSIONS_CONFIG_FILENAME } from './variables.js';
+import { ExtensionStorage } from './storage.js';
+import { assertTarArchiveHasNoLinks } from './archive-safety.js';
 
 const mockPlatform = vi.hoisted(() => vi.fn());
 const mockArch = vi.hoisted(() => vi.fn());
@@ -143,10 +147,14 @@ describe('git extension helpers', () => {
       getRemotes: vi.fn(),
       fetch: vi.fn(),
       checkout: vi.fn(),
+      version: vi.fn(),
+      env: vi.fn(),
     };
 
     beforeEach(() => {
       vi.mocked(simpleGit).mockReturnValue(mockGit as unknown as SimpleGit);
+      mockGit.env.mockReturnValue(mockGit);
+      mockGit.version.mockResolvedValue({ major: 2, minor: 52 });
     });
 
     it('should clone, fetch and checkout a repo', async () => {
@@ -160,9 +168,13 @@ describe('git extension helpers', () => {
       mockGit.getRemotes.mockResolvedValue([
         { name: 'origin', refs: { fetch: 'http://my-repo.com' } },
       ]);
+      const controller = new AbortController();
 
-      await cloneFromGit(installMetadata, destination);
+      await cloneFromGit(installMetadata, destination, controller.signal);
 
+      expect(simpleGit).toHaveBeenCalledWith(destination, {
+        abort: controller.signal,
+      });
       expect(mockGit.clone).toHaveBeenCalledWith('http://my-repo.com', './', [
         '-c',
         'core.symlinks=true',
@@ -170,7 +182,10 @@ describe('git extension helpers', () => {
         '1',
       ]);
       expect(mockGit.getRemotes).toHaveBeenCalledWith(true);
-      expect(mockGit.fetch).toHaveBeenCalledWith('origin', 'my-ref');
+      expect(mockGit.fetch).toHaveBeenCalledWith(
+        'http://my-repo.com',
+        'my-ref',
+      );
       expect(mockGit.checkout).toHaveBeenCalledWith('FETCH_HEAD');
     });
 
@@ -230,7 +245,90 @@ describe('git extension helpers', () => {
 
       await cloneFromGit(installMetadata, destination);
 
-      expect(mockGit.fetch).toHaveBeenCalledWith('origin', 'HEAD');
+      expect(mockGit.fetch).toHaveBeenCalledWith('http://my-repo.com', 'HEAD');
+    });
+
+    it('pins public HTTPS Git traffic and disables redirects and proxies', async () => {
+      const previousGitConfigCount = process.env['GIT_CONFIG_COUNT'];
+      process.env['GIT_CONFIG_COUNT'] = '1';
+      vi.spyOn(dns, 'lookup').mockResolvedValue([
+        { address: '8.8.8.8', family: 4 },
+      ] as never);
+      const installMetadata = {
+        source: 'https://github.com/owner/repo.git',
+        type: 'git' as const,
+        networkPolicy: 'public' as const,
+      };
+      mockGit.getRemotes.mockResolvedValue([
+        {
+          name: 'origin',
+          refs: { fetch: 'https://github.com/owner/repo.git' },
+        },
+      ]);
+
+      try {
+        await cloneFromGit(installMetadata, '/dest');
+      } finally {
+        if (previousGitConfigCount === undefined) {
+          delete process.env['GIT_CONFIG_COUNT'];
+        } else {
+          process.env['GIT_CONFIG_COUNT'] = previousGitConfigCount;
+        }
+      }
+
+      expect(simpleGit).toHaveBeenLastCalledWith('/dest', {
+        config: [
+          'http.curloptResolve=github.com:443:8.8.8.8',
+          'http.followRedirects=false',
+          'http.proxy=',
+          'protocol.allow=never',
+          'protocol.https.allow=always',
+        ],
+      });
+      expect(mockGit.env).toHaveBeenCalledWith(
+        expect.objectContaining({
+          GIT_CONFIG_NOSYSTEM: '1',
+          GIT_CONFIG_GLOBAL: expect.any(String),
+        }),
+      );
+      expect(mockGit.env.mock.calls[0]?.[0]).not.toHaveProperty(
+        'GIT_CONFIG_COUNT',
+      );
+      expect(mockGit.fetch).toHaveBeenCalledWith(
+        'https://github.com/owner/repo.git',
+        'HEAD',
+      );
+    });
+
+    it('rejects SSH Git traffic under the public network policy', async () => {
+      await expect(
+        cloneFromGit(
+          {
+            source: 'git@github.com:owner/repo.git',
+            type: 'git',
+            networkPolicy: 'public',
+          },
+          '/dest',
+        ),
+      ).rejects.toThrow('must use HTTPS');
+      expect(mockGit.clone).not.toHaveBeenCalled();
+    });
+
+    it('allows SCP-like SSH Git sources without the public network policy', async () => {
+      const source = 'git@github.com:owner/repo.git';
+      mockGit.getRemotes.mockResolvedValue([
+        { name: 'origin', refs: { fetch: source } },
+      ]);
+
+      await cloneFromGit({ source, type: 'git' }, '/dest');
+
+      expect(mockGit.clone).toHaveBeenCalledWith(source, './', [
+        '-c',
+        'core.symlinks=true',
+        '--depth',
+        '1',
+      ]);
+      expect(mockGit.fetch).toHaveBeenCalledWith(source, 'HEAD');
     });
 
     it('should throw if no remotes are found', async () => {
@@ -342,6 +440,40 @@ describe('git extension helpers', () => {
         'Failed to clone Git repository from http://my-repo.com',
       );
     });
+
+    it('preserves abort errors raised after a git operation', async () => {
+      const installMetadata = {
+        source: 'http://my-repo.com',
+        type: 'git' as const,
+      };
+      const controller = new AbortController();
+      const reason = new Error('download cancelled');
+      mockGit.clone.mockImplementationOnce(async () => {
+        controller.abort(reason);
+      });
+
+      await expect(
+        cloneFromGit(installMetadata, '/dest', controller.signal),
+      ).rejects.toBe(reason);
+    });
+
+    it('preserves a git failure when the signal aborts as a side effect', async () => {
+      const controller = new AbortController();
+      mockGit.clone.mockImplementationOnce(async () => {
+        controller.abort();
+        throw new Error('authentication failed');
+      });
+
+      await expect(
+        cloneFromGit(
+          { source: 'http://my-repo.com', type: 'git' },
+          '/dest',
+          controller.signal,
+        ),
+      ).rejects.toThrow(
+        'Failed to clone Git repository from http://my-repo.com authentication failed',
+      );
+    });
   });
 
   describe('checkForExtensionUpdate', () => {
@@ -349,6 +481,8 @@ describe('git extension helpers', () => {
       getRemotes: vi.fn(),
       listRemote: vi.fn(),
       revparse: vi.fn(),
+      version: vi.fn(),
+      env: vi.fn(),
     };
 
     const mockExtensionManager = {
@@ -357,6 +491,8 @@ describe('git extension helpers', () => {
 
     beforeEach(() => {
       vi.mocked(simpleGit).mockReturnValue(mockGit as unknown as SimpleGit);
+      mockGit.version.mockResolvedValue({ major: 2, minor: 52 });
+      mockGit.env.mockReturnValue(mockGit);
     });
 
     function createExtension(overrides: Partial<Extension> = {}): Extension {
@@ -419,6 +555,67 @@ describe('git extension helpers', () => {
         mockExtensionManager,
       );
       expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
+    });
+
+    it('pins public Git update checks and disables redirects and proxies', async () => {
+      vi.spyOn(dns, 'lookup').mockResolvedValue([
+        { address: '8.8.8.8', family: 4 },
+      ] as never);
+      const extension = createExtension({
+        installMetadata: {
+          type: 'git',
+          source: 'https://github.com/owner/repo.git',
+          networkPolicy: 'public',
+        },
+      });
+      mockGit.getRemotes.mockResolvedValue([
+        {
+          name: 'origin',
+          refs: { fetch: 'https://github.com/owner/repo.git' },
+        },
+      ]);
+      mockGit.listRemote.mockResolvedValue('same-hash\tHEAD');
+      mockGit.revparse.mockResolvedValue('same-hash');
+
+      const result = await checkForExtensionUpdate(
+        extension,
+        mockExtensionManager,
+      );
+
+      expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
+      expect(simpleGit).toHaveBeenLastCalledWith('/ext', {
+        config: [
+          'http.curloptResolve=github.com:443:8.8.8.8',
+          'http.followRedirects=false',
+          'http.proxy=',
+          'protocol.allow=never',
+          'protocol.https.allow=always',
+        ],
+      });
+      expect(mockGit.listRemote).toHaveBeenCalledWith([
+        'https://github.com/owner/repo.git',
+        'HEAD',
+      ]);
+    });
+
+    it('checks SCP-like SSH Git remotes without the public network policy', async () => {
+      const source = 'git@github.com:owner/repo.git';
+      const extension = createExtension({
+        installMetadata: { type: 'git', source },
+      });
+      mockGit.getRemotes.mockResolvedValue([
+        { name: 'origin', refs: { fetch: source } },
+      ]);
+      mockGit.listRemote.mockResolvedValue('same-hash\tHEAD');
+      mockGit.revparse.mockResolvedValue('same-hash');
+
+      const result = await checkForExtensionUpdate(
+        extension,
+        mockExtensionManager,
+      );
+
+      expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
+      expect(mockGit.listRemote).toHaveBeenCalledWith([source, 'HEAD']);
     });
 
     it('should return UP_TO_DATE when remote and local hashes are the same', async () => {
@@ -606,6 +803,100 @@ describe('git extension helpers', () => {
       }
     });
 
+    it('should propagate an abort observed after extracting a local archive', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'local-archive-abort-test-'),
+      );
+      try {
+        const archivePath = path.join(tempDir, 'qwen-extension.zip');
+        const archive = await createZipBuffer(tempDir, [
+          {
+            name: EXTENSIONS_CONFIG_FILENAME,
+            content: JSON.stringify({
+              name: 'local-archive-extension',
+              version: '2.0.0',
+            }),
+          },
+        ]);
+        await fs.writeFile(archivePath, archive);
+        const extension = createExtension({
+          version: '1.0.0',
+          installMetadata: {
+            type: 'local',
+            source: archivePath,
+          },
+        });
+        const mockManager = {
+          loadExtensionConfig: vi.fn(),
+        } as unknown as ExtensionManager;
+        const abortError = new DOMException('Aborted', 'AbortError');
+        let abortChecks = 0;
+        const signal = {
+          throwIfAborted: () => {
+            abortChecks += 1;
+            if (abortChecks >= 3) throw abortError;
+          },
+        } as unknown as AbortSignal;
+
+        await expect(
+          checkForExtensionUpdate(extension, mockManager, signal),
+        ).rejects.toBe(abortError);
+        expect(mockManager.loadExtensionConfig).not.toHaveBeenCalled();
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('should clean up a converted local archive when aborted after conversion', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'local-converted-archive-abort-test-'),
+      );
+      const convertedDir = path.join(tempDir, 'converted');
+      try {
+        const archivePath = path.join(tempDir, 'gemini-extension.zip');
+        const archive = await createZipBuffer(tempDir, [
+          {
+            name: 'gemini-extension.json',
+            content: JSON.stringify({
+              name: 'gemini-archive-extension',
+              version: '2.0.0',
+            }),
+          },
+        ]);
+        await fs.writeFile(archivePath, archive);
+        vi.spyOn(ExtensionStorage, 'createTmpDir').mockImplementation(
+          async () => {
+            await fs.mkdir(convertedDir);
+            return convertedDir;
+          },
+        );
+        const extension = createExtension({
+          version: '1.0.0',
+          installMetadata: {
+            type: 'local',
+            source: archivePath,
+          },
+        });
+        const abortError = new DOMException('Aborted', 'AbortError');
+        let abortChecks = 0;
+        const signal = {
+          throwIfAborted: () => {
+            abortChecks += 1;
+            if (abortChecks >= 4) throw abortError;
+          },
+        } as unknown as AbortSignal;
+
+        await expect(
+          checkForExtensionUpdate(extension, {} as ExtensionManager, signal),
+        ).rejects.toBe(abortError);
+        await expect(fs.stat(convertedDir)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
     it('should return UPDATE_AVAILABLE for archive URL extension with different version', async () => {
       const tempDir = await fs.mkdtemp(
         path.join(os.tmpdir(), 'archive-url-update-test-'),
@@ -743,6 +1034,87 @@ describe('git extension helpers', () => {
 
     afterEach(async () => {
       await fs.rm(tempDir, { recursive: true, force: true });
+    });
+
+    it('preserves the abort reason for release metadata response errors', async () => {
+      const responseError = new Error('response interrupted');
+      const controller = new AbortController();
+      const abortReason = new Error('release check cancelled');
+      const response = new Readable({
+        read() {
+          controller.abort(abortReason);
+          this.destroy(responseError);
+        },
+      }) as IncomingMessage;
+      Object.assign(response, { statusCode: 200, headers: {} });
+      mockHttpsGet.mockImplementationOnce(((_url, options, callback) => {
+        callResponseCallback(options, callback, response);
+        return createRequestMock();
+      }) as typeof https.get);
+
+      await expect(
+        downloadFromGitHubRelease(
+          { source: 'owner/repo', type: 'github-release' },
+          tempDir,
+          controller.signal,
+        ),
+      ).rejects.toBe(abortReason);
+    });
+
+    it('preserves the abort reason for release metadata status errors', async () => {
+      const controller = new AbortController();
+      const abortReason = new Error('release check cancelled');
+      const response = createResponse('missing', 404);
+      mockHttpsGet.mockImplementationOnce(((_url, options, callback) => {
+        controller.abort(abortReason);
+        callResponseCallback(options, callback, response);
+        return createRequestMock();
+      }) as typeof https.get);
+
+      await expect(
+        downloadFromGitHubRelease(
+          { source: 'owner/repo', type: 'github-release' },
+          tempDir,
+          controller.signal,
+        ),
+      ).rejects.toBe(abortReason);
+    });
+
+    it('times out release metadata requests', async () => {
+      vi.useFakeTimers();
+      const request = {
+        on: vi.fn().mockReturnThis(),
+        destroy: vi.fn().mockReturnThis(),
+      } as unknown as ReturnType<typeof https.get>;
+      mockHttpsGet.mockImplementationOnce(() => request);
+
+      try {
+        const download = downloadFromGitHubRelease(
+          { source: 'owner/repo', type: 'github-release' },
+          tempDir,
+        );
+        const outcome = download.catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(120_000);
+
+        await expect(outcome).resolves.toMatchObject({
+          message: 'Timed out fetching GitHub API response',
+        });
+        expect(request.destroy).toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('rejects invalid release metadata JSON', async () => {
+      mockHttpsResponses('{ invalid json');
+
+      await expect(
+        downloadFromGitHubRelease(
+          { source: 'owner/repo', type: 'github-release' },
+          tempDir,
+        ),
+      ).rejects.toBeInstanceOf(SyntaxError);
     });
 
     it('should explain when a release archive is missing an extension manifest', async () => {
@@ -938,6 +1310,61 @@ describe('git extension helpers', () => {
       expect(request.destroy).toHaveBeenCalled();
     });
 
+    it('does not start an archive request when DNS outlives the deadline', async () => {
+      vi.useFakeTimers();
+      vi.spyOn(dns, 'lookup').mockImplementation(
+        () => new Promise(() => undefined),
+      );
+
+      try {
+        const outcome = downloadFromArchiveUrl(
+          {
+            source: 'https://packages.example/extension.zip',
+            type: 'archive-url',
+            networkPolicy: 'public',
+          },
+          tempDir,
+        ).catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(120_000);
+
+        await expect(outcome).resolves.toMatchObject({
+          message:
+            'Failed to download archive from https://packages.example/extension.zip: Timed out downloading extension archive',
+        });
+        expect(mockHttpsGet).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('preserves the caller abort reason for archive URL downloads', async () => {
+      let errorHandler: ((error: Error) => void) | undefined;
+      const request = {
+        on: vi.fn((event: string, handler: (error: Error) => void) => {
+          if (event === 'error') errorHandler = handler;
+          return request;
+        }),
+        setTimeout: vi.fn().mockReturnThis(),
+        destroy: vi.fn().mockReturnThis(),
+      } as unknown as ReturnType<typeof https.get>;
+      mockHttpsGet.mockImplementationOnce(() => request);
+      const controller = new AbortController();
+      const reason = new Error('download cancelled');
+
+      const download = downloadFromArchiveUrl(
+        {
+          source: 'https://example.com/releases/extension.zip',
+          type: 'archive-url',
+        },
+        tempDir,
+        controller.signal,
+      );
+      controller.abort(reason);
+      errorHandler?.(reason);
+
+      await expect(download).rejects.toBe(reason);
+    });
+
     it('should reject oversized archive URL downloads', async () => {
       let dataHandler: ((chunk: Buffer) => void) | undefined;
       const response = {
@@ -1108,6 +1535,59 @@ describe('git extension helpers', () => {
       });
       expect(redirectedDownloadOptions?.headers).toEqual({
         'User-agent': 'gemini-cli',
+      });
+    });
+
+    it('should reject same-host scheme downgrade redirects before sending a token', async () => {
+      const originalToken = process.env['GITHUB_TOKEN'];
+      process.env['GITHUB_TOKEN'] = 'secret-token';
+      mockHttpsGet
+        .mockImplementationOnce(((_url, options, callback) => {
+          const response = createResponse(
+            JSON.stringify({
+              assets: [
+                {
+                  name: 'extension.zip',
+                  browser_download_url:
+                    'https://github.com/owner/repo/releases/download/v1.0.0/extension.zip',
+                },
+              ],
+              tag_name: 'v1.0.0',
+            }),
+          );
+          callResponseCallback(options, callback, response);
+          return createRequestMock();
+        }) as typeof https.get)
+        .mockImplementationOnce(((_url, options, callback) => {
+          const response = createResponse(undefined, 302, {
+            location:
+              'http://github.com/owner/repo/releases/download/v1.0.0/extension.zip',
+          });
+          callResponseCallback(options, callback, response);
+          return createRequestMock();
+        }) as typeof https.get);
+
+      try {
+        await expect(
+          downloadFromGitHubRelease(
+            { source: 'owner/repo', type: 'github-release' },
+            tempDir,
+          ),
+        ).rejects.toThrow('Unsupported download URL protocol: http:');
+      } finally {
+        if (originalToken === undefined) {
+          delete process.env['GITHUB_TOKEN'];
+        } else {
+          process.env['GITHUB_TOKEN'] = originalToken;
+        }
+      }
+
+      expect(mockHttpsGet).toHaveBeenCalledTimes(2);
+      const originalDownloadOptions = mockHttpsGet.mock.calls[1][1] as
+        | https.RequestOptions
+        | undefined;
+      expect(originalDownloadOptions?.headers).toMatchObject({
+        Authorization: 'token secret-token',
       });
     });
 
@@ -1508,6 +1988,20 @@ describe('git extension helpers', () => {
       expect(repo).toBe('repo');
     });
 
+    it('should not strip .git from the middle of a repo name (GitHub Pages)', () => {
+      const source = 'https://github.com/owner/owner.github.io';
+      const { owner, repo } = parseGitHubRepoForReleases(source);
+      expect(owner).toBe('owner');
+      expect(repo).toBe('owner.github.io');
+    });
+
+    it('should only strip a trailing .git, not an embedded one', () => {
+      const { repo } = parseGitHubRepoForReleases(
+        'owner/my.gitignore-tools.git',
+      );
+      expect(repo).toBe('my.gitignore-tools');
+    });
+
     it('should fail on a GitHub SSH URL', () => {
       const source = 'git@github.com:owner/repo.git';
       expect(() => parseGitHubRepoForReleases(source)).toThrow(
@@ -1571,6 +2065,40 @@ describe('git extension helpers', () => {
   describe('extractFile', () => {
     let tempDir: string;
 
+    async function getFileSize(filePath: string): Promise<number> {
+      try {
+        return (await fs.stat(filePath)).size;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+        throw error;
+      }
+    }
+
+    async function waitForFileData(filePath: string): Promise<void> {
+      for (let attempt = 0; attempt < 1_000; attempt += 1) {
+        if ((await getFileSize(filePath)) > 0) return;
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      throw new Error(`Timed out waiting for extracted data at ${filePath}`);
+    }
+
+    async function waitForStableFileSize(filePath: string): Promise<number> {
+      let previousSize = -1;
+      let stableChecks = 0;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        await new Promise((resolve) => setImmediate(resolve));
+        const size = await getFileSize(filePath);
+        if (size === previousSize) {
+          stableChecks += 1;
+          if (stableChecks === 3) return size;
+        } else {
+          previousSize = size;
+          stableChecks = 0;
+        }
+      }
+      throw new Error(`Extracted data did not stop changing at ${filePath}`);
+    }
+
     beforeEach(async () => {
       tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gemini-test-'));
     });
@@ -1603,6 +2131,54 @@ describe('git extension helpers', () => {
       const extractedFilePath = path.join(extractionDest, 'test.txt');
       const content = await fs.readFile(extractedFilePath, 'utf-8');
       expect(content).toBe('hello tar');
+    });
+
+    it('should cancel while scanning a tar archive', async () => {
+      const archivePath = path.join(tempDir, 'scan-cancel.tar.gz');
+      const sourcePath = path.join(tempDir, 'large.bin');
+      await fs.writeFile(sourcePath, randomBytes(16 * 1024 * 1024));
+      await tar.c({ gzip: true, file: archivePath, cwd: tempDir }, [
+        'large.bin',
+      ]);
+
+      const controller = new AbortController();
+      const abortReason = new Error('cancel tar scan');
+      const scan = assertTarArchiveHasNoLinks(archivePath, controller.signal);
+      setImmediate(() => controller.abort(abortReason));
+      await expect(scan).rejects.toBe(abortReason);
+    });
+
+    it('should cancel while extracting a tar archive', async () => {
+      const archivePath = path.join(tempDir, 'extract-cancel.tar.gz');
+      const extractionDest = path.join(tempDir, 'extracted');
+      const sourcePath = path.join(tempDir, 'large.bin');
+      const extractedFilePath = path.join(extractionDest, 'large.bin');
+      const content = randomBytes(32 * 1024 * 1024);
+      await fs.mkdir(extractionDest);
+      await fs.writeFile(sourcePath, content);
+      await tar.c({ gzip: true, file: archivePath, cwd: tempDir }, [
+        'large.bin',
+      ]);
+
+      const controller = new AbortController();
+      const abortReason = new Error('cancel tar extraction');
+      const extraction = extractFile(
+        archivePath,
+        extractionDest,
+        controller.signal,
+      );
+      try {
+        await waitForFileData(extractedFilePath);
+      } catch (error) {
+        controller.abort(error);
+        await extraction.catch(() => undefined);
+        throw error;
+      }
+      controller.abort(abortReason);
+      await expect(extraction).rejects.toBe(abortReason);
+      expect(await waitForStableFileSize(extractedFilePath)).toBeLessThan(
+        content.length,
+      );
     });
 
     it.skipIf(process.platform === 'win32')(
@@ -1666,6 +2242,45 @@ describe('git extension helpers', () => {
       expect(content).toBe('hello zip');
     });
 
+    it('should cancel while extracting a zip archive', async () => {
+      const archivePath = path.join(tempDir, 'extract-cancel.zip');
+      const extractionDest = path.join(tempDir, 'extracted');
+      const extractedFilePath = path.join(extractionDest, 'large.bin');
+      const content = Buffer.alloc(64 * 1024 * 1024, 0x61);
+      await fs.mkdir(extractionDest);
+
+      const output = fsSync.createWriteStream(archivePath);
+      const archive = archiver.create('zip');
+      const streamFinished = new Promise((resolve, reject) => {
+        output.on('close', () => resolve(null));
+        archive.on('error', reject);
+      });
+      archive.pipe(output);
+      archive.append(content, { name: 'large.bin' });
+      await archive.finalize();
+      await streamFinished;
+
+      const controller = new AbortController();
+      const abortReason = new Error('cancel zip extraction');
+      const extraction = extractFile(
+        archivePath,
+        extractionDest,
+        controller.signal,
+      );
+      try {
+        await waitForFileData(extractedFilePath);
+      } catch (error) {
+        controller.abort(error);
+        await extraction.catch(() => undefined);
+        throw error;
+      }
+      controller.abort(abortReason);
+      await expect(extraction).rejects.toBe(abortReason);
+      expect(await waitForStableFileSize(extractedFilePath)).toBeLessThan(
+        content.length,
+      );
+    });
+
     it('should reject symlink entries in zip archives', async () => {
       const archivePath = path.join(tempDir, 'symlink.zip');
       const extractionDest = path.join(tempDir, 'extracted');
@@ -1691,6 +2306,36 @@ describe('git extension helpers', () => {
         fs.lstat(path.join(extractionDest, 'escape-link')),
       ).rejects.toThrow();
     });
+
+    it.skipIf(process.platform === 'win32')(
+      'should reject zip extraction through an existing symlink',
+      async () => {
+        const archivePath = path.join(tempDir, 'existing-symlink.zip');
+        const extractionDest = path.join(tempDir, 'extracted');
+        const outsideDir = path.join(tempDir, 'outside');
+        await fs.mkdir(extractionDest);
+        await fs.mkdir(outsideDir);
+        await fs.symlink(outsideDir, path.join(extractionDest, 'escape'));
+
+        const output = fsSync.createWriteStream(archivePath);
+        const archive = archiver.create('zip');
+        const streamFinished = new Promise((resolve, reject) => {
+          output.on('close', () => resolve(null));
+          archive.on('error', reject);
+        });
+        archive.pipe(output);
+        archive.append('outside write', { name: 'escape/file.txt' });
+        await archive.finalize();
+        await streamFinished;
+
+        await expect(extractFile(archivePath, extractionDest)).rejects.toThrow(
+          'Refusing to extract through non-directory path',
+        );
+        await expect(
+          fs.lstat(path.join(outsideDir, 'file.txt')),
+        ).rejects.toThrow();
+      },
+    );
 
     it('should throw an error for unsupported file types', async () => {
       const unsupportedFilePath = path.join(tempDir, 'test.txt');

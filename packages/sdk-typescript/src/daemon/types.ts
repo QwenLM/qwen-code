@@ -31,6 +31,27 @@ export interface DaemonWorkspaceCapability {
   cwd: string;
   primary: boolean;
   trusted: boolean;
+  /** Whether this runtime can be removed without restarting the daemon. */
+  removable?: boolean;
+}
+
+export interface DaemonWorkspaceRemovalActivity {
+  sessions: number;
+  activePrompts: number;
+  pendingSessionStarts: number;
+  acpConnections: number;
+  memoryTasks: number;
+  channelWorkers: number;
+  voiceSessions?: number;
+}
+
+export interface DaemonWorkspaceRemovalResult {
+  removed: true;
+  workspaceId: string;
+  workspaceCwd: string;
+  forced: boolean;
+  persistedRegistrationRemoved: boolean;
+  activity: DaemonWorkspaceRemovalActivity;
 }
 
 /** Current Git branch metadata returned from a workspace Git status route. */
@@ -100,9 +121,9 @@ export interface DaemonCapabilities {
    */
   workspaceCwd?: string;
   /**
-   * Registered workspace runtimes. Present only when the daemon advertises
-   * `multi_workspace_sessions`; `workspaceCwd` remains the primary cwd for
-   * old clients.
+   * Registered workspace runtimes. Newer daemons include the primary runtime
+   * even in single-workspace mode so workspace-qualified features can address
+   * it by ID; `workspaceCwd` remains the primary cwd for old clients.
    */
   workspaces?: DaemonWorkspaceCapability[];
 }
@@ -203,8 +224,9 @@ export interface DaemonStatusReportSession {
  * One time-bucketed sample in the Daemon Status metrics series. **Manual mirror
  * of `packages/cli/src/serve/daemon-metrics-ring.ts` → `DaemonMetricsBucket`;
  * keep the two field lists in sync.** Each bucket covers a fixed window: the
- * request/token counters, the `*P50Ms`/`*P95Ms` percentiles, and
- * `promptsCompleted` aggregate what happened *during* the window, while
+ * request/token counters, the `*P50Ms`/`*P95Ms` percentiles, the
+ * `llmApiErrors`/`llmApiRetries` counters, and `promptsCompleted` aggregate
+ * what happened *during* the window, while
  * `activeSessions`/`activePrompts`/`queuedPrompts`/`rssBytes`/`heapUsedBytes`/
  * `eventLoopLagP99Ms` are gauges read at seal time `t`.
  */
@@ -236,6 +258,11 @@ export interface DaemonMetricsSeriesBucket {
   llmApiP50Ms: number;
   /** p95 per-round LLM API round-trip over the window (ms); 0 when none. */
   llmApiP95Ms: number;
+  /** Model API errors in the window (one per failed model API attempt);
+   *  provider-side failures, distinct from the client→daemon HTTP `errors`. */
+  llmApiErrors: number;
+  /** Automatic backoff retries in the window (one per retried attempt). */
+  llmApiRetries: number;
   /** Process CPU utilization over the window, percent of total capacity across
    *  all cores, clamped to [0,100]. */
   cpuPercent: number;
@@ -565,7 +592,7 @@ export interface DaemonSessionSummary {
   pinnedAt?: string;
   groupId?: string | null;
   /** Quick color grouping tag; mutually exclusive with `groupId` in the UI. */
-  color?: DaemonSessionGroupColor | null;
+  color?: DaemonSessionGroupPresetColor | null;
 }
 
 export type DaemonSessionExportFormat = 'html' | 'md' | 'json' | 'jsonl';
@@ -597,13 +624,20 @@ export interface DaemonSessionTranscriptPage {
 
 export type DaemonSessionArchiveState = 'active' | 'archived';
 
-export type DaemonSessionGroupColor =
+export type DaemonSessionGroupPresetColor =
   | 'red'
   | 'orange'
   | 'yellow'
   | 'green'
   | 'blue'
   | 'purple';
+
+/** Shape hint only; the daemon validates exactly six Hex digits at runtime. */
+export type DaemonSessionGroupHexColor = `#${string}`;
+
+export type DaemonSessionGroupColor =
+  | DaemonSessionGroupPresetColor
+  | DaemonSessionGroupHexColor;
 
 export interface DaemonSessionGroup {
   id: string;
@@ -616,7 +650,7 @@ export interface DaemonSessionGroup {
 
 export interface DaemonSessionGroupCatalog {
   groups: DaemonSessionGroup[];
-  colorOptions: DaemonSessionGroupColor[];
+  colorOptions: DaemonSessionGroupPresetColor[];
 }
 
 export interface DaemonSessionGroupInput {
@@ -633,7 +667,7 @@ export interface DaemonSessionGroupUpdate {
 export interface DaemonSessionOrganizationUpdate {
   isPinned?: boolean;
   groupId?: string | null;
-  color?: DaemonSessionGroupColor | null;
+  color?: DaemonSessionGroupPresetColor | null;
 }
 
 export interface DaemonSessionOrganizationResult {
@@ -641,7 +675,7 @@ export interface DaemonSessionOrganizationResult {
   groupId: string | null;
   isPinned: boolean;
   pinnedAt?: string;
-  color?: DaemonSessionGroupColor | null;
+  color?: DaemonSessionGroupPresetColor | null;
   updatedAt: string;
 }
 
@@ -1066,6 +1100,8 @@ export interface DaemonWorkspaceSkillStatus extends DaemonStatusCell {
   description: string;
   level: DaemonSkillLevel;
   modelInvocable: boolean;
+  userInvocable?: false;
+  installedPath?: string;
   argumentHint?: string;
   model?: string;
   extensionName?: string;
@@ -1959,6 +1995,17 @@ export interface DaemonToolToggleResult {
   enabled: boolean;
 }
 
+export type DaemonSkillToggleActivation = 'applied' | 'deferred' | 'partial';
+
+export interface DaemonSkillToggleResult {
+  skillName: string;
+  enabled: boolean;
+  changed: boolean;
+  activation: DaemonSkillToggleActivation;
+  sessionsRefreshed: number;
+  sessionsFailed: number;
+}
+
 export interface DaemonSettingDescriptor {
   key: string;
   type: string;
@@ -1986,9 +2033,23 @@ export interface DaemonWorkspaceSettingsStatus {
 
 export interface DaemonSettingUpdateResult {
   key: string;
-  scope: 'workspace';
+  scope: 'workspace' | 'user';
   value: unknown;
   requiresRestart: boolean;
+}
+
+/** Identifies a configured model to remove from `modelProviders`. */
+export interface DaemonModelDeleteRequest {
+  authType: string;
+  modelId: string;
+  baseUrl?: string;
+}
+
+export interface DaemonModelDeleteResult {
+  removed: boolean;
+  clearedActiveModel: boolean;
+  /** True when a committed write targets a restart-required setting. */
+  requiresRestart?: boolean;
 }
 
 export type DaemonVoiceMode = 'hold' | 'tap';
@@ -2026,6 +2087,7 @@ export interface DaemonWorkspaceVoiceTranscribeOptions {
   mimeType: string;
   voiceModel?: string;
   clientId?: string;
+  timeoutMs?: number;
 }
 
 export interface DaemonWorkspaceVoiceTranscriptionResult {
@@ -2256,12 +2318,43 @@ export interface DaemonChannelWorkerSnapshot {
   staleHeartbeatAt?: string;
 }
 
+export type DaemonChannelSelection =
+  | { mode: 'all' }
+  | { mode: 'names'; names: string[] };
+
+export type DaemonChannelControlTransition =
+  | 'idle'
+  | 'starting'
+  | 'reconciling'
+  | 'stopping'
+  | 'rolling_back';
+
 /** A channel worker snapshot annotated with its owning workspace. */
 export interface DaemonChannelWorkerGroupSnapshot
   extends DaemonChannelWorkerSnapshot {
   workspaceId: string;
   workspaceCwd: string;
   primary: boolean;
+}
+
+export interface DaemonChannelControlState {
+  enabled: boolean;
+  selection: DaemonChannelSelection | null;
+  pendingSelection?: DaemonChannelSelection;
+  transition: DaemonChannelControlTransition;
+  workers: DaemonChannelWorkerGroupSnapshot[];
+}
+
+export interface DaemonChannelSetResult {
+  changed: boolean;
+  replaced: boolean;
+  partial: boolean;
+  state: DaemonChannelControlState;
+}
+
+export interface DaemonChannelStopResult {
+  changed: boolean;
+  state: DaemonChannelControlState;
 }
 
 /**
@@ -2791,6 +2884,7 @@ export type DaemonExtensionInstallType =
   | 'git'
   | 'local'
   | 'link'
+  | 'archive-url'
   | 'github-release'
   | 'npm';
 
@@ -2810,6 +2904,7 @@ export interface DaemonExtensionCapabilities {
 export type DaemonExtensionUpdateState =
   | 'checking for updates'
   | 'updated, needs restart'
+  | 'updated with warnings'
   | 'updating'
   | 'updated'
   | 'update available'
@@ -2863,6 +2958,58 @@ export interface ExtensionInstallRequest {
   consent?: boolean;
 }
 
+export type ExtensionInitialActivation =
+  | { scope: 'user' }
+  | { scope: 'workspace'; workspaceId: string };
+
+export interface ExtensionManagementInstallRequest
+  extends ExtensionInstallRequest {
+  consent: true;
+  activation: ExtensionInitialActivation;
+}
+
+export type ExtensionActivationState = 'enabled' | 'disabled';
+export type ExtensionWorkspaceActivation = ExtensionActivationState | null;
+
+export interface ExtensionCatalogEntry {
+  id: string;
+  name: string;
+  version: string;
+  installType?: DaemonExtensionInstallType;
+  defaultActivation: ExtensionActivationState;
+  workspaceOverrideCount: number;
+}
+
+export interface ExtensionCatalog {
+  v: 1;
+  generation: number;
+  extensions: ExtensionCatalogEntry[];
+}
+
+export interface WorkspaceExtensionProjectionEntry {
+  extensionId: string;
+  name: string;
+  version: string;
+  defaultActivation: ExtensionActivationState;
+  workspaceActivation: ExtensionWorkspaceActivation;
+  effectiveActivation: ExtensionActivationState;
+  activationSource:
+    | 'cli_override'
+    | 'workspace_override'
+    | 'legacy_path_rule'
+    | 'default';
+}
+
+export interface WorkspaceExtensionProjection {
+  v: 1;
+  workspaceId: string;
+  workspaceCwd: string;
+  trusted: boolean;
+  desiredGeneration: number;
+  appliedGeneration: number;
+  extensions: WorkspaceExtensionProjectionEntry[];
+}
+
 export interface ExtensionInstallResponse {
   accepted: true;
   operationId: string;
@@ -2873,18 +3020,30 @@ export type ExtensionMutationResponse = ExtensionInstallResponse;
 export type ExtensionOperationState =
   | 'queued'
   | 'running'
+  | 'waiting_for_input'
   | 'succeeded'
   | 'succeeded_with_refresh_error'
+  | 'succeeded_with_warnings'
   | 'failed';
 
 export interface ExtensionOperationResult {
-  status: 'installed' | 'enabled' | 'disabled' | 'updated' | 'uninstalled';
+  status:
+    | 'installed'
+    | 'enabled'
+    | 'disabled'
+    | 'updated'
+    | 'uninstalled'
+    | 'checked'
+    | 'refreshed';
   source?: string;
   name?: string;
   version?: string;
   refreshed?: number;
   failed?: number;
   error?: string;
+  updated?: boolean;
+  reason?: string;
+  states?: Record<string, DaemonExtensionUpdateState>;
 }
 
 export interface ExtensionOperationStatus {
@@ -2892,12 +3051,62 @@ export interface ExtensionOperationStatus {
   operationId: string;
   operation: string;
   status: ExtensionOperationState;
+  phase?: 'preparing' | 'committing' | 'reconciling';
   createdAt: number;
   updatedAt: number;
   source?: string;
   name?: string;
   result?: ExtensionOperationResult;
+  interaction?: ExtensionPendingInteraction;
   error?: string;
+  code?: string;
+  warnings?: Array<{
+    workspaceId?: string;
+    workspaceCwd: string;
+    code?: string;
+    error: string;
+  }>;
+}
+
+export interface ExtensionActiveOperations {
+  v: 1;
+  operations: ExtensionOperationStatus[];
+}
+
+export type ExtensionPendingInteraction =
+  | ExtensionMarketplacePluginInteraction
+  | ExtensionSettingInteraction;
+
+export interface ExtensionMarketplacePluginInteraction {
+  id: string;
+  kind: 'marketplace_plugin';
+  marketplace: { name: string };
+  plugins: Array<{
+    name: string;
+    description?: string;
+    source: string;
+    category?: string;
+    tags?: string[];
+  }>;
+}
+
+export interface ExtensionSettingInteraction {
+  id: string;
+  kind: 'setting';
+  setting: {
+    name: string;
+    description: string;
+    sensitive: boolean;
+  };
+}
+
+export type ExtensionInteractionResponse =
+  | { pluginName: string }
+  | { value: string }
+  | { cancelled: true };
+
+export interface ExtensionInteractionResponseResult {
+  accepted: true;
 }
 
 export type ExtensionScope = 'user' | 'workspace';

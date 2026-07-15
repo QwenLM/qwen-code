@@ -11,6 +11,7 @@ import { SchemaValidator } from '../utils/schemaValidator.js';
 import { type AgentStatsSummary } from '../agents/runtime/agent-statistics.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
 import type { PermissionDecision } from '../permissions/types.js';
+import type { VisionBridgeNoticeDisplay } from '../services/visionBridge/vision-bridge-service.js';
 
 /**
  * Represents a validated and ready-to-execute tool call.
@@ -651,6 +652,39 @@ export interface McpToolProgressData {
   message?: string;
 }
 
+/**
+ * Structured heartbeat for silent foreground shell commands, emitted through
+ * the updateOutput channel while no display update has fired for
+ * `tools.shell.heartbeatIntervalMs` (default 10s). Carries liveness stats
+ * only — never command output — and never enters model context. Consumers
+ * that render live output (TUI, subagent views) ignore it; the ACP session
+ * and stream-json adapters forward it so headless gateways can distinguish
+ * "still running" from a dead execution chain.
+ */
+export interface ShellProgressData {
+  type: 'shell_progress';
+  /** Monotonic elapsed time since the process spawned (post-PTY-init), in ms. */
+  elapsedMs: number;
+  /** Monotonic age of the last output chunk, in ms; absent = no output yet. */
+  lastOutputAgeMs?: number;
+  /** Cumulative output stats; only present on the PTY/AnsiOutput path. */
+  totalLines?: number;
+  totalBytes?: number;
+  /** Effective timeout governing this command (including the 120s default); absent when disabled. */
+  timeoutMs?: number;
+}
+
+export function isShellProgressData(
+  display: unknown,
+): display is ShellProgressData {
+  return (
+    typeof display === 'object' &&
+    display !== null &&
+    'type' in display &&
+    (display as ShellProgressData).type === 'shell_progress'
+  );
+}
+
 export type ToolResultDisplay =
   | string
   | FileDiff
@@ -660,7 +694,9 @@ export type ToolResultDisplay =
   | TeamResultDisplay
   | TaskListResultDisplay
   | AnsiOutputDisplay
-  | McpToolProgressData;
+  | McpToolProgressData
+  | VisionBridgeNoticeDisplay
+  | ShellProgressData;
 
 export interface TeamResultDisplay {
   type: 'team_result';

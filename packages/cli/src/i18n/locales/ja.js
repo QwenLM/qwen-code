@@ -1951,6 +1951,16 @@ export default {
     'このスタンドアロンインストールを自動更新できません。以下から再インストールしてください：',
   'Manual update required. Please reinstall Qwen Code.':
     '手動更新が必要です。Qwen Codeを再インストールしてください。',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    'このセッションではカスタムサンドボックスイメージ {{image}} を使用しています。イメージを更新して Qwen Code を再起動してください。',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    'ホスト上の Qwen Code を更新してから、サンドボックスを再起動してください。',
+  'The update will be installed after you exit this session.':
+    'このセッションを終了すると、更新が自動的にインストールされます。',
+  'Run /update to install the update on the host.':
+    '/update を実行してホストに更新をインストールしてください。',
+  'Run /update to install the update.':
+    '/update を実行して更新をインストールしてください。',
 
   // ============================================================================
   // reload-plugins command
@@ -1981,4 +1991,8 @@ export default {
     'Failed to refresh extension content. Run /reload-plugins to apply updates.',
   'Extension reload did not complete. Run /reload-plugins to try again.':
     'Extension reload did not complete. Run /reload-plugins to try again.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.':
+    '書き込みに失敗したため、セッションの記録を停止しました。影響を受けたセッションの新しいメッセージは保存されません。ディスク容量と権限を確認してから、新しいセッションを開始して記録を再開してください。詳細はデバッグログを確認してください。',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
+    '書き込みに失敗したため、セッションの記録を停止しました。影響を受けたセッションの新しいメッセージは保存されません。ディスク容量と権限を確認してから、`/clear` を実行して記録可能な新しいセッションを開始してください。詳細はデバッグログを確認してください。',
 };

@@ -64,7 +64,7 @@ import {
 import { escapeSystemReminderTags } from '../utils/xml.js';
 import { unescapePath, PATH_ARG_KEYS } from '../utils/paths.js';
 import type { MemoryPressureMonitor } from '../services/memoryPressureMonitor.js';
-import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
+import { CONCURRENCY_SAFE_KINDS, isShellProgressData } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import { parsePositiveIntegerEnv } from '../utils/env.js';
@@ -842,6 +842,7 @@ const createErrorResponse = (
   error: Error,
   errorType: ToolErrorType | undefined,
   artifacts?: ToolArtifact[],
+  resultDisplay?: ToolResultDisplay,
 ): ToolCallResponseInfo => ({
   callId: request.callId,
   error,
@@ -854,7 +855,7 @@ const createErrorResponse = (
       },
     },
   ],
-  resultDisplay: error.message,
+  resultDisplay: resultDisplay ?? error.message,
   errorType,
   contentLength: error.message.length,
   ...(artifacts && artifacts.length > 0 ? { artifacts } : {}),
@@ -2467,9 +2468,10 @@ export class CoreToolScheduler {
                 `Tool blocked by plan mode: "${reqInfo.name}" is not a read-only tool. ` +
                   `Only read-only tools (read_file, grep_search, glob, list_directory, ` +
                   `web_fetch, etc.) are allowed in plan mode.` +
+                  ` Do NOT retry this tool. ` +
                   (isPlanRequiredTeammate
-                    ? ` Call exit_plan_mode to exit plan mode and execute this tool.`
-                    : ` Present your plan directly to the caller instead of executing this tool.`),
+                    ? `Pivot to read-only alternatives to gather the information you need, then call exit_plan_mode with a plan that covers this tool's purpose.`
+                    : `Pivot to read-only alternatives to gather equivalent information, then present your plan directly to the caller.`),
               );
               this.setStatusInternal(reqInfo.callId, 'error', {
                 ...createErrorResponse(
@@ -3601,6 +3603,16 @@ export class CoreToolScheduler {
 
     const liveOutputCallback = scheduledCall.tool.canUpdateOutput
       ? (outputChunk: ToolResultDisplay) => {
+          if (isShellProgressData(outputChunk)) {
+            // Liveness heartbeat, not display content: forward to the
+            // outputUpdateHandler (stream-json progress events) but keep it
+            // out of liveOutput — replacing the accumulated command output
+            // with a stats object would blank the live view.
+            if (this.outputUpdateHandler) {
+              this.outputUpdateHandler(callId, outputChunk);
+            }
+            return;
+          }
           const compactOutput =
             this.compactResultDisplayForInteractiveHistory(outputChunk);
           if (this.outputUpdateHandler) {
@@ -3834,7 +3846,7 @@ export class CoreToolScheduler {
       }
 
       if (toolResult.error === undefined) {
-        let content = toolResult.llmContent;
+        let content = toolResult.llmContent ?? '';
         let contentLength: number | undefined =
           typeof content === 'string' ? content.length : undefined;
 
@@ -4247,6 +4259,11 @@ export class CoreToolScheduler {
           error,
           toolResult.error.type,
           failureHookArtifacts,
+          typeof toolResult.returnDisplay === 'string'
+            ? undefined
+            : this.compactResultDisplayForInteractiveHistory(
+                toolResult.returnDisplay,
+              ),
         );
         this.setStatusInternal(callId, 'error', errorResponse);
         if (toolResult.error.type === ToolErrorType.EXECUTION_TIMEOUT) {

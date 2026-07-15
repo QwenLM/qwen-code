@@ -80,6 +80,7 @@ export {
   useDaemonUsageDashboard,
   useDaemonTools,
   useDaemonSettings,
+  useDaemonProviders,
 } from './workspace/index.js';
 export type {
   DaemonDirectoryEntry,
@@ -169,4 +170,10 @@ export type {
   DaemonSettingDescriptor,
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
+  DaemonWorkspaceProvidersStatus,
+  DaemonWorkspaceProviderStatus,
+  DaemonWorkspaceProviderModel,
+  DaemonWorkspaceProviderCurrent,
+  DaemonModelDeleteRequest,
+  DaemonModelDeleteResult,
 } from '@qwen-code/sdk/daemon';

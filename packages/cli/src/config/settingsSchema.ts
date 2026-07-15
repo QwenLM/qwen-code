@@ -603,6 +603,23 @@ const SETTINGS_SCHEMA = {
           'Play terminal bell sound when response completes or needs approval.',
         showInDialog: true,
       },
+      notificationMode: {
+        type: 'enum',
+        label: 'Notification Mode',
+        category: 'General',
+        requiresRestart: false,
+        default: 'all',
+        description:
+          'Which unfocused-terminal events fire a bell/OS notification. ' +
+          '"all" fires on every tool approval prompt AND on task completion (current behavior). ' +
+          '"task-complete" suppresses the per-approval notification and only fires when a long task returns to idle. ' +
+          'Requires `terminalBell` to be enabled; otherwise no notifications fire regardless of mode.',
+        showInDialog: true,
+        options: [
+          { value: 'all', label: 'All (approvals + task completion)' },
+          { value: 'task-complete', label: 'Task completion only' },
+        ],
+      },
       preventSystemSleep: {
         type: 'boolean',
         label: 'Prevent System Sleep While Running',
@@ -1364,13 +1381,13 @@ const SETTINGS_SCHEMA = {
         ],
       },
       maxSessionTurns: {
-        type: 'number',
+        type: 'integer',
         label: 'Max Session Turns',
         category: 'Model',
         requiresRestart: false,
         default: -1,
         description:
-          'Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.',
+          'Maximum number of user/model/tool turns to keep in a session. Must be an integer; -1 means unlimited.',
         showInDialog: false,
       },
       maxWallTimeSeconds: {
@@ -1451,7 +1468,7 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
       },
       maxToolCallsPerTurn: {
-        type: 'number',
+        type: 'integer',
         label: 'Max Tool Calls Per Turn',
         category: 'Model',
         requiresRestart: false,
@@ -2257,6 +2274,18 @@ const SETTINGS_SCHEMA = {
               'Default timeout, in milliseconds, for foreground shell commands started by the agent. A per-call timeout on the shell tool overrides this. When unset, foreground commands time out after 120000 ms (2 minutes). Set to 0 to disable the timeout.',
             showInDialog: false,
           },
+          heartbeatIntervalMs: {
+            type: 'integer',
+            minimum: 0,
+            maximum: 600000,
+            label: 'Silent Command Heartbeat Interval (ms)',
+            category: 'Tools',
+            requiresRestart: true,
+            default: undefined as number | undefined,
+            description:
+              'Interval, in milliseconds, between liveness heartbeats emitted while a foreground shell command produces no output. Heartbeats are forwarded to ACP clients and stream-json consumers so they can tell a silent command from a dead session. When unset, heartbeats fire every 10000 ms (10 seconds). Set to 0 to disable heartbeats.',
+            showInDialog: false,
+          },
         },
       },
       // Legacy tool permission fields – kept for backward compatibility.
@@ -2316,7 +2345,7 @@ const SETTINGS_SCHEMA = {
         label: 'Tool Approval Mode',
         category: 'Tools',
         requiresRestart: false,
-        default: ApprovalMode.DEFAULT,
+        default: ApprovalMode.AUTO,
         description:
           'Approval mode for tool usage. Controls how tools are approved before execution.',
         showInDialog: true,
@@ -2761,9 +2790,30 @@ const SETTINGS_SCHEMA = {
     requiresRestart: false,
     default: {},
     description:
-      'Settings for multi-agent collaboration features (Arena, Team, Swarm).',
+      'Settings for built-in agents and multi-agent collaboration features (Arena, Team, Swarm).',
     showInDialog: false,
     properties: {
+      builtin: {
+        type: 'object',
+        label: 'Built-in Agents',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: {},
+        description: 'Settings for built-in subagents.',
+        showInDialog: false,
+        properties: {
+          exploreModel: {
+            type: 'string',
+            label: 'Explore Model',
+            category: 'Model',
+            requiresRestart: true,
+            default: 'inherit' as string,
+            description:
+              'Model selector for the built-in Explore subagent. Use "inherit" for the main session model, "fast" for fastModel, a model ID, or an authType:model-id selector. Custom same-name agents are unaffected.',
+            showInDialog: false,
+          },
+        },
+      },
       maxParallelAgents: {
         type: 'number',
         label: 'Max Parallel Agents',

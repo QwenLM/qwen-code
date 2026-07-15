@@ -7,17 +7,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   useConnection,
-  useSessions,
   useStatusReport,
 } from '@qwen-code/webui/daemon-react-sdk';
 import type {
-  DaemonSessionGroupColor,
+  DaemonSessionGroupPresetColor,
   DaemonSessionSummary,
   DaemonStatusReportSession,
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../i18n';
 import { formatRelativeTime } from '../utils/formatRelativeTime';
 import { buildSplitUrl, MAX_SPLIT_PANES } from '../utils/splitUrl';
+import {
+  hasMultipleWorkspaces,
+  isNonPrimaryWorkspaceSession,
+  mergeSessionsById,
+  workspaceBasename,
+} from '../utils/workspace';
+import { useOtherWorkspaceSessions } from '../hooks/useOtherWorkspaceSessions';
+import { useScopedSessions } from '../hooks/useScopedSessions';
 import { getDaemonToken } from '../config/daemon';
 import {
   SESSION_LIST_PAGE_SIZE,
@@ -47,8 +54,12 @@ export interface SessionCard {
   clientCount: number;
   model?: string;
   updatedAt?: string;
-  color?: DaemonSessionGroupColor | null;
+  color?: DaemonSessionGroupPresetColor | null;
   isCurrent: boolean;
+  /** The workspace the session lives in. */
+  workspaceCwd: string;
+  /** True when the session belongs to a non-primary workspace. */
+  isNonPrimary: boolean;
 }
 
 const STATUS_PRIORITY: Record<SessionCardStatus, number> = {
@@ -70,6 +81,7 @@ export function deriveSessionCards(
   sessions: DaemonSessionSummary[],
   statusSessions: DaemonStatusReportSession[],
   currentSessionId: string | undefined,
+  primaryCwd?: string,
 ): SessionCard[] {
   const statusById = new Map(
     statusSessions.map((session) => [session.sessionId, session]),
@@ -87,6 +99,11 @@ export function deriveSessionCards(
       updatedAt: session.updatedAt || session.createdAt,
       color: session.color,
       isCurrent: session.sessionId === currentSessionId,
+      workspaceCwd: session.workspaceCwd,
+      isNonPrimary: isNonPrimaryWorkspaceSession(
+        session.workspaceCwd,
+        primaryCwd,
+      ),
     };
   });
   cards.sort((a, b) => {
@@ -102,7 +119,9 @@ function cx(...classes: Array<string | false | undefined>): string {
   return classes.filter(Boolean).join(' ');
 }
 
-function colorDotClass(color: DaemonSessionGroupColor): string | undefined {
+function colorDotClass(
+  color: DaemonSessionGroupPresetColor,
+): string | undefined {
   switch (color) {
     case 'red':
       return styles.colorRed;
@@ -135,9 +154,13 @@ function statusClass(status: SessionCardStatus): string {
 function SessionOverviewPanelInner({
   onOpenSession,
   onOpenSplit,
+  includeOtherWorkspaces,
+  workspaceCwd,
 }: {
   onOpenSession: (sessionId: string) => void;
   onOpenSplit?: (sessionIds: string[]) => void;
+  includeOtherWorkspaces: boolean;
+  workspaceCwd?: string;
 }) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -146,7 +169,7 @@ function SessionOverviewPanelInner({
     connection.capabilities?.features?.includes(SESSION_ORGANIZATION_FEATURE) ??
     false;
 
-  const { sessions, loading, error, reload } = useSessions({
+  const { sessions, loading, error, reload } = useScopedSessions(workspaceCwd, {
     autoLoad: true,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
@@ -154,6 +177,19 @@ function SessionOverviewPanelInner({
       ? { view: 'organized' as const, group: 'all' }
       : {}),
   });
+  // Fold in the live sessions of the daemon's other workspaces (empty on a
+  // single-workspace daemon), so the overview is mission control for every
+  // workspace, not just the primary one.
+  const { sessions: otherSessions, reload: reloadOther } =
+    useOtherWorkspaceSessions(includeOtherWorkspaces && !workspaceCwd);
+  const mergedSessions = useMemo(
+    () => mergeSessionsById(sessions, otherSessions),
+    [sessions, otherSessions],
+  );
+  const multiWorkspace =
+    !workspaceCwd &&
+    includeOtherWorkspaces &&
+    hasMultipleWorkspaces(connection.capabilities);
   const status = useStatusReport({ autoLoad: true, detail: 'full' });
   const statusReload = status.reload;
   const statusReport = status.report;
@@ -168,12 +204,12 @@ function SessionOverviewPanelInner({
     const timer = window.setInterval(() => {
       if (document.hidden || listInFlight.current) return;
       listInFlight.current = true;
-      void reload().finally(() => {
+      void Promise.all([reload(), reloadOther()]).finally(() => {
         listInFlight.current = false;
       });
     }, LIST_POLL_MS);
     return () => window.clearInterval(timer);
-  }, [reload]);
+  }, [reload, reloadOther]);
 
   // Poll the richer status report less often — it is the only source of
   // per-session "needs approval" and current-model, but costs more to build.
@@ -189,14 +225,19 @@ function SessionOverviewPanelInner({
     return () => window.clearInterval(timer);
   }, [statusReload]);
 
+  // The primary workspace cwd (not `connection.workspaceCwd`, which follows the
+  // currently-loaded session and can itself be non-primary) — so cards are
+  // tagged against the real primary.
+  const primaryCwd = connection.capabilities?.workspaceCwd;
   const cards = useMemo(
     () =>
       deriveSessionCards(
-        sessions,
+        mergedSessions,
         statusReport?.full?.sessions ?? [],
         currentSessionId,
+        primaryCwd,
       ),
-    [sessions, statusReport, currentSessionId],
+    [mergedSessions, statusReport, currentSessionId, primaryCwd],
   );
 
   const toggleSelected = useCallback((sessionId: string) => {
@@ -267,8 +308,9 @@ function SessionOverviewPanelInner({
 
   const refresh = useCallback(() => {
     void reload();
+    void reloadOther();
     void statusReload();
-  }, [reload, statusReload]);
+  }, [reload, reloadOther, statusReload]);
 
   if (cards.length === 0) {
     return (
@@ -392,6 +434,19 @@ function SessionOverviewPanelInner({
               >
                 {t(`sessionsOverview.status.${card.status}`)}
               </span>
+              {multiWorkspace && (
+                <span
+                  className={cx(
+                    styles.workspaceBadge,
+                    card.isNonPrimary && styles.workspaceBadgeOther,
+                  )}
+                  title={card.workspaceCwd}
+                >
+                  {card.isNonPrimary
+                    ? workspaceBasename(card.workspaceCwd)
+                    : t('sidebar.workspacePrimary')}
+                </span>
+              )}
               {card.model && (
                 <span className={styles.metaItem} title={card.model}>
                   {card.model}
@@ -425,9 +480,13 @@ function SessionOverviewPanelInner({
 export function SessionOverviewPanel({
   onOpenSession,
   onOpenSplit,
+  includeOtherWorkspaces = true,
+  workspaceCwd,
 }: {
   onOpenSession: (sessionId: string) => void;
   onOpenSplit?: (sessionIds: string[]) => void;
+  includeOtherWorkspaces?: boolean;
+  workspaceCwd?: string;
 }) {
   const { t } = useI18n();
   return (
@@ -444,6 +503,8 @@ export function SessionOverviewPanel({
       <SessionOverviewPanelInner
         onOpenSession={onOpenSession}
         onOpenSplit={onOpenSplit}
+        includeOtherWorkspaces={includeOtherWorkspaces}
+        workspaceCwd={workspaceCwd}
       />
     </ErrorBoundary>
   );

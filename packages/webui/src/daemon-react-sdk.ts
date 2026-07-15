@@ -115,6 +115,7 @@ export { useDaemonTools as useTools } from './daemon/index.js';
 
 /** Workspace settings (read/write). */
 export { useDaemonSettings as useSettings } from './daemon/index.js';
+export { useDaemonProviders as useProviders } from './daemon/index.js';
 
 // ── Workspace Hooks ───────────────────────────────────────────────
 
@@ -355,6 +356,13 @@ export type {
   DaemonWorkspaceSettingsStatus,
   /** Result of POST /workspace/settings. */
   DaemonSettingUpdateResult,
+  /** Configured model providers returned by GET /workspace/providers. */
+  DaemonWorkspaceProvidersStatus,
+  DaemonWorkspaceProviderStatus,
+  DaemonWorkspaceProviderModel,
+  /** Request/result for DELETE /workspace/models. */
+  DaemonModelDeleteRequest,
+  DaemonModelDeleteResult,
 } from './daemon/index.js';
 
 // ── Types: SDK Transcript Blocks (low-level) ─────────────────────

@@ -119,4 +119,16 @@ describe('no-AK integration CI wiring', () => {
     expect(coverageJob).toContain("runs-on: 'ubuntu-latest'");
     expect(coverageJob).not.toContain('ubuntu_runner');
   });
+
+  it('does not install Linux packages on self-hosted Playwright runners', () => {
+    const workflow = readFileSync(
+      path.join(ROOT, '.github/workflows/ci.yml'),
+      'utf8',
+    );
+    const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
+
+    expect(webShellJob).toContain('ubuntu_runner');
+    expect(webShellJob).toContain("run: 'npx playwright install chromium'");
+    expect(webShellJob).toContain('--with-deps chromium');
+  });
 });

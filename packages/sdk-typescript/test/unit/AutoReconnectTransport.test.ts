@@ -58,6 +58,18 @@ describe('AutoReconnectTransport', () => {
   // ---- Delegation to inner transport ------------------------------------
 
   describe('delegation', () => {
+    it('preserves the initial transport native fetch for REST-only calls', () => {
+      const restFetch = vi.fn() as unknown as typeof globalThis.fetch;
+      const inner = createMockTransport({ restFetch });
+      const transport = new AutoReconnectTransport({
+        baseUrl: 'http://d',
+        initial: inner,
+      });
+
+      expect(transport.restFetch).toBe(restFetch);
+      transport.dispose();
+    });
+
     it('type delegates to inner transport', () => {
       const inner = createMockTransport({ type: 'acp-ws' });
       const transport = new AutoReconnectTransport({

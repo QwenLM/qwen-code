@@ -6,7 +6,10 @@ const mockLoadChannelsFromExtensions = vi.hoisted(() => vi.fn());
 const mockParseConfiguredChannels = vi.hoisted(() => vi.fn());
 const mockCreateChannel = vi.hoisted(() => vi.fn());
 const mockReadChannelMemory = vi.hoisted(() => vi.fn());
-const mockAppendChannelMemory = vi.hoisted(() => vi.fn());
+const mockListChannelMemoryEntries = vi.hoisted(() => vi.fn());
+const mockAddChannelMemoryEntries = vi.hoisted(() => vi.fn());
+const mockUpdateChannelMemoryEntry = vi.hoisted(() => vi.fn());
+const mockRemoveChannelMemoryEntries = vi.hoisted(() => vi.fn());
 const mockClearChannelMemory = vi.hoisted(() => vi.fn());
 const mockRegisterToolCallDispatch = vi.hoisted(() => vi.fn());
 const mockRegisterPermissionRelay = vi.hoisted(() => vi.fn());
@@ -130,9 +133,12 @@ vi.mock('@qwen-code/acp-bridge/workspacePaths', () => ({
 }));
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
-  appendChannelMemory: mockAppendChannelMemory,
+  addChannelMemoryEntries: mockAddChannelMemoryEntries,
   clearChannelMemory: mockClearChannelMemory,
+  listChannelMemoryEntries: mockListChannelMemoryEntries,
   readChannelMemory: mockReadChannelMemory,
+  removeChannelMemoryEntries: mockRemoveChannelMemoryEntries,
+  updateChannelMemoryEntry: mockUpdateChannelMemoryEntry,
 }));
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
@@ -633,9 +639,12 @@ describe('runChannelDaemonWorker', () => {
         proxy: 'http://settings-proxy:8080',
         router: mockSessionRouter.mock.results[0]!.value,
         channelMemory: {
-          appendChannelMemory: mockAppendChannelMemory,
-          clearChannelMemory: mockClearChannelMemory,
           readChannelMemory: mockReadChannelMemory,
+          listChannelMemoryEntries: mockListChannelMemoryEntries,
+          addChannelMemoryEntries: mockAddChannelMemoryEntries,
+          updateChannelMemoryEntry: mockUpdateChannelMemoryEntry,
+          removeChannelMemoryEntries: mockRemoveChannelMemoryEntries,
+          clearChannelMemory: mockClearChannelMemory,
         },
         memoryIntentClassifier: expect.objectContaining({
           classifyChannelMemoryIntent: expect.any(Function),
@@ -883,6 +892,29 @@ describe('runChannelDaemonWorker', () => {
     ).resolves.toBeDefined();
   });
 
+  it('preserves the legacy trust behavior for a singleton workspace', async () => {
+    const sdk = createSdk();
+    sdk.client.capabilities.mockResolvedValueOnce({
+      v: 1,
+      mode: 'http-bridge',
+      features: [],
+      modelServices: [],
+      workspaceCwd: '/workspace',
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: false },
+      ],
+    });
+
+    await expect(
+      runChannelDaemonWorker({
+        daemonUrl: 'http://127.0.0.1:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        loadDaemonSdk: async () => sdk,
+      }),
+    ).resolves.toBeDefined();
+  });
+
   it('accepts a trusted registered non-primary workspace', async () => {
     const sdk = createSdk();
     sdk.client.capabilities.mockResolvedValueOnce({
@@ -917,6 +949,7 @@ describe('runChannelDaemonWorker', () => {
       workspaceCwd: '/primary',
       workspaces: [
         { id: 'primary', cwd: '/primary', primary: true, trusted: true },
+        { id: 'other', cwd: '/other', primary: false, trusted: true },
       ],
     });
 
@@ -939,6 +972,7 @@ describe('runChannelDaemonWorker', () => {
       modelServices: [],
       workspaceCwd: '/primary',
       workspaces: [
+        { id: 'primary', cwd: '/primary', primary: true, trusted: true },
         { id: 'worker', cwd: '/workspace', primary: false, trusted: false },
       ],
     });

@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { tmpdir } from 'node:os';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   WorkspaceRegistrationStore,
   WorkspaceRegistrationStoreError,
@@ -87,6 +87,26 @@ describe('WorkspaceRegistrationStore', () => {
       });
     },
   );
+
+  it('removes multiple raw and canonical registration identities atomically', async () => {
+    const home = await tempHome();
+    const store = new WorkspaceRegistrationStore('/work/primary', home);
+    await store.add('/work/raw-alias-a');
+    await store.add('/work/raw-alias-b');
+    await store.add('/work/other');
+
+    await expect(
+      store.removeByIds([
+        workspaceRegistrationId('/work/raw-alias-a'),
+        workspaceRegistrationId('/work/raw-alias-b'),
+        'missing',
+      ]),
+    ).resolves.toBe(2);
+    await expect(store.read()).resolves.toMatchObject({
+      workspaces: ['/work/other'],
+    });
+    await expect(store.removeByIds([])).resolves.toBe(0);
+  });
 
   it('rejects invalid primary and primary-as-secondary inputs', async () => {
     const home = await tempHome();
@@ -220,5 +240,91 @@ describe('WorkspaceRegistrationStore', () => {
 
     await expect(store.add('/work/secondary')).resolves.toBe(true);
     await expect(fs.stat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('reports lock release failure after a committed write', async () => {
+    const home = await tempHome();
+    vi.resetModules();
+    vi.doMock('proper-lockfile', () => ({
+      default: {
+        lock: vi.fn(async () => async () => {
+          throw new Error('release failed');
+        }),
+      },
+    }));
+    try {
+      const storeModule = await import('./workspace-registration-store.js');
+      const store = new storeModule.WorkspaceRegistrationStore(
+        '/work/primary',
+        home,
+      );
+      await fs.mkdir(path.dirname(store.filePath), { recursive: true });
+      await fs.writeFile(
+        store.filePath,
+        JSON.stringify({
+          schemaVersion: 1,
+          primaryWorkspace: '/work/primary',
+          workspaces: ['/work/secondary'],
+        }),
+      );
+
+      await expect(
+        store.removeByIds([
+          storeModule.workspaceRegistrationId('/work/secondary'),
+        ]),
+      ).rejects.toBeInstanceOf(
+        storeModule.WorkspaceRegistrationStoreCommittedError,
+      );
+      expect(
+        JSON.parse(await fs.readFile(store.filePath, 'utf8')),
+      ).toMatchObject({ workspaces: [] });
+    } finally {
+      vi.doUnmock('proper-lockfile');
+      vi.resetModules();
+    }
+  });
+
+  it('preserves the write failure when lock release also fails', async () => {
+    const home = await tempHome();
+    const writeError = new Error('write failed');
+    const releaseError = new Error('release failed');
+    vi.resetModules();
+    vi.doMock('proper-lockfile', () => ({
+      default: {
+        lock: vi.fn(async () => async () => {
+          throw releaseError;
+        }),
+      },
+    }));
+    vi.doMock('@qwen-code/qwen-code-core', () => ({
+      atomicWriteFile: vi.fn().mockRejectedValue(writeError),
+    }));
+    try {
+      const storeModule = await import('./workspace-registration-store.js');
+      const store = new storeModule.WorkspaceRegistrationStore(
+        '/work/primary',
+        home,
+      );
+      await fs.mkdir(path.dirname(store.filePath), { recursive: true });
+      await fs.writeFile(
+        store.filePath,
+        JSON.stringify({
+          schemaVersion: 1,
+          primaryWorkspace: '/work/primary',
+          workspaces: ['/work/secondary'],
+        }),
+      );
+
+      await expect(
+        store.removeByIds([
+          storeModule.workspaceRegistrationId('/work/secondary'),
+        ]),
+      ).rejects.toBe(writeError);
+      expect(writeError.cause).toBe(releaseError);
+    } finally {
+      vi.doUnmock('proper-lockfile');
+      vi.doUnmock('@qwen-code/qwen-code-core');
+      vi.resetModules();
+    }
   });
 });

@@ -1226,6 +1226,60 @@ describe('CoreToolScheduler', () => {
     expect(outputOfFirstCall(onAllToolCallsComplete)).toBe('small output');
   });
 
+  it('preserves display output when a tool omits model-facing content', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: undefined,
+      returnDisplay: 'completed',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        'malformedTool',
+        new MockTool({
+          name: 'malformedTool',
+          // SAFETY: This deliberately violates ToolResult to exercise the
+          // runtime boundary used by untyped custom tool adapters.
+          execute: execute as (
+            params: Record<string, unknown>,
+          ) => Promise<ToolResult>,
+        }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'c-malformed',
+          name: 'malformedTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p-malformed',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completedCall = (
+      onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+    )[0];
+    expect(completedCall.status).toBe('success');
+    if (completedCall.status === 'success') {
+      expect(completedCall.response.responseParts).toEqual([
+        {
+          functionResponse: {
+            id: 'c-malformed',
+            name: 'malformedTool',
+            response: {
+              output: '(malformedTool completed with no output)',
+            },
+          },
+        },
+      ]);
+      expect(completedCall.response.resultDisplay).toBe('completed');
+    }
+  });
+
   it('applies the per-tool budget for a tool invoked via a legacy alias', async () => {
     // Regression (C1): limitsTool read getTool(request.name) with the raw alias
     // ('task'), which the registry stores only under the canonical name
@@ -4764,6 +4818,152 @@ describe('CoreToolScheduler cancellation during executing with live output', () 
     abortController.abort();
     await schedulePromise;
   });
+
+  it('forwards shell heartbeats without replacing liveOutput', async () => {
+    class HeartbeatInvocation extends BaseToolInvocation<
+      { id: string },
+      ToolResult
+    > {
+      getDescription(): string {
+        return `Heartbeat tool ${this.params.id}`;
+      }
+
+      async execute(
+        signal: AbortSignal,
+        updateOutput?: (output: ToolResultDisplay) => void,
+      ): Promise<ToolResult> {
+        updateOutput?.('real output');
+        updateOutput?.({ type: 'shell_progress', elapsedMs: 10_000 });
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) return resolve();
+          const onAbort = () => {
+            signal.removeEventListener('abort', onAbort);
+            resolve();
+          };
+          signal.addEventListener('abort', onAbort, { once: true });
+        });
+        return { llmContent: 'done', returnDisplay: 'done' };
+      }
+    }
+
+    class HeartbeatTool extends BaseDeclarativeTool<
+      { id: string },
+      ToolResult
+    > {
+      constructor() {
+        super(
+          'heartbeat-tool',
+          'Heartbeat Tool',
+          'Emits a heartbeat and waits for abort',
+          Kind.Other,
+          {
+            type: 'object',
+            properties: { id: { type: 'string' } },
+            required: ['id'],
+          },
+          true,
+          true,
+        );
+      }
+      protected createInvocation(params: { id: string }) {
+        return new HeartbeatInvocation(params);
+      }
+    }
+
+    const tool = new HeartbeatTool();
+    const mockToolRegistry = {
+      getTool: () => tool,
+      ensureTool: async () => tool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => tool,
+      getToolByDisplayName: () => tool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const outputUpdateHandler = vi.fn();
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getToolRegistry: () => mockToolRegistry,
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      isInteractive: () => true,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      outputUpdateHandler,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const abortController = new AbortController();
+    const schedulePromise = scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: 'heartbeat-tool',
+          args: { id: 'x' },
+          isClientInitiated: true,
+          prompt_id: 'prompt-heartbeat',
+        },
+      ],
+      abortController.signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(outputUpdateHandler).toHaveBeenCalledTimes(2);
+    });
+
+    // Both the display chunk and the heartbeat reach the handler...
+    expect(outputUpdateHandler.mock.calls[0][1]).toBe('real output');
+    expect(outputUpdateHandler.mock.calls[1][1]).toMatchObject({
+      type: 'shell_progress',
+      elapsedMs: 10_000,
+    });
+
+    // ...but liveOutput only ever holds the display chunk.
+    const liveOutputs = onToolCallsUpdate.mock.calls
+      .map((call) => call[0][0] as ToolCall)
+      .filter(
+        (call): call is ExecutingToolCall =>
+          call.status === 'executing' && call.liveOutput !== undefined,
+      )
+      .map((call) => call.liveOutput);
+    expect(liveOutputs).toContain('real output');
+    expect(
+      liveOutputs.some(
+        (out) =>
+          typeof out === 'object' &&
+          out !== null &&
+          (out as { type?: string }).type === 'shell_progress',
+      ),
+    ).toBe(false);
+
+    abortController.abort();
+    await schedulePromise;
+  });
 });
 
 describe('CoreToolScheduler request queueing', () => {
@@ -6239,7 +6439,9 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
       expect(responseJson).toContain('"error"');
       expect(responseJson).toContain('Tool blocked by plan mode');
       expect(responseJson).toContain('write_file');
-      // Plan-required teammates get exit_plan_mode hint
+      // Plan-required teammates get pivot-to-read-only then exit_plan_mode hint
+      expect(responseJson).toContain('Do NOT retry');
+      expect(responseJson).toContain('Pivot to read-only');
       expect(responseJson).toContain('exit_plan_mode');
       expect(completedCalls[0].response.error).toBeInstanceOf(Error);
       expect(completedCalls[0].response.errorType).toBe(
@@ -6312,12 +6514,14 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
       expect(completedCalls[0].status).toBe('error');
       if (completedCalls[0].status === 'error') {
         // SDK, subagent, and teammate paths all get the same error format
-        // but different guidance: SDK/subagents get "Present your plan directly"
+        // but different guidance: SDK/subagents get "present your plan directly"
         const responseParts = completedCalls[0].response.responseParts;
         const responseJson = JSON.stringify(responseParts);
         expect(responseJson).toContain('"error"');
         expect(responseJson).toContain('Tool blocked by plan mode');
-        expect(responseJson).toContain('Present your plan directly');
+        expect(responseJson).toContain('Do NOT retry');
+        expect(responseJson).toContain('Pivot to read-only');
+        expect(responseJson).toContain('present your plan directly');
         expect(responseJson).not.toContain('exit_plan_mode');
         expect(completedCalls[0].response.error).toBeInstanceOf(Error);
         expect(completedCalls[0].response.errorType).toBe(
@@ -7195,8 +7399,47 @@ describe('CoreToolScheduler telemetry spans', () => {
       }),
     });
 
-    expect(completedCalls[0].status).toBe('error');
+    const completedCall = completedCalls[0];
+    expect(completedCall?.status).toBe('error');
+    if (completedCall?.status !== 'error') {
+      throw new Error('expected an errored tool call');
+    }
+    expect(completedCall.response.resultDisplay).toBe('sensitive /secret/path');
     expectSanitizedFailure(spanRecord, 'Tool execution failed', 'tool_error');
+  });
+
+  it('preserves a structured tool display when the tool returns an error', async () => {
+    const resultDisplay = {
+      type: 'vision_bridge_notice' as const,
+      summary: 'Failed to read PDF after rendering pages 20-23',
+      notice:
+        'Vision bridge (qwen3-vl-plus) failed after sending images to dashscope.aliyuncs.com.',
+    };
+    const { completedCalls } = await runSingleTool({
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'original PDF extraction error',
+        returnDisplay: resultDisplay,
+        error: {
+          message: 'No extractable text layer.',
+          type: ToolErrorType.READ_CONTENT_FAILURE,
+        },
+      }),
+    });
+
+    expect(completedCalls[0]).toMatchObject({
+      status: 'error',
+      response: {
+        resultDisplay,
+        error: { message: 'No extractable text layer.' },
+        responseParts: [
+          {
+            functionResponse: {
+              response: { error: 'No extractable text layer.' },
+            },
+          },
+        ],
+      },
+    });
   });
 
   it('preserves PostToolUseFailure artifacts on toolResult.error responses', async () => {

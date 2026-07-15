@@ -73,6 +73,8 @@ const GROUP_HISTORY_ENTRY_TEXT_LIMIT = 1000;
 const GROUP_HISTORY_ENTRY_METADATA_LIMIT = 256;
 const LOOP_CANCEL_GRACE_MS = 5000;
 const CHANNEL_MEMORY_PROMPT_CODE_POINT_LIMIT = 12_000;
+const CHANNEL_MEMORY_PAGE_SIZE = 20;
+const CHANNEL_MEMORY_PREVIEW_CODE_POINT_LIMIT = 160;
 const CHANNEL_MEMORY_CLASSIFIER_MIN_CONFIDENCE = 0.7;
 const CHANNEL_MEMORY_CLASSIFIER_TRIGGER_RE =
   /(记住|记得|记一下|记忆|忘掉|忘记|清空|清除|删除|保存|remember|memory|forget)/iu;
@@ -605,6 +607,10 @@ export abstract class ChannelBase {
     return target.threadId === undefined;
   }
 
+  protected supportsProactiveWebhookTarget(target: SessionTarget): boolean {
+    return this.supportsProactiveTarget(target);
+  }
+
   protected async pushProactive(
     target: SessionTarget,
     text: string,
@@ -1017,7 +1023,7 @@ export abstract class ChannelBase {
       task.source,
       task.targetRef,
     );
-    if (!this.supportsProactiveTarget(target)) {
+    if (!this.supportsProactiveWebhookTarget(target)) {
       throw new Error(
         'Channel does not support proactive webhook messages for this chat target.',
       );
@@ -2036,43 +2042,6 @@ export abstract class ChannelBase {
       this.handlePermissionResponseCommand(envelope, args, 'deny'),
     );
 
-    this.registerCommand('remember-channel', async (envelope, args) => {
-      const text = args.trim();
-      if (text === '') {
-        await this.sendMessage(
-          envelope.chatId,
-          'Usage: /remember-channel <text>',
-        );
-        return true;
-      }
-      await this.handleChannelMemoryIntent(envelope, {
-        kind: 'remember',
-        text,
-      });
-      return true;
-    });
-
-    this.registerCommand('channel-memory', async (envelope) => {
-      await this.handleChannelMemoryIntent(envelope, { kind: 'list' });
-      return true;
-    });
-
-    this.registerCommand('forget-channel', async (envelope, args) => {
-      if (args.toLowerCase() !== 'confirm') {
-        await this.sendMessage(
-          envelope.chatId,
-          'This clears channel memory for this chat. Re-send with "confirm" (e.g. /forget-channel confirm) to proceed.',
-        );
-        return true;
-      }
-      await this.handleChannelMemoryIntent(
-        envelope,
-        { kind: 'clear_confirm' },
-        { skipPendingClear: true },
-      );
-      return true;
-    });
-
     // Read-only: report the current (possibly group-shared) session and workspace.
     // For a shared session, gate it to authorized senders like /clear — /who
     // leaks the workspace basename, so non-members shouldn't see it either.
@@ -2751,7 +2720,6 @@ export abstract class ChannelBase {
   private async handleChannelMemoryIntent(
     envelope: Envelope,
     intent: ChannelMemoryIntent,
-    options: { skipPendingClear?: boolean } = {},
   ): Promise<void> {
     if (intent.kind === 'clear_request') {
       this.setPendingClear(this.clearPendingKey(envelope));
@@ -2768,10 +2736,16 @@ export abstract class ChannelBase {
     }
 
     if (intent.kind === 'remember') {
+      let result: {
+        changed: boolean;
+        added: Array<{ id: string }>;
+        duplicateIds: string[];
+      };
       try {
-        await channelMemory.appendChannelMemory(
+        result = await channelMemory.addChannelMemoryEntries(
           this.channelMemoryTarget(envelope),
-          intent.text,
+          [intent.text],
+          envelope.senderId,
         );
       } catch (error) {
         const message = this.channelMemoryErrorMessage(error);
@@ -2782,19 +2756,34 @@ export abstract class ChannelBase {
         );
         return;
       }
-      this.invalidateSessionContext(envelope);
-      await this.sendMessage(envelope.chatId, 'Channel memory updated.');
+      if (result.changed) {
+        this.invalidateSessionContext(envelope);
+      }
+      if (result.added.length > 0) {
+        const ids = result.added.map((entry) => entry.id);
+        await this.sendMessage(
+          envelope.chatId,
+          ids.length === 1
+            ? `Channel memory ${ids[0]} saved.`
+            : `Channel memory saved: ${ids.join(', ')}.`,
+        );
+      } else if (result.duplicateIds.length > 0) {
+        await this.sendMessage(
+          envelope.chatId,
+          `Channel memory already contains ${result.duplicateIds.join(', ')}.`,
+        );
+      } else {
+        await this.sendMessage(envelope.chatId, 'Channel memory updated.');
+      }
       return;
     }
 
-    if (intent.kind === 'list') {
-      let text: string;
+    if (intent.kind === 'list' || intent.kind === 'inspect') {
+      let entries;
       try {
-        text = (
-          await channelMemory.readChannelMemory(
-            this.channelMemoryTarget(envelope),
-          )
-        ).trim();
+        entries = await channelMemory.listChannelMemoryEntries(
+          this.channelMemoryTarget(envelope),
+        );
       } catch (error) {
         const message = this.channelMemoryErrorMessage(error);
         this.logChannelMemoryError('read', envelope, message);
@@ -2804,25 +2793,104 @@ export abstract class ChannelBase {
         );
         return;
       }
+      if (intent.kind === 'inspect') {
+        const entry = entries.find((candidate) => candidate.id === intent.id);
+        await this.sendMessage(
+          envelope.chatId,
+          entry
+            ? `Channel memory ${entry.id}:\n${sanitizePromptText(entry.text).trim()}`
+            : `No channel memory entry ${intent.id}.`,
+        );
+        return;
+      }
+      const totalPages = Math.max(
+        1,
+        Math.ceil(entries.length / CHANNEL_MEMORY_PAGE_SIZE),
+      );
+      if (intent.page > totalPages) {
+        await this.sendMessage(
+          envelope.chatId,
+          `Channel memory page ${intent.page} does not exist.`,
+        );
+        return;
+      }
+      if (entries.length === 0) {
+        await this.sendMessage(envelope.chatId, 'No channel memory saved.');
+        return;
+      }
+      const pageStart = (intent.page - 1) * CHANNEL_MEMORY_PAGE_SIZE;
+      const lines = entries
+        .slice(pageStart, pageStart + CHANNEL_MEMORY_PAGE_SIZE)
+        .map((entry) => {
+          const preview = truncateCodePoints(
+            sanitizePromptText(entry.text)
+              .replace(/[\r\n]+/gu, ' ')
+              .trim(),
+            CHANNEL_MEMORY_PREVIEW_CODE_POINT_LIMIT,
+          );
+          return `${entry.id}  ${preview}`;
+        });
       await this.sendMessage(
         envelope.chatId,
-        text === '' ? 'No channel memory saved.' : sanitizePromptText(text),
+        [`Channel memory (page ${intent.page}/${totalPages}):`, ...lines].join(
+          '\n',
+        ),
+      );
+      return;
+    }
+
+    if (intent.kind === 'update' || intent.kind === 'remove') {
+      let changed: boolean;
+      try {
+        if (intent.kind === 'update') {
+          ({ changed } = await channelMemory.updateChannelMemoryEntry(
+            this.channelMemoryTarget(envelope),
+            { id: intent.id, text: intent.text },
+          ));
+        } else {
+          ({ changed } = await channelMemory.removeChannelMemoryEntries(
+            this.channelMemoryTarget(envelope),
+            { ids: [intent.id] },
+          ));
+        }
+      } catch (error) {
+        const message = this.channelMemoryErrorMessage(error);
+        this.logChannelMemoryError(
+          intent.kind === 'update' ? 'update' : 'remove',
+          envelope,
+          message,
+        );
+        await this.sendMessage(
+          envelope.chatId,
+          `Failed to ${intent.kind === 'update' ? 'update' : 'remove'} channel memory: ${this.channelMemoryUserErrorMessage()}`,
+        );
+        return;
+      }
+      if (!changed) {
+        await this.sendMessage(
+          envelope.chatId,
+          `No channel memory entry ${intent.id}.`,
+        );
+        return;
+      }
+      this.invalidateSessionContext(envelope);
+      await this.sendMessage(
+        envelope.chatId,
+        `Channel memory ${intent.id} ${intent.kind === 'update' ? 'updated' : 'removed'}.`,
       );
       return;
     }
 
     if (intent.kind === 'clear_confirm') {
-      if (!options.skipPendingClear) {
-        const pendingKey = this.clearPendingKey(envelope);
-        const expiresAt = this.pendingClears.get(pendingKey);
-        this.pendingClears.delete(pendingKey);
-        if (expiresAt === undefined || expiresAt < Date.now()) {
-          await this.sendMessage(
-            envelope.chatId,
-            'No pending clear request. Say "清空记忆" first.',
-          );
-          return;
-        }
+      const pendingKey = this.clearPendingKey(envelope);
+      const expiresAt = this.pendingClears.get(pendingKey);
+      this.pendingClears.delete(pendingKey);
+      if (expiresAt === undefined || expiresAt < Date.now()) {
+        await this.sendMessage(
+          envelope.chatId,
+          'No pending clear request. Say "清空记忆" first.',
+        );
+        return;
       }
 
       let result: { changed: boolean };
@@ -2839,7 +2907,9 @@ export abstract class ChannelBase {
         );
         return;
       }
-      this.invalidateSessionContext(envelope);
+      if (result.changed) {
+        this.invalidateSessionContext(envelope);
+      }
       await this.sendMessage(
         envelope.chatId,
         result.changed ? 'Channel memory cleared.' : 'No channel memory saved.',
@@ -2909,7 +2979,7 @@ export abstract class ChannelBase {
       return memory ? { kind: 'remember', text: memory } : null;
     }
     if (classified.intent === 'list') {
-      return { kind: 'list' };
+      return { kind: 'list', page: 1 };
     }
     if (classified.intent === 'clear_all') {
       return { kind: 'clear_request' };
@@ -2926,7 +2996,7 @@ export abstract class ChannelBase {
   }
 
   private logChannelMemoryError(
-    action: 'save' | 'read' | 'clear',
+    action: 'save' | 'read' | 'update' | 'remove' | 'clear',
     envelope: Envelope,
     message: string,
   ): void {
@@ -3825,8 +3895,10 @@ export abstract class ChannelBase {
       // to any visible sink could send output the cancel can't recall. On a
       // failed cancel they're replayed; on success, discarded.
       const heldChunks: string[] = [];
+      let hasStreamedText = false;
       const releaseHeldChunks = () => {
         for (const held of heldChunks.splice(0)) {
+          hasStreamedText = true;
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
               envelope.chatId,
@@ -3858,6 +3930,7 @@ export abstract class ChannelBase {
           return;
         }
         heldChunks.length = 0;
+        hasStreamedText = false;
         this.onResponseBoundary(envelope.chatId, sessionId);
         streamer?.stop();
       };
@@ -3880,6 +3953,9 @@ export abstract class ChannelBase {
         if (!promptState.cancelled && response) {
           promptState.deliveryStarted = true;
           if (streamer) {
+            if (!hasStreamedText) {
+              streamer.push(response);
+            }
             await streamer.flush();
           } else {
             await this.onResponseComplete(envelope.chatId, response, sessionId);

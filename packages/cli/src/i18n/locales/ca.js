@@ -2140,6 +2140,16 @@ export default {
     'No es pot actualitzar automàticament aquesta instal·lació autònoma. Reinstal·leu des de:',
   'Manual update required. Please reinstall Qwen Code.':
     'Actualització manual requerida. Reinstal·leu Qwen Code.',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    'Aquesta sessió utilitza la imatge de sandbox personalitzada {{image}}. Actualitzeu la imatge i reinicieu Qwen Code.',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    "Actualitzeu Qwen Code a l'amfitrió i reinicieu l'entorn aïllat.",
+  'The update will be installed after you exit this session.':
+    "L'actualització s'instal·larà després de sortir d'aquesta sessió.",
+  'Run /update to install the update on the host.':
+    "Executeu /update per instal·lar l'actualització a l'amfitrió.",
+  'Run /update to install the update.':
+    "Executeu /update per instal·lar l'actualització.",
 
   // ============================================================================
   // reload-plugins command
@@ -2170,4 +2180,8 @@ export default {
     'Failed to refresh extension content. Run /reload-plugins to apply updates.',
   'Extension reload did not complete. Run /reload-plugins to try again.':
     'Extension reload did not complete. Run /reload-plugins to try again.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.':
+    "L'enregistrament de la sessió s'ha aturat després d'un error d'escriptura. Els missatges nous de la sessió afectada no es desaran. Comproveu l'espai de disc i els permisos i, després, inicieu una sessió nova per reprendre l'enregistrament. Consulteu el registre de depuració per obtenir-ne més informació.",
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
+    "L'enregistrament de la sessió s'ha aturat després d'un error d'escriptura. Els missatges nous de la sessió afectada no es desaran. Comproveu l'espai de disc i els permisos i, després, executeu `/clear` per iniciar una sessió nova que es pugui enregistrar. Consulteu el registre de depuració per obtenir-ne més informació.",
 };

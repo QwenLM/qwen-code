@@ -18,6 +18,8 @@ import type {
   GeminiChat,
   ToolCallConfirmationDetails,
   ToolResult,
+  ToolResultDisplay,
+  ShellProgressData,
   ChatRecord,
   HistoryGap,
   AgentEventEmitter,
@@ -109,6 +111,7 @@ import {
   runInToolSpanContext,
   startToolExecutionSpan,
   endToolExecutionSpan,
+  isShellProgressData,
   logConversationFinishedEvent,
   ConversationFinishedEvent,
   logLoopDetected,
@@ -127,6 +130,7 @@ import {
   normalizeParts,
   runVisionBridge,
   shouldRunVisionBridge,
+  formatVisionBridgeNotice,
   splitImageParts,
   approxBase64Bytes,
 } from '@qwen-code/qwen-code-core';
@@ -165,7 +169,7 @@ import type {
   SetSessionModelResponse,
   AgentSideConnection,
 } from '@agentclientprotocol/sdk';
-import type { LoadedSettings } from '../../config/settings.js';
+import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import { z } from 'zod';
 import {
   insertAfterFunctionResponses,
@@ -211,8 +215,9 @@ import type {
   SessionContext,
   ToolCallStartParams,
 } from './types.js';
-import { HistoryReplayer } from './HistoryReplayer.js';
-import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
+import { HistoryReplayer } from './history-replayer.js';
+import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
+import { ToolCallPreparationTracker } from './tool-call-preparation-tracker.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
@@ -230,6 +235,22 @@ const debugLogger = createDebugLogger('SESSION');
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
+
+/** Finalizes preparations without allowing ACP cleanup to change the stream outcome. */
+async function finalizeToolCallPreparations(
+  tracker: ToolCallPreparationTracker,
+  includeResolved: boolean,
+  streamName: string,
+): Promise<void> {
+  try {
+    await tracker.discard(includeResolved);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    debugLogger.warn(
+      `Failed to discard tool preparations for ${streamName}; continuing stream: ${message}`,
+    );
+  }
+}
 
 function maskApiKeyForDisplay(apiKey: string | undefined): string {
   const trimmed = apiKey?.trim() ?? '';
@@ -994,6 +1015,7 @@ export class Session implements SessionContext {
   // or session reload), which would otherwise execute orphaned cron prompts
   // on a session whose registries are already unregistered.
   private disposed = false;
+  private unsubscribeChatRecordingFailure?: () => void;
 
   // Modular components
   private readonly historyReplayer: HistoryReplayer;
@@ -1160,6 +1182,8 @@ export class Session implements SessionContext {
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
     this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);
     this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
+    this.unsubscribeChatRecordingFailure?.();
+    this.unsubscribeChatRecordingFailure = undefined;
     this.config.setSubSessionSpawner(undefined);
     clearGoalTerminalObserver(this.sessionId);
   }
@@ -1991,6 +2015,9 @@ export class Session implements SessionContext {
                 }
 
                 const functionCalls: FunctionCall[] = [];
+                const preparationTracker = new ToolCallPreparationTracker(
+                  this.toolCallEmitter,
+                );
                 let usageMetadata: GenerateContentResponseUsageMetadata | null =
                   null;
                 const streamStartTime = Date.now();
@@ -2020,49 +2047,70 @@ export class Session implements SessionContext {
                   const responseStream = sendResult.responseStream;
                   nextMessage = null;
 
-                  for await (const resp of responseStream) {
-                    if (pendingSend.signal.aborted) {
-                      return { stopReason: 'cancelled' };
-                    }
+                  let streamFailed = false;
+                  try {
+                    for await (const resp of responseStream) {
+                      if (pendingSend.signal.aborted) {
+                        return { stopReason: 'cancelled' };
+                      }
 
-                    if (
-                      resp.type === StreamEventType.CHUNK &&
-                      resp.value.candidates &&
-                      resp.value.candidates.length > 0
-                    ) {
-                      const candidate = resp.value.candidates[0];
-                      for (const part of candidate.content?.parts ?? []) {
-                        if (!part.text) {
-                          continue;
-                        }
+                      if (
+                        resp.type === StreamEventType.CHUNK &&
+                        resp.value.candidates &&
+                        resp.value.candidates.length > 0
+                      ) {
+                        const candidate = resp.value.candidates[0];
+                        for (const part of candidate.content?.parts ?? []) {
+                          if (!part.text) {
+                            continue;
+                          }
 
-                        this.messageEmitter.emitMessage(
-                          part.text,
-                          'assistant',
-                          part.thought,
-                        );
-                        if (!part.thought) {
-                          messageDisplay?.addChunk(part.text);
+                          this.messageEmitter.emitMessage(
+                            part.text,
+                            'assistant',
+                            part.thought,
+                          );
+                          if (!part.thought) {
+                            messageDisplay?.addChunk(part.text);
+                          }
                         }
                       }
-                    }
 
-                    if (
-                      resp.type === StreamEventType.CHUNK &&
-                      resp.value.usageMetadata
-                    ) {
-                      usageMetadata = resp.value.usageMetadata;
-                    }
+                      if (
+                        resp.type === StreamEventType.CHUNK &&
+                        resp.value.usageMetadata
+                      ) {
+                        usageMetadata = resp.value.usageMetadata;
+                      }
 
-                    if (
-                      resp.type === StreamEventType.CHUNK &&
-                      resp.value.functionCalls
-                    ) {
-                      functionCalls.push(...resp.value.functionCalls);
+                      if (resp.type === StreamEventType.CHUNK) {
+                        await preparationTracker.observe(resp.value);
+                        if (resp.value.functionCalls) {
+                          preparationTracker.resolve(resp.value.functionCalls);
+                          functionCalls.push(...resp.value.functionCalls);
+                        }
+                      }
+                      if (
+                        resp.type === StreamEventType.RETRY ||
+                        resp.type === StreamEventType.MODEL_FALLBACK
+                      ) {
+                        await finalizeToolCallPreparations(
+                          preparationTracker,
+                          true,
+                          `main prompt ${resp.type}`,
+                        );
+                        functionCalls.length = 0;
+                      }
                     }
-                    if (resp.type === StreamEventType.MODEL_FALLBACK) {
-                      functionCalls.length = 0;
-                    }
+                  } catch (error) {
+                    streamFailed = true;
+                    throw error;
+                  } finally {
+                    await finalizeToolCallPreparations(
+                      preparationTracker,
+                      streamFailed || pendingSend.signal.aborted,
+                      'main prompt',
+                    );
                   }
                 } catch (error) {
                   // Restore the stripped orphan if the send threw before
@@ -2332,6 +2380,9 @@ export class Session implements SessionContext {
           }
 
           const functionCalls: FunctionCall[] = [];
+          const preparationTracker = new ToolCallPreparationTracker(
+            this.toolCallEmitter,
+          );
           let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
           const streamStartTime = Date.now();
           const messageDisplay = this.#createMessageDisplayDispatcher(
@@ -2356,46 +2407,67 @@ export class Session implements SessionContext {
             const continueResponseStream = continueSendResult.responseStream;
             nextMessage = null;
 
-            for await (const resp of continueResponseStream) {
-              if (pendingSend.signal.aborted) {
-                return { stopReason: 'cancelled' };
-              }
+            let streamFailed = false;
+            try {
+              for await (const resp of continueResponseStream) {
+                if (pendingSend.signal.aborted) {
+                  return { stopReason: 'cancelled' };
+                }
 
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.candidates &&
-                resp.value.candidates.length > 0
-              ) {
-                const candidate = resp.value.candidates[0];
-                for (const part of candidate.content?.parts ?? []) {
-                  if (!part.text) continue;
-                  this.messageEmitter.emitMessage(
-                    part.text,
-                    'assistant',
-                    part.thought,
-                  );
-                  if (!part.thought) {
-                    messageDisplay?.addChunk(part.text);
+                if (
+                  resp.type === StreamEventType.CHUNK &&
+                  resp.value.candidates &&
+                  resp.value.candidates.length > 0
+                ) {
+                  const candidate = resp.value.candidates[0];
+                  for (const part of candidate.content?.parts ?? []) {
+                    if (!part.text) continue;
+                    this.messageEmitter.emitMessage(
+                      part.text,
+                      'assistant',
+                      part.thought,
+                    );
+                    if (!part.thought) {
+                      messageDisplay?.addChunk(part.text);
+                    }
                   }
                 }
-              }
 
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.usageMetadata
-              ) {
-                usageMetadata = resp.value.usageMetadata;
-              }
+                if (
+                  resp.type === StreamEventType.CHUNK &&
+                  resp.value.usageMetadata
+                ) {
+                  usageMetadata = resp.value.usageMetadata;
+                }
 
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.functionCalls
-              ) {
-                functionCalls.push(...resp.value.functionCalls);
+                if (resp.type === StreamEventType.CHUNK) {
+                  await preparationTracker.observe(resp.value);
+                  if (resp.value.functionCalls) {
+                    preparationTracker.resolve(resp.value.functionCalls);
+                    functionCalls.push(...resp.value.functionCalls);
+                  }
+                }
+                if (
+                  resp.type === StreamEventType.RETRY ||
+                  resp.type === StreamEventType.MODEL_FALLBACK
+                ) {
+                  await finalizeToolCallPreparations(
+                    preparationTracker,
+                    true,
+                    `Stop Hook continuation ${resp.type}`,
+                  );
+                  functionCalls.length = 0;
+                }
               }
-              if (resp.type === StreamEventType.MODEL_FALLBACK) {
-                functionCalls.length = 0;
-              }
+            } catch (error) {
+              streamFailed = true;
+              throw error;
+            } finally {
+              await finalizeToolCallPreparations(
+                preparationTracker,
+                streamFailed || pendingSend.signal.aborted,
+                'Stop Hook continuation',
+              );
             }
           } catch (error) {
             // Fire StopFailure hook (fire-and-forget)
@@ -3282,6 +3354,9 @@ export class Session implements SessionContext {
                 if (ac.signal.aborted) return;
 
                 const functionCalls: FunctionCall[] = [];
+                const preparationTracker = new ToolCallPreparationTracker(
+                  this.toolCallEmitter,
+                );
                 let usageMetadata: GenerateContentResponseUsageMetadata | null =
                   null;
                 const streamStartTime = Date.now();
@@ -3315,6 +3390,7 @@ export class Session implements SessionContext {
                   ac.signal,
                 );
 
+                let streamFailed = false;
                 try {
                   for await (const resp of responseStream) {
                     if (ac.signal.aborted) return;
@@ -3345,20 +3421,40 @@ export class Session implements SessionContext {
                       usageMetadata = resp.value.usageMetadata;
                     }
 
-                    if (
-                      resp.type === StreamEventType.CHUNK &&
-                      resp.value.functionCalls
-                    ) {
-                      functionCalls.push(...resp.value.functionCalls);
+                    if (resp.type === StreamEventType.CHUNK) {
+                      await preparationTracker.observe(resp.value);
+                      if (resp.value.functionCalls) {
+                        preparationTracker.resolve(resp.value.functionCalls);
+                        functionCalls.push(...resp.value.functionCalls);
+                      }
                     }
-                    if (resp.type === StreamEventType.MODEL_FALLBACK) {
+                    if (
+                      resp.type === StreamEventType.RETRY ||
+                      resp.type === StreamEventType.MODEL_FALLBACK
+                    ) {
+                      await finalizeToolCallPreparations(
+                        preparationTracker,
+                        true,
+                        `cron/loop tick ${resp.type}`,
+                      );
                       functionCalls.length = 0;
                     }
                   }
+                } catch (error) {
+                  streamFailed = true;
+                  throw error;
                 } finally {
-                  // is_final (skipped on abort) delivered and drained on
-                  // every exit path, same as the interactive prompt loops.
-                  await messageDisplay?.finish();
+                  try {
+                    await finalizeToolCallPreparations(
+                      preparationTracker,
+                      streamFailed || ac.signal.aborted,
+                      'cron/loop tick',
+                    );
+                  } finally {
+                    // is_final (skipped on abort) delivered and drained on
+                    // every exit path, same as the interactive prompt loops.
+                    await messageDisplay?.finish();
+                  }
                 }
 
                 if (usageMetadata) {
@@ -3494,11 +3590,11 @@ export class Session implements SessionContext {
     // new title on their next poll.
     this.config
       .getChatRecordingService()
-      ?.setTitleRecordedCallback((customTitle, titleSource) => {
+      ?.setTitleRecordedCallback((customTitle, titleSource, sessionId) => {
         void this.client
           .extNotification('qwen/notify/session/title-update', {
             v: 1,
-            sessionId: this.sessionId,
+            sessionId,
             title: customTitle,
             titleSource,
           })
@@ -3507,6 +3603,20 @@ export class Session implements SessionContext {
             // until the client's next session-list refresh.
           });
       });
+
+    if (typeof this.config.onChatRecordingFailure === 'function') {
+      this.unsubscribeChatRecordingFailure = this.config.onChatRecordingFailure(
+        (event) =>
+          this.client.extNotification(
+            'qwen/notify/session/recording-degraded',
+            {
+              v: 1,
+              sessionId: event.sessionId,
+              reason: 'write_failed',
+            },
+          ),
+      );
+    }
   }
 
   #enqueueBackgroundNotification(item: BackgroundNotificationQueueItem): void {
@@ -3605,6 +3715,9 @@ export class Session implements SessionContext {
             }
 
             const functionCalls: FunctionCall[] = [];
+            const preparationTracker = new ToolCallPreparationTracker(
+              this.toolCallEmitter,
+            );
             let usageMetadata: GenerateContentResponseUsageMetadata | null =
               null;
             let responseText = '';
@@ -3632,6 +3745,7 @@ export class Session implements SessionContext {
               ac.signal,
             );
 
+            let streamFailed = false;
             try {
               for await (const resp of responseStream) {
                 if (ac.signal.aborted) {
@@ -3667,20 +3781,40 @@ export class Session implements SessionContext {
                   usageMetadata = resp.value.usageMetadata;
                 }
 
-                if (
-                  resp.type === StreamEventType.CHUNK &&
-                  resp.value.functionCalls
-                ) {
-                  functionCalls.push(...resp.value.functionCalls);
+                if (resp.type === StreamEventType.CHUNK) {
+                  await preparationTracker.observe(resp.value);
+                  if (resp.value.functionCalls) {
+                    preparationTracker.resolve(resp.value.functionCalls);
+                    functionCalls.push(...resp.value.functionCalls);
+                  }
                 }
-                if (resp.type === StreamEventType.MODEL_FALLBACK) {
+                if (
+                  resp.type === StreamEventType.RETRY ||
+                  resp.type === StreamEventType.MODEL_FALLBACK
+                ) {
+                  await finalizeToolCallPreparations(
+                    preparationTracker,
+                    true,
+                    `background notification ${resp.type}`,
+                  );
                   functionCalls.length = 0;
                 }
               }
+            } catch (error) {
+              streamFailed = true;
+              throw error;
             } finally {
-              // is_final (skipped on abort) delivered and drained on every
-              // exit path, same as the interactive prompt loops.
-              await messageDisplay?.finish();
+              try {
+                await finalizeToolCallPreparations(
+                  preparationTracker,
+                  streamFailed || ac.signal.aborted,
+                  'background notification',
+                );
+              } finally {
+                // is_final (skipped on abort) delivered and drained on every
+                // exit path, same as the interactive prompt loops.
+                await messageDisplay?.finish();
+              }
             }
 
             if (responseText.length > 0) {
@@ -3827,31 +3961,59 @@ export class Session implements SessionContext {
 
   async sendAvailableCommandsUpdate(): Promise<void> {
     try {
-      const { availableCommands, availableSkills, availableSkillDetails } =
-        await buildAvailableCommandsSnapshot(
-          this.config,
-          undefined,
-          this.settings,
-        );
-
-      const update: SessionUpdate = {
-        sessionUpdate: 'available_commands_update',
-        availableCommands,
-        ...(availableSkills !== undefined
-          ? {
-              _meta: {
-                availableSkills,
-                ...(availableSkillDetails ? { availableSkillDetails } : {}),
-              },
-            }
-          : {}),
-      };
-
-      await this.sendUpdate(update);
+      await this.sendAvailableCommandsUpdateOrThrow();
     } catch (error) {
       // Log error but don't fail session creation
       debugLogger.error('Error sending available commands update:', error);
     }
+  }
+
+  async refreshSkillsFromSettings(): Promise<void> {
+    this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+    const skillManager = this.config.getSkillManager();
+    let updateFailed = false;
+    let updateError: unknown;
+    try {
+      await this.sendAvailableCommandsUpdateOrThrow();
+    } catch (error) {
+      updateFailed = true;
+      updateError = error;
+    }
+    if (skillManager) {
+      try {
+        skillManager.suppressNextSlashReload();
+        await skillManager.notifyConfigChanged();
+      } catch (error) {
+        if (!updateFailed) throw error;
+        debugLogger.error(
+          'SkillManager refresh failed after command update failure:',
+          error,
+        );
+      }
+    }
+    if (updateFailed) throw updateError;
+  }
+
+  private async sendAvailableCommandsUpdateOrThrow(): Promise<void> {
+    const { availableCommands, availableSkills, availableSkillDetails } =
+      await buildAvailableCommandsSnapshot(
+        this.config,
+        undefined,
+        this.settings,
+      );
+    const update: SessionUpdate = {
+      sessionUpdate: 'available_commands_update',
+      availableCommands,
+      ...(availableSkills !== undefined
+        ? {
+            _meta: {
+              availableSkills,
+              ...(availableSkillDetails ? { availableSkillDetails } : {}),
+            },
+          }
+        : {}),
+    };
+    await this.sendUpdate(update);
   }
 
   /**
@@ -5249,14 +5411,55 @@ export class Session implements SessionContext {
 
           const execSpan = startToolExecutionSpan();
           let toolResult: ToolResult;
+          // Shell liveness heartbeats: forwarded to the client as meta-only
+          // tool_call_update frames so a headless gateway can tell a silent
+          // command from a dead session. `toolSettled` gates out a heartbeat
+          // tick that lands between the result settling and execute()
+          // returning — without it the client could see in_progress after
+          // completed and regress the tool call's status.
+          let toolSettled = false;
+          let heartbeatCount = 0;
+          let lastHeartbeat: ShellProgressData | undefined;
+          const onToolProgress = (chunk: ToolResultDisplay) => {
+            if (toolSettled || !isShellProgressData(chunk)) {
+              return;
+            }
+            heartbeatCount++;
+            lastHeartbeat = chunk;
+            void this.sendUpdate({
+              sessionUpdate: 'tool_call_update',
+              toolCallId: callId,
+              status: 'in_progress',
+              _meta: { toolName, shellProgress: chunk },
+            }).catch((err) => {
+              debugLogger.debug(
+                `[Session.runTool] heartbeat update failed for ${callId}: ${err}`,
+              );
+            });
+          };
+          const heartbeatSpanAttributes = () =>
+            heartbeatCount > 0
+              ? {
+                  attributes: {
+                    'shell.heartbeat_count': heartbeatCount,
+                    ...(lastHeartbeat?.lastOutputAgeMs !== undefined && {
+                      'shell.last_output_age_ms': lastHeartbeat.lastOutputAgeMs,
+                    }),
+                  },
+                }
+              : undefined;
           try {
             const sleepInhibitorHandle = acquireSleepInhibitor(
               this.config,
               `Qwen Code is executing tool ${toolName}`,
             );
             try {
-              toolResult = await invocation.execute(activeToolAbortSignal);
+              toolResult = await invocation.execute(
+                activeToolAbortSignal,
+                onToolProgress,
+              );
             } finally {
+              toolSettled = true;
               sleepInhibitorHandle.release();
             }
             const aborted = activeToolAbortSignal.aborted;
@@ -5268,6 +5471,7 @@ export class Session implements SessionContext {
                   ? 'tool_error'
                   : undefined,
               cancelled: aborted,
+              ...heartbeatSpanAttributes(),
             });
           } catch (execError) {
             endToolExecutionSpan(execSpan, {
@@ -5276,6 +5480,7 @@ export class Session implements SessionContext {
                 ? 'tool_cancelled'
                 : 'tool_exception',
               cancelled: activeToolAbortSignal.aborted,
+              ...heartbeatSpanAttributes(),
             });
             throw execError;
           }
@@ -5642,7 +5847,7 @@ export class Session implements SessionContext {
         // Replace bare \n with Markdown hard line-breaks (two trailing spaces)
         // so Zed's Markdown renderer preserves the line structure.
         const rendered = (result.content || '').replace(/\n/g, '  \n');
-        await this.messageEmitter.emitAgentMessage(rendered);
+        await this.messageEmitter.emitSlashCommandOutput(rendered);
         // Write a system/slash_command record so history replay on restart can
         // re-emit this message. system records are skipped by
         // buildApiHistoryFromConversation, so this won't pollute model context.
@@ -5667,7 +5872,7 @@ export class Session implements SessionContext {
           if (msg.messageType === 'error') {
             throw new Error(msg.content || 'Slash command failed.');
           }
-          await this.messageEmitter.emitAgentMessage(
+          await this.messageEmitter.emitSlashCommandOutput(
             (msg.content || '').replace(/\n/g, '  \n'),
           );
           chunks.push(msg.content || '');
@@ -5952,7 +6157,7 @@ export class Session implements SessionContext {
     if (bridgeResult.status !== 'skipped' || bridgeResult.egressOccurred) {
       try {
         await this.messageEmitter.emitAgentMessage(
-          this.#formatVisionBridgeNotice(bridgeResult),
+          formatVisionBridgeNotice(bridgeResult),
         );
       } catch (error) {
         debugLogger.debug(
@@ -6092,34 +6297,6 @@ export class Session implements SessionContext {
 
   #formatVoiceBridgeEgressNotice(modelId: string, audioCount: number): string {
     return `Sent ${audioCount} audio file(s) to ${modelId} for transcription, but no transcript was produced.`;
-  }
-
-  #formatVisionBridgeNotice(result: VisionBridgeResult): string {
-    const modelName = result.modelId ?? 'vision model';
-    const target = result.modelEndpoint
-      ? `${modelName} (${result.modelEndpoint})`
-      : modelName;
-    const egressNote = result.egressOccurred
-      ? ` Your image and prompt/context were sent to ${target}.`
-      : '';
-
-    if (result.status === 'failed') {
-      const reason = result.egressOccurred
-        ? 'the vision model request failed'
-        : 'the vision bridge could not run';
-      return `Vision bridge (${modelName}) failed: ${reason}.${egressNote} The image was not interpreted.`;
-    }
-
-    if (result.status === 'skipped') {
-      return `Vision bridge cancelled.${egressNote}`;
-    }
-
-    // On success the image was always sent, so disclose egress unconditionally.
-    const omitted =
-      result.omittedCount > 0
-        ? ` (${result.omittedCount} image(s) omitted)`
-        : '';
-    return `Converted ${result.convertedCount} image(s)${omitted} to text via ${target}. Your image and prompt/context were sent to that model.`;
   }
 
   async #resolveExtensionMentionParts(

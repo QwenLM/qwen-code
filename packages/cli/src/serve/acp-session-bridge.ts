@@ -90,6 +90,7 @@ export type {
   BridgeDaemonStatusLimits,
   BridgeDaemonSessionDiagnostic,
   BridgeDaemonStatusSnapshot,
+  BridgeShutdownOptions,
   AcpSessionBridge,
   HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -116,6 +117,7 @@ export {
   McpServerNotFoundError,
   McpServerRestartFailedError,
   SessionBusyError,
+  WorkspaceDrainingError,
   InvalidRewindTargetError,
   TotalSessionLimitExceededError,
   NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE,

@@ -7,6 +7,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -19,6 +20,7 @@ import {
 } from '@qwen-code/webui/daemon-react-sdk';
 import type {
   DaemonExtensionEntry,
+  DaemonWorkspaceCapability,
   DaemonWorkspaceMcpServerStatus,
   DaemonWorkspaceSkillStatus,
 } from '@qwen-code/sdk/daemon';
@@ -79,7 +81,30 @@ interface ScheduledTasksDialogProps {
   /** Open a task's bound session — its transcript IS the task's run history.
    * When absent, tasks fall back to the inline fire-timestamp list. */
   onOpenSession?: (sessionId: string) => void;
+  /** Registered workspaces on a multi-workspace daemon (from capabilities).
+   * When more than one is present the page aggregates every trusted workspace's
+   * tasks (each card tagged with its workspace) and the New-task form offers a
+   * workspace picker. Absent or a single entry → the plain primary-only view. */
+  workspaces?: DaemonWorkspaceCapability[];
+  /** Forces all task operations through this workspace's route. */
+  lockedWorkspace?: DaemonWorkspaceCapability;
   onError: (error: unknown, fallback: string) => void;
+}
+
+/** A short, human-readable label for a workspace card badge / picker option:
+ * the cwd's last path segment, marked when it's the primary. */
+function workspaceLabel(cwd: string, primary: boolean, t: TranslateFn): string {
+  const segments = cwd.split(/[\\/]/).filter(Boolean);
+  const base = segments[segments.length - 1] || cwd;
+  return primary ? `${base} ${t('scheduledTasks.workspacePrimaryTag')}` : base;
+}
+
+/** A stable per-card identity. Task ids are unique only WITHIN a workspace's
+ * file, so the aggregated view keys on (workspace, id) — otherwise two
+ * same-id tasks from different workspaces would collide in the React list and
+ * in the busy/expanded per-card state. */
+function taskKey(task: DaemonScheduledTask): string {
+  return `${task.workspaceId ?? ''}:${task.id}`;
 }
 
 const FREQUENCIES: Frequency[] = [
@@ -433,10 +458,42 @@ export function ScheduledTasksDialog({
   onRunPrompt,
   onCreateViaChat,
   onOpenSession,
+  workspaces,
+  lockedWorkspace,
   onError,
 }: ScheduledTasksDialogProps) {
   const { t } = useI18n();
   const actions = useWorkspaceActions();
+
+  // Multi-workspace aggregation. `workspaces` mirrors the daemon capabilities;
+  // with more than one the page lists every trusted workspace's tasks together
+  // and the New form offers a workspace picker. A single (or absent) workspace
+  // keeps the original primary-only view — no badges, no picker. Memoized so the
+  // derived arrays are stable identities — `reload` depends on them, and a fresh
+  // array each render would re-fire its mount effect in a loop.
+  const workspaceList = useMemo(() => workspaces ?? [], [workspaces]);
+  const isMultiWorkspace = !lockedWorkspace && workspaceList.length > 1;
+  // The workspaces the page can actually read + write: every trusted one, PLUS
+  // the primary even when it is untrusted. The primary is reached through the
+  // trust-free unqualified route (the same one the single-workspace page always
+  // used), so excluding an untrusted primary would silently drop its readable
+  // tasks from the aggregate AND desync the create picker (its default targets
+  // the primary, so the primary must be a selectable option). Secondaries stay
+  // gated on trust — their qualified route rejects an untrusted read/write.
+  const operableWorkspaces = useMemo(
+    () => workspaceList.filter((ws) => ws.primary || ws.trusted),
+    [workspaceList],
+  );
+  // The workspace id to pass to the per-task actions: primary uses its
+  // trust-free unqualified route (undefined), secondaries their qualified one.
+  const workspaceActionId = useCallback(
+    (ws: DaemonWorkspaceCapability): string | undefined =>
+      ws.primary ? undefined : ws.id,
+    [],
+  );
+  const lockedWorkspaceId = lockedWorkspace
+    ? workspaceActionId(lockedWorkspace)
+    : undefined;
 
   const [tasks, setTasks] = useState<DaemonScheduledTask[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -450,6 +507,12 @@ export function ScheduledTasksDialog({
   // task being edited (the form is dual-mode — same fields, different verb).
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  // The workspace the form targets. On create it's the picker's value (undefined
+  // = primary); on edit it's pinned to the task's own workspace (a task can't
+  // move files, so the picker is read-only). Passed to create/update actions.
+  const [formWorkspaceId, setFormWorkspaceId] = useState<string | undefined>(
+    lockedWorkspaceId,
+  );
   const [name, setName] = useState('');
   const [prompt, setPrompt] = useState('');
   const [builder, setBuilder] = useState<BuilderState>(DEFAULT_BUILDER);
@@ -496,18 +559,64 @@ export function ScheduledTasksDialog({
   const reload = useCallback(async () => {
     const seq = ++reloadSeqRef.current;
     try {
-      const list = await actions.listScheduledTasks();
+      let list: DaemonScheduledTask[];
+      let firstError: string | null = null;
+      if (lockedWorkspace) {
+        list = (await actions.listScheduledTasks(lockedWorkspaceId)).map(
+          (task) => ({
+            ...task,
+            workspaceId: lockedWorkspaceId,
+            workspaceCwd: lockedWorkspace.cwd,
+          }),
+        );
+      } else if (isMultiWorkspace) {
+        // Fan out over every OPERABLE workspace (trusted secondaries + the
+        // primary, which is always reachable via its trust-free route) and tag
+        // each task with its workspace so the cards can badge it and the
+        // mutations can target its file. One workspace failing (corrupt file,
+        // etc.) must not blank the whole list — keep the others and surface the
+        // first error.
+        const results = await Promise.all(
+          operableWorkspaces.map(async (ws) => {
+            try {
+              const tasks = await actions.listScheduledTasks(
+                workspaceActionId(ws),
+              );
+              return tasks.map((task) => ({
+                ...task,
+                workspaceId: workspaceActionId(ws),
+                workspaceCwd: ws.cwd,
+              }));
+            } catch (err) {
+              if (!firstError) {
+                firstError = err instanceof Error ? err.message : String(err);
+              }
+              return [] as DaemonScheduledTask[];
+            }
+          }),
+        );
+        list = results.flat();
+      } else {
+        list = await actions.listScheduledTasks();
+      }
       if (!mountedRef.current || seq !== reloadSeqRef.current) return;
       // Newest first — matches the reference "sort by created, descending".
       const sorted = [...list].sort((a, b) => b.createdAt - a.createdAt);
       setTasks(sorted);
-      setLoadError(null);
+      setLoadError(firstError);
     } catch (err) {
       if (!mountedRef.current || seq !== reloadSeqRef.current) return;
       setLoadError(err instanceof Error ? err.message : String(err));
       setTasks((prev) => prev ?? []);
     }
-  }, [actions]);
+  }, [
+    actions,
+    isMultiWorkspace,
+    lockedWorkspace,
+    lockedWorkspaceId,
+    operableWorkspaces,
+    workspaceActionId,
+  ]);
 
   useEffect(() => {
     void reload();
@@ -713,22 +822,29 @@ export function ScheduledTasksDialog({
     setFormError(null);
     setShowForm(false);
     setEditingId(null);
+    setFormWorkspaceId(lockedWorkspaceId);
     resetReferenceState();
-  }, [resetReferenceState]);
+  }, [lockedWorkspaceId, resetReferenceState]);
 
   const openCreate = useCallback(() => {
     setEditingId(null);
+    // Default to the locked workspace, or primary when the page is unlocked.
+    // In the latter case the picker can move it to a trusted secondary.
+    setFormWorkspaceId(lockedWorkspaceId);
     setName('');
     setPrompt('');
     setBuilder(DEFAULT_BUILDER);
     setFormError(null);
     resetReferenceState();
     setShowForm(true);
-  }, [resetReferenceState]);
+  }, [lockedWorkspaceId, resetReferenceState]);
 
   const openEdit = useCallback(
     (task: DaemonScheduledTask) => {
       setEditingId(task.id);
+      // Pin the edit to the task's own workspace — a PATCH can't move a task
+      // between per-workspace files, so the picker is read-only while editing.
+      setFormWorkspaceId(task.workspaceId);
       setName(task.name ?? '');
       setPrompt(task.prompt);
       // Reverse the cron back onto the pickers; an expression the pickers can't
@@ -766,19 +882,26 @@ export function ScheduledTasksDialog({
         // Update only the editable fields; `recurring`/`enabled` are omitted so
         // the PATCH leaves them unchanged (recurring isn't in this form, and
         // enabled is driven by the card toggle). Empty name clears it.
-        await actions.updateScheduledTask(editingId, {
-          cron,
-          prompt: prompt.trim(),
-          name: name.trim() || null,
-        });
+        await actions.updateScheduledTask(
+          editingId,
+          {
+            cron,
+            prompt: prompt.trim(),
+            name: name.trim() || null,
+          },
+          formWorkspaceId,
+        );
       } else {
-        await actions.createScheduledTask({
-          cron,
-          prompt: prompt.trim(),
-          name: name.trim() || null,
-          recurring: true,
-          enabled: true,
-        });
+        await actions.createScheduledTask(
+          {
+            cron,
+            prompt: prompt.trim(),
+            name: name.trim() || null,
+            recurring: true,
+            enabled: true,
+          },
+          formWorkspaceId,
+        );
       }
       if (!mountedRef.current) return;
       resetForm();
@@ -789,13 +912,27 @@ export function ScheduledTasksDialog({
     } finally {
       if (mountedRef.current) setSubmitting(false);
     }
-  }, [actions, builder, editingId, name, prompt, reload, resetForm, t]);
+  }, [
+    actions,
+    builder,
+    editingId,
+    formWorkspaceId,
+    name,
+    prompt,
+    reload,
+    resetForm,
+    t,
+  ]);
 
   const handleToggle = useCallback(
     async (task: DaemonScheduledTask) => {
-      setBusyId(task.id);
+      setBusyId(taskKey(task));
       try {
-        await actions.updateScheduledTask(task.id, { enabled: !task.enabled });
+        await actions.updateScheduledTask(
+          task.id,
+          { enabled: !task.enabled },
+          task.workspaceId,
+        );
         await reload();
       } catch (err) {
         onError(err, t('scheduledTasks.error.toggleFailed'));
@@ -820,7 +957,7 @@ export function ScheduledTasksDialog({
         // session while /run only refuses the RECORD afterward, i.e. a real
         // unrecorded run. Refresh, bail if gone/disabled, and use the FRESH
         // prompt/session so we never run an outdated one.
-        const fresh = (await actions.listScheduledTasks()).find(
+        const fresh = (await actions.listScheduledTasks(task.workspaceId)).find(
           (tk) => tk.id === task.id,
         );
         if (!fresh || !fresh.enabled) {
@@ -838,7 +975,7 @@ export function ScheduledTasksDialog({
           // history still catches up on the next refresh.
           await onRunPrompt(fresh.prompt, fresh.sessionId);
           try {
-            await actions.runScheduledTask(fresh.id);
+            await actions.runScheduledTask(fresh.id, task.workspaceId);
             await reload();
           } catch (err) {
             onError(err, t('scheduledTasks.error.runFailed'));
@@ -850,7 +987,7 @@ export function ScheduledTasksDialog({
           // leaves the task gone AND un-run — and reload() has already dropped it
           // from the list — so surface THAT explicitly rather than the generic
           // "run failed", which would hide the deletion.
-          await actions.runScheduledTask(fresh.id);
+          await actions.runScheduledTask(fresh.id, task.workspaceId);
           await reload();
           try {
             await onRunPrompt(fresh.prompt, fresh.sessionId);
@@ -877,9 +1014,9 @@ export function ScheduledTasksDialog({
       if (!window.confirm(t('scheduledTasks.deleteConfirm', { name: label }))) {
         return;
       }
-      setBusyId(task.id);
+      setBusyId(taskKey(task));
       try {
-        await actions.deleteScheduledTask(task.id);
+        await actions.deleteScheduledTask(task.id, task.workspaceId);
         await reload();
       } catch (err) {
         onError(err, t('scheduledTasks.error.deleteFailed'));
@@ -992,6 +1129,31 @@ export function ScheduledTasksDialog({
           onClose={resetForm}
         >
           <div className={styles.formFields}>
+            {isMultiWorkspace && (
+              <label className={styles.field}>
+                <span className={styles.fieldLabel}>
+                  {t('scheduledTasks.workspace')}
+                </span>
+                <select
+                  className={styles.select}
+                  value={formWorkspaceId ?? ''}
+                  // A task lives in one workspace's file; editing can't move it,
+                  // so the picker is fixed while editing and when only one
+                  // workspace is operable (nothing to choose).
+                  disabled={!!editingId || operableWorkspaces.length <= 1}
+                  onChange={(e) =>
+                    setFormWorkspaceId(e.target.value || undefined)
+                  }
+                >
+                  {operableWorkspaces.map((ws) => (
+                    <option key={ws.id} value={workspaceActionId(ws) ?? ''}>
+                      {workspaceLabel(ws.cwd, ws.primary, t)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+
             <label className={styles.field}>
               <span className={styles.fieldLabel}>
                 {t('scheduledTasks.name')}
@@ -1226,10 +1388,10 @@ export function ScheduledTasksDialog({
       <div className={styles.list}>
         {(tasks ?? []).map((task) => {
           const title = task.name || task.prompt;
-          const busy = busyId === task.id;
+          const busy = busyId === taskKey(task);
           return (
             <div
-              key={task.id}
+              key={taskKey(task)}
               className={`${styles.card} ${task.enabled ? '' : styles.cardDisabled}`}
             >
               <div className={styles.cardHeader}>
@@ -1292,6 +1454,17 @@ export function ScheduledTasksDialog({
               )}
 
               <div className={styles.cardFooter}>
+                {isMultiWorkspace && task.workspaceCwd && (
+                  <span
+                    className={styles.workspacePill}
+                    title={task.workspaceCwd}
+                  >
+                    <span className={styles.workspaceIcon} aria-hidden="true">
+                      ⌂
+                    </span>
+                    {workspaceLabel(task.workspaceCwd, !task.workspaceId, t)}
+                  </span>
+                )}
                 <span className={styles.schedulePill}>
                   <span className={styles.clockIcon} aria-hidden="true">
                     ◷
@@ -1345,10 +1518,10 @@ export function ScheduledTasksDialog({
                     <button
                       type="button"
                       className={styles.runsToggle}
-                      aria-expanded={expandedRunsId === task.id}
+                      aria-expanded={expandedRunsId === taskKey(task)}
                       onClick={() =>
                         setExpandedRunsId((cur) =>
-                          cur === task.id ? null : task.id,
+                          cur === taskKey(task) ? null : taskKey(task),
                         )
                       }
                     >
@@ -1360,7 +1533,7 @@ export function ScheduledTasksDialog({
                 )}
               </div>
 
-              {expandedRunsId === task.id && task.runs.length > 0 && (
+              {expandedRunsId === taskKey(task) && task.runs.length > 0 && (
                 <ul className={styles.runsList}>
                   {/* Newest first — the ring is stored oldest-first. */}
                   {[...task.runs].reverse().map((run, idx) => (

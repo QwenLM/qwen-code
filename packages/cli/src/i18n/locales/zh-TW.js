@@ -2225,6 +2225,15 @@ export default {
     '無法自動更新此獨立安裝。請從以下位址重新安裝：',
   'Manual update required. Please reinstall Qwen Code.':
     '需要手動更新。請重新安裝 Qwen Code。',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    '此工作階段使用自訂沙箱映像 {{image}}。請更新該映像並重新啟動 Qwen Code。',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    '請在主機上更新 Qwen Code，然後重新啟動沙箱。',
+  'The update will be installed after you exit this session.':
+    '結束目前工作階段後將自動安裝更新。',
+  'Run /update to install the update on the host.':
+    '執行 /update 在主機上安裝更新。',
+  'Run /update to install the update.': '執行 /update 安裝更新。',
   '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
     '⚠️ 歷史記錄缺口：此處之前的會話記錄已遺失（儲存中斷），且無法找回。',
 
@@ -2270,4 +2279,8 @@ export default {
     '正在新會話中執行該定時任務：{{link}}',
   'This scheduled run could not be started: {{error}}':
     '本次定時執行無法啟動：{{error}}',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.':
+    '工作階段錄製因寫入失敗而停止。受影響工作階段中的新訊息將不會被儲存。請檢查磁碟空間和權限，然後建立新的工作階段以恢復錄製。詳細資訊請查看偵錯日誌。',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
+    '工作階段錄製因寫入失敗而停止。受影響工作階段中的新訊息將不會被儲存。請檢查磁碟空間和權限，然後執行 `/clear` 建立新的可錄製工作階段。詳細資訊請查看偵錯日誌。',
 };

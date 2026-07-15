@@ -170,12 +170,10 @@
 }
 
 /* Hosts can embed WebShell in a narrow side pane while the browser viewport
- * remains wide. The public drawer API must still show a usable overlay in
+ * remains wide. The public drawer API must still show a usable overlay inside
  * that container instead of relying exclusively on the viewport media query. */
 .mobileDrawerForced {
   display: block;
-  /* `.app` is the narrow host Webview's positioning context. Absolute keeps
-   * the drawer inside it; fixed would target the IDE's larger page instead. */
   position: absolute;
   inset: 0;
   z-index: 50;
@@ -305,10 +303,6 @@
   box-sizing: border-box;
   scrollbar-width: thin;
   scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
-}
-
-:where(.app button) {
-  padding: 0;
 }
 
 .app *::-webkit-scrollbar {
@@ -592,6 +586,8 @@
 }
 
 .panelBody {
+  container-name: panel-body;
+  container-type: inline-size;
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;

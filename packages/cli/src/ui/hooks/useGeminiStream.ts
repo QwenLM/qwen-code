@@ -27,7 +27,6 @@ import {
   type GeminiErrorEventValue,
   type StopFailureErrorType,
   type ActiveGoal,
-  type VisionBridgeResult,
   GeminiEventType as ServerGeminiEventType,
   SendMessageType,
   createDebugLogger,
@@ -53,6 +52,7 @@ import {
   getUnsupportedImageFormatWarning,
   runVisionBridge,
   shouldRunVisionBridge,
+  formatVisionBridgeNotice,
   hasImageParts,
   splitImageParts,
   generateToolUseSummary,
@@ -149,45 +149,6 @@ interface PendingDuplicateToolResponses {
   executableCallIds: Set<string>;
   promptId: string | undefined;
   responseParts: Part[];
-}
-
-/**
- * Build the user-facing notice shown when the vision bridge runs. On success it
- * states which model was used, how many images were converted (and omitted),
- * and discloses the data egress (and endpoint, since auto-select can route to a
- * different host than the primary model). On failure it surfaces the reason.
- *
- * The transcription itself is not shown: it is fed to the primary model and
- * surfaced in its answer, so repeating it here only duplicated the description.
- *
- * @param result The structured result returned by the vision bridge.
- * @returns A notice string for the message history.
- */
-function formatVisionBridgeNotice(result: VisionBridgeResult): string {
-  const modelName = result.modelId ?? 'vision model';
-  const target = result.modelEndpoint
-    ? `${modelName} (${result.modelEndpoint})`
-    : modelName;
-  const egressNote = result.egressOccurred
-    ? ` Your image and prompt/context were sent to ${target}.`
-    : '';
-  // No leading glyph here: the renderer supplies the gutter prefix (◎ for the
-  // dim notice, ✕ for the error variant). Baking one in too produced a doubled
-  // marker (e.g. `● ◎ …`).
-  if (result.status === 'failed') {
-    const reason = result.egressOccurred
-      ? 'the vision model request failed'
-      : 'the vision bridge could not run';
-    return `Vision bridge (${modelName}) failed: ${reason}.${egressNote} The image was not interpreted.`;
-  }
-  if (result.status === 'skipped') {
-    return `Vision bridge cancelled.${egressNote}`;
-  }
-  // On success the image was always sent, so disclose egress unconditionally.
-  const omitted =
-    result.omittedCount > 0 ? ` (${result.omittedCount} image(s) omitted)` : '';
-  const header = `Converted ${result.convertedCount} image(s)${omitted} to text via ${target}. Your image and prompt/context were sent to that model.`;
-  return header;
 }
 
 /**

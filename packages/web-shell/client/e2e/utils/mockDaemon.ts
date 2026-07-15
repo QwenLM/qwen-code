@@ -6,6 +6,8 @@ import {
   type DaemonEvent,
   type DaemonRestoredSession,
   type DaemonSession,
+  type DaemonSessionGroup,
+  type DaemonSessionGroupCatalog,
   type DaemonSessionState,
   type DaemonSessionSummary,
   type DaemonWorkspaceExtensionsStatus,
@@ -41,6 +43,7 @@ export interface WebShellDaemonScenario {
   skills: DaemonWorkspaceSkillsStatus;
   settings: DaemonWorkspaceSettingsStatus;
   sessions: DaemonSessionSummary[];
+  sessionGroups: DaemonSessionGroup[];
   events: DaemonEvent[];
   state: DaemonSessionState;
 }
@@ -59,7 +62,13 @@ export interface MockDaemonController {
 type ScenarioOverrides = Partial<
   Omit<
     WebShellDaemonScenario,
-    'capabilities' | 'providers' | 'skills' | 'settings' | 'sessions' | 'state'
+    | 'capabilities'
+    | 'providers'
+    | 'skills'
+    | 'settings'
+    | 'sessions'
+    | 'sessionGroups'
+    | 'state'
   >
 > & {
   capabilities?: Partial<DaemonCapabilities>;
@@ -67,6 +76,7 @@ type ScenarioOverrides = Partial<
   skills?: Partial<DaemonWorkspaceSkillsStatus>;
   settings?: Partial<DaemonWorkspaceSettingsStatus>;
   sessions?: DaemonSessionSummary[];
+  sessionGroups?: DaemonSessionGroup[];
   state?: Partial<DaemonSessionState>;
 };
 
@@ -241,6 +251,7 @@ export function createWebShellDaemonScenario(
     skills,
     settings,
     sessions,
+    sessionGroups: overrides.sessionGroups ?? [],
     events: overrides.events ?? [],
     state,
   };
@@ -285,7 +296,14 @@ export async function installMockDaemon(
       return;
     }
 
-    await handleDaemonRoute(route, method, path, scenario, body);
+    await handleDaemonRoute(
+      route,
+      method,
+      path,
+      scenario,
+      body,
+      url.searchParams,
+    );
   });
 
   return {
@@ -429,6 +447,7 @@ function isDaemonPath(path: string): boolean {
     /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/resources\/?$/.test(path) ||
     /^\/workspace\/.+\/sessions\/?$/.test(path) ||
+    /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
     path === '/session' ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
@@ -466,6 +485,9 @@ function isDaemonRoute(method: string, path: string): boolean {
   if (method === 'GET' && /^\/workspace\/.+\/sessions\/?$/.test(path)) {
     return true;
   }
+  if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
+    return true;
+  }
   if (method === 'POST' && path === '/session') return true;
   if (method === 'POST' && /^\/permission\/[^/]+\/?$/.test(path)) return true;
   if (
@@ -497,6 +519,7 @@ async function handleDaemonRoute(
   path: string,
   scenario: WebShellDaemonScenario,
   body: unknown,
+  searchParams: URLSearchParams = new URLSearchParams(),
 ): Promise<void> {
   if (method === 'GET' && path === '/health') {
     await json(route, { ok: true, healthy: true });
@@ -521,10 +544,14 @@ async function handleDaemonRoute(
   if (method === 'POST' && path === '/workspace/settings') {
     await json(route, {
       key: getRecordValue(body, 'key') ?? 'unknown',
-      scope: 'workspace',
+      scope: getRecordValue(body, 'scope') ?? 'workspace',
       value: getRecordValue(body, 'value'),
       requiresRestart: false,
     });
+    return;
+  }
+  if (method === 'DELETE' && path === '/workspace/models') {
+    await json(route, { removed: true, clearedActiveModel: false });
     return;
   }
   if (method === 'GET' && path === '/workspace/tools') {
@@ -557,7 +584,23 @@ async function handleDaemonRoute(
     return;
   }
   if (method === 'GET' && /^\/workspace\/.+\/sessions\/?$/.test(path)) {
-    await json(route, { sessions: scenario.sessions });
+    // Mirror production query modes: `group=pinned` is the pinned bucket;
+    // `group=all` (and missing group) returns the full active list. The UI
+    // excludes pinned rows from organized sections via `excludePinned`.
+    const group = searchParams.get('group');
+    const sessions =
+      group === 'pinned'
+        ? scenario.sessions.filter((session) => Boolean(session.isPinned))
+        : scenario.sessions;
+    await json(route, { sessions });
+    return;
+  }
+  if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
+    const catalog: DaemonSessionGroupCatalog = {
+      groups: scenario.sessionGroups,
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    };
+    await json(route, catalog);
     return;
   }
   if (method === 'POST' && path === '/session') {

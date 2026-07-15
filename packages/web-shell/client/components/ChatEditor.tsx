@@ -9,8 +9,8 @@ import {
   useRef,
   useState,
 } from 'react';
-import { createPortal } from 'react-dom';
 import type { CSSProperties, ReactNode, RefObject } from 'react';
+import { Tooltip as TooltipPrimitive } from 'radix-ui';
 import { DAEMON_APPROVAL_MODES } from '@qwen-code/webui/daemon-react-sdk';
 import type { CommandInfo } from '../adapters/types';
 import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/webui/daemon-react-sdk';
@@ -43,6 +43,36 @@ import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { VoiceButton } from '../voice/VoiceButton';
 import { GitBranchIndicator } from './GitBranchIndicator';
+import { WorkspaceIndicator } from './WorkspaceIndicator';
+import { ChevronDownIcon, FolderClosedIcon } from 'lucide-react';
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from './ui/select';
+import {
+  Popover,
+  PopoverAnchor,
+  PopoverContent,
+  PopoverTrigger,
+} from './ui/popover';
+import { Input } from './ui/input';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from './ui/tooltip';
+import {
+  filterToolbarDropdownItems,
+  getToolbarExpansionBudget,
+  getToolbarItemVisibilityWithHysteresis,
+  resolveToolbarModelLabel,
+  type ToolbarDropdownItem,
+} from './toolbarDropdown';
 import styles from './ChatEditor.module.css';
 
 export type ComposerToolbarAction =
@@ -52,7 +82,8 @@ export type ComposerToolbarAction =
   | 'commands'
   | 'files'
   | 'widthMode'
-  | 'voice';
+  | 'voice'
+  | 'workspace';
 
 const ACTIVE_TOOLBAR_ACTIONS = [
   'approvalMode',
@@ -60,6 +91,7 @@ const ACTIVE_TOOLBAR_ACTIONS = [
   'model',
   'widthMode',
   'voice',
+  'workspace',
 ] as const satisfies readonly ComposerToolbarAction[];
 const ACTIVE_TOOLBAR_ACTION_SET = new Set<ComposerToolbarAction>(
   ACTIVE_TOOLBAR_ACTIONS,
@@ -90,6 +122,10 @@ interface ChatEditorProps {
   currentMode?: string;
   currentModel?: string;
   gitBranch?: string;
+  /** Workspace name shown in the pane composer's `workspace` toolbar chip. */
+  workspaceName?: string;
+  /** Full workspace cwd, used as the chip's tooltip. */
+  workspaceTitle?: string;
   chatWidthMode?: '1000' | 'wide';
   showChatWidthToggle?: boolean;
   chatWidthToggleMin?: number;
@@ -97,6 +133,16 @@ interface ChatEditorProps {
   availableModels?: Array<{ id: string; label?: string }>;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
+  workspaces?: Array<{
+    id: string;
+    cwd: string;
+    label: string;
+    primary: boolean;
+  }>;
+  selectedWorkspaceCwd?: string;
+  workspaceSelectionDisabled?: boolean;
+  onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
+  atWorkspaceCwd?: string;
   onChatWidthModeChange?: (mode: '1000' | 'wide') => void;
   onFocusFooter?: () => boolean;
   dialogOpen?: boolean;
@@ -174,19 +220,104 @@ function isTouchLikeDevice(): boolean {
   );
 }
 
-const SLASH_PANEL_THEME_VARS = [
-  '--chat-editor-accent-color',
-  '--accent',
-  '--background',
-  '--chat-editor-bg-tertiary',
-  '--chat-editor-border-color',
-  '--foreground',
-  '--font-mono',
-  '--font-sans',
-  '--muted-foreground',
-  '--chat-editor-text-primary',
-  '--chat-editor-text-secondary',
-] as const;
+function TopComposerTag({
+  tag,
+  content,
+  tooltip,
+  onActivate,
+  onRemove,
+}: {
+  tag: WebShellComposerTag;
+  content: ReactNode;
+  tooltip: ReactNode | null | undefined;
+  onActivate?: (anchorRect: DOMRectReadOnly) => void;
+  onRemove?: () => void;
+}) {
+  const anchorRef = useRef<HTMLSpanElement>(null);
+  const portalRoot = useWebShellPortalRoot();
+  const hasTooltip = tooltip !== undefined && tooltip !== null;
+  const tagContent = (
+    <span
+      className={styles.tagContent}
+      data-web-shell-composer-tag-trigger
+      role={onActivate ? 'button' : undefined}
+      tabIndex={onActivate || hasTooltip ? 0 : undefined}
+      onClick={(event) => {
+        if (!onActivate) return;
+        event.stopPropagation();
+        onActivate(
+          anchorRef.current?.getBoundingClientRect() ??
+            event.currentTarget.getBoundingClientRect(),
+        );
+      }}
+      onKeyDown={(event) => {
+        if (!onActivate) return;
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        onActivate(
+          anchorRef.current?.getBoundingClientRect() ??
+            event.currentTarget.getBoundingClientRect(),
+        );
+      }}
+    >
+      {content}
+    </span>
+  );
+  const tagElement = (
+    <span ref={anchorRef} className={styles.tag} data-web-shell-composer-tag>
+      {hasTooltip ? (
+        <TooltipPrimitive.Trigger asChild>
+          {tagContent}
+        </TooltipPrimitive.Trigger>
+      ) : (
+        tagContent
+      )}
+      {onRemove && (
+        <button
+          type="button"
+          className={styles.tagRemove}
+          aria-label={`Remove ${getComposerTagDisplay(tag)}`}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={(event) => {
+            event.stopPropagation();
+            onRemove();
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.stopPropagation();
+              return;
+            }
+            if (event.key !== 'Backspace' && event.key !== 'Delete') return;
+            event.preventDefault();
+            event.stopPropagation();
+            onRemove();
+          }}
+        >
+          ×
+        </button>
+      )}
+    </span>
+  );
+
+  if (!hasTooltip) return tagElement;
+
+  return (
+    <TooltipPrimitive.Root disableHoverableContent={false}>
+      {tagElement}
+      <TooltipPrimitive.Portal container={portalRoot ?? undefined}>
+        <TooltipPrimitive.Content
+          className={styles.tagTooltip}
+          data-web-shell-composer-tag-tooltip
+          sideOffset={6}
+          collisionPadding={8}
+          avoidCollisions
+        >
+          {tooltip}
+        </TooltipPrimitive.Content>
+      </TooltipPrimitive.Portal>
+    </TooltipPrimitive.Root>
+  );
+}
 
 function SendIcon() {
   return (
@@ -347,10 +478,6 @@ function WidthModeIcon({ mode }: { mode: '1000' | 'wide' }) {
   );
 }
 
-function ChevronDownIcon() {
-  return <span className={styles.chevronDown} aria-hidden="true" />;
-}
-
 function ModelIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -373,9 +500,7 @@ function ModelIcon() {
   );
 }
 
-interface DropdownItem {
-  id: string;
-  label: string;
+interface DropdownItem extends ToolbarDropdownItem {
   description?: string;
   icon?: ReactNode;
 }
@@ -495,114 +620,178 @@ function getModeListLabel(modeId: string, t: (key: string) => string): string {
   return labels[modeId] ?? getModeLabel(modeId, t);
 }
 
-function ToolbarDropdown({
+function ToolbarPopover({
   open,
   items,
   activeId,
-  onClose,
+  onOpenChange,
   onSelect,
-  anchorRef,
+  trigger,
+  tooltip,
   showCheck = false,
-  maxHeight,
+  searchable = false,
+  searchLabel,
+  noResultsLabel,
 }: {
   open: boolean;
   items: DropdownItem[];
   activeId: string;
-  onClose: () => void;
+  onOpenChange: (open: boolean) => void;
   onSelect: (id: string) => void;
-  anchorRef: React.RefObject<HTMLButtonElement | null>;
+  trigger: ReactNode;
+  tooltip?: ReactNode;
   showCheck?: boolean;
-  maxHeight?: number;
+  searchable?: boolean;
+  searchLabel?: string;
+  noResultsLabel?: (query: string) => string;
 }) {
-  const dropdownRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onPointerOutside = (event: Event) => {
-      if (event instanceof MouseEvent && event.button !== 0) return;
-      if (event.defaultPrevented) return;
-      const dropdown = dropdownRef.current;
-      const anchor = anchorRef.current;
-      const target = event.target;
-      if (
-        dropdown &&
-        target instanceof Node &&
-        !dropdown.contains(target) &&
-        anchor &&
-        !anchor.contains(target)
-      ) {
-        onClose();
-      }
-    };
-    window.addEventListener('mousedown', onPointerOutside);
-    return () => window.removeEventListener('mousedown', onPointerOutside);
-  }, [open, onClose, anchorRef]);
-
-  useEffect(() => {
-    if (!open) return;
-    const onEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        e.stopPropagation();
-        onClose();
-      }
-    };
-    window.addEventListener('keydown', onEscape);
-    return () => window.removeEventListener('keydown', onEscape);
-  }, [open, onClose]);
-
-  if (!open) return null;
-
+  const [searchQuery, setSearchQuery] = useState('');
+  const [collisionBoundary, setCollisionBoundary] =
+    useState<HTMLElement | null>(null);
+  const selectionRef = useRef(false);
+  const handoffRef = useRef(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const hasRichItems = items.some((item) => item.description || item.icon);
+  const visibleItems = searchable
+    ? filterToolbarDropdownItems(items, searchQuery)
+    : items;
+
+  useEffect(() => {
+    if (!open) {
+      setSearchQuery('');
+    }
+  }, [open]);
+
   const hasCheckItems = hasRichItems || showCheck;
 
   return (
-    <div
-      ref={dropdownRef}
-      className={`${styles.dropdown} ${
-        hasRichItems
-          ? styles.dropdownRich
-          : showCheck
-            ? styles.dropdownCheck
-            : ''
-      }`}
-      style={maxHeight ? { maxHeight, overflowY: 'auto' } : undefined}
+    <Popover
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (nextOpen) {
+          selectionRef.current = false;
+          handoffRef.current = false;
+          setCollisionBoundary(
+            triggerRef.current?.closest<HTMLElement>('[data-web-shell-root]') ??
+              null,
+          );
+        }
+        onOpenChange(nextOpen);
+      }}
     >
-      {items.map((item) => (
-        <button
-          key={item.id}
-          type="button"
-          className={`${styles.dropdownItem} ${
-            item.id === activeId ? styles.dropdownItemActive : ''
-          }`}
-          onMouseDown={(e) => {
-            e.preventDefault();
-            onSelect(item.id);
-          }}
+      {tooltip ? (
+        <TooltipProvider delayDuration={300}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <PopoverTrigger ref={triggerRef} asChild>
+                {trigger}
+              </PopoverTrigger>
+            </TooltipTrigger>
+            <TooltipContent side="top">{tooltip}</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      ) : (
+        <PopoverTrigger ref={triggerRef} asChild>
+          {trigger}
+        </PopoverTrigger>
+      )}
+      <PopoverContent
+        side="top"
+        align="start"
+        collisionPadding={8}
+        collisionBoundary={collisionBoundary ?? undefined}
+        data-web-shell-toolbar-popover
+        onClick={(event) => event.stopPropagation()}
+        onPointerDownOutside={(event) => {
+          const target = event.target;
+          if (
+            target instanceof Element &&
+            target.closest('[data-web-shell-toolbar-popover-trigger]')
+          ) {
+            handoffRef.current = true;
+          }
+        }}
+        onCloseAutoFocus={(event) => {
+          if (handoffRef.current) {
+            event.preventDefault();
+            handoffRef.current = false;
+            return;
+          }
+          if (
+            document.activeElement instanceof HTMLElement &&
+            document.activeElement.closest('[data-web-shell-toolbar-popover]')
+          ) {
+            event.preventDefault();
+            return;
+          }
+          if (!selectionRef.current) return;
+          event.preventDefault();
+          selectionRef.current = false;
+        }}
+      >
+        {searchable && (
+          <Input
+            type="search"
+            value={searchQuery}
+            aria-label={searchLabel}
+            placeholder={searchLabel}
+            autoComplete="off"
+            onChange={(event) => setSearchQuery(event.target.value)}
+          />
+        )}
+        <div
+          className={`${styles.dropdownList} ${
+            hasRichItems
+              ? styles.dropdownRich
+              : showCheck
+                ? styles.dropdownCheck
+                : ''
+          } ${searchable ? styles.dropdownListConstrained : ''}`}
         >
-          {hasCheckItems ? (
-            <>
-              {hasRichItems && (
-                <span className={styles.dropdownItemIcon}>{item.icon}</span>
-              )}
-              <span className={styles.dropdownItemContent}>
-                <span className={styles.dropdownItemLabel}>{item.label}</span>
-                {item.description && (
-                  <span className={styles.dropdownItemDesc}>
-                    {item.description}
+          {visibleItems.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={`${styles.dropdownItem} ${
+                item.id === activeId ? styles.dropdownItemActive : ''
+              }`}
+              onClick={() => {
+                selectionRef.current = true;
+                onSelect(item.id);
+              }}
+            >
+              {hasCheckItems ? (
+                <>
+                  {hasRichItems && (
+                    <span className={styles.dropdownItemIcon}>{item.icon}</span>
+                  )}
+                  <span className={styles.dropdownItemContent}>
+                    <span className={styles.dropdownItemLabel}>
+                      {item.label}
+                    </span>
+                    {item.description && (
+                      <span className={styles.dropdownItemDesc}>
+                        {item.description}
+                      </span>
+                    )}
                   </span>
-                )}
-              </span>
-              <span className={styles.dropdownItemCheck}>
-                {item.id === activeId ? <CheckIcon /> : null}
-              </span>
-            </>
-          ) : (
-            item.label
+                  <span className={styles.dropdownItemCheck}>
+                    {item.id === activeId ? <CheckIcon /> : null}
+                  </span>
+                </>
+              ) : (
+                item.label
+              )}
+            </button>
+          ))}
+          {visibleItems.length === 0 && noResultsLabel && (
+            <div className={styles.dropdownEmpty} role="status">
+              {noResultsLabel(searchQuery)}
+            </div>
           )}
-        </button>
-      ))}
-    </div>
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -610,31 +799,27 @@ function SlashCommandPanel({
   menu,
   anchorRef,
   panelRef,
+  detailRef,
+  onClose,
   onSelect,
   onAccept,
 }: {
   menu: SlashMenuState;
   anchorRef: RefObject<HTMLElement | null>;
   panelRef: RefObject<HTMLDivElement | null>;
+  detailRef: RefObject<HTMLDivElement | null>;
+  onClose: () => void;
   onSelect: (index: number) => boolean;
   onAccept: (index?: number) => boolean;
 }) {
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const [anchorRect, setAnchorRect] = useState<{
-    left: number;
-    bottom: number;
-    width: number;
-  } | null>(null);
-  const [themeVars, setThemeVars] = useState<CSSProperties>({});
+  const hoverAnchorRef = useRef<HTMLButtonElement>(null);
+  const [collisionBoundary, setCollisionBoundary] =
+    useState<HTMLElement | null>(null);
   const [hoverDetail, setHoverDetail] = useState<{
     label: string;
     detail: string;
-    left: number;
-    top?: number;
-    bottom?: number;
-    maxHeight: number;
   } | null>(null);
-  const detailRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     itemRefs.current[menu.selectedIndex]?.scrollIntoView({
@@ -642,50 +827,51 @@ function SlashCommandPanel({
     });
   }, [menu.items, menu.selectedIndex]);
 
-  useLayoutEffect(() => {
-    const anchor = anchorRef.current;
-    if (!anchor) return undefined;
-
-    const update = () => {
-      const rect = anchor.getBoundingClientRect();
-      const computedStyle = getComputedStyle(anchor);
-      const nextThemeVars = Object.fromEntries(
-        SLASH_PANEL_THEME_VARS.map((name) => [
-          name,
-          computedStyle.getPropertyValue(name),
-        ]),
-      ) as CSSProperties;
-      setAnchorRect({
-        left: Math.max(12, Math.min(rect.left + 16, window.innerWidth - 252)),
-        bottom: window.innerHeight - rect.top + 8,
-        width: rect.width,
-      });
-      setThemeVars(nextThemeVars);
-    };
-
-    update();
-    const resizeObserver = new ResizeObserver(update);
-    resizeObserver.observe(anchor);
-    window.addEventListener('resize', update);
-    window.addEventListener('scroll', update, true);
-    return () => {
-      resizeObserver.disconnect();
-      window.removeEventListener('resize', update);
-      window.removeEventListener('scroll', update, true);
-    };
-  }, [anchorRef, menu.items]);
-
   useEffect(() => {
     setHoverDetail(null);
   }, [menu.items]);
 
-  const measureText = (text: string) => Array.from(text).length;
+  useLayoutEffect(() => {
+    setCollisionBoundary(
+      anchorRef.current?.closest<HTMLElement>('[data-web-shell-root]') ?? null,
+    );
+  }, [anchorRef]);
+
+  useEffect(() => {
+    const preserveImeEscape = (event: KeyboardEvent) => {
+      if (
+        event.key !== 'Escape' ||
+        (!event.isComposing && event.keyCode !== 229)
+      ) {
+        return;
+      }
+      Object.defineProperty(event, 'key', {
+        configurable: true,
+        value: 'Process',
+      });
+      window.addEventListener(
+        'keydown',
+        (currentEvent) => {
+          if (currentEvent === event) Reflect.deleteProperty(event, 'key');
+        },
+        { once: true },
+      );
+    };
+    window.addEventListener('keydown', preserveImeEscape, { capture: true });
+    return () => {
+      window.removeEventListener('keydown', preserveImeEscape, {
+        capture: true,
+      });
+    };
+  }, []);
+
+  const rowPlans = planSlashSectionRows(menu.items, menu.kind);
   const maxLabelLength = Math.max(
-    ...menu.items.map((item) => measureText(item.label)),
+    ...menu.items.map((item) => Array.from(item.label).length),
     0,
   );
   const maxDetailLength = Math.max(
-    ...menu.items.map((item) => measureText(item.detail ?? '')),
+    ...menu.items.map((item) => Array.from(item.detail ?? '').length),
     0,
   );
   const hasDetailColumn = maxDetailLength > 0;
@@ -700,151 +886,173 @@ function SlashCommandPanel({
     '--slash-column-gap': hasDetailColumn ? '2ch' : '0px',
   } as CSSProperties;
 
-  if (!anchorRect) return null;
-
-  const rowPlans = planSlashSectionRows(menu.items, menu.kind);
-
-  const positionedPanelStyle = {
-    ...panelStyle,
-    ...themeVars,
-    left: anchorRect.left,
-    bottom: anchorRect.bottom,
-    '--slash-anchor-width': `${anchorRect.width}px`,
-  } as CSSProperties;
-
-  return createPortal(
-    <div
-      ref={panelRef}
-      className={styles.slashPortalLayer}
-      style={themeVars}
-      data-web-shell-slash-menu
-    >
-      <div
-        className={styles.slashPanel}
-        style={positionedPanelStyle}
-        role="listbox"
-        onMouseDown={(event) => event.preventDefault()}
-        onMouseLeave={(event) => {
-          const nextTarget = event.relatedTarget;
-          if (
-            nextTarget instanceof Node &&
-            detailRef.current?.contains(nextTarget)
-          ) {
-            return;
-          }
-          setHoverDetail(null);
+  return (
+    <>
+      <Popover
+        open
+        onOpenChange={(open) => {
+          if (!open) onClose();
         }}
       >
-        <div className={styles.slashPanelBody}>
-          <div
-            className={styles.slashList}
-            onScroll={() => setHoverDetail(null)}
-          >
-            {menu.items.map((item, index) => {
-              const plan = rowPlans[index];
-              return (
-                <div key={`${item.id}:${index}`} className={styles.slashEntry}>
-                  {plan.showHeader && (
-                    <>
-                      {plan.showDivider && (
-                        <div className={styles.slashSection} />
-                      )}
-                      <div className={styles.slashSectionHeader}>
-                        <span>{item.section}</span>
-                        {plan.count > 0 ? (
-                          <span className={styles.slashSectionCount}>
-                            {plan.count}
-                          </span>
-                        ) : null}
-                      </div>
-                    </>
-                  )}
-                  <button
-                    ref={(node) => {
-                      itemRefs.current[index] = node;
-                    }}
-                    type="button"
-                    role="option"
-                    aria-selected={index === menu.selectedIndex}
-                    className={`${styles.slashItem} ${
-                      index === menu.selectedIndex ? styles.slashItemActive : ''
-                    }`}
-                    onMouseEnter={(event) => {
-                      onSelect(index);
-                      if (!item.detail) {
-                        setHoverDetail(null);
-                        return;
-                      }
-                      const row = event.currentTarget;
-                      const gap = 8;
-                      const detailMaxHeight = 180;
-                      const rowRect = row.getBoundingClientRect();
-                      const detailWidth = 320;
-                      const left = Math.min(
-                        rowRect.left + Math.min(220, rowRect.width * 0.34),
-                        window.innerWidth - detailWidth - 12,
-                      );
-                      const spaceBelow =
-                        window.innerHeight - rowRect.bottom - gap - 12;
-                      const spaceAbove = rowRect.top - gap - 12;
-                      const showBelow =
-                        spaceBelow >= 96 || spaceBelow >= spaceAbove;
-                      const maxHeight = Math.max(
-                        72,
-                        Math.min(
-                          detailMaxHeight,
-                          showBelow ? spaceBelow : spaceAbove,
-                        ),
-                      );
-                      setHoverDetail({
-                        label: item.label,
-                        detail: item.detail,
-                        left: Math.max(12, left),
-                        ...(showBelow
-                          ? { top: rowRect.bottom + gap }
-                          : {
-                              bottom: window.innerHeight - rowRect.top + gap,
-                            }),
-                        maxHeight,
-                      });
-                    }}
-                    onMouseDown={(event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      onAccept(index);
-                    }}
-                  >
-                    <span className={styles.slashCommand}>{item.label}</span>
-                    {item.detail && (
-                      <span className={styles.slashDescription}>
-                        {item.detail}
-                      </span>
-                    )}
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-      {hoverDetail && (
-        <div
-          ref={detailRef}
-          className={styles.slashDetail}
-          style={{
-            ...themeVars,
-            left: hoverDetail.left,
-            top: hoverDetail.top,
-            bottom: hoverDetail.bottom,
-            maxHeight: hoverDetail.maxHeight,
+        <PopoverAnchor
+          virtualRef={
+            anchorRef as RefObject<{ getBoundingClientRect(): DOMRect }>
+          }
+        />
+        <PopoverContent
+          ref={panelRef}
+          side="top"
+          align="start"
+          alignOffset={16}
+          sideOffset={8}
+          collisionPadding={12}
+          collisionBoundary={collisionBoundary ?? undefined}
+          role="listbox"
+          data-web-shell-slash-menu
+          style={panelStyle}
+          onOpenAutoFocus={(event) => event.preventDefault()}
+          onCloseAutoFocus={(event) => event.preventDefault()}
+          onInteractOutside={(event) => {
+            const target = event.target;
+            if (
+              target instanceof Node &&
+              (anchorRef.current?.contains(target) ||
+                detailRef.current?.contains(target))
+            ) {
+              event.preventDefault();
+            }
+          }}
+          onMouseDown={(event) => event.preventDefault()}
+          onMouseLeave={(event) => {
+            const nextTarget = event.relatedTarget;
+            if (
+              nextTarget instanceof Node &&
+              detailRef.current?.contains(nextTarget)
+            ) {
+              return;
+            }
+            setHoverDetail(null);
           }}
         >
-          <div className={styles.slashDetailCommand}>{hoverDetail.label}</div>
-          <div className={styles.slashDetailText}>{hoverDetail.detail}</div>
-        </div>
-      )}
-    </div>,
-    document.body,
+          <div className={styles.slashPanel}>
+            <div className={styles.slashPanelBody}>
+              <div
+                className={styles.slashList}
+                onScroll={() => setHoverDetail(null)}
+              >
+                {menu.items.map((item, index) => {
+                  const plan = rowPlans[index];
+                  return (
+                    <div
+                      key={`${item.id}:${index}`}
+                      className={styles.slashEntry}
+                    >
+                      {plan.showHeader && (
+                        <>
+                          {plan.showDivider && (
+                            <div className={styles.slashSection} />
+                          )}
+                          <div className={styles.slashSectionHeader}>
+                            <span>{item.section}</span>
+                            {plan.count > 0 ? (
+                              <span className={styles.slashSectionCount}>
+                                {plan.count}
+                              </span>
+                            ) : null}
+                          </div>
+                        </>
+                      )}
+                      <button
+                        ref={(node) => {
+                          itemRefs.current[index] = node;
+                        }}
+                        type="button"
+                        role="option"
+                        aria-selected={index === menu.selectedIndex}
+                        data-has-description={item.detail ? '' : undefined}
+                        className={`${styles.slashItem} ${
+                          index === menu.selectedIndex
+                            ? styles.slashItemActive
+                            : ''
+                        }`}
+                        onMouseEnter={(event) => {
+                          onSelect(index);
+                          if (!item.detail) {
+                            setHoverDetail(null);
+                            return;
+                          }
+                          hoverAnchorRef.current = event.currentTarget;
+                          setHoverDetail({
+                            label: item.label,
+                            detail: item.detail,
+                          });
+                        }}
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          onAccept(index);
+                        }}
+                      >
+                        <span className={styles.slashCommand}>
+                          {item.label}
+                        </span>
+                        {item.detail && (
+                          <span className={styles.slashDescription}>
+                            {item.detail}
+                          </span>
+                        )}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </PopoverContent>
+      </Popover>
+      <Popover
+        open={Boolean(hoverDetail)}
+        onOpenChange={(open) => {
+          if (!open) setHoverDetail(null);
+        }}
+      >
+        <PopoverAnchor
+          virtualRef={
+            hoverAnchorRef as RefObject<{ getBoundingClientRect(): DOMRect }>
+          }
+        />
+        {hoverDetail && (
+          <PopoverContent
+            ref={detailRef}
+            side="right"
+            align="start"
+            sideOffset={8}
+            collisionPadding={12}
+            collisionBoundary={collisionBoundary ?? undefined}
+            data-web-shell-slash-detail
+            onOpenAutoFocus={(event) => event.preventDefault()}
+            onCloseAutoFocus={(event) => event.preventDefault()}
+            onMouseLeave={(event) => {
+              const nextTarget = event.relatedTarget;
+              if (
+                nextTarget instanceof Node &&
+                panelRef.current?.contains(nextTarget)
+              ) {
+                return;
+              }
+              setHoverDetail(null);
+            }}
+          >
+            <div className={styles.slashDetail}>
+              <div className={styles.slashDetailCommand}>
+                {hoverDetail.label}
+              </div>
+              <div className={styles.slashDetailText}>{hoverDetail.detail}</div>
+            </div>
+          </PopoverContent>
+        )}
+      </Popover>
+    </>
   );
 }
 
@@ -918,6 +1126,8 @@ export const ChatEditor = memo(
       currentMode = 'default',
       currentModel = '',
       gitBranch,
+      workspaceName,
+      workspaceTitle,
       chatWidthMode = '1000',
       showChatWidthToggle = true,
       chatWidthToggleMin,
@@ -925,6 +1135,11 @@ export const ChatEditor = memo(
       availableModels = [],
       onSelectMode,
       onSelectModel,
+      workspaces,
+      selectedWorkspaceCwd,
+      workspaceSelectionDisabled = false,
+      onSelectWorkspace,
+      atWorkspaceCwd,
       onChatWidthModeChange,
       onFocusFooter,
       dialogOpen = false,
@@ -970,6 +1185,7 @@ export const ChatEditor = memo(
       composerInputVersion,
       builtinAtProviders,
       atProviders,
+      atWorkspaceCwd,
       composerTagIcons,
       renderComposerTag,
       renderComposerTagTooltip,
@@ -984,13 +1200,31 @@ export const ChatEditor = memo(
     const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
     const [quickActionsOpen, setQuickActionsOpen] = useState(false);
+    const [workspaceTooltipOpen, setWorkspaceTooltipOpen] = useState(false);
     const [showQuickActions, setShowQuickActions] = useState(isTouchLikeDevice);
     const containerRef = useRef<HTMLDivElement>(null);
     const slashPanelRef = useRef<HTMLDivElement>(null);
+    const slashDetailRef = useRef<HTMLDivElement>(null);
     const atPanelRef = useRef<HTMLDivElement>(null);
-    const modeBtnRef = useRef<HTMLButtonElement>(null);
-    const modelBtnRef = useRef<HTMLButtonElement>(null);
+    const toolbarRef = useRef<HTMLDivElement>(null);
+    const toolbarLeadingRef = useRef<HTMLDivElement>(null);
+    const toolbarRightRef = useRef<HTMLDivElement>(null);
+    const toolbarStartRef = useRef<HTMLDivElement>(null);
+    const toolbarEndRef = useRef<HTMLDivElement>(null);
+    const toolbarRightCustomRef = useRef<HTMLDivElement>(null);
+    const toolbarMeasurementsRef = useRef<HTMLDivElement>(null);
+    const workspaceSelectTriggerRef = useRef<HTMLButtonElement>(null);
+    const suppressWorkspaceTooltipRef = useRef(false);
+    const workspaceSelectPointerInsideRef = useRef(false);
     const [widthToggleFits, setWidthToggleFits] = useState(false);
+    const [toolbarLabelVisibility, setToolbarLabelVisibility] = useState({
+      workspaceSelect: false,
+      workspace: false,
+      gitBranch: false,
+      mode: false,
+      model: false,
+    });
+    const [lastConfirmedModelLabel, setLastConfirmedModelLabel] = useState('');
     const slashMenu = core.slashMenu;
     const closeSlashMenu = core.closeSlashMenu;
     const atMenu = core.atMenu;
@@ -1022,6 +1256,7 @@ export const ChatEditor = memo(
           container &&
           !container.contains(target) &&
           !slashPanelRef.current?.contains(target) &&
+          !slashDetailRef.current?.contains(target) &&
           !atPanelRef.current?.contains(target)
         ) {
           closeSlashMenu();
@@ -1084,6 +1319,8 @@ export const ChatEditor = memo(
       if (!visibleActionSet) return true;
       return visibleActionSet.has(action);
     };
+    const showModeAction = showToolbarAction('approvalMode');
+    const showModelAction = showToolbarAction('model');
     const commandNames = useMemo(
       () =>
         new Set(commands.map((command) => command.name.replace(/^\/+/, ''))),
@@ -1210,6 +1447,7 @@ export const ChatEditor = memo(
         availableModels.map((m) => ({
           id: m.id,
           label: getModelDisplayName(m.label || m.id),
+          searchText: `${m.label ?? ''}\n${m.id}`,
         })),
       [availableModels],
     );
@@ -1329,12 +1567,226 @@ export const ChatEditor = memo(
     // Mode display label
     const modeLabel = getModeLabel(currentMode, t);
 
-    // Model display label
-    const modelLabel = getModelDisplayName(currentModel);
+    const currentModelLabel = currentModel
+      ? getModelDisplayName(currentModel)
+      : '';
+    const { modelLabel, modelLabelReady } = resolveToolbarModelLabel({
+      currentModelLabel,
+      lastConfirmedModelLabel,
+    });
+    const selectedWorkspace = workspaces?.find((entry) =>
+      selectedWorkspaceCwd ? entry.cwd === selectedWorkspaceCwd : entry.primary,
+    );
+    const selectedWorkspaceLabel = selectedWorkspace
+      ? `${selectedWorkspace.label}${
+          selectedWorkspace.primary ? ` · ${t('sidebar.workspacePrimary')}` : ''
+        }`
+      : '';
+    const workspaceSelectVisible = Boolean(
+      workspaces && workspaces.length > 1 && onSelectWorkspace,
+    );
+    const workspaceIndicatorVisible = Boolean(
+      workspaceName && showToolbarAction('workspace'),
+    );
+    const gitBranchVisible = Boolean(
+      gitBranch && showToolbarAction('gitBranch'),
+    );
+
+    useLayoutEffect(() => {
+      if (currentModelLabel && currentModelLabel !== lastConfirmedModelLabel) {
+        setLastConfirmedModelLabel(currentModelLabel);
+      }
+    }, [currentModelLabel, lastConfirmedModelLabel]);
+
+    const showWorkspaceSelectLabel = toolbarLabelVisibility.workspaceSelect;
+    const showWorkspaceLabel = toolbarLabelVisibility.workspace;
+    const showGitBranchLabel = toolbarLabelVisibility.gitBranch;
+    const showModeLabel = toolbarLabelVisibility.mode;
+    const showModelLabel = toolbarLabelVisibility.model;
     const showCancelButton = isRunning && !core.hasContent;
 
+    useLayoutEffect(() => {
+      const toolbar = toolbarRef.current;
+      const toolbarLeading = toolbarLeadingRef.current;
+      const toolbarRight = toolbarRightRef.current;
+      const measurements = toolbarMeasurementsRef.current;
+      if (!toolbar || !toolbarLeading || !toolbarRight || !measurements) {
+        return undefined;
+      }
+
+      const update = () => {
+        const expansionWidth = (id: string) => {
+          const collapsed = measurements.querySelector<HTMLElement>(
+            `[data-toolbar-measure="${id}:collapsed"]`,
+          );
+          const expanded = measurements.querySelector<HTMLElement>(
+            `[data-toolbar-measure="${id}:expanded"]`,
+          );
+          return Math.max(
+            0,
+            Math.ceil(expanded?.getBoundingClientRect().width ?? 0) -
+              Math.ceil(collapsed?.getBoundingClientRect().width ?? 0),
+          );
+        };
+        const items = [
+          ...(workspaceSelectVisible
+            ? [
+                {
+                  id: 'workspaceSelect',
+                  expansionWidth: expansionWidth('workspaceSelect'),
+                },
+              ]
+            : []),
+          ...(workspaceIndicatorVisible
+            ? [
+                {
+                  id: 'workspace',
+                  expansionWidth: expansionWidth('workspace'),
+                },
+              ]
+            : []),
+          ...(gitBranchVisible
+            ? [
+                {
+                  id: 'gitBranch',
+                  expansionWidth: expansionWidth('gitBranch'),
+                },
+              ]
+            : []),
+          ...(showModeAction
+            ? [
+                {
+                  id: 'mode',
+                  expansionWidth: expansionWidth('mode'),
+                },
+              ]
+            : []),
+          ...(showModelAction
+            ? [
+                {
+                  id: 'model',
+                  expansionWidth: expansionWidth('model'),
+                  ready: modelLabelReady,
+                },
+              ]
+            : []),
+        ];
+        const currentExpansionWidth = items.reduce(
+          (total, item) =>
+            total +
+            (toolbarLabelVisibility[
+              item.id as keyof typeof toolbarLabelVisibility
+            ]
+              ? item.expansionWidth
+              : 0),
+          0,
+        );
+        const currentLeadingWidth = toolbarLeading.scrollWidth;
+        const gap = Math.ceil(
+          Number.parseFloat(getComputedStyle(toolbar).columnGap) || 0,
+        );
+        const availableWidth = getToolbarExpansionBudget({
+          toolbarWidth: Math.floor(toolbar.getBoundingClientRect().width),
+          leadingWidth: currentLeadingWidth,
+          rightWidth: Math.ceil(toolbarRight.getBoundingClientRect().width),
+          currentExpansionWidth,
+          gap,
+        });
+        const itemVisibility = getToolbarItemVisibilityWithHysteresis({
+          availableWidth,
+          items,
+          currentVisibility: toolbarLabelVisibility,
+          // Aggregate scrollWidth can differ from the sum of individually
+          // rounded replicas by one pixel per item. Apply that slack only when
+          // expanding so a collapsed/expanded pair cannot form a two-cycle.
+          expansionMargin: items.length,
+        });
+        const next = {
+          workspaceSelect: itemVisibility.workspaceSelect ?? false,
+          workspace: itemVisibility.workspace ?? false,
+          gitBranch: itemVisibility.gitBranch ?? false,
+          mode: itemVisibility.mode ?? false,
+          model: itemVisibility.model ?? false,
+        };
+        setToolbarLabelVisibility((current) => {
+          const unchanged = Object.keys(next).every(
+            (key) =>
+              current[key as keyof typeof current] ===
+              next[key as keyof typeof next],
+          );
+          return unchanged ? current : next;
+        });
+      };
+
+      update();
+      const resizeObserver = new ResizeObserver(update);
+      resizeObserver.observe(toolbar);
+      resizeObserver.observe(toolbarLeading);
+      resizeObserver.observe(toolbarRight);
+      for (const child of measurements.children) {
+        resizeObserver.observe(child);
+      }
+      const customToolbarRoots = [
+        toolbarStartRef.current,
+        toolbarEndRef.current,
+        toolbarRightCustomRef.current,
+      ].filter((element): element is HTMLDivElement => element !== null);
+      const observeCustomToolbarContent = () => {
+        for (const root of customToolbarRoots) {
+          resizeObserver.observe(root);
+          for (const child of root.children) {
+            resizeObserver.observe(child);
+          }
+        }
+      };
+      observeCustomToolbarContent();
+      const mutationObserver = new MutationObserver(() => {
+        observeCustomToolbarContent();
+        update();
+      });
+      for (const root of customToolbarRoots) {
+        mutationObserver.observe(root, {
+          attributes: true,
+          characterData: true,
+          childList: true,
+          subtree: true,
+        });
+      }
+      return () => {
+        mutationObserver.disconnect();
+        resizeObserver.disconnect();
+      };
+    }, [
+      ToolbarEnd,
+      ToolbarRight,
+      ToolbarStart,
+      disabled,
+      gitBranch,
+      gitBranchVisible,
+      isRunning,
+      modelLabel,
+      modelLabelReady,
+      modeLabel,
+      sessionName,
+      showModelAction,
+      showModeAction,
+      toolbarLabelVisibility,
+      workspaceIndicatorVisible,
+      workspaceName,
+      workspaceSelectVisible,
+      selectedWorkspaceLabel,
+    ]);
+
     return (
-      <div className={styles.editorShell} data-composer data-web-shell-composer>
+      <div
+        className={`${styles.editorShell} ${
+          modeDropdownOpen || modelDropdownOpen
+            ? styles.editorShellDropdownOpen
+            : ''
+        }`}
+        data-composer
+        data-web-shell-composer
+      >
         <div
           ref={containerRef}
           className={styles.container}
@@ -1405,102 +1857,82 @@ export const ChatEditor = memo(
             </div>
           )}
           <div className={styles.content}>
-            {core.composerTags.length > 0 && (
-              <div className={styles.tags}>
-                {core.composerTags.map((tag) => {
-                  const tagInfo = {
-                    tag,
-                    placement: 'composer' as const,
-                    readonly: false,
-                  };
-                  const tooltip = renderComposerTagTooltip?.(tagInfo);
-                  return (
-                    <span
-                      key={tag.id}
-                      className={styles.tag}
-                      role={onComposerTagClick ? 'button' : undefined}
-                      tabIndex={onComposerTagClick ? 0 : undefined}
-                      onClick={(event) => {
-                        if (!onComposerTagClick) return;
-                        event.stopPropagation();
-                        onComposerTagClick({
-                          ...tagInfo,
-                          anchorRect:
-                            event.currentTarget.getBoundingClientRect(),
-                        });
-                      }}
-                      onKeyDown={(event) => {
-                        if (!onComposerTagClick) return;
-                        if (event.key !== 'Enter' && event.key !== ' ') return;
-                        event.preventDefault();
-                        onComposerTagClick({
-                          ...tagInfo,
-                          anchorRect:
-                            event.currentTarget.getBoundingClientRect(),
-                        });
-                      }}
-                    >
-                      {renderComposerTagContent(tag)}
-                      {tag.removable !== false && (
+            {(core.composerTags.length > 0 || core.pastedImages.length > 0) && (
+              <div
+                className={styles.attachments}
+                data-web-shell-composer-attachments
+              >
+                {core.composerTags.length > 0 && (
+                  <TooltipPrimitive.Provider
+                    delayDuration={0}
+                    disableHoverableContent={false}
+                  >
+                    <div className={styles.tags}>
+                      {core.composerTags.map((tag) => {
+                        const tagInfo = {
+                          tag,
+                          placement: 'composer' as const,
+                          readonly: false,
+                        };
+                        let tooltip: ReactNode | null | undefined;
+                        try {
+                          tooltip = renderComposerTagTooltip?.(tagInfo);
+                        } catch (error) {
+                          console.warn(
+                            '[WebShell] composer tag tooltip render failed',
+                            error,
+                          );
+                        }
+                        return (
+                          <TopComposerTag
+                            key={tag.id}
+                            tag={tag}
+                            content={renderComposerTagContent(tag)}
+                            tooltip={tooltip}
+                            onActivate={
+                              onComposerTagClick
+                                ? (anchorRect) =>
+                                    onComposerTagClick({
+                                      ...tagInfo,
+                                      anchorRect,
+                                    })
+                                : undefined
+                            }
+                            onRemove={
+                              tag.removable !== false
+                                ? () => {
+                                    core.removeTopTag(tag.id);
+                                    core.viewRef.current?.focus();
+                                  }
+                                : undefined
+                            }
+                          />
+                        );
+                      })}
+                    </div>
+                  </TooltipPrimitive.Provider>
+                )}
+                {core.pastedImages.length > 0 && (
+                  <div className={styles.images}>
+                    {core.pastedImages.map((img, i) => (
+                      <div key={i} className={styles.imageThumb}>
+                        <img
+                          src={`data:${img.media_type};base64,${img.data}`}
+                          alt=""
+                        />
                         <button
-                          type="button"
-                          className={styles.tagRemove}
-                          aria-label={`Remove ${getComposerTagDisplay(tag)}`}
-                          onMouseDown={(event) => event.preventDefault()}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            core.removeTopTag(tag.id);
-                            core.viewRef.current?.focus();
-                          }}
-                          onKeyDown={(event) => {
-                            if (event.key === 'Enter' || event.key === ' ') {
-                              event.stopPropagation();
-                              return;
-                            }
-                            if (
-                              event.key !== 'Backspace' &&
-                              event.key !== 'Delete'
-                            ) {
-                              return;
-                            }
-                            event.preventDefault();
-                            event.stopPropagation();
-                            core.removeTopTag(tag.id);
-                            core.viewRef.current?.focus();
+                          className={styles.imageRemove}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            core.removeImage(i);
                           }}
                         >
                           ×
                         </button>
-                      )}
-                      {tooltip !== undefined && tooltip !== null && (
-                        <span className={styles.tagTooltip} role="tooltip">
-                          {tooltip}
-                        </span>
-                      )}
-                    </span>
-                  );
-                })}
-              </div>
-            )}
-            {core.pastedImages.length > 0 && (
-              <div className={styles.images}>
-                {core.pastedImages.map((img, i) => (
-                  <div key={i} className={styles.imageThumb}>
-                    <img
-                      src={`data:${img.media_type};base64,${img.data}`}
-                      alt=""
-                    />
-                    <button
-                      className={styles.imageRemove}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        core.removeImage(i);
-                      }}
-                    >
-                      ×
-                    </button>
+                      </div>
+                    ))}
                   </div>
-                ))}
+                )}
               </div>
             )}
             {core.slashMenu && (
@@ -1508,6 +1940,8 @@ export const ChatEditor = memo(
                 menu={core.slashMenu}
                 anchorRef={containerRef}
                 panelRef={slashPanelRef}
+                detailRef={slashDetailRef}
+                onClose={core.closeSlashMenu}
                 onSelect={core.selectSlashCompletion}
                 onAccept={core.acceptSlashCompletion}
               />
@@ -1538,10 +1972,10 @@ export const ChatEditor = memo(
               )}
               <div ref={core.containerRef} data-web-shell-composer-editor />
             </div>
-            <div className={styles.toolbar}>
-              <div className={styles.toolbarLeading}>
+            <div ref={toolbarRef} className={styles.toolbar}>
+              <div ref={toolbarLeadingRef} className={styles.toolbarLeading}>
                 {ToolbarStart && (
-                  <div className={styles.toolbarStart}>
+                  <div ref={toolbarStartRef} className={styles.toolbarStart}>
                     <ToolbarStart
                       disabled={disabled}
                       isRunning={isRunning}
@@ -1552,84 +1986,221 @@ export const ChatEditor = memo(
                   </div>
                 )}
                 <div className={styles.toolbarLeft}>
-                  {gitBranch && showToolbarAction('gitBranch') && (
+                  {workspaceSelectVisible &&
+                    workspaces &&
+                    onSelectWorkspace && (
+                      <Select
+                        value={selectedWorkspace?.id}
+                        disabled={workspaceSelectionDisabled}
+                        onValueChange={(value) => {
+                          const nextWorkspace = workspaces.find(
+                            (entry) => entry.id === value,
+                          );
+                          if (!nextWorkspace) return;
+                          onSelectWorkspace(
+                            nextWorkspace.primary
+                              ? undefined
+                              : nextWorkspace.cwd,
+                          );
+                          suppressWorkspaceTooltipRef.current = true;
+                          setWorkspaceTooltipOpen(false);
+                          requestAnimationFrame(() => {
+                            workspaceSelectTriggerRef.current?.blur();
+                          });
+                        }}
+                      >
+                        <TooltipProvider delayDuration={300}>
+                          <Tooltip
+                            open={workspaceTooltipOpen}
+                            onOpenChange={(open) => {
+                              if (
+                                open &&
+                                (suppressWorkspaceTooltipRef.current ||
+                                  !workspaceSelectPointerInsideRef.current)
+                              ) {
+                                return;
+                              }
+                              setWorkspaceTooltipOpen(open);
+                            }}
+                          >
+                            <TooltipTrigger asChild>
+                              <span
+                                className={`${styles.workspaceSelectTooltipTrigger} ${
+                                  showWorkspaceSelectLabel
+                                    ? ''
+                                    : styles.workspaceSelectTooltipTriggerCompact
+                                }`}
+                                onPointerEnter={() => {
+                                  workspaceSelectPointerInsideRef.current = true;
+                                }}
+                                onPointerLeave={() => {
+                                  workspaceSelectPointerInsideRef.current = false;
+                                  suppressWorkspaceTooltipRef.current = false;
+                                }}
+                                onBlur={() => {
+                                  if (
+                                    !workspaceSelectPointerInsideRef.current
+                                  ) {
+                                    suppressWorkspaceTooltipRef.current = false;
+                                  }
+                                }}
+                              >
+                                <SelectTrigger
+                                  ref={workspaceSelectTriggerRef}
+                                  size="sm"
+                                  className={`${styles.toolBtn} ${styles.workspaceSelectTrigger} ${
+                                    showWorkspaceSelectLabel
+                                      ? ''
+                                      : styles.workspaceSelectTriggerCompact
+                                  }`}
+                                  aria-label={t('sidebar.workspaceSelectLabel')}
+                                >
+                                  <FolderClosedIcon
+                                    size={16}
+                                    strokeWidth={1.2}
+                                  />
+                                  <SelectValue />
+                                </SelectTrigger>
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent side="top">
+                              {selectedWorkspaceLabel}
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                        <SelectContent position="popper" align="start">
+                          <SelectGroup>
+                            {workspaces.map((entry) => (
+                              <SelectItem key={entry.id} value={entry.id}>
+                                {entry.label}
+                                {entry.primary
+                                  ? ` · ${t('sidebar.workspacePrimary')}`
+                                  : ''}
+                              </SelectItem>
+                            ))}
+                          </SelectGroup>
+                        </SelectContent>
+                      </Select>
+                    )}
+                  {workspaceIndicatorVisible && workspaceName && (
+                    <WorkspaceIndicator
+                      name={workspaceName}
+                      title={workspaceTitle ?? workspaceName}
+                      compact={!showWorkspaceLabel}
+                      ariaLabel={t('workspace.paneLabel', {
+                        name: workspaceName,
+                      })}
+                    />
+                  )}
+                  {gitBranchVisible && gitBranch && (
                     <GitBranchIndicator
                       branch={gitBranch}
+                      compact={!showGitBranchLabel}
                       ariaLabel={t('git.currentBranch', { branch: gitBranch })}
                     />
                   )}
-                  {showToolbarAction('approvalMode') && (
-                    <div className={styles.dropdownWrapper}>
-                      <ToolbarDropdown
+                  {showModeAction && (
+                    <div
+                      className={`${styles.dropdownWrapper} ${
+                        showModeLabel ? '' : styles.dropdownWrapperCompact
+                      }`}
+                    >
+                      <ToolbarPopover
                         open={modeDropdownOpen}
                         items={modeItems}
                         activeId={currentMode}
-                        onClose={() => setModeDropdownOpen(false)}
-                        onSelect={handleModeSelect}
-                        anchorRef={modeBtnRef}
-                      />
-                      <button
-                        ref={modeBtnRef}
-                        className={styles.toolBtn}
-                        data-web-shell-mode-button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          core.closeSlashMenu();
-                          core.closeAtMenu();
-                          setQuickActionsOpen(false);
-                          setModeDropdownOpen((v) => !v);
-                          setModelDropdownOpen(false);
+                        onOpenChange={(open) => {
+                          setModeDropdownOpen(open);
+                          if (open) setModelDropdownOpen(false);
                         }}
-                        aria-label={t('status.mode')}
-                      >
-                        <span className={styles.toolBtnModeIcon}>
-                          <ModeIcon mode={currentMode} />
-                        </span>
-                        <span className={styles.toolBtnText}>{modeLabel}</span>
-                        <span className={styles.toolBtnArrow}>
-                          <ChevronDownIcon />
-                        </span>
-                      </button>
+                        onSelect={handleModeSelect}
+                        tooltip={modeLabel}
+                        trigger={
+                          <button
+                            className={`${styles.toolBtn} ${styles.modeToolBtn} ${
+                              showModeLabel ? '' : styles.toolBtnCompact
+                            }`}
+                            data-web-shell-mode-button
+                            data-web-shell-toolbar-popover-trigger
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              core.closeSlashMenu();
+                              core.closeAtMenu();
+                              setQuickActionsOpen(false);
+                            }}
+                            aria-label={t('status.mode')}
+                          >
+                            <span className={styles.toolBtnModeIcon}>
+                              <ModeIcon mode={currentMode} />
+                            </span>
+                            {showModeLabel && (
+                              <span className={styles.toolBtnText}>
+                                {modeLabel}
+                              </span>
+                            )}
+                            <span className={styles.toolBtnArrow}>
+                              <ChevronDownIcon />
+                            </span>
+                          </button>
+                        }
+                      />
                     </div>
                   )}
-                  {showToolbarAction('model') && (
-                    <div className={styles.dropdownWrapper}>
-                      <ToolbarDropdown
+                  {showModelAction && (
+                    <div
+                      className={`${styles.dropdownWrapper} ${
+                        showModelLabel ? '' : styles.dropdownWrapperCompact
+                      }`}
+                    >
+                      <ToolbarPopover
                         open={modelDropdownOpen}
                         items={modelItems}
                         activeId={currentModel}
-                        onClose={() => setModelDropdownOpen(false)}
-                        onSelect={handleModelSelect}
-                        anchorRef={modelBtnRef}
-                        showCheck
-                        maxHeight={300}
-                      />
-                      <button
-                        ref={modelBtnRef}
-                        className={styles.toolBtn}
-                        data-web-shell-model-button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          core.closeSlashMenu();
-                          core.closeAtMenu();
-                          setQuickActionsOpen(false);
-                          setModelDropdownOpen((v) => !v);
-                          setModeDropdownOpen(false);
+                        onOpenChange={(open) => {
+                          setModelDropdownOpen(open);
+                          if (open) setModeDropdownOpen(false);
                         }}
-                        aria-label={t('model.select')}
-                      >
-                        <span className={styles.toolBtnModelIcon}>
-                          <ModelIcon />
-                        </span>
-                        <span className={styles.toolBtnText}>{modelLabel}</span>
-                        <span className={styles.toolBtnArrow}>
-                          <ChevronDownIcon />
-                        </span>
-                      </button>
+                        onSelect={handleModelSelect}
+                        tooltip={modelLabel}
+                        showCheck
+                        searchable
+                        searchLabel={t('common.search')}
+                        noResultsLabel={(query) =>
+                          t('model.noMatch', { query })
+                        }
+                        trigger={
+                          <button
+                            className={`${styles.toolBtn} ${styles.modelToolBtn} ${
+                              showModelLabel ? '' : styles.toolBtnCompact
+                            }`}
+                            data-web-shell-model-button
+                            data-web-shell-toolbar-popover-trigger
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              core.closeSlashMenu();
+                              core.closeAtMenu();
+                              setQuickActionsOpen(false);
+                            }}
+                            aria-label={t('model.select')}
+                          >
+                            <span className={styles.toolBtnModelIcon}>
+                              <ModelIcon />
+                            </span>
+                            {showModelLabel && (
+                              <span className={styles.toolBtnText}>
+                                {modelLabel}
+                              </span>
+                            )}
+                            <span className={styles.toolBtnArrow}>
+                              <ChevronDownIcon />
+                            </span>
+                          </button>
+                        }
+                      />
                     </div>
                   )}
                   {ToolbarEnd && (
-                    <div className={styles.toolbarEnd}>
+                    <div ref={toolbarEndRef} className={styles.toolbarEnd}>
                       <ToolbarEnd
                         disabled={disabled}
                         isRunning={isRunning}
@@ -1641,7 +2212,7 @@ export const ChatEditor = memo(
                   )}
                 </div>
               </div>
-              <div className={styles.toolbarRight}>
+              <div ref={toolbarRightRef} className={styles.toolbarRight}>
                 {showQuickActions && quickActions.length > 0 && (
                   <button
                     className={`${styles.toolBtn} ${styles.quickActionsBtn}`}
@@ -1664,7 +2235,10 @@ export const ChatEditor = memo(
                   </button>
                 )}
                 {ToolbarRight && (
-                  <div className={styles.toolbarRightCustom}>
+                  <div
+                    ref={toolbarRightCustomRef}
+                    className={styles.toolbarRightCustom}
+                  >
                     <ToolbarRight
                       disabled={disabled}
                       isRunning={isRunning}
@@ -1782,6 +2356,128 @@ export const ChatEditor = memo(
                   {isRunning && cancelArmed ? t('stream.cancelArmed') : ''}
                 </span>
               </div>
+            </div>
+            <div
+              ref={toolbarMeasurementsRef}
+              className={styles.toolbarMeasurements}
+              aria-hidden="true"
+            >
+              {workspaceSelectVisible && selectedWorkspace && (
+                <>
+                  <span
+                    data-toolbar-measure="workspaceSelect:collapsed"
+                    className={`${styles.toolBtn} ${styles.workspaceSelectTrigger} ${styles.workspaceSelectTriggerCompact}`}
+                  >
+                    <FolderClosedIcon size={16} strokeWidth={1.2} />
+                    <span className={styles.toolBtnText}>
+                      {selectedWorkspaceLabel}
+                    </span>
+                    <span className={styles.toolBtnArrow}>
+                      <ChevronDownIcon />
+                    </span>
+                  </span>
+                  <span
+                    data-toolbar-measure="workspaceSelect:expanded"
+                    className={`${styles.toolBtn} ${styles.workspaceSelectTrigger}`}
+                  >
+                    <FolderClosedIcon size={16} strokeWidth={1.2} />
+                    <span className={styles.toolBtnText}>
+                      {selectedWorkspaceLabel}
+                    </span>
+                    <span className={styles.toolBtnArrow}>
+                      <ChevronDownIcon />
+                    </span>
+                  </span>
+                </>
+              )}
+              {workspaceIndicatorVisible && workspaceName && (
+                <>
+                  <span
+                    data-toolbar-measure="workspace:collapsed"
+                    className={`${styles.workspaceChip} ${styles.workspaceChipCompact}`}
+                  >
+                    <span className={styles.workspaceChipIcon} />
+                    <span className={styles.workspaceChipText}>
+                      {workspaceName}
+                    </span>
+                  </span>
+                  <span
+                    data-toolbar-measure="workspace:expanded"
+                    className={styles.workspaceChip}
+                  >
+                    <span className={styles.workspaceChipIcon} />
+                    <span className={styles.workspaceChipText}>
+                      {workspaceName}
+                    </span>
+                  </span>
+                </>
+              )}
+              {gitBranchVisible && gitBranch && (
+                <>
+                  <span
+                    data-toolbar-measure="gitBranch:collapsed"
+                    className={`${styles.gitBranchChip} ${styles.gitBranchChipCompact}`}
+                  >
+                    <span className={styles.gitBranchIcon} />
+                    <span className={styles.gitBranchText}>{gitBranch}</span>
+                  </span>
+                  <span
+                    data-toolbar-measure="gitBranch:expanded"
+                    className={styles.gitBranchChip}
+                  >
+                    <span className={styles.gitBranchIcon} />
+                    <span className={styles.gitBranchText}>{gitBranch}</span>
+                  </span>
+                </>
+              )}
+              <span
+                data-toolbar-measure="mode:collapsed"
+                className={`${styles.toolBtn} ${styles.modeToolBtn} ${styles.toolBtnCompact}`}
+              >
+                <span className={styles.toolBtnModeIcon}>
+                  <ModeIcon mode={currentMode} />
+                </span>
+                <span className={styles.toolBtnText}>{modeLabel}</span>
+                <span className={styles.toolBtnArrow}>
+                  <ChevronDownIcon />
+                </span>
+              </span>
+              <span
+                data-toolbar-measure="mode:expanded"
+                className={`${styles.toolBtn} ${styles.modeToolBtn}`}
+              >
+                <span className={styles.toolBtnModeIcon}>
+                  <ModeIcon mode={currentMode} />
+                </span>
+                <span className={styles.toolBtnText}>{modeLabel}</span>
+                <span className={styles.toolBtnArrow}>
+                  <ChevronDownIcon />
+                </span>
+              </span>
+              <span
+                data-toolbar-measure="model:collapsed"
+                className={`${styles.toolBtn} ${styles.modelToolBtn} ${styles.toolBtnCompact}`}
+              >
+                <span className={styles.toolBtnModelIcon}>
+                  <ModelIcon />
+                </span>
+                <span className={styles.toolBtnText}>{modelLabel}</span>
+                <span className={styles.toolBtnArrow}>
+                  <ChevronDownIcon />
+                </span>
+              </span>
+              <span
+                data-toolbar-measure="model:expanded"
+                className={`${styles.toolBtn} ${styles.modelToolBtn}`}
+              >
+                <span className={styles.toolBtnModelIcon}>
+                  <ModelIcon />
+                </span>
+                <span className={styles.toolBtnText}>{modelLabel}</span>
+                <span className={styles.toolBtnArrow}>
+                  <ChevronDownIcon />
+                </span>
+              </span>
             </div>
           </div>
         </div>

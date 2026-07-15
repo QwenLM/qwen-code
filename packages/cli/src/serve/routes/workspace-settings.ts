@@ -28,6 +28,7 @@ import type { WorkspaceRegistry } from '../workspace-registry.js';
 const TUI_ONLY_SETTINGS = new Set([
   'general.vimMode',
   'general.terminalBell',
+  'general.notificationMode',
   'general.preferredEditor',
   'general.outputLanguage',
   'ide.enabled',
@@ -44,7 +45,11 @@ const TUI_ONLY_SETTINGS = new Set([
 // `/voice/stream` then reads it back via `loadSettings`.
 const WEB_SHELL_SETTINGS = new Set(['ui.compactMode', 'voiceModel']);
 
-const VALID_WRITE_SCOPES = new Set(['workspace']);
+// The primary /workspace/settings route may write the global user scope
+// (~/.qwen/settings.json). The trust-gated workspace-qualified route stays
+// workspace-only by design.
+const VALID_WRITE_SCOPES = new Set(['workspace', 'user']);
+const QUALIFIED_WRITE_SCOPES = new Set(['workspace']);
 
 interface SettingDescriptor {
   key: string;
@@ -145,6 +150,7 @@ function buildSettingsResponse(
 
 const SCOPE_MAP: Record<string, SettingScope> = {
   workspace: SettingScope.Workspace,
+  user: SettingScope.User,
 };
 
 export interface WorkspaceSettingsRouteDeps {
@@ -359,9 +365,9 @@ export function registerWorkspaceQualifiedSettingsRoutes(
       const key = body['key'];
       const value = body['value'];
 
-      if (typeof scope !== 'string' || !VALID_WRITE_SCOPES.has(scope)) {
+      if (typeof scope !== 'string' || !QUALIFIED_WRITE_SCOPES.has(scope)) {
         res.status(400).json({
-          error: `scope must be one of: ${[...VALID_WRITE_SCOPES].join(', ')}`,
+          error: `scope must be one of: ${[...QUALIFIED_WRITE_SCOPES].join(', ')}`,
           code: 'invalid_scope',
         });
         return;
@@ -410,10 +416,11 @@ export function registerWorkspaceQualifiedSettingsRoutes(
       );
       if (clientId === null) return;
 
+      // The guard above already rejected any scope outside QUALIFIED_WRITE_SCOPES.
       const settingScope = SCOPE_MAP[scope];
       if (!settingScope) {
         res.status(400).json({
-          error: `scope must be one of: ${[...VALID_WRITE_SCOPES].join(', ')}`,
+          error: `scope must be one of: ${[...QUALIFIED_WRITE_SCOPES].join(', ')}`,
           code: 'invalid_scope',
         });
         return;

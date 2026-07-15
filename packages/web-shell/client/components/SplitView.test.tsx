@@ -16,17 +16,37 @@ Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 /* eslint-disable @typescript-eslint/no-explicit-any */
 let connectionState: any;
 let sessionsState: any[];
+// Live sessions the mock daemon returns per non-primary workspace cwd, keyed by
+// cwd — drives `useOtherWorkspaceSessions` (via the mocked `useWorkspace`).
+let otherWorkspaceSessions: Record<string, any[]>;
+// Stable client object (assigned once per test) so the other-workspace hook's
+// load callback keeps a stable identity and its effect doesn't loop.
+let workspaceClient: {
+  listWorkspaceSessions: ReturnType<typeof vi.fn>;
+  workspaceByCwd: ReturnType<typeof vi.fn>;
+};
 // Stable across renders (assigned once per test) so SplitView's reload effects,
 // which depend on `reload`'s identity, don't re-fire on every render.
 let reloadMock: ReturnType<typeof vi.fn>;
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   DaemonSessionProvider: (props: any) => (
-    <div data-session={props.sessionId} data-clientid={props.clientId}>
+    <div
+      data-session={props.sessionId}
+      data-clientid={props.clientId}
+      data-workspace={props.workspaceCwd}
+    >
       {props.children}
     </div>
   ),
   useConnection: () => connectionState,
+  // `client` is a stable object; `capabilities` mirrors the connection so a test
+  // that sets `capabilities.workspaces` drives both the picker labels and the
+  // other-workspace fan-out from one place.
+  useWorkspace: () => ({
+    client: workspaceClient,
+    capabilities: connectionState.capabilities,
+  }),
   // Stateful, like the real hook: reload() re-renders with the CURRENT module
   // store. This lets a test prove the picker renders sessions that appeared
   // only after the reload — not merely that reload() was called.
@@ -46,7 +66,7 @@ vi.mock('./ChatPane', () => ({
     // Let a test force a render crash to exercise the per-pane ErrorBoundary.
     if (props.title === 'BOOM') throw new Error('pane exploded');
     return (
-      <div data-testid="chat-pane">
+      <div data-testid="chat-pane" data-pane-workspace={props.workspaceCwd}>
         <span data-testid="pane-title">{props.title}</span>
         {props.onClose && (
           <button data-testid="pane-close" onClick={props.onClose}>
@@ -75,8 +95,29 @@ beforeEach(() => {
     { sessionId: 's3', workspaceCwd: '/w', displayName: 'Three' },
     { sessionId: 's4', workspaceCwd: '/w', displayName: 'Four' },
   ];
+  otherWorkspaceSessions = {};
+  workspaceClient = {
+    listWorkspaceSessions: vi.fn(
+      async (cwd: string) => otherWorkspaceSessions[cwd] ?? [],
+    ),
+    workspaceByCwd: vi.fn((cwd: string) => ({
+      listWorkspaceSessions: vi.fn(
+        async () => otherWorkspaceSessions[cwd] ?? [],
+      ),
+    })),
+  };
   reloadMock = vi.fn();
 });
+
+// Flush the other-workspace hook's async fan-out (Promise.allSettled + the
+// effect's `.then` setState). Three ticks so the state update lands in `act`.
+async function flushAsync(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
 
 afterEach(() => {
   act(() => root?.unmount());
@@ -404,5 +445,154 @@ describe('SplitView', () => {
     const close = container!.querySelector('[data-testid="pane-close"]');
     act(() => close!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
     expect(onPanesChange).toHaveBeenLastCalledWith(['s1']);
+  });
+
+  const MULTI_WORKSPACE_CAPS = {
+    features: [] as string[],
+    workspaceCwd: '/w',
+    workspaces: [
+      { id: 'w0', cwd: '/w', primary: true, trusted: true },
+      { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+    ],
+  };
+
+  it('offers other trusted workspaces’ sessions in the picker, tagged by workspace', async () => {
+    connectionState.capabilities = MULTI_WORKSPACE_CAPS;
+    otherWorkspaceSessions['/wsB'] = [
+      { sessionId: 'b1', workspaceCwd: '/wsB', displayName: 'Beta' },
+    ];
+    render({ sessionIds: ['s1'] });
+    await flushAsync(); // let the other-workspace fan-out resolve
+    openPicker();
+    await flushAsync(); // opening the picker re-fires reload()/reloadOther()
+    const options = pickerOptions();
+    // Primary sessions are still listed…
+    expect(options.some((o) => o.includes('Two'))).toBe(true);
+    // …plus the non-primary session, tagged with its workspace basename.
+    expect(options.some((o) => o.includes('Beta') && o.includes('wsB'))).toBe(
+      true,
+    );
+  });
+
+  it('attaches an added other-workspace pane under its own workspace cwd', async () => {
+    connectionState.capabilities = MULTI_WORKSPACE_CAPS;
+    otherWorkspaceSessions['/wsB'] = [
+      { sessionId: 'b1', workspaceCwd: '/wsB', displayName: 'Beta' },
+    ];
+    // Uncontrolled (no `sessionIds`) so the picker mounts panes locally; the
+    // seed is the current session s3.
+    render();
+    await flushAsync();
+    openPicker();
+    await flushAsync(); // opening the picker re-fires reload()/reloadOther()
+    const betaButton = Array.from(
+      container!.querySelectorAll('[role="option"] button'),
+    ).find((el) =>
+      (el.textContent ?? '').includes('Beta'),
+    ) as HTMLButtonElement;
+    act(() =>
+      betaButton.dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    const providerFor = (id: string) =>
+      Array.from(container!.querySelectorAll('[data-session]')).find(
+        (el) => el.getAttribute('data-session') === id,
+      );
+    // The new pane binds the session's own workspace, so the daemon routes the
+    // attach to /wsB instead of 409ing it against the primary cwd.
+    expect(providerFor('b1')?.getAttribute('data-workspace')).toBe('/wsB');
+    // The primary seed pane still binds the primary cwd.
+    expect(providerFor('s3')?.getAttribute('data-workspace')).toBe('/w');
+    // The pane also receives its workspace as a prop (for the composer chip),
+    // not just through the provider — so dropping that pass-through fails here.
+    expect(
+      providerFor('b1')
+        ?.querySelector('[data-testid="chat-pane"]')
+        ?.getAttribute('data-pane-workspace'),
+    ).toBe('/wsB');
+  });
+
+  it('loads and attaches only the locked secondary workspace', async () => {
+    connectionState.capabilities = MULTI_WORKSPACE_CAPS;
+    otherWorkspaceSessions['/wsB'] = [
+      { sessionId: 'b1', workspaceCwd: '/wsB', displayName: 'Beta' },
+    ];
+
+    render({
+      sessionIds: ['b1'],
+      includeOtherWorkspaces: false,
+      workspaceCwd: '/wsB',
+    });
+    await flushAsync();
+
+    expect(titles()).toEqual(['Beta']);
+    expect(
+      container!
+        .querySelector('[data-session="b1"]')
+        ?.getAttribute('data-workspace'),
+    ).toBe('/wsB');
+    openPicker();
+    expect(pickerOptions().some((option) => option.includes('One'))).toBe(
+      false,
+    );
+  });
+
+  it('remounts a deep-linked pane under its workspace once the session list resolves', async () => {
+    connectionState.capabilities = MULTI_WORKSPACE_CAPS;
+    otherWorkspaceSessions['/wsB'] = [
+      { sessionId: 'b1', workspaceCwd: '/wsB', displayName: 'Beta' },
+    ];
+    // Deep-link straight to an other-workspace session (b1) — the pane mounts
+    // before the other-workspace fan-out has resolved, so its workspace is not
+    // yet known.
+    render({ sessionIds: ['b1'] });
+    const workspaceOf = () =>
+      container!
+        .querySelector('[data-session="b1"]')
+        ?.getAttribute('data-workspace');
+    // Before the fan-out resolves the pane can't be pinned to a workspace.
+    expect(workspaceOf()).toBeNull();
+
+    await flushAsync();
+
+    // Once `workspaceCwdById` populates, the pane key flips from `b1:` to
+    // `b1:/wsB`, so the pane remounts bound to /wsB (never left on the primary
+    // cwd, which would 409 the attach).
+    expect(workspaceOf()).toBe('/wsB');
+  });
+
+  it('never fans out to other workspaces on a single-workspace daemon', async () => {
+    // Default capabilities carry no `workspaces`, so the other-workspace hook
+    // must not touch the daemon and the picker stays untagged.
+    render({ sessionIds: ['s1'] });
+    await flushAsync();
+    expect(workspaceClient.listWorkspaceSessions).not.toHaveBeenCalled();
+    openPicker();
+    expect(pickerOptions()).toEqual(['Two', 'Three', 'Four']);
+  });
+
+  it('does not pin a workspace on panes for a single-workspace daemon', () => {
+    // The pane provider must get no `workspaceCwd` prop (it falls back to the
+    // provider's primary cwd) so a deep-linked pane never re-attaches when the
+    // session list resolves — today's behavior, unchanged.
+    render({ sessionIds: ['s1'] });
+    const provider = container!.querySelector('[data-session="s1"]');
+    expect(provider?.getAttribute('data-workspace')).toBeNull();
+  });
+
+  it('re-queries other workspaces when the picker opens', async () => {
+    connectionState.capabilities = MULTI_WORKSPACE_CAPS;
+    otherWorkspaceSessions['/wsB'] = [
+      { sessionId: 'b1', workspaceCwd: '/wsB', displayName: 'Beta' },
+    ];
+    render({ sessionIds: ['s1'] });
+    await flushAsync();
+    const before = workspaceClient.listWorkspaceSessions.mock.calls.length;
+    openPicker();
+    await flushAsync();
+    // Opening the picker reloads the other-workspace list so it never offers a
+    // stale set (mirrors the primary `reload()` on picker open).
+    expect(
+      workspaceClient.listWorkspaceSessions.mock.calls.length,
+    ).toBeGreaterThan(before);
   });
 });

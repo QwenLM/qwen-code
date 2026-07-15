@@ -72,6 +72,7 @@ export * from './core/nonInteractiveToolExecutor.js';
 export * from './core/prompts.js';
 export * from './core/session-recovery.js';
 export * from './core/tokenLimits.js';
+export * from './core/tool-call-preparation.js';
 export * from './core/toolCallIdUtils.js';
 export * from './core/turn.js';
 export * from './core/turn-interruption.js';
@@ -241,7 +242,9 @@ export {
   SESSION_TRANSCRIPT_DEFAULT_LIMIT,
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SESSION_TRANSCRIPT_MAX_LIMIT,
+  SessionTranscriptCursorCodec,
   SessionTranscriptReader,
+  SessionTranscriptPageTooLargeError,
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
 } from './services/session-transcript-reader.js';
@@ -320,6 +323,7 @@ export * from './memory/types.js';
 export * from './memory/paths.js';
 export * from './memory/store.js';
 export * from './memory/const.js';
+export * from './memory/channel-memory-document.js';
 export * from './memory/channel-memory.js';
 export * from './memory/remember.js';
 export * from './memory/refresh.js';

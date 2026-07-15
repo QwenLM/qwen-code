@@ -13,9 +13,12 @@ import type {
   ServerGeminiStreamEvent,
   AgentResultDisplay,
   McpToolProgressData,
+  ShellProgressData,
 } from '@qwen-code/qwen-code-core';
 import {
+  formatVisionBridgeNoticeDisplay,
   GeminiEventType,
+  isVisionBridgeNoticeDisplay,
   ToolErrorType,
   parseAndFormatApiError,
 } from '@qwen-code/qwen-code-core';
@@ -96,11 +99,11 @@ export interface MessageEmitter {
    * In non-streaming mode, this is a no-op.
    *
    * @param request - Tool call request info
-   * @param progress - Structured MCP progress data
+   * @param progress - Structured MCP progress data or shell liveness heartbeat
    */
   emitToolProgress(
     request: ToolCallRequestInfo,
-    progress: McpToolProgressData,
+    progress: McpToolProgressData | ShellProgressData,
   ): void;
 }
 
@@ -1155,11 +1158,11 @@ export abstract class BaseJsonOutputAdapter {
    * to emit stream events when includePartialMessages is enabled.
    *
    * @param _request - Tool call request info
-   * @param _progress - Structured MCP progress data
+   * @param _progress - Structured MCP progress data or shell liveness heartbeat
    */
   emitToolProgress(
     _request: ToolCallRequestInfo,
-    _progress: McpToolProgressData,
+    _progress: McpToolProgressData | ShellProgressData,
   ): void {
     // No-op in base class. Only StreamJsonOutputAdapter emits tool progress
     // as stream events when includePartialMessages is enabled.
@@ -1400,6 +1403,22 @@ function checkResponsePartsForError(
 export function toolResultContent(
   response: ToolCallResponseInfo,
 ): string | undefined {
+  if (isVisionBridgeNoticeDisplay(response.resultDisplay)) {
+    const notice = formatVisionBridgeNoticeDisplay(response.resultDisplay);
+    if (response.error) {
+      return `${notice}\n${response.error.message}`;
+    }
+    const responsePartsError = checkResponsePartsForError(
+      response.responseParts,
+    );
+    if (responsePartsError) {
+      return `${notice}\n${responsePartsError}`;
+    }
+    if (response.responseParts && response.responseParts.length > 0) {
+      return `${notice}\n${functionResponsePartsToString(response.responseParts)}`;
+    }
+    return notice;
+  }
   if (response.error) {
     return response.error.message;
   }

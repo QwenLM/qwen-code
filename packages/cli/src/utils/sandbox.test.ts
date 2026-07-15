@@ -10,7 +10,11 @@ import { pathToFileURL } from 'node:url';
 import { FatalSandboxError, QWEN_DIR } from '@qwen-code/qwen-code-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { isContainerPathWithinWorkdir } from './sandbox-path.js';
-import { resolveSeatbeltProfileFile, start_sandbox } from './sandbox.js';
+import {
+  getSandboxPassthroughEnvArgs,
+  resolveSeatbeltProfileFile,
+  start_sandbox,
+} from './sandbox.js';
 import { parseSandboxImageName } from './sandboxImageName.js';
 import { parseSandboxMountSpec } from './sandboxMounts.js';
 
@@ -73,6 +77,25 @@ describe('resolveSeatbeltProfileFile', () => {
         `Missing macos seatbelt profile file '${expectedPath}'`,
       ),
     );
+  });
+});
+
+describe('getSandboxPassthroughEnvArgs', () => {
+  it('passes update relaunch state into container sandboxes', () => {
+    expect(
+      getSandboxPassthroughEnvArgs({
+        QWEN_CODE_SKIP_UPDATE_CHECK_ONCE: 'true',
+        QWEN_CODE_CUSTOM_SANDBOX_IMAGE: 'example.com/qwen:1.0.0',
+        QWEN_CODE_HOST_UPDATE_RELAUNCH: 'false',
+      }),
+    ).toEqual([
+      '--env',
+      'QWEN_CODE_SKIP_UPDATE_CHECK_ONCE=true',
+      '--env',
+      'QWEN_CODE_CUSTOM_SANDBOX_IMAGE=example.com/qwen:1.0.0',
+      '--env',
+      'QWEN_CODE_HOST_UPDATE_RELAUNCH=false',
+    ]);
   });
 });
 

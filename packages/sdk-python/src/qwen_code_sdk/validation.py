@@ -134,7 +134,11 @@ def validate_query_options(options: QueryOptions) -> None:
             "fork_session requires resume or continue_session to be set"
         )
 
-    if options.max_session_turns is not None and options.max_session_turns < -1:
+    if options.max_session_turns is not None and (
+        isinstance(options.max_session_turns, bool)
+        or not isinstance(options.max_session_turns, int)
+        or options.max_session_turns < -1
+    ):
         raise ValidationError("max_session_turns must be -1 or a non-negative integer")
 
     if (

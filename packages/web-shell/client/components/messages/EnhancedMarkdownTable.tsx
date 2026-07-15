@@ -69,6 +69,18 @@ interface SelectionRange {
   focusCol: number;
 }
 
+interface SelectionStatistics {
+  selectedCount: number;
+  nonEmptyCount: number;
+  numericCount: number;
+  sum: number;
+  average: number;
+  min: number;
+  max: number;
+  format: 'number' | 'percent' | 'currency';
+  currencySymbol?: string;
+}
+
 interface ColumnFilter {
   selectedValues?: string[];
   textFilter?: {
@@ -348,6 +360,7 @@ function parseNumber(value: string): number | null {
   const normalized = numericText.replace(/[$€£¥₹,\s]/g, '');
   if (!/^-?(\d+(\.\d+)?|\.\d+)$/.test(normalized)) return null;
   const parsed = Number(normalized);
+  if (!Number.isFinite(parsed)) return null;
   return isPercent ? parsed / 100 : parsed;
 }
 
@@ -464,17 +477,98 @@ function getVisibleTableText(
   return lines.join('\n');
 }
 
-function selectionSize(
+function getSelectionStatistics(
   range: SelectionRange | null,
+  rows: EnhancedTableRow[],
   visibleColumnIndexes: number[],
-): number {
-  if (!range) return 0;
+): SelectionStatistics | null {
+  if (!range) return null;
   const { minRow, maxRow } = getSelectionRowBounds(range);
-  const selectedColumnCount = getSelectedColumnIndexes(
-    range,
-    visibleColumnIndexes,
-  ).length;
-  return (maxRow - minRow + 1) * selectedColumnCount;
+  const selectedColumns = getSelectedColumnIndexes(range, visibleColumnIndexes);
+  if (selectedColumns.length === 0) return null;
+
+  let selectedCount = 0;
+  let nonEmptyCount = 0;
+  let numericCount = 0;
+  let sum = 0;
+  let min = Infinity;
+  let max = -Infinity;
+  let allPercent = true;
+  let allCurrency = true;
+  let currencySymbol: string | undefined;
+
+  for (let rowIndex = minRow; rowIndex <= maxRow; rowIndex++) {
+    const row = rows[rowIndex];
+    if (!row) continue;
+    selectedColumns.forEach((columnIndex) => {
+      const cell = row.cells[columnIndex];
+      if (!cell) return;
+      selectedCount += 1;
+      const value = cell.text.trim();
+      if (!value) return;
+      nonEmptyCount += 1;
+      const numericValue = parseNumber(value);
+      if (numericValue === null) return;
+
+      numericCount += 1;
+      sum += numericValue;
+      min = Math.min(min, numericValue);
+      max = Math.max(max, numericValue);
+      allPercent = allPercent && value.endsWith('%');
+
+      const symbols = value.match(/[$€£¥₹]/g);
+      const currentSymbol = symbols?.length === 1 ? symbols[0] : undefined;
+      if (!currentSymbol) {
+        allCurrency = false;
+      } else if (currencySymbol === undefined) {
+        currencySymbol = currentSymbol;
+      } else if (currencySymbol !== currentSymbol) {
+        allCurrency = false;
+      }
+    });
+  }
+
+  if (selectedCount === 0) return null;
+  const format =
+    numericCount > 0 && allPercent
+      ? 'percent'
+      : numericCount > 0 && allCurrency && currencySymbol
+        ? 'currency'
+        : 'number';
+  return {
+    selectedCount,
+    nonEmptyCount,
+    numericCount,
+    sum,
+    average: numericCount > 0 ? sum / numericCount : 0,
+    min: numericCount > 0 ? min : 0,
+    max: numericCount > 0 ? max : 0,
+    format,
+    currencySymbol,
+  };
+}
+
+function formatSelectionStatistic(
+  value: number,
+  statistics: SelectionStatistics,
+  language: string,
+): string {
+  const normalizedValue = Object.is(value, -0) ? 0 : value;
+  const locale = language === 'en' ? 'en-US' : language;
+  if (statistics.format === 'percent') {
+    return new Intl.NumberFormat(locale, {
+      style: 'percent',
+      maximumFractionDigits: 6,
+    }).format(normalizedValue);
+  }
+
+  const formatted = new Intl.NumberFormat(locale, {
+    maximumFractionDigits: 6,
+  }).format(Math.abs(normalizedValue));
+  if (statistics.format === 'currency' && statistics.currencySymbol) {
+    return `${normalizedValue < 0 ? '-' : ''}${statistics.currencySymbol}${formatted}`;
+  }
+  return normalizedValue < 0 ? `-${formatted}` : formatted;
 }
 
 function moveColumn(order: number[], fromColumn: number, toColumn: number) {
@@ -1221,7 +1315,7 @@ export function EnhancedTable({
   table: EnhancedTableData;
   toolbarExtra?: ReactNode;
 }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const theme = useTheme();
   const registerInteractionBlocker = useInteractionBlocker();
   const tableId = useId();
@@ -1564,6 +1658,14 @@ export function EnhancedTable({
     () => sortRows(filteredRows, sort),
     [filteredRows, sort],
   );
+  useEffect(() => {
+    setSelection((current) => {
+      if (!current) return current;
+      return getSelectionRowBounds(current).maxRow < visibleRows.length
+        ? current
+        : null;
+    });
+  }, [visibleRows.length]);
   const openFilterOptions = useMemo(() => {
     if (!openFilterMenu) return [];
     const columnIndex = openFilterMenu.columnIndex;
@@ -2195,7 +2297,16 @@ export function EnhancedTable({
     event.clipboardData.setData('text/plain', text);
   };
 
-  const selectedCount = selectionSize(selection, orderedVisibleColumnIndexes);
+  const selectionStatistics = useMemo(
+    () =>
+      getSelectionStatistics(
+        selection,
+        visibleRows,
+        orderedVisibleColumnIndexes,
+      ),
+    [orderedVisibleColumnIndexes, selection, visibleRows],
+  );
+  const selectedCount = selectionStatistics?.selectedCount ?? 0;
   const activeFilterCount =
     Object.values(filters).filter(isFilterActive).length;
   const densityLabel = t(`markdownTable.density.${density}`);
@@ -2319,9 +2430,72 @@ export function EnhancedTable({
         )}
         {selectedCount > 0 && (
           <>
-            <span className={styles.selection}>
-              {t('markdownTable.cellsSelected', { count: selectedCount })}
-            </span>
+            {selectionStatistics && (
+              <div className={styles.selectionStats}>
+                <span className={styles.selectionMetric}>
+                  {t('markdownTable.selection.selected')}{' '}
+                  <strong className={styles.selectionMetricValue}>
+                    {selectionStatistics.selectedCount}
+                  </strong>
+                </span>
+                <span className={styles.selectionMetric}>
+                  {t('markdownTable.selection.nonEmpty')}{' '}
+                  <strong className={styles.selectionMetricValue}>
+                    {selectionStatistics.nonEmptyCount}
+                  </strong>
+                </span>
+                <span className={styles.selectionMetric}>
+                  {t('markdownTable.selection.numeric')}{' '}
+                  <strong className={styles.selectionMetricValue}>
+                    {selectionStatistics.numericCount}
+                  </strong>
+                </span>
+                {selectionStatistics.numericCount > 0 && (
+                  <>
+                    <span className={styles.selectionMetric}>
+                      {t('markdownTable.selection.sum')}{' '}
+                      <strong className={styles.selectionMetricValue}>
+                        {formatSelectionStatistic(
+                          selectionStatistics.sum,
+                          selectionStatistics,
+                          language,
+                        )}
+                      </strong>
+                    </span>
+                    <span className={styles.selectionMetric}>
+                      {t('markdownTable.selection.average')}{' '}
+                      <strong className={styles.selectionMetricValue}>
+                        {formatSelectionStatistic(
+                          selectionStatistics.average,
+                          selectionStatistics,
+                          language,
+                        )}
+                      </strong>
+                    </span>
+                    <span className={styles.selectionMetric}>
+                      {t('markdownTable.selection.min')}{' '}
+                      <strong className={styles.selectionMetricValue}>
+                        {formatSelectionStatistic(
+                          selectionStatistics.min,
+                          selectionStatistics,
+                          language,
+                        )}
+                      </strong>
+                    </span>
+                    <span className={styles.selectionMetric}>
+                      {t('markdownTable.selection.max')}{' '}
+                      <strong className={styles.selectionMetricValue}>
+                        {formatSelectionStatistic(
+                          selectionStatistics.max,
+                          selectionStatistics,
+                          language,
+                        )}
+                      </strong>
+                    </span>
+                  </>
+                )}
+              </div>
+            )}
             <button
               className={styles.copyButton}
               type="button"

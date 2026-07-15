@@ -338,15 +338,52 @@ describe('Tool Control Parameters (E2E)', () => {
       'should block read operations on specific path patterns with excludeTools',
       async () => {
         await helper.createFile('.env', 'SECRET=password');
-        await helper.createFile('config.json', '{"key": "value"}');
         await helper.createFile('data.txt', 'public data');
 
+        const fakeServer = await startFakeOpenAIServer(
+          ({ requestIndex }) => {
+            if (requestIndex === 0) {
+              return {
+                toolCalls: [
+                  fakeToolCall(
+                    'read_file',
+                    { file_path: helper.getPath('.env') },
+                    'read-env',
+                  ),
+                  fakeToolCall(
+                    'read_file',
+                    { file_path: helper.getPath('data.txt') },
+                    'read-data',
+                  ),
+                ],
+              };
+            }
+
+            return { content: 'Done.' };
+          },
+          IS_CONTAINER_SANDBOX
+            ? {
+                listenHost: '0.0.0.0',
+                baseUrlHost: 'host.docker.internal',
+              }
+            : undefined,
+        );
+
         const q = query({
-          prompt:
-            'Read .env file, read config.json, and read data.txt. Tell me about their contents.',
+          prompt: 'Read .env and data.txt.',
           options: {
             ...SHARED_TEST_OPTIONS,
             cwd: testDir,
+            model: 'fake-model',
+            env: {
+              NO_PROXY: LOCAL_OPENAI_NO_PROXY,
+              no_proxy: LOCAL_OPENAI_NO_PROXY,
+              OPENAI_API_KEY: 'fake-key',
+              OPENAI_BASE_URL: fakeServer.baseUrl,
+              OPENAI_MODEL: 'fake-model',
+              QWEN_MODEL: 'fake-model',
+            },
+            authType: 'openai',
             permissionMode: 'yolo',
             // Block reading .env files
             excludeTools: ['Read(.env)'],
@@ -361,29 +398,26 @@ describe('Tool Control Parameters (E2E)', () => {
             messages.push(message);
           }
 
-          const toolCalls = findToolCalls(messages);
-          const readCalls = toolCalls.filter(
-            (tc) => tc.toolUse.name === 'read_file',
+          assertSuccessfulCompletion(messages);
+          const readResults = findToolResults(messages, 'read_file');
+          const envReadResult = readResults.find(
+            (result) => result.toolUseId === 'read-env',
+          );
+          const dataReadResult = readResults.find(
+            (result) => result.toolUseId === 'read-data',
           );
 
-          // Should have attempted to read files
-          expect(readCalls.length).toBeGreaterThan(0);
-
-          // Check that .env read was blocked
-          const envReadResults = findToolResults(messages, 'read_file').filter(
-            (result) => {
-              return result.content.includes('.env');
-            },
+          expect(envReadResult?.isError).toBe(true);
+          expect(envReadResult?.content).toMatch(
+            /permission.*(?:declined|denied)|denied.*permission/i,
           );
-          if (envReadResults.length > 0) {
-            for (const result of envReadResults) {
-              expect(result.content).toMatch(
-                /permission.*(?:declined|denied)|denied.*permission/i,
-              );
-            }
-          }
+          expect(dataReadResult).toMatchObject({
+            isError: false,
+            content: expect.stringContaining('public data'),
+          });
         } finally {
           await q.close();
+          await fakeServer.close();
         }
       },
       TEST_TIMEOUT,
