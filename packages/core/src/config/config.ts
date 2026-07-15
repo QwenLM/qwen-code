@@ -833,6 +833,13 @@ export interface AgentsCollabSettings {
    * When the cap is reached, additional launches wait for a slot.
    */
   maxParallelAgents?: number;
+  /**
+   * Per-model maximum number of background sub-agents running concurrently,
+   * keyed by concrete model ID. Overrides the global `maxParallelAgents` for
+   * the matched model; models not listed here fall back to the global limit.
+   * Useful when a model has a lower concurrency capacity than the rest.
+   */
+  maxParallelAgentsByModel?: Record<string, number>;
   /** Display mode for multi-agent sessions ('in-process' | 'tmux' | 'iterm2') */
   displayMode?: string;
   /** Arena-specific settings */
@@ -2132,14 +2139,20 @@ export class Config {
     this.eventEmitter = params.eventEmitter;
     this.arenaAgentClient = ArenaAgentClient.create();
     this.agentsSettings = params.agents ?? {};
-    this.backgroundTaskRegistry = new BackgroundTaskRegistry(
-      this.agentsSettings.maxParallelAgents === undefined
-        ? undefined
-        : {
+    this.backgroundTaskRegistry = new BackgroundTaskRegistry({
+      ...(this.agentsSettings.maxParallelAgents !== undefined
+        ? {
             maxConcurrentBackgroundAgents:
               this.agentsSettings.maxParallelAgents,
-          },
-    );
+          }
+        : {}),
+      ...(this.agentsSettings.maxParallelAgentsByModel !== undefined
+        ? {
+            maxConcurrentBackgroundAgentsByModel:
+              this.agentsSettings.maxParallelAgentsByModel,
+          }
+        : {}),
+    });
     this.worktreeSettings = params.worktree ?? {};
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);

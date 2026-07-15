@@ -1139,6 +1139,19 @@ describe('loadCliConfig', () => {
     expect(config.getAgentsSettings().maxParallelAgents).toBe(2);
   });
 
+  it('passes agents.maxParallelAgentsByModel from settings to core config', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { agents: { maxParallelAgentsByModel: { 'weak-model': 1 } } },
+      argv,
+    );
+
+    expect(config.getAgentsSettings().maxParallelAgentsByModel).toEqual({
+      'weak-model': 1,
+    });
+  });
+
   it('passes tools.shell.defaultTimeoutMs from settings to core config', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();

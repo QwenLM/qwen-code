@@ -2254,6 +2254,7 @@ export async function loadCliConfig(
               }
             : undefined,
           maxParallelAgents: settings.agents.maxParallelAgents,
+          maxParallelAgentsByModel: settings.agents.maxParallelAgentsByModel,
           displayMode: settings.agents.displayMode,
           arena: settings.agents.arena
             ? {
