@@ -1226,6 +1226,60 @@ describe('CoreToolScheduler', () => {
     expect(outputOfFirstCall(onAllToolCallsComplete)).toBe('small output');
   });
 
+  it('preserves display output when a tool omits model-facing content', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: undefined,
+      returnDisplay: 'completed',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        'malformedTool',
+        new MockTool({
+          name: 'malformedTool',
+          // SAFETY: This deliberately violates ToolResult to exercise the
+          // runtime boundary used by untyped custom tool adapters.
+          execute: execute as (
+            params: Record<string, unknown>,
+          ) => Promise<ToolResult>,
+        }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'c-malformed',
+          name: 'malformedTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p-malformed',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completedCall = (
+      onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+    )[0];
+    expect(completedCall.status).toBe('success');
+    if (completedCall.status === 'success') {
+      expect(completedCall.response.responseParts).toEqual([
+        {
+          functionResponse: {
+            id: 'c-malformed',
+            name: 'malformedTool',
+            response: {
+              output: '(malformedTool completed with no output)',
+            },
+          },
+        },
+      ]);
+      expect(completedCall.response.resultDisplay).toBe('completed');
+    }
+  });
+
   it('applies the per-tool budget for a tool invoked via a legacy alias', async () => {
     // Regression (C1): limitsTool read getTool(request.name) with the raw alias
     // ('task'), which the registry stores only under the canonical name
