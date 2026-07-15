@@ -3053,7 +3053,20 @@ describe('loadCliConfig safe mode', () => {
     } as unknown as Settings;
     const config = await loadCliConfig(settings, argv, undefined, []);
 
-    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.AUTO);
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
+  });
+
+  it('should force DEFAULT approval mode in bare mode regardless of settings', async () => {
+    process.argv = ['node', 'script.js', '--bare'];
+    const argv = await parseArguments();
+    const settings = {
+      tools: {
+        approvalMode: 'yolo',
+      },
+    } as unknown as Settings;
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
   });
 
   it('should ignore settings-sourced disabled slash commands in safe mode', async () => {
