@@ -14,7 +14,6 @@ import {
   SessionTranscriptTooLargeError,
   TrustGateError,
 } from '@qwen-code/qwen-code-core';
-import { SessionNotArchivedError } from './session-archive.js';
 import type { Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
@@ -38,6 +37,7 @@ import {
   SessionBusyError,
   SessionConflictError,
   SessionLimitExceededError,
+  SessionNotArchivedError,
   SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,

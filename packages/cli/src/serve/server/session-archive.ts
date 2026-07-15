@@ -13,6 +13,7 @@ import {
   SessionArchivedError,
   SessionArchivingError,
   SessionConflictError,
+  SessionNotArchivedError,
   SessionNotFoundError,
 } from '../acp-session-bridge.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -44,15 +45,6 @@ export interface DaemonDeleteSessionsResult {
 }
 
 export type DaemonDeleteErrorPhase = 'close' | 'remove' | 'delete';
-
-export class SessionNotArchivedError extends Error {
-  constructor(readonly sessionId: string) {
-    super(
-      `Session "${sessionId}" is active. Archive it before exporting from archived storage.`,
-    );
-    this.name = 'SessionNotArchivedError';
-  }
-}
 
 export class SessionArchiveCoordinator {
   private readonly exclusive = new Set<string>();

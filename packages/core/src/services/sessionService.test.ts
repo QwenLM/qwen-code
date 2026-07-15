@@ -518,6 +518,19 @@ describe('SessionService', () => {
       expect(vi.mocked(jsonl.read)).not.toHaveBeenCalled();
     });
 
+    it('returns undefined when the archived file is missing at the size check', async () => {
+      statSyncSpy.mockImplementationOnce(() => {
+        throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+      });
+
+      await expect(
+        sessionService.loadArchivedSession(sessionIdB, {
+          maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+        }),
+      ).resolves.toBeUndefined();
+      expect(vi.mocked(jsonl.read)).not.toHaveBeenCalled();
+    });
+
     it('loads artifact side records attached to the active branch', async () => {
       const now = Date.now();
       statSyncSpy.mockReturnValue({

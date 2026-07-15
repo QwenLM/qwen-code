@@ -1149,6 +1149,7 @@ export class SessionService {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         throw error;
       }
+      return undefined;
     }
     return this.loadSessionFromState(sessionId, 'archived');
   }
