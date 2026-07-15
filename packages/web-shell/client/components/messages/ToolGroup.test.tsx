@@ -122,7 +122,7 @@ const t = (key: string, values?: Record<string, string | number>): string => {
     return 'Provide information';
   }
   if (key === 'toolGroup.summary.askedQuestions') {
-    return `Asked ${values?.count ?? 0} questions`;
+    return `Asked ${values?.count ?? 0} question${values?.count === 1 ? '' : 's'}`;
   }
   if (key === 'toolGroup.summary.otherTools') {
     return `Called ${values?.count ?? 0} other tools`;
@@ -279,6 +279,21 @@ describe('tool group summary logic', () => {
         t,
       ),
     ).toBe('Provide information');
+  });
+
+  it('counts legacy or empty AskUserQuestion inputs as one question', () => {
+    expect(
+      formatSingleToolSummary(makeTool({ toolName: 'ask_user_question' }), t),
+    ).toBe('Asked 1 question');
+    expect(
+      formatSingleToolSummary(
+        makeTool({
+          toolName: 'ask_user_question',
+          args: { questions: [] },
+        }),
+        t,
+      ),
+    ).toBe('Asked 1 question');
   });
 
   it('truncates long single tool descriptions in the chat summary', () => {
