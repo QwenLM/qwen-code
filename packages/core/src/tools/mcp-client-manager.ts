@@ -2387,11 +2387,15 @@ export class McpClientManager {
             if (rootPid !== undefined) {
               const descendants = await listDescendantPids(rootPid);
               if (descendants.length > 0) {
-                sigtermPids(descendants);
+                const signaled = sigtermPids(descendants);
+                debugLogger.debug(
+                  `Sent SIGTERM to ${signaled}/${descendants.length} descendants ` +
+                    `of pid ${rootPid} for timed-out server '${serverName}'`,
+                );
               }
             }
           } catch (err) {
-            debugLogger.debug(
+            debugLogger.warn(
               `Descendant pid sweep for timed-out server '${serverName}' threw: ${getErrorMessage(err)}. Proceeding with disconnect.`,
             );
           }
