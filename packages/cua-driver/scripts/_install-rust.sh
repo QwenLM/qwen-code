@@ -471,7 +471,7 @@ if [[ "$OS" == "Darwin" && "$ARCH_RAW" == "x86_64" ]]; then
     fi
 fi
 
-# LABEL  = the release-asset tarball label (matches what cd-rust-cua-driver.yml
+# LABEL  = the release-asset tarball label (matches what cd-cua-driver.yml
 #          publishes; user-facing).
 # TARGET = the Rust target triple, used in the on-disk per-version dir name so
 #          a multi-arch dev can keep e.g. aarch64-apple-darwin and
