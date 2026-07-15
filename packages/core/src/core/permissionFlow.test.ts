@@ -166,6 +166,29 @@ describe('evaluatePermissionFlow', () => {
 
     expect(result.finalPermission).toBe('deny');
   });
+
+  it('preserves a permission-rule deny for an interaction-required tool', async () => {
+    const mockPm = {
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      evaluate: vi.fn().mockResolvedValue('deny'),
+      findMatchingDenyRule: vi.fn().mockReturnValue('deny exit_plan_mode'),
+      hasMatchingAskRule: vi.fn().mockReturnValue(false),
+    };
+    const invocation = mockInvocation({
+      getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+      requiresUserInteraction: vi.fn().mockReturnValue(true),
+    });
+
+    const result = await evaluatePermissionFlow(
+      mockConfig({ getPermissionManager: vi.fn().mockReturnValue(mockPm) }),
+      invocation,
+      ToolNames.EXIT_PLAN_MODE,
+      { plan: 'Plan' },
+    );
+
+    expect(result.finalPermission).toBe('deny');
+    expect(result.denyMessage).toContain('denied by permission rules');
+  });
 });
 
 describe('needsConfirmation', () => {

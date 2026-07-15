@@ -363,4 +363,30 @@ describe('ExitPlanModeTool', () => {
     expect(result.llmContent).toContain('cancelled');
     expect(config.setApprovalMode).not.toHaveBeenCalled();
   });
+
+  it('keeps plan mode when teammate approval has no execution mode', async () => {
+    vi.mocked(config.getTeamManager).mockReturnValue({
+      requestPlanApproval: vi.fn(async () => ({
+        action: 'approve',
+        targetMode: ApprovalMode.PLAN,
+      })),
+    } as never);
+    const invocation = tool.build({ plan: 'Teammate plan' });
+
+    const result = await runWithTeammateIdentity(
+      {
+        agentId: 'planner@test',
+        agentName: 'planner',
+        teamName: 'test',
+        isTeamLead: false,
+        planModeRequired: true,
+      },
+      () => invocation.execute(new AbortController().signal),
+    );
+
+    expect(result.error?.message).toContain('did not select an execution mode');
+    expect(approvalMode).toBe(ApprovalMode.PLAN);
+    expect(config.setApprovalMode).not.toHaveBeenCalled();
+    expect(config.savePlan).not.toHaveBeenCalled();
+  });
 });
