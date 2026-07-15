@@ -27,6 +27,7 @@ import type {
   DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
+  DaemonSessionContinueResult,
   DaemonSessionLspStatus,
   DaemonSessionRecapResult,
   DaemonSessionSummary,
@@ -490,6 +491,17 @@ export class DaemonSessionClient {
       ...(opts?.signal ? { signal: opts.signal } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
+  }
+
+  async continue(opts?: {
+    signal?: AbortSignal;
+  }): Promise<DaemonSessionContinueResult> {
+    return await this.withClientIdSelfHeal(() =>
+      this.client.continueSession(this.sessionId, {
+        ...(opts?.signal ? { signal: opts.signal } : {}),
+        ...(this.clientId ? { clientId: this.clientId } : {}),
+      }),
+    );
   }
 
   async btw(

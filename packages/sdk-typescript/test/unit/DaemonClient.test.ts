@@ -3018,6 +3018,38 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('continueSession', () => {
+    it('POSTs an empty body with the client id and returns the ACP decision', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          accepted: true,
+          interruption: 'interrupted_prompt',
+          promptId: 'p-1',
+          lastEventId: 7,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const controller = new AbortController();
+      const result = await client.continueSession('s/1', {
+        clientId: 'client-1',
+        signal: controller.signal,
+      });
+
+      expect(result).toMatchObject({
+        accepted: true,
+        interruption: 'interrupted_prompt',
+      });
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/session/s%2F1/continue',
+        method: 'POST',
+        body: '{}',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(calls[0]?.signal).toBe(controller.signal);
+    });
+  });
+
   describe('enqueueMidTurnMessage (web-shell mid-turn drain)', () => {
     it('POSTs the message and returns accepted:true', async () => {
       const { fetch, calls } = recordingFetch(() =>

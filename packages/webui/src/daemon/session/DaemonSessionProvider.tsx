@@ -831,6 +831,45 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
           }
+          if (
+            shouldInjectReplaySnapshot &&
+            restoreSessionId &&
+            !activeSession.hasActivePrompt &&
+            hasAcpUserTurn(replayEvents)
+          ) {
+            try {
+              const continuation = await activeSession.continue({
+                signal: abort.signal,
+              });
+              if (disposed || abort.signal.aborted) break;
+              if (continuation.accepted) {
+                if (continuation.lastEventId !== undefined) {
+                  activeSession.setLastEventId(continuation.lastEventId);
+                }
+                if (continuation.promptId) {
+                  activePromptsRef.current.set(activeSession.sessionId, {
+                    controller: new AbortController(),
+                    promptId: continuation.promptId,
+                  });
+                }
+                clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+                setPromptStatus('waiting');
+              }
+            } catch (error) {
+              if (disposed || abort.signal.aborted) break;
+              const message =
+                error instanceof Error ? error.message : String(error);
+              addNotice({
+                severity: 'warning',
+                category: 'lifecycle',
+                operation: 'load_session',
+                code: 'daemon.session_continue_failed',
+                message: 'Could not continue the interrupted session',
+                debugMessage: message,
+                recoverable: true,
+              });
+            }
+          }
           setConnection((current) => ({
             ...current,
             status: 'connected',
@@ -2394,6 +2433,24 @@ function bumpWorkspaceEventSignals(
 function isTerminalSessionHttpError(error: unknown): boolean {
   const status = extractHttpStatus(error);
   return status !== undefined && TERMINAL_SESSION_HTTP_STATUSES.has(status);
+}
+
+function hasAcpUserTurn(events: readonly DaemonEvent[]): boolean {
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index];
+    let data: unknown;
+    try {
+      data = event?.data;
+    } catch {
+      continue;
+    }
+    if (event?.type !== 'session_update' || !isRecord(data)) continue;
+    const update = data['update'];
+    if (isRecord(update) && update['sessionUpdate'] === 'user_message_chunk') {
+      return true;
+    }
+  }
+  return false;
 }
 
 function isAuthFailureHttpError(error: unknown): boolean {

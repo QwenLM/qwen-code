@@ -117,6 +117,29 @@ function turnCompleteFrame(promptId: string): string {
 }
 
 describe('DaemonSessionClient', () => {
+  it('continues through the bound session and client ids', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, { accepted: false, interruption: 'none' }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.continue()).resolves.toEqual({
+      accepted: false,
+      interruption: 'none',
+    });
+    expect(calls[0]?.url).toBe('http://daemon/session/s-1/continue');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+  });
+
   it('creates or attaches a daemon session and exposes session metadata', async () => {
     const { fetch, calls } = recordingFetch(() =>
       jsonResponse(200, {
