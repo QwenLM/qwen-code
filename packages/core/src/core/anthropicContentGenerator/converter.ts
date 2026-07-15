@@ -488,6 +488,10 @@ export class AnthropicContentConverter {
       type: 'tool_result',
       tool_use_id: response.id || '',
       content,
+      ...(response.response &&
+      Object.prototype.hasOwnProperty.call(response.response, 'error')
+        ? { is_error: true }
+        : {}),
     };
   }
 

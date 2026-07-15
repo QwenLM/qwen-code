@@ -315,6 +315,7 @@ describe('AnthropicContentConverter', () => {
             type: 'tool_result',
             tool_use_id: 'call-1',
             content: 'boom',
+            is_error: true,
             cache_control: { type: 'ephemeral' },
           },
         ],

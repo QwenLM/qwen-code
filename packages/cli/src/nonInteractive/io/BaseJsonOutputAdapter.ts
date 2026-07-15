@@ -1419,13 +1419,13 @@ export function toolResultContent(
     }
     return notice;
   }
-  if (response.error) {
-    return response.error.message;
-  }
-  // Check for errors in responseParts (e.g., cancelled responses)
+  // Prefer model-facing detail over the short operational error summary.
   const responsePartsError = checkResponsePartsForError(response.responseParts);
   if (responsePartsError) {
     return responsePartsError;
+  }
+  if (response.error) {
+    return response.error.message;
   }
   if (
     typeof response.resultDisplay === 'string' &&
