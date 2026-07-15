@@ -14,6 +14,7 @@ import type {
   Tool,
   Schema,
 } from '@google/genai';
+import { FunctionCallingConfigMode } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { ContentGenerator } from './contentGenerator.js';
 import { AuthType, createContentGenerator } from './contentGenerator.js';
@@ -266,7 +267,7 @@ export class BaseLlmClient {
               // adaptive-thinking models that consume the tiny output
               // budget on thinking before producing any tool_use.
               toolConfig: {
-                functionCallingConfig: { mode: 'ANY' },
+                functionCallingConfig: { mode: FunctionCallingConfigMode.ANY },
               },
             },
             contents,

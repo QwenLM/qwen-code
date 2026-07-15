@@ -1036,24 +1036,21 @@ export class AnthropicContentGenerator implements ContentGenerator {
    *
    * Mapping:
    *   mode 'ANY'  → `{ type: 'any' }`   (model must call at least one tool)
-   *   mode 'NONE' → `{ type: 'none' }`  (model must not call any tool)
-   *   mode 'AUTO' or absent → undefined (let Anthropic default to auto)
+   *   mode 'NONE' or 'AUTO' or absent → undefined (Anthropic has no
+   *     `tool_choice: { type: 'none' }`; to prevent tool calls the caller
+   *     should omit `tools` entirely)
    *
    * Only emitted when `tools` is non-empty — Anthropic rejects requests
    * that carry `tool_choice` without a `tools` array.
    */
   private resolveToolChoice(
     request: GenerateContentParameters,
-    tools: AnthropicToolParam[] | undefined,
+    tools: Anthropic.Tool[] | undefined,
   ): NonNullable<MessageCreateParamsNonStreaming['tool_choice']> | undefined {
     if (!tools || tools.length === 0) return undefined;
-    const mode =
-      request.config?.toolConfig?.functionCallingConfig?.mode;
+    const mode = request.config?.toolConfig?.functionCallingConfig?.mode;
     if (mode === 'ANY') {
       return { type: 'any' };
-    }
-    if (mode === 'NONE') {
-      return { type: 'none' };
     }
     return undefined;
   }

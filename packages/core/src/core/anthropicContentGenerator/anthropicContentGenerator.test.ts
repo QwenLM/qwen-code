@@ -3823,9 +3823,9 @@ describe('AnthropicContentGenerator', () => {
       expect(req['tool_choice']).toEqual({ type: 'any' });
     });
 
-    it('sets tool_choice=none when mode is NONE', async () => {
+    it('omits tool_choice when mode is NONE (Anthropic has no none type)', async () => {
       const req = await sendWithToolConfig('NONE');
-      expect(req['tool_choice']).toEqual({ type: 'none' });
+      expect(req['tool_choice']).toBeUndefined();
     });
 
     it('omits tool_choice when mode is AUTO', async () => {
