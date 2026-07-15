@@ -180,9 +180,7 @@ describe('tool group summary logic', () => {
       }),
     ];
 
-    expect(formatToolGroupSummary(tools, t)).toBe(
-      'Running Provide information',
-    );
+    expect(formatToolGroupSummary(tools, t)).toBe('Provide information');
   });
 
   it('summarizes completed tool groups by common action type', () => {

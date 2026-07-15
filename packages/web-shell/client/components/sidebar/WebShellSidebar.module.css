@@ -811,7 +811,7 @@
   padding: 0 9px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--success-color) 10%, transparent);
-  color: color-mix(in srgb, var(--success-color) 72%, transparent);
+  color: color-mix(in srgb, var(--success-color) 95%, var(--foreground));
   font-size: 12px;
   font-weight: 500;
   line-height: 20px;
@@ -820,7 +820,7 @@
 
 .sessionAttentionUserInput {
   background: color-mix(in srgb, var(--agent-blue-500) 10%, transparent);
-  color: color-mix(in srgb, var(--agent-blue-500) 72%, transparent);
+  color: color-mix(in srgb, var(--agent-blue-500) 95%, var(--foreground));
 }
 
 .sessionAttention + .sessionLoading {

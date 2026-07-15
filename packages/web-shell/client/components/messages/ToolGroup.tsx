@@ -571,11 +571,11 @@ export function formatToolGroupSummary(
 ): string {
   if (hasActiveTool(tools)) {
     const activeTool = getActiveTool(tools);
-    const name = isAskUserQuestionToolName(activeTool.toolName)
-      ? t('toolGroup.summary.provideInformation')
-      : localizeToolDisplayName(activeTool.toolName, t);
+    if (isAskUserQuestionToolName(activeTool.toolName)) {
+      return t('toolGroup.summary.provideInformation');
+    }
     return t('toolGroup.running', {
-      name,
+      name: localizeToolDisplayName(activeTool.toolName, t),
       count: tools.length,
       duration: duration ?? '',
     });
@@ -643,13 +643,13 @@ function SingleToolSummary({
   workspaceCwd?: string;
 }) {
   const { t } = useI18n();
+  const isAskUserQuestion = isAskUserQuestionToolName(tool.toolName);
   const runningPrefix =
-    isActiveToolStatus(tool.status) && t('toolGroup.runningPrefix').trim();
+    !isAskUserQuestion &&
+    isActiveToolStatus(tool.status) &&
+    t('toolGroup.runningPrefix').trim();
 
-  if (
-    isTodoWriteToolName(tool.toolName) ||
-    isAskUserQuestionToolName(tool.toolName)
-  ) {
+  if (isTodoWriteToolName(tool.toolName) || isAskUserQuestion) {
     return (
       <>
         {runningPrefix && <span>{runningPrefix} </span>}
