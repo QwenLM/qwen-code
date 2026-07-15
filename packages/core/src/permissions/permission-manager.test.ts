@@ -677,6 +677,26 @@ describe('matchesPathPattern', () => {
     });
   });
 
+  it('canonicalizes through a file that causes ENOTDIR', () => {
+    withTempRoot((root) => {
+      const protectedDir = path.join(root, 'protected');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(protectedDir);
+      fs.writeFileSync(path.join(protectedDir, 'config.json'), '{}');
+      fs.symlinkSync(protectedDir, link, 'dir');
+
+      expect(
+        matchesPathPattern(
+          '/protected/**',
+          path.join(link, 'config.json', 'nested.txt'),
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(true);
+    });
+  });
+
   it('canonicalizes a symlinked project root in restrictive rules', () => {
     withTempRoot((root) => {
       const realRoot = path.join(root, 'real');

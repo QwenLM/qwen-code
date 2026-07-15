@@ -290,6 +290,8 @@ export class PermissionManager {
     // Compute the base decision from explicit Bash/file/domain rules.
     // Using an IIFE to keep the priority-cascade logic clean.
     const baseDecision: PermissionDecision = (() => {
+      // Restrictive rules follow canonical destinations; allow rules stay
+      // lexical so a symlink cannot widen what the user explicitly allowed.
       // Priority 1: deny rules (session first, then persistent)
       for (const rule of [
         ...this.sessionRules.deny,

@@ -1076,6 +1076,7 @@ function getCanonicalPathMatchCandidates(
 }
 
 function resolveWithoutNormalizing(base: string, filePath: string): string {
+  // Preserve `..` until realpathNearestExisting resolves symlinks on disk.
   return path.isAbsolute(filePath)
     ? filePath
     : `${base}${/[\\/]$/.test(base) ? '' : path.sep}${filePath}`;
@@ -1089,6 +1090,7 @@ function realpathNearestExisting(filePath: string): string | undefined {
 
   while (true) {
     try {
+      // Joining deliberately normalizes traversal in the unresolved suffix.
       return path.join(fs.realpathSync.native(current), ...missingSegments);
     } catch (error: unknown) {
       if (
