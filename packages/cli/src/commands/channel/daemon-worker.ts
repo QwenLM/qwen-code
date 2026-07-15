@@ -1,9 +1,12 @@
 import type { CommandModule } from 'yargs';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import {
-  appendChannelMemory,
+  addChannelMemoryEntries,
   clearChannelMemory,
+  listChannelMemoryEntries,
   readChannelMemory,
+  removeChannelMemoryEntries,
+  updateChannelMemoryEntry,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
 import {
@@ -415,7 +418,10 @@ export async function runChannelDaemonWorker(
             router: createdRouter,
             channelMemory: {
               readChannelMemory,
-              appendChannelMemory,
+              listChannelMemoryEntries,
+              addChannelMemoryEntries,
+              updateChannelMemoryEntry,
+              removeChannelMemoryEntries,
               clearChannelMemory,
             },
             memoryIntentClassifier: new BridgeChannelMemoryIntentClassifier(

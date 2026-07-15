@@ -132,6 +132,7 @@ import {
   normalizeParts,
   runVisionBridge,
   shouldRunVisionBridge,
+  formatVisionBridgeNotice,
   splitImageParts,
   approxBase64Bytes,
 } from '@qwen-code/qwen-code-core';
@@ -214,6 +215,7 @@ import type {
 } from './types.js';
 import { HistoryReplayer } from './history-replayer.js';
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
+import { ToolCallPreparationTracker } from './tool-call-preparation-tracker.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
@@ -231,6 +233,22 @@ const debugLogger = createDebugLogger('SESSION');
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
+
+/** Finalizes preparations without allowing ACP cleanup to change the stream outcome. */
+async function finalizeToolCallPreparations(
+  tracker: ToolCallPreparationTracker,
+  includeResolved: boolean,
+  streamName: string,
+): Promise<void> {
+  try {
+    await tracker.discard(includeResolved);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    debugLogger.warn(
+      `Failed to discard tool preparations for ${streamName}; continuing stream: ${message}`,
+    );
+  }
+}
 
 function maskApiKeyForDisplay(apiKey: string | undefined): string {
   const trimmed = apiKey?.trim() ?? '';
@@ -1967,6 +1985,9 @@ export class Session implements SessionContext {
                 }
 
                 const functionCalls: FunctionCall[] = [];
+                const preparationTracker = new ToolCallPreparationTracker(
+                  this.toolCallEmitter,
+                );
                 let usageMetadata: GenerateContentResponseUsageMetadata | null =
                   null;
                 const streamStartTime = Date.now();
@@ -1996,49 +2017,70 @@ export class Session implements SessionContext {
                   const responseStream = sendResult.responseStream;
                   nextMessage = null;
 
-                  for await (const resp of responseStream) {
-                    if (pendingSend.signal.aborted) {
-                      return { stopReason: 'cancelled' };
-                    }
+                  let streamFailed = false;
+                  try {
+                    for await (const resp of responseStream) {
+                      if (pendingSend.signal.aborted) {
+                        return { stopReason: 'cancelled' };
+                      }
 
-                    if (
-                      resp.type === StreamEventType.CHUNK &&
-                      resp.value.candidates &&
-                      resp.value.candidates.length > 0
-                    ) {
-                      const candidate = resp.value.candidates[0];
-                      for (const part of candidate.content?.parts ?? []) {
-                        if (!part.text) {
-                          continue;
-                        }
+                      if (
+                        resp.type === StreamEventType.CHUNK &&
+                        resp.value.candidates &&
+                        resp.value.candidates.length > 0
+                      ) {
+                        const candidate = resp.value.candidates[0];
+                        for (const part of candidate.content?.parts ?? []) {
+                          if (!part.text) {
+                            continue;
+                          }
 
-                        this.messageEmitter.emitMessage(
-                          part.text,
-                          'assistant',
-                          part.thought,
-                        );
-                        if (!part.thought) {
-                          messageDisplay?.addChunk(part.text);
+                          this.messageEmitter.emitMessage(
+                            part.text,
+                            'assistant',
+                            part.thought,
+                          );
+                          if (!part.thought) {
+                            messageDisplay?.addChunk(part.text);
+                          }
                         }
                       }
-                    }
 
-                    if (
-                      resp.type === StreamEventType.CHUNK &&
-                      resp.value.usageMetadata
-                    ) {
-                      usageMetadata = resp.value.usageMetadata;
-                    }
+                      if (
+                        resp.type === StreamEventType.CHUNK &&
+                        resp.value.usageMetadata
+                      ) {
+                        usageMetadata = resp.value.usageMetadata;
+                      }
 
-                    if (
-                      resp.type === StreamEventType.CHUNK &&
-                      resp.value.functionCalls
-                    ) {
-                      functionCalls.push(...resp.value.functionCalls);
+                      if (resp.type === StreamEventType.CHUNK) {
+                        await preparationTracker.observe(resp.value);
+                        if (resp.value.functionCalls) {
+                          preparationTracker.resolve(resp.value.functionCalls);
+                          functionCalls.push(...resp.value.functionCalls);
+                        }
+                      }
+                      if (
+                        resp.type === StreamEventType.RETRY ||
+                        resp.type === StreamEventType.MODEL_FALLBACK
+                      ) {
+                        await finalizeToolCallPreparations(
+                          preparationTracker,
+                          true,
+                          `main prompt ${resp.type}`,
+                        );
+                        functionCalls.length = 0;
+                      }
                     }
-                    if (resp.type === StreamEventType.MODEL_FALLBACK) {
-                      functionCalls.length = 0;
-                    }
+                  } catch (error) {
+                    streamFailed = true;
+                    throw error;
+                  } finally {
+                    await finalizeToolCallPreparations(
+                      preparationTracker,
+                      streamFailed || pendingSend.signal.aborted,
+                      'main prompt',
+                    );
                   }
                 } catch (error) {
                   // Restore the stripped orphan if the send threw before
@@ -2308,6 +2350,9 @@ export class Session implements SessionContext {
           }
 
           const functionCalls: FunctionCall[] = [];
+          const preparationTracker = new ToolCallPreparationTracker(
+            this.toolCallEmitter,
+          );
           let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
           const streamStartTime = Date.now();
           const messageDisplay = this.#createMessageDisplayDispatcher(
@@ -2332,46 +2377,67 @@ export class Session implements SessionContext {
             const continueResponseStream = continueSendResult.responseStream;
             nextMessage = null;
 
-            for await (const resp of continueResponseStream) {
-              if (pendingSend.signal.aborted) {
-                return { stopReason: 'cancelled' };
-              }
+            let streamFailed = false;
+            try {
+              for await (const resp of continueResponseStream) {
+                if (pendingSend.signal.aborted) {
+                  return { stopReason: 'cancelled' };
+                }
 
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.candidates &&
-                resp.value.candidates.length > 0
-              ) {
-                const candidate = resp.value.candidates[0];
-                for (const part of candidate.content?.parts ?? []) {
-                  if (!part.text) continue;
-                  this.messageEmitter.emitMessage(
-                    part.text,
-                    'assistant',
-                    part.thought,
-                  );
-                  if (!part.thought) {
-                    messageDisplay?.addChunk(part.text);
+                if (
+                  resp.type === StreamEventType.CHUNK &&
+                  resp.value.candidates &&
+                  resp.value.candidates.length > 0
+                ) {
+                  const candidate = resp.value.candidates[0];
+                  for (const part of candidate.content?.parts ?? []) {
+                    if (!part.text) continue;
+                    this.messageEmitter.emitMessage(
+                      part.text,
+                      'assistant',
+                      part.thought,
+                    );
+                    if (!part.thought) {
+                      messageDisplay?.addChunk(part.text);
+                    }
                   }
                 }
-              }
 
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.usageMetadata
-              ) {
-                usageMetadata = resp.value.usageMetadata;
-              }
+                if (
+                  resp.type === StreamEventType.CHUNK &&
+                  resp.value.usageMetadata
+                ) {
+                  usageMetadata = resp.value.usageMetadata;
+                }
 
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.functionCalls
-              ) {
-                functionCalls.push(...resp.value.functionCalls);
+                if (resp.type === StreamEventType.CHUNK) {
+                  await preparationTracker.observe(resp.value);
+                  if (resp.value.functionCalls) {
+                    preparationTracker.resolve(resp.value.functionCalls);
+                    functionCalls.push(...resp.value.functionCalls);
+                  }
+                }
+                if (
+                  resp.type === StreamEventType.RETRY ||
+                  resp.type === StreamEventType.MODEL_FALLBACK
+                ) {
+                  await finalizeToolCallPreparations(
+                    preparationTracker,
+                    true,
+                    `Stop Hook continuation ${resp.type}`,
+                  );
+                  functionCalls.length = 0;
+                }
               }
-              if (resp.type === StreamEventType.MODEL_FALLBACK) {
-                functionCalls.length = 0;
-              }
+            } catch (error) {
+              streamFailed = true;
+              throw error;
+            } finally {
+              await finalizeToolCallPreparations(
+                preparationTracker,
+                streamFailed || pendingSend.signal.aborted,
+                'Stop Hook continuation',
+              );
             }
           } catch (error) {
             // Fire StopFailure hook (fire-and-forget)
@@ -3258,6 +3324,9 @@ export class Session implements SessionContext {
                 if (ac.signal.aborted) return;
 
                 const functionCalls: FunctionCall[] = [];
+                const preparationTracker = new ToolCallPreparationTracker(
+                  this.toolCallEmitter,
+                );
                 let usageMetadata: GenerateContentResponseUsageMetadata | null =
                   null;
                 const streamStartTime = Date.now();
@@ -3291,6 +3360,7 @@ export class Session implements SessionContext {
                   ac.signal,
                 );
 
+                let streamFailed = false;
                 try {
                   for await (const resp of responseStream) {
                     if (ac.signal.aborted) return;
@@ -3321,20 +3391,40 @@ export class Session implements SessionContext {
                       usageMetadata = resp.value.usageMetadata;
                     }
 
-                    if (
-                      resp.type === StreamEventType.CHUNK &&
-                      resp.value.functionCalls
-                    ) {
-                      functionCalls.push(...resp.value.functionCalls);
+                    if (resp.type === StreamEventType.CHUNK) {
+                      await preparationTracker.observe(resp.value);
+                      if (resp.value.functionCalls) {
+                        preparationTracker.resolve(resp.value.functionCalls);
+                        functionCalls.push(...resp.value.functionCalls);
+                      }
                     }
-                    if (resp.type === StreamEventType.MODEL_FALLBACK) {
+                    if (
+                      resp.type === StreamEventType.RETRY ||
+                      resp.type === StreamEventType.MODEL_FALLBACK
+                    ) {
+                      await finalizeToolCallPreparations(
+                        preparationTracker,
+                        true,
+                        `cron/loop tick ${resp.type}`,
+                      );
                       functionCalls.length = 0;
                     }
                   }
+                } catch (error) {
+                  streamFailed = true;
+                  throw error;
                 } finally {
-                  // is_final (skipped on abort) delivered and drained on
-                  // every exit path, same as the interactive prompt loops.
-                  await messageDisplay?.finish();
+                  try {
+                    await finalizeToolCallPreparations(
+                      preparationTracker,
+                      streamFailed || ac.signal.aborted,
+                      'cron/loop tick',
+                    );
+                  } finally {
+                    // is_final (skipped on abort) delivered and drained on
+                    // every exit path, same as the interactive prompt loops.
+                    await messageDisplay?.finish();
+                  }
                 }
 
                 if (usageMetadata) {
@@ -3595,6 +3685,9 @@ export class Session implements SessionContext {
             }
 
             const functionCalls: FunctionCall[] = [];
+            const preparationTracker = new ToolCallPreparationTracker(
+              this.toolCallEmitter,
+            );
             let usageMetadata: GenerateContentResponseUsageMetadata | null =
               null;
             let responseText = '';
@@ -3622,6 +3715,7 @@ export class Session implements SessionContext {
               ac.signal,
             );
 
+            let streamFailed = false;
             try {
               for await (const resp of responseStream) {
                 if (ac.signal.aborted) {
@@ -3657,20 +3751,40 @@ export class Session implements SessionContext {
                   usageMetadata = resp.value.usageMetadata;
                 }
 
-                if (
-                  resp.type === StreamEventType.CHUNK &&
-                  resp.value.functionCalls
-                ) {
-                  functionCalls.push(...resp.value.functionCalls);
+                if (resp.type === StreamEventType.CHUNK) {
+                  await preparationTracker.observe(resp.value);
+                  if (resp.value.functionCalls) {
+                    preparationTracker.resolve(resp.value.functionCalls);
+                    functionCalls.push(...resp.value.functionCalls);
+                  }
                 }
-                if (resp.type === StreamEventType.MODEL_FALLBACK) {
+                if (
+                  resp.type === StreamEventType.RETRY ||
+                  resp.type === StreamEventType.MODEL_FALLBACK
+                ) {
+                  await finalizeToolCallPreparations(
+                    preparationTracker,
+                    true,
+                    `background notification ${resp.type}`,
+                  );
                   functionCalls.length = 0;
                 }
               }
+            } catch (error) {
+              streamFailed = true;
+              throw error;
             } finally {
-              // is_final (skipped on abort) delivered and drained on every
-              // exit path, same as the interactive prompt loops.
-              await messageDisplay?.finish();
+              try {
+                await finalizeToolCallPreparations(
+                  preparationTracker,
+                  streamFailed || ac.signal.aborted,
+                  'background notification',
+                );
+              } finally {
+                // is_final (skipped on abort) delivered and drained on every
+                // exit path, same as the interactive prompt loops.
+                await messageDisplay?.finish();
+              }
             }
 
             if (responseText.length > 0) {
@@ -6025,7 +6139,7 @@ export class Session implements SessionContext {
     if (bridgeResult.status !== 'skipped' || bridgeResult.egressOccurred) {
       try {
         await this.messageEmitter.emitAgentMessage(
-          this.#formatVisionBridgeNotice(bridgeResult),
+          formatVisionBridgeNotice(bridgeResult),
         );
       } catch (error) {
         debugLogger.debug(
@@ -6165,34 +6279,6 @@ export class Session implements SessionContext {
 
   #formatVoiceBridgeEgressNotice(modelId: string, audioCount: number): string {
     return `Sent ${audioCount} audio file(s) to ${modelId} for transcription, but no transcript was produced.`;
-  }
-
-  #formatVisionBridgeNotice(result: VisionBridgeResult): string {
-    const modelName = result.modelId ?? 'vision model';
-    const target = result.modelEndpoint
-      ? `${modelName} (${result.modelEndpoint})`
-      : modelName;
-    const egressNote = result.egressOccurred
-      ? ` Your image and prompt/context were sent to ${target}.`
-      : '';
-
-    if (result.status === 'failed') {
-      const reason = result.egressOccurred
-        ? 'the vision model request failed'
-        : 'the vision bridge could not run';
-      return `Vision bridge (${modelName}) failed: ${reason}.${egressNote} The image was not interpreted.`;
-    }
-
-    if (result.status === 'skipped') {
-      return `Vision bridge cancelled.${egressNote}`;
-    }
-
-    // On success the image was always sent, so disclose egress unconditionally.
-    const omitted =
-      result.omittedCount > 0
-        ? ` (${result.omittedCount} image(s) omitted)`
-        : '';
-    return `Converted ${result.convertedCount} image(s)${omitted} to text via ${target}. Your image and prompt/context were sent to that model.`;
   }
 
   async #resolveExtensionMentionParts(

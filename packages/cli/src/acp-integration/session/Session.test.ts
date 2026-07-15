@@ -15,7 +15,12 @@ import {
   resolveHomeLoopResolverRoots,
   Session,
 } from './Session.js';
-import type { Content, FunctionCall, Part } from '@google/genai';
+import type {
+  Content,
+  FunctionCall,
+  GenerateContentResponse,
+  Part,
+} from '@google/genai';
 import type {
   ChatRecord,
   Config,
@@ -230,6 +235,16 @@ function createStreamWithChunks(
       yield chunk;
     }
   })();
+}
+
+/** Builds provider preparation metadata that arrives before complete arguments. */
+function createPreparationResponse(
+  callId: string,
+  toolName: string,
+): GenerateContentResponse {
+  const response = {} as GenerateContentResponse;
+  core.setToolCallPreparations(response, [{ callId, toolName }]);
+  return response;
 }
 
 function expectCompressBeforeSend(
@@ -8479,6 +8494,570 @@ describe('Session', () => {
                 },
               },
             },
+          });
+        });
+      });
+    });
+
+    describe('tool preparation stream lifecycle', () => {
+      function registerAllowedTool(
+        name: string,
+        execute: ReturnType<typeof vi.fn>,
+      ) {
+        mockToolRegistry.getTool.mockImplementation((toolName: string) =>
+          toolName === name
+            ? {
+                name,
+                kind: core.Kind.Read,
+                displayName: name,
+                build: vi
+                  .fn()
+                  .mockImplementation((args: Record<string, unknown>) => ({
+                    params: args,
+                    execute,
+                    getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                    getDescription: vi.fn().mockReturnValue(name),
+                    toolLocations: vi.fn().mockReturnValue([]),
+                  })),
+              }
+            : undefined,
+        );
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      }
+
+      it('emits preparing before execution and keeps resolved preparations out of finally discard', async () => {
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        registerAllowedTool('read_file', execute);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: createPreparationResponse('call-1', 'read_file'),
+              },
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { file_path: 'a.sql' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read the file' }],
+        });
+
+        const updates = vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.map(([params]) => params.update);
+        const preparingIndex = updates.findIndex(
+          (update) =>
+            update.sessionUpdate === 'tool_call' &&
+            update.toolCallId === 'call-1' &&
+            update.status === 'pending' &&
+            update._meta?.['phase'] === 'preparing',
+        );
+        const inProgressIndex = updates.findIndex(
+          (update) =>
+            update.sessionUpdate === 'tool_call_update' &&
+            update.toolCallId === 'call-1' &&
+            update.status === 'in_progress' &&
+            'rawInput' in update &&
+            update.rawInput?.['file_path'] === 'a.sql',
+        );
+
+        expect(preparingIndex).toBeGreaterThanOrEqual(0);
+        expect(inProgressIndex).toBeGreaterThan(preparingIndex);
+        expect(execute).toHaveBeenCalledOnce();
+        expect(updates).not.toContainEqual(
+          expect.objectContaining({
+            toolCallId: 'call-1',
+            _meta: expect.objectContaining({ preparationDiscarded: true }),
+          }),
+        );
+      });
+
+      it('suppresses TodoWrite preparation updates at the Session boundary', async () => {
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: createPreparationResponse(
+                'call-todo',
+                core.ToolNames.TODO_WRITE,
+              ),
+            },
+          ]),
+        );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'update the plan' }],
+        });
+
+        const updates = vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.map(([params]) => params.update);
+        expect(
+          updates.some(
+            (update) =>
+              (update.sessionUpdate === 'tool_call' ||
+                update.sessionUpdate === 'tool_call_update') &&
+              update.toolCallId === 'call-todo',
+          ),
+        ).toBe(false);
+      });
+
+      it('discards a resolved preparation when the stream fails before tool execution', async () => {
+        const execute = vi.fn();
+        registerAllowedTool('read_file', execute);
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          (async function* () {
+            yield {
+              type: core.StreamEventType.CHUNK,
+              value: createPreparationResponse(
+                'call-stream-error',
+                'read_file',
+              ),
+            };
+            yield {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-stream-error',
+                    name: 'read_file',
+                    args: { file_path: 'a.sql' },
+                  },
+                ],
+              },
+            };
+            throw new Error('stream failed after function call');
+          })(),
+        );
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read the file' }],
+          }),
+        ).rejects.toThrow('stream failed after function call');
+
+        expect(execute).not.toHaveBeenCalled();
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'call-stream-error',
+            status: 'failed',
+            _meta: expect.objectContaining({
+              phase: 'preparing',
+              preparationDiscarded: true,
+            }),
+          }),
+        });
+      });
+
+      it.each([
+        core.StreamEventType.RETRY,
+        core.StreamEventType.MODEL_FALLBACK,
+      ])(
+        'discards preparation and stale function calls on %s before accepting the next attempt',
+        async (resetEvent) => {
+          const staleExecute = vi.fn();
+          const currentExecute = vi.fn().mockResolvedValue({
+            llmContent: 'current result',
+            returnDisplay: 'current result',
+          });
+          mockToolRegistry.getTool.mockImplementation((toolName: string) => {
+            const execute =
+              toolName === 'stale_tool'
+                ? staleExecute
+                : toolName === 'current_tool'
+                  ? currentExecute
+                  : undefined;
+            if (!execute) return undefined;
+            return {
+              name: toolName,
+              kind: core.Kind.Read,
+              displayName: toolName,
+              build: vi.fn().mockImplementation((args) => ({
+                params: args,
+                execute,
+                getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                getDescription: vi.fn().mockReturnValue(toolName),
+                toolLocations: vi.fn().mockReturnValue([]),
+              })),
+            };
+          });
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: createPreparationResponse(
+                    'preparing-stale',
+                    'read_file',
+                  ),
+                },
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    functionCalls: [
+                      { id: 'stale-call', name: 'stale_tool', args: {} },
+                    ],
+                  },
+                },
+                { type: resetEvent, value: {} },
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    functionCalls: [
+                      { id: 'current-call', name: 'current_tool', args: {} },
+                    ],
+                  },
+                },
+              ]),
+            )
+            .mockResolvedValueOnce(createEmptyStream());
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'retry the tool call' }],
+          });
+
+          expect(staleExecute).not.toHaveBeenCalled();
+          expect(currentExecute).toHaveBeenCalledOnce();
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+            sessionId: 'test-session-id',
+            update: expect.objectContaining({
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'preparing-stale',
+              status: 'failed',
+              _meta: expect.objectContaining({
+                phase: 'preparing',
+                preparationDiscarded: true,
+              }),
+            }),
+          });
+        },
+      );
+
+      it.each([
+        core.StreamEventType.RETRY,
+        core.StreamEventType.MODEL_FALLBACK,
+      ])(
+        'continues after preparation cleanup fails during %s',
+        async (resetEvent) => {
+          debugLoggerWarnSpy.mockClear();
+          const execute = vi.fn().mockResolvedValue({
+            llmContent: 'current result',
+            returnDisplay: 'current result',
+          });
+          registerAllowedTool('current_tool', execute);
+          vi.mocked(mockClient.sessionUpdate).mockImplementation(
+            async ({ update }) => {
+              if (update._meta?.['preparationDiscarded'] === true) {
+                throw new Error('cleanup failed');
+              }
+            },
+          );
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: createPreparationResponse(
+                    'preparing-stale',
+                    'read_file',
+                  ),
+                },
+                { type: resetEvent, value: {} },
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    functionCalls: [
+                      { id: 'current-call', name: 'current_tool', args: {} },
+                    ],
+                  },
+                },
+              ]),
+            )
+            .mockResolvedValueOnce(createEmptyStream());
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'retry the tool call' }],
+          });
+
+          expect(execute).toHaveBeenCalledOnce();
+          expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+            expect.stringContaining('cleanup failed'),
+          );
+        },
+      );
+
+      it('preserves the stream error when discarding its unresolved preparation also fails', async () => {
+        debugLoggerWarnSpy.mockClear();
+        vi.mocked(mockClient.sessionUpdate).mockImplementation(
+          async ({ update }) => {
+            if (update._meta?.['preparationDiscarded'] === true) {
+              throw new Error('cleanup failed');
+            }
+          },
+        );
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          (async function* () {
+            yield {
+              type: core.StreamEventType.CHUNK,
+              value: createPreparationResponse('call-error', 'read_file'),
+            };
+            throw new Error('stream failed');
+          })(),
+        );
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'trigger a stream error' }],
+          }),
+        ).rejects.toThrow('stream failed');
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining('cleanup failed'),
+        );
+      });
+
+      it('preserves a cancelled return when discarding its unresolved preparation fails', async () => {
+        debugLoggerWarnSpy.mockClear();
+        vi.mocked(mockClient.sessionUpdate).mockImplementation(
+          async ({ update }) => {
+            if (update._meta?.['preparationDiscarded'] === true) {
+              throw new Error('cleanup failed');
+            }
+          },
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(
+            async (_model, request: { config: { abortSignal: AbortSignal } }) =>
+              (async function* (signal: AbortSignal) {
+                yield {
+                  type: core.StreamEventType.CHUNK,
+                  value: createPreparationResponse('call-cancel', 'read_file'),
+                };
+                await new Promise<void>((resolve) => {
+                  signal.addEventListener('abort', () => resolve(), {
+                    once: true,
+                  });
+                });
+                yield { type: core.StreamEventType.CHUNK, value: {} };
+              })(request.config.abortSignal),
+          );
+
+        const promptPromise = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'cancel this stream' }],
+        });
+        await vi.waitFor(() => {
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+            sessionId: 'test-session-id',
+            update: expect.objectContaining({
+              sessionUpdate: 'tool_call',
+              toolCallId: 'call-cancel',
+            }),
+          });
+        });
+
+        await session.cancelPendingPrompt();
+
+        await expect(promptPromise).resolves.toEqual({
+          stopReason: 'cancelled',
+        });
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining('cleanup failed'),
+        );
+      });
+
+      it('preserves a normally completed stream when preparation cleanup fails', async () => {
+        debugLoggerWarnSpy.mockClear();
+        vi.mocked(mockClient.sessionUpdate).mockImplementation(
+          async ({ update }) => {
+            if (update._meta?.['preparationDiscarded'] === true) {
+              throw new Error('cleanup failed');
+            }
+          },
+        );
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: createPreparationResponse('call-normal', 'read_file'),
+            },
+          ]),
+        );
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'finish normally' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining('cleanup failed'),
+        );
+      });
+
+      it('tracks unresolved preparation in a Stop Hook continuation stream', async () => {
+        const messageBus = {
+          request: vi.fn().mockImplementation(async (request) => ({
+            success: true,
+            output:
+              request.eventName === 'Stop'
+                ? {
+                    decision: 'block',
+                    reason: 'Continue after Stop hook',
+                  }
+                : {},
+          })),
+        };
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((eventName: string) => eventName === 'Stop');
+        mockConfig.getStopHookBlockingCap = vi.fn().mockReturnValue(2);
+        mockChat.getLastModelMessageText = vi
+          .fn()
+          .mockReturnValue('response text');
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: createPreparationResponse('call-stop-hook', 'read_file'),
+              },
+            ]),
+          );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'run stop hook' }],
+        });
+
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'call-stop-hook',
+            _meta: expect.objectContaining({ preparationDiscarded: true }),
+          }),
+        });
+      });
+
+      it('tracks unresolved preparation in a cron stream', async () => {
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: 'scheduled work', cronExpr: '* * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: createPreparationResponse('call-cron', 'read_file'),
+              },
+            ]),
+          );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start cron' }],
+        });
+
+        await vi.waitFor(() => {
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+            sessionId: 'test-session-id',
+            update: expect.objectContaining({
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'call-cron',
+              _meta: expect.objectContaining({ preparationDiscarded: true }),
+            }),
+          });
+        });
+      });
+
+      it('tracks unresolved preparation in a background notification stream', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: createPreparationResponse(
+                  'call-notification',
+                  'read_file',
+                ),
+              },
+            ]),
+          );
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start background work' }],
+        });
+        const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+          .calls[0][0] as (
+          displayText: string,
+          modelText: string,
+          meta: { agentId: string; status: string },
+        ) => void;
+
+        callback('done', '<task-notification />', {
+          agentId: 'agent-1',
+          status: 'completed',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+            sessionId: 'test-session-id',
+            update: expect.objectContaining({
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'call-notification',
+              _meta: expect.objectContaining({ preparationDiscarded: true }),
+            }),
           });
         });
       });
