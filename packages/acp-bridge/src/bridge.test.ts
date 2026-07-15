@@ -8002,6 +8002,80 @@ describe('createAcpSessionBridge', () => {
     });
   });
 
+  describe('session source metadata', () => {
+    it('persists and returns source metadata in status and list summaries', async () => {
+      const handles: ChannelHandle[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () => {
+          const handle = makeChannel({
+            extMethodImpl: async (method) =>
+              method === SERVE_CONTROL_EXT_METHODS.sessionSource
+                ? { persisted: true }
+                : {},
+          });
+          handles.push(handle);
+          return handle.channel;
+        },
+      });
+
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      });
+
+      expect(session).toMatchObject({
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+        sourcePersisted: true,
+      });
+      expect(bridge.getSessionSummary(session.sessionId)).toMatchObject({
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      });
+      expect(bridge.listWorkspaceSessions(WS_A)[0]).toMatchObject({
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      });
+      expect(handles[0]?.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionSource,
+        params: {
+          sessionId: session.sessionId,
+          sourceType: 'scheduled_task',
+          sourceId: 'task-123',
+        },
+      });
+
+      await bridge.shutdown();
+    });
+
+    it('does not replace the source when single scope attaches', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const first = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+      });
+      const attached = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'api',
+        sourceId: 'request-2',
+      });
+
+      expect(attached).toMatchObject({
+        sessionId: first.sessionId,
+        attached: true,
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+      });
+
+      await bridge.shutdown();
+    });
+  });
+
   describe('parentSessionId', () => {
     it('carries parentSessionId from a spawn into the session summary', async () => {
       const bridge = makeBridge({
@@ -11175,7 +11249,9 @@ describe('createAcpSessionBridge', () => {
       const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       expect(b.attached).toBe(true);
       // Client A's disconnect-reaper fires now.
-      await bridge.killSession(a.sessionId, { requireZeroAttaches: true });
+      await expect(
+        bridge.killSession(a.sessionId, { requireZeroAttaches: true }),
+      ).resolves.toBe(false);
       // Session must SURVIVE — client B is still using it.
       const c = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       expect(c.attached).toBe(true);
@@ -11317,8 +11393,11 @@ describe('createAcpSessionBridge', () => {
       expect(a.attached).toBe(false);
       expect(bridge.sessionCount).toBe(1);
       // No second attach. Reaper fires.
-      await bridge.killSession(a.sessionId, { requireZeroAttaches: true });
+      await expect(
+        bridge.killSession(a.sessionId, { requireZeroAttaches: true }),
+      ).resolves.toBe(true);
       expect(bridge.sessionCount).toBe(0);
+      await expect(bridge.killSession(a.sessionId)).resolves.toBe(false);
       await bridge.shutdown();
     });
 

@@ -71,6 +71,8 @@ export interface ScheduledTasksSessionBridge {
   spawnOrAttach(req: {
     workspaceCwd: string;
     sessionScope?: 'single' | 'thread';
+    sourceType?: string;
+    sourceId?: string;
   }): Promise<{ sessionId: string }>;
   closeSession(sessionId: string): Promise<unknown>;
   /** Give the task's session a readable name so it's recognizable in the
@@ -374,6 +376,7 @@ function registerScheduledTaskCrudRoutes(
     }
     const recurring = body['recurring'] !== false;
     const enabled = body['enabled'] !== false;
+    const taskId = generateCronTaskId();
 
     // Mint the task's dedicated session up front. The task is BOUND to it and
     // fires only inside it — its transcript becomes the task's run history, and
@@ -409,6 +412,8 @@ function registerScheduledTaskCrudRoutes(
         const session = await bridge.spawnOrAttach({
           workspaceCwd,
           sessionScope: 'thread',
+          sourceType: 'scheduled_task',
+          sourceId: taskId,
         });
         boundSessionId = session.sessionId;
         // Name the session after the task so it's recognizable in the session
@@ -434,7 +439,7 @@ function registerScheduledTaskCrudRoutes(
 
     const now = Date.now();
     const task: DurableCronTask = {
-      id: generateCronTaskId(),
+      id: taskId,
       cron,
       prompt,
       recurring,
