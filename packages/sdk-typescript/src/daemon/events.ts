@@ -742,7 +742,12 @@ export interface DaemonMcpServerRestartedData {
  */
 export interface DaemonMcpServerRestartRefusedData {
   serverName: string;
-  reason: 'in_flight' | 'disabled' | 'budget_would_exceed' | 'restart_failed';
+  reason:
+    | 'in_flight'
+    | 'disabled'
+    | 'budget_would_exceed'
+    | 'authentication_required'
+    | 'restart_failed';
   originatorClientId?: string;
   entryIndex?: number;
   details?: string;
@@ -2985,6 +2990,7 @@ const MCP_RESTART_REFUSED_REASONS: ReadonlySet<string> = new Set([
   'in_flight',
   'disabled',
   'budget_would_exceed',
+  'authentication_required',
   // Pool-mode hard restart failure (entry's `client.connect()` or
   // rediscover threw). Carried alongside the soft-skip reasons so
   // SDK reducers maintain a single union for narrowing the event's

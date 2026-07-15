@@ -199,6 +199,72 @@ describe('POST /workspace/settings', () => {
     },
   );
 
+  it('atomically adds one MCP server without replacing existing servers', async () => {
+    const existing = { docs: { command: 'docs-server' } };
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: { mcpServers: existing },
+      user: { settings: {} },
+      workspace: { settings: { mcpServers: existing } },
+      forScope: vi.fn().mockReturnValue({
+        settings: { mcpServers: existing },
+      }),
+    } as never);
+    const { app, persistSetting } = makeApp();
+
+    const res = await request(app)
+      .post('/workspace/settings')
+      .send({
+        scope: 'workspace',
+        key: 'mcpServers',
+        value: { command: 'new-server' },
+        mcpServerMutation: { operation: 'set', name: 'new' },
+      });
+
+    expect(res.status).toBe(200);
+    expect(persistSetting).toHaveBeenCalledWith(
+      '/workspace',
+      expect.any(String),
+      'mcpServers',
+      {
+        docs: { command: 'docs-server' },
+        new: { command: 'new-server' },
+      },
+    );
+  });
+
+  it('atomically removes only the named MCP server', async () => {
+    const existing = {
+      docs: { command: 'docs-server' },
+      keep: { command: 'keep-server' },
+    };
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: { mcpServers: existing },
+      user: { settings: {} },
+      workspace: { settings: { mcpServers: existing } },
+      forScope: vi.fn().mockReturnValue({
+        settings: { mcpServers: existing },
+      }),
+    } as never);
+    const { app, persistSetting } = makeApp();
+
+    const res = await request(app)
+      .post('/workspace/settings')
+      .send({
+        scope: 'workspace',
+        key: 'mcpServers',
+        value: {},
+        mcpServerMutation: { operation: 'remove', name: 'docs' },
+      });
+
+    expect(res.status).toBe(200);
+    expect(persistSetting).toHaveBeenCalledWith(
+      '/workspace',
+      expect.any(String),
+      'mcpServers',
+      { keep: { command: 'keep-server' } },
+    );
+  });
+
   it('redacts MCP secrets in reads and restores them on writes', async () => {
     const existing = {
       secure: {

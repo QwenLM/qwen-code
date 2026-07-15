@@ -660,7 +660,7 @@ describe('createDaemonWorkspaceService', () => {
       expect(result.servers).toEqual([]);
     });
 
-    it('retains the last live MCP snapshot after the channel is idle', async () => {
+    it('does not replay a stale MCP snapshot when the status provider is idle', async () => {
       const liveStatus = {
         v: 1 as const,
         workspaceCwd: '/ws',
@@ -691,7 +691,9 @@ describe('createDaemonWorkspaceService', () => {
       await svc.getWorkspaceMcpStatus(makeCtx());
       const result = await svc.getWorkspaceMcpStatus(makeCtx());
 
-      expect(result).toEqual(liveStatus);
+      expect(result.initialized).toBe(false);
+      expect(result.discoveryState).toBe('not_started');
+      expect(result.servers).toEqual([]);
     });
 
     it('getWorkspaceSkillsStatus delegates with correct method', async () => {

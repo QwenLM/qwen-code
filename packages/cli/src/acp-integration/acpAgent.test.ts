@@ -63,6 +63,8 @@ const { mockDebugLogger } = vi.hoisted(() => ({
   },
 }));
 
+const mockMcpServerRequiresOAuth = vi.hoisted(() => new Map<string, boolean>());
+
 const { mockMcpApprovals, mockGetPendingGatedMcpServers } = vi.hoisted(() => ({
   mockMcpApprovals: {
     getState: vi.fn().mockReturnValue('approved'),
@@ -177,6 +179,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     scope === 'project' || scope === 'workspace',
   matchesAnyServerPattern: (name: string, patterns: string[] | undefined) =>
     patterns?.includes(name) ?? false,
+  mcpServerRequiresOAuth: mockMcpServerRequiresOAuth,
   AuthType: {
     QWEN_OAUTH: 'qwen-oauth',
     USE_OPENAI: 'openai',
@@ -729,6 +732,7 @@ import {
   startEventLoopLagMonitor,
   registerAcpEventLoopLagGauge,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
+  mcpServerRequiresOAuth,
 } from '@qwen-code/qwen-code-core';
 import type { McpServer } from '@agentclientprotocol/sdk';
 import { AgentSideConnection } from '@agentclientprotocol/sdk';
@@ -1345,6 +1349,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockExtensionManagerState.refreshCache.mockResolvedValue(undefined);
     mockRunManagedAutoMemoryDream.mockReset();
     mockRunManagedRememberByAgent.mockReset();
+    mcpServerRequiresOAuth.clear();
     mockHistoryPendingToolCalls.mockReturnValue([]);
     lastSessionMock = undefined;
     capturedAgentFactory = undefined;
@@ -2058,6 +2063,83 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     expect(workspaceDiscover).toHaveBeenCalledWith('aone');
     expect(sessionDiscover).toHaveBeenCalledWith('aone');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('reports authentication-required MCP servers and refuses reconnect', async () => {
+    const server: {
+      httpUrl: string;
+      oauth?: { enabled: boolean };
+    } = { httpUrl: 'https://example.com/mcp' };
+    const manager = {
+      getDiscoveryState: vi.fn().mockReturnValue(MCPDiscoveryState.COMPLETED),
+      getMcpClientAccounting: vi.fn().mockReturnValue({
+        total: 0,
+        reservedSlots: [],
+        refusedServerNames: [],
+      }),
+      getMcpClientBudget: vi.fn().mockReturnValue(undefined),
+      getMcpBudgetMode: vi.fn().mockReturnValue('off'),
+      getServerStatus: vi.fn().mockReturnValue(MCPServerStatus.DISCONNECTED),
+    };
+    mockConfig = {
+      ...mockConfig,
+      getMcpServers: vi.fn().mockReturnValue({ oauth: server }),
+      getWorkingDir: vi.fn().mockReturnValue('/tmp'),
+      getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      isMcpServerDisabled: vi.fn().mockReturnValue(false),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getMcpClientManager: vi.fn().mockReturnValue(manager),
+      }),
+    } as unknown as Config;
+    mcpServerRequiresOAuth.set('oauth', true);
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceMcp, {}),
+    ).resolves.toMatchObject({
+      servers: [
+        expect.objectContaining({
+          name: 'oauth',
+          mcpStatus: 'disconnected',
+          requiresAuth: true,
+        }),
+      ],
+    });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart, {
+        serverName: 'oauth',
+      }),
+    ).resolves.toEqual({
+      serverName: 'oauth',
+      restarted: false,
+      skipped: true,
+      reason: 'authentication_required',
+    });
+
+    mcpServerRequiresOAuth.delete('oauth');
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceMcp, {}),
+    ).resolves.toMatchObject({
+      servers: [expect.not.objectContaining({ requiresAuth: true })],
+    });
+
+    server.oauth = { enabled: true };
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceMcp, {}),
+    ).resolves.toMatchObject({
+      servers: [expect.objectContaining({ requiresAuth: true })],
+    });
+
+    mcpServerRequiresOAuth.set('oauth', true);
+    manager.getServerStatus.mockReturnValue(MCPServerStatus.CONNECTED);
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceMcp, {}),
+    ).resolves.toMatchObject({
+      servers: [expect.not.objectContaining({ requiresAuth: true })],
+    });
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -11089,6 +11171,16 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       httpUrl: 'https://example.com/mcp',
       scope: 'workspace' as const,
     };
+    const userServer = { command: 'user-server' };
+    const projectServer = {
+      command: 'project-server',
+      scope: 'project' as const,
+    };
+    const systemDefaultServer = { command: 'system-default-server' };
+    const extensionServer = {
+      command: 'extension-server',
+      extensionName: 'example-extension',
+    };
     const cliServer = { command: 'cli-server' };
     let excluded: string[] = [];
     const disableMcpServer = vi.fn().mockResolvedValue(undefined);
@@ -11100,7 +11192,14 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
     const discoveryConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
       setMcpTransportPool: vi.fn(),
-      getMcpServers: vi.fn().mockReturnValue({ aone: server, cli: cliServer }),
+      getMcpServers: vi.fn().mockReturnValue({
+        aone: server,
+        user: userServer,
+        project: projectServer,
+        systemDefault: systemDefaultServer,
+        extension: extensionServer,
+        cli: cliServer,
+      }),
       getTopTierMcpServers: vi.fn().mockReturnValue({ cli: cliServer }),
       getRuntimeMcpServers: vi.fn().mockReturnValue({}),
       isMcpServerDisabled: vi.fn().mockReturnValue(false),
@@ -11117,12 +11216,23 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
     } as unknown as Config;
     const setValue = vi.fn();
     vi.mocked(loadSettings).mockReturnValue({
-      merged: { mcpServers: { aone: server } },
+      systemDefaults: {
+        settings: {
+          mcpServers: {
+            systemDefault: systemDefaultServer,
+            user: { command: 'overridden-system-default' },
+          },
+        },
+      },
+      user: { settings: { mcpServers: { user: userServer } } },
+      merged: { mcpServers: { aone: server, user: userServer } },
       forScope: vi.fn((scope: SettingScope) => ({
         settings: {
           mcp: { excluded: [] },
           mcpServers:
-            scope === SettingScope.Workspace ? { aone: server } : undefined,
+            scope === SettingScope.Workspace
+              ? { aone: server }
+              : { user: userServer },
         },
       })),
       setValue,
@@ -11148,12 +11258,38 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
         expect.objectContaining({
           name: 'aone',
           mcpStatus: 'disconnected',
-          source: 'workspace',
+          source: 'project',
+          configOrigin: 'workspace_settings',
           removable: true,
+        }),
+        expect.objectContaining({
+          name: 'user',
+          source: 'user',
+          configOrigin: 'user_settings',
+          removable: true,
+        }),
+        expect.objectContaining({
+          name: 'project',
+          source: 'user',
+          configOrigin: 'project_mcp_json',
+          removable: false,
+        }),
+        expect.objectContaining({
+          name: 'systemDefault',
+          source: 'user',
+          configOrigin: 'system_settings',
+          removable: false,
+        }),
+        expect.objectContaining({
+          name: 'extension',
+          source: 'extension',
+          configOrigin: 'extension',
+          removable: false,
         }),
         expect.objectContaining({
           name: 'cli',
           source: 'user',
+          configOrigin: 'runtime',
           removable: false,
         }),
       ],

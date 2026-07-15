@@ -969,10 +969,18 @@ export interface DaemonWorkspaceMcpServerStatus extends DaemonStatusCell {
   transport: DaemonMcpTransport;
   disabled: boolean;
   hasOAuthTokens?: boolean;
+  requiresAuth?: boolean;
   approvalState?: 'pending' | 'rejected';
   authenticationState?: 'pending' | 'succeeded' | 'failed';
   authenticationError?: string;
-  source?: 'user' | 'workspace' | 'project' | 'extension';
+  source?: 'user' | 'project' | 'extension';
+  configOrigin?:
+    | 'user_settings'
+    | 'workspace_settings'
+    | 'project_mcp_json'
+    | 'system_settings'
+    | 'extension'
+    | 'runtime';
   removable?: boolean;
   config?: {
     command?: string;
@@ -2402,7 +2410,11 @@ export type DaemonMcpRestartResult =
       serverName: string;
       restarted: false;
       skipped: true;
-      reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+      reason:
+        | 'in_flight'
+        | 'disabled'
+        | 'budget_would_exceed'
+        | 'authentication_required';
     }
   | {
       serverName: string;

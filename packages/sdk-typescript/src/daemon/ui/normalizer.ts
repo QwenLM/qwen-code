@@ -48,6 +48,7 @@ const MCP_RESTART_REFUSED_REASONS = new Set<string>([
   'in_flight',
   'disabled',
   'budget_would_exceed',
+  'authentication_required',
 ]);
 
 const MALFORMED_MEMORY_CHANGED = 'malformed memory_changed payload';
@@ -1603,7 +1604,11 @@ function normalizeMcpServerRestartRefused(
       ...base,
       type: 'workspace.mcp.server_restart_refused',
       serverName,
-      reason: reason as 'in_flight' | 'disabled' | 'budget_would_exceed',
+      reason: reason as
+        | 'in_flight'
+        | 'disabled'
+        | 'budget_would_exceed'
+        | 'authentication_required',
     },
   ];
 }
@@ -1628,7 +1633,7 @@ function normalizeMcpServerChanged(
       'clear-auth',
     ].includes(action)
   ) {
-    return fallbackDebug(event, base, 'malformed mcp_server_changed payload');
+    return fallbackDebug(event, base, `malformed ${event.type} payload`);
   }
   return [
     {

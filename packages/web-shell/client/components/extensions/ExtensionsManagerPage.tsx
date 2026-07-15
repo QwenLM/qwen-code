@@ -1459,8 +1459,8 @@ export function ExtensionsManagerPage({
                               variant="secondary"
                               className={
                                 extension.isActive
-                                  ? 'bg-[var(--success-bg)] text-[var(--success-color)]'
-                                  : undefined
+                                  ? 'bg-[var(--success-bg)] text-[10px] text-[var(--success-color)]'
+                                  : 'text-[10px]'
                               }
                             >
                               {statusLabel(extension, t)}
@@ -1469,10 +1469,12 @@ export function ExtensionsManagerPage({
                         </div>
                         {state === UPDATE_AVAILABLE ? (
                           <div className="mt-1">
-                            <Badge>{updateLabel(state, t)}</Badge>
+                            <Badge className="text-[10px]">
+                              {updateLabel(state, t)}
+                            </Badge>
                           </div>
                         ) : null}
-                        <CardDescription className="mt-0.5 truncate">
+                        <CardDescription className="mt-1 truncate text-xs">
                           {extension.description ||
                             t('extensions.manage.noDescription')}
                         </CardDescription>

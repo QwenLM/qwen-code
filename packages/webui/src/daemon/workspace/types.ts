@@ -339,6 +339,9 @@ export interface DaemonWorkspaceActions {
     scope: 'workspace' | 'user',
     key: string,
     value: unknown,
+    options?: {
+      mcpServerMutation?: { operation: 'set' | 'remove'; name: string };
+    },
   ): Promise<DaemonSettingUpdateResult>;
 
   // Memory

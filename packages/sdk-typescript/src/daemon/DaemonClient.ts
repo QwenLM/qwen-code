@@ -2675,7 +2675,10 @@ export class DaemonClient {
     scope: 'workspace' | 'user',
     key: string,
     value: unknown,
-    opts?: { clientId?: string },
+    opts?: {
+      clientId?: string;
+      mcpServerMutation?: { operation: 'set' | 'remove'; name: string };
+    },
   ): Promise<DaemonSettingUpdateResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/workspace/settings`,
@@ -2685,7 +2688,14 @@ export class DaemonClient {
           { 'Content-Type': 'application/json' },
           opts?.clientId,
         ),
-        body: JSON.stringify({ scope, key, value }),
+        body: JSON.stringify({
+          scope,
+          key,
+          value,
+          ...(opts?.mcpServerMutation
+            ? { mcpServerMutation: opts.mcpServerMutation }
+            : {}),
+        }),
       },
       async (res) => {
         if (!res.ok) {
@@ -4430,12 +4440,22 @@ export class WorkspaceDaemonClient {
     scope: 'workspace',
     key: string,
     value: unknown,
-    opts?: { clientId?: string },
+    opts?: {
+      clientId?: string;
+      mcpServerMutation?: { operation: 'set' | 'remove'; name: string };
+    },
   ): Promise<DaemonSettingUpdateResult> {
     return this.post(
       '/settings',
       'POST /workspaces/:workspace/settings',
-      { scope, key, value },
+      {
+        scope,
+        key,
+        value,
+        ...(opts?.mcpServerMutation
+          ? { mcpServerMutation: opts.mcpServerMutation }
+          : {}),
+      },
       opts?.clientId,
     );
   }

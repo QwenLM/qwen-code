@@ -205,6 +205,14 @@ export function registerWorkspaceMcpControlRoutes(
       }
       const clientId = parseAndValidateClientId(req, res);
       if (clientId === null) return;
+      if (!clientId) {
+        res.status(400).json({
+          error:
+            '`X-Qwen-Client-Id` header is required for runtime MCP mutation',
+          code: 'missing_client_id',
+        });
+        return;
+      }
       try {
         const result = await bridge.addRuntimeMcpServer(
           name,
@@ -228,6 +236,14 @@ export function registerWorkspaceMcpControlRoutes(
       if (!validateMcpRuntimeServerName(name, res)) return;
       const clientId = parseAndValidateClientId(req, res);
       if (clientId === null) return;
+      if (!clientId) {
+        res.status(400).json({
+          error:
+            '`X-Qwen-Client-Id` header is required for runtime MCP mutation',
+          code: 'missing_client_id',
+        });
+        return;
+      }
       try {
         const result = await bridge.removeRuntimeMcpServer(name, clientId);
         res.status(200).json(result);
@@ -454,6 +470,14 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
         runtime.bridge,
       );
       if (clientId === null) return;
+      if (!clientId) {
+        res.status(400).json({
+          error:
+            '`X-Qwen-Client-Id` header is required for runtime MCP mutation',
+          code: 'missing_client_id',
+        });
+        return;
+      }
       const route = 'POST /workspaces/:workspace/mcp/servers';
       try {
         const result = await runtime.bridge.addRuntimeMcpServer(
@@ -486,6 +510,14 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
         runtime.bridge,
       );
       if (clientId === null) return;
+      if (!clientId) {
+        res.status(400).json({
+          error:
+            '`X-Qwen-Client-Id` header is required for runtime MCP mutation',
+          code: 'missing_client_id',
+        });
+        return;
+      }
       const route = 'DELETE /workspaces/:workspace/mcp/servers/:name';
       try {
         const result = await runtime.bridge.removeRuntimeMcpServer(

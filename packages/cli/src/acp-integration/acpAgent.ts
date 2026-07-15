@@ -71,6 +71,7 @@ import {
   runManagedAutoMemoryDream,
   runManagedRememberByAgent,
   matchesAnyServerPattern,
+  mcpServerRequiresOAuth,
   IMAGE_CAPABILITY,
   registerAcpEventLoopLagGauge,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
@@ -298,6 +299,7 @@ const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
 // Must be less than SESSION_BTW_TIMEOUT_MS (60s) in bridge.ts so the child
 // aborts before the bridge's backstop timer fires.
 const BTW_CHILD_TIMEOUT_MS = 55_000;
+const MCP_OAUTH_START_TIMEOUT_MS = 30_000;
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
 
@@ -2804,7 +2806,7 @@ class QwenAgent implements Agent {
   private getLiveMcpConfigs(serverName: string): Config[] {
     return [
       ...new Set([
-        this.getWorkspaceMcpConfig(),
+        this.getWorkspaceMcpConfig(serverName),
         this.config,
         ...this.getActiveSessions().map((session) => session.getConfig()),
       ]),
@@ -3876,6 +3878,10 @@ class QwenAgent implements Agent {
   ): Promise<ServeWorkspaceMcpStatus> {
     try {
       const workspaceCwd = this.workspaceCwd(config);
+      const settings = loadSettings(config.getTargetDir());
+      const userServers = settings.user?.settings.mcpServers ?? {};
+      const systemDefaultServers =
+        settings.systemDefaults?.settings.mcpServers ?? {};
       const servers = config.getMcpServers() ?? {};
       const approvals = loadMcpApprovals();
 
@@ -3960,6 +3966,10 @@ class QwenAgent implements Agent {
               // Match CLI: token lookup errors should not break /mcp status.
             }
             const rawStatus = this.getMcpServerStatus(config, name);
+            const requiresAuth =
+              rawStatus !== MCPServerStatus.CONNECTED &&
+              (mcpServerRequiresOAuth.get(name) === true ||
+                (server.oauth?.enabled === true && !hasOAuthTokens));
             const refusedByBudget = refusedSet.has(name);
             // Config-disable takes precedence over budget-refusal.
             const effectivelyRefused = refusedByBudget && !disabled;
@@ -3977,6 +3987,7 @@ class QwenAgent implements Agent {
               transport: this.mcpTransport(server),
               disabled,
               hasOAuthTokens,
+              ...(requiresAuth ? { requiresAuth: true } : {}),
             };
             if (isGatedMcpScope(server.scope)) {
               const approvalState = approvals.getState(
@@ -4025,27 +4036,35 @@ class QwenAgent implements Agent {
             if (typeof extensionName === 'string') {
               out.extensionName = extensionName;
             }
-            const source = out.extensionName
-              ? 'extension'
-              : server.scope === 'workspace'
-                ? 'workspace'
-                : server.scope === 'project'
-                  ? 'project'
-                  : 'user';
-            (
-              out as unknown as {
-                source?: 'user' | 'workspace' | 'project' | 'extension';
-              }
-            ).source = source;
             const transient =
               config.getTopTierMcpServers?.()?.[name] !== undefined ||
               config.getRuntimeMcpServers?.()[name] !== undefined;
-            (
-              out as ServeWorkspaceMcpServerStatus & { removable?: boolean }
-            ).removable =
-              !out.extensionName &&
-              !transient &&
-              (server.scope === undefined || server.scope === 'workspace');
+            const configOrigin: NonNullable<
+              ServeWorkspaceMcpServerStatus['configOrigin']
+            > = out.extensionName
+              ? 'extension'
+              : transient
+                ? 'runtime'
+                : server.scope === 'workspace'
+                  ? 'workspace_settings'
+                  : server.scope === 'project'
+                    ? 'project_mcp_json'
+                    : server.scope === 'system'
+                      ? 'system_settings'
+                      : userServers[name] !== undefined
+                        ? 'user_settings'
+                        : systemDefaultServers[name] !== undefined
+                          ? 'system_settings'
+                          : 'user_settings';
+            out.configOrigin = configOrigin;
+            out.source = out.extensionName
+              ? 'extension'
+              : configOrigin === 'workspace_settings'
+                ? 'project'
+                : 'user';
+            out.removable =
+              configOrigin === 'user_settings' ||
+              configOrigin === 'workspace_settings';
             if (server && typeof server === 'object') {
               const candidate = server as {
                 command?: unknown;
@@ -6574,6 +6593,30 @@ class QwenAgent implements Agent {
             reason: 'disabled' as const,
           };
         }
+        const server = servers[serverName]!;
+        let requiresAuth = mcpServerRequiresOAuth.get(serverName) === true;
+        if (!requiresAuth && server.oauth?.enabled === true) {
+          try {
+            requiresAuth =
+              (await new MCPOAuthTokenStorage().getCredentials(serverName)) ===
+              null;
+          } catch {
+            // A token-storage read failure is not proof that authentication is
+            // required; let reconnect surface the underlying connection error.
+          }
+        }
+        if (
+          requiresAuth &&
+          this.getMcpServerStatus(config, serverName) !==
+            MCPServerStatus.CONNECTED
+        ) {
+          return {
+            serverName,
+            restarted: false,
+            skipped: true,
+            reason: 'authentication_required' as const,
+          };
+        }
         const manager = config.getToolRegistry()?.getMcpClientManager();
         if (!manager) {
           throw RequestError.internalError(
@@ -6882,12 +6925,29 @@ class QwenAgent implements Agent {
             messages: string[];
           }) => void;
           let rejectStarted!: (reason: unknown) => void;
+          let startedTimer!: NodeJS.Timeout;
           const started = new Promise<{
             authUrl: string;
             messages: string[];
           }>((resolve, reject) => {
-            resolveStarted = resolve;
-            rejectStarted = reject;
+            resolveStarted = (value) => {
+              clearTimeout(startedTimer);
+              resolve(value);
+            };
+            rejectStarted = (reason) => {
+              clearTimeout(startedTimer);
+              reject(reason);
+            };
+            startedTimer = setTimeout(
+              () =>
+                rejectStarted(
+                  new Error(
+                    `MCP OAuth authentication did not provide a URL within ${MCP_OAUTH_START_TIMEOUT_MS / 1000} seconds`,
+                  ),
+                ),
+              MCP_OAUTH_START_TIMEOUT_MS,
+            );
+            startedTimer.unref();
           });
           pending = { started };
           this.pendingMcpAuthentications.set(serverName, pending);
@@ -6909,34 +6969,44 @@ class QwenAgent implements Agent {
           appEvents.on(AppEvent.OauthAuthUrl, authUrlListener);
           void (async () => {
             try {
-              const oauthConfig = server.oauth ?? { enabled: false };
-              const mcpServerUrl = server.httpUrl || server.url;
-              const authProvider = new MCPOAuthProvider(
-                new MCPOAuthTokenStorage(),
-              );
-              await authProvider.authenticate(
-                serverName,
-                oauthConfig,
-                mcpServerUrl,
-                appEvents,
-              );
-              await this.reconcileMcpServerAcrossLiveConfigs(
-                serverName,
-                'discover',
-              );
-              this.mcpAuthenticationResults.set(serverName, {
-                state: 'succeeded',
-              });
-            } catch (error) {
-              this.mcpAuthenticationResults.set(serverName, {
-                state: 'failed',
-                error: error instanceof Error ? error.message : String(error),
-              });
-              rejectStarted(error);
-              debugLogger.warn(
-                `MCP OAuth authentication failed for ${serverName}:`,
-                error,
-              );
+              try {
+                const oauthConfig = server.oauth ?? { enabled: false };
+                const mcpServerUrl = server.httpUrl || server.url;
+                const authProvider = new MCPOAuthProvider(
+                  new MCPOAuthTokenStorage(),
+                );
+                await authProvider.authenticate(
+                  serverName,
+                  oauthConfig,
+                  mcpServerUrl,
+                  appEvents,
+                );
+                this.mcpAuthenticationResults.set(serverName, {
+                  state: 'succeeded',
+                });
+              } catch (error) {
+                this.mcpAuthenticationResults.set(serverName, {
+                  state: 'failed',
+                  error: error instanceof Error ? error.message : String(error),
+                });
+                rejectStarted(error);
+                debugLogger.warn(
+                  `MCP OAuth authentication failed for ${serverName}:`,
+                  error,
+                );
+                return;
+              }
+              try {
+                await this.reconcileMcpServerAcrossLiveConfigs(
+                  serverName,
+                  'discover',
+                );
+              } catch (error) {
+                debugLogger.warn(
+                  `MCP OAuth authenticated for ${serverName}, but tool synchronization failed:`,
+                  error,
+                );
+              }
             } finally {
               appEvents.removeListener(
                 AppEvent.OauthDisplayMessage,

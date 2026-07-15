@@ -592,7 +592,11 @@ interface FakeBridgeOpts {
         serverName: string;
         restarted: false;
         skipped: true;
-        reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+        reason:
+          | 'in_flight'
+          | 'disabled'
+          | 'budget_would_exceed'
+          | 'authentication_required';
       }
   >;
   addRuntimeMcpServerImpl?: (
@@ -12979,19 +12983,18 @@ describe('createServeApp', () => {
       });
     });
 
-    it('200 fresh add does not require X-Qwen-Client-Id', async () => {
+    it('400 fresh add requires X-Qwen-Client-Id', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, { bridge });
       const res = await auth(request(app).post('/workspace/mcp/servers')).send({
         name: 'echo',
         config: { command: 'echo' },
       });
-      expect(res.status).toBe(200);
-      expect(bridge.addRuntimeMcpServerCalls).toHaveLength(1);
-      expect(bridge.addRuntimeMcpServerCalls[0]).toMatchObject({
-        name: 'echo',
-        originatorClientId: undefined,
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'missing_client_id',
       });
+      expect(bridge.addRuntimeMcpServerCalls).toHaveLength(0);
     });
 
     it('200 soft refuse (skipped:true, reason:budget_warning_only)', async () => {
@@ -13196,18 +13199,17 @@ describe('createServeApp', () => {
       });
     });
 
-    it('200 remove does not require X-Qwen-Client-Id', async () => {
+    it('400 remove requires X-Qwen-Client-Id', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, { bridge });
       const res = await auth(
         request(app).delete('/workspace/mcp/servers/echo'),
       ).send();
-      expect(res.status).toBe(200);
-      expect(bridge.removeRuntimeMcpServerCalls).toHaveLength(1);
-      expect(bridge.removeRuntimeMcpServerCalls[0]).toMatchObject({
-        name: 'echo',
-        originatorClientId: undefined,
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'missing_client_id',
       });
+      expect(bridge.removeRuntimeMcpServerCalls).toHaveLength(0);
     });
 
     it('200 skipped:true when server not present (idempotent)', async () => {

@@ -1803,7 +1803,8 @@ describe('App session callbacks', () => {
       servers: [
         {
           name: 'filesystem',
-          source: 'workspace',
+          source: 'project',
+          configOrigin: 'workspace_settings',
           disabled: false,
           mcpStatus: 'connecting',
         },
@@ -1833,7 +1834,8 @@ describe('App session callbacks', () => {
       servers: [
         {
           name: 'filesystem',
-          source: 'workspace',
+          source: 'project',
+          configOrigin: 'workspace_settings',
           disabled: false,
           mcpStatus: 'disconnected',
           resourceCount: 1,
@@ -1897,9 +1899,11 @@ describe('App session callbacks', () => {
     vi.useFakeTimers();
     const disconnectedServer = {
       name: 'yuque',
-      source: 'workspace' as const,
+      source: 'project' as const,
+      configOrigin: 'workspace_settings' as const,
       disabled: false,
       mcpStatus: 'disconnected' as const,
+      requiresAuth: true,
       resourceCount: 0,
     };
     mockWorkspaceActions.loadMcpStatus.mockResolvedValue({

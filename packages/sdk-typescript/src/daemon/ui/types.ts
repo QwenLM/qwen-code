@@ -501,7 +501,11 @@ export interface DaemonUiMcpServerRestartRefusedEvent
   extends DaemonUiEventBase {
   type: 'workspace.mcp.server_restart_refused';
   serverName: string;
-  reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+  reason:
+    | 'in_flight'
+    | 'disabled'
+    | 'budget_would_exceed'
+    | 'authentication_required';
 }
 
 export interface DaemonUiMcpServerChangedEvent extends DaemonUiEventBase {

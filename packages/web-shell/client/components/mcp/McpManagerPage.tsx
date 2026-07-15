@@ -22,6 +22,7 @@ import type {
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useMcp, useSettings } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import { extractErrorDetail } from '../../utils/errorDetail';
 import styles from './McpManagerPage.module.css';
 import type { SerializedMcpStatusMessage } from '../messages/McpStatusMessage';
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
@@ -50,7 +51,13 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
-import { Empty, EmptyHeader, EmptyMedia, EmptyTitle } from '../ui/empty';
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from '../ui/empty';
 import { Input } from '../ui/input';
 import {
   Dialog,
@@ -77,8 +84,10 @@ type McpStatus = Awaited<ReturnType<DaemonWorkspaceActions['loadMcpStatus']>>;
 type T = ReturnType<typeof useI18n>['t'];
 type SourceFilter = 'all' | 'user' | 'workspace' | 'extension';
 type McpSettingsScope = 'user' | 'workspace';
+const DEFAULT_MCP_SERVER_CONFIG = '{\n  "command": "",\n  "args": []\n}';
 type McpServerAction = {
   id:
+    | 'edit'
     | 'approve'
     | 'reconnect'
     | 'enable'
@@ -95,39 +104,36 @@ interface McpManagerPageProps {
   embedded?: EmbeddedManagerPage;
 }
 
-function extractErrorDetail(error: unknown): string {
-  if (error && typeof error === 'object') {
-    const body = (error as { body?: unknown }).body;
-    if (body && typeof body === 'object') {
-      const data = (body as { data?: unknown }).data;
-      if (data && typeof data === 'object') {
-        const details = (data as { details?: unknown }).details;
-        if (typeof details === 'string' && details) return details;
-      }
-      const bodyError = (body as { error?: unknown }).error;
-      if (typeof bodyError === 'string' && bodyError) return bodyError;
-    }
-    if (error instanceof Error && error.message) return error.message;
+function configOriginValue(
+  server: DaemonWorkspaceMcpServerStatus,
+): DaemonWorkspaceMcpServerStatus['configOrigin'] {
+  if (server.configOrigin) return server.configOrigin;
+  if (server.extensionName || server.source === 'extension') return 'extension';
+  const legacySource = (server as { source?: string }).source;
+  if (legacySource === 'project' && server.removable === false) {
+    return 'project_mcp_json';
   }
-  return String(error);
+  if (legacySource === 'workspace' || legacySource === 'project') {
+    return 'workspace_settings';
+  }
+  return server.removable ? 'user_settings' : undefined;
 }
 
 function sourceValue(server: DaemonWorkspaceMcpServerStatus): SourceFilter {
-  const source = (server as unknown as { source?: SourceFilter }).source;
-  if (source === 'workspace') return 'workspace';
-  if (source === 'extension' || server.extensionName) return 'extension';
+  const origin = configOriginValue(server);
+  if (origin === 'workspace_settings') return 'workspace';
+  if (origin === 'extension') return 'extension';
   return 'user';
 }
 
 function isManagedServerVisible(
   server: DaemonWorkspaceMcpServerStatus,
 ): boolean {
-  const source = (server as { source?: string }).source;
-  if (source === 'project') return false;
-  if (source === 'extension' || server.extensionName) return true;
-  if (source === 'workspace') return true;
+  const origin = configOriginValue(server);
   return (
-    source === 'user' && (server as { removable?: boolean }).removable === true
+    origin === 'extension' ||
+    origin === 'workspace_settings' ||
+    origin === 'user_settings'
   );
 }
 
@@ -194,9 +200,14 @@ function serverActions(
 ): McpServerAction[] {
   const actions: McpServerAction[] = [];
   const awaitingApproval = Boolean(server.approvalState);
+  const origin = configOriginValue(server);
+  if (origin === 'user_settings' || origin === 'workspace_settings') {
+    actions.push({ id: 'edit', label: t('mcp.action.edit') });
+  }
   if (
     !server.disabled &&
     !awaitingApproval &&
+    !server.requiresAuth &&
     server.mcpStatus === 'disconnected'
   ) {
     actions.push({ id: 'reconnect', label: t('mcp.action.reconnect') });
@@ -204,11 +215,17 @@ function serverActions(
   if (!server.disabled && awaitingApproval) {
     actions.push({ id: 'approve', label: t('mcp.action.approve') });
   }
-  actions.push({
-    id: server.disabled ? 'enable' : 'disable',
-    label: server.disabled ? t('mcp.action.enable') : t('mcp.action.disable'),
-  });
-  if (!server.disabled && !awaitingApproval) {
+  if (origin !== 'extension' || server.disabled) {
+    actions.push({
+      id: server.disabled ? 'enable' : 'disable',
+      label: server.disabled ? t('mcp.action.enable') : t('mcp.action.disable'),
+    });
+  }
+  if (
+    !server.disabled &&
+    !awaitingApproval &&
+    (server.mcpStatus !== 'disconnected' || server.requiresAuth)
+  ) {
     actions.push({
       id: 'authenticate',
       label: server.hasOAuthTokens
@@ -375,11 +392,12 @@ export function McpManagerPage({
   const [initializing, setInitializing] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
+  const [editingServer, setEditingServer] =
+    useState<DaemonWorkspaceMcpServerStatus | null>(null);
   const [serverName, setServerName] = useState('');
+  const [serverDescription, setServerDescription] = useState('');
   const [serverScope, setServerScope] = useState<McpSettingsScope>('workspace');
-  const [serverConfig, setServerConfig] = useState(
-    '{\n  "command": "",\n  "args": []\n}',
-  );
+  const [serverConfig, setServerConfig] = useState(DEFAULT_MCP_SERVER_CONFIG);
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
   const [serverToRemove, setServerToRemove] =
@@ -396,6 +414,19 @@ export function McpManagerPage({
   const hasInitializedDiscovery = useRef(
     message.status.discoveryState === 'completed',
   );
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const waitForPoll = useCallback(async () => {
+    await new Promise((resolve) => window.setTimeout(resolve, 1_500));
+    return mountedRef.current;
+  }, []);
 
   const startDiscovery = useCallback(
     async (
@@ -406,10 +437,12 @@ export function McpManagerPage({
       await (operation === 'initialize'
         ? mcp.initialize()
         : mcp.reloadConfig());
+      if (!mountedRef.current) return false;
 
       for (let attempt = 0; attempt < 40; attempt += 1) {
-        await new Promise((resolve) => window.setTimeout(resolve, 1_500));
+        if (!(await waitForPoll())) return false;
         const nextStatus = await mcp.reload();
+        if (!mountedRef.current) return false;
         if (!nextStatus) continue;
         if (!deferStatus || nextStatus.discoveryState === 'completed') {
           setStatus((current) =>
@@ -450,7 +483,7 @@ export function McpManagerPage({
       }
       return false;
     },
-    [mcp, t],
+    [mcp, t, waitForPoll],
   );
 
   useEffect(() => {
@@ -459,9 +492,13 @@ export function McpManagerPage({
     setInitializing(true);
     void startDiscovery('initialize')
       .catch((error: unknown) => {
-        setNotice({ text: extractErrorDetail(error), error: true });
+        if (mountedRef.current) {
+          setNotice({ text: extractErrorDetail(error), error: true });
+        }
       })
-      .finally(() => setInitializing(false));
+      .finally(() => {
+        if (mountedRef.current) setInitializing(false);
+      });
   }, [startDiscovery]);
 
   const servers = useMemo(
@@ -586,6 +623,7 @@ export function McpManagerPage({
 
   const addServer = useCallback(async () => {
     const name = serverName.trim();
+    const editing = editingServer !== null;
     if (!name) {
       setAddError(t('mcp.add.nameRequired'));
       return;
@@ -596,7 +634,11 @@ export function McpManagerPage({
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
         throw new Error(t('mcp.add.configInvalid'));
       }
-      config = parsed as Parameters<typeof mcp.addServer>[0]['config'];
+      const description = serverDescription.trim();
+      config = {
+        ...(parsed as Parameters<typeof mcp.addServer>[0]['config']),
+        ...(description ? { description } : {}),
+      };
     } catch (error) {
       setAddError(extractErrorDetail(error));
       return;
@@ -605,11 +647,8 @@ export function McpManagerPage({
     setAdding(true);
     let persisted = false;
     try {
-      const currentSettings = await settings.reload();
-      if (!currentSettings) throw new Error(t('mcp.add.settingsUnavailable'));
-      await settings.setValue(serverScope, 'mcpServers', {
-        ...mcpServersForScope(currentSettings, serverScope),
-        [name]: config,
+      await settings.setValue(serverScope, 'mcpServers', config, {
+        mcpServerMutation: { operation: 'set', name },
       });
       persisted = true;
       setNotice(null);
@@ -617,25 +656,46 @@ export function McpManagerPage({
         () => false,
       );
       setNotice({
+        ...(editing ? { serverName: name } : {}),
         text: runtimeUpdated
-          ? t('mcp.add.done', { name })
+          ? t(editing ? 'mcp.edit.done' : 'mcp.add.done', { name })
           : t('mcp.runtime.notUpdated'),
         error: !runtimeUpdated,
       });
       setAddDialogOpen(false);
+      setEditingServer(null);
       setServerName('');
+      setServerDescription('');
+      setServerConfig(DEFAULT_MCP_SERVER_CONFIG);
     } catch (error) {
       if (persisted) {
-        setNotice({ text: t('mcp.runtime.notUpdated'), error: true });
+        setNotice({
+          ...(editing ? { serverName: name } : {}),
+          text: t('mcp.runtime.notUpdated'),
+          error: true,
+        });
         setAddDialogOpen(false);
+        setEditingServer(null);
         setServerName('');
+        setServerDescription('');
+        setServerConfig(DEFAULT_MCP_SERVER_CONFIG);
       } else {
         setAddError(extractErrorDetail(error));
       }
     } finally {
       setAdding(false);
     }
-  }, [mcp, serverConfig, serverName, serverScope, settings, startDiscovery, t]);
+  }, [
+    mcp,
+    editingServer,
+    serverConfig,
+    serverDescription,
+    serverName,
+    serverScope,
+    settings,
+    startDiscovery,
+    t,
+  ]);
 
   const removeServer = useCallback(async () => {
     if (!serverToRemove) return;
@@ -662,8 +722,17 @@ export function McpManagerPage({
         });
         return;
       }
-      const { [serverToRemove.name]: _removed, ...nextServers } = servers;
-      await settings.setValue(scope, 'mcpServers', nextServers);
+      await settings.setValue(
+        scope,
+        'mcpServers',
+        {},
+        {
+          mcpServerMutation: {
+            operation: 'remove',
+            name: serverToRemove.name,
+          },
+        },
+      );
       persisted = true;
       setServerToRemove(null);
       setNotice({
@@ -698,11 +767,68 @@ export function McpManagerPage({
     }
   }, [serverToRemove, settings, startDiscovery, t]);
 
+  const openEditServer = useCallback(
+    async (server: DaemonWorkspaceMcpServerStatus) => {
+      if (busyServer) return;
+      const origin = configOriginValue(server);
+      if (origin !== 'user_settings' && origin !== 'workspace_settings') {
+        return;
+      }
+      const scope: McpSettingsScope =
+        origin === 'workspace_settings' ? 'workspace' : 'user';
+      setBusyServer(server.name);
+      setNotice(null);
+      try {
+        const currentSettings = await settings.reload();
+        if (!currentSettings) {
+          throw new Error(t('mcp.add.settingsUnavailable'));
+        }
+        const storedConfig = mcpServersForScope(currentSettings, scope)[
+          server.name
+        ];
+        if (
+          !storedConfig ||
+          typeof storedConfig !== 'object' ||
+          Array.isArray(storedConfig)
+        ) {
+          throw new Error(t('mcp.edit.notFound'));
+        }
+        const editableConfig = {
+          ...(storedConfig as Record<string, unknown>),
+        };
+        const description = editableConfig['description'];
+        delete editableConfig['description'];
+        setEditingServer(server);
+        setServerName(server.name);
+        setServerScope(scope);
+        setServerDescription(
+          typeof description === 'string' ? description : '',
+        );
+        setServerConfig(JSON.stringify(editableConfig, null, 2));
+        setAddError(null);
+        setAddDialogOpen(true);
+      } catch (error) {
+        setNotice({
+          serverName: server.name,
+          text: t('mcp.action.failed', { error: extractErrorDetail(error) }),
+          error: true,
+        });
+      } finally {
+        setBusyServer(null);
+      }
+    },
+    [busyServer, settings, t],
+  );
+
   const runAction = useCallback(
     async (server: DaemonWorkspaceMcpServerStatus, action: McpServerAction) => {
       if (busyServer) return;
       if (action.id === 'remove') {
         setServerToRemove(server);
+        return;
+      }
+      if (action.id === 'edit') {
+        await openEditServer(server);
         return;
       }
       setBusyServer(server.name);
@@ -719,7 +845,11 @@ export function McpManagerPage({
         let pendingAuthentication = false;
         if (action.id === 'reconnect') {
           const result = await mcp.restartServer(server.name);
+          if (!mountedRef.current) return;
           if ('restarted' in result && !result.restarted) {
+            if (result.reason === 'authentication_required') {
+              throw new Error(t('mcp.reconnect.authenticationRequired'));
+            }
             throw new Error(
               t('mcp.reconnect.skipped', { reason: result.reason }),
             );
@@ -741,6 +871,7 @@ export function McpManagerPage({
           }
         } else {
           const result = await mcp.manageServer(server.name, action.id);
+          if (!mountedRef.current) return;
           authUrl = result.authUrl;
           detail = [...(result.messages ?? [])].join('\n');
           pendingAuthentication =
@@ -756,24 +887,35 @@ export function McpManagerPage({
         let nextStatus: McpStatus | undefined;
         if (pendingAuthentication) {
           for (let attempt = 0; attempt < 400; attempt += 1) {
-            await new Promise((resolve) => window.setTimeout(resolve, 1_500));
+            if (!(await waitForPoll())) return;
             const candidate = await mcp.reload();
+            if (!mountedRef.current) return;
             if (!candidate) continue;
             setStatus(candidate);
+            const statusError = candidate.errors?.[0];
+            if (statusError) {
+              throw new Error(
+                statusError.error ||
+                  statusError.hint ||
+                  t('mcp.oauth.statusFailed'),
+              );
+            }
             const candidateServer = candidate.servers?.find(
               (item) => item.name === server.name,
             );
-            if (candidateServer?.authenticationState === 'failed') {
+            if (!candidateServer) {
+              throw new Error(t('mcp.oauth.serverRemoved'));
+            }
+            if (candidateServer.authenticationState === 'failed') {
               throw new Error(
                 candidateServer.authenticationError ||
                   t('mcp.oauth.authenticationFailed'),
               );
             }
             if (
-              candidateServer &&
-              (candidateServer.authenticationState === 'succeeded' ||
-                (candidateServer.authenticationState === undefined &&
-                  candidateServer.mcpStatus === 'connected'))
+              candidateServer.authenticationState === 'succeeded' ||
+              (candidateServer.authenticationState === undefined &&
+                candidateServer.mcpStatus === 'connected')
             ) {
               nextStatus = candidate;
               break;
@@ -782,6 +924,7 @@ export function McpManagerPage({
           if (!nextStatus) throw new Error(t('mcp.oauth.timeout'));
         } else {
           nextStatus = await mcp.reload();
+          if (!mountedRef.current) return;
           for (
             let attempt = 0;
             nextStatus?.discoveryState !== undefined &&
@@ -790,8 +933,9 @@ export function McpManagerPage({
             attempt < 40;
             attempt += 1
           ) {
-            await new Promise((resolve) => window.setTimeout(resolve, 1_500));
+            if (!(await waitForPoll())) return;
             const candidate = await mcp.reload();
+            if (!mountedRef.current) return;
             if (!candidate) continue;
             nextStatus = candidate;
             setStatus(candidate);
@@ -808,6 +952,7 @@ export function McpManagerPage({
               nextStatus.discoveryState === 'completed')
           ) {
             await loadServerData(nextServer);
+            if (!mountedRef.current) return;
           }
         }
         setNotice({
@@ -820,18 +965,20 @@ export function McpManagerPage({
           ...(!pendingAuthentication && authUrl ? { authUrl } : {}),
         });
       } catch (error) {
-        setNotice({
-          serverName: server.name,
-          text: t('mcp.action.failed', {
-            error: extractErrorDetail(error),
-          }),
-          error: true,
-        });
+        if (mountedRef.current) {
+          setNotice({
+            serverName: server.name,
+            text: t('mcp.action.failed', {
+              error: extractErrorDetail(error),
+            }),
+            error: true,
+          });
+        }
       } finally {
-        setBusyServer(null);
+        if (mountedRef.current) setBusyServer(null);
       }
     },
-    [busyServer, loadServerData, mcp, t],
+    [busyServer, loadServerData, mcp, openEditServer, t, waitForPoll],
   );
 
   const openServer = (server: DaemonWorkspaceMcpServerStatus) => {
@@ -1020,57 +1167,160 @@ export function McpManagerPage({
       </DialogContent>
     </Dialog>
   );
+  const editorDialog = (
+    <Dialog
+      open={addDialogOpen}
+      onOpenChange={(open) => {
+        if (!adding) {
+          setAddDialogOpen(open);
+          if (!open) setEditingServer(null);
+        }
+      }}
+    >
+      <DialogContent className="sm:max-w-lg" showCloseButton={false}>
+        <DialogHeader>
+          <DialogTitle>
+            {t(editingServer ? 'mcp.edit.title' : 'mcp.add.title')}
+          </DialogTitle>
+          <DialogDescription>
+            {t(editingServer ? 'mcp.edit.description' : 'mcp.add.description')}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-4">
+          {addError ? (
+            <Alert variant="destructive">
+              <AlertCircleIcon />
+              <AlertDescription>{addError}</AlertDescription>
+            </Alert>
+          ) : null}
+          <label className="grid gap-2 text-sm font-medium">
+            {t('mcp.add.name')}
+            <Input
+              value={serverName}
+              onChange={(event) => setServerName(event.target.value)}
+              placeholder="my-mcp-server"
+              disabled={adding || editingServer !== null}
+            />
+          </label>
+          <label className="grid gap-2 text-sm font-medium">
+            {t('mcp.add.serverDescription')}
+            <Input
+              value={serverDescription}
+              onChange={(event) => setServerDescription(event.target.value)}
+              placeholder={t('mcp.add.serverDescriptionPlaceholder')}
+              disabled={adding}
+            />
+          </label>
+          <label className="grid gap-2 text-sm font-medium">
+            {t('mcp.add.scope')}
+            <Select
+              value={serverScope}
+              onValueChange={(value) =>
+                setServerScope(value as McpSettingsScope)
+              }
+              disabled={adding || editingServer !== null}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="workspace">
+                  {t('settings.scope.workspace')}
+                </SelectItem>
+                <SelectItem value="user">
+                  {t('mcp.add.scope.global')}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </label>
+          <label className="grid gap-2 text-sm font-medium">
+            {t('mcp.add.config')}
+            <Textarea
+              className="min-h-44 font-mono text-xs"
+              value={serverConfig}
+              onChange={(event) => setServerConfig(event.target.value)}
+              disabled={adding}
+            />
+          </label>
+        </div>
+        <DialogFooter>
+          <Button
+            variant="outline"
+            onClick={() => {
+              setAddDialogOpen(false);
+              setEditingServer(null);
+            }}
+            disabled={adding}
+          >
+            {t('common.cancel')}
+          </Button>
+          <Button onClick={() => void addServer()} disabled={adding}>
+            {adding ? <Spinner data-icon="inline-start" /> : null}
+            {adding
+              ? t(editingServer ? 'mcp.edit.saving' : 'mcp.add.adding')
+              : t(editingServer ? 'mcp.edit.save' : 'mcp.add.button')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 
   if (selectedTool && selectedServer) {
     return (
-      <div className="flex w-full flex-col gap-6 pb-8">
-        {navigation}
-        <div className="flex w-full flex-col gap-6">
-          <div className="flex items-center gap-4">
-            <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-muted">
-              <WrenchIcon />
+      <>
+        <div className="flex w-full flex-col gap-6 pb-8">
+          {navigation}
+          <div className="flex w-full flex-col gap-6">
+            <div className="flex items-center gap-4">
+              <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-muted">
+                <WrenchIcon />
+              </div>
+              <div className="min-w-0">
+                <h1 className="break-words text-2xl font-semibold">
+                  {selectedTool.name}
+                </h1>
+                <p className="text-sm text-muted-foreground">
+                  {selectedTool.serverToolName || selectedServer.name}
+                </p>
+              </div>
             </div>
-            <div className="min-w-0">
-              <h1 className="break-words text-2xl font-semibold">
-                {selectedTool.name}
-              </h1>
-              <p className="text-sm text-muted-foreground">
-                {selectedTool.serverToolName || selectedServer.name}
-              </p>
-            </div>
+            <Card>
+              <CardContent>
+                <ToolDetail tool={selectedTool} t={t} />
+              </CardContent>
+            </Card>
           </div>
-          <Card>
-            <CardContent>
-              <ToolDetail tool={selectedTool} t={t} />
-            </CardContent>
-          </Card>
         </div>
-      </div>
+        {editorDialog}
+      </>
     );
   }
 
   if (selectedResource && selectedServer) {
     return (
-      <div className="flex w-full flex-col gap-6 pb-8">
-        {navigation}
-        <div className="flex w-full flex-col gap-6">
-          <div className="flex items-center gap-4">
-            <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-muted">
-              <DatabaseIcon />
+      <>
+        <div className="flex w-full flex-col gap-6 pb-8">
+          {navigation}
+          <div className="flex w-full flex-col gap-6">
+            <div className="flex items-center gap-4">
+              <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-muted">
+                <DatabaseIcon />
+              </div>
+              <h1 className="min-w-0 break-words text-2xl font-semibold">
+                {selectedResource.title ||
+                  selectedResource.name ||
+                  selectedResource.uri}
+              </h1>
             </div>
-            <h1 className="min-w-0 break-words text-2xl font-semibold">
-              {selectedResource.title ||
-                selectedResource.name ||
-                selectedResource.uri}
-            </h1>
+            <Card>
+              <CardContent>
+                <ResourceDetail resource={selectedResource} t={t} />
+              </CardContent>
+            </Card>
           </div>
-          <Card>
-            <CardContent>
-              <ResourceDetail resource={selectedResource} t={t} />
-            </CardContent>
-          </Card>
         </div>
-      </div>
+        {editorDialog}
+      </>
     );
   }
 
@@ -1129,6 +1379,9 @@ export function McpManagerPage({
                       <DropdownMenuItem
                         key={action.id}
                         data-testid={`mcp-server-action-${action.id}`}
+                        variant={
+                          action.id === 'remove' ? 'destructive' : 'default'
+                        }
                         disabled={busyServer !== null}
                         onSelect={() => void runAction(selectedServer, action)}
                       >
@@ -1164,7 +1417,7 @@ export function McpManagerPage({
               onValueChange={setSelectedServerTab}
             >
               <TabsList>
-                <TabsTrigger value="overview">{t('mcp.status')}</TabsTrigger>
+                <TabsTrigger value="overview">{t('mcp.basicInfo')}</TabsTrigger>
                 <TabsTrigger value="tools">
                   {t('mcp.tools')} {tools.length}
                 </TabsTrigger>
@@ -1176,9 +1429,11 @@ export function McpManagerPage({
               <TabsContent value="overview" className="pt-4">
                 <Card>
                   <CardHeader>
-                    <CardTitle>{t('mcp.status')}</CardTitle>
+                    <CardTitle className="text-sm">
+                      {t('mcp.descriptionTitle')}
+                    </CardTitle>
                     <CardDescription>
-                      {selectedServer.description || t('mcp.noDescription')}
+                      {selectedServer.description?.trim() || '-'}
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="grid gap-6 sm:grid-cols-2">
@@ -1231,15 +1486,17 @@ export function McpManagerPage({
                         className="cursor-pointer transition-colors hover:bg-accent/50"
                         onClick={() => setSelectedToolName(tool.name)}
                         onKeyDown={(event) => {
-                          if (event.key === 'Enter' || event.key === ' ')
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault();
                             setSelectedToolName(tool.name);
+                          }
                         }}
                       >
                         <CardHeader>
                           <CardTitle className="break-words">
                             {tool.name}
                           </CardTitle>
-                          <CardDescription className="line-clamp-2">
+                          <CardDescription className="line-clamp-2 text-xs">
                             {tool.description || t('mcp.noDescription')}
                           </CardDescription>
                           {!tool.isValid ? (
@@ -1282,8 +1539,10 @@ export function McpManagerPage({
                         className="cursor-pointer transition-colors hover:bg-accent/50"
                         onClick={() => setSelectedResourceUri(resource.uri)}
                         onKeyDown={(event) => {
-                          if (event.key === 'Enter' || event.key === ' ')
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault();
                             setSelectedResourceUri(resource.uri);
+                          }
                         }}
                       >
                         <CardHeader>
@@ -1303,7 +1562,7 @@ export function McpManagerPage({
                       <EmptyMedia variant="icon">
                         <DatabaseIcon />
                       </EmptyMedia>
-                      <EmptyTitle>{t('mcp.resourcesUnavailable')}</EmptyTitle>
+                      <EmptyTitle>{t('mcp.noResources')}</EmptyTitle>
                     </EmptyHeader>
                   </Empty>
                 )}
@@ -1312,6 +1571,7 @@ export function McpManagerPage({
           </div>
         </div>
         {removeDialog}
+        {editorDialog}
       </>
     );
   }
@@ -1354,6 +1614,11 @@ export function McpManagerPage({
             </Button>
             <Button
               onClick={() => {
+                setEditingServer(null);
+                setServerName('');
+                setServerDescription('');
+                setServerScope('workspace');
+                setServerConfig(DEFAULT_MCP_SERVER_CONFIG);
                 setAddError(null);
                 setAddDialogOpen(true);
               }}
@@ -1466,13 +1731,13 @@ export function McpManagerPage({
                         </CardTitle>
                         <Badge
                           variant="secondary"
-                          className={`${statusBadgeClass(server)} shrink-0`}
+                          className={`${statusBadgeClass(server)} shrink-0 text-[10px]`}
                         >
                           {statusLabel(server, t)}
                         </Badge>
                       </div>
-                      <CardDescription className="mt-0.5 truncate">
-                        {server.description || t('mcp.noDescription')}
+                      <CardDescription className="mt-1 truncate text-xs">
+                        {server.description?.trim() || '-'}
                       </CardDescription>
                     </div>
                   </div>
@@ -1481,94 +1746,28 @@ export function McpManagerPage({
             ))}
           </div>
         ) : (
-          <Empty className="rounded-xl border border-dashed">
+          <Empty className="border">
             <EmptyHeader>
               <EmptyMedia variant="icon">
-                <ServerIcon />
+                {query || sourceFilter !== 'all' ? (
+                  <SearchIcon />
+                ) : (
+                  <ServerIcon />
+                )}
               </EmptyMedia>
               <EmptyTitle>
                 {query || sourceFilter !== 'all'
                   ? t('mcp.noMatches')
                   : t('mcp.empty')}
               </EmptyTitle>
+              {!query && sourceFilter === 'all' ? (
+                <EmptyDescription>{t('mcp.emptyDescription')}</EmptyDescription>
+              ) : null}
             </EmptyHeader>
           </Empty>
         )}
       </div>
-      <Dialog
-        open={addDialogOpen}
-        onOpenChange={(open) => {
-          if (!adding) setAddDialogOpen(open);
-        }}
-      >
-        <DialogContent className="sm:max-w-lg" showCloseButton={false}>
-          <DialogHeader>
-            <DialogTitle>{t('mcp.add.title')}</DialogTitle>
-            <DialogDescription>{t('mcp.add.description')}</DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-4">
-            {addError ? (
-              <Alert variant="destructive">
-                <AlertCircleIcon />
-                <AlertDescription>{addError}</AlertDescription>
-              </Alert>
-            ) : null}
-            <label className="grid gap-2 text-sm font-medium">
-              {t('mcp.add.name')}
-              <Input
-                value={serverName}
-                onChange={(event) => setServerName(event.target.value)}
-                placeholder="my-mcp-server"
-                disabled={adding}
-              />
-            </label>
-            <label className="grid gap-2 text-sm font-medium">
-              {t('mcp.add.scope')}
-              <Select
-                value={serverScope}
-                onValueChange={(value) =>
-                  setServerScope(value as McpSettingsScope)
-                }
-                disabled={adding}
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="workspace">
-                    {t('settings.scope.workspace')}
-                  </SelectItem>
-                  <SelectItem value="user">
-                    {t('mcp.add.scope.global')}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <label className="grid gap-2 text-sm font-medium">
-              {t('mcp.add.config')}
-              <Textarea
-                className="min-h-44 font-mono text-xs"
-                value={serverConfig}
-                onChange={(event) => setServerConfig(event.target.value)}
-                disabled={adding}
-              />
-            </label>
-          </div>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setAddDialogOpen(false)}
-              disabled={adding}
-            >
-              {t('common.cancel')}
-            </Button>
-            <Button onClick={() => void addServer()} disabled={adding}>
-              {adding ? <Spinner data-icon="inline-start" /> : null}
-              {adding ? t('mcp.add.adding') : t('mcp.add.button')}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {editorDialog}
     </div>
   );
 }

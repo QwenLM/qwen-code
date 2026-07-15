@@ -224,10 +224,18 @@ export interface ServeWorkspaceMcpServerStatus extends ServeStatusCell {
   transport: ServeMcpTransport;
   disabled: boolean;
   hasOAuthTokens?: boolean;
+  requiresAuth?: boolean;
   approvalState?: 'pending' | 'rejected';
   authenticationState?: 'pending' | 'succeeded' | 'failed';
   authenticationError?: string;
-  source?: 'user' | 'workspace' | 'project' | 'extension';
+  source?: 'user' | 'project' | 'extension';
+  configOrigin?:
+    | 'user_settings'
+    | 'workspace_settings'
+    | 'project_mcp_json'
+    | 'system_settings'
+    | 'extension'
+    | 'runtime';
   removable?: boolean;
   config?: {
     command?: string;

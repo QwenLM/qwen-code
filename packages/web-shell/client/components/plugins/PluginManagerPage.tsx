@@ -1,7 +1,18 @@
 import { useCallback, useMemo, useState, type Ref } from 'react';
+import { SearchIcon, ServerIcon } from 'lucide-react';
 import type { SerializedMcpStatusMessage } from '../messages/McpStatusMessage';
 import { ExtensionsManagerPage } from '../extensions/ExtensionsManagerPage';
 import { McpManagerPage } from '../mcp/McpManagerPage';
+import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
+import { Button } from '../ui/button';
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from '../ui/empty';
+import { Input } from '../ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 import { useI18n } from '../../i18n';
 import type { EmbeddedManagerPage } from './manager-page';
@@ -26,6 +37,17 @@ export function PluginManagerPage({
   const [detailOpen, setDetailOpen] = useState(false);
   const [pageRevision, setPageRevision] = useState(0);
   const [mcpLoaded, setMcpLoaded] = useState(false);
+  const [mcpLoadError, setMcpLoadError] = useState<string | null>(null);
+
+  const loadMcp = useCallback(() => {
+    setMcpLoaded(false);
+    setMcpLoadError(null);
+    void loadMcpMessage()
+      .then(() => setMcpLoaded(true))
+      .catch((error: unknown) => {
+        setMcpLoadError(error instanceof Error ? error.message : String(error));
+      });
+  }, [loadMcpMessage]);
 
   const resetToRoot = useCallback(() => {
     setDetailOpen(false);
@@ -42,10 +64,7 @@ export function PluginManagerPage({
     setDetailOpen(false);
     setPageRevision((revision) => revision + 1);
     if (nextTab === 'mcp') {
-      setMcpLoaded(false);
-      void loadMcpMessage()
-        .then(() => setMcpLoaded(true))
-        .catch(() => undefined);
+      loadMcp();
     }
   };
 
@@ -69,6 +88,16 @@ export function PluginManagerPage({
             onClose={onClose}
             embedded={embedded}
           />
+        ) : mcpLoadError ? (
+          <Alert variant="destructive" className="mt-4">
+            <AlertTitle>{t('plugins.mcpLoadFailed')}</AlertTitle>
+            <AlertDescription className="space-y-3">
+              <p>{mcpLoadError}</p>
+              <Button variant="outline" size="sm" onClick={loadMcp}>
+                {t('common.retry')}
+              </Button>
+            </AlertDescription>
+          </Alert>
         ) : mcpMessage && mcpLoaded ? (
           <McpManagerPage
             key={`mcp-${pageRevision}`}
@@ -76,7 +105,28 @@ export function PluginManagerPage({
             onClose={onClose}
             embedded={embedded}
           />
-        ) : null}
+        ) : (
+          <div className="flex w-full flex-col gap-6 pb-8 pt-4">
+            <div className="relative">
+              <SearchIcon className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                aria-label={t('common.search')}
+                readOnly
+                className="pl-9"
+                placeholder={`${t('common.search')} MCP…`}
+              />
+            </div>
+            <Empty className="border">
+              <EmptyHeader>
+                <EmptyMedia variant="icon">
+                  <ServerIcon />
+                </EmptyMedia>
+                <EmptyTitle>{t('mcp.empty')}</EmptyTitle>
+                <EmptyDescription>{t('mcp.emptyDescription')}</EmptyDescription>
+              </EmptyHeader>
+            </Empty>
+          </div>
+        )}
       </TabsContent>
     </Tabs>
   );

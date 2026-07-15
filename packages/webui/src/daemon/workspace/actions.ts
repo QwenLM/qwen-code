@@ -325,10 +325,13 @@ export function createDaemonWorkspaceActions({
       scope: 'workspace' | 'user',
       key: string,
       value: unknown,
+      options?: {
+        mcpServerMutation?: { operation: 'set' | 'remove'; name: string };
+      },
     ) {
       const client = requireClient(getClient, 'Set setting failed');
       return withActionTimeout(
-        client.setWorkspaceSetting(scope, key, value),
+        client.setWorkspaceSetting(scope, key, value, options),
         'Set setting timed out',
       );
     },

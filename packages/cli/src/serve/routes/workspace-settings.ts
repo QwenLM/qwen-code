@@ -58,6 +58,12 @@ const WEB_SHELL_SETTINGS = new Set([
 // workspace-only by design.
 const VALID_WRITE_SCOPES = new Set(['workspace', 'user']);
 const QUALIFIED_WRITE_SCOPES = new Set(['workspace']);
+const mcpServerMutationQueues = new Map<string, Promise<void>>();
+
+interface McpServerSettingMutation {
+  operation: 'set' | 'remove';
+  name: string;
+}
 
 interface SettingDescriptor {
   key: string;
@@ -168,16 +174,70 @@ function prepareSettingWrite(
   scope: SettingScope,
   key: string,
   value: unknown,
+  mcpServerMutation?: McpServerSettingMutation,
 ): { persistedValue: unknown; publicValue: unknown } {
   if (key !== 'mcpServers') {
     return { persistedValue: value, publicValue: value };
   }
-  const existing = loadSettings(workspace).forScope(scope).settings.mcpServers;
-  const persistedValue = restoreRedactedMcpServersSetting(value, existing);
+  const existing =
+    loadSettings(workspace).forScope(scope).settings.mcpServers ?? {};
+  let nextValue = value;
+  if (mcpServerMutation) {
+    const servers = { ...existing };
+    if (mcpServerMutation.operation === 'set') {
+      servers[mcpServerMutation.name] = value as (typeof servers)[string];
+    } else {
+      delete servers[mcpServerMutation.name];
+    }
+    nextValue = servers;
+  }
+  const persistedValue = restoreRedactedMcpServersSetting(nextValue, existing);
   return {
     persistedValue,
     publicValue: redactMcpServersSetting(persistedValue),
   };
+}
+
+function parseMcpServerMutation(
+  key: string,
+  value: unknown,
+): McpServerSettingMutation | undefined {
+  if (value === undefined) return undefined;
+  if (key !== 'mcpServers' || typeof value !== 'object' || value === null) {
+    throw new Error('mcpServerMutation is only valid for mcpServers');
+  }
+  const operation = (value as Record<string, unknown>)['operation'];
+  const name = (value as Record<string, unknown>)['name'];
+  if (
+    (operation !== 'set' && operation !== 'remove') ||
+    typeof name !== 'string' ||
+    !name.trim()
+  ) {
+    throw new Error('mcpServerMutation requires a valid operation and name');
+  }
+  return { operation, name };
+}
+
+async function withMcpServerMutationLock<T>(
+  workspace: string,
+  scope: SettingScope,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const key = `${workspace}\0${scope}`;
+  const previous = mcpServerMutationQueues.get(key) ?? Promise.resolve();
+  const run = previous.catch(() => undefined).then(operation);
+  const tail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  mcpServerMutationQueues.set(key, tail);
+  try {
+    return await run;
+  } finally {
+    if (mcpServerMutationQueues.get(key) === tail) {
+      mcpServerMutationQueues.delete(key);
+    }
+  }
 }
 
 export interface WorkspaceSettingsRouteDeps {
@@ -242,6 +302,19 @@ export function registerWorkspaceSettingsRoutes(
       const scope = body['scope'];
       const key = body['key'];
       const value = body['value'];
+      let mcpServerMutation: McpServerSettingMutation | undefined;
+      try {
+        mcpServerMutation = parseMcpServerMutation(
+          typeof key === 'string' ? key : '',
+          body['mcpServerMutation'],
+        );
+      } catch (error) {
+        res.status(400).json({
+          error: error instanceof Error ? error.message : String(error),
+          code: 'invalid_mcp_server_mutation',
+        });
+        return;
+      }
 
       if (typeof scope !== 'string' || !VALID_WRITE_SCOPES.has(scope)) {
         res.status(400).json({
@@ -306,19 +379,31 @@ export function registerWorkspaceSettingsRoutes(
       }
       let publicValue: unknown = value;
       try {
-        const prepared = prepareSettingWrite(
-          boundWorkspace,
-          settingScope,
-          key,
-          value,
-        );
-        publicValue = prepared.publicValue;
-        await persistSetting(
-          boundWorkspace,
-          settingScope,
-          key,
-          prepared.persistedValue,
-        );
+        const persist = async () => {
+          const prepared = prepareSettingWrite(
+            boundWorkspace,
+            settingScope,
+            key,
+            value,
+            mcpServerMutation,
+          );
+          publicValue = prepared.publicValue;
+          await persistSetting(
+            boundWorkspace,
+            settingScope,
+            key,
+            prepared.persistedValue,
+          );
+        };
+        if (mcpServerMutation) {
+          await withMcpServerMutationLock(
+            boundWorkspace,
+            settingScope,
+            persist,
+          );
+        } else {
+          await persist();
+        }
       } catch (err) {
         writeStderrLine(
           `qwen serve: POST /workspace/settings persist error (key=${key}, scope=${scope}, workspace=${boundWorkspace}): ${
@@ -404,6 +489,19 @@ export function registerWorkspaceQualifiedSettingsRoutes(
       const scope = body['scope'];
       const key = body['key'];
       const value = body['value'];
+      let mcpServerMutation: McpServerSettingMutation | undefined;
+      try {
+        mcpServerMutation = parseMcpServerMutation(
+          typeof key === 'string' ? key : '',
+          body['mcpServerMutation'],
+        );
+      } catch (error) {
+        res.status(400).json({
+          error: error instanceof Error ? error.message : String(error),
+          code: 'invalid_mcp_server_mutation',
+        });
+        return;
+      }
 
       if (typeof scope !== 'string' || !QUALIFIED_WRITE_SCOPES.has(scope)) {
         res.status(400).json({
@@ -467,19 +565,31 @@ export function registerWorkspaceQualifiedSettingsRoutes(
       }
       let publicValue: unknown = value;
       try {
-        const prepared = prepareSettingWrite(
-          runtime.workspaceCwd,
-          settingScope,
-          key,
-          value,
-        );
-        publicValue = prepared.publicValue;
-        await deps.persistSetting(
-          runtime.workspaceCwd,
-          settingScope,
-          key,
-          prepared.persistedValue,
-        );
+        const persist = async () => {
+          const prepared = prepareSettingWrite(
+            runtime.workspaceCwd,
+            settingScope,
+            key,
+            value,
+            mcpServerMutation,
+          );
+          publicValue = prepared.publicValue;
+          await deps.persistSetting(
+            runtime.workspaceCwd,
+            settingScope,
+            key,
+            prepared.persistedValue,
+          );
+        };
+        if (mcpServerMutation) {
+          await withMcpServerMutationLock(
+            runtime.workspaceCwd,
+            settingScope,
+            persist,
+          );
+        } else {
+          await persist();
+        }
       } catch (err) {
         writeStderrLine(
           `qwen serve: POST /workspaces/:workspace/settings persist error (key=${key}, scope=${scope}, workspace=${runtime.workspaceCwd}): ${

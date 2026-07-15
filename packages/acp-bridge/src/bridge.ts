@@ -342,9 +342,8 @@ interface ChannelInfo {
   workspaceMcpDiscoveryInFlight: boolean;
   workspaceMcpDiscoveryTimer?: NodeJS.Timeout;
   workspaceMcpDiscoveryRequested: boolean;
-  workspaceMcpAuthenticationInFlight: boolean;
-  workspaceMcpAuthenticationTimer?: NodeJS.Timeout;
-  workspaceMcpManagedServerName?: string;
+  workspaceMcpAuthenticationServerNames: Set<string>;
+  workspaceMcpAuthenticationTimers: Map<string, NodeJS.Timeout>;
   /**
    * Set when an empty channel should be reaped after overlapping
    * session/workspace-control work drains.
@@ -1444,7 +1443,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       pendingRestoreCount === 0 &&
       ci.workspaceControlInFlight === 0 &&
       !ci.workspaceMcpDiscoveryInFlight &&
-      !ci.workspaceMcpAuthenticationInFlight &&
+      ci.workspaceMcpAuthenticationServerNames.size === 0 &&
       inFlightSpawnCount === 0
     );
   }
@@ -1916,7 +1915,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         workspaceControlInFlight: 0,
         workspaceMcpDiscoveryInFlight: false,
         workspaceMcpDiscoveryRequested: false,
-        workspaceMcpAuthenticationInFlight: false,
+        workspaceMcpAuthenticationServerNames: new Set(),
+        workspaceMcpAuthenticationTimers: new Map(),
         emptyReapPending: false,
         isDying: false,
         handshakeComplete: false,
@@ -1965,10 +1965,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           clearTimeout(info.workspaceMcpDiscoveryTimer);
           info.workspaceMcpDiscoveryTimer = undefined;
         }
-        if (info.workspaceMcpAuthenticationTimer) {
-          clearTimeout(info.workspaceMcpAuthenticationTimer);
-          info.workspaceMcpAuthenticationTimer = undefined;
+        for (const timer of info.workspaceMcpAuthenticationTimers.values()) {
+          clearTimeout(timer);
         }
+        info.workspaceMcpAuthenticationTimers.clear();
+        info.workspaceMcpAuthenticationServerNames.clear();
         aliveChannels.delete(info);
         if (channelInfo === info) channelInfo = undefined;
         const sessions = Array.from(info.sessionIds);
@@ -2822,7 +2823,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   };
 
   const mergeManagedWorkspaceMcpStatus = (
-    serverName: string,
+    serverNames: ReadonlySet<string>,
     previous: ServeWorkspaceMcpStatus | undefined,
     current: ServeWorkspaceMcpStatus,
   ): ServeWorkspaceMcpStatus => {
@@ -2831,14 +2832,23 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       previous?.discoveryState === 'completed' &&
       current.discoveryState === 'not_started'
     ) {
-      const previousServers = new Map(
-        previous.servers.map((server) => [server.name, server]),
+      if (current.servers.length === 0) return previous;
+      const currentServers = new Map(
+        current.servers.map((server) => [server.name, server]),
       );
-      const servers = current.servers.map((server) =>
-        server.name === serverName
-          ? server
-          : (previousServers.get(server.name) ?? server),
+      const previousNames = new Set(
+        previous.servers.map((server) => server.name),
       );
+      const servers = previous.servers.map((server) =>
+        serverNames.has(server.name)
+          ? (currentServers.get(server.name) ?? server)
+          : server,
+      );
+      for (const server of current.servers) {
+        if (serverNames.has(server.name) && !previousNames.has(server.name)) {
+          servers.push(server);
+        }
+      }
       return {
         ...previous,
         discoveryState: 'completed',
@@ -2852,6 +2862,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     method: string,
     idle: () => T,
     params: Record<string, unknown> = {},
+    managedServerNames?: ReadonlySet<string>,
   ): Promise<T> => {
     const info = liveChannelInfo();
     if (!info) {
@@ -2872,11 +2883,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       method,
     );
     if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
-      const managedServerName = info.workspaceMcpManagedServerName;
       const rawStatus = response as unknown as ServeWorkspaceMcpStatus;
-      if (managedServerName) {
+      const effectiveManagedServerNames = new Set([
+        ...info.workspaceMcpAuthenticationServerNames,
+        ...(managedServerNames ?? []),
+      ]);
+      if (
+        effectiveManagedServerNames.size > 0 ||
+        (workspaceMcpStatusCache?.discoveryState === 'completed' &&
+          rawStatus.discoveryState === 'not_started' &&
+          rawStatus.servers.length === 0)
+      ) {
         response = mergeManagedWorkspaceMcpStatus(
-          managedServerName,
+          effectiveManagedServerNames,
           workspaceMcpStatusCache,
           rawStatus,
         ) as unknown as typeof response;
@@ -2889,11 +2908,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (status.discoveryState === 'completed') {
         await cacheWorkspaceMcpDetails(
           info,
-          managedServerName
+          effectiveManagedServerNames.size > 0
             ? {
                 servers: Array.isArray(rawStatus.servers)
-                  ? rawStatus.servers.filter(
-                      (server) => server.name === managedServerName,
+                  ? rawStatus.servers.filter((server) =>
+                      effectiveManagedServerNames.has(server.name),
                     )
                   : [],
               }
@@ -2917,20 +2936,23 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       } else if (Array.isArray(status.errors) && status.errors.length > 0) {
         info.workspaceMcpDiscoveryRequested = false;
       }
-      const authenticationPending = Array.isArray(
-        (response as { servers?: unknown }).servers,
-      )
-        ? (
-            response as { servers: Array<{ authenticationState?: unknown }> }
-          ).servers.some((server) => server.authenticationState === 'pending')
-        : false;
-      if (info.workspaceMcpAuthenticationInFlight && !authenticationPending) {
-        info.workspaceMcpAuthenticationInFlight = false;
-        info.workspaceMcpManagedServerName = undefined;
-        if (info.workspaceMcpAuthenticationTimer) {
-          clearTimeout(info.workspaceMcpAuthenticationTimer);
-          info.workspaceMcpAuthenticationTimer = undefined;
+      let authenticationCompleted = false;
+      for (const serverName of info.workspaceMcpAuthenticationServerNames) {
+        const server = rawStatus.servers.find(
+          (candidate) => candidate.name === serverName,
+        );
+        if (
+          server?.authenticationState !== 'pending' &&
+          (server !== undefined || rawStatus.discoveryState === 'completed')
+        ) {
+          info.workspaceMcpAuthenticationServerNames.delete(serverName);
+          const timer = info.workspaceMcpAuthenticationTimers.get(serverName);
+          if (timer) clearTimeout(timer);
+          info.workspaceMcpAuthenticationTimers.delete(serverName);
+          authenticationCompleted = true;
         }
+      }
+      if (authenticationCompleted) {
         if (hasNoChannelWork(info)) {
           await startIdleTimer(info, 'workspace MCP authentication complete');
         }
@@ -5675,12 +5697,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ? await ensureChannel()
         : liveChannelInfo();
       if (!info) throw new SessionNotFoundError(`workspace-command:${method}`);
-      if (
-        startsWorkspaceChannel &&
-        typeof params?.['serverName'] === 'string'
-      ) {
-        info.workspaceMcpManagedServerName = params['serverName'];
-      }
       try {
         const timeout = invokeOpts?.timeoutMs ?? initTimeoutMs;
         const invoke = () =>
@@ -5707,13 +5723,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 'workspace MCP restart status refresh',
               );
             },
+            {},
+            new Set([params['serverName']]),
           );
         }
         return response as T;
       } finally {
-        if (startsWorkspaceChannel) {
-          info.workspaceMcpManagedServerName = undefined;
-        }
         if (startsWorkspaceChannel && hasNoChannelWork(info)) {
           await startIdleTimer(info, 'workspace MCP restart');
         }
@@ -6896,7 +6911,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
     async manageMcpServer(serverName, action, originatorClientId) {
       const info = await ensureChannel();
-      info.workspaceMcpManagedServerName = serverName;
       try {
         return await withWorkspaceControl(info, async () => {
           const timeout =
@@ -6928,14 +6942,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             pending?: boolean;
           };
           if (action === 'authenticate' && response.pending) {
-            info.workspaceMcpAuthenticationInFlight = true;
-            if (info.workspaceMcpAuthenticationTimer) {
-              clearTimeout(info.workspaceMcpAuthenticationTimer);
-            }
-            info.workspaceMcpAuthenticationTimer = setTimeout(() => {
-              info.workspaceMcpAuthenticationInFlight = false;
-              info.workspaceMcpManagedServerName = undefined;
-              info.workspaceMcpAuthenticationTimer = undefined;
+            info.workspaceMcpAuthenticationServerNames.add(serverName);
+            const previousTimer =
+              info.workspaceMcpAuthenticationTimers.get(serverName);
+            if (previousTimer) clearTimeout(previousTimer);
+            const timer = setTimeout(() => {
+              info.workspaceMcpAuthenticationServerNames.delete(serverName);
+              info.workspaceMcpAuthenticationTimers.delete(serverName);
               if (hasNoChannelWork(info)) {
                 void startIdleTimer(
                   info,
@@ -6943,7 +6956,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 );
               }
             }, MCP_OAUTH_TIMEOUT_MS);
-            info.workspaceMcpAuthenticationTimer.unref();
+            timer.unref();
+            info.workspaceMcpAuthenticationTimers.set(serverName, timer);
           }
           invalidateWorkspaceMcpDetailCache(serverName);
           await requestWorkspaceStatus<ServeWorkspaceMcpStatus>(
@@ -6953,6 +6967,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 'workspace MCP management status refresh',
               );
             },
+            {},
+            new Set([serverName]),
           );
           broadcastWorkspaceEvent({
             type: 'mcp_server_changed',
@@ -6966,9 +6982,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           return response;
         });
       } finally {
-        if (!info.workspaceMcpAuthenticationInFlight) {
-          info.workspaceMcpManagedServerName = undefined;
-        }
         if (hasNoChannelWork(info)) {
           await startIdleTimer(info, 'workspace MCP management');
         }
