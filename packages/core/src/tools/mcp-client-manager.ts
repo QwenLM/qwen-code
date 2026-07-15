@@ -2393,6 +2393,10 @@ export class McpClientManager {
                     `of pid ${rootPid} for timed-out server '${serverName}'`,
                 );
               }
+            } else {
+              debugLogger.debug(
+                `Skipping descendant pid sweep for timed-out server '${serverName}': transport pid unavailable`,
+              );
             }
           } catch (err) {
             debugLogger.warn(
