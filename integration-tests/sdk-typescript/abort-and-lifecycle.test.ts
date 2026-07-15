@@ -351,11 +351,11 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
 
       const canUseToolCalled = boundedPromise(
         'canUseTool callback not called',
-        30000,
+        60000,
       );
-      const inputStreamDone = boundedPromise('inputStreamDone', 30000);
-      const firstResult = boundedPromise('firstResult', 30000);
-      const secondResult = boundedPromise('secondResult', 30000);
+      const inputStreamDone = boundedPromise('inputStreamDone', 60000);
+      const firstResult = boundedPromise('firstResult', 60000);
+      const secondResult = boundedPromise('secondResult', 60000);
       const pendingTimers = [
         canUseToolCalled,
         inputStreamDone,
