@@ -1012,6 +1012,29 @@ describe('StreamingToolCallParser', () => {
       });
     });
 
+    it('routes id-less continuation chunks to a slot claimed by a colliding opener delta', () => {
+      parser.addChunk(0, '{"a":1}', 'call_1', 'function1');
+
+      // The provider reuses index 0 for a second tool call whose id and name
+      // arrive together on an empty opener delta (the standard OpenAI streaming
+      // shape: function: { name, arguments: '' }).
+      const opener = parser.addChunk(0, '', 'call_2', 'function2');
+      expect(opener.actualIndex).toBe(1);
+
+      // The following id-less argument chunk must land on call_2's slot, not on
+      // a fresh orphan slot that would drop the arguments and get the call
+      // flagged as malformed.
+      const continuation = parser.addChunk(0, '{"b":2}');
+      expect(continuation.actualIndex).toBe(1);
+
+      expect(parser.getCompletedToolCalls()).toContainEqual({
+        id: 'call_2',
+        name: 'function2',
+        args: { b: 2 },
+        index: 1,
+      });
+    });
+
     it('should handle rapid tool call switching at same index', () => {
       // Rapid switching between different tool calls at index 0
       parser.addChunk(0, '{"step1":', 'call_1', 'function1');

@@ -110,8 +110,14 @@ export class StreamingToolCallParser {
       if (this.idToIndexMap.has(id)) {
         // We've seen this ID before, use the existing mapped index
         actualIndex = this.idToIndexMap.get(id)!;
-      } else if (this.pendingIndexRemaps.has(index)) {
-        // Some providers stream name or arguments before the stable ID.
+      } else if (
+        this.pendingIndexRemaps.has(index) &&
+        !this.toolCallMeta.get(this.pendingIndexRemaps.get(index)!)?.id
+      ) {
+        // Some providers stream name or arguments before the stable ID. Only
+        // adopt the remapped slot while it has not yet been claimed by an id:
+        // once it has one, the remap only exists to route later id-less
+        // continuation chunks, so a brand-new id must not hijack that slot.
         actualIndex = this.pendingIndexRemaps.get(index)!;
         this.pendingIndexRemaps.delete(index);
         this.idToIndexMap.set(id, actualIndex);
@@ -206,7 +212,7 @@ export class StreamingToolCallParser {
       } else {
         this.namelessToolCallIndices.delete(actualIndex);
       }
-      if (!meta.id && actualIndex !== index) {
+      if (actualIndex !== index) {
         this.pendingIndexRemaps.set(index, actualIndex);
       }
       return { actualIndex, complete: false };
@@ -236,7 +242,7 @@ export class StreamingToolCallParser {
         meta.name = validName;
       }
     }
-    if (!meta.id && actualIndex !== index) {
+    if (actualIndex !== index) {
       this.pendingIndexRemaps.set(index, actualIndex);
     }
 
