@@ -33,6 +33,7 @@ import {
   type ToolCallPreparation,
 } from '../tool-call-preparation.js';
 import { InvalidStreamError } from '../invalid-stream-error.js';
+import { normalizeMcpToolName } from '../../utils/tool-name-utils.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
 const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
@@ -607,7 +608,7 @@ function processContent(
         id: callId || `call_${toolCallIndex}`,
         type: 'function' as const,
         function: {
-          name: part.functionCall.name || '',
+          name: normalizeMcpToolName(part.functionCall.name || ''),
           arguments: JSON.stringify(part.functionCall.args || {}),
         },
       });

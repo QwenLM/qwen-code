@@ -71,6 +71,7 @@ export async function evaluatePermissionFlow(
     toolName,
     toolParams,
     config.getTargetDir?.() ?? '',
+    invocation.permissionAliases,
   );
   const { finalPermission, pmForcedAsk } = await evaluatePermissionRules(
     pm,

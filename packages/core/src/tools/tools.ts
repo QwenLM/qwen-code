@@ -26,6 +26,9 @@ export interface ToolInvocation<
    */
   params: TParams;
 
+  /** Historical names accepted only when evaluating persisted permissions. */
+  readonly permissionAliases?: readonly string[];
+
   /**
    * Gets a pre-execution description of the tool operation.
    *

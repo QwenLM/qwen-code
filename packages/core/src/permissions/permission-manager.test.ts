@@ -24,6 +24,7 @@ import {
 } from './rule-parser.js';
 import { PermissionManager } from './permission-manager.js';
 import type { PermissionManagerConfig } from './permission-manager.js';
+import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
 
 // ─── resolveToolName ─────────────────────────────────────────────────────────
 
@@ -857,6 +858,14 @@ describe('matchesRule', () => {
     expect(matchesRule(rule, 'mcp__puppeteer__puppeteer_click')).toBe(false);
   });
 
+  it('matches a legacy dotted MCP rule against its provider-safe name', () => {
+    const legacyName = 'mcp__zybio__literature.search_pubmed';
+    const providerSafeName = normalizeToolNameForProvider(legacyName);
+
+    expect(providerSafeName).not.toBe(legacyName);
+    expect(matchesRule(parseRule(legacyName), providerSafeName)).toBe(true);
+  });
+
   it('MCP server-level match (2-part pattern)', async () => {
     const rule = parseRule('mcp__puppeteer');
     expect(matchesRule(rule, 'mcp__puppeteer__puppeteer_navigate')).toBe(true);
@@ -1255,6 +1264,39 @@ describe('PermissionManager', () => {
       // Note: 'glob' is covered by ReadFileTool via Read meta-category,
       // so use a tool not in any rule or meta-category
       expect(await pm.evaluate({ toolName: 'agent' })).toBe('default');
+    });
+
+    it('matches a legacy truncated MCP permission alias', async () => {
+      const rawName = `mcp__server__${'x'.repeat(80)}`;
+      const legacyName = rawName.slice(0, 28) + '___' + rawName.slice(-32);
+      const providerSafeName = normalizeToolNameForProvider(rawName);
+      const pm2 = new PermissionManager(
+        makeConfig({ permissionsAllow: [legacyName] }),
+      );
+      pm2.initialize();
+
+      expect(
+        await pm2.evaluate({
+          toolName: providerSafeName,
+          toolAliases: [legacyName],
+        }),
+      ).toBe('allow');
+    });
+
+    it('does not apply legacy aliases to MCP wildcard rules', async () => {
+      const legacyName = 'mcp__server__literature.search_pubmed';
+      const providerSafeName = normalizeToolNameForProvider(legacyName);
+      const pm2 = new PermissionManager(
+        makeConfig({ permissionsAllow: ['mcp__server__literature.*'] }),
+      );
+      pm2.initialize();
+
+      expect(
+        await pm2.evaluate({
+          toolName: providerSafeName,
+          toolAliases: [legacyName],
+        }),
+      ).toBe('default');
     });
 
     it('deny takes precedence over ask and allow', async () => {

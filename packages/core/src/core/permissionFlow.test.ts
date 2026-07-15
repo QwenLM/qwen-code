@@ -128,6 +128,32 @@ describe('evaluatePermissionFlow', () => {
     expect(result.finalPermission).toBe('ask');
     expect(result.pmForcedAsk).toBe(true);
   });
+
+  it('passes invocation permission aliases to the permission manager', async () => {
+    const legacyName = 'mcp__server__legacy_name';
+    const mockPm = {
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      evaluate: vi.fn().mockResolvedValue('allow'),
+      hasMatchingAskRule: vi.fn().mockReturnValue(false),
+    };
+    const invocation = mockInvocation({
+      getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+      permissionAliases: [legacyName],
+    });
+
+    await evaluatePermissionFlow(
+      mockConfig({
+        getPermissionManager: vi.fn().mockReturnValue(mockPm),
+      }),
+      invocation,
+      'mcp__server__provider_safe_name',
+      {},
+    );
+
+    expect(mockPm.hasRelevantRules).toHaveBeenCalledWith(
+      expect.objectContaining({ toolAliases: [legacyName] }),
+    );
+  });
 });
 
 describe('needsConfirmation', () => {
