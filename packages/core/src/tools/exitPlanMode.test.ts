@@ -364,6 +364,39 @@ describe('ExitPlanModeTool', () => {
     expect(config.setApprovalMode).not.toHaveBeenCalled();
   });
 
+  it('keeps plan mode and returns leader feedback after rejection', async () => {
+    vi.mocked(config.getTeamManager).mockReturnValue({
+      requestPlanApproval: vi.fn(async () => ({
+        action: 'reject',
+        message: 'Clarify the rollout steps.',
+      })),
+    } as never);
+    const invocation = tool.build({ plan: 'Teammate plan' });
+
+    const result = await runWithTeammateIdentity(
+      {
+        agentId: 'planner@test',
+        agentName: 'planner',
+        teamName: 'test',
+        isTeamLead: false,
+        planModeRequired: true,
+      },
+      () => invocation.execute(new AbortController().signal),
+    );
+
+    expect(result.llmContent).toContain('Leader rejected the plan');
+    expect(result.llmContent).toContain('Clarify the rollout steps.');
+    expect(result.returnDisplay).toMatchObject({
+      type: 'plan_summary',
+      message: 'Leader rejected the plan.',
+      plan: expect.stringContaining('Clarify the rollout steps.'),
+      rejected: true,
+    });
+    expect(approvalMode).toBe(ApprovalMode.PLAN);
+    expect(config.setApprovalMode).not.toHaveBeenCalled();
+    expect(config.savePlan).not.toHaveBeenCalled();
+  });
+
   it('keeps plan mode when teammate approval has no execution mode', async () => {
     vi.mocked(config.getTeamManager).mockReturnValue({
       requestPlanApproval: vi.fn(async () => ({
