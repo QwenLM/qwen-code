@@ -480,6 +480,58 @@ describe('SplitView', () => {
     input.remove();
   });
 
+  it('moves maximize to another pane when its toggle is clicked', () => {
+    render({ sessionIds: ['s1', 's2', 's3'] });
+    // Maximize s1.
+    act(() =>
+      maximizeButtons()[0].dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+    let maximized = container!.querySelector('[data-maximized="true"]');
+    expect(
+      maximized?.querySelector('[data-testid="pane-title"]')?.textContent,
+    ).toBe('One');
+    // Click s2's toggle while s1 is maximized — maximize MOVES to s2 (it does
+    // not restore to tiled). Guards the toggle's switch branch, which a
+    // "clear on any second click" regression would break.
+    act(() =>
+      maximizeButtons()[1].dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+    maximized = container!.querySelector('[data-maximized="true"]');
+    expect(
+      maximized?.querySelector('[data-testid="pane-title"]')?.textContent,
+    ).toBe('Two');
+    // Exactly one pane maximized, the other two hidden.
+    expect(container!.querySelectorAll('[data-maximized="true"]')).toHaveLength(
+      1,
+    );
+    expect(hiddenSlots()).toHaveLength(2);
+  });
+
+  it('closes the picker on Escape without un-maximizing', () => {
+    render({ sessionIds: ['s1', 's2'] });
+    act(() =>
+      maximizeButtons()[0].dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+    expect(hiddenSlots()).toHaveLength(1);
+    // Open the add-session picker, then press Escape: it closes the picker but
+    // must NOT also un-maximize — Escape defers to the open picker first.
+    openPicker();
+    expect(container!.querySelector('[role="listbox"]')).not.toBeNull();
+    act(() =>
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      ),
+    );
+    expect(container!.querySelector('[role="listbox"]')).toBeNull();
+    expect(hiddenSlots()).toHaveLength(1);
+  });
+
   it('drops maximize when the maximized pane is closed', () => {
     // Uncontrolled so the close button removes the pane locally (a controlled
     // split only reports removals up via onPanesChange).
