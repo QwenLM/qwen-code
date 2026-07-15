@@ -110,6 +110,7 @@ import {
 import { createShareRouter, createShareWhoamiHandler } from './routes/share.js';
 import { createAuditQueryRoute } from './routes/audit.js';
 import { createOwnerEventsRoute } from './routes/ownerEvents.js';
+import { createHookIngestRoute } from './routes/hookIngest.js';
 import { OwnerEventBus } from './ownerEvents.js';
 import { createPushRouter } from './routes/push.js';
 import { createRoutingRouter } from './routes/routing.js';
@@ -266,6 +267,19 @@ export interface GatewayDeps {
     costFor?: (sessionId: string) => number | undefined;
     /** Spawn accept window override (tests). */
     promptAcceptWindowMs?: number;
+  };
+  /**
+   * Hook event mirror (add-agent-observability). When set, `POST
+   * /rc/hooks/ingest` mounts — loopback-only, authenticated by the dedicated
+   * persistent `ingestToken` (NOT a TokenStore token), mirroring local hook
+   * firings as read-only `hook_event` frames on the OWNER events stream. The
+   * route mounts BEFORE `bearerResolve` (same early-mount reason as
+   * `/rc/pair/redeem`). Omitted → the route does not mount.
+   */
+  hookIngest?: {
+    ingestToken: string;
+    bucketCapacity?: number;
+    bucketRefillPerSec?: number;
   };
 }
 
@@ -457,6 +471,24 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
         : undefined,
     ),
   );
+
+  // Loopback hook-event mirror (add-agent-observability). Mounted BEFORE
+  // bearerResolve: the ingest token is a dedicated persistent secret, not a
+  // TokenStore token (same early-mount reason as /rc/pair/redeem above). Uses
+  // the app-local ownerEvents bus + audit so mirrored frames reach GET
+  // /rc/events and rejections land in the same audit chain.
+  if (deps.hookIngest) {
+    app.post(
+      '/rc/hooks/ingest',
+      createHookIngestRoute({
+        ownerEvents,
+        ingestToken: deps.hookIngest.ingestToken,
+        audit,
+        bucketCapacity: deps.hookIngest.bucketCapacity,
+        bucketRefillPerSec: deps.hookIngest.bucketRefillPerSec,
+      }),
+    );
+  }
 
   const webRoot =
     deps.webRoot ?? fileURLToPath(new URL('../public', import.meta.url));

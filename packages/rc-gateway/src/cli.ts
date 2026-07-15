@@ -70,6 +70,7 @@ import { IdleSessionToggles } from './idle/sessionToggles.js';
 import type { IdleStatusResolver } from './routes/idleToggle.js';
 import { SessionEventPump } from './webpush/pump.js';
 import { AgentRegistry } from './agents/agentRegistry.js';
+import { loadOrCreateHookIngestToken } from './agents/hookIngestToken.js';
 import {
   DEFAULT_RATE_TABLE,
   RateTableHolder,
@@ -419,6 +420,13 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   const agentRegistry = await AgentRegistry.open(
     join(homedir(), '.qwen', 'rc', 'agents.json'),
   );
+  // Hook event mirror (add-agent-observability): mint-or-load the dedicated
+  // loopback ingest token once and persist it 0600 alongside the bootstrap
+  // code file. Regenerating per start would invalidate the hook config that
+  // interpolates it, so the value is stable across restarts.
+  const hookIngestToken = await loadOrCreateHookIngestToken(
+    join(homedir(), '.qwen', 'rc', 'hook-ingest-token'),
+  );
   const rates = new RateTableHolder(DEFAULT_RATE_TABLE);
   if (usageStore) {
     try {
@@ -494,6 +502,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
           ? (sid) => usageStore.sessionTotals(sid).costMicrocentsSesTotal
           : undefined,
       },
+      hookIngest: { ingestToken: hookIngestToken },
     });
 
   // Startup reconciliation (design: "Reconciliation"): running/blocked agent
