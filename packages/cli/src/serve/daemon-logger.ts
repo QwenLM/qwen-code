@@ -307,6 +307,11 @@ function resolvePolicy(
       'Daemon logger maxRecordBytes must not exceed maxBytes',
     );
   }
+  if (policy.maxRecordBytes > policy.maxPendingBytes) {
+    throw new TypeError(
+      'Daemon logger maxRecordBytes must not exceed maxPendingBytes',
+    );
+  }
   return policy;
 }
 
@@ -1488,7 +1493,7 @@ export async function initDaemonLogger(
         if (familyMutationAllowed()) {
           issues.add('rotation_failed');
           warnOnce(
-            'archive-init',
+            `archive-init:${family.mode}`,
             `qwen serve: daemon log archive unavailable; active file will remain bounded: ${
               error instanceof Error ? error.message : String(error)
             }`,

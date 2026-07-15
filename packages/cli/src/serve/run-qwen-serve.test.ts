@@ -496,10 +496,17 @@ describe('runQwenServe daemon logger wiring', () => {
       // Close the handle (graceful shutdown)
       await handle.close();
 
-      // The log should still be readable after shutdown
-      const finalContent = fs.readFileSync(
-        path.join(daemonDir, 'daemon.log'),
-        'utf8',
+      // close() is intentionally bounded, so the file finalizer may still be
+      // draining when it returns under a slow filesystem.
+      const logPath = path.join(daemonDir, 'daemon.log');
+      let finalContent = '';
+      await vi.waitFor(
+        () => {
+          finalContent = fs.readFileSync(logPath, 'utf8');
+          expect(finalContent).toContain('access logs suppressed');
+          expect(finalContent).toContain('daemon stopped');
+        },
+        { timeout: 7_000, interval: 50 },
       );
       expect(finalContent).toContain('daemon started');
       const suppressedIndex = finalContent.indexOf('access logs suppressed');
@@ -512,7 +519,7 @@ describe('runQwenServe daemon logger wiring', () => {
         process.env['QWEN_RUNTIME_DIR'] = origEnv;
       }
     }
-  });
+  }, 10_000);
 });
 
 describe('runQwenServe telemetry validation', () => {

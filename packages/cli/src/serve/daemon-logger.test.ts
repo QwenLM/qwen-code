@@ -181,6 +181,18 @@ describe('initDaemonLogger file init', () => {
     }
   });
 
+  it('rejects a pending-byte budget smaller than one capped record', async () => {
+    await expect(
+      initDaemonLogger({
+        boundWorkspace: '/workspace/foo',
+        baseDir: tmp,
+        policy: { maxRecordBytes: 256, maxPendingBytes: 255 },
+      }),
+    ).rejects.toThrow(
+      'Daemon logger maxRecordBytes must not exceed maxPendingBytes',
+    );
+  });
+
   it('derives daemon-scoped daemon-id and creates the stable log file', async () => {
     const logger = await createLogger({
       boundWorkspace: '/workspace/foo',
