@@ -26,6 +26,7 @@ import {
   createDebugLogger,
   getToolResponseDisplayText,
   isAnyAutoMemPath,
+  isShellProgressData,
 } from '@qwen-code/qwen-code-core';
 import * as path from 'node:path';
 import { useCallback, useState, useMemo } from 'react';
@@ -114,6 +115,12 @@ export function useReactToolScheduler(
 
   const outputUpdateHandler: OutputUpdateHandler = useCallback(
     (toolCallId, outputChunk) => {
+      // Shell liveness heartbeats are for headless consumers; the TUI
+      // already shows a spinner and must not replace accumulated live
+      // output with a stats object.
+      if (isShellProgressData(outputChunk)) {
+        return;
+      }
       const compactOutput = compactToolResultDisplayForHistory(outputChunk);
       setToolCallsForDisplay((prevCalls) =>
         prevCalls.map((tc) => {

@@ -21,6 +21,7 @@ import {
 } from '@google/genai';
 import type OpenAI from 'openai';
 import { convertToFunctionResponse } from '../coreToolScheduler.js';
+import { getToolCallPreparations } from '../tool-call-preparation.js';
 import { isOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
 
 describe('OpenAIContentConverter', () => {
@@ -6005,6 +6006,357 @@ describe('Truncated tool call detection in streaming', () => {
       ctx,
     );
   }
+
+  it('emits tool preparation metadata before the complete function call', () => {
+    const context = createStreamingRequestContext();
+    const opener = converter.convertOpenAIChunkToGemini(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-open',
+        created: 100,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call-1',
+                  type: 'function',
+                  function: { name: 'read_file', arguments: '' },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      context,
+    );
+    const args = converter.convertOpenAIChunkToGemini(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-args',
+        created: 101,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  type: 'function',
+                  function: { arguments: '{"file_path":"a.sql"}' },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      context,
+    );
+    const finish = converter.convertOpenAIChunkToGemini(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-finish',
+        created: 102,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {},
+            finish_reason: 'tool_calls',
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      context,
+    );
+
+    expect(getToolCallPreparations(opener)).toEqual([
+      { callId: 'call-1', toolName: 'read_file' },
+    ]);
+    expect(getToolCallPreparations(args)).toEqual([]);
+    expect(getToolCallPreparations(finish)).toEqual([]);
+    expect(opener.functionCalls).toBeUndefined();
+    expect(finish.functionCalls).toEqual([
+      { id: 'call-1', name: 'read_file', args: { file_path: 'a.sql' } },
+    ]);
+  });
+
+  it('does not duplicate tool preparation metadata for a replayed opener', () => {
+    const context = createStreamingRequestContext();
+    const opener = {
+      object: 'chat.completion.chunk',
+      id: 'chunk-open',
+      created: 100,
+      model: 'test-model',
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call-1',
+                type: 'function',
+                function: { name: 'read_file', arguments: '' },
+              },
+            ],
+          },
+          finish_reason: null,
+          logprobs: null,
+        },
+      ],
+    } as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+    const first = converter.convertOpenAIChunkToGemini(opener, context);
+    const replay = converter.convertOpenAIChunkToGemini(opener, context);
+
+    expect(getToolCallPreparations(first)).toEqual([
+      { callId: 'call-1', toolName: 'read_file' },
+    ]);
+    expect(getToolCallPreparations(replay)).toEqual([]);
+  });
+
+  it('emits preparation after split identity deltas using the remapped parser index', () => {
+    const context = createStreamingRequestContext();
+
+    const firstCall = converter.convertOpenAIChunkToGemini(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-first-call',
+        created: 100,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call-1',
+                  type: 'function',
+                  function: {
+                    name: 'read_file',
+                    arguments: '{"file_path":"a.sql"}',
+                  },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      context,
+    );
+    const secondCallId = converter.convertOpenAIChunkToGemini(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-second-id',
+        created: 101,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [{ index: 0, id: 'call-2', type: 'function' }],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      context,
+    );
+    const secondCallName = converter.convertOpenAIChunkToGemini(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-second-name',
+        created: 102,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  type: 'function',
+                  function: {
+                    name: 'write_file',
+                    arguments: '{"file_path":"b.sql"}',
+                  },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      context,
+    );
+    const thirdCallName = converter.convertOpenAIChunkToGemini(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-third-name',
+        created: 103,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  type: 'function',
+                  function: {
+                    name: 'delete_file',
+                    arguments: '',
+                  },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      context,
+    );
+    const thirdCallArguments = converter.convertOpenAIChunkToGemini(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-third-arguments',
+        created: 104,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  type: 'function',
+                  function: { arguments: '{"file_path":"c.sql"}' },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      context,
+    );
+    const thirdCallId = converter.convertOpenAIChunkToGemini(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-third-id',
+        created: 105,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [{ index: 0, id: 'call-3', type: 'function' }],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      context,
+    );
+    const finish = converter.convertOpenAIChunkToGemini(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-finish',
+        created: 106,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {},
+            finish_reason: 'tool_calls',
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      context,
+    );
+
+    expect(getToolCallPreparations(firstCall)).toEqual([
+      { callId: 'call-1', toolName: 'read_file' },
+    ]);
+    expect(getToolCallPreparations(secondCallId)).toEqual([]);
+    expect(getToolCallPreparations(secondCallName)).toEqual([
+      { callId: 'call-2', toolName: 'write_file' },
+    ]);
+    expect(getToolCallPreparations(thirdCallName)).toEqual([]);
+    expect(getToolCallPreparations(thirdCallArguments)).toEqual([]);
+    expect(getToolCallPreparations(thirdCallId)).toEqual([
+      { callId: 'call-3', toolName: 'delete_file' },
+    ]);
+    expect(firstCall.functionCalls).toBeUndefined();
+    expect(secondCallId.functionCalls).toBeUndefined();
+    expect(secondCallName.functionCalls).toBeUndefined();
+    expect(thirdCallName.functionCalls).toBeUndefined();
+    expect(thirdCallArguments.functionCalls).toBeUndefined();
+    expect(thirdCallId.functionCalls).toBeUndefined();
+    expect(finish.functionCalls).toEqual([
+      { id: 'call-1', name: 'read_file', args: { file_path: 'a.sql' } },
+      { id: 'call-2', name: 'write_file', args: { file_path: 'b.sql' } },
+      { id: 'call-3', name: 'delete_file', args: { file_path: 'c.sql' } },
+    ]);
+  });
+
+  it.each([
+    {
+      label: 'call ID is missing',
+      toolCall: {
+        index: 0,
+        type: 'function' as const,
+        function: { name: 'read_file', arguments: '' },
+      },
+    },
+    {
+      label: 'tool name is missing',
+      toolCall: {
+        index: 0,
+        id: 'call-1',
+        type: 'function' as const,
+        function: { arguments: '' },
+      },
+    },
+  ])('does not emit tool preparation metadata when $label', ({ toolCall }) => {
+    const response = converter.convertOpenAIChunkToGemini(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-open',
+        created: 100,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: { tool_calls: [toolCall] },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      createStreamingRequestContext(),
+    );
+
+    expect(getToolCallPreparations(response)).toEqual([]);
+  });
 
   it('should override finishReason to MAX_TOKENS when tool call JSON is truncated and provider reports "stop"', () => {
     // Simulate: write_file call truncated mid-JSON, provider says "stop"

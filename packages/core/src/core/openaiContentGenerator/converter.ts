@@ -28,6 +28,10 @@ import {
   convertSchema,
   type SchemaComplianceMode,
 } from '../../utils/schemaConverter.js';
+import {
+  setToolCallPreparations,
+  type ToolCallPreparation,
+} from '../tool-call-preparation.js';
 import { InvalidStreamError } from '../invalid-stream-error.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
@@ -1249,6 +1253,7 @@ export function convertOpenAIChunkToGemini(
 ): GenerateContentResponse {
   const choice = chunk.choices?.[0];
   const response = new GenerateContentResponse();
+  const preparations: ToolCallPreparation[] = [];
   const toolCallParser = requestContext.toolCallParser;
   if (!toolCallParser) {
     throw new Error(
@@ -1385,21 +1390,29 @@ export function convertOpenAIChunkToGemini(
         const index = toolCall.index ?? 0;
 
         // Process the tool call chunk through the streaming parser
-        if (toolCall.function?.arguments) {
-          toolCallParser.addChunk(
-            index,
-            toolCall.function.arguments,
-            toolCall.id,
-            toolCall.function.name,
-          );
-        } else {
-          // Handle metadata-only chunks (id and/or name without arguments)
-          toolCallParser.addChunk(
-            index,
-            '', // Empty chunk for metadata-only updates
-            toolCall.id,
-            toolCall.function?.name,
-          );
+        const parseResult = toolCall.function?.arguments
+          ? toolCallParser.addChunk(
+              index,
+              toolCall.function.arguments,
+              toolCall.id,
+              toolCall.function.name,
+            )
+          : toolCallParser.addChunk(
+              index,
+              '', // Empty chunk for metadata-only updates
+              toolCall.id,
+              toolCall.function?.name,
+            );
+
+        const { id: callId, name: toolName } = toolCallParser.getToolCallMeta(
+          parseResult.actualIndex ?? index,
+        );
+        if (callId && toolName) {
+          const emitted = (requestContext.preparedToolCallIds ??= new Set());
+          if (!emitted.has(callId)) {
+            emitted.add(callId);
+            preparations.push({ callId, toolName });
+          }
         }
       }
     }
@@ -1653,6 +1666,10 @@ export function convertOpenAIChunkToGemini(
       totalTokenCount: totalTokens,
       cachedContentTokenCount: cachedTokens,
     };
+  }
+
+  if (preparations.length > 0) {
+    setToolCallPreparations(response, preparations);
   }
 
   return response;

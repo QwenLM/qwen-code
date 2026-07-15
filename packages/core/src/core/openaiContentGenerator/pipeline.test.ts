@@ -28,6 +28,7 @@ import {
   QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
 } from './constants.js';
 import { logProtocolTagSanitized } from '../../telemetry/loggers.js';
+import { setToolCallPreparations } from '../tool-call-preparation.js';
 
 // Mock dependencies
 vi.mock('./converter.js', () => ({
@@ -2007,6 +2008,48 @@ describe('ContentGenerationPipeline', () => {
         }
       }).rejects.toThrow(StreamContentError);
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('should preserve an otherwise empty response with tool preparation metadata', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const mockChunk = {
+        id: 'chunk-tool-opener',
+        choices: [{ delta: { tool_calls: [] }, finish_reason: null }],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield mockChunk;
+        },
+      };
+      const preparationResponse = new GenerateContentResponse();
+      preparationResponse.candidates = [
+        { content: { parts: [], role: 'model' } },
+      ];
+      setToolCallPreparations(preparationResponse, [
+        { callId: 'call-1', toolName: 'read_file' },
+      ]);
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
+        preparationResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+      const results = [];
+      for await (const result of resultGenerator) {
+        results.push(result);
+      }
+
+      expect(results).toEqual([preparationResponse]);
     });
 
     it('should handle streaming errors and reset tool calls', async () => {

@@ -1227,14 +1227,17 @@ const EN: Messages = {
     }: ${v?.error ?? 'Unknown error'}`,
   'extensions.manage.agents': 'Agents:',
   'extensions.manage.actions': 'Extension actions',
+  'extensions.manage.add': 'Add Extension',
   'extensions.manage.checkingUpdates': 'Checking for updates...',
+  'extensions.manage.checkUpdates': 'Check for updates',
   'extensions.manage.commands': 'Commands:',
   'extensions.manage.contextFiles': 'Context files:',
   'extensions.manage.count': (v) => `${v?.count ?? 0} extensions installed`,
-  'extensions.manage.detailsTitle': 'Extension Details',
   'extensions.manage.disable': 'Disable Extension',
   'extensions.manage.disabled': (v) =>
     `Extension "${v?.name ?? 'extension'}" disabled.`,
+  'extensions.manage.disabling': (v) =>
+    `Disabling extension "${v?.name ?? 'extension'}"…`,
   'extensions.manage.empty': 'No extensions installed.',
   'extensions.manage.emptyAgents': 'This extension has no agents.',
   'extensions.manage.emptyCommands': 'This extension has no commands.',
@@ -1246,16 +1249,19 @@ const EN: Messages = {
   'extensions.manage.enable': 'Enable Extension',
   'extensions.manage.enabled': (v) =>
     `Extension "${v?.name ?? 'extension'}" enabled.`,
-  'extensions.manage.footer.back': 'Esc to go back',
-  'extensions.manage.footer.confirm': 'Enter confirm · Esc cancel',
-  'extensions.manage.footer.list':
-    '↑↓ to navigate · Enter select · r refresh · Esc close',
-  'extensions.manage.footer.select': '↑↓ to navigate · Enter select · Esc back',
-  'extensions.manage.loading': 'Loading extensions...',
-  'extensions.manage.mcpServers': 'MCP servers:',
+  'extensions.manage.enabling': (v) =>
+    `Enabling extension "${v?.name ?? 'extension'}"…`,
+  'extensions.manage.install': 'Install',
+  'extensions.manage.installDescription':
+    'Enter a GitHub, Git, or npm extension source.',
+  'extensions.manage.installSelectPluginDescription': (v) =>
+    `Choose a plugin from "${v?.marketplace ?? 'this marketplace'}".`,
   'extensions.manage.installType': 'Install type:',
+  'extensions.manage.mcpServers': 'MCP servers:',
+  'extensions.manage.marketplaceRoot': 'Marketplace root',
   'extensions.manage.name': 'Name:',
   'extensions.manage.notUpdatable': 'not updatable',
+  'extensions.manage.operationFailed': 'Extension operation failed.',
   'extensions.manage.noDescription': 'No description',
   'extensions.manage.noMatches': 'No matching extensions.',
   'extensions.manage.origin': 'Origin:',
@@ -1263,13 +1269,17 @@ const EN: Messages = {
   'extensions.manage.path': 'Path:',
   'extensions.manage.queued': (v) =>
     `Extension action queued for "${v?.name ?? 'extension'}".`,
-  'extensions.manage.refreshed': (v) =>
-    `Extensions refreshed in ${v?.refreshed ?? 0} session(s), ${v?.failed ?? 0} failed.`,
+  'extensions.manage.refreshFailed': (v) =>
+    `Extension action succeeded, but session refresh failed${
+      v?.error ? `: ${v.error}` : '.'
+    }`,
   'extensions.manage.restartRequired': 'updated; restart required',
-  'extensions.manage.settings': 'Settings:',
   'extensions.manage.search': 'Search extensions…',
+  'extensions.manage.selectExtension': 'Choose an extension',
+  'extensions.manage.settings': 'Settings:',
   'extensions.manage.skills': 'Skills:',
   'extensions.manage.source': 'Source:',
+  'extensions.manage.sourcePlaceholder': 'https://github.com/owner/repository',
   'extensions.manage.status': 'Status:',
   'extensions.manage.status.disabled': 'disabled',
   'extensions.manage.status.enabled': 'enabled',
@@ -1277,6 +1287,8 @@ const EN: Messages = {
   'extensions.manage.unknownUpdate': 'unknown',
   'extensions.manage.uninstalled': (v) =>
     `Extension "${v?.name ?? 'extension'}" uninstalled.`,
+  'extensions.manage.uninstalling': (v) =>
+    `Uninstalling extension "${v?.name ?? 'extension'}"…`,
   'extensions.manage.uninstallAction': 'Uninstall Extension',
   'extensions.manage.uninstallConfirm': (v) =>
     `Uninstall extension "${v?.name ?? 'extension'}"?`,
@@ -1285,8 +1297,11 @@ const EN: Messages = {
   'extensions.manage.updateAvailable': 'update available',
   'extensions.manage.updateError': 'update check failed',
   'extensions.manage.updateComplete': 'updated',
+  'extensions.manage.updatedWithWarnings': 'updated with warnings',
   'extensions.manage.updateStatus': 'Update status:',
   'extensions.manage.updating': 'updating…',
+  'extensions.manage.updatingExtension': (v) =>
+    `Updating extension "${v?.name ?? 'extension'}"…`,
   'extensions.manage.updated': (v) =>
     `Extension "${v?.name ?? 'extension'}" updated.`,
   'extensions.manage.updatedWithVersion': (v) =>
@@ -3122,13 +3137,15 @@ const ZH: Messages = {
     }`,
   'extensions.manage.agents': '智能体：',
   'extensions.manage.actions': '扩展操作',
+  'extensions.manage.add': '添加扩展',
   'extensions.manage.checkingUpdates': '正在检查更新...',
+  'extensions.manage.checkUpdates': '检查更新',
   'extensions.manage.commands': '命令：',
   'extensions.manage.contextFiles': '上下文文件：',
   'extensions.manage.count': (v) => `已安装 ${v?.count ?? 0} 个扩展`,
-  'extensions.manage.detailsTitle': '扩展详情',
   'extensions.manage.disable': '禁用扩展',
   'extensions.manage.disabled': (v) => `扩展 "${v?.name ?? '扩展'}" 已禁用。`,
+  'extensions.manage.disabling': (v) => `正在禁用扩展 "${v?.name ?? '扩展'}"…`,
   'extensions.manage.empty': '未安装扩展。',
   'extensions.manage.emptyAgents': '此扩展没有智能体。',
   'extensions.manage.emptyCommands': '此扩展没有命令。',
@@ -3139,15 +3156,17 @@ const ZH: Messages = {
   'extensions.manage.emptySkills': '此扩展没有 Skills。',
   'extensions.manage.enable': '启用扩展',
   'extensions.manage.enabled': (v) => `扩展 "${v?.name ?? '扩展'}" 已启用。`,
-  'extensions.manage.footer.back': 'Esc 返回',
-  'extensions.manage.footer.confirm': 'Enter 确认 · Esc 取消',
-  'extensions.manage.footer.list': '↑↓ 导航 · Enter 选择 · r 刷新 · Esc 关闭',
-  'extensions.manage.footer.select': '↑↓ 导航 · Enter 选择 · Esc 返回',
-  'extensions.manage.loading': '正在加载扩展...',
-  'extensions.manage.mcpServers': 'MCP servers：',
+  'extensions.manage.enabling': (v) => `正在启用扩展 "${v?.name ?? '扩展'}"…`,
+  'extensions.manage.install': '安装',
+  'extensions.manage.installDescription': '输入 GitHub、Git 或 npm 扩展来源。',
+  'extensions.manage.installSelectPluginDescription': (v) =>
+    `从「${v?.marketplace ?? '此市场'}」中选择插件。`,
   'extensions.manage.installType': '安装类型：',
+  'extensions.manage.mcpServers': 'MCP servers：',
+  'extensions.manage.marketplaceRoot': '此市场根目录',
   'extensions.manage.name': '名称：',
   'extensions.manage.notUpdatable': '不可更新',
+  'extensions.manage.operationFailed': '扩展操作失败。',
   'extensions.manage.noDescription': '暂无描述',
   'extensions.manage.noMatches': '没有匹配的扩展。',
   'extensions.manage.origin': '来源平台：',
@@ -3155,13 +3174,15 @@ const ZH: Messages = {
   'extensions.manage.path': '路径：',
   'extensions.manage.queued': (v) =>
     `扩展 "${v?.name ?? '扩展'}" 的操作已提交。`,
-  'extensions.manage.refreshed': (v) =>
-    `已刷新 ${v?.refreshed ?? 0} 个 session，${v?.failed ?? 0} 个失败。`,
+  'extensions.manage.refreshFailed': (v) =>
+    `扩展操作已成功，但 session 刷新失败${v?.error ? `：${v.error}` : '。'}`,
   'extensions.manage.restartRequired': '已更新，需要重启',
-  'extensions.manage.settings': '设置：',
   'extensions.manage.search': '搜索扩展…',
+  'extensions.manage.selectExtension': '请选择扩展',
+  'extensions.manage.settings': '设置：',
   'extensions.manage.skills': 'Skills：',
   'extensions.manage.source': '来源：',
+  'extensions.manage.sourcePlaceholder': 'https://github.com/owner/repository',
   'extensions.manage.status': '状态：',
   'extensions.manage.status.disabled': '已禁用',
   'extensions.manage.status.enabled': '已启用',
@@ -3169,6 +3190,8 @@ const ZH: Messages = {
   'extensions.manage.unknownUpdate': '未知',
   'extensions.manage.uninstalled': (v) =>
     `扩展 "${v?.name ?? '扩展'}" 已卸载。`,
+  'extensions.manage.uninstalling': (v) =>
+    `正在卸载扩展 "${v?.name ?? '扩展'}"…`,
   'extensions.manage.uninstallAction': '卸载扩展',
   'extensions.manage.uninstallConfirm': (v) =>
     `确定卸载扩展 "${v?.name ?? '扩展'}"？`,
@@ -3177,8 +3200,11 @@ const ZH: Messages = {
   'extensions.manage.updateAvailable': '有可用更新',
   'extensions.manage.updateError': '检查更新失败',
   'extensions.manage.updateComplete': '已更新',
+  'extensions.manage.updatedWithWarnings': '已更新，但有警告',
   'extensions.manage.updateStatus': '更新状态：',
   'extensions.manage.updating': '正在更新…',
+  'extensions.manage.updatingExtension': (v) =>
+    `正在更新扩展 "${v?.name ?? '扩展'}"…`,
   'extensions.manage.updated': (v) => `扩展 "${v?.name ?? '扩展'}" 已更新。`,
   'extensions.manage.updatedWithVersion': (v) =>
     `扩展 "${v?.name ?? '扩展'}" 已更新到 v${v?.version ?? ''}。`,

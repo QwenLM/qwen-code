@@ -51,6 +51,7 @@ import type {
   ToolCallConfirmationDetails,
   ToolResultDisplay,
 } from '../../tools/tools.js';
+import { isShellProgressData } from '../../tools/tools.js';
 import { getInitialChatHistory } from '../../utils/environmentContext.js';
 import { FinishReason } from '@google/genai';
 import type {
@@ -1481,6 +1482,11 @@ export class AgentCore {
     const scheduler = new CoreToolScheduler({
       config: this.runtimeContext,
       outputUpdateHandler: (callId, outputChunk) => {
+        // Shell liveness heartbeats have no subagent consumer; broadcasting
+        // one would overwrite the live output view kept in liveOutputs.
+        if (isShellProgressData(outputChunk)) {
+          return;
+        }
         this.eventEmitter?.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
           subagentId: this.subagentId,
           round: currentRound,

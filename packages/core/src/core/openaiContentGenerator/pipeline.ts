@@ -27,6 +27,7 @@ import {
   QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
 } from './constants.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { getToolCallPreparations } from '../tool-call-preparation.js';
 import { InvalidStreamError } from '../invalid-stream-error.js';
 import { logProtocolTagSanitized } from '../../telemetry/loggers.js';
 import { ProtocolTagSanitizedEvent } from '../../telemetry/types.js';
@@ -537,7 +538,9 @@ export class ContentGenerationPipeline {
         if (
           response.candidates?.[0]?.content?.parts?.length === 0 &&
           !response.candidates?.[0]?.finishReason &&
-          !response.usageMetadata
+          !response.usageMetadata &&
+          // Preparation-only responses must reach ACP before arguments complete.
+          getToolCallPreparations(response).length === 0
         ) {
           continue;
         }

@@ -8,7 +8,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   DaemonSessionProvider,
   useConnection,
-  useSessions,
   type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
@@ -25,6 +24,7 @@ import {
   SESSION_ORGANIZATION_FEATURE,
 } from '../constants/sessions';
 import { useOtherWorkspaceSessions } from '../hooks/useOtherWorkspaceSessions';
+import { useScopedSessions } from '../hooks/useScopedSessions';
 import {
   hasMultipleWorkspaces,
   isNonPrimaryWorkspaceSession,
@@ -62,6 +62,9 @@ export interface SplitViewProps {
    * offers a session that has since been removed or misses one just created.
    */
   sessionListReloadToken?: number;
+  includeOtherWorkspaces?: boolean;
+  /** Limit session discovery and pane attachment to this workspace. */
+  workspaceCwd?: string;
 }
 
 /**
@@ -80,6 +83,8 @@ export function SplitView({
   onPaneArtifactsChange,
   messageTurnOutputs,
   sessionListReloadToken,
+  includeOtherWorkspaces = true,
+  workspaceCwd,
 }: SplitViewProps) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -87,7 +92,7 @@ export function SplitView({
   const organizationEnabled =
     connection.capabilities?.features?.includes(SESSION_ORGANIZATION_FEATURE) ??
     false;
-  const { sessions, reload } = useSessions({
+  const { sessions, reload } = useScopedSessions(workspaceCwd, {
     autoLoad: true,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
@@ -99,12 +104,16 @@ export function SplitView({
   // and a pane can attach to — sessions that aren't in the primary workspace.
   // Empty (a no-op) on a single-workspace daemon.
   const { sessions: otherSessions, reload: reloadOther } =
-    useOtherWorkspaceSessions();
+    useOtherWorkspaceSessions(includeOtherWorkspaces && !workspaceCwd);
   const allSessions = useMemo(
     () => mergeSessionsById(sessions, otherSessions),
     [sessions, otherSessions],
   );
-  const multiWorkspace = hasMultipleWorkspaces(connection.capabilities);
+  const multiWorkspace =
+    !workspaceCwd &&
+    includeOtherWorkspaces &&
+    hasMultipleWorkspaces(connection.capabilities);
+  const scopePanesByWorkspace = Boolean(workspaceCwd) || multiWorkspace;
   // The primary workspace cwd, for labeling picker items the same way the
   // Session Overview labels its cards (primary → the localized tag, others →
   // the workspace basename).
@@ -165,9 +174,8 @@ export function SplitView({
     };
   }, [pickerOpen]);
 
-  // Refresh the list the moment the picker opens — `useSessions` only fetches on
-  // mount, so without this the picker would offer whatever was current when the
-  // split was first entered, missing sessions created since.
+  // Refresh the list the moment the picker opens so it includes sessions
+  // created since the split was first entered.
   useEffect(() => {
     if (pickerOpen) {
       void reload();
@@ -374,7 +382,7 @@ export function SplitView({
                 // a `?split=` deep link) remounts under the right workspace rather
                 // than staying attached with the primary cwd.
                 key={
-                  multiWorkspace
+                  scopePanesByWorkspace
                     ? `${sessionId}:${paneWorkspaceCwd ?? ''}`
                     : sessionId
                 }
@@ -410,7 +418,11 @@ export function SplitView({
                     // to the primary cwd once the list resolves, needlessly
                     // re-attaching it. Undefined falls back to the provider's
                     // primary cwd, i.e. today's behavior.
-                    workspaceCwd={multiWorkspace ? paneWorkspaceCwd : undefined}
+                    workspaceCwd={
+                      scopePanesByWorkspace
+                        ? (paneWorkspaceCwd ?? workspaceCwd)
+                        : undefined
+                    }
                     // Distinct from the main view's client (and from any other
                     // tab's panes) for the same session, so the attachments don't
                     // collide on one client identity.

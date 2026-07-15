@@ -1,10 +1,13 @@
 import type { CommandModule } from 'yargs';
 import {
-  appendChannelMemory,
+  addChannelMemoryEntries,
   clearChannelMemory,
+  listChannelMemoryEntries,
   nextFireTime,
   parseCron,
   readChannelMemory,
+  removeChannelMemoryEntries,
+  updateChannelMemoryEntry,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -62,7 +65,10 @@ function channelMemoryOptions(
   return {
     channelMemory: {
       readChannelMemory,
-      appendChannelMemory,
+      listChannelMemoryEntries,
+      addChannelMemoryEntries,
+      updateChannelMemoryEntry,
+      removeChannelMemoryEntries,
       clearChannelMemory,
     },
     memoryIntentClassifier: new BridgeChannelMemoryIntentClassifier(

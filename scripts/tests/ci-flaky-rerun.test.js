@@ -1,0 +1,659 @@
+import { describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
+import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import {
+  actOnDecision,
+  actOnDecisions,
+  alreadyHandled,
+  argsMap,
+  currentActionCount,
+  eligibleAttemptJob,
+  fileSha256,
+  fingerprint,
+  GhClient,
+  resetSuccessfulFailures,
+  selectCandidateTargets,
+  skillLog,
+} from '../../.github/scripts/ci-flaky-rerun.mjs';
+
+const NOW = new Date('2026-07-12T08:00:00.000Z');
+
+function run(overrides = {}) {
+  return {
+    databaseId: 11,
+    name: 'E2E Tests',
+    workflowName: 'Qwen Code CI',
+    status: 'COMPLETED',
+    conclusion: 'FAILURE',
+    startedAt: '2026-07-12T07:10:00.000Z',
+    completedAt: '2026-07-12T07:20:00.000Z',
+    detailsUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/123/job/1',
+    ...overrides,
+  };
+}
+
+function pr(overrides = {}) {
+  return {
+    number: 42,
+    isDraft: false,
+    baseRefName: 'main',
+    headRefOid: 'abc123',
+    statusCheckRollup: [run()],
+    ...overrides,
+  };
+}
+
+function target(overrides = {}) {
+  return {
+    ...selectCandidateTargets([pr()], { now: NOW })[0],
+    runAttempt: 2,
+    failureKey: 'check-0123456789abcdef',
+    actionCount: 0,
+    ...overrides,
+  };
+}
+
+function decision(overrides = {}) {
+  const t = target();
+  return {
+    prNumber: t.prNumber,
+    headSha: t.headSha,
+    runId: t.runId,
+    runAttempt: t.runAttempt,
+    failureKey: t.failureKey,
+    action: 'rerun',
+    confidence: 'high',
+    reason_en: 'runner timeout',
+    reason_zh: 'runner 超时',
+    ...overrides,
+  };
+}
+
+function markerComment(overrides = {}) {
+  return {
+    body: '<!-- qwen-ci-flaky-rerun v=5 pr=42 head=abc123 run=123 attempt=2 workflow=Qwen%20Code%20CI check=E2E%20Tests action=rerun key=check-0123456789abcdef count=2 -->',
+    createdAt: '2026-07-12T07:25:00.000Z',
+    author: { login: 'patrol-bot' },
+    ...overrides,
+  };
+}
+
+function client(overrides = {}) {
+  const calls = [];
+  return {
+    calls,
+    trustedMarkerLogin: 'patrol-bot',
+    async currentPr() {
+      return { ...pr(), state: 'OPEN' };
+    },
+    async comments() {
+      return [];
+    },
+    async run() {
+      return {
+        status: 'completed',
+        conclusion: 'failure',
+        head_sha: 'abc123',
+        run_attempt: 2,
+      };
+    },
+    async rerunFailedJobs(...args) {
+      calls.push(['rerunFailedJobs', ...args]);
+    },
+    async comment(...args) {
+      calls.push(['comment', ...args]);
+    },
+    ...overrides,
+  };
+}
+
+describe('ci flaky rerun patrol', () => {
+  it('selects only recent stale current Qwen Code CI failures', () => {
+    const selected = selectCandidateTargets(
+      [
+        pr({
+          statusCheckRollup: [
+            run(),
+            run({
+              databaseId: 12,
+              status: 'IN_PROGRESS',
+              conclusion: null,
+              completedAt: null,
+              startedAt: '2026-07-12T07:40:00.000Z',
+              detailsUrl:
+                'https://github.com/QwenLM/qwen-code/actions/runs/124/job/2',
+            }),
+          ],
+        }),
+        pr({
+          number: 43,
+          headRefOid: 'def456',
+          statusCheckRollup: [
+            run({
+              databaseId: 13,
+              conclusion: 'TIMED_OUT',
+              detailsUrl:
+                'https://github.com/QwenLM/qwen-code/actions/runs/125/job/3',
+            }),
+          ],
+        }),
+        pr({
+          number: 44,
+          statusCheckRollup: [run({ completedAt: '2026-07-01T07:20:00.000Z' })],
+        }),
+        pr({ number: 45, isDraft: true }),
+        pr({ number: 46, baseRefName: 'release' }),
+        pr({
+          number: 47,
+          statusCheckRollup: [run({ workflowName: 'Review PR' })],
+        }),
+      ],
+      { now: NOW, staleMinutes: 30, activeDays: 7 },
+    );
+
+    expect(selected).toEqual([
+      expect.objectContaining({ prNumber: 43, runId: 125, jobId: 3 }),
+    ]);
+  });
+
+  it('orders the newest eligible failures first', () => {
+    const selected = selectCandidateTargets(
+      [
+        pr({
+          number: 41,
+          statusCheckRollup: [
+            run({
+              completedAt: '2026-07-12T06:00:00.000Z',
+              detailsUrl:
+                'https://github.com/QwenLM/qwen-code/actions/runs/121/job/1',
+            }),
+          ],
+        }),
+        pr(),
+      ],
+      { now: NOW },
+    );
+    expect(selected.map((item) => item.prNumber)).toEqual([42, 41]);
+  });
+
+  it('keeps distinct failures from the same PR available for scanning', () => {
+    const selected = selectCandidateTargets(
+      [
+        pr({
+          statusCheckRollup: [
+            run(),
+            run({
+              databaseId: 12,
+              name: 'Unit Tests',
+              completedAt: '2026-07-12T07:25:00.000Z',
+              detailsUrl:
+                'https://github.com/QwenLM/qwen-code/actions/runs/124/job/2',
+            }),
+          ],
+        }),
+      ],
+      { now: NOW },
+    );
+
+    expect(selected.map((item) => item.checkName)).toEqual([
+      'Unit Tests',
+      'E2E Tests',
+    ]);
+  });
+
+  it('binds job evidence to the exact live run attempt', () => {
+    const t = target();
+    const job = {
+      id: t.jobId,
+      run_id: t.runId,
+      run_attempt: t.runAttempt,
+      head_sha: t.headSha,
+      name: t.checkName,
+      status: 'completed',
+      conclusion: 'failure',
+      completed_at: '2026-07-12T07:20:00.000Z',
+    };
+
+    expect(eligibleAttemptJob(job, t, 2, { now: NOW })).toBe(true);
+    expect(
+      eligibleAttemptJob({ ...job, run_attempt: 1 }, t, 2, { now: NOW }),
+    ).toBe(false);
+    expect(
+      eligibleAttemptJob(
+        { ...job, completed_at: '2026-07-12T07:45:00.000Z' },
+        t,
+        2,
+        { now: NOW },
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects a command-line flag without a value', () => {
+    expect(() => argsMap(['--repo'])).toThrow('missing value for --repo');
+  });
+
+  it('runs from an entry path containing spaces', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ci flaky rerun-'));
+    const script = join(dir, 'ci flaky rerun.mjs');
+    try {
+      copyFileSync(
+        join(process.cwd(), '.github/scripts/ci-flaky-rerun.mjs'),
+        script,
+      );
+      const result = spawnSync(process.execPath, [script, 'invalid'], {
+        encoding: 'utf8',
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('command must be scan, act, or reset');
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  it('ignores empty lines in paginated comment output', async () => {
+    const api = new GhClient('QwenLM/qwen-code');
+    api.gh = async () => '{"body":"first"}\n\n{"body":"second"}\n';
+    await expect(api.comments(42)).resolves.toEqual([
+      { body: 'first' },
+      { body: 'second' },
+    ]);
+  });
+
+  it('requests the PR number when refreshing current PR state', async () => {
+    const api = new GhClient('QwenLM/qwen-code');
+    let args = [];
+    api.gh = async (nextArgs) => {
+      args = nextArgs;
+      return JSON.stringify({ ...pr(), state: 'OPEN' });
+    };
+    await api.currentPr(42);
+    expect(args[args.indexOf('--json') + 1].split(',')).toContain('number');
+  });
+
+  it('handles an exact run attempt once and allows a new attempt', () => {
+    const comments = [markerComment()];
+    expect(alreadyHandled(comments, target(), 'patrol-bot')).toBe(true);
+    expect(
+      alreadyHandled(comments, target({ runAttempt: 3 }), 'patrol-bot'),
+    ).toBe(false);
+    expect(alreadyHandled(comments, target(), 'someone-else')).toBe(false);
+    const malformed = markerComment({
+      body: markerComment().body.replace(' count=2', ' malformed count=2'),
+    });
+    expect(alreadyHandled([malformed], target(), 'patrol-bot')).toBe(false);
+  });
+
+  it('counts actions per head and resets after the handled check succeeds', () => {
+    const comments = [markerComment()];
+    expect(currentActionCount(pr(), comments, 'patrol-bot')).toBe(2);
+    expect(
+      currentActionCount(
+        pr({
+          statusCheckRollup: [
+            run({
+              conclusion: 'SUCCESS',
+              completedAt: '2026-07-12T07:30:00.000Z',
+            }),
+          ],
+        }),
+        comments,
+        'patrol-bot',
+      ),
+    ).toBe(0);
+    expect(
+      currentActionCount(
+        pr({
+          statusCheckRollup: [
+            run({
+              conclusion: 'SUCCESS',
+              completedAt: '2026-07-12T07:30:00.000Z',
+              detailsUrl:
+                'https://github.com/QwenLM/qwen-code/actions/runs/124/job/2',
+            }),
+          ],
+        }),
+        comments,
+        'patrol-bot',
+      ),
+    ).toBe(2);
+    expect(
+      currentActionCount(
+        pr({ headRefOid: 'new-head' }),
+        comments,
+        'patrol-bot',
+      ),
+    ).toBe(0);
+  });
+
+  it('reruns before recording the hidden action marker', async () => {
+    const c = client();
+    await actOnDecision(c, target(), decision());
+    expect(c.calls).toEqual([
+      ['rerunFailedJobs', 123],
+      ['comment', 42, expect.stringMatching(/^<!-- .*action=rerun.* -->$/)],
+    ]);
+  });
+
+  it('posts deterministic failures in English with folded Chinese', async () => {
+    const c = client();
+    await actOnDecision(
+      c,
+      target(),
+      decision({
+        action: 'comment',
+        reason_en: 'TypeScript cannot resolve the imported module.',
+        reason_zh: 'TypeScript 无法解析导入模块。',
+      }),
+    );
+    expect(c.calls).toHaveLength(1);
+    expect(c.calls[0][2]).toContain('TypeScript cannot resolve');
+    expect(c.calls[0][2]).toContain('<details>');
+    expect(c.calls[0][2]).toContain('TypeScript 无法解析');
+    expect(c.calls[0][2]).toContain('action=comment');
+  });
+
+  it('records no_action without a visible comment', async () => {
+    const c = client();
+    await actOnDecision(
+      c,
+      target(),
+      decision({ action: 'no_action', confidence: 'low' }),
+    );
+    expect(c.calls).toEqual([
+      ['comment', 42, expect.stringMatching(/^<!-- .*action=no_action.* -->$/)],
+    ]);
+  });
+
+  it('rejects malformed, unsafe, or mismatched decisions', async () => {
+    for (const invalid of [
+      null,
+      {},
+      decision({ action: 'delete_branch' }),
+      decision({ confidence: 'low' }),
+      decision({ failureKey: 'wrong-key' }),
+      decision({ runAttempt: 3 }),
+      decision({ action: 'update_branch' }),
+      decision({ reason_en: 'x'.repeat(201) }),
+      decision({ reason_en: '' }),
+      decision({ reason_zh: ' ' }),
+    ]) {
+      const c = client();
+      await actOnDecision(c, target(), invalid);
+      expect(c.calls).toEqual([]);
+    }
+  });
+
+  it('neutralizes mentions and markup copied into visible reasons', async () => {
+    const c = client();
+    await actOnDecision(
+      c,
+      target(),
+      decision({
+        action: 'comment',
+        reason_en: '@qwen-maintainers <script>alert(1)</script>',
+        reason_zh: '@全体成员 </details>',
+      }),
+    );
+    expect(c.calls[0][2]).toContain('@\u200bqwen-maintainers');
+    expect(c.calls[0][2]).toContain('&lt;script&gt;');
+    expect(c.calls[0][2]).toContain('@\u200b全体成员 &lt;/details&gt;');
+  });
+
+  it('stops after three actions on the same head', async () => {
+    const c = client({
+      async comments() {
+        return [
+          markerComment({
+            body: markerComment()
+              .body.replace('attempt=2', 'attempt=1')
+              .replace('count=2', 'count=3'),
+          }),
+        ];
+      },
+    });
+    await actOnDecision(c, target(), decision());
+    expect(c.calls).toEqual([]);
+  });
+
+  it('does nothing when the PR or failure is no longer current', async () => {
+    const changedPr = (overrides) =>
+      client({
+        async currentPr() {
+          return { ...pr(), state: 'OPEN', ...overrides };
+        },
+      });
+    const cases = [
+      client({
+        async currentPr() {
+          return { ...pr(), state: 'CLOSED' };
+        },
+      }),
+      changedPr({ headRefOid: 'new-head' }),
+      changedPr({ isDraft: true }),
+      changedPr({ baseRefName: 'release' }),
+      changedPr({
+        statusCheckRollup: [
+          run({
+            detailsUrl:
+              'https://github.com/QwenLM/qwen-code/actions/runs/123/job/2',
+          }),
+        ],
+      }),
+      client({
+        async run() {
+          return {
+            status: 'completed',
+            conclusion: 'success',
+            head_sha: 'abc123',
+            run_attempt: 2,
+          };
+        },
+      }),
+    ];
+    for (const c of cases) {
+      await actOnDecision(c, target(), decision());
+      expect(c.calls).toEqual([]);
+    }
+  });
+
+  it('applies a bounded batch independently and deduplicates decisions', async () => {
+    const c = client({
+      async rerunFailedJobs(runId) {
+        c.calls.push(['rerunFailedJobs', runId]);
+        if (runId === 123) throw new Error('temporary API failure');
+      },
+      async currentPr(prNumber) {
+        return {
+          ...pr({
+            number: prNumber,
+            headRefOid: prNumber === 42 ? 'abc123' : 'def456',
+            statusCheckRollup: [
+              run({
+                detailsUrl: `https://github.com/QwenLM/qwen-code/actions/runs/${prNumber === 42 ? 123 : 124}/job/1`,
+              }),
+            ],
+          }),
+          state: 'OPEN',
+        };
+      },
+      async run(runId) {
+        return {
+          status: 'completed',
+          conclusion: 'failure',
+          head_sha: runId === 123 ? 'abc123' : 'def456',
+          run_attempt: 2,
+        };
+      },
+    });
+    const second = target({ prNumber: 43, headSha: 'def456', runId: 124 });
+    const secondDecision = decision({
+      prNumber: 43,
+      headSha: 'def456',
+      runId: 124,
+    });
+    await actOnDecisions(
+      c,
+      [target(), second],
+      [decision(), decision(), secondDecision],
+    );
+    expect(c.calls.filter((call) => call[0] === 'rerunFailedJobs')).toEqual([
+      ['rerunFailedJobs', 123],
+      ['rerunFailedJobs', 124],
+    ]);
+    expect(c.calls.filter((call) => call[0] === 'comment')).toHaveLength(1);
+  });
+
+  it('persists a zero-count reset marker after success', async () => {
+    const c = client({
+      async comments() {
+        return [markerComment()];
+      },
+    });
+    await resetSuccessfulFailures(c, [
+      pr({
+        statusCheckRollup: [
+          run({
+            conclusion: 'SUCCESS',
+            completedAt: '2026-07-12T07:30:00.000Z',
+          }),
+        ],
+      }),
+    ]);
+    expect(c.calls).toEqual([
+      [
+        'comment',
+        42,
+        expect.stringMatching(/^<!-- .*action=reset.*count=0.* -->$/),
+      ],
+    ]);
+  });
+
+  it('hashes classifier inputs and fingerprints failures deterministically', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ci-flaky-rerun-'));
+    const path = join(dir, 'input.json');
+    try {
+      writeFileSync(path, '{"candidates":[]}\n');
+      const before = fileSha256(path);
+      writeFileSync(path, '{"candidates":[1]}\n');
+      expect(fileSha256(path)).not.toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+    expect(fingerprint(target(), 'Error 123 at deadbeef')).toBe(
+      fingerprint(target(), 'error 456 at cafebabe'),
+    );
+    expect(fingerprint(target(), 'Error 12345678')).toBe(
+      fingerprint(target(), 'Error 456'),
+    );
+    expect(fingerprint(target(), 'timeout')).not.toBe(
+      fingerprint(target({ checkName: 'Lint' }), 'timeout'),
+    );
+  });
+
+  it('bounds and redacts untrusted classifier evidence', () => {
+    const evidence = skillLog(
+      [
+        '-----BEGIN PRIVATE KEY-----',
+        'private-material',
+        '-----END PRIVATE KEY-----',
+        'Authorization: Bearer bearer-secret',
+        'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signaturevalue',
+        'ghp_abcdef1234567890',
+        'TypeError: ensureTool is not a function',
+        ...Array.from({ length: 220 }, (_, index) => `line-${index}`),
+        'x'.repeat(600),
+        'AKIAABCDEFGHIJKLMNOP',
+        'npm_abcdefghijklmnopqrst',
+        'sk-abcdefghijklmnopqrst',
+        'Cookie: session=cookie-secret',
+        'https://user:url-secret@example.com/path',
+        'API_SECRET=env-secret',
+        '"db_password": "quoted-secret"',
+      ].join('\n'),
+    );
+    const lines = evidence.split('\n');
+    expect(lines.length).toBeLessThanOrEqual(120);
+    expect(Math.max(...lines.map((line) => line.length))).toBeLessThanOrEqual(
+      300,
+    );
+    expect(evidence).not.toContain('private-material');
+    expect(evidence).not.toContain('bearer-secret');
+    expect(evidence).not.toContain('eyJhbGci');
+    expect(evidence).not.toContain('abcdef1234567890');
+    for (const secret of [
+      'ABCDEFGHIJKLMNOP',
+      'abcdefghijklmnopqrst',
+      'cookie-secret',
+      'url-secret',
+      'env-secret',
+      'quoted-secret',
+    ]) {
+      expect(evidence).not.toContain(secret);
+    }
+    expect(evidence).toContain('TypeError: ensureTool is not a function');
+  });
+
+  it('keeps fallback errors', () => {
+    expect(skillLog('Error: connect ECONNREFUSED')).toContain(
+      'Error: connect ECONNREFUSED',
+    );
+  });
+
+  it('rejects tampered classifier input before GitHub access', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ci-flaky-rerun-act-'));
+    try {
+      writeFileSync(join(dir, 'ci-flaky-input.json'), '{"candidates":[]}\n');
+      const result = spawnSync(
+        process.execPath,
+        [
+          join(process.cwd(), '.github/scripts/ci-flaky-rerun.mjs'),
+          'act',
+          '--workdir',
+          dir,
+          '--input-sha',
+          'tampered',
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('integrity check failed');
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  it('keeps the failure summary when later tests log expected errors', () => {
+    const evidence = skillLog(
+      [
+        'Failed Tests 1',
+        'FAIL toolFormatting.test.ts > translates every tool',
+        "AssertionError: expected ['deferred_tool_call'] to deeply equal []",
+        ...Array.from(
+          { length: 200 },
+          () => 'TypeError: fetch failed (expected by this passing test)',
+        ),
+        'Cleaning up orphan processes',
+      ].join('\n'),
+    );
+    expect(evidence).toContain("expected ['deferred_tool_call']");
+  });
+
+  it('keeps the primary failure when later summary lines fill the limit', () => {
+    const evidence = skillLog(
+      [
+        'Failed Tests 1',
+        'FAIL toolFormatting.test.ts > translates every tool',
+        "AssertionError: expected ['deferred_tool_call'] to deeply equal []",
+        ...Array.from(
+          { length: 200 },
+          (_, index) => `npm error cleanup noise ${index}`,
+        ),
+      ].join('\n'),
+    );
+    expect(evidence.split('\n')).toHaveLength(120);
+    expect(evidence).toContain("expected ['deferred_tool_call']");
+  });
+});

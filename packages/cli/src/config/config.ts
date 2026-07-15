@@ -2165,6 +2165,7 @@ export async function loadCliConfig(
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
     shellDefaultTimeoutMs: settings.tools?.shell?.defaultTimeoutMs,
+    shellHeartbeatIntervalMs: settings.tools?.shell?.heartbeatIntervalMs,
     preventSystemSleep: settings.general?.preventSystemSleep ?? true,
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
     skipWorkflowUsageWarning: settings.model?.skipWorkflowUsageWarning ?? false,

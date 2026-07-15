@@ -22,6 +22,7 @@ import {
   getArenaSystemReminder,
   getMCPServerStatus,
   getPlanModeSystemReminder,
+  isShellProgressData,
 } from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
 import type {
@@ -272,9 +273,10 @@ function isMcpToolProgressData(
 
 /**
  * Creates a generic output update handler for tools with canUpdateOutput=true.
- * This handler forwards MCP progress data (McpToolProgressData) as tool_progress
- * stream events via the adapter. Progress events are only emitted when the adapter
- * supports partial messages (i.e., includePartialMessages is true).
+ * This handler forwards MCP progress data (McpToolProgressData) and shell
+ * liveness heartbeats (ShellProgressData) as tool_progress stream events via
+ * the adapter. Progress events are only emitted when the adapter supports
+ * partial messages (i.e., includePartialMessages is true).
  *
  * @param request - Tool call request info
  * @param adapter - The adapter instance for emitting messages
@@ -290,7 +292,7 @@ export function createToolProgressHandler(
     _callId: string,
     output: ToolResultDisplay,
   ) => {
-    if (isMcpToolProgressData(output)) {
+    if (isMcpToolProgressData(output) || isShellProgressData(output)) {
       adapter.emitToolProgress(request, output);
     }
   };
