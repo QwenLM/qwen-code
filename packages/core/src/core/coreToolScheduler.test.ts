@@ -12451,9 +12451,11 @@ describe('CoreToolScheduler validation retry loop detection', () => {
   }
 
   function createSchedulerWithTool(tool: StrictStringTool) {
+    const ensureTool = vi.fn(async (name: string) =>
+      name === StrictStringTool.Name ? tool : undefined,
+    );
     const mockToolRegistry = {
-      ensureTool: async (name: string) =>
-        name === StrictStringTool.Name ? tool : undefined,
+      ensureTool,
       getTool: (name: string) =>
         name === StrictStringTool.Name ? tool : undefined,
       getFunctionDeclarations: () => [],
@@ -12515,7 +12517,12 @@ describe('CoreToolScheduler validation retry loop detection', () => {
       onEditorClose: vi.fn(),
     });
 
-    return { scheduler, onToolCallsUpdate, onAllToolCallsComplete };
+    return {
+      scheduler,
+      onToolCallsUpdate,
+      onAllToolCallsComplete,
+      ensureTool,
+    };
   }
 
   function makeRequest(
@@ -12614,6 +12621,32 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     );
     msg = getLastErrorMessage(onToolCallsUpdate);
     expect(msg).toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
+
+  it('reuses the deferred tool instance resolved during normalization', async () => {
+    const authorizedTool = new StrictStringTool();
+    const replacementTool = new StrictStringTool();
+    const authorizedBuild = vi.spyOn(authorizedTool, 'build');
+    const replacementBuild = vi.spyOn(replacementTool, 'build');
+    const { scheduler, ensureTool } = createSchedulerWithTool(authorizedTool);
+    ensureTool
+      .mockResolvedValueOnce(authorizedTool)
+      .mockResolvedValue(replacementTool);
+
+    await scheduler.schedule(
+      [
+        makeRequest('proxy-once', ToolNames.DEFERRED_TOOL_CALL, {
+          name: StrictStringTool.Name,
+          arguments: { value: 'valid' },
+        }),
+      ],
+      new AbortController().signal,
+    );
+
+    expect(ensureTool).toHaveBeenCalledTimes(1);
+    expect(ensureTool).toHaveBeenCalledWith(StrictStringTool.Name);
+    expect(authorizedBuild).toHaveBeenCalledWith({ value: 'valid' });
+    expect(replacementBuild).not.toHaveBeenCalled();
   });
 
   it('should keep retry counts for deferred_tool_call normalization failures', async () => {

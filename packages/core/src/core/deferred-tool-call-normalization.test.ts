@@ -83,6 +83,7 @@ describe('normalizeDeferredToolCallRequest', () => {
 
     expect(result.ok).toBe(true);
     if (result.ok) {
+      expect(result.resolvedTool).toBe(target);
       expect(result.request.name).toBe(ToolNames.CRON_CREATE);
       expect(result.request.args).toEqual({ schedule: '0 9 * * *' });
       expect(result.request.providerName).toBe(ToolNames.DEFERRED_TOOL_CALL);
@@ -90,6 +91,35 @@ describe('normalizeDeferredToolCallRequest', () => {
         ToolNames.DEFERRED_TOOL_CALL,
       );
     }
+  });
+
+  it('rejects a target replaced while normalization is in progress', async () => {
+    const registry = createRegistry();
+    const authorizedTool = new MockTool({
+      name: ToolNames.CRON_CREATE,
+      shouldDefer: true,
+    });
+    const replacementTool = new MockTool({
+      name: ToolNames.CRON_CREATE,
+      shouldDefer: true,
+    });
+    registry.registerTool(authorizedTool);
+    vi.spyOn(registry, 'ensureTool').mockResolvedValue(authorizedTool);
+    vi.spyOn(registry, 'getTool').mockReturnValue(replacementTool);
+
+    const result = await normalizeDeferredToolCallRequest(
+      request(ToolNames.DEFERRED_TOOL_CALL, {
+        name: ToolNames.CRON_CREATE,
+        arguments: { schedule: '0 9 * * *' },
+      }),
+      registry,
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      errorType: ToolErrorType.EXECUTION_DENIED,
+      error: { message: expect.stringContaining('changed') },
+    });
   });
 
   it.each([

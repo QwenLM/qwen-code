@@ -11120,6 +11120,77 @@ describe('Session', () => {
       );
     });
 
+    it('executes the deferred tool instance authorized by normalization', async () => {
+      const authorizedExecute = vi.fn().mockResolvedValue({
+        llmContent: 'authorized tool executed',
+        returnDisplay: 'authorized tool executed',
+      });
+      const replacementExecute = vi.fn().mockResolvedValue({
+        llmContent: 'replacement tool executed',
+        returnDisplay: 'replacement tool executed',
+      });
+      const authorizedBuild = vi.fn((params: Record<string, unknown>) => ({
+        params,
+        execute: authorizedExecute,
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getDescription: vi.fn().mockReturnValue(core.ToolNames.CRON_CREATE),
+        toolLocations: vi.fn().mockReturnValue([]),
+      }));
+      const replacementBuild = vi.fn((params: Record<string, unknown>) => ({
+        params,
+        execute: replacementExecute,
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getDescription: vi.fn().mockReturnValue(core.ToolNames.CRON_CREATE),
+        toolLocations: vi.fn().mockReturnValue([]),
+      }));
+      const authorizedTool = mockAllowedToolWithBuild(
+        core.ToolNames.CRON_CREATE,
+        authorizedBuild,
+      );
+      const replacementTool = mockAllowedToolWithBuild(
+        core.ToolNames.CRON_CREATE,
+        replacementBuild,
+      );
+      let currentTool = authorizedTool;
+      let replacementQueued = false;
+      mockToolRegistry.ensureTool.mockResolvedValue(authorizedTool);
+      mockToolRegistry.getTool.mockImplementation(() => currentTool);
+      mockToolRegistry.isProxyEligibleDeferredTool.mockReturnValue(true);
+      mockToolRegistry.hasPresentedProxySchema.mockImplementation(() => {
+        if (!replacementQueued) {
+          replacementQueued = true;
+          queueMicrotask(() => {
+            currentTool = replacementTool;
+          });
+        }
+        return true;
+      });
+
+      const result = await (
+        session as unknown as {
+          runTool(
+            signal: AbortSignal,
+            promptId: string,
+            functionCall: FunctionCall,
+          ): Promise<{ parts: Part[] }>;
+        }
+      ).runTool(new AbortController().signal, 'prompt-proxy-toctou', {
+        id: 'proxy_call',
+        name: core.ToolNames.DEFERRED_TOOL_CALL,
+        args: {
+          name: core.ToolNames.CRON_CREATE,
+          arguments: { schedule: '0 9 * * *' },
+        },
+      });
+
+      expect(authorizedBuild).toHaveBeenCalledWith({ schedule: '0 9 * * *' });
+      expect(authorizedExecute).toHaveBeenCalledOnce();
+      expect(replacementExecute).not.toHaveBeenCalled();
+      expect(result.parts[0]?.functionResponse?.name).toBe(
+        core.ToolNames.DEFERRED_TOOL_CALL,
+      );
+    });
+
     it('does not let same-batch tool_search self-authorize deferred_tool_call', async () => {
       const presented = new Set<string>();
       const toolSearchBuild = vi.fn().mockReturnValue({

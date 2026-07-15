@@ -4775,7 +4775,8 @@ export class Session implements SessionContext {
     args = effectiveRequest.args;
     responseToolName = providerToolName(effectiveRequest);
     telemetryToolName = toolName;
-    const tool = toolRegistry.getTool(toolName);
+    const tool =
+      normalizedRequest.resolvedTool ?? toolRegistry.getTool(toolName);
     isMcpTool = tool instanceof DiscoveredMCPTool;
 
     if (!tool) {

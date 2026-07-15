@@ -158,11 +158,13 @@ The implementation must preserve all of the following invariants:
 3. Permissions, hooks, UI, telemetry, validation, and execution use the real
    target name and target arguments.
 4. Provider responses use the provider-visible call name and original call ID.
-5. Tool removal, MCP reconnect, or schema changes invalidate prior proxy
+5. Normalization and execution use the same resolved target instance; a
+   same-name replacement must never be substituted after authorization.
+6. Tool removal, MCP reconnect, or schema changes invalidate prior proxy
    eligibility.
-6. Compression and resume must not preserve only proxy eligibility without also
+7. Compression and resume must not preserve only proxy eligibility without also
    restoring the corresponding current schema into model-visible context.
-7. `includeDeferred`, `visibleTools`, `alwaysLoad`, resume-time direct
+8. `includeDeferred`, `visibleTools`, `alwaysLoad`, resume-time direct
    compatibility exposure, and proxy eligibility remain independent from one
    another.
 
@@ -196,8 +198,8 @@ flowchart LR
 
   subgraph Normalization["Main-session call normalization"]
     C["Validate proxy envelope"]
-    D["Resolve current target"]
-    E["Verify schema fingerprint was presented"]
+    D["Resolve and retain current target instance"]
+    E["Verify the retained instance and schema were presented"]
     F["Verify target is proxy-eligible"]
   end
 
@@ -231,6 +233,15 @@ args         = {...}
 
 All model-facing response builders use `providerName ?? name`. All internal
 consumers use `name` and `args`.
+
+A successful proxy normalization also carries the resolved target instance.
+Before returning it, the helper verifies that `ToolRegistry` still maps the
+canonical name to that same instance. `CoreToolScheduler` and ACP
+`Session.runTool()` then build and execute this retained instance instead of
+resolving the name again. This binds presentation authorization, validation,
+and execution to one tool object and closes the same-name replacement TOCTOU
+window. Ordinary calls carry no resolved instance and keep their existing
+lookup path.
 
 Normalization is shared core routing semantics, not private
 `CoreToolScheduler` behavior. Both the main scheduler and ACP/daemon
@@ -316,8 +327,7 @@ A target is proxy-eligible only when all of these conditions hold:
 
 - It currently exists.
 - It is deferred.
-- It is not `alwaysLoad`, not in `visibleTools`, and not directly revealed for
-  resume compatibility.
+- It is not `alwaysLoad` and not in `visibleTools`.
 - Its current schema fingerprint matches the recorded fingerprint.
 - The current execution context is the main session.
 
@@ -374,8 +384,8 @@ sequenceDiagram
   H-->>M: next request contains the schema result
   Note over R,P: No setTools call. API declarations remain byte-stable
   M->>S: deferred_tool_call(name=cron_create, arguments=...)
-  S->>R: resolve and verify current fingerprint
-  S->>S: normalize to execution name cron_create
+  S->>R: resolve and retain current tool; verify current fingerprint
+  S->>S: normalize to cron_create with the verified tool instance
   S->>S: permission, validation, confirmation, hooks
   S->>T: execute real invocation
   T-->>S: real tool result
@@ -398,11 +408,11 @@ Detailed behavior:
   failure, or history rollback must discard the pending metadata. At commit,
   reject the metadata if the current schema fingerprint no longer matches the
   displayed fingerprint.
-- ACP/daemon does not have the core chat-append lifecycle, so it commits
-  `deferredToolPresentations` after successfully constructing and recording the
-  `tool_search` response that will be returned to the model. Tool execution
-  failure, cancellation, PostToolUse stop, or a response that is not returned to
-  the model must not unlock the proxy.
+- ACP/daemon stages `deferredToolPresentations` on the exact user message that
+  carries the successful `tool_search` function response. It commits them only
+  after that message enters active model history. Tool execution failure,
+  cancellation, PostToolUse stop, delivery failure, or history rollback must
+  not unlock the proxy.
 - Remove `setTools()` and its reveal/API-sync rollback. If result construction
   or history commit fails, do not record the fingerprint.
 - Explicitly tell the model to use `deferred_tool_call` on a later turn.
@@ -421,18 +431,24 @@ Before the existing target permission flow:
 3. Validate the envelope:
    - `name` is a non-empty string;
    - `arguments` is a non-null, non-array plain object.
-4. Canonicalize and resolve the current target from `ToolRegistry`.
-5. Reject self-target recursion, where the proxy envelope names
+4. Canonicalize the target name and reject self-target recursion, where the
+   proxy envelope names
    `deferred_tool_call` itself as the target tool. This check does not reject
    multiple proxy calls to different real deferred tools in the same session.
-6. Reject missing, normally visible, `alwaysLoad`, or already-revealed direct
-   targets and tell the model to call them by their real names.
-7. Compare the current target schema fingerprint with the presentation record.
-8. Construct a normalized request using the real target `name` and `args`, while
+5. Resolve the current target from `ToolRegistry`, retain that exact tool
+   instance, and reject load failures or missing targets.
+6. Verify that the registry still maps the canonical name to the retained
+   instance.
+7. Reject normally visible or `alwaysLoad` targets and tell the model to call
+   them by their real names.
+8. Compare the retained instance's current schema fingerprint with the
+   presentation record.
+9. Construct a normalized request using the real target `name` and `args`, while
    preserving `providerName`, call ID, provider call ID, prompt ID, response
-   ID, and truncation state.
-9. Run the unchanged target permission, build, confirmation, hook, scheduling,
-   execution, timeout, streaming, truncation, and recording pipeline.
+   ID, and truncation state; return the retained target instance with it.
+10. Run the unchanged target permission, build, confirmation, hook, scheduling,
+    execution, timeout, streaming, truncation, and recording pipeline using the
+    retained instance, without resolving the target name again.
 
 Therefore, the first permission decision after normalization targets the real
 tool, not the proxy. Unknown and unrevealed target errors are returned under the
@@ -633,6 +649,8 @@ instead of assuming that stable schema necessarily yields a net benefit.
   insufficient.
 - Schema fingerprints prevent a schema shown before MCP reconnect from
   authorizing a current tool with the same name but a different definition.
+- Retaining the normalized tool instance prevents a same-name replacement from
+  being executed after a different instance passed presentation checks.
 - Reserved-name enforcement prevents registration sources from shadowing the
   dispatcher surface.
 - Untrusted MCP schema text uses the existing escaping and is explicitly
@@ -649,11 +667,11 @@ instead of assuming that stable schema necessarily yields a net benefit.
 | `packages/core/src/config/config.ts`                             | Register `tool_search` and the proxy atomically for the main registry, rolling search back if proxy registration fails; keep the proxy out of `forSubAgent` registries.                                                                                   |
 | `packages/core/src/tools/tool-registry.ts`                       | Separate committed proxy presentations from direct declaration visibility, compare pending and current schema fingerprints at commit, preserve `includeDeferred` behavior, reserve the proxy name, and invalidate fingerprints on tool lifecycle changes. |
 | `packages/core/src/tools/tool-search.ts`                         | Render a captured schema and return its name plus fingerprint as pending presentation metadata without calling `setTools()`.                                                                                                                              |
-| `packages/core/src/core/deferred-tool-call-normalization.ts`     | Provide the shared normalization helper for proxy envelope validation, target resolution, presentation gating, and provider-facing response naming.                                                                                                       |
+| `packages/core/src/core/deferred-tool-call-normalization.ts`     | Provide the shared normalization helper for proxy envelope validation, target resolution, instance binding, presentation gating, and provider-facing response naming.                                                                                     |
 | `packages/core/src/core/turn.ts`                                 | Explicitly represent provider identity and execution identity.                                                                                                                                                                                            |
-| `packages/core/src/core/coreToolScheduler.ts`                    | Reuse the shared helper to normalize proxy calls before target authorization, execute the real target, centralize provider response naming, and forward pending presentation metadata.                                                                    |
+| `packages/core/src/core/coreToolScheduler.ts`                    | Reuse the shared helper to normalize proxy calls before target authorization, execute the retained target instance, centralize provider response naming, and forward pending presentation metadata.                                                       |
 | `packages/core/src/core/client.ts`                               | Commit presentation metadata after history append; handle disabled search, compression, resume, and clear.                                                                                                                                                |
-| `packages/cli/src/acp-integration/session/Session.ts`            | Reuse the shared helper in ACP's independent `runTool()` path; commit presentations after successful `tool_search` responses; keep all function response names provider-facing.                                                                           |
+| `packages/cli/src/acp-integration/session/Session.ts`            | Reuse the shared helper and retained target instance in ACP's independent `runTool()` path; commit presentations after their response message enters active history; keep all function response names provider-facing.                                    |
 | `packages/core/src/tools/enterPlanMode.ts` and `exitPlanMode.ts` | Remove dynamic exit-tool reveal and keep the exit tool on the stable direct main-session surface.                                                                                                                                                         |
 | `packages/core/src/agents/runtime/agent-core.ts`                 | Preserve real-name agent filtering and defensively reject hallucinated proxy names.                                                                                                                                                                       |
 | Provider converter tests                                         | Verify Gemini, OpenAI, and Anthropic call/result pairing; if scheduler response normalization is complete, converter production code does not need proxy-specific routing.                                                                                |
@@ -670,10 +688,11 @@ instead of assuming that stable schema necessarily yields a net benefit.
    matches the displayed fingerprint.
 4. Add a shared core normalization helper and reuse it from both
    `CoreToolScheduler` and ACP `Session.runTool()` before target permission
-   evaluation.
+   evaluation. Return and execute the same resolved target instance rather than
+   resolving its name again.
 5. Centralize provider response naming in every terminal path.
-6. Commit `deferredToolPresentations` at the core chat-append lifecycle point
-   and at the ACP point where a successful response is returned to the model.
+6. Commit `deferredToolPresentations` only after the associated response message
+   enters active model history in both core and ACP flows.
 7. Make `exit_plan_mode` part of the stable direct main-session surface and
    remove its dynamic reveal/setTools path.
 8. Add integration for disabled `tool_search`, subagents, compression, resume,
@@ -706,6 +725,10 @@ instead of assuming that stable schema necessarily yields a net benefit.
   pattern restrictions cannot be bypassed through the proxy.
 - Unrevealed, stale-fingerprint, missing, normal-visible, `alwaysLoad`, and
   recursive proxy targets are rejected.
+- If normalization observes one tool instance but the registry already maps the
+  name to another, reject the call. If a same-name replacement appears after
+  normalization, Core and ACP must still execute only the retained authorized
+  instance, never the replacement.
 - Real target permission denial, confirmation, and plan-mode policy use the
   target identity and target arguments.
 - PreToolUse, PostToolUse, and PostToolUseFailure hooks receive target identity

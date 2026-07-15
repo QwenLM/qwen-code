@@ -2089,7 +2089,9 @@ export class CoreToolScheduler {
           }
         }
 
-        const toolInstance = await this.toolRegistry.ensureTool(canonicalName);
+        const toolInstance =
+          normalizedRequest.resolvedTool ??
+          (await this.toolRegistry.ensureTool(canonicalName));
         if (!toolInstance) {
           // Tool is not in registry and not excluded - likely hallucinated or typo
           const errorMessage = await this.getToolNotFoundMessage(

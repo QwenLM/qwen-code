@@ -7,10 +7,15 @@
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
 import { ToolErrorType } from '../tools/tool-error.js';
+import type { AnyDeclarativeTool } from '../tools/tools.js';
 import type { ToolCallRequestInfo } from './turn.js';
 
 export type DeferredToolCallNormalizationResult =
-  | { ok: true; request: ToolCallRequestInfo }
+  | {
+      ok: true;
+      request: ToolCallRequestInfo;
+      resolvedTool?: AnyDeclarativeTool;
+    }
   | {
       ok: false;
       error: Error;
@@ -92,6 +97,12 @@ export async function normalizeDeferredToolCallRequest(
       ToolErrorType.TOOL_NOT_REGISTERED,
     );
   }
+  if (toolRegistry.getTool(canonicalTarget) !== targetTool) {
+    return fail(
+      `Deferred tool "${canonicalTarget}" changed while the request was being normalized. Use tool_search to fetch its current schema, then try again on a later turn.`,
+      ToolErrorType.EXECUTION_DENIED,
+    );
+  }
   if (!toolRegistry.isProxyEligibleDeferredTool(canonicalTarget)) {
     return fail(
       `Tool "${canonicalTarget}" is not eligible for deferred_tool_call. Call directly if it is visible, or use tool_search for deferred tools.`,
@@ -107,6 +118,7 @@ export async function normalizeDeferredToolCallRequest(
 
   return {
     ok: true,
+    resolvedTool: targetTool,
     request: {
       ...request,
       name: canonicalTarget,
