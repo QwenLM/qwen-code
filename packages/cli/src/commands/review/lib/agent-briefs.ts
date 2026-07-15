@@ -83,6 +83,18 @@ export interface Brief {
    * its output shape is the verdict, and its brief defines that.
    */
   output?: 'findings' | 'verdicts';
+  /**
+   * May this role be launched `--role <r> --chunk <id>` to own one chunk's
+   * territory, the way a Step 3B reverse auditor does?
+   *
+   * It is declarative for two readers. The command guard rejects `--chunk` on any
+   * role that does not set it, so a new per-chunk role is a data change here, not a
+   * name hardcoded in the guard. And the brief builder scopes such a role's diff
+   * reads to its one chunk — a per-chunk agent whose brief still said "walk it
+   * chunk by chunk" over all twenty chunks would read the whole diff the `--chunk`
+   * design exists to spare it, because the brief is what the agent is told to obey.
+   */
+  acceptsChunk?: boolean;
   /** The agent-facing text. */
   brief: string;
 }
@@ -409,6 +421,7 @@ Return, for each finding, one verdict:
 
   'reverse-audit': {
     reviewsCode: true,
+    acceptsChunk: true,
     label: 'Reverse audit agent',
     readsDiff: true,
     brief: `You are a **reverse audit agent**. Prior agents have already reviewed this diff and their confirmed findings are listed in the message that launched you. Your job is not to re-report them — it is to find the **gaps**: the important issues no prior agent or round caught.

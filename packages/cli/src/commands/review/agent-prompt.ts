@@ -413,13 +413,35 @@ function requireDiffPath(report: PlanReport): string {
 }
 
 /** How to walk the whole diff: one un-truncated read per chunk, and the paging rule. */
-function diffReadingBlock(report: PlanReport, diffPath: string): string[] {
+function diffReadingBlock(
+  report: PlanReport,
+  diffPath: string,
+  chunkId?: number,
+): string[] {
   if (!Array.isArray(report.chunks) || report.chunks.length === 0) {
     throw new Error('agent-prompt: the plan has no `chunks[]`.');
   }
   const chunks = report.chunks as DiffChunk[];
 
-  const reads = chunks
+  // A per-chunk agent — a Step 3B reverse auditor — owns one chunk's territory.
+  // Its brief must read that chunk alone, the same range its launch prompt reads.
+  // The brief is what the agent is told is authoritative; a brief that listed every
+  // chunk and said "walk it chunk by chunk" would send the auditor to read the whole
+  // diff the `--chunk` design exists to spare it — the defect this scoping removes.
+  const scoped = chunkId !== undefined;
+  let selected = chunks;
+  if (scoped) {
+    const c = chunks.find((x) => x.id === chunkId);
+    if (!c) {
+      throw new Error(
+        `agent-prompt: the plan has no chunk ${chunkId} ` +
+          `(it has ${chunks.map((x) => x.id).join(', ')}).`,
+      );
+    }
+    selected = [c];
+  }
+
+  const reads = selected
     .map((c) => {
       // Same guard `chunkFrom` applies element by element: a corrupted chunk with
       // a non-integer `startLine` would otherwise emit `offset=NaN, limit=NaN`
@@ -441,16 +463,25 @@ function diffReadingBlock(report: PlanReport, diffPath: string): string[] {
     })
     .join('\n');
 
-  const unreachable = chunks.filter((c) => c.maxLineChars > READ_FILE_CHAR_CAP);
+  const unreachable = selected.filter(
+    (c) => c.maxLineChars > READ_FILE_CHAR_CAP,
+  );
 
   const parts = [
     '## The diff',
     '',
-    '**Read the diff first. It is a file on disk — nothing in this prompt contains the code.**',
+    scoped
+      ? `Your territory is **chunk ${chunkId}** of the diff. It is a file on disk — ` +
+        'nothing in this prompt contains the code. Read your chunk:'
+      : '**Read the diff first. It is a file on disk — nothing in this prompt contains the code.**',
     '',
-    'Walk it chunk by chunk. Each of these reads fits inside one un-truncated ' +
-      '`read_file`; asking for the whole file in one call does not, and you would ' +
-      'silently receive its first screenful.',
+    scoped
+      ? 'This read fits inside one un-truncated `read_file`; if it comes back ' +
+        '`isTruncated`, page with a larger `offset` until it does not. Do not read the ' +
+        'other chunks — they belong to other agents; your gap is inside this one.'
+      : 'Walk it chunk by chunk. Each of these reads fits inside one un-truncated ' +
+        '`read_file`; asking for the whole file in one call does not, and you would ' +
+        'silently receive its first screenful.',
     '',
     '```',
     reads,
@@ -595,7 +626,12 @@ function invariantFileBlock(
 export function buildRoleBrief(
   report: PlanReport,
   role: RoleId,
-  opts: { rules?: string; file?: string; planPath?: string } = {},
+  opts: {
+    rules?: string;
+    file?: string;
+    planPath?: string;
+    chunk?: number;
+  } = {},
 ): string {
   const brief = BRIEFS[role];
   if (!brief) {
@@ -617,7 +653,7 @@ export function buildRoleBrief(
       }
       parts.push(...invariantFileBlock(report, diffPath, opts.file));
     } else {
-      parts.push(...diffReadingBlock(report, diffPath));
+      parts.push(...diffReadingBlock(report, diffPath, opts.chunk));
     }
     parts.push('');
   }
@@ -893,10 +929,12 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       );
     }
   } else if (hasRole) {
-    // `--chunk` combines with a role for exactly one case: a Step 3B reverse-audit
-    // agent, which owns one chunk's territory. Any other role + chunk is a mistake
+    // `--chunk` combines with a role only when that role owns one chunk's territory
+    // — a Step 3B reverse auditor. Which roles those are is declared on the brief
+    // (`acceptsChunk`), not hardcoded here, so a new per-chunk role is a data change
+    // in agent-briefs, not an edit to this guard. Any other role + chunk is a mistake
     // (a dimension agent walks the whole diff; a chunk agent is `--chunk` alone).
-    if (hasChunk && args.role !== 'reverse-audit') {
+    if (hasChunk && !BRIEFS[args.role as RoleId]?.acceptsChunk) {
       bad(
         `--chunk combines with --role only for reverse-audit (a Step 3B per-chunk ` +
           `auditor); role "${args.role}" does not take --chunk.`,
@@ -971,6 +1009,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
         rules,
         file: args.file,
         planPath: args.plan,
+        chunk: args.chunk,
       }),
     );
     prompt = buildRoleLaunchPrompt(report, role, briefFile, {

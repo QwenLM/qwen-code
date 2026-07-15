@@ -340,6 +340,36 @@ describe('agent-prompt (command boundary)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('lets --role reverse-audit --chunk N through and keys the record by its chunk', () => {
+    // The unit tests build the launch prompt directly, bypassing the guard and the
+    // key derivation. This drives the real handler: the guard must let the one legal
+    // role+chunk combo through, the record key must carry the chunk — the delivery
+    // check finds the recorded prompt by that key — and the brief it points at must
+    // read that chunk alone, so brief and launch prompt agree on one chunk's range.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-ra-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      expect(() =>
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan,
+          role: 'reverse-audit',
+          chunk: 14,
+        }),
+      ).not.toThrow();
+      const recorded = readRecordedPrompts(plan);
+      expect([...recorded.keys()]).toEqual(['reverse-audit--chunk-14']);
+      const briefText = readFileSync(
+        briefPath(plan, 'reverse-audit--chunk-14'),
+        'utf8',
+      );
+      expect(briefText).toContain('offset=4024, limit=176'); // chunk 14 only
+      expect(briefText).not.toContain('offset=3807'); // not chunk 13
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 // The half of the fan-out this command did not cover. Measured against one real
@@ -433,6 +463,31 @@ describe('buildWholeDiffBlock — the agents that walk the whole diff', () => {
     expect(p).toContain('offset=4024, limit=176');
     // and NOT chunk 13's or chunk 15's range.
     expect(p).not.toContain('offset=3807');
+  });
+
+  it('rejects --role reverse-audit --chunk N when the plan has no such chunk', () => {
+    // The happy path uses chunk 14, which the fixture has. A wrong chunk must name
+    // what the plan actually holds — not emit offset=NaN, and not credit an empty read.
+    expect(() =>
+      buildRoleLaunchPrompt(PLAN, 'reverse-audit', '/t/ra.brief.md', {
+        chunk: 999,
+      }),
+    ).toThrow(/the plan has no chunk 999/);
+    // Through the handler the brief is built first, and rejects it the same way.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-ra-bad-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      expect(() =>
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan,
+          role: 'reverse-audit',
+          chunk: 999,
+        }),
+      ).toThrow(/the plan has no chunk 999/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -907,6 +962,24 @@ describe('verify and reverse-audit briefs — the Step 4/5 methodology, in code'
     expect(p).toContain('say what you examined'); // the substantive-return receipt
     // It DOES file findings, so it keeps the finding format.
     expect(p).toContain('**Anchor:**');
+  });
+
+  it('scopes a per-chunk reverse-audit brief to its one chunk, not the whole diff', () => {
+    // The brief is what the agent is told to obey. If it listed every chunk and said
+    // "walk it chunk by chunk", a `--chunk 14` auditor would read the whole diff the
+    // per-chunk design exists to spare it. Its brief reads chunk 14's range alone —
+    // the same range its launch prompt reads.
+    const scoped = buildRoleBrief(PLAN, 'reverse-audit', { chunk: 14 });
+    expect(scoped).toContain('offset=4024, limit=176'); // chunk 14
+    expect(scoped).not.toContain('offset=3807'); // not chunk 13
+    expect(scoped).not.toContain('offset=4200'); // not chunk 15
+    expect(scoped).toContain('chunk 14');
+    expect(scoped).not.toMatch(/Walk it chunk by chunk/);
+    // A whole-diff (3A) reverse audit, with no chunk, still walks every chunk.
+    const whole = buildRoleBrief(PLAN, 'reverse-audit');
+    expect(whole).toContain('offset=3807');
+    expect(whole).toContain('offset=4024, limit=176');
+    expect(whole).toMatch(/Walk it chunk by chunk/);
   });
 
   it('both point the agent at its brief file and give it diff reads', () => {
