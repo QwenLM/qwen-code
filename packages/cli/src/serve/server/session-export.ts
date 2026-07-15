@@ -7,6 +7,7 @@
 import {
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SessionService,
+  type SessionArchiveState,
 } from '@qwen-code/qwen-code-core';
 import { SessionNotFoundError } from '../acp-session-bridge.js';
 import {
@@ -74,7 +75,7 @@ export async function exportSessionTranscript(params: {
   workspaceCwd: string;
   sessionId: string;
   format: SessionExportFormat;
-  archiveState?: 'active' | 'archived';
+  archiveState?: SessionArchiveState;
   config?: ExportConfig;
 }): Promise<SessionExportResult> {
   const { workspaceCwd, sessionId, format } = params;

@@ -522,7 +522,7 @@ export function registerSessionRoutes(
       route: string;
       workspaceCwd: string;
       workspaceQualified?: boolean;
-      archiveState?: 'active' | 'archived';
+      archiveState?: SessionArchiveState;
     },
   ): Promise<void> => {
     const sessionId = requireSessionId(req, res);

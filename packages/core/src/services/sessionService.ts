@@ -1147,6 +1147,9 @@ export class SessionService {
         );
       }
     } catch (error) {
+      if (error instanceof SessionTranscriptTooLargeError) {
+        throw error;
+      }
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         throw error;
       }
