@@ -29,7 +29,7 @@ describe('workspaceAccentColor', () => {
     expect(workspaceAccentColor('/work/infra', caps)).toBe('purple');
   });
 
-  it('gives every pane in the same workspace the same color', () => {
+  it('returns a stable color per cwd and distinct colors for different workspaces', () => {
     const caps = capabilities(['/work/api', '/work/web']);
     expect(workspaceAccentColor('/work/web', caps)).toBe(
       workspaceAccentColor('/work/web', caps),

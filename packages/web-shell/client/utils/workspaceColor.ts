@@ -8,6 +8,7 @@ import type {
   DaemonCapabilities,
   DaemonSessionGroupPresetColor,
 } from '@qwen-code/sdk/daemon';
+import accentStyles from '../components/WorkspaceAccent.module.css';
 
 // Reuse the sidebar session-group palette so a workspace's accent speaks the
 // same visual language as the group dots (see WebShellSidebar.module.css /
@@ -35,6 +36,21 @@ type _AccentColorsAreExhaustive = AssertNever<
     (typeof WORKSPACE_ACCENT_COLORS)[number]
   >
 >;
+
+// Dev-only runtime companion to the compile-time guard above: the guard proves
+// every color is listed, but CSS modules are typed as `Record<string, string>`,
+// so a renamed or removed class in WorkspaceAccent.module.css would still slip
+// through as `accentStyles[color] === undefined` — a silent missing accent with
+// no error. Fail loudly in dev instead. Stripped from production builds.
+if (import.meta.env.DEV) {
+  for (const color of WORKSPACE_ACCENT_COLORS) {
+    if (!accentStyles[color]) {
+      throw new Error(
+        `WorkspaceAccent.module.css is missing a class for the "${color}" accent`,
+      );
+    }
+  }
+}
 
 // A cheap deterministic string hash, only used when a cwd isn't in the
 // advertised `workspaces[]` yet (e.g. a pane whose runtime resolves after
