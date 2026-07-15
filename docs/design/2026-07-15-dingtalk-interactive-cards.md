@@ -10,7 +10,7 @@ The DingTalk channel currently sends Markdown responses and already receives tas
 
 The design should add those DingTalk interactions without teaching the model, the tool, ACP, or other channel adapters about DingTalk templates and callback payloads.
 
-## Architecture
+## Chapter 1: DingTalk target architecture
 
 ![DingTalk interactive cards architecture](./assets/dingtalk-interactive-cards-architecture.png)
 
@@ -145,7 +145,7 @@ The initial implementation uses the existing template IDs from `soimy/openclaw-c
 | SDK and custom ACP clients             | No protocol change; the existing permission request and response schema remains intact.                           |
 | Ordinary permissions on every client   | No change; existing approval and denial controls remain available.                                                |
 
-## Other IM impact surface
+## Chapter 2: Current impact on other IM adapters
 
 ![Other IM impact after the channel-neutral hook](./assets/dingtalk-interactive-cards-other-im-impact.png)
 
@@ -159,6 +159,28 @@ The shared hook is an opt-in extension point, not a behavior rollout to every ad
 | Raw request data       | The existing permission formatter does not render `rawInput`, so this change does not introduce visible question JSON.   |
 | Existing limitation    | `/approve` still cannot carry `ask_user_question` answers; this proposal deliberately does not hide or broaden that gap. |
 | Future opt-in          | Another adapter may later override the hook, but its native form or text-answer protocol requires a separate design.     |
+
+## Chapter 3: Future extension blueprint for other IM adapters
+
+![Future extension blueprint for other IM adapters](./assets/dingtalk-interactive-cards-other-im-extension.png)
+
+Future adapters opt in explicitly by overriding the same semantic hook. The shared layer does not select a platform UI or parse channel payloads. Each adapter chooses exactly one result path for a request:
+
+| Hook result   | Adapter behavior                                                                                                                                                      |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `presented`   | Keep the request pending, present a native form/card or a deliberately designed structured-reply protocol, and later call the responder with answers or cancellation. |
+| `handled`     | Perform a one-shot semantic handoff, cancel or otherwise resolve the original request, and retain no pending input state.                                             |
+| `unsupported` | Decline semantic input presentation and return control to the existing permission formatter and commands.                                                             |
+
+An adapter that returns `presented` owns all channel-specific machinery:
+
+- A channel-local capability configuration. It is not added to a shared card-template schema.
+- A pending-input registry keyed by request, session, owner, and any run generation needed to reject stale actions.
+- Native callback or structured-reply parsing that maps platform payloads to semantic answer keys.
+- One-shot response, idempotency, owner validation, timeout handling, and `AbortSignal` cleanup when another surface resolves first.
+- Direct response to the original request. It does not inject a synthetic user message.
+
+Each IM should opt in through a separate change so its platform capabilities, fallback behavior, timeout, and state ownership can be reviewed independently. An adapter without a reliable answer protocol should continue returning `unsupported`.
 
 ## Scope boundaries
 
