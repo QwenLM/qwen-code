@@ -37,19 +37,17 @@ type _AccentColorsAreExhaustive = AssertNever<
   >
 >;
 
-// Dev-only runtime companion to the compile-time guard above: the guard proves
-// every color is listed, but CSS modules are typed as `Record<string, string>`,
-// so a renamed or removed class in WorkspaceAccent.module.css would still slip
+// Runtime companion to the compile-time guard above: the guard proves every
+// color is listed, but CSS modules are typed as `Record<string, string>`, so a
+// renamed or removed class in WorkspaceAccent.module.css would still slip
 // through as `accentStyles[color] === undefined` — a silent missing accent with
-// no error. Fail loudly in dev instead. Stripped from production builds.
-if (import.meta.env.DEV) {
-  for (const color of WORKSPACE_ACCENT_COLORS) {
-    if (!accentStyles[color]) {
-      throw new Error(
-        `WorkspaceAccent.module.css is missing a class for the "${color}" accent`,
-      );
-    }
-  }
+// no error. Fail loudly in dev; in production log a diagnostic (rather than stay
+// silent) but don't throw and take the app down for a purely cosmetic gap.
+for (const color of WORKSPACE_ACCENT_COLORS) {
+  if (accentStyles[color]) continue;
+  const message = `WorkspaceAccent.module.css is missing a class for the "${color}" accent`;
+  if (import.meta.env.DEV) throw new Error(message);
+  else console.error(message);
 }
 
 // A cheap deterministic string hash, only used when a cwd isn't in the
