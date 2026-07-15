@@ -12,6 +12,7 @@ type ChannelMemoryEntry = ChannelMemoryEntries[number];
 
 const MANIFEST_CODE_POINT_LIMIT = 64_000;
 const MAX_PREVIEW_CODE_POINTS = 160;
+const MAX_METADATA_CODE_POINTS = 32;
 
 const CLASSIFIER_PROMPT = `Classify whether the user is trying to manage channel memory.
 
@@ -45,12 +46,19 @@ function sanitizeMemoryPreview(text: string): string {
   return sanitizePromptText(text).replace(/["\\]/g, ' ');
 }
 
+function sanitizeMetadata(value: string | undefined): string {
+  return truncateCodePoints(
+    sanitizeMemoryPreview(value ?? ''),
+    MAX_METADATA_CODE_POINTS,
+  );
+}
+
 function formatEntry(
   entry: ChannelMemoryEntry,
   ordinal: number,
   preview: string,
 ): string {
-  return `${ordinal}. id=${JSON.stringify(entry.id)} createdAt=${JSON.stringify(entry.createdAt ?? '')} updatedAt=${JSON.stringify(entry.updatedAt ?? '')} preview=${JSON.stringify(preview)}`;
+  return `${ordinal}. id=${JSON.stringify(entry.id)} createdAt=${JSON.stringify(sanitizeMetadata(entry.createdAt))} updatedAt=${JSON.stringify(sanitizeMetadata(entry.updatedAt))} preview=${JSON.stringify(preview)}`;
 }
 
 function buildMemoryManifest(entries: readonly ChannelMemoryEntry[]): string {
@@ -149,7 +157,6 @@ function normalizeClassifierResult(
   }
   if (
     !Array.isArray(targetIds) ||
-    targetIds.length === 0 ||
     !targetIds.every((id): id is string => typeof id === 'string')
   ) {
     return { intent: 'none', confidence: 0 };
