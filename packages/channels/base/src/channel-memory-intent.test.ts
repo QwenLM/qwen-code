@@ -34,13 +34,79 @@ describe('parseChannelMemoryIntent', () => {
   it('parses list requests', () => {
     expect(parseChannelMemoryIntent('你现在记住了什么？')).toEqual({
       kind: 'list',
+      page: 1,
     });
-    expect(parseChannelMemoryIntent('查看记忆')).toEqual({ kind: 'list' });
+    expect(parseChannelMemoryIntent('查看记忆')).toEqual({
+      kind: 'list',
+      page: 1,
+    });
     expect(parseChannelMemoryIntent('查看记忆\u200b')).toEqual({
       kind: 'list',
+      page: 1,
     });
     expect(parseChannelMemoryIntent('what do you remember?')).toEqual({
       kind: 'list',
+      page: 1,
+    });
+  });
+
+  it('parses deterministic item intents', () => {
+    expect(parseChannelMemoryIntent('查看第 2 页记忆')).toEqual({
+      kind: 'list',
+      page: 2,
+    });
+    expect(parseChannelMemoryIntent('show memory page 3')).toEqual({
+      kind: 'list',
+      page: 3,
+    });
+    expect(parseChannelMemoryIntent('查看记忆 m-a31f0d82c7e4')).toEqual({
+      kind: 'inspect',
+      id: 'm-a31f0d82c7e4',
+    });
+    expect(parseChannelMemoryIntent('show memory m-a31f0d82c7e4')).toEqual({
+      kind: 'inspect',
+      id: 'm-a31f0d82c7e4',
+    });
+    expect(parseChannelMemoryIntent('忘掉 m-a31f0d82c7e4')).toEqual({
+      kind: 'remove',
+      id: 'm-a31f0d82c7e4',
+    });
+    expect(parseChannelMemoryIntent('forget m-a31f0d82c7e4')).toEqual({
+      kind: 'remove',
+      id: 'm-a31f0d82c7e4',
+    });
+    expect(
+      parseChannelMemoryIntent('把 m-a31f0d82c7e4 改成默认使用 production'),
+    ).toEqual({
+      kind: 'update',
+      id: 'm-a31f0d82c7e4',
+      text: '默认使用 production',
+    });
+    expect(
+      parseChannelMemoryIntent('update m-a31f0d82c7e4 to use production'),
+    ).toEqual({
+      kind: 'update',
+      id: 'm-a31f0d82c7e4',
+      text: 'use production',
+    });
+  });
+
+  it('rejects invalid item intent arguments', () => {
+    expect(parseChannelMemoryIntent('忘掉 m-not-valid')).toBeNull();
+    expect(parseChannelMemoryIntent('查看第 0 页记忆')).toBeNull();
+    expect(parseChannelMemoryIntent('查看第 -1 页记忆')).toBeNull();
+    expect(parseChannelMemoryIntent('show memory page 1.5')).toBeNull();
+    expect(parseChannelMemoryIntent('把 m-a31f0d82c7e4 改成   ')).toBeNull();
+    expect(parseChannelMemoryIntent('/forget m-a31f0d82c7e4')).toBeNull();
+  });
+
+  it('parses item updates before broad clear requests', () => {
+    expect(
+      parseChannelMemoryIntent('把 m-a31f0d82c7e4 改成默认的记忆清空'),
+    ).toEqual({
+      kind: 'update',
+      id: 'm-a31f0d82c7e4',
+      text: '默认的记忆清空',
     });
   });
 
