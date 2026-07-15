@@ -13,6 +13,7 @@ import type {
   ServerGeminiStreamEvent,
   AgentResultDisplay,
   McpToolProgressData,
+  ShellProgressData,
 } from '@qwen-code/qwen-code-core';
 import {
   formatVisionBridgeNoticeDisplay,
@@ -98,11 +99,11 @@ export interface MessageEmitter {
    * In non-streaming mode, this is a no-op.
    *
    * @param request - Tool call request info
-   * @param progress - Structured MCP progress data
+   * @param progress - Structured MCP progress data or shell liveness heartbeat
    */
   emitToolProgress(
     request: ToolCallRequestInfo,
-    progress: McpToolProgressData,
+    progress: McpToolProgressData | ShellProgressData,
   ): void;
 }
 
@@ -1157,11 +1158,11 @@ export abstract class BaseJsonOutputAdapter {
    * to emit stream events when includePartialMessages is enabled.
    *
    * @param _request - Tool call request info
-   * @param _progress - Structured MCP progress data
+   * @param _progress - Structured MCP progress data or shell liveness heartbeat
    */
   emitToolProgress(
     _request: ToolCallRequestInfo,
-    _progress: McpToolProgressData,
+    _progress: McpToolProgressData | ShellProgressData,
   ): void {
     // No-op in base class. Only StreamJsonOutputAdapter emits tool progress
     // as stream events when includePartialMessages is enabled.

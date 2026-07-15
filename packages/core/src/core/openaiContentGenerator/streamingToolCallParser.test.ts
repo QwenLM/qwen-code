@@ -944,6 +944,44 @@ describe('StreamingToolCallParser', () => {
   });
 
   describe('Complex collision scenarios', () => {
+    it('does not append continuation fragments to a completed remapped slot', () => {
+      parser.addChunk(0, '{"first":true}', 'call_1', 'function1');
+      const remapped = parser.addChunk(
+        0,
+        '{"second":true}',
+        undefined,
+        'function2',
+      );
+
+      expect(remapped.actualIndex).toBe(1);
+      expect(remapped.complete).toBe(true);
+
+      const continuation = parser.addChunk(0, '{"third":true}');
+
+      expect(continuation.actualIndex).not.toBe(remapped.actualIndex);
+      expect(parser.getBuffer(remapped.actualIndex!)).toBe('{"second":true}');
+    });
+
+    it('associates a late stable ID with its completed remapped slot', () => {
+      parser.addChunk(0, '{"first":true}', 'call_1', 'function1');
+      const remapped = parser.addChunk(
+        0,
+        '{"second":true}',
+        undefined,
+        'function2',
+      );
+
+      const identified = parser.addChunk(0, '', 'call_2');
+
+      expect(identified.actualIndex).toBe(remapped.actualIndex);
+      expect(parser.getCompletedToolCalls()).toContainEqual({
+        id: 'call_2',
+        name: 'function2',
+        args: { second: true },
+        index: remapped.actualIndex,
+      });
+    });
+
     it('should handle rapid tool call switching at same index', () => {
       // Rapid switching between different tool calls at index 0
       parser.addChunk(0, '{"step1":', 'call_1', 'function1');

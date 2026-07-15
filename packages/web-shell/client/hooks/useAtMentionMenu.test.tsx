@@ -651,6 +651,31 @@ describe('useAtMentionMenu', () => {
     ]);
   });
 
+  it('searches matching files across the workspace', async () => {
+    vi.useFakeTimers();
+    const listDirectory = vi.fn();
+    const globWorkspace = vi.fn().mockResolvedValue({
+      matches: ['packages/cli/src/config.ts', 'packages/core/src/config.ts'],
+    });
+    mount({ actions: { globWorkspace, listDirectory } });
+
+    act(() => latest!.refreshForView(makeView('@config')));
+    await runDebounce();
+
+    expect(globWorkspace).toHaveBeenCalledWith(
+      '**/*[cC][oO][nN][fF][iI][gG]*',
+      {
+        maxResults: 50,
+        signal: expect.any(AbortSignal),
+      },
+    );
+    expect(listDirectory).not.toHaveBeenCalled();
+    expect(latest!.state?.items.map((item) => item.label)).toEqual([
+      'packages/cli/src/config.ts',
+      'packages/core/src/config.ts',
+    ]);
+  });
+
   it('preserves provider selection when accept dispatch triggers a synchronous refresh', async () => {
     vi.useFakeTimers();
     const view = makeView('@');
@@ -1418,7 +1443,7 @@ describe('useAtMentionMenu', () => {
     });
   });
 
-  it('escapes glob metacharacters in the fallback file search', async () => {
+  it('escapes glob metacharacters in workspace file search', async () => {
     vi.useFakeTimers();
     const globWorkspace = vi.fn().mockResolvedValue({ matches: [] });
     mount({ actions: { globWorkspace } });
@@ -1428,10 +1453,29 @@ describe('useAtMentionMenu', () => {
     act(() => latest!.updateSearch('foo*bar?'));
     await runDebounce();
 
-    expect(globWorkspace).toHaveBeenCalledWith('foo\\*bar\\?*', {
-      maxResults: 50,
-      signal: expect.any(AbortSignal),
-    });
+    expect(globWorkspace).toHaveBeenCalledWith(
+      '**/*[fF][oO][oO]\\*[bB][aA][rR]\\?*',
+      {
+        maxResults: 50,
+        signal: expect.any(AbortSignal),
+      },
+    );
+  });
+
+  it('normalizes escaped paths and literalizes extglob operators', async () => {
+    vi.useFakeTimers();
+    const globWorkspace = vi.fn().mockResolvedValue({ matches: [] });
+    mount({ actions: { globWorkspace } });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(0));
+    act(() => latest!.updateSearch('./foo\\ bar+(test)'));
+    await runDebounce();
+
+    expect(globWorkspace).toHaveBeenCalledWith(
+      '**/*[fF][oO][oO] [bB][aA][rR]\\+\\([tT][eE][sS][tT]\\)*',
+      { maxResults: 50, signal: expect.any(AbortSignal) },
+    );
   });
 
   it('recovers from file provider list failures', async () => {

@@ -81,6 +81,11 @@ import { AddWorkspaceDialog } from '../dialogs/AddWorkspaceDialog';
 import { WorkspaceSection } from './WorkspaceSection';
 import { SessionGroupSection } from './SessionGroupSection';
 import {
+  isPrimaryCollapsedSectionId,
+  readCollapsedSessionSectionIds,
+  replaceOwnedCollapsedSessionSectionIds,
+} from './collapsedSessionSections';
+import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
 } from '../../constants/sessions';
@@ -441,6 +446,7 @@ export function WebShellSidebar({
     sessions,
     loading,
     error,
+    data: sessionsPage,
     reload,
     deleteSession,
     exportSession,
@@ -454,6 +460,16 @@ export function WebShellSidebar({
       ? { view: 'organized' as const, group: 'all' }
       : {}),
   });
+  // useDaemonResource starts with loading=false before autoLoad runs, so
+  // !loading is not “settled”. Treat the first data as the ready signal (empty
+  // lists are still defined data) so the initial-catalog latch waits. Errors
+  // must NOT settle it: a latch consumed against a failed request would treat
+  // every section from the eventual successful reload as brand-new,
+  // auto-collapsing and persisting over the user's restored expansions.
+  const sessionsCatalogReady =
+    !organizationEnabled ||
+    !includePrimaryWorkspaceSessions ||
+    sessionsPage !== undefined;
   const { sessions: primaryPinnedSessions, reload: reloadPinnedSessions } =
     useSessions({
       autoLoad: organizationEnabled,
@@ -524,8 +540,32 @@ export function WebShellSidebar({
   } | null>(null);
   const [collapsedSessionSectionIds, setCollapsedSessionSectionIds] = useState<
     Set<string>
-  >(() => new Set());
+  >(
+    () =>
+      new Set(
+        Array.from(readCollapsedSessionSectionIds()).filter(
+          isPrimaryCollapsedSectionId,
+        ),
+      ),
+  );
   const knownSessionSectionIdsRef = useRef<Set<string>>(new Set());
+  // Dedicated first-sync latch. Cleared only after both groups catalog and
+  // sessions list have settled (including empty responses). Do not infer this
+  // from knownSessionSectionIdsRef.size — seeding that set early would make the
+  // first real sync look mid-session and auto-collapse restored expansions.
+  const awaitingInitialSessionCatalogRef = useRef(true);
+  const [groupsCatalogReady, setGroupsCatalogReady] =
+    useState(!organizationEnabled);
+  // organizationEnabled can flip true mid-session (capabilities can land after
+  // the flat sessions request settles). Close the gate during that same render:
+  // deferring to the reload effect would let the auto-collapse effect consume
+  // the first-sync latch against the stale pre-organized catalog first.
+  const [prevOrganizationEnabled, setPrevOrganizationEnabled] =
+    useState(organizationEnabled);
+  if (prevOrganizationEnabled !== organizationEnabled) {
+    setPrevOrganizationEnabled(organizationEnabled);
+    setGroupsCatalogReady(!organizationEnabled);
+  }
   const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
   const [projectExpanded, setProjectExpanded] = useState(false);
   const [projectsExpanded, setProjectsExpanded] = useState(true);
@@ -837,6 +877,7 @@ export function WebShellSidebar({
     if (!organizationEnabled) {
       setGroups([]);
       setColorOptions([]);
+      setGroupsCatalogReady(true);
       return;
     }
     try {
@@ -844,6 +885,10 @@ export function WebShellSidebar({
       setGroups(catalog.groups);
       setMenuGroups(catalog.groups);
       setColorOptions(catalog.colorOptions);
+      // Empty catalogs still settle the latch — sessions/groups hydrate on
+      // independent requests, so readiness cannot wait for a non-empty list.
+      // Failures must not settle it (see sessionsCatalogReady above).
+      setGroupsCatalogReady(true);
     } catch (err) {
       onError(err, t('sidebar.groupsLoadFailed'));
     }
@@ -853,8 +898,10 @@ export function WebShellSidebar({
     if (!organizationEnabled) {
       setGroups([]);
       setColorOptions([]);
+      setGroupsCatalogReady(true);
       return;
     }
+    setGroupsCatalogReady(false);
     void reloadGroups();
   }, [organizationEnabled, reloadGroups]);
 
@@ -1933,17 +1980,43 @@ export function WebShellSidebar({
   }, [filteredSessions, groups, organizationEnabled, searchQuery, t]);
 
   useEffect(() => {
+    if (!organizationEnabled) return;
+    // Wait for both independent catalog sources. Flipping the latch on the
+    // first non-empty derived sections would treat later initial recent/color
+    // ids as brand-new and auto-collapse them; leaving the latch set when the
+    // first ready catalog is empty would leave the first real section expanded.
+    if (!groupsCatalogReady || !sessionsCatalogReady) return;
+
     const unseenIds = sessionSections
       .map((section) => section.id)
       .filter((id) => !knownSessionSectionIdsRef.current.has(id));
+    const isInitialCatalog = awaitingInitialSessionCatalogRef.current;
+    if (isInitialCatalog) {
+      awaitingInitialSessionCatalogRef.current = false;
+      for (const id of unseenIds) knownSessionSectionIdsRef.current.add(id);
+      return;
+    }
     if (unseenIds.length === 0) return;
     for (const id of unseenIds) knownSessionSectionIdsRef.current.add(id);
+    // Brand-new sections that appear mid-session still start collapsed.
     setCollapsedSessionSectionIds((current) => {
       const next = new Set(current);
       for (const id of unseenIds) next.add(id);
       return next;
     });
-  }, [sessionSections]);
+  }, [
+    groupsCatalogReady,
+    organizationEnabled,
+    sessionSections,
+    sessionsCatalogReady,
+  ]);
+
+  useEffect(() => {
+    replaceOwnedCollapsedSessionSectionIds(
+      collapsedSessionSectionIds,
+      isPrimaryCollapsedSectionId,
+    );
+  }, [collapsedSessionSectionIds]);
 
   const toggleSessionSection = useCallback((sectionId: string) => {
     setCollapsedSessionSectionIds((current) => {

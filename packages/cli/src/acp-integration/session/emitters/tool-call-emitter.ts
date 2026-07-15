@@ -62,6 +62,7 @@ const KIND_MAP: Record<Kind, ToolKind> = {
  */
 export class ToolCallEmitter extends BaseEmitter {
   private readonly planEmitter: PlanEmitter;
+  private readonly preparedCallIds = new Set<string>();
 
   constructor(ctx: SessionEmitterContext) {
     super(ctx);
@@ -79,6 +80,12 @@ export class ToolCallEmitter extends BaseEmitter {
     if (this.isTodoWriteTool(params.toolName)) {
       return false;
     }
+    if (
+      params.phase === 'preparing' &&
+      this.preparedCallIds.has(params.callId)
+    ) {
+      return false;
+    }
 
     const { title, locations, kind } = this.resolveToolMetadata(
       params.toolName,
@@ -88,9 +95,11 @@ export class ToolCallEmitter extends BaseEmitter {
       params.toolName,
       params.subagentMeta,
     );
+    const updatesPreparedCall =
+      params.phase !== 'preparing' &&
+      this.preparedCallIds.delete(params.callId);
 
-    await this.sendUpdate({
-      sessionUpdate: 'tool_call',
+    const update = {
       toolCallId: params.callId,
       status: params.status || 'pending',
       title,
@@ -100,6 +109,7 @@ export class ToolCallEmitter extends BaseEmitter {
       rawInput: params.args ?? {},
       _meta: {
         toolName: params.toolName,
+        ...(params.phase ? { phase: params.phase } : {}),
         ...params.subagentMeta,
         provenance: provenance.provenance,
         ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
@@ -107,9 +117,47 @@ export class ToolCallEmitter extends BaseEmitter {
           timestamp: BaseEmitter.toEpochMs(params.timestamp),
         }),
       },
-    });
+    };
+    await this.sendUpdate(
+      updatesPreparedCall
+        ? { sessionUpdate: 'tool_call_update', ...update }
+        : { sessionUpdate: 'tool_call', ...update },
+    );
+    if (params.phase === 'preparing') {
+      this.preparedCallIds.add(params.callId);
+    }
 
     return true;
+  }
+
+  /**
+   * Emits a terminal frame when a prepared tool call is discarded before
+   * execution. TodoWrite remains represented exclusively by plan updates.
+   *
+   * @param callId - ID of the prepared tool call
+   * @param toolName - Name of the prepared tool
+   */
+  async emitPreparationDiscarded(
+    callId: string,
+    toolName: string,
+  ): Promise<void> {
+    if (this.isTodoWriteTool(toolName)) return;
+
+    this.preparedCallIds.delete(callId);
+    const provenance = ToolCallEmitter.resolveToolProvenance(toolName);
+    await this.sendUpdate({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: callId,
+      status: 'failed',
+      content: [],
+      _meta: {
+        toolName,
+        phase: 'preparing',
+        preparationDiscarded: true,
+        provenance: provenance.provenance,
+        ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
+      },
+    });
   }
 
   /**
@@ -135,6 +183,8 @@ export class ToolCallEmitter extends BaseEmitter {
       }
       return; // Skip tool_call_update for TodoWriteTool
     }
+
+    this.preparedCallIds.delete(params.callId);
 
     // Determine content for the update
     let contentArray: ToolCallContent[] = [];
@@ -218,6 +268,7 @@ export class ToolCallEmitter extends BaseEmitter {
     error: Error,
     subagentMeta?: SubagentMeta,
   ): Promise<void> {
+    this.preparedCallIds.delete(callId);
     const provenance = ToolCallEmitter.resolveToolProvenance(
       toolName,
       subagentMeta,

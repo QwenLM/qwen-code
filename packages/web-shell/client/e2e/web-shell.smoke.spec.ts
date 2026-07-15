@@ -1,4 +1,10 @@
-import { expect, test, type Page, type TestInfo } from '@playwright/test';
+import {
+  expect,
+  test,
+  type Locator,
+  type Page,
+  type TestInfo,
+} from '@playwright/test';
 import {
   assistantTextEvent,
   createWebShellDaemonScenario,
@@ -11,6 +17,8 @@ import {
   type MockDaemonController,
   type WebShellDaemonScenario,
 } from './utils/mockDaemon';
+
+const COMPOSER_VIEWPORT_HEIGHTS = [1000, 800, 600] as const;
 
 test('loads replayed transcript and connects to fake daemon @smoke', async ({
   page,
@@ -197,6 +205,198 @@ test('opens slash menu, resume dialog, model dialog, and theme dialog @smoke', a
   await expect(page.locator('[data-web-shell-theme-dialog]')).toHaveCount(0);
 });
 
+for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
+  test(`grows long text to the responsive composer cap at ${viewportHeight}px @smoke`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width: 1280, height: viewportHeight });
+    const scenario = createWebShellDaemonScenario();
+    const daemon = await installScenario(page, scenario, testInfo);
+
+    await gotoSession(page, scenario, daemon);
+    const surface = page.locator('[data-web-shell-composer-surface]');
+    const initialHeight = await composerHeight(page);
+    expect(initialHeight).toBe(140);
+
+    await replaceComposerText(
+      page,
+      Array.from(
+        { length: 10 },
+        (_, index) => `Visible line ${index + 1}`,
+      ).join('\n'),
+    );
+    await expect
+      .poll(() => composerHeight(page))
+      .toBeGreaterThan(initialHeight);
+
+    await replaceComposerText(
+      page,
+      Array.from({ length: 80 }, (_, index) => `Capped line ${index + 1}`).join(
+        '\n',
+      ),
+    );
+    await expectCappedComposerLayout(page, viewportHeight);
+    await expect(surface).toBeVisible();
+
+    await page.keyboard.press('Control+r');
+    const historySearch = surface.locator('input');
+    await expect(historySearch).toBeVisible();
+    const searchPanel = historySearch.locator('..').locator('..');
+    await expect
+      .poll(async () => {
+        const [panelBox, surfaceBox] = await Promise.all([
+          searchPanel.boundingBox(),
+          surface.boundingBox(),
+        ]);
+        if (!panelBox || !surfaceBox) return Number.POSITIVE_INFINITY;
+        return panelBox.y + panelBox.height - surfaceBox.y;
+      })
+      .toBeLessThanOrEqual(-7);
+    await page.keyboard.press('Escape');
+    await expect(historySearch).toHaveCount(0);
+
+    const modeButton = page.locator('[data-web-shell-mode-button]');
+    await modeButton.click();
+    const modeDropdown = modeButton.locator('..').locator(':scope > div');
+    await expect(modeDropdown).toBeVisible();
+    await expect
+      .poll(async () => {
+        const [dropdownBox, buttonBox] = await Promise.all([
+          modeDropdown.boundingBox(),
+          modeButton.boundingBox(),
+        ]);
+        if (!dropdownBox || !buttonBox) return Number.POSITIVE_INFINITY;
+        return dropdownBox.y + dropdownBox.height - buttonBox.y;
+      })
+      .toBeLessThanOrEqual(-3);
+    await page.keyboard.press('Escape');
+
+    await replaceComposerText(page, 'Short draft');
+    await expect.poll(() => composerHeight(page)).toBe(initialHeight);
+  });
+}
+
+for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
+  test(`bounds shared attachments and long text at ${viewportHeight}px @smoke`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width: 1280, height: viewportHeight });
+    const scenario = createWebShellDaemonScenario({
+      sessionId: `composer-layout-${viewportHeight}`,
+    });
+    const daemon = await installScenario(page, scenario, testInfo);
+
+    await gotoComposerLayoutHarness(page, scenario, daemon);
+    const tags = page.locator('[data-web-shell-composer-tag]');
+    await expect(tags).toHaveCount(18);
+    await expect(tags.first()).toBeVisible();
+
+    await pasteComposerImages(page, 8);
+    const images = page.locator(
+      '[data-web-shell-composer-attachments] img[src^="data:image/png;base64,"]',
+    );
+    await expect(images).toHaveCount(8);
+    await expectImagesDecoded(images);
+    await replaceComposerText(
+      page,
+      Array.from(
+        { length: 80 },
+        (_, index) => `Attachment line ${index + 1}`,
+      ).join('\n'),
+    );
+
+    await expectCappedComposerLayout(page, viewportHeight);
+    const attachments = page.locator('[data-web-shell-composer-attachments]');
+    await expect(attachments).toBeVisible();
+    await expect
+      .poll(async () => (await attachments.boundingBox())?.height ?? 0)
+      .toBeLessThanOrEqual(136);
+    await expect
+      .poll(() =>
+        attachments.evaluate(
+          (element) => element.scrollHeight > element.clientHeight + 1,
+        ),
+      )
+      .toBe(true);
+
+    if (viewportHeight === 600) {
+      await tags
+        .first()
+        .locator('[data-web-shell-composer-tag-trigger]')
+        .hover();
+      const portalRoot = page.locator('[data-web-shell-portal-root]');
+      const tooltip = portalRoot.locator(
+        '[data-web-shell-composer-tag-tooltip]',
+      );
+      await expect(tooltip).toBeVisible();
+      await expect
+        .poll(async () =>
+          tooltip.evaluate((element) => {
+            const rect = element.getBoundingClientRect();
+            const tolerance = 1;
+            return (
+              getComputedStyle(element).overflowY === 'auto' &&
+              rect.top >= 8 - tolerance &&
+              rect.left >= 8 - tolerance &&
+              rect.right <= window.innerWidth - 8 + tolerance &&
+              rect.bottom <= window.innerHeight - 8 + tolerance
+            );
+          }),
+        )
+        .toBe(true);
+    }
+
+    await attachments.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+    });
+    await expect
+      .poll(async () => {
+        const [attachmentsBox, imageBox] = await Promise.all([
+          attachments.boundingBox(),
+          images.last().boundingBox(),
+        ]);
+        if (!attachmentsBox || !imageBox) return false;
+        const tolerance = 1;
+        return (
+          imageBox.y >= attachmentsBox.y - tolerance &&
+          imageBox.y + imageBox.height <=
+            attachmentsBox.y + attachmentsBox.height + tolerance
+        );
+      })
+      .toBe(true);
+  });
+}
+
+test('lets a pasted image grow the composer without collapsing the text viewport @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoSession(page, scenario, daemon);
+  const initialHeight = await composerHeight(page);
+  await pasteComposerImages(page, 1);
+
+  const image = page.locator(
+    '[data-web-shell-composer-surface] img[src^="data:image/png;base64,"]',
+  );
+  await expect(image).toHaveCount(1);
+  await expectImagesDecoded(image);
+  await expect.poll(() => composerHeight(page)).toBeGreaterThan(initialHeight);
+  await expect
+    .poll(async () => {
+      const box = await page
+        .locator('[data-web-shell-composer-editor]')
+        .boundingBox();
+      return box?.height ?? 0;
+    })
+    .toBeGreaterThanOrEqual(44);
+
+  await image.locator('..').getByRole('button').click();
+  await expect(image).toHaveCount(0);
+  await expect.poll(() => composerHeight(page)).toBe(initialHeight);
+});
+
 async function installScenario(
   page: Page,
   scenario: WebShellDaemonScenario,
@@ -222,6 +422,18 @@ async function gotoSession(
   );
 }
 
+async function gotoComposerLayoutHarness(
+  page: Page,
+  scenario: WebShellDaemonScenario,
+  daemon: MockDaemonController,
+): Promise<void> {
+  await page.goto(
+    `/e2e/composer-layout-harness.html?sessionId=${encodeURIComponent(scenario.sessionId)}`,
+  );
+  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await completeReplay(page, daemon, scenario.sessionId);
+}
+
 async function completeReplay(
   page: Page,
   daemon: MockDaemonController,
@@ -245,6 +457,144 @@ async function fillComposer(page: Page, text: string): Promise<void> {
     process.platform === 'darwin' ? 'Meta+A' : 'Control+A',
   );
   await page.keyboard.type(text);
+}
+
+async function replaceComposerText(page: Page, text: string): Promise<void> {
+  const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
+  await editor.click();
+  await page.keyboard.press(
+    process.platform === 'darwin' ? 'Meta+A' : 'Control+A',
+  );
+  await page.keyboard.insertText(text);
+}
+
+async function pasteComposerImages(page: Page, count: number): Promise<void> {
+  const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
+  await editor.evaluate((element, imageCount) => {
+    const pngBase64 =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+    const binary = atob(pngBase64);
+    const pngBytes = Uint8Array.from(binary, (byte) => byte.charCodeAt(0));
+    const clipboard = new DataTransfer();
+    for (let index = 0; index < imageCount; index += 1) {
+      clipboard.items.add(
+        new File([pngBytes], `pasted-${index + 1}.png`, { type: 'image/png' }),
+      );
+    }
+    element.dispatchEvent(
+      new ClipboardEvent('paste', {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: clipboard,
+      }),
+    );
+  }, count);
+}
+
+async function expectImagesDecoded(images: Locator): Promise<void> {
+  await expect
+    .poll(() =>
+      images.evaluateAll((elements) =>
+        elements.every(
+          (element) =>
+            element instanceof HTMLImageElement &&
+            element.complete &&
+            element.naturalWidth > 0 &&
+            element.naturalHeight > 0,
+        ),
+      ),
+    )
+    .toBe(true);
+}
+
+async function expectCappedComposerLayout(
+  page: Page,
+  viewportHeight: number,
+): Promise<void> {
+  const maximumHeight = Math.min(350, viewportHeight * 0.4);
+  await expect
+    .poll(() => composerHeight(page))
+    .toBeGreaterThanOrEqual(maximumHeight - 1);
+  await expect
+    .poll(() => composerHeight(page))
+    .toBeLessThanOrEqual(maximumHeight + 1);
+
+  const surface = page.locator('[data-web-shell-composer-surface]');
+  const editorHost = page.locator('[data-web-shell-composer-editor]');
+  const editorArea = editorHost.locator('..');
+  const scroller = editorHost.locator('.cm-scroller');
+  const content = scroller.locator('.cm-content');
+  const toolbar = page
+    .locator('[data-web-shell-composer-submit]')
+    .locator('..')
+    .locator('..');
+
+  await expect
+    .poll(async () => (await editorArea.boundingBox())?.height ?? 0)
+    .toBeGreaterThanOrEqual(44);
+  await expect(toolbar).toBeVisible();
+  await expect
+    .poll(async () => {
+      const [surfaceBox, toolbarBox] = await Promise.all([
+        surface.boundingBox(),
+        toolbar.boundingBox(),
+      ]);
+      if (!surfaceBox || !toolbarBox) return false;
+      return (
+        toolbarBox.y >= surfaceBox.y - 1 &&
+        toolbarBox.y + toolbarBox.height <= surfaceBox.y + surfaceBox.height + 1
+      );
+    })
+    .toBe(true);
+
+  await expect
+    .poll(() =>
+      editorArea.evaluate((element) => getComputedStyle(element).overflowY),
+    )
+    .toBe('clip');
+  await expect
+    .poll(() =>
+      editorHost.evaluate((element) => getComputedStyle(element).overflowY),
+    )
+    .toBe('clip');
+  await expect
+    .poll(() =>
+      scroller.evaluate((element) => getComputedStyle(element).overflowY),
+    )
+    .toBe('auto');
+  await expect
+    .poll(() =>
+      editorArea.evaluate(
+        (element) => element.scrollHeight <= element.clientHeight + 1,
+      ),
+    )
+    .toBe(true);
+  await expect
+    .poll(() =>
+      editorHost.evaluate(
+        (element) => element.scrollHeight <= element.clientHeight + 1,
+      ),
+    )
+    .toBe(true);
+  await expect
+    .poll(() =>
+      scroller.evaluate(
+        (element) => element.scrollHeight > element.clientHeight + 1,
+      ),
+    )
+    .toBe(true);
+  await expect
+    .poll(() => scroller.evaluate((element) => element.scrollTop > 0))
+    .toBe(true);
+  await expect(content).toBeFocused();
+}
+
+async function composerHeight(page: Page): Promise<number> {
+  const box = await page
+    .locator('[data-web-shell-composer-surface]')
+    .boundingBox();
+  if (!box) throw new Error('Expected the composer surface to be visible.');
+  return box.height;
 }
 
 async function submitLocalCommand(page: Page, text: string): Promise<void> {

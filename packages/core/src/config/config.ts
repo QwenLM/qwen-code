@@ -1091,6 +1091,13 @@ export interface ConfigParameters {
    * getShellDefaultTimeoutMs.
    */
   shellDefaultTimeoutMs?: number;
+  /**
+   * Interval, in ms, between liveness heartbeats emitted while a foreground
+   * shell command produces no output. 0 disables heartbeats; unset falls
+   * back to the shell tool's built-in default. See
+   * getShellHeartbeatIntervalMs.
+   */
+  shellHeartbeatIntervalMs?: number;
   eventEmitter?: EventEmitter;
   output?: OutputSettings;
   inputFormat?: InputFormat;
@@ -1786,6 +1793,7 @@ export class Config {
   private readonly truncateToolOutputLines: number;
   private readonly toolOutputBatchBudget: number;
   private readonly shellDefaultTimeoutMs: number | undefined;
+  private readonly shellHeartbeatIntervalMs: number | undefined;
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
   private readonly jsonFd: number | undefined;
@@ -2061,6 +2069,16 @@ export class Config {
       params.shellDefaultTimeoutMs >= 0 &&
       params.shellDefaultTimeoutMs <= 2_147_483_647
         ? params.shellDefaultTimeoutMs
+        : undefined;
+    // Same timer-safety gate as shellDefaultTimeoutMs: the value reaches
+    // `setInterval`, which needs an integer in [0, 2^31-1]. 0 is valid and
+    // disables heartbeats.
+    this.shellHeartbeatIntervalMs =
+      params.shellHeartbeatIntervalMs !== undefined &&
+      Number.isInteger(params.shellHeartbeatIntervalMs) &&
+      params.shellHeartbeatIntervalMs >= 0 &&
+      params.shellHeartbeatIntervalMs <= 2_147_483_647
+        ? params.shellHeartbeatIntervalMs
         : undefined;
     this.channel = params.channel;
     this.jsonFd = params.jsonFd;
@@ -6032,6 +6050,15 @@ export class Config {
    */
   getShellDefaultTimeoutMs(): number | undefined {
     return this.shellDefaultTimeoutMs;
+  }
+
+  /**
+   * Configured interval (ms) between silent-command heartbeats, or
+   * `undefined` when unset (the shell tool falls back to its built-in
+   * default). 0 disables heartbeats.
+   */
+  getShellHeartbeatIntervalMs(): number | undefined {
+    return this.shellHeartbeatIntervalMs;
   }
 
   getToolOutputBatchBudget(): number {

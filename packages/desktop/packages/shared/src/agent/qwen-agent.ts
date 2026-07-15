@@ -4625,9 +4625,23 @@ export class QwenAgent extends BaseAgent {
   }
 
   private handleToolCallUpdate(update: JsonRecord): void {
+    // Silent-shell liveness heartbeats arrive as in_progress frames with no
+    // kind, carrying _meta.shellProgress, while the tool is still running;
+    // converting one into a tool_result would prematurely complete the call
+    // with an empty result. Match the web-shell normalizer's predicate
+    // exactly — in_progress AND kind-absent AND shellProgress — so a
+    // kind-bearing frame is never dropped here while the normalizer forwards
+    // it (heartbeats emitted by the ACP session never carry a kind).
+    const meta = toRecord(update._meta);
+    if (
+      asString(update.status) === 'in_progress' &&
+      asString(update.kind) === undefined &&
+      meta.shellProgress !== undefined
+    ) {
+      return;
+    }
     const toolUseId =
       asString(update.toolCallId) || `qwen-tool-${++this.toolIdCounter}`;
-    const meta = toRecord(update._meta);
     const toolName =
       this.toolNames.get(toolUseId) ||
       normalizeToolName(asString(meta.toolName), asString(update.kind));

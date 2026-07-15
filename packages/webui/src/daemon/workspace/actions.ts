@@ -616,6 +616,38 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async activeExtensionOperations() {
+      const client = requireClient(
+        getClient,
+        'Load active extension operations failed',
+      );
+      return withActionTimeout(
+        client.activeExtensionOperations(),
+        'Load active extension operations timed out',
+      );
+    },
+
+    async respondToExtensionInteraction(
+      operationId,
+      interactionId,
+      response,
+      clientId,
+    ) {
+      const client = requireClient(
+        getClient,
+        'Respond to extension interaction failed',
+      );
+      return withActionTimeout(
+        client.respondToExtensionInteraction(
+          operationId,
+          interactionId,
+          response,
+          clientId,
+        ),
+        'Respond to extension interaction timed out',
+      );
+    },
+
     async checkExtensionUpdates(clientId) {
       const client = requireClient(getClient, 'Check extension updates failed');
       return withActionTimeout(

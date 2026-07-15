@@ -255,16 +255,49 @@ function generateJsonSchema(
   return jsonSchema;
 }
 
-const schema = getSettingsSchema();
-const jsonSchema = generateJsonSchema(schema as unknown as SettingsSchema);
-
 const outputDir = path.resolve(
   __dirname,
   '../packages/vscode-ide-companion/schemas',
 );
 const outputPath = path.join(outputDir, 'settings.schema.json');
 
-fs.mkdirSync(outputDir, { recursive: true });
-fs.writeFileSync(outputPath, JSON.stringify(jsonSchema, null, 2) + '\n');
+export function runGenerateSettingsSchema(
+  args: string[],
+  schemaPath = outputPath,
+): number {
+  const checkMode = args.length === 1 && args[0] === '--check';
+  if (args.length > 0 && !checkMode) {
+    console.error(
+      `Unknown argument${args.length === 1 ? '' : 's'}: ${args.join(' ')}. Usage: npm run generate:settings-schema -- [--check]`,
+    );
+    return 1;
+  }
 
-console.log(`Generated settings JSON Schema at: ${outputPath}`);
+  const schema = getSettingsSchema();
+  const jsonSchema = generateJsonSchema(schema as unknown as SettingsSchema);
+  const serializedSchema = JSON.stringify(jsonSchema, null, 2) + '\n';
+
+  if (checkMode) {
+    if (
+      !fs.existsSync(schemaPath) ||
+      fs.readFileSync(schemaPath, 'utf8') !== serializedSchema
+    ) {
+      console.error(
+        'Settings JSON Schema is stale. Run "npm run generate:settings-schema" and commit the updated schema.',
+      );
+      return 1;
+    }
+    console.log(`Settings JSON Schema is current: ${schemaPath}`);
+    return 0;
+  }
+
+  fs.mkdirSync(path.dirname(schemaPath), { recursive: true });
+  fs.writeFileSync(schemaPath, serializedSchema);
+
+  console.log(`Generated settings JSON Schema at: ${schemaPath}`);
+  return 0;
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
+  process.exitCode = runGenerateSettingsSchema(process.argv.slice(2));
+}

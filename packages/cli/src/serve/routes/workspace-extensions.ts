@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as crypto from 'node:crypto';
 import {
   parseInstallSource,
   redactUrlCredentials,
@@ -11,6 +12,8 @@ import {
   type Extension,
   type ExtensionInstallMetadata,
   type ExtensionManager,
+  type ClaudeMarketplaceConfig,
+  type ExtensionSetting,
 } from '@qwen-code/qwen-code-core';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -30,6 +33,8 @@ import type {
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 import {
   createExtensionsController,
+  redactExtensionDisplaySource,
+  type ExtensionPendingInteraction,
   type ExtensionOperationContext,
   type ExtensionsController,
   type RuntimeReconciliationReservation,
@@ -38,6 +43,9 @@ import {
 type SafeBody = typeof safeBodyType;
 
 const EXTENSION_PREPARE_DEADLINE_MS = 10 * 60_000;
+const EXTENSION_INTERACTION_DEADLINE_MS = 10 * 60_000;
+const EXTENSION_INTERACTIVE_PREPARE_DEADLINE_MS =
+  EXTENSION_PREPARE_DEADLINE_MS + EXTENSION_INTERACTION_DEADLINE_MS;
 const EXTENSION_UPDATE_CHECK_DEADLINE_MS = 2 * 60_000;
 
 const parseExtensionScope = (
@@ -206,6 +214,136 @@ export function registerWorkspaceExtensionRoutes(
   const primaryController = createExtensionsController(
     controllerDeps(boundWorkspace, bridge, workspace),
   );
+  type ExtensionInteractionRequest =
+    | Omit<
+        Extract<ExtensionPendingInteraction, { kind: 'marketplace_plugin' }>,
+        'id'
+      >
+    | Omit<Extract<ExtensionPendingInteraction, { kind: 'setting' }>, 'id'>;
+  const pendingExtensionInteractions = new Map<
+    string,
+    {
+      interaction: ExtensionPendingInteraction;
+      resolve: (value: string) => void;
+      reject: (reason: Error) => void;
+      timeout: ReturnType<typeof setTimeout>;
+    }
+  >();
+  const supersededInstallOperations = new Set<string>();
+  const cancelPendingExtensionInteraction = (
+    operationId: string,
+    reason: string,
+  ): void => {
+    const pending = pendingExtensionInteractions.get(operationId);
+    if (!pending) return;
+    clearTimeout(pending.timeout);
+    pendingExtensionInteractions.delete(operationId);
+    pending.reject(new Error(reason));
+  };
+  const supersedeActiveInstallOperations = (
+    controller: ExtensionsController,
+    currentOperationId: string,
+  ): void => {
+    for (const operation of controller.getActiveOperations()) {
+      if (
+        operation.operation !== 'install' ||
+        operation.operationId === currentOperationId
+      ) {
+        continue;
+      }
+      supersededInstallOperations.add(operation.operationId);
+      cancelPendingExtensionInteraction(
+        operation.operationId,
+        'Extension installation cancelled by a new install request',
+      );
+    }
+  };
+  const waitForExtensionInteraction = (
+    controller: ExtensionsController,
+    operationId: string,
+    interaction: ExtensionInteractionRequest,
+  ): Promise<string> => {
+    if (supersededInstallOperations.delete(operationId)) {
+      return Promise.reject(
+        new Error('Extension installation superseded by a new install request'),
+      );
+    }
+    const operation = controller.getOperation(operationId);
+    if (
+      operation &&
+      operation.status !== 'queued' &&
+      operation.status !== 'running' &&
+      operation.status !== 'waiting_for_input'
+    ) {
+      return Promise.reject(new Error('Extension operation already completed'));
+    }
+    const pendingInteraction = {
+      ...interaction,
+      id: crypto.randomUUID(),
+    } as ExtensionPendingInteraction;
+    return new Promise<string>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        pendingExtensionInteractions.delete(operationId);
+        controller.updateOperation(operationId, {
+          status: 'failed',
+          phase: undefined,
+          interaction: undefined,
+          error: 'Extension interaction timed out',
+        });
+        reject(new Error('Extension interaction timed out'));
+      }, EXTENSION_INTERACTION_DEADLINE_MS);
+      timeout.unref?.();
+      pendingExtensionInteractions.set(operationId, {
+        interaction: pendingInteraction,
+        resolve,
+        reject,
+        timeout,
+      });
+      controller.updateOperation(operationId, {
+        status: 'waiting_for_input',
+        phase: undefined,
+        interaction: pendingInteraction,
+      });
+    });
+  };
+  const extensionInteractionHandlers = (
+    controller: ExtensionsController,
+    operationId: string,
+  ) => ({
+    requestSetting: (setting: ExtensionSetting) =>
+      waitForExtensionInteraction(controller, operationId, {
+        kind: 'setting',
+        setting: {
+          name: setting.name,
+          description: setting.description,
+          sensitive: setting.sensitive === true,
+        },
+      }),
+    requestChoicePlugin: (marketplace: ClaudeMarketplaceConfig) => {
+      if (marketplace.plugins.length === 0) {
+        return Promise.reject(
+          new Error(`Marketplace "${marketplace.name}" has no plugins`),
+        );
+      }
+      return waitForExtensionInteraction(controller, operationId, {
+        kind: 'marketplace_plugin',
+        marketplace: { name: marketplace.name },
+        plugins: marketplace.plugins.map((plugin) => ({
+          name: plugin.name,
+          ...(plugin.description ? { description: plugin.description } : {}),
+          source: redactExtensionDisplaySource(
+            typeof plugin.source === 'string'
+              ? plugin.source
+              : plugin.source.source === 'github'
+                ? plugin.source.repo
+                : plugin.source.url,
+          ),
+          ...(plugin.category ? { category: plugin.category } : {}),
+          ...(plugin.tags ? { tags: plugin.tags } : {}),
+        })),
+      });
+    },
+  });
   const runtimeReconciliationQueue = createFifoTaskQueue(1);
   const reserveRuntimeReconciliation = (): RuntimeReconciliationReservation => {
     let provideTask!: (task?: () => Promise<unknown>) => void;
@@ -357,6 +495,12 @@ export function registerWorkspaceExtensionRoutes(
       }
     });
 
+    app.get(`${base}/operations`, async (req, res) => {
+      const ctrl = resolve(req, res, false);
+      if (!ctrl) return;
+      res.status(200).json({ v: 1, operations: ctrl.getActiveOperations() });
+    });
+
     app.get(`${base}/operations/:operationId`, async (req, res) => {
       const ctrl = resolve(req, res, false);
       if (!ctrl) return;
@@ -406,13 +550,101 @@ export function registerWorkspaceExtensionRoutes(
       }
     });
 
+    app.post(
+      `${base}/operations/:operationId/interactions/:interactionId`,
+      mutate({ strict: true }),
+      async (req, res) => {
+        const ctrl = resolve(req, res, false);
+        if (!ctrl) return;
+        try {
+          if (
+            !ctrl.validateExtensionMutationClient(req, res, {
+              requireClientId: false,
+            })
+          ) {
+            return;
+          }
+          const operationId = req.params['operationId'];
+          const interactionId = req.params['interactionId'];
+          const pending = operationId
+            ? pendingExtensionInteractions.get(operationId)
+            : undefined;
+          if (!operationId || !interactionId || !pending) {
+            res.status(404).json({ error: 'Extension interaction not found' });
+            return;
+          }
+          if (pending.interaction.id !== interactionId) {
+            res.status(404).json({ error: 'Extension interaction not found' });
+            return;
+          }
+          const body = safeBody(req);
+          let value: string;
+          if (body['cancelled'] === true) {
+            clearTimeout(pending.timeout);
+            pendingExtensionInteractions.delete(operationId);
+            ctrl.updateOperation(operationId, {
+              status: 'failed',
+              phase: undefined,
+              interaction: undefined,
+              error: 'Extension operation cancelled',
+            });
+            pending.reject(new Error('Extension operation cancelled'));
+            res.status(200).json({ accepted: true });
+            return;
+          }
+          if (pending.interaction.kind === 'marketplace_plugin') {
+            const pluginName = body['pluginName'];
+            if (
+              typeof pluginName !== 'string' ||
+              !pending.interaction.plugins.some(
+                (plugin) => plugin.name === pluginName,
+              )
+            ) {
+              res
+                .status(400)
+                .json({ error: 'Invalid marketplace plugin name' });
+              return;
+            }
+            value = pluginName;
+          } else {
+            const settingValue = body['value'];
+            if (typeof settingValue !== 'string') {
+              res
+                .status(400)
+                .json({ error: 'Extension setting value must be a string' });
+              return;
+            }
+            value = settingValue;
+          }
+          clearTimeout(pending.timeout);
+          pendingExtensionInteractions.delete(operationId);
+          ctrl.updateOperation(operationId, {
+            status: 'running',
+            phase: 'preparing',
+            interaction: undefined,
+            error: undefined,
+          });
+          pending.resolve(value);
+          res.status(200).json({ accepted: true });
+        } catch (err) {
+          sendBridgeError(res, err, {
+            route: `POST ${base}/operations/:operationId/interactions/:interactionId`,
+          });
+        }
+      },
+    );
+
     // POST {base}/install — install an extension and refresh all active
     // sessions asynchronously.
     app.post(`${base}/install`, mutate({ strict: true }), async (req, res) => {
       const ctrl = resolve(req, res, true);
       if (!ctrl) return;
       try {
-        if (!ctrl.validateExtensionMutationClient(req, res)) {
+        if (
+          !ctrl.validateExtensionMutationClient(req, res, {
+            requireClientId: false,
+          })
+        ) {
           return;
         }
         const body = safeBody(req);
@@ -474,12 +706,71 @@ export function registerWorkspaceExtensionRoutes(
         if (!validateExtensionSourceHost(sourceValue, res)) {
           return;
         }
+        const localSource =
+          /^[A-Za-z]:[\\/]/.test(sourceValue) ||
+          sourceValue.startsWith('/') ||
+          sourceValue.startsWith('.');
+        if (localSource) {
+          try {
+            const metadata = await parseInstallSource(sourceValue, {
+              networkPolicy: 'public',
+            });
+            if (
+              metadata.type !== 'git' &&
+              metadata.type !== 'github-release' &&
+              metadata.type !== 'npm'
+            ) {
+              res.status(400).json({
+                error:
+                  'Only GitHub, Git, and npm extension installs are supported over the daemon endpoint.',
+              });
+              return;
+            }
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : 'Invalid install source';
+            res.status(400).json({
+              error: redactUrlCredentials(
+                message.replaceAll(
+                  sourceValue,
+                  redactExtensionDisplaySource(sourceValue),
+                ),
+              ),
+            });
+            return;
+          }
+        }
+        const npmSource = sourceValue.startsWith('@');
+        const remoteSource =
+          npmSource ||
+          sourceValue.startsWith('https://') ||
+          /^[^/\s]+\/[^/\s]+/.test(sourceValue);
+        if (!localSource && !remoteSource) {
+          res.status(400).json({
+            error: `Install source not found: ${redactExtensionDisplaySource(
+              sourceValue,
+            )}`,
+          });
+          return;
+        }
+        if (npmSource && refValue) {
+          res
+            .status(400)
+            .json({ error: '--ref is not applicable for npm extensions.' });
+          return;
+        }
+        if (!npmSource && registryValue) {
+          res.status(400).json({
+            error: '--registry is only applicable for npm extensions.',
+          });
+          return;
+        }
 
         ctrl.runQueuedExtensionMutation(
           'install',
           { source: sourceValue },
           res,
-          async (extensionManager, _signal, context) => {
+          async (extensionManager, _signal, context, operationId) => {
             const prepared = await context!.prepare(async (signal) => {
               const installMetadata = await parseInstallSource(sourceValue, {
                 networkPolicy: 'public',
@@ -508,6 +799,7 @@ export function registerWorkspaceExtensionRoutes(
               if (installMetadata.type === 'npm' && registryUrl) {
                 installMetadata.registryUrl = registryUrl;
               }
+              supersedeActiveInstallOperations(ctrl, operationId!);
               return await extensionManager.prepareExtensionInstall({
                 installMetadata: {
                   ...installMetadata,
@@ -539,7 +831,20 @@ export function registerWorkspaceExtensionRoutes(
             }
           },
           {
-            deadlineMs: EXTENSION_PREPARE_DEADLINE_MS,
+            createManager: (operationId) =>
+              ctrl.createExtensionManager(
+                undefined,
+                undefined,
+                extensionInteractionHandlers(ctrl, operationId),
+              ),
+            onSettled: (operationId) => {
+              supersededInstallOperations.delete(operationId);
+              cancelPendingExtensionInteraction(
+                operationId,
+                'Extension operation ended',
+              );
+            },
+            deadlineMs: EXTENSION_INTERACTIVE_PREPARE_DEADLINE_MS,
             ...globalReconciliationOptions(),
           },
         );
@@ -557,7 +862,11 @@ export function registerWorkspaceExtensionRoutes(
         let timer: ReturnType<typeof setTimeout> | undefined;
         let releaseOperationSlot: (() => void) | undefined;
         try {
-          if (!ctrl.validateExtensionMutationClient(req, res)) {
+          if (
+            !ctrl.validateExtensionMutationClient(req, res, {
+              requireClientId: false,
+            })
+          ) {
             return;
           }
           releaseOperationSlot = ctrl.acquireOperationSlot(res);
@@ -619,7 +928,11 @@ export function registerWorkspaceExtensionRoutes(
       const ctrl = resolve(req, res, true);
       if (!ctrl) return;
       try {
-        if (!ctrl.validateExtensionMutationClient(req, res)) {
+        if (
+          !ctrl.validateExtensionMutationClient(req, res, {
+            requireClientId: false,
+          })
+        ) {
           return;
         }
         const releaseOperationSlot = ctrl.acquireOperationSlot(res);
@@ -748,7 +1061,11 @@ export function registerWorkspaceExtensionRoutes(
         const ctrl = resolve(req, res, true);
         if (!ctrl) return;
         try {
-          if (!ctrl.validateExtensionMutationClient(req, res)) {
+          if (
+            !ctrl.validateExtensionMutationClient(req, res, {
+              requireClientId: false,
+            })
+          ) {
             return;
           }
           const name = req.params['name'];
@@ -815,7 +1132,19 @@ export function registerWorkspaceExtensionRoutes(
               }
             },
             {
-              deadlineMs: EXTENSION_PREPARE_DEADLINE_MS,
+              createManager: (operationId) =>
+                ctrl.createExtensionManager(
+                  undefined,
+                  undefined,
+                  extensionInteractionHandlers(ctrl, operationId),
+                ),
+              onSettled: (operationId) => {
+                cancelPendingExtensionInteraction(
+                  operationId,
+                  'Extension operation ended',
+                );
+              },
+              deadlineMs: EXTENSION_INTERACTIVE_PREPARE_DEADLINE_MS,
               ...globalReconciliationOptions(),
             },
           );
@@ -829,7 +1158,11 @@ export function registerWorkspaceExtensionRoutes(
       const ctrl = resolve(req, res, true);
       if (!ctrl) return;
       try {
-        if (!ctrl.validateExtensionMutationClient(req, res)) {
+        if (
+          !ctrl.validateExtensionMutationClient(req, res, {
+            requireClientId: false,
+          })
+        ) {
           return;
         }
         const name = req.params['name'];
