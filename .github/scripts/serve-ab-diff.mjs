@@ -129,17 +129,28 @@ export function renderTable(scenario, changes) {
  */
 export function buildComment(sections, ctx = {}) {
   const shortSha = String(ctx.shortSha ?? '').replace(/[^\w.-]/g, '');
-  const changed = sections.filter((s) => s.changes.length > 0);
   const out = [];
   out.push('<!-- qwen:serve-ab -->');
   out.push('### 🩺 serve daemon A/B');
   out.push(
-    `Built \`main\` vs this PR head \`${shortSha}\`, drove a fixed endpoint set against each, and diffed the JSON responses. Only fields that changed are shown.`,
+    `Built the PR base vs this PR head \`${shortSha}\`, drove a fixed endpoint set against each, and diffed the JSON responses. Only fields that changed are shown.`,
   );
   out.push('');
+  // Degraded run: head captures exist but the PR-base build/drive produced
+  // none. Say so explicitly instead of misreporting every field as "added"
+  // (which a `{}` baseline would) — the diff was never actually performed.
+  if (ctx.baselineMissing) {
+    out.push(
+      '⚠️ _The PR-base baseline could not be built this run, so the before/after diff was skipped. Re-run to compare._',
+    );
+    out.push('');
+    out.push('— _Qwen Code · serve A/B_');
+    return out.join('\n') + '\n';
+  }
+  const changed = sections.filter((s) => s.changes.length > 0);
   if (changed.length === 0) {
     out.push(
-      `✅ _No response changes against \`main\` across ${sections.length} scenario(s)._`,
+      `✅ _No response changes against the PR base across ${sections.length} scenario(s)._`,
     );
     out.push('');
   } else {
@@ -149,36 +160,51 @@ export function buildComment(sections, ctx = {}) {
   return out.join('\n') + '\n';
 }
 
-// Read a capture dir's `<scenario>.json` files → `[{ scenario, changes }]`,
-// diffing each against the same-named file in the base dir (missing base → all
-// fields read as added).
-function diffCaptureDirs(beforeDir, afterDir) {
-  let names = [];
-  try {
-    names = readdirSync(afterDir).filter((f) => f.endsWith('.json'));
-  } catch {
-    // no captures → empty
-  }
-  return names.sort().map((f) => {
+/**
+ * Read a capture dir's `<scenario>.json` files → `{ sections, baselineMissing }`.
+ * Each section diffs an after-capture against the same-named base file. When the
+ * base captures are ENTIRELY absent (a failed base build/drive) but head
+ * captures exist, `baselineMissing` is set so the caller reports "diff skipped"
+ * rather than misreporting every field as added. This is the function the CI
+ * `comment` subcommand actually invokes, so it is exported + covered.
+ */
+export function diffCaptureDirs(beforeDir, afterDir) {
+  const jsonFiles = (dir) => {
+    try {
+      return readdirSync(dir).filter((f) => f.endsWith('.json'));
+    } catch {
+      return [];
+    }
+  };
+  const afterFiles = jsonFiles(afterDir).sort();
+  const baselineMissing =
+    afterFiles.length > 0 && jsonFiles(beforeDir).length === 0;
+  const sections = afterFiles.map((f) => {
     const scenario = f.replace(/\.json$/, '');
     const after = JSON.parse(readFileSync(join(afterDir, f), 'utf8'));
     let before = {};
     try {
       before = JSON.parse(readFileSync(join(beforeDir, f), 'utf8'));
     } catch {
-      // no baseline for this scenario
+      // no baseline for this individual scenario
     }
     return { scenario, changes: diffJson(before, after) };
   });
+  return { sections, baselineMissing };
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const [cmd, ...rest] = process.argv.slice(2);
   if (cmd === 'comment') {
     const [beforeDir, afterDir, shortSha, bodyFile] = rest;
-    const sections = diffCaptureDirs(beforeDir, afterDir);
-    writeFileSync(bodyFile, buildComment(sections, { shortSha }));
-    const total = sections.reduce((n, s) => n + s.changes.length, 0);
+    const { sections, baselineMissing } = diffCaptureDirs(beforeDir, afterDir);
+    writeFileSync(
+      bodyFile,
+      buildComment(sections, { shortSha, baselineMissing }),
+    );
+    const total = baselineMissing
+      ? 0
+      : sections.reduce((n, s) => n + s.changes.length, 0);
     // stdout = total changed fields (workflow reads it to decide whether to post).
     process.stdout.write(`${total}\n`);
   } else {

@@ -18,10 +18,13 @@ on:
     branches:
       - 'main'
       - 'release/**'
-    # The daemon's HTTP response surface. Doc/UI-only PRs don't need an A/B.
+    # The daemon's HTTP response surface lives entirely under serve/. `core` has
+    # no serve/health subtree, and firing on all ~1100 packages/core/src files
+    # (tools, prompts, models, …) would trigger the expensive 2x-build A/B on
+    # most core PRs for nothing — a rare core-only response change is an
+    # acceptable best-effort miss. Doc/UI-only PRs don't need an A/B either.
     paths:
       - 'packages/cli/src/serve/**'
-      - 'packages/core/src/**'
       - '.github/workflows/serve-ab.yml'
       - '.github/scripts/serve-ab-diff.mjs'
       - '.github/scripts/serve-ab-drive.mjs'

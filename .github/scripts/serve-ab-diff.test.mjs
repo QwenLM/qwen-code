@@ -5,10 +5,14 @@
  */
 
 import assert from 'node:assert/strict';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import {
   buildComment,
+  diffCaptureDirs,
   diffJson,
   isPrimitiveArray,
   maskPath,
@@ -147,6 +151,46 @@ test('buildComment: all unchanged → one no-change note, no tables', () => {
     ],
     { shortSha: 'deadbee' },
   );
-  assert.match(body, /No response changes against `main` across 2 scenario/);
+  assert.match(
+    body,
+    /No response changes against the PR base across 2 scenario/,
+  );
   assert.doesNotMatch(body, /\| field \|/);
+});
+
+test('diffCaptureDirs: diffs each scenario against its same-named base file', () => {
+  const before = mkdtempSync(join(tmpdir(), 'sa-before-'));
+  const after = mkdtempSync(join(tmpdir(), 'sa-after-'));
+  writeFileSync(
+    join(before, 'capabilities.json'),
+    JSON.stringify({ v: 1, features: ['a'] }),
+  );
+  writeFileSync(
+    join(after, 'capabilities.json'),
+    JSON.stringify({ v: 1, features: ['a', 'b'] }),
+  );
+  writeFileSync(join(before, 'health.json'), JSON.stringify({ status: 'ok' }));
+  writeFileSync(join(after, 'health.json'), JSON.stringify({ status: 'ok' }));
+  const { sections, baselineMissing } = diffCaptureDirs(before, after);
+  assert.equal(baselineMissing, false);
+  assert.deepEqual(sections.map((s) => s.scenario).sort(), [
+    'capabilities',
+    'health',
+  ]);
+  assert.deepEqual(
+    sections.find((s) => s.scenario === 'capabilities').changes,
+    [{ path: 'features[]', kind: 'added', after: 'b' }],
+  );
+  assert.deepEqual(sections.find((s) => s.scenario === 'health').changes, []);
+});
+
+test('diffCaptureDirs: absent base + present head → baselineMissing (not "no change")', () => {
+  const before = mkdtempSync(join(tmpdir(), 'sa-before-')); // left empty
+  const after = mkdtempSync(join(tmpdir(), 'sa-after-'));
+  writeFileSync(join(after, 'capabilities.json'), JSON.stringify({ v: 1 }));
+  const { baselineMissing } = diffCaptureDirs(before, after);
+  assert.equal(baselineMissing, true);
+  const body = buildComment([], { shortSha: 'x', baselineMissing: true });
+  assert.match(body, /baseline could not be built/);
+  assert.doesNotMatch(body, /No response changes/);
 });
