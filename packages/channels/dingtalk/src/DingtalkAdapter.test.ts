@@ -2014,6 +2014,7 @@ describe('DingtalkChannel proactive send', () => {
     const body = JSON.parse(String(init.body));
     expect(body.robotCode).toBe('client-id');
     expect(body.openConversationId).toBe(groupTarget.chatId);
+    expect(body.userIds).toBeUndefined();
     expect(body.msgKey).toBe('sampleMarkdown');
     expect(msgParamOf(sends[0]!).title).toBe('Result');
     expect(msgParamOf(sends[0]!).text).toContain('loop output');
@@ -2074,6 +2075,44 @@ describe('DingtalkChannel proactive send', () => {
     await expect(channel.pushProactive(directTarget, 'hello')).rejects.toThrow(
       'DingTalk proactive send failed: direct recipient rate limited',
     );
+  });
+
+  it('rejects direct messages when DingTalk returns malformed JSON', async () => {
+    const channel = proactive(createChannel());
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const response = new Response('<html>bad gateway</html>', { status: 200 });
+    stubProactiveFetch(() => response);
+
+    await expect(channel.pushProactive(directTarget, 'hello')).rejects.toThrow(
+      'DingTalk proactive send failed: invalid JSON response',
+    );
+
+    expect(response.bodyUsed).toBe(true);
+    const logged = writeSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain(
+      'proactive send failed (dm, chunk 1/1): invalid JSON response',
+    );
+  });
+
+  it('accepts direct messages when DingTalk rejects only other recipients', async () => {
+    const channel = proactive(createChannel());
+    const { directSendCalls } = stubProactiveFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            invalidStaffIdList: ['other-user'],
+            flowControlledStaffIdList: ['another-user'],
+          }),
+          { status: 200 },
+        ),
+    );
+
+    await expect(
+      channel.pushProactive(directTarget, 'hello'),
+    ).resolves.toBeUndefined();
+    expect(directSendCalls()).toHaveLength(1);
   });
 
   it('reuses the cached token across group and direct-message sends', async () => {

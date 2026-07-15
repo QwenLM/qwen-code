@@ -489,6 +489,8 @@ export class DingtalkChannel extends ChannelBase {
     return true;
   }
 
+  // Regular proactive paths accept only group targets; webhook tasks may use
+  // DMs through the one-to-one API.
   protected override supportsProactiveTarget(target: SessionTarget): boolean {
     return (
       target.isGroup === true &&
@@ -626,10 +628,18 @@ export class DingtalkChannel extends ChannelBase {
         );
       }
       if (target.isGroup === false) {
-        const data = (await resp.json().catch(() => undefined)) as
-          | DingTalkDirectMessageResponse
-          | undefined;
-        if (data?.invalidStaffIdList?.includes(target.chatId)) {
+        let data: DingTalkDirectMessageResponse;
+        try {
+          data = (await resp.json()) as DingTalkDirectMessageResponse;
+        } catch {
+          process.stderr.write(
+            `[DingTalk:${this.name}] proactive send failed (${targetKind}, ${chunkLabel}): invalid JSON response\n`,
+          );
+          throw new Error(
+            'DingTalk proactive send failed: invalid JSON response',
+          );
+        }
+        if (data.invalidStaffIdList?.includes(target.chatId)) {
           process.stderr.write(
             `[DingTalk:${this.name}] proactive send failed (${targetKind}, ${chunkLabel}): invalid direct recipient\n`,
           );
@@ -637,7 +647,7 @@ export class DingtalkChannel extends ChannelBase {
             'DingTalk proactive send failed: invalid direct recipient',
           );
         }
-        if (data?.flowControlledStaffIdList?.includes(target.chatId)) {
+        if (data.flowControlledStaffIdList?.includes(target.chatId)) {
           process.stderr.write(
             `[DingTalk:${this.name}] proactive send failed (${targetKind}, ${chunkLabel}): direct recipient rate limited\n`,
           );
