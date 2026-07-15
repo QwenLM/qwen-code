@@ -1326,8 +1326,13 @@ export function KeypressProvider({
           sequence: text,
         });
       } else {
-        // Empty paste — check for clipboard image (async, but fine here)
-        void clipboardHasImage().then((hasImage) => {
+        // Empty paste — check for clipboard image (async, but fine here).
+        // Mirror the keypress-level paste-end path: surface whether the
+        // native clipboard module was unavailable.
+        let clipboardImageUnavailable = false;
+        void clipboardHasImage(() => {
+          clipboardImageUnavailable = true;
+        }).then((hasImage) => {
           broadcast({
             name: '',
             ctrl: false,
@@ -1335,6 +1340,7 @@ export function KeypressProvider({
             shift: false,
             paste: true,
             pasteImage: hasImage,
+            clipboardImageUnavailable,
             sequence: '',
           });
         });
