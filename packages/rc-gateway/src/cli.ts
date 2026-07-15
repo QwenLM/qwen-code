@@ -971,19 +971,23 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
               usageIngester?.ingest(sid, ev.data, sessionAttribution.get(sid));
               // Fire-and-forget: lifecycle transitions must never block or
               // break the pump's subscribe loop.
-              void agentLifecycle?.handleSessionEvent(sid, {
-                type: ev.type,
-                data: ev.data,
-              });
+              agentLifecycle
+                ?.handleSessionEvent(sid, {
+                  type: ev.type,
+                  data: ev.data,
+                })
+                .catch(() => {});
             },
           }
         : {}),
     });
     await pump.start();
+    const consumers: string[] = [];
+    if (notifier) consumers.push('push');
+    if (usageIngester) consumers.push('cost tracking');
+    if (agentLifecycle) consumers.push('agents');
     // eslint-disable-next-line no-console
-    console.log(
-      notifier ? 'push pump: started' : 'session pump: started (cost tracking)',
-    );
+    console.log(`session pump: started (${consumers.join(', ')})`);
   }
 
   // End-of-quiet-window digest flush (webpush D4, cycle 75): poll on an unref'd
