@@ -481,8 +481,18 @@ function diffReadingBlock(report: PlanReport, diffPath: string): string[] {
 }
 
 /** The closing half every prompt shares: how to report, and what "nothing" means. */
-function tail(rules?: string): string[] {
-  const parts = ['', FINDING_FORMAT, '', SEVERITY, '', EXCLUSIONS];
+function tail(
+  rules?: string,
+  output: 'findings' | 'verdicts' = 'findings',
+): string[] {
+  // The verifier does not file findings, so it gets no finding format and no
+  // severity ladder — its output shape is the verdict, defined in its own brief. It
+  // does get the Exclusion Criteria, because a finding that matches one is a
+  // rejection. Every other role produces findings and gets the full tail.
+  const parts =
+    output === 'verdicts'
+      ? ['', EXCLUSIONS]
+      : ['', FINDING_FORMAT, '', SEVERITY, '', EXCLUSIONS];
   if (rules && rules.trim()) {
     parts.push('', '## Project rules', '', rules.trim());
   }
@@ -745,7 +755,7 @@ export function buildRoleBrief(
     if (pathRules) parts.push('', pathRules);
   }
 
-  parts.push(...tail(opts.rules));
+  parts.push(...tail(opts.rules, brief.output));
   return parts.join('\n');
 }
 
@@ -784,7 +794,7 @@ export function buildRoleLaunchPrompt(
   report: PlanReport,
   role: RoleId,
   briefFile: string,
-  opts: { file?: string } = {},
+  opts: { file?: string; chunk?: number } = {},
 ): string {
   const b = BRIEFS[role];
   if (!b) {
@@ -811,14 +821,32 @@ export function buildRoleLaunchPrompt(
     // thousand lines it was not asked about, and worse: coverage is computed from
     // the ranges in this prompt, so it would be credited with reading every chunk in
     // the review. One agent could then mask twenty missing ones.
-    const ranges = role.startsWith('invariant-')
-      ? invariantDiffRange(report, opts.file)
-      : (
-          (Array.isArray(report.chunks) ? report.chunks : []) as DiffChunk[]
-        ).map((c) => ({
-          offset: c.startLine - 1,
-          limit: c.endLine - c.startLine + 1,
-        }));
+    const allChunks = (
+      Array.isArray(report.chunks) ? report.chunks : []
+    ) as DiffChunk[];
+    const rangeOf = (c: DiffChunk) => ({
+      offset: c.startLine - 1,
+      limit: c.endLine - c.startLine + 1,
+    });
+    let ranges: Array<{ offset: number; limit: number }>;
+    if (role.startsWith('invariant-')) {
+      ranges = invariantDiffRange(report, opts.file);
+    } else if (opts.chunk !== undefined) {
+      // A Step 3B reverse-audit agent owns one chunk's territory, the same as its
+      // Step 3 counterpart. Give it that chunk's range, not the whole diff — a
+      // reverse auditor handed a 5 800-line diff is the most context-starved agent
+      // in the pipeline, on exactly the PRs where the reverse audit matters most.
+      const c = allChunks.find((x) => x.id === opts.chunk);
+      if (!c) {
+        throw new Error(
+          `agent-prompt: --role ${role} --chunk ${opts.chunk}: the plan has no ` +
+            `chunk ${opts.chunk} (it has ${allChunks.map((x) => x.id).join(', ')}).`,
+        );
+      }
+      ranges = [rangeOf(c)];
+    } else {
+      ranges = allChunks.map(rangeOf);
+    }
     const reads = ranges
       .map(
         (r) =>
@@ -848,19 +876,36 @@ export function buildRoleLaunchPrompt(
 }
 
 function runAgentPrompt(args: AgentPromptArgs): void {
-  // Exactly one mode. A call that named none used to fall through to the chunk
-  // builder with `undefined`, which then reported that the *plan* had no chunk
-  // `undefined` — an error about the plan, for a mistake in the call.
-  const modes = [
-    typeof args.chunk === 'number',
-    !!args.wholeDiff,
-    typeof args.role === 'string' && args.role.length > 0,
-  ].filter(Boolean).length;
-  if (modes !== 1) {
-    throw new Error(
-      'agent-prompt: pass exactly one of --chunk <id> (a Step 3B territory ' +
-        'agent), --role <role> (a named dimension agent), or --whole-diff (the ' +
-        'diff-reading block on its own).',
+  // Exactly one primary mode: a territory chunk, a named role, or the bare
+  // whole-diff block. A call that named none used to fall through to the chunk
+  // builder with `undefined`, which then blamed the *plan* for "no chunk undefined"
+  // — an error about the plan, for a mistake in the call.
+  const hasChunk = typeof args.chunk === 'number';
+  const hasRole = typeof args.role === 'string' && args.role.length > 0;
+  const hasWhole = !!args.wholeDiff;
+  const bad = (msg: string): never => {
+    throw new Error(`agent-prompt: ${msg}`);
+  };
+  if (hasWhole) {
+    if (hasChunk || hasRole) {
+      bad(
+        '--whole-diff builds the diff-reading block alone; it takes no --chunk or --role.',
+      );
+    }
+  } else if (hasRole) {
+    // `--chunk` combines with a role for exactly one case: a Step 3B reverse-audit
+    // agent, which owns one chunk's territory. Any other role + chunk is a mistake
+    // (a dimension agent walks the whole diff; a chunk agent is `--chunk` alone).
+    if (hasChunk && args.role !== 'reverse-audit') {
+      bad(
+        `--chunk combines with --role only for reverse-audit (a Step 3B per-chunk ` +
+          `auditor); role "${args.role}" does not take --chunk.`,
+      );
+    }
+  } else if (!hasChunk) {
+    bad(
+      'pass exactly one of --chunk <id> (a Step 3B territory agent), --role ' +
+        '<role> (a named agent), or --whole-diff (the diff-reading block on its own).',
     );
   }
 
@@ -907,7 +952,15 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     key = 'whole-diff';
   } else if (args.role) {
     const role = args.role as RoleId;
-    key = args.file ? `${role}--${args.file}` : role;
+    // The record key must be unique per launch. An invariant agent is keyed by its
+    // file; a Step 3B reverse-audit agent by its chunk (its brief is identical
+    // across chunks, but its launch prompt reads a different range, and the delivery
+    // check compares launch prompts). Everything else is one per review.
+    key = args.file
+      ? `${role}--${args.file}`
+      : typeof args.chunk === 'number'
+        ? `${role}--chunk-${args.chunk}`
+        : role;
     // Two artifacts, both written here. The brief is what the agent reads; the
     // launch prompt is the short thing the orchestrator carries, and the only thing
     // it has to get right.
@@ -922,6 +975,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     );
     prompt = buildRoleLaunchPrompt(report, role, briefFile, {
       file: args.file,
+      chunk: args.chunk,
     });
   } else {
     const id = args.chunk as number;

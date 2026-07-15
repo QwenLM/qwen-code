@@ -388,24 +388,51 @@ describe('buildWholeDiffBlock — the agents that walk the whole diff', () => {
   });
 
   it.each([
-    ['none of the three', {}],
-    ['chunk + whole-diff', { chunk: 13, 'whole-diff': true }],
-    ['chunk + role', { chunk: 13, role: '2' }],
-    ['whole-diff + role', { 'whole-diff': true, role: '2' }],
-    ['all three', { chunk: 13, 'whole-diff': true, role: '2' }],
-  ])('rejects a call that names %s', (_, extra) => {
-    // Three mutually exclusive modes: a territory chunk, a named role, or the
-    // bare whole-diff block. A run that named none used to fall through to the
-    // chunk builder with `undefined` and blame the plan for "no chunk undefined";
+    ['none of the three', {}, /exactly one of/],
+    [
+      'chunk + whole-diff',
+      { chunk: 13, 'whole-diff': true },
+      /--whole-diff builds the diff-reading block alone/,
+    ],
+    [
+      'a non-reverse role + chunk',
+      { chunk: 13, role: '2' },
+      /combines with --role only for reverse-audit/,
+    ],
+    [
+      'whole-diff + role',
+      { 'whole-diff': true, role: '2' },
+      /--whole-diff builds the diff-reading block alone/,
+    ],
+    [
+      'all three',
+      { chunk: 13, 'whole-diff': true, role: '2' },
+      /--whole-diff builds the diff-reading block alone/,
+    ],
+  ])('rejects a call that names %s', (_, extra, pattern) => {
+    // A territory chunk, a named role, or the bare whole-diff block — one primary
+    // mode. A run that named none used to blame the plan for "no chunk undefined";
     // a run that named two would silently pick one. The guard runs before the plan
-    // is read, so the message is about the call, and it covers every bad shape —
-    // not just the two the first version tested.
+    // is read, so the message is about the call, and it names the specific bad shape.
     expect(() =>
       (agentPromptCommand.handler as (a: unknown) => void)({
         plan: '/nonexistent/plan.json',
         ...extra,
       }),
-    ).toThrow(/exactly one of/);
+    ).toThrow(pattern as RegExp);
+  });
+
+  it('accepts --role reverse-audit --chunk N — the one legal role+chunk combo', () => {
+    // A Step 3B reverse-audit agent owns one chunk's territory. The guard lets that
+    // one through, and the launch prompt reads exactly that chunk's range — not the
+    // whole diff, which is what makes a large-PR reverse auditor context-starved.
+    const p = buildRoleLaunchPrompt(PLAN, 'reverse-audit', '/t/ra.brief.md', {
+      chunk: 14,
+    });
+    // Chunk 14 is lines 4025-4200 → offset 4024, limit 176.
+    expect(p).toContain('offset=4024, limit=176');
+    // and NOT chunk 13's or chunk 15's range.
+    expect(p).not.toContain('offset=3807');
   });
 });
 
@@ -844,5 +871,49 @@ describe('an invariant agent reads its file, not the whole review', () => {
     expect(p).toContain('offset=0, limit=400');
     expect(p).toContain('offset=400, limit=400');
     expect(p).toContain('offset=800, limit=400');
+  });
+});
+
+// Step 4 and Step 5 agents: their methodology now lives in code, not in prose the
+// orchestrator retypes each run. The rules pinned here are the ones a paraphrase
+// would have dropped — and one of them (the documented-intent gate) is the exact
+// rule a real run skipped when it auto-posted a false "leaks tokens" Critical.
+describe('verify and reverse-audit briefs — the Step 4/5 methodology, in code', () => {
+  it('the verify brief carries the reject-a-Critical high bar and the documented-intent gate', () => {
+    const p = buildRoleBrief(PLAN, 'verify');
+    // The verdict is a trace, not a vote.
+    expect(p).toMatch(/trac(e|ing) it through the real code/i);
+    // Rejecting a Critical needs quoted contradicting code, floors at low otherwise.
+    expect(p).toContain('quote the specific code that contradicts');
+    expect(p).toMatch(/floor is `confirmed \(low confidence\)`/);
+    // The documented-intent gate — the rule the token-leak false positive skipped.
+    expect(p).toContain('documented intent');
+    expect(p).toMatch(/documentation does not make a harm safe/);
+    // Agent 0 findings are not disproved by a green test.
+    expect(p).toMatch(/do not reject an issue-fidelity/i);
+  });
+
+  it('the verify brief is a verdict role: Exclusion Criteria yes, finding format no', () => {
+    const p = buildRoleBrief(PLAN, 'verify');
+    expect(p).toContain('What is NOT a finding'); // the Exclusion Criteria heading
+    // It rules on findings; it does not file them, so no finding-format block.
+    expect(p).not.toContain('**Anchor:**');
+  });
+
+  it('the reverse-audit brief hunts gaps and demands a substantive receipt', () => {
+    const p = buildRoleBrief(PLAN, 'reverse-audit');
+    expect(p).toMatch(/find the \*\*gaps\*\*/);
+    expect(p).toMatch(/Report only Critical or Suggestion/i);
+    expect(p).toContain('say what you examined'); // the substantive-return receipt
+    // It DOES file findings, so it keeps the finding format.
+    expect(p).toContain('**Anchor:**');
+  });
+
+  it('both point the agent at its brief file and give it diff reads', () => {
+    for (const role of ['verify', 'reverse-audit'] as const) {
+      const launch = buildRoleLaunchPrompt(PLAN, role, `/t/${role}.brief.md`);
+      expect(launch).toContain(`read_file(file_path="/t/${role}.brief.md")`);
+      expect(launch).toContain(PLAN.diffPathAbsolute);
+    }
   });
 });
