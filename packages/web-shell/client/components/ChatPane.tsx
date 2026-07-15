@@ -5,6 +5,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { Maximize2Icon, Minimize2Icon } from 'lucide-react';
 import {
   useActions,
   useConnection,
@@ -77,6 +78,14 @@ export interface ChatPaneProps {
    */
   workspaceCwd?: string;
   onClose?: () => void;
+  /**
+   * Toggle this pane between maximized (solo, filling the whole split) and the
+   * tiled layout. Omitted when only one pane is open — there's nothing to
+   * maximize against.
+   */
+  onToggleMaximize?: () => void;
+  /** Whether this pane is currently the maximized (solo) one. */
+  isMaximized?: boolean;
   onError?: (error: unknown, fallback: string) => void;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onPaneArtifactsChange?: (
@@ -98,6 +107,8 @@ export function ChatPane({
   title,
   workspaceCwd,
   onClose,
+  onToggleMaximize,
+  isMaximized = false,
   onError,
   onRightPanelOpen,
   onPaneArtifactsChange,
@@ -397,6 +408,27 @@ export function ChatPane({
         <span className={styles.title} title={headerLabel}>
           {headerLabel}
         </span>
+        {onToggleMaximize && (
+          <button
+            type="button"
+            className={styles.maximizeButton}
+            onClick={onToggleMaximize}
+            aria-pressed={isMaximized}
+            aria-label={t(
+              isMaximized ? 'splitView.restorePane' : 'splitView.maximizePane',
+            )}
+            title={t(
+              isMaximized ? 'splitView.restorePane' : 'splitView.maximizePane',
+            )}
+          >
+            {/* Same icon vocabulary as the dialog fullscreen toggle. */}
+            {isMaximized ? (
+              <Minimize2Icon size={16} aria-hidden />
+            ) : (
+              <Maximize2Icon size={16} aria-hidden />
+            )}
+          </button>
+        )}
         {onClose && (
           <button
             type="button"
