@@ -6,6 +6,7 @@
 
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
+import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';
 import { sanitizeLogText } from '@qwen-code/channel-base';
 import { normalizeServeChannelSelection } from '../channel-selection.js';
 import {
@@ -150,7 +151,7 @@ function startupFailureResponseFields(error: unknown): {
       }
       const workspaceCwd = sanitizeControlDiagnostic(
         failure['workspaceCwd'],
-        4096,
+        MAX_WORKSPACE_PATH_LENGTH,
       );
       const channel = sanitizeControlDiagnostic(
         failure['channel'],

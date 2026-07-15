@@ -52,6 +52,11 @@ describe('channel worker startup IPC', () => {
       }),
     ).toBe(false);
     expect(
+      isChannelStartupReportMessage({
+        type: 'channel_startup_failure',
+      }),
+    ).toBe(false);
+    expect(
       isChannelStartupFailure({
         channel: 'telegram',
         phase: 'create',
