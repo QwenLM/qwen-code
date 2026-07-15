@@ -106,7 +106,7 @@ export const QWEN_OAUTH_MODELS: ModelConfig[] = [
     id: 'coder-model',
     name: 'coder-model',
     description:
-      'Qwen 3.6 Plus — efficient hybrid model with leading coding performance',
+      'Qwen 3.7 Max — efficient hybrid model with leading coding performance',
     capabilities: { vision: true },
   },
 ];
