@@ -1033,6 +1033,33 @@ describe('StreamingToolCallParser', () => {
         args: { b: 2 },
         index: 1,
       });
+      // call_1's arguments must survive the collision intact.
+      expect(parser.getCompletedToolCalls()).toContainEqual({
+        id: 'call_1',
+        name: 'function1',
+        args: { a: 1 },
+        index: 0,
+      });
+    });
+
+    it('routes id-less continuations after a content-bearing colliding opener', () => {
+      parser.addChunk(0, '{"a":1}', 'call_1', 'function1');
+
+      // Same collision as above, but call_2's opener already carries a partial
+      // arguments fragment alongside its id and name — the line-239 remap-record
+      // path, as opposed to the empty-opener early return.
+      const opener = parser.addChunk(0, '{"b":', 'call_2', 'function2');
+      expect(opener.actualIndex).toBe(1);
+
+      const continuation = parser.addChunk(0, '2}');
+      expect(continuation.actualIndex).toBe(1);
+
+      expect(parser.getCompletedToolCalls()).toContainEqual({
+        id: 'call_2',
+        name: 'function2',
+        args: { b: 2 },
+        index: 1,
+      });
     });
 
     it('does not let a brand-new tool-call id adopt a remap slot that already has an id', () => {

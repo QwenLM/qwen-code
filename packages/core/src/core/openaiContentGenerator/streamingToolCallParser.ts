@@ -49,7 +49,12 @@ export class StreamingToolCallParser {
   private namelessToolCallIndices = new Set<number>();
   /** Map from tool call ID to actual index used for storage */
   private idToIndexMap: Map<string, number> = new Map();
-  /** Remapped slots awaiting a stable ID from a later chunk. */
+  /**
+   * Maps a provider index to the actual slot it was remapped to on collision.
+   * Two readers consume it: an id that arrives after its name/args adopts the
+   * slot, and later id-less continuation chunks at the same provider index are
+   * routed to it.
+   */
   private pendingIndexRemaps: Map<number, number> = new Map();
   /** Counter for generating new indices when collisions occur */
   private nextAvailableIndex: number = 0;
