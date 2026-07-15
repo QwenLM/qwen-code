@@ -842,6 +842,7 @@ const createErrorResponse = (
   error: Error,
   errorType: ToolErrorType | undefined,
   artifacts?: ToolArtifact[],
+  resultDisplay?: ToolResultDisplay,
 ): ToolCallResponseInfo => ({
   callId: request.callId,
   error,
@@ -854,7 +855,7 @@ const createErrorResponse = (
       },
     },
   ],
-  resultDisplay: error.message,
+  resultDisplay: resultDisplay ?? error.message,
   errorType,
   contentLength: error.message.length,
   ...(artifacts && artifacts.length > 0 ? { artifacts } : {}),
@@ -4258,6 +4259,11 @@ export class CoreToolScheduler {
           error,
           toolResult.error.type,
           failureHookArtifacts,
+          typeof toolResult.returnDisplay === 'string'
+            ? undefined
+            : this.compactResultDisplayForInteractiveHistory(
+                toolResult.returnDisplay,
+              ),
         );
         this.setStatusInternal(callId, 'error', errorResponse);
         if (toolResult.error.type === ToolErrorType.EXECUTION_TIMEOUT) {

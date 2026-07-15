@@ -7399,8 +7399,47 @@ describe('CoreToolScheduler telemetry spans', () => {
       }),
     });
 
-    expect(completedCalls[0].status).toBe('error');
+    const completedCall = completedCalls[0];
+    expect(completedCall?.status).toBe('error');
+    if (completedCall?.status !== 'error') {
+      throw new Error('expected an errored tool call');
+    }
+    expect(completedCall.response.resultDisplay).toBe('sensitive /secret/path');
     expectSanitizedFailure(spanRecord, 'Tool execution failed', 'tool_error');
+  });
+
+  it('preserves a structured tool display when the tool returns an error', async () => {
+    const resultDisplay = {
+      type: 'vision_bridge_notice' as const,
+      summary: 'Failed to read PDF after rendering pages 20-23',
+      notice:
+        'Vision bridge (qwen3-vl-plus) failed after sending images to dashscope.aliyuncs.com.',
+    };
+    const { completedCalls } = await runSingleTool({
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'original PDF extraction error',
+        returnDisplay: resultDisplay,
+        error: {
+          message: 'No extractable text layer.',
+          type: ToolErrorType.READ_CONTENT_FAILURE,
+        },
+      }),
+    });
+
+    expect(completedCalls[0]).toMatchObject({
+      status: 'error',
+      response: {
+        resultDisplay,
+        error: { message: 'No extractable text layer.' },
+        responseParts: [
+          {
+            functionResponse: {
+              response: { error: 'No extractable text layer.' },
+            },
+          },
+        ],
+      },
+    });
   });
 
   it('preserves PostToolUseFailure artifacts on toolResult.error responses', async () => {

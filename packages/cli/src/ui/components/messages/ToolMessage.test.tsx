@@ -173,6 +173,100 @@ describe('<ToolMessage />', () => {
     expect(output).not.toContain('MockMarkdown:Test result'); // collapsed
   });
 
+  it('always shows the vision bridge disclosure for a completed read', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="ReadFile"
+        description="scanned.pdf"
+        resultDisplay={{
+          type: 'vision_bridge_notice',
+          summary: 'Transcribed PDF pages 20-23; remaining pages 24-25',
+          notice:
+            'Converted 4 images via qwen3-vl-plus (dashscope.aliyuncs.com).',
+        }}
+      />,
+      StreamingState.Idle,
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('Transcribed PDF pages 20-23');
+    expect(output).toContain('remaining pages 24-25');
+    expect(output).toContain('qwen3-vl-plus');
+    expect(output).toContain('dashscope.aliyuncs.com');
+  });
+
+  it('sanitizes terminal controls in the vision bridge display summary', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="ReadFile"
+        description="scanned.pdf"
+        resultDisplay={{
+          type: 'vision_bridge_notice',
+          summary: 'Transcribed evil\x1b]52;c;ZXZpbA==\x07.pdf\u202e',
+          notice: 'Converted via qwen3-vl-plus.',
+        }}
+      />,
+      StreamingState.Idle,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('Transcribed evil');
+    expect(output).toContain('qwen3-vl-plus');
+    expect(output).not.toContain('\x1b]52;');
+    expect(output).not.toContain('\x07');
+    expect(output).not.toContain('\u202e');
+  });
+
+  it('keeps the vision bridge disclosure beside full read details', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="ReadFile"
+        description="scanned.pdf"
+        resultDisplay={{
+          type: 'vision_bridge_notice',
+          summary: 'Transcribed PDF pages 20-23',
+          notice:
+            'Converted 4 images via qwen3-vl-plus (dashscope.aliyuncs.com).',
+        }}
+        detailedDisplay="Page 20: transcribed content"
+        fullDetail
+        forceShowResult
+      />,
+      StreamingState.Idle,
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('Transcribed PDF pages 20-23');
+    expect(output).toContain('dashscope.aliyuncs.com');
+    expect(output).toContain('Page 20: transcribed content');
+  });
+
+  it('shows the vision bridge disclosure when the PDF fallback is an error', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="ReadFile"
+        description="scanned.pdf"
+        status={ToolCallStatus.Error}
+        resultDisplay={{
+          type: 'vision_bridge_notice',
+          summary: 'Failed to read PDF after rendering pages 20-23',
+          notice:
+            'Vision bridge (qwen3-vl-plus) failed after sending images to dashscope.aliyuncs.com.',
+        }}
+      />,
+      StreamingState.Idle,
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('Failed to read PDF');
+    expect(output).toContain('qwen3-vl-plus');
+    expect(output).toContain('dashscope.aliyuncs.com');
+  });
+
   it('collapses ANSI result for completed collapsible tool', () => {
     const ansiResult: AnsiOutputDisplay = {
       ansiOutput: [
