@@ -60,6 +60,45 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `session-transcript-${theme}`);
     });
 
+    test(`mermaid diagram`, async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        events: [
+          userTextEvent('Diagram the tool-approval flow so I can review it.', {
+            id: 1,
+          }),
+          assistantTextEvent(
+            'Here is the tool-approval flow:\n\n' +
+              '```mermaid\n' +
+              'flowchart LR\n' +
+              '  A[Tool call] --> B{Folder trusted?}\n' +
+              '  B -->|Yes| C[Run immediately]\n' +
+              '  B -->|No| D{Ask approval}\n' +
+              '  D -->|Approve| C\n' +
+              '  D -->|Reject| E[Cancel turn]\n' +
+              '  C --> F[Return result]\n' +
+              '```',
+            { id: 2 },
+          ),
+          turnCompleteEvent('prompt-mermaid', { id: 3 }),
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      // MermaidBlock lazy-imports `mermaid` and renders asynchronously (behind a
+      // ~150ms timer), swapping a "rendering…" placeholder for the injected
+      // `<svg id="mermaid-N">`. Wait for that SVG so the diagram is captured
+      // rendered — not the placeholder — on every run.
+      await expect(
+        page.locator('[data-web-shell-message-list] svg[id^="mermaid-"]'),
+      ).toBeVisible();
+      await captureScreenshot(page, `mermaid-diagram-${theme}`);
+    });
+
     test(`slash menu`, async ({ page }, testInfo) => {
       const scenario = createWebShellDaemonScenario();
       const daemon = await installScenario(
