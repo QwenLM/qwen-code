@@ -1215,6 +1215,11 @@ describe('AnthropicContentConverter', () => {
               parts: [
                 { text: 'unsigned', thought: true },
                 {
+                  text: 'empty signature',
+                  thought: true,
+                  thoughtSignature: '',
+                },
+                {
                   text: 'signed',
                   thought: true,
                   thoughtSignature: 'real-signature',
