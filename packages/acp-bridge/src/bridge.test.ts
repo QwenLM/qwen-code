@@ -406,10 +406,13 @@ describe('createAcpSessionBridge', () => {
         events.push('inject');
         const meta =
           (request as { _meta?: Record<string, unknown> })._meta ?? {};
+        const sanitizedMeta = { ...meta };
+        delete sanitizedMeta['qwen.telemetry.traceparent'];
+        delete sanitizedMeta['qwen.telemetry.tracestate'];
         return {
           ...request,
           _meta: {
-            ...meta,
+            ...sanitizedMeta,
             'qwen.telemetry.traceparent': 'daemon-traceparent',
           },
         };
@@ -429,6 +432,7 @@ describe('createAcpSessionBridge', () => {
         _meta: {
           keep: 'value',
           'qwen.telemetry.traceparent': 'client-spoof',
+          'qwen.telemetry.tracestate': 'client-state',
         },
       } as PromptRequest,
       undefined,
@@ -454,9 +458,15 @@ describe('createAcpSessionBridge', () => {
       keep: 'value',
       'qwen.telemetry.traceparent': 'daemon-traceparent',
     });
+    expect(handle.agent.promptCalls[0]!._meta).not.toHaveProperty(
+      'qwen.telemetry.tracestate',
+    );
     expect(handle.agent.newSessionCalls[0]!._meta).toMatchObject({
       'qwen.telemetry.traceparent': 'daemon-traceparent',
     });
+    expect(handle.agent.newSessionCalls[0]!._meta).not.toHaveProperty(
+      'qwen.telemetry.tracestate',
+    );
     expect(session.clientId).toBeDefined();
     expect(spanAttributes.get('prompt.dispatch')).toMatchObject({
       'qwen-code.client_id': session.clientId,
