@@ -85,14 +85,20 @@ vi.mock('../utils/retry.js', async (importOriginal) => {
   };
 });
 
-const { mockLogContentRetry, mockLogContentRetryFailure } = vi.hoisted(() => ({
+const {
+  mockLogContentRetry,
+  mockLogContentRetryFailure,
+  mockLogProtocolTagSanitized,
+} = vi.hoisted(() => ({
   mockLogContentRetry: vi.fn(),
   mockLogContentRetryFailure: vi.fn(),
+  mockLogProtocolTagSanitized: vi.fn(),
 }));
 
 vi.mock('../telemetry/loggers.js', () => ({
   logContentRetry: mockLogContentRetry,
   logContentRetryFailure: mockLogContentRetryFailure,
+  logProtocolTagSanitized: mockLogProtocolTagSanitized,
   // Real ChatCompressionService.compress() calls logChatCompression on
   // every attempt; the R3.4 integration test exercises that path, so the
   // mock has to expose it (no-op).
@@ -1970,6 +1976,103 @@ describe('GeminiChat', async () => {
         }
       },
     );
+
+    it('sanitizes a standalone closing thinking tag without retrying valid tool calls', async () => {
+      const recordAssistantTurn = vi.fn();
+      const chatWithRecording = new GeminiChat(
+        mockConfig,
+        config,
+        [],
+        {
+          recordAssistantTurn,
+          recordChatCompression: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      const create = vi.fn().mockImplementation(async () =>
+        (async function* () {
+          yield {
+            id: 'sanitized-protocol-tag',
+            created: 1,
+            model: 'test-model',
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  reasoning_content: 'hidden reasoning',
+                  content: '\n</think>\n',
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: 'call_read',
+                      type: 'function',
+                      function: { name: 'read_file', arguments: '{}' },
+                    },
+                  ],
+                },
+                finish_reason: 'tool_calls',
+              },
+            ],
+          } as unknown as OpenAI.Chat.ChatCompletionChunk;
+        })(),
+      );
+      const provider = {
+        buildClient: () =>
+          ({ chat: { completions: { create } } }) as unknown as OpenAI,
+        buildRequest: (request: OpenAI.Chat.ChatCompletionCreateParams) =>
+          request,
+        buildHeaders: () => ({}),
+        getDefaultGenerationConfig: () => ({}),
+      } as OpenAICompatibleProvider;
+      const generator = new OpenAIContentGenerator(
+        { model: 'test-model', authType: AuthType.USE_OPENAI },
+        mockConfig,
+        provider,
+      );
+      vi.mocked(mockConfig.getContentGenerator).mockReturnValue(generator);
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+      });
+
+      const stream = await chatWithRecording.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-sanitized-protocol-tag',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) events.push(event);
+      const parts = events.flatMap((event) =>
+        event.type === StreamEventType.CHUNK
+          ? (event.value.candidates?.[0]?.content?.parts ?? [])
+          : [],
+      );
+
+      expect(create).toHaveBeenCalledTimes(1);
+      expect(mockLogContentRetry).not.toHaveBeenCalled();
+      expect(mockLogProtocolTagSanitized).toHaveBeenCalledTimes(1);
+      expect(mockLogProtocolTagSanitized).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          model: 'test-model',
+          prompt_id: 'prompt-id-sanitized-protocol-tag',
+          response_id: 'sanitized-protocol-tag',
+          tag_name: 'think',
+          tool_call_count: 1,
+        }),
+      );
+      expect(parts).toContainEqual({
+        functionCall: { id: 'call_read', name: 'read_file', args: {} },
+      });
+      expect(parts.some((part) => part.text?.includes('</think>'))).toBe(false);
+      expect(JSON.stringify(chatWithRecording.getHistory())).not.toContain(
+        '</think>',
+      );
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(
+        JSON.stringify(recordAssistantTurn.mock.calls[0]?.[0].message),
+      ).not.toContain('</think>');
+    });
 
     it('falls back to coerced totalTokenCount when promptTokenCount is hostile', async () => {
       const response = (async function* () {
