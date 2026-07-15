@@ -149,6 +149,12 @@ def test_rejects_fractional_max_session_turns() -> None:
         validate_query_options(QueryOptions(max_session_turns=cast(Any, 0.5)))
 
 
+@pytest.mark.parametrize("value", [True, False])
+def test_rejects_bool_max_session_turns(value: bool) -> None:
+    with pytest.raises(ValidationError, match="max_session_turns"):
+        validate_query_options(QueryOptions(max_session_turns=cast(Any, value)))
+
+
 def test_rejects_empty_qwen_executable_path() -> None:
     with pytest.raises(
         ValidationError, match="path_to_qwen_executable cannot be empty"

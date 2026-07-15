@@ -1320,7 +1320,10 @@ export function normalizeMaxSubagentDepth(
     : Math.min(MAX_SUBAGENT_DEPTH_LIMIT, Math.max(1, Math.floor(value)));
 }
 
-function validateMaxSessionTurns(value: number | undefined): number {
+/**
+ * Validates the session-turn limit at config and persisted-agent boundaries.
+ */
+export function validateMaxSessionTurns(value: number | undefined): number {
   const resolved = value ?? -1;
   if (!Number.isInteger(resolved)) {
     throw new FatalConfigError(
