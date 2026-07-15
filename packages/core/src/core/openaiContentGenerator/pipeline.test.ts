@@ -1741,6 +1741,51 @@ describe('ContentGenerationPipeline', () => {
       expect(results).toEqual([]);
     });
 
+    it('flushes held response parts for a whitespace-only candidate at clean EOF', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'response-id',
+            choices: [{ delta: { content: ' ' }, finish_reason: null }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+      const emptyResponse = new GenerateContentResponse();
+      emptyResponse.candidates = [
+        { content: { parts: [], role: 'model' }, index: 0 },
+      ];
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+        (_chunk, context) => {
+          context.pendingThinkingTagCandidate = { text: ' ' };
+          context.pendingUntrustedResponseParts = [
+            { thought: true, text: 'reasoning' },
+          ];
+          return emptyResponse;
+        },
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+      const results = [];
+      for await (const result of resultGenerator) results.push(result);
+
+      expect(results).toHaveLength(1);
+      expect(results[0]?.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'reasoning' },
+      ]);
+    });
+
     it('does not log protocol-tag sanitization before a held finish is yielded', async () => {
       const request: GenerateContentParameters = {
         model: 'test-model',
@@ -1872,6 +1917,133 @@ describe('ContentGenerationPipeline', () => {
           tool_call_count: 1,
         }),
       );
+    });
+
+    it('does not attribute sanitization from a discarded duplicate finish', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const chunks = ['finish-1', 'finish-2', 'usage'].map(
+        (id) =>
+          ({
+            id,
+            choices: [{ delta: {}, finish_reason: null }],
+          }) as OpenAI.Chat.ChatCompletionChunk,
+      );
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield* chunks;
+        },
+      };
+      const makeFinishResponse = (responseId: string) => {
+        const response = new GenerateContentResponse();
+        response.responseId = responseId;
+        response.candidates = [
+          {
+            content: { parts: [{ functionCall: { name: 'read_file' } }] },
+            finishReason: FinishReason.STOP,
+            index: 0,
+          },
+        ];
+        return response;
+      };
+      const firstFinish = makeFinishResponse('finish-1');
+      const secondFinish = makeFinishResponse('finish-2');
+      const usageResponse = new GenerateContentResponse();
+      usageResponse.usageMetadata = { totalTokenCount: 1 };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+        (chunk, context) => {
+          if (chunk.id === 'finish-1') return firstFinish;
+          if (chunk.id === 'finish-2') {
+            context.protocolTagSanitized = {
+              tagName: 'think',
+              toolCallCount: 1,
+            };
+            return secondFinish;
+          }
+          return usageResponse;
+        },
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+      for await (const _ of resultGenerator) {
+        // Consume the merged finish response.
+      }
+
+      expect(logProtocolTagSanitized).not.toHaveBeenCalled();
+    });
+
+    it('rejects visible content after a sanitized finish', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const chunks = ['finish', 'trailing-content'].map(
+        (id) =>
+          ({
+            id,
+            choices: [{ delta: {}, finish_reason: null }],
+          }) as OpenAI.Chat.ChatCompletionChunk,
+      );
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield* chunks;
+        },
+      };
+      const finishResponse = new GenerateContentResponse();
+      finishResponse.responseId = 'finish';
+      finishResponse.candidates = [
+        {
+          content: { parts: [{ functionCall: { name: 'read_file' } }] },
+          finishReason: FinishReason.STOP,
+          index: 0,
+        },
+      ];
+      const trailingResponse = new GenerateContentResponse();
+      trailingResponse.candidates = [
+        {
+          content: { parts: [{ text: 'unexpected' }], role: 'model' },
+          index: 0,
+        },
+      ];
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+        (chunk, context) => {
+          if (chunk.id === 'finish') {
+            context.protocolTagSanitized = {
+              tagName: 'think',
+              toolCallCount: 1,
+            };
+            return finishResponse;
+          }
+          return trailingResponse;
+        },
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+
+      await expect(async () => {
+        for await (const _ of resultGenerator) {
+          // Consume until trailing content validation runs.
+        }
+      }).rejects.toMatchObject({ type: 'PROTOCOL_TAG_LEAK' });
+      expect(logProtocolTagSanitized).not.toHaveBeenCalled();
     });
 
     it.each(['transport error', 'explicit abort'] as const)(

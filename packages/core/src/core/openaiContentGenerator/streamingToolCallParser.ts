@@ -54,6 +54,7 @@ export class StreamingToolCallParser {
   /** Counter for generating new indices when collisions occur */
   private nextAvailableIndex: number = 0;
   private conflictingToolCallIdentity = false;
+  private invalidToolCallIndex = false;
 
   /**
    * Processes a new chunk of tool call data and attempts to parse complete JSON objects
@@ -78,19 +79,20 @@ export class StreamingToolCallParser {
     name?: string,
   ): ToolCallParseResult {
     const validName = name?.trim() || undefined;
+    if (!Number.isSafeInteger(index) || index < 0) {
+      this.conflictingToolCallIdentity = true;
+      this.invalidToolCallIndex = true;
+      return {
+        complete: false,
+        error: new Error(`Invalid tool call index: ${index}`),
+      };
+    }
     if (!id && !validName && !chunk.trim()) {
       const depth = this.depths.get(index) ?? 0;
       const inString = this.inStrings.get(index) ?? false;
       if (!this.buffers.has(index) || (depth === 0 && !inString)) {
         return { complete: false };
       }
-    }
-    if (!Number.isSafeInteger(index) || index < 0) {
-      this.conflictingToolCallIdentity = true;
-      return {
-        complete: false,
-        error: new Error(`Invalid tool call index: ${index}`),
-      };
     }
 
     let actualIndex = index;
@@ -326,9 +328,13 @@ export class StreamingToolCallParser {
     return this.conflictingToolCallIdentity;
   }
 
+  hasInvalidToolCallIndex(): boolean {
+    return this.invalidToolCallIndex;
+  }
+
   hasInvalidToolCallArguments(): boolean {
     for (const [index, buffer] of this.buffers.entries()) {
-      if (!this.toolCallMeta.get(index)?.name || !buffer.trim()) continue;
+      if (!this.toolCallMeta.get(index)?.name || buffer.length === 0) continue;
 
       try {
         const args: unknown = JSON.parse(buffer);
@@ -551,6 +557,7 @@ export class StreamingToolCallParser {
     this.pendingIndexRemaps.clear();
     this.nextAvailableIndex = 0;
     this.conflictingToolCallIdentity = false;
+    this.invalidToolCallIndex = false;
   }
 
   /**

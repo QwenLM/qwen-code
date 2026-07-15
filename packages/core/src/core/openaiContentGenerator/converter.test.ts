@@ -509,6 +509,22 @@ describe('OpenAIContentConverter', () => {
       ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
     });
 
+    it('rejects closing-tag recovery after a tag leaked in reasoning', () => {
+      const stream = withStreamParser();
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', {
+          reasoning_content: 'Let me check<think>',
+        }),
+        stream,
+      );
+      emitToolCall(stream, '</think>');
+
+      expect(() => finishStream(stream)).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+      expect(stream.protocolTagSanitized).toBeUndefined();
+    });
+
     it.each([
       ['think', '\n</think>\n\n'],
       ['thinking', ' </thinking> '],
@@ -701,6 +717,23 @@ describe('OpenAIContentConverter', () => {
       });
     });
 
+    it('buffers long whitespace without treating it as a protocol tag', () => {
+      const stream = withStreamParser();
+      const whitespace = ' '.repeat(129);
+      emitReasoning(stream);
+
+      const pending = converter.convertOpenAIChunkToGemini(
+        streamChunk('whitespace', { content: whitespace }),
+        stream,
+      );
+      const finish = finishStream(stream, 'stop');
+
+      expect(pending.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
+        { text: whitespace },
+      ]);
+    });
+
     it('emits trailing whitespace when the stream finishes', () => {
       const stream = withStreamParser();
       emitReasoning(stream);
@@ -749,6 +782,79 @@ describe('OpenAIContentConverter', () => {
         tagName: 'think',
         toolCallCount: 1,
       });
+    });
+
+    it('ignores cumulative replays of an incomplete closing tag', () => {
+      const stream = withStreamParser();
+      emitReasoning(stream);
+      const first = converter.convertOpenAIChunkToGemini(
+        streamChunk('tag-prefix', { content: '</thi' }),
+        stream,
+      );
+      const replay = converter.convertOpenAIChunkToGemini(
+        streamChunk('tag-prefix-replay', { content: '</thi' }),
+        stream,
+      );
+      const tag = emitToolCall(stream, '</think>');
+      const finish = finishStream(stream);
+
+      expect(first.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(replay.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(tag.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
+        {
+          functionCall: { id: 'call_read', name: 'read_file', args: {} },
+        },
+      ]);
+      expect(stream.protocolTagSanitized).toEqual({
+        tagName: 'think',
+        toolCallCount: 1,
+      });
+    });
+
+    it('rejects an invalid tool-call index on a stop finish', () => {
+      const stream = withStreamParser();
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('invalid-tool-call', {
+          tool_calls: [
+            {
+              index: Number.MAX_SAFE_INTEGER + 1,
+              id: 'call_invalid',
+              function: { name: 'read_file', arguments: '{}' },
+            },
+          ],
+        }),
+        stream,
+      );
+
+      expect(() => finishStream(stream, 'stop')).toThrowError(
+        expect.objectContaining({ type: 'MALFORMED_TOOL_CALL' }),
+      );
+    });
+
+    it('rejects valid tool calls accompanied by an invalid index', () => {
+      const stream = withStreamParser();
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('mixed-tool-calls', {
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_read',
+              function: { name: 'read_file', arguments: '{}' },
+            },
+            {
+              index: Number.MAX_SAFE_INTEGER + 1,
+              id: 'call_invalid',
+              function: { name: 'write_file', arguments: '{}' },
+            },
+          ],
+        }),
+        stream,
+      );
+
+      expect(() => finishStream(stream)).toThrowError(
+        expect.objectContaining({ type: 'MALFORMED_TOOL_CALL' }),
+      );
     });
 
     it('releases a split tag-like prefix when it becomes ordinary text', () => {
@@ -842,7 +948,7 @@ describe('OpenAIContentConverter', () => {
       expect(stream.protocolTagSanitized).toBeUndefined();
     });
 
-    it.each(['{"path":', '{bad}', 'null', '[]', '42'])(
+    it.each(['{"path":', '{bad}', 'null', '[]', '42', '   '])(
       'rejects a standalone closing thinking tag with unsafe tool arguments %s',
       (toolArguments) => {
         const stream = withStreamParser();

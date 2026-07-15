@@ -484,21 +484,23 @@ export class ContentGenerationPipeline {
     // function-call parts from the finish chunk).
     let pendingFinishResponse: GenerateContentResponse | null = null;
     let finishYielded = false;
-    let pendingProtocolTagSanitized:
+    let pendingFinishProtocolTagSanitized:
       | NonNullable<RequestContext['protocolTagSanitized']>
       | undefined;
     const logPendingProtocolTagSanitized = (
       response: GenerateContentResponse,
+      sanitization:
+        | NonNullable<RequestContext['protocolTagSanitized']>
+        | undefined,
     ) => {
-      if (!pendingProtocolTagSanitized) return;
+      if (!sanitization) return;
       const event = new ProtocolTagSanitizedEvent({
         model: context.model,
         promptId: userPromptId,
         responseId: response.responseId,
-        tagName: pendingProtocolTagSanitized.tagName,
-        toolCallCount: pendingProtocolTagSanitized.toolCallCount,
+        tagName: sanitization.tagName,
+        toolCallCount: sanitization.toolCallCount,
       });
-      pendingProtocolTagSanitized = undefined;
       debugLogger.warn('Sanitized a model protocol tag', {
         model: event.model,
         promptId: event.prompt_id,
@@ -530,7 +532,6 @@ export class ContentGenerationPipeline {
 
         const sanitization = context.protocolTagSanitized;
         if (sanitization) {
-          pendingProtocolTagSanitized ??= sanitization;
           context.protocolTagSanitized = undefined;
         }
 
@@ -543,6 +544,20 @@ export class ContentGenerationPipeline {
           getToolCallPreparations(response).length === 0
         ) {
           continue;
+        }
+
+        if (
+          pendingFinishProtocolTagSanitized &&
+          pendingFinishResponse &&
+          !response.candidates?.[0]?.finishReason &&
+          response.candidates?.some(
+            (candidate) => (candidate.content?.parts?.length ?? 0) > 0,
+          )
+        ) {
+          throw new InvalidStreamError(
+            'Model response continued after a finish reason.',
+            'PROTOCOL_TAG_LEAK',
+          );
         }
 
         // Stage 2c: Handle chunk merging for providers that send
@@ -568,6 +583,14 @@ export class ContentGenerationPipeline {
           continue;
         }
 
+        if (
+          !pendingFinishResponse &&
+          response.candidates?.[0]?.finishReason &&
+          sanitization
+        ) {
+          pendingFinishProtocolTagSanitized = sanitization;
+        }
+
         const shouldYield = this.handleChunkMerging(
           response,
           collectedGeminiResponses,
@@ -579,13 +602,16 @@ export class ContentGenerationPipeline {
         if (shouldYield) {
           // If we have a pending finish response, yield it instead
           if (pendingFinishResponse) {
-            logPendingProtocolTagSanitized(pendingFinishResponse);
+            logPendingProtocolTagSanitized(
+              pendingFinishResponse,
+              pendingFinishProtocolTagSanitized,
+            );
             yield pendingFinishResponse;
             finishYielded = true;
             // Keep pendingFinishResponse alive so late-arriving usage
             // metadata can still be merged (see finishYielded block above).
           } else {
-            logPendingProtocolTagSanitized(response);
+            logPendingProtocolTagSanitized(response, sanitization);
             yield response;
           }
         }
@@ -596,8 +622,19 @@ export class ContentGenerationPipeline {
         !context.pendingThinkingTagCandidate.closingTagName &&
         !/\S/.test(context.pendingThinkingTagCandidate.text)
       ) {
+        const pendingParts = context.pendingUntrustedResponseParts;
         context.pendingThinkingTagCandidate = undefined;
         context.pendingUntrustedResponseParts = undefined;
+        if (pendingParts?.length) {
+          const response = new GenerateContentResponse();
+          response.candidates = [
+            {
+              content: { parts: pendingParts, role: 'model' },
+              index: 0,
+            },
+          ];
+          yield response;
+        }
       } else if (context.pendingThinkingTagCandidate) {
         throw new InvalidStreamError(
           'Model response leaked thinking tags.',
@@ -608,7 +645,10 @@ export class ContentGenerationPipeline {
       // Stage 2d: If there's still a pending finish response at the end
       // (e.g. no usage chunk arrived after the finish chunk), yield it.
       if (pendingFinishResponse && !finishYielded) {
-        logPendingProtocolTagSanitized(pendingFinishResponse);
+        logPendingProtocolTagSanitized(
+          pendingFinishResponse,
+          pendingFinishProtocolTagSanitized,
+        );
         yield pendingFinishResponse;
       }
     } catch (error) {

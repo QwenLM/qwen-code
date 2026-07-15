@@ -814,14 +814,10 @@ describe('StreamingToolCallParser', () => {
     });
 
     it('should reject unsafe provider indices', () => {
-      const result = parser.addChunk(
-        Number.MAX_SAFE_INTEGER + 1,
-        '{}',
-        'call_1',
-        'read_file',
-      );
+      const result = parser.addChunk(Number.MAX_SAFE_INTEGER + 1, '   ');
 
       expect(result.error?.message).toContain('Invalid tool call index');
+      expect(parser.hasInvalidToolCallIndex()).toBe(true);
       expect(parser.hasConflictingToolCallIdentity()).toBe(true);
     });
 
@@ -1133,6 +1129,7 @@ describe('StreamingToolCallParser', () => {
   describe('hasInvalidToolCallArguments', () => {
     it.each([
       ['', false],
+      ['   ', true],
       ['{"path":"a.ts"}', false],
       ['{bad}', true],
       ['null', true],

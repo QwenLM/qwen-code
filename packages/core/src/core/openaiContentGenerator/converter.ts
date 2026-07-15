@@ -1422,13 +1422,18 @@ export function convertOpenAIChunkToGemini(
     let visibleText = parts.map(getVisibleText).join('');
 
     const pendingTagCandidate = requestContext.pendingThinkingTagCandidate;
+    const replayedTagPrefix =
+      !pendingTagCandidate?.closingTagName &&
+      /\S/.test(pendingTagCandidate?.text ?? '') &&
+      pendingTagCandidate?.text === visibleText;
     const replayedClosingTag =
       STANDALONE_CLOSING_THINKING_TAG_PATTERN.exec(
         visibleText,
       )?.[1]?.toLowerCase();
     if (
-      pendingTagCandidate?.closingTagName &&
-      pendingTagCandidate.closingTagName === replayedClosingTag
+      replayedTagPrefix ||
+      (pendingTagCandidate?.closingTagName &&
+        pendingTagCandidate.closingTagName === replayedClosingTag)
     ) {
       parts = parts.filter((part) => !getVisibleText(part));
       visibleText = '';
@@ -1478,7 +1483,8 @@ export function convertOpenAIChunkToGemini(
       } else if (isPossibleTag) {
         if (
           !closingTagName &&
-          combinedCandidateText.length > MAX_THINKING_TAG_CANDIDATE_LENGTH
+          combinedCandidateText.trimStart().length >
+            MAX_THINKING_TAG_CANDIDATE_LENGTH
         ) {
           throwProtocolTagLeak(requestContext);
         }
@@ -1536,6 +1542,7 @@ export function convertOpenAIChunkToGemini(
       requestContext.pendingThinkingTagCandidate?.closingTagName
     ) {
       if (
+        requestContext.hasThinkingTagInReasoning === true ||
         choice.finish_reason !== 'tool_calls' ||
         completedToolCalls.length === 0 ||
         toolCallWithoutName ||
@@ -1554,7 +1561,8 @@ export function convertOpenAIChunkToGemini(
 
     if (
       choice.finish_reason &&
-      (toolCallWithoutName ||
+      (toolCallParser.hasInvalidToolCallIndex() ||
+        toolCallWithoutName ||
         (choice.finish_reason === 'tool_calls' &&
           completedToolCalls.length === 0))
     ) {
