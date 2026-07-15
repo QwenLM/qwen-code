@@ -193,6 +193,66 @@ describe('useReactToolScheduler in YOLO Mode', () => {
     });
     expect(confirmationCall).toBeUndefined();
   });
+
+  it('keeps shell heartbeats out of liveOutput while retaining display chunks', async () => {
+    let resolveExecute: (result: ToolResult) => void;
+    let emitUpdate: ((output: unknown) => void) | undefined;
+    const streamingTool = new MockTool({
+      name: 'streamingTool',
+      displayName: 'Streaming Tool',
+      canUpdateOutput: true,
+      execute: vi.fn(
+        (_params: unknown, _signal?: AbortSignal, updateOutput?: unknown) => {
+          emitUpdate = updateOutput as (output: unknown) => void;
+          return new Promise<ToolResult>((resolve) => {
+            resolveExecute = resolve;
+          });
+        },
+      ) as any,
+    });
+    mockToolRegistry.getTool.mockReturnValue(streamingTool);
+
+    const { result } = renderSchedulerInYoloMode();
+    const schedule = result.current[1];
+
+    act(() => {
+      schedule(
+        {
+          callId: 'hbCall',
+          name: 'streamingTool',
+          args: {},
+        } as any,
+        new AbortController().signal,
+      );
+    });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    act(() => {
+      emitUpdate!('streamed text');
+      emitUpdate!({ type: 'shell_progress', elapsedMs: 10_000 });
+    });
+
+    const executing = result.current[0].find(
+      (tc) => tc.request.callId === 'hbCall',
+    ) as { liveOutput?: unknown };
+    // The display chunk is retained; the later heartbeat did not replace it.
+    expect(executing?.liveOutput).toBe('streamed text');
+
+    act(() => {
+      resolveExecute!({
+        llmContent: 'done',
+        returnDisplay: 'done',
+      } as ToolResult);
+    });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+  });
 });
 
 describe('useReactToolScheduler', () => {

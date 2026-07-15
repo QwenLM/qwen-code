@@ -671,6 +671,22 @@ export class DaemonChannelBridge
       case 'tool_call_update': {
         const toolCallId = getString(update['toolCallId']);
         const kind = getString(update['kind']);
+        const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+        if (
+          !kind &&
+          toolCallId &&
+          getString(update['status']) === 'in_progress' &&
+          meta?.['shellProgress'] !== undefined
+        ) {
+          // Silent-shell liveness heartbeat: a kind-less in_progress frame
+          // carrying only the id, status, and _meta.shellProgress stats.
+          // Channels have no use for it — drop it without flagging the
+          // session as malformed. Gate on shellProgress (matching the
+          // qwen-agent and web-shell normalizer guards) so a genuinely
+          // malformed kind-less tool_call still reaches emitProtocolError
+          // below instead of being silently swallowed.
+          break;
+        }
         if (!toolCallId || !kind) {
           this.emitProtocolError(`Malformed daemon ${type} event`, update);
           break;

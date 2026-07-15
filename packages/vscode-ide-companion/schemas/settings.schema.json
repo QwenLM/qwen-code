@@ -1040,6 +1040,12 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 600000
+            },
+            "heartbeatIntervalMs": {
+              "description": "Interval, in milliseconds, between liveness heartbeats emitted while a foreground shell command produces no output. Heartbeats are forwarded to ACP clients and stream-json consumers so they can tell a silent command from a dead session. When unset, heartbeats fire every 10000 ms (10 seconds). Set to 0 to disable heartbeats.",
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 600000
             }
           }
         },
