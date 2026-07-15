@@ -118,8 +118,11 @@ const t = (key: string, values?: Record<string, string | number>): string => {
   if (key === 'toolGroup.summary.updatedTodos') {
     return `Updated todos ${values?.count ?? 0} times`;
   }
-  if (key === 'toolGroup.summary.askedUser') {
-    return 'Asked user';
+  if (key === 'toolGroup.summary.provideInformation') {
+    return 'Provide information';
+  }
+  if (key === 'toolGroup.summary.askedQuestions') {
+    return `Asked ${values?.count ?? 0} question${values?.count === 1 ? '' : 's'}`;
   }
   if (key === 'toolGroup.summary.otherTools') {
     return `Called ${values?.count ?? 0} other tools`;
@@ -168,6 +171,18 @@ describe('tool group summary logic', () => {
     expect(formatToolGroupSummary(tools, zhT)).toBe('Running 读取文件');
   });
 
+  it('asks for information while AskUserQuestion is running', () => {
+    const tools = [
+      makeTool({
+        toolName: 'ask_user_question',
+        status: 'in_progress',
+        args: { questions: [{}, {}] },
+      }),
+    ];
+
+    expect(formatToolGroupSummary(tools, t)).toBe('Provide information');
+  });
+
   it('summarizes completed tool groups by common action type', () => {
     const tools = [
       makeTool({ callId: 'shell', status: 'completed' }),
@@ -183,13 +198,14 @@ describe('tool group summary logic', () => {
         callId: 'ask',
         toolName: 'ask_user_question',
         status: 'completed',
+        args: { questions: [{}, {}] },
       }),
     ];
 
     expect(hasActiveTool(tools)).toBe(false);
     expect(getActiveTool(tools).callId).toBe('ask');
     expect(formatToolGroupSummary(tools, t)).toBe(
-      'Edited 1 files Ran 1 commands Read 1 files Searched 1 times Updated todos 1 times Asked user',
+      'Edited 1 files Ran 1 commands Read 1 files Searched 1 times Updated todos 1 times Asked 2 questions',
     );
   });
 
@@ -243,8 +259,39 @@ describe('tool group summary logic', () => {
       formatSingleToolSummary(makeTool({ toolName: 'todo_write' }), t),
     ).toBe('Updated todos 1 times');
     expect(
+      formatSingleToolSummary(
+        makeTool({
+          toolName: 'ask_user_question',
+          args: { questions: [{}, {}, {}] },
+        }),
+        t,
+      ),
+    ).toBe('Asked 3 questions');
+    expect(
+      formatSingleToolSummary(
+        makeTool({
+          toolName: 'ask_user_question',
+          status: 'in_progress',
+          args: { questions: [{}, {}, {}] },
+        }),
+        t,
+      ),
+    ).toBe('Provide information');
+  });
+
+  it('counts legacy or empty AskUserQuestion inputs as one question', () => {
+    expect(
       formatSingleToolSummary(makeTool({ toolName: 'ask_user_question' }), t),
-    ).toBe('Asked user');
+    ).toBe('Asked 1 question');
+    expect(
+      formatSingleToolSummary(
+        makeTool({
+          toolName: 'ask_user_question',
+          args: { questions: [] },
+        }),
+        t,
+      ),
+    ).toBe('Asked 1 question');
   });
 
   it('truncates long single tool descriptions in the chat summary', () => {
