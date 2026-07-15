@@ -410,7 +410,6 @@ export class WeComChannel extends ChannelBase {
     }
 
     const text = extractText(body);
-    const explicitMention = getExplicitMention(body, this.wecom.botId);
     const quote = getRecord(body, 'quote');
     const envelope: Envelope = {
       channelName: this.name,
@@ -420,7 +419,7 @@ export class WeComChannel extends ChannelBase {
       text,
       messageId: rawMessageId ?? messageId,
       isGroup,
-      isMentioned: !isGroup || (explicitMention ?? false),
+      isMentioned: true,
       isReplyToBot:
         getString(getRecord(quote, 'from'), 'userid') === this.wecom.botId,
       referencedText: extractQuoteText(quote),
@@ -2091,62 +2090,4 @@ function getString(
 ): string {
   const raw = value?.[key];
   return typeof raw === 'string' ? raw : '';
-}
-
-function getBoolean(
-  value: Record<string, unknown> | undefined,
-  key: string,
-): boolean | undefined {
-  const raw = value?.[key];
-  return typeof raw === 'boolean' ? raw : undefined;
-}
-
-function getExplicitMention(
-  body: Record<string, unknown>,
-  botId: string,
-): boolean | undefined {
-  const botSpecificMention =
-    getBoolean(body, 'isInAtList') ?? getBoolean(body, 'is_in_at_list');
-  if (botSpecificMention !== undefined) return botSpecificMention;
-
-  const mentions = collectMentionValues(body);
-  if (!mentions.present) return getBoolean(body, 'isMentioned');
-
-  return mentions.values.some(
-    (mention) => mention === botId || mention === '@all' || mention === 'all',
-  );
-}
-
-function collectMentionValues(body: Record<string, unknown>): {
-  present: boolean;
-  values: string[];
-} {
-  const values: string[] = [];
-  let present = false;
-  for (const key of [
-    'mentions',
-    'mentioned_list',
-    'mentionedList',
-    'at_list',
-    'atList',
-    'at_userids',
-    'atUserIds',
-  ]) {
-    if (Object.prototype.hasOwnProperty.call(body, key)) {
-      present = true;
-    }
-    for (const item of getArray(body, key)) {
-      if (typeof item === 'string') {
-        values.push(item);
-        continue;
-      }
-      const record = asRecord(item);
-      if (!record) continue;
-      for (const itemKey of ['userid', 'userId', 'id', 'open_id', 'openId']) {
-        const value = getString(record, itemKey);
-        if (value) values.push(value);
-      }
-    }
-  }
-  return { present, values };
 }
