@@ -15133,7 +15133,7 @@ describe('Session', () => {
               update._meta?.['source'] === 'todo_stop_guard',
           )
           .map((update) => update._meta?.['attempt']),
-      ).toEqual([1]);
+      ).toEqual([]);
     });
 
     it('drains deferred automatic work after an active Guard is invalidated and the prompt errors', async () => {

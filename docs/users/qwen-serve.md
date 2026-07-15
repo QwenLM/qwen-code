@@ -301,6 +301,10 @@ includes the attempt and unfinished count but never Todo text. A queued full
 prompt also runs first, and existing permission/cancellation rules are
 unchanged.
 
+While an armed chain waits on related background work, unrelated cron/loop
+fires and old-task notifications are deferred. Recurring work is bounded and
+coalesced per task until the chain yields.
+
 The option defaults to `false`, requires restart, and is forced off in safe
 mode, bare mode, and Approval `plan` mode. It is in-memory only: loading Todo
 state from disk or restarting the daemon does not arm it. A new ordinary prompt

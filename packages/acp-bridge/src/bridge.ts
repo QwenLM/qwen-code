@@ -4739,7 +4739,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             entry.todoStopGuardAwaitingQueuedPrompt = false;
             void entry.connection
               .extMethod(TODO_STOP_GUARD_QUEUE_RELEASE_METHOD, { sessionId })
-              .catch(() => {});
+              .catch((error) => {
+                writeStderrLine(
+                  `qwen serve: Todo Stop Guard queued-prompt release failed for ` +
+                    `${JSON.stringify(sessionId)}: ${error instanceof Error ? error.message : String(error)}`,
+                );
+              });
           },
           { once: true },
         );

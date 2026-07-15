@@ -6226,6 +6226,12 @@ describe('createAcpSessionBridge', () => {
           }
           return { stopReason: 'end_turn' } as PromptResponse;
         },
+        extMethodImpl: async (method) => {
+          if (method === TODO_STOP_GUARD_QUEUE_RELEASE_METHOD) {
+            throw new Error('release failed');
+          }
+          return {};
+        },
       });
       const bridge = makeBridge({
         channelFactory: async () => handle.channel,
@@ -6270,15 +6276,29 @@ describe('createAcpSessionBridge', () => {
         }),
       ).resolves.toMatchObject({ hasQueuedPrompt: true });
 
-      const result = bridge.removePendingPrompt(session.sessionId, queuedId!);
-      expect(result.removed).toBe(true);
-      expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(1);
-      await vi.waitFor(() => {
-        expect(handle.agent.extMethodCalls).toContainEqual({
-          method: TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
-          params: { sessionId: session.sessionId },
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const result = bridge.removePendingPrompt(session.sessionId, queuedId!);
+        expect(result.removed).toBe(true);
+        expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(1);
+        await vi.waitFor(() => {
+          expect(handle.agent.extMethodCalls).toContainEqual({
+            method: TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
+            params: { sessionId: session.sessionId },
+          });
         });
-      });
+        await vi.waitFor(() => {
+          expect(stderrSpy).toHaveBeenCalledWith(
+            expect.stringContaining(
+              'Todo Stop Guard queued-prompt release failed',
+            ),
+          );
+        });
+      } finally {
+        stderrSpy.mockRestore();
+      }
 
       const again = bridge.removePendingPrompt(
         session.sessionId,

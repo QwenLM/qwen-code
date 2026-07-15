@@ -253,6 +253,8 @@ const TODO_STOP_GUARD_PROMPT_BODY_SUFFIX =
 const TODO_STOP_GUARD_FINAL_PROMPT_SUFFIX =
   ' This is the final automatic continuation. Before ending, either complete/update the todos or report the completed progress and the exact blocker.';
 
+// Content has no private metadata slot, so history cleanup recognizes only
+// these exact templates; byte-identical user text is intentionally ambiguous.
 function isTodoStopGuardPromptText(text: unknown): text is string {
   if (typeof text !== 'string') return false;
   if (!text.startsWith(TODO_STOP_GUARD_PROMPT_PREFIX)) return false;
@@ -2778,6 +2780,8 @@ export class Session implements SessionContext {
             if (continuation.kind === 'terminal') {
               return { stopReason: continuation.stopReason };
             }
+            // The hook decision targeted the pre-input assistant response.
+            // Let user input supersede it; the next natural stop re-evaluates.
             continue;
           }
           if (waitsForQueuedPrompt) {
@@ -3126,7 +3130,9 @@ export class Session implements SessionContext {
           const guardCommitted = this.todoStopGuard.commitContinuation(
             guardForThisSend.attempt,
           );
-          await this.#emitTodoStopGuardContinuation(guardForThisSend);
+          if (guardCommitted) {
+            await this.#emitTodoStopGuardContinuation(guardForThisSend);
+          }
           if (!guardCommitted && externalParts) {
             guardForThisSend = undefined;
           }
@@ -5938,6 +5944,8 @@ export class Session implements SessionContext {
 
         // Detect TodoWriteTool early - route to plan updates instead of tool_call events
         const isTodoWriteTool = tool.name === ToolNames.TODO_WRITE;
+        // Core exposes TodoWriteTool as a type only. The bundle's keepNames
+        // preserves this class check; name and kind also reject MCP shadows.
         const isTrustedTodoWriteTool =
           isTodoWriteTool &&
           tool.kind === Kind.Think &&
