@@ -279,6 +279,15 @@ describe('ExitPlanModeTool', () => {
   it('retains the subagent lifecycle policy', async () => {
     const invocation = tool.build({ plan: 'Subagent plan' });
 
+    await expect(
+      runWithAgentContext('agent-1', async () =>
+        invocation.requiresUserInteraction?.(),
+      ),
+    ).resolves.toBe(false);
+    await expect(
+      runWithAgentContext('agent-1', () => invocation.getDefaultPermission()),
+    ).resolves.toBe('allow');
+
     const result = await runWithAgentContext('agent-1', () =>
       invocation.execute(new AbortController().signal),
     );

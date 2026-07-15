@@ -390,6 +390,8 @@ export class ExitPlanModeTool extends BaseDeclarativeTool<
       true,
       false,
       true,
+      // Plan mode tells the model to call exit_plan_mode directly, so its schema
+      // must always be declared instead of deferred (issue #5210).
       true,
     );
   }
