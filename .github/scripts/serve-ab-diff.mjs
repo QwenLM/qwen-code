@@ -21,6 +21,18 @@ import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+// Read + parse a capture file, turning malformed JSON into a CLEAR error (a raw
+// SyntaxError doesn't say which capture is bad). Used for both the base and head
+// sides so neither can crash opaquely on a truncated/garbage capture.
+function readJson(path) {
+  const text = readFileSync(path, 'utf8');
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new Error(`invalid JSON capture at ${path}: ${e.message}`);
+  }
+}
+
 // Leaf keys whose VALUES vary run-to-run (not base→head), so a diff on them is
 // noise. Masked paths are ignored. Extend per scenario as richer endpoints are
 // added (session ids, createdAt, …).
@@ -203,10 +215,10 @@ export function diffCaptureDirs(beforeDir, afterDir) {
     .sort();
   const sections = afterFiles.map((f) => {
     const scenario = f.replace(/\.json$/, '');
-    const after = JSON.parse(readFileSync(join(afterDir, f), 'utf8'));
+    const after = readJson(join(afterDir, f));
     let before = {};
     try {
-      before = JSON.parse(readFileSync(join(beforeDir, f), 'utf8'));
+      before = readJson(join(beforeDir, f));
     } catch {
       // no baseline for this individual scenario
     }
@@ -235,8 +247,8 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   } else {
     // Single scenario: `serve-ab-diff.mjs <scenario> <beforeJson> <afterJson>`.
     const [beforePath, afterPath] = rest;
-    const before = JSON.parse(readFileSync(beforePath, 'utf8'));
-    const after = JSON.parse(readFileSync(afterPath, 'utf8'));
+    const before = readJson(beforePath);
+    const after = readJson(afterPath);
     const changes = diffJson(before, after);
     process.stdout.write(renderTable(cmd, changes) + '\n');
     process.stderr.write(`${changes.length}\n`);
