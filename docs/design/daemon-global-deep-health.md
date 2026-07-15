@@ -31,13 +31,16 @@ that are draining but have not completed bridge cleanup.
 
 The route reads each runtime's required getters before combining the values.
 It does not short-circuit channel reads. If the registry or any getter throws,
-the whole deep probe fails with `503 {"status":"degraded"}` rather than
-returning a partial snapshot.
+the whole deep probe fails with
+`503 {"status":"degraded","reason":"aggregation_failed"}` rather than
+returning a partial snapshot. Getter failures identify the workspace runtime in
+the daemon stderr log without exposing that identifier in the HTTP response.
 
 While the bootstrap listener is up but the runtime registry is not ready, a
-deep request returns the same degraded body with `Retry-After: 1`. In the
-health-first startup mode, completing that response still triggers runtime
-startup. The shallow bootstrap response remains `200 {"status":"ok"}`.
+deep request returns a degraded body with `reason: "bootstrap"` and
+`Retry-After: 1`. In the health-first startup mode, completing that response
+still triggers runtime startup. The shallow bootstrap response remains
+`200 {"status":"ok"}`.
 
 ## Compatibility and boundaries
 

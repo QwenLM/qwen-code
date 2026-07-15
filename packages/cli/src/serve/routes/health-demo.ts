@@ -90,6 +90,7 @@ export function createHealthDemoRoutes(
       res.status(200).json({ status: 'ok' });
       return;
     }
+    let failedWorkspaceId: string | undefined;
     try {
       const runtimes = workspaceRegistry.listManaged();
       let sessions = 0;
@@ -99,6 +100,7 @@ export function createHealthDemoRoutes(
       let lastActivity: number | null = null;
 
       for (const runtime of runtimes) {
+        failedWorkspaceId = runtime.workspaceId;
         const bridge = runtime.bridge;
         const runtimeSessions = bridge.sessionCount;
         const runtimePendingPermissions = bridge.pendingPermissionCount;
@@ -116,6 +118,7 @@ export function createHealthDemoRoutes(
         ) {
           lastActivity = runtimeLastActivity;
         }
+        failedWorkspaceId = undefined;
       }
 
       const now = Date.now();
@@ -134,10 +137,16 @@ export function createHealthDemoRoutes(
         ...(rateLimiter ? { rateLimitHits: rateLimiter.getHitCounts() } : {}),
       });
     } catch (err) {
+      const workspaceContext =
+        failedWorkspaceId !== undefined
+          ? ` for workspace ${JSON.stringify(failedWorkspaceId)}`
+          : '';
       writeStderrLine(
-        `qwen serve: /health deep probe failed: ${err instanceof Error ? err.message : String(err)}`,
+        `qwen serve: /health deep probe failed${workspaceContext}: ${err instanceof Error ? err.message : String(err)}`,
       );
-      res.status(503).json({ status: 'degraded' });
+      res
+        .status(503)
+        .json({ status: 'degraded', reason: 'aggregation_failed' });
     }
   };
 

@@ -3234,7 +3234,10 @@ describe('runQwenServe runtime startup failures', () => {
       const bootstrapRes = await fetch(`${handle.url}/health?deep=1`);
       expect(bootstrapRes.status).toBe(503);
       expect(bootstrapRes.headers.get('retry-after')).toBe('1');
-      expect(await bootstrapRes.json()).toEqual({ status: 'degraded' });
+      expect(await bootstrapRes.json()).toEqual({
+        status: 'degraded',
+        reason: 'bootstrap',
+      });
 
       await vi.waitFor(() => expect(createBridge).toHaveBeenCalledTimes(1), {
         timeout: 500,

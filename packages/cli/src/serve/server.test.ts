@@ -16430,12 +16430,26 @@ describe('createServeApp', () => {
       const app = createServeApp(baseOpts, undefined, {
         workspaceRegistry: registry,
       });
-
-      const res = await request(app)
-        .get('/health?deep=1')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
-      expect(res.status).toBe(503);
-      expect(res.body).toEqual({ status: 'degraded' });
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        const res = await request(app)
+          .get('/health?deep=1')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(res.status).toBe(503);
+        expect(res.body).toEqual({
+          status: 'degraded',
+          reason: 'aggregation_failed',
+        });
+        expect(
+          stderrSpy.mock.calls.some(([line]) =>
+            String(line).includes(
+              'deep probe failed for workspace "health-secondary"',
+            ),
+          ),
+        ).toBe(true);
+      } finally {
+        stderrSpy.mockRestore();
+      }
     });
 
     it('deep=1 returns 503 when bridge state access throws', async () => {
@@ -16451,7 +16465,10 @@ describe('createServeApp', () => {
         .get('/health?deep=1')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(503);
-      expect(res.body).toEqual({ status: 'degraded' });
+      expect(res.body).toEqual({
+        status: 'degraded',
+        reason: 'aggregation_failed',
+      });
     });
   });
 

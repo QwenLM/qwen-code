@@ -1222,7 +1222,7 @@ function createBootstrapServeApp(input: {
     }
     if (isDeepHealthQuery(req.query['deep'])) {
       res.setHeader('Retry-After', '1');
-      res.status(503).json({ status: 'degraded' });
+      res.status(503).json({ status: 'degraded', reason: 'bootstrap' });
       return;
     }
     res.status(200).json({ status: 'ok' });
