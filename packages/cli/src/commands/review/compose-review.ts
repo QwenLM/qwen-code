@@ -22,7 +22,7 @@
 import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   coverageFromTranscripts,
   TranscriptsUnavailableError,
@@ -94,6 +94,17 @@ export interface ComposeReviewResult {
   cappedBy: string[];
   /** True when a presubmit flag actually changed the event. */
   downgraded: boolean;
+  /**
+   * What the presubmit downgrade moved the event *from*, when it moved one.
+   *
+   * `baseEvent` cannot answer this: it is the row before caps AND downgrades, so a
+   * `REQUEST_CHANGES` that a cap already softened to `COMMENT` before the downgrade
+   * ran would look the same as one the downgrade itself moved. This names the
+   * transition the downgrade made, so the terminal verdict can say a Request
+   * changes — a review with confirmed Criticals — was downgraded, and not let it
+   * read as "Comment, nothing blocking".
+   */
+  downgradedFrom: 'Approve' | 'Request changes' | null;
 }
 
 const CRITICAL_MARKER = '**[Critical]**';
@@ -225,6 +236,36 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
             'so it could not have read it (build the prompt with `qwen review ' +
             'agent-prompt`)',
         );
+      }
+      // Worked, but not on the diff. Not idle and not blind — it had the path and
+      // spent its run somewhere else, which on a diff with deletions means it
+      // reviewed a file the removed lines are simply not in.
+      for (const label of cov.unopenedAgents) {
+        unreviewed.push(
+          `${label} — pointed at diff lines it never opened: it made tool calls, ` +
+            'but none of them read the diff',
+        );
+      }
+      // The prompt was built in code and edited on the way to the agent. This caps
+      // for the same reason the others do: what the agent was actually asked is not
+      // what this skill's guarantees are written against.
+      // `coverage.ts` already writes these self-explanatory (`… — launched with a
+      // prompt that is not the one the CLI built`), so push the label as-is —
+      // wrapping it in a second ` — ` clause read as one run-on sentence with two
+      // dashes. Same for `missingRoles` below; `unreadBriefs` already did this.
+      for (const label of cov.rewrittenPrompts) {
+        unreviewed.push(label);
+      }
+      // A dimension nobody reviewed. This is exactly what `unreviewedDimensions`
+      // has always meant, arrived at from the plan instead of from the orchestrator
+      // noticing — which, on the run that never launched Agent 0, it did not.
+      for (const label of cov.missingRoles) {
+        unreviewed.push(label);
+      }
+      // Launched, but never read the brief it was pointed at: it reviewed with no
+      // dimension, no severity definitions and no project rules.
+      for (const label of cov.unreadBriefs) {
+        unreviewed.push(label);
       }
     } catch (err) {
       // Two different failures, and they must not wear each other's message. A
@@ -382,6 +423,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       baseEvent,
       cappedBy,
       downgraded,
+      downgradedFrom,
     };
   }
 
@@ -392,6 +434,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       baseEvent,
       cappedBy,
       downgraded,
+      downgradedFrom,
     };
   }
 
@@ -464,6 +507,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     baseEvent,
     cappedBy,
     downgraded,
+    downgradedFrom,
   };
 }
 
@@ -504,5 +548,63 @@ export const composeReviewCommand: CommandModule = {
       writeFileSync(out, json, 'utf8');
     }
     writeStdoutLine(json);
+    // The verdict a human reads, next to the JSON a program reads.
+    //
+    // Step 6 prints a verdict to the terminal, and until now it *composed* one —
+    // from the same prose rules this file exists to replace. So a run could skip
+    // this command entirely and tell the user whatever it had concluded: dogfooded,
+    // one did, and reported an Approve on a review whose coverage check had refused.
+    // There is now nothing to compose. This is the sentence; print it.
+    writeStderrLine(verdictLine(result));
   },
 };
+
+/** The terminal verdict, in the words Step 6 is told to print. */
+export function verdictLine(r: ComposeReviewResult): string {
+  const label: Record<ReviewEvent, string> = {
+    APPROVE: 'Approve',
+    REQUEST_CHANGES: 'Request changes',
+    COMMENT: 'Comment',
+  };
+  const why: Record<string, string> = {
+    'cannot-tell-existing-critical':
+      'an existing blocker could not be ruled on',
+    'chunk-nobody-read': 'part of the diff was never read',
+    'uncoverable-chunk': 'part of the diff cannot be read at all',
+    'unreviewed-dimension': 'a dimension nobody reviewed',
+    'context-unavailable': "the PR's existing discussion could not be read",
+  };
+  let line = `Verdict: ${label[r.event]}`;
+  // Why an Approve was not available — but only when one would otherwise have been.
+  // A cap and a presubmit downgrade are BOTH reasons, and either can be the sole
+  // one: a review with no cap state that the presubmit dropped from Approve to
+  // Comment has an empty `cappedBy` and `downgraded: true`. Joining `cappedBy`
+  // unconditionally then printed `an Approve was NOT available:  — downgraded …`,
+  // a dangling colon over nothing. Collect the reasons first, and say the clause
+  // only if there is a reason to say it.
+  //
+  // A cap never softens a Request changes — a confirmed blocker earned that, and
+  // naming a constraint that did not bind would send the reader looking for an
+  // effect that is not there — so this clause is gated on the base having been an
+  // Approve at all.
+  if (r.baseEvent === 'APPROVE' && r.event !== 'APPROVE') {
+    const reasons = r.cappedBy.map((c) => why[c] ?? c);
+    if (r.downgraded) reasons.push('a presubmit check failed');
+    line += ` — an Approve was NOT available: ${reasons.join('; ')}`;
+  } else if (r.downgradedFrom === 'Request changes') {
+    // The decisive case, and the one a review caught. A presubmit downgrade can
+    // move a REQUEST_CHANGES — a review with **confirmed Criticals** — down to
+    // COMMENT (a self-PR, failing CI). Printed as a bare "Comment — downgraded",
+    // that reads to an operator as "minor issues, nothing blocking", while the
+    // review has just posted blockers inline. Say what it was.
+    line +=
+      ' — Request changes, downgraded to Comment by a presubmit check ' +
+      '(the blockers are still posted)';
+  } else if (r.downgraded) {
+    // A Suggestion-only Comment the presubmit still moved: there was no Approve to
+    // lose and no blocker to hide, but the event did change and the user should see
+    // it did.
+    line += ' — downgraded by a presubmit check';
+  }
+  return line;
+}
