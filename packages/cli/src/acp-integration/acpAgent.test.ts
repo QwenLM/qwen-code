@@ -660,7 +660,7 @@ vi.mock('../utils/languageUtils.js', () => ({
   getOutputLanguageFilePath: vi
     .fn()
     .mockReturnValue('/mock/.qwen/output-language.md'),
-  resolveOutputLanguage: vi.fn((v: string) => v),
+  resolveOutputLanguage: vi.fn((v: string | null | undefined) => v ?? 'auto'),
   isAutoLanguage: vi.fn(() => false),
   OUTPUT_LANGUAGE_AUTO: 'auto',
 }));
@@ -10622,7 +10622,9 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(isAutoLanguage).mockReturnValue(false);
-    vi.mocked(resolveOutputLanguage).mockImplementation((v: string) => v);
+    vi.mocked(resolveOutputLanguage).mockImplementation(
+      (v: string | null | undefined) => v ?? 'auto',
+    );
     mockConnectionState.reset();
     capturedAgentFactory = undefined;
 
