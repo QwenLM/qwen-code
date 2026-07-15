@@ -4,19 +4,33 @@
 
 In Virtualized-viewport (VP) mode — the mode enabled by `ui.useTerminalBuffer` — the CLI runs inside the terminal's alternate screen and enables SGR mouse tracking so it can drive scrolling, click-to-focus, and hover highlighting. A side effect is that the terminal no longer receives the click-drag events it would use for native text selection, so users cannot select and copy text with the mouse the way they can in a normal (non-VP) session. The only current workaround is to hold Shift/Option while dragging (terminal-dependent), and nothing in the UI surfaces it.
 
-This document proposes an application-level text selection and copy system for VP mode: the CLI takes ownership of press/drag/release, maintains a selection, renders a highlight, and copies the selected text to the system clipboard (with an OSC 52 fallback for remote/tmux sessions). It evaluates two implementation routes and commits to **Route B: expose the Ink renderer's per-frame cell grid through the existing Ink patch**, because that removes the correctness hazard that makes the alternative fragile.
+This document proposes an application-level text selection and copy system for VP mode: the CLI takes ownership of press/drag/release, maintains a selection, renders a highlight, and copies the selected text to the system clipboard (with an OSC 52 fallback for remote/tmux sessions).
 
-This is the design step of a feature PR. Implementation lands in subsequent commits on the same branch, staged as the milestones in this document.
+The feature is delivered in **two PRs** with a deliberately conservative first release:
+
+- **PR 1 (this branch, #6937)** — the design (this commit) followed by the Ink frame-buffer foundation and a **visible-region visual selection** MVP: drag-select within the currently visible viewport, word/line selection, copy-on-select, and manual copy. Copy returns the **visual cells** as shown on screen; it does not yet rejoin soft-wrapped lines or exclude gutters. Selection clears on scroll/resize/streaming.
+- **PR 2 (follow-up)** — completion: cross-screen selection (off-screen accumulation, edge auto-scroll, reverse drag) and **semantic copy fidelity** (soft-wrap rejoin, gutter/decoration exclusion), which require renderer-level semantic metadata rather than a raw grid.
+
+This split follows the "Simplicity First" principle: PR 1 solves the core problem (mouse select-and-copy of what's on screen) with a small, well-scoped Ink patch and no per-renderer text serialization; the deeper renderer semantic extension is isolated in PR 2 so it can be reviewed against its own cost.
+
+The design was revised after an implementation-feasibility audit against the Ink 7 renderer source; the corrected data contracts, coordinate formula, clipboard behavior, and highlight API below reflect that audit.
 
 ## Goals
 
-- Mouse click-drag selects text on screen in VP mode, with a visible highlight.
-- Double-click selects a word; triple-click selects a line.
-- Releasing the mouse copies the selection to the system clipboard (copy-on-select, on by default and configurable), matching the behavior most terminals give natively.
-- A keyboard path to copy (`Ctrl+Shift+C`) and to clear the selection (`Esc`).
-- Selected text is faithful: soft-wrapped lines are rejoined, wide characters (CJK/emoji) and their spacer cells are handled, gutter/decoration cells are excluded, trailing whitespace is trimmed.
-- Works across local (pbcopy/xclip/xsel/clip), remote (OSC 52), and multiplexer (tmux/screen passthrough) environments by reusing existing clipboard infrastructure.
-- An escape hatch that returns the mouse to the terminal so users who prefer native selection (or hit an environment where ours misbehaves) can opt out.
+### PR 1 — visible-region visual selection
+
+- Mouse click-drag selects text within the currently visible viewport, with a visible highlight.
+- Double-click selects a visual word; triple-click selects a visual line.
+- Releasing the mouse copies the selection to the system clipboard (copy-on-select, on by default and configurable).
+- Keyboard: `Ctrl+Shift+C` copies; `Esc` clears the selection.
+- Copy delivers the visual cells as displayed, across local (pbcopy/xclip/xsel/clip), remote (OSC 52), and multiplexer (tmux/screen passthrough) environments, reusing existing clipboard infrastructure. Wide characters (CJK/emoji) and their spacer cells are handled; per-line trailing padding is trimmed.
+- Selection clears deterministically on any non-selection scroll, resize, or streaming/layout change.
+- An escape hatch returns the mouse to the terminal for users who prefer native selection.
+
+### PR 2 — completion (follow-up)
+
+- Cross-screen selection: dragging past a viewport edge auto-scrolls and accumulates off-screen rows so a long selection copies in full; reverse drag works.
+- Semantic copy fidelity: soft-wrapped logical lines are rejoined (true hard newlines preserved); gutter/decoration cells (line-number gutters, scrollbar column, and confirmed decorations) are excluded, per per-renderer copy rules for diff/table/markdown/tool output.
 
 ## Non-goals
 
@@ -33,169 +47,206 @@ Mouse tracking is enabled only in VP mode, gated by the "VP gate" in `useMouseEv
 
 ## Prior art
 
-- **gemini-cli** (this project's upstream sibling) does not implement application-level selection. It offers two escape hatches: a global toggle that disables mouse tracking (`Ctrl+S`) and an in-app "Copy Mode" (`F9`) that temporarily disables tracking and freezes scrolling so the terminal's own selection works, exiting on any key. It also detects a left-drag and shows a transient hint pointing the user at the toggle. This is low-cost and robust but hands selection back to the terminal rather than owning it.
-- **A reference terminal coding agent** takes the opposite approach: it forks Ink so the renderer exposes a per-cell screen buffer, then implements the full selection stack itself — character/word/line selection, drag-to-scroll with off-screen accumulation, a highlight overlay drawn by overriding cell background, copy-on-select, and clipboard delivery via native tools / tmux buffer / OSC 52. Coordinate-to-text mapping is trivial there because the cell grid is directly addressable. This is the richest UX and the model for Route B below.
+- **gemini-cli** (this project's upstream sibling) does not implement application-level selection. It offers two escape hatches: a global toggle that disables mouse tracking and an in-app "Copy Mode" (`F9`) that temporarily disables tracking and freezes scrolling so the terminal's own selection works, exiting on any key. It also detects a left-drag and shows a transient hint. This is low-cost and robust but hands selection back to the terminal rather than owning it, and cannot provide an in-app highlight or copy-on-select. It remains the recommended fallback (see the escape hatch) if application selection is disabled.
+- **A reference terminal coding agent** takes the opposite approach: it forks Ink so the renderer composites into an addressable cell buffer, then implements the full selection stack — character/word/line selection, drag-to-scroll with off-screen accumulation, a highlight drawn by overriding cell background before serialization, copy-on-select, and clipboard delivery via native tools / tmux buffer / OSC 52. It carries per-cell source/selectability metadata so it can rejoin soft wraps and exclude decorations. This is the model for the frame-buffer foundation (PR 1) and the semantic contract (PR 2) below.
 
 ## Feasibility: what already exists
 
-The mouse and clipboard layers are mature and reusable. The missing pieces are the selection state machine, coordinate-to-text mapping across the whole history, highlight rendering, and a key-preemption path.
+The mouse and clipboard layers are mature and reusable. The missing pieces are the frame-buffer foundation, the selection state machine, highlight rendering, mouse-event arbitration, and a key-preemption path.
 
-| Capability                                                                                      | Status                                                                                                            | Reuse                                   |
-| ----------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
-| SGR mouse parse, fragment reassembly, ref-counted enable/disable                                | Present (`mouse.ts`, `KeypressContext`, `useMouseEvents`) — parses press/move/**release**, guards bracketed-paste | Direct                                  |
-| System clipboard write: pbcopy/xclip/xsel/clip, OSC 52 remote fallback, tmux/screen passthrough | Present (`commandUtils.ts:copyToClipboard`, `clipboardUtils.ts:writeOsc52`, `utils/osc.ts`)                       | Direct                                  |
-| Centralized keybindings + matchers                                                              | Present (`config/keyBindings.ts`, `keyMatchers.ts`)                                                               | Add commands                            |
-| Declarative boolean settings                                                                    | Present (`settingsSchema.ts`)                                                                                     | Add entries                             |
-| Yoga element position/size measurement                                                          | Present (`measure-element-position.ts`, `list-mouse.ts`)                                                          | Direct                                  |
-| Coordinate → character offset with wide-char/soft-wrap awareness                                | Present but input-only (`input-mouse.ts:visualClickToOffset`)                                                     | Generalize / superseded by Route B grid |
-| Per-line text model                                                                             | Local only (`MaxSizedBox` styled lines, `text-buffer` visual lines)                                               | N/A under Route B                       |
-| Addressable screen cell buffer                                                                  | **Absent** in the app; Ink builds one transiently in `Output.get()` but does not expose it                        | **Route B exposes it**                  |
-| Selection state machine, highlight rendering, key preemption, transient toast                   | **Absent**                                                                                                        | Build                                   |
+| Capability                                                                                       | Status                                                                                                        | Reuse                    |
+| ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| SGR mouse parse, fragment reassembly, ref-counted enable/disable                                 | Present (`mouse.ts`, `KeypressContext`, `useMouseEvents`) — parses press/move/release, guards bracketed-paste | Direct                   |
+| System clipboard write: pbcopy/xclip/xsel/clip, OSC 52 remote fallback, tmux/screen passthrough  | Present (`commandUtils.ts:copyToClipboard`, `clipboardUtils.ts:writeOsc52`, `utils/osc.ts`)                   | Direct (with API change) |
+| Centralized keybindings + matchers                                                               | Present (`config/keyBindings.ts`, `keyMatchers.ts`)                                                           | Add commands             |
+| Declarative boolean settings                                                                     | Present (`settingsSchema.ts`)                                                                                 | Add entries              |
+| Yoga element position/size measurement                                                           | Present (`measure-element-position.ts`, `list-mouse.ts`, `layoutRowForEvent`)                                 | Direct                   |
+| Coordinate → character offset with wide-char/soft-wrap awareness                                 | Present but input-only (`input-mouse.ts:visualClickToOffset`); mid-cell snap logic reusable                   | Reuse snap logic         |
+| Addressable screen cell buffer                                                                   | **Absent** in the app; Ink composites one transiently in `Output.get()` but does not expose it                | **PR 1 exposes it**      |
+| Selection state machine, highlight rendering, mouse arbitration, key preemption, transient toast | **Absent**                                                                                                    | Build                    |
 
-Two facts anchor the design. First, `left-release` is already parsed but has no consumer — no drag-to-select logic exists yet. Second, Ink 7's renderer already composites every frame into a cell grid: `Output.get()` in `node_modules/ink/build/output.js` builds `row[][]` where each cell is `{ type: 'char', value, fullWidth, styles }`. That grid is the fully composited, clipped, scrolled screen — exactly what a coordinate query needs — but it is local to `get()` and thrown away after being serialized to the string Ink writes to stdout.
+Two facts anchor the design. First, `left-release` is already parsed and existing consumers (scrollbar drag, click-to-focus) react to mouse events, but there is **no selection consumer** and mouse events are broadcast with no consumption/arbitration semantics — a selection handler must coordinate with the existing scrollbar-drag and click-to-focus handlers. Second, Ink 7's renderer composites every frame into a cell grid in `Output.get()` (`node_modules/ink/build/output.js`), producing `row[][]` where each cell is `{ type: 'char', value, fullWidth, styles }`. That grid is the fully composited, clipped screen — but it is local to `get()`, discarded after serialization, and (critically) carries no logical-text semantics.
 
-## Design decision: Route A vs Route B
+## Design decision: raw frame buffer (PR 1) → semantic frame buffer (PR 2)
 
-**Route A — application-level per-item text model (no Ink change).** Attach a measurable ref to each visible history item, measure item positions with `measureElementPosition`, hit-test a mouse row to an item, then map within the item to a line/character by generalizing `visualClickToOffset`. Render the highlight by re-slicing each `<Text>` into selected/unselected segments.
+The audit confirmed the direction but corrected a category error in the earlier draft: a raw `Output.get()` grid is sufficient for _visual_ selection but **cannot** by itself deliver _logical-text fidelity_, because the information needed for that is destroyed before the grid exists.
 
-- Pro: no Ink change; fits the current "stock Ink + application shims" posture; upgrades stay painless.
-- Con: history items are heterogeneous (markdown, `DiffRenderer`, `TableRenderer`, tool output, …), and each would need a text serialization that matches its actual on-screen wrapping exactly. Three wrapping implementations coexist (Ink `<Text wrap>`, `MaxSizedBox`'s own wrapper, `wrapToVisualLines`); any mismatch puts the selection boundary out of step with the screen. Every new renderer type becomes a place selection can silently break. The correctness surface is large and permanent.
+- **Soft vs hard wrap is unrecoverable from the grid.** `render-node-to-output.ts` calls `wrapText()` and only then passes newline-joined strings to `Output.write()`; `Output.get()` sees `text.split('\n')` and cannot tell a soft wrap from a hard newline. A hard break that exactly fills the wrap width is byte-identical in the grid to a soft wrap. "Line width + absence of intervening content" does not disambiguate it.
+- **Selectability has no data source in the grid.** Gutters, the scrollbar column, and decorations cannot be reliably identified by column region and style across markdown/diff/table/tool output.
+- **The grid is one frame, not the virtual document.** `VirtualizedList` mounts only the visible range; off-screen items have no cells. Cross-screen selection therefore needs off-screen snapshotting and a content/layout-version lifecycle, not a bigger grid.
 
-**Route B — expose the renderer cell grid via the Ink patch.** The project already patches Ink (`patches/ink+7.0.3.patch` adds the `./dom` and `./components/CursorContext` exports). Extend that patch minimally so the renderer captures the `Output.get()` cell grid for the committed frame and exposes it (plus width/height and a per-frame change signal) to the application. Selection then queries the grid directly: a screen coordinate maps to a cell, and a range of cells maps to text.
+Therefore:
 
-- Pro: coordinate-to-text becomes trivial and **uniform across every content type** — markdown, diffs, tables, and tool output are already composited into the same grid, so there is nothing per-renderer to maintain. Wide-char spacer cells (`fullWidth`) and soft wrapping are represented in the grid natively. Because VP mode uses the alternate screen, the grid is top-anchored and full-screen, so the terminal-row → grid-row mapping is near-identity, avoiding most of the frame-anchor arithmetic Route A would need.
-- Con: it deepens the Ink patch, so an Ink upgrade must re-apply it; and the patch must be covered by tests and ideally upstreamed.
+- **PR 1 uses the raw frame buffer**, scoped to visible-region visual selection. Coordinate-to-text is uniform across every content type because everything is already composited into one grid; there is nothing per-renderer to serialize. This is genuinely small and well-scoped.
+- **PR 2 extends the frame into a semantic frame buffer**, adding `breakAfter` (hard/soft) and `selectable` metadata produced at the wrap/`render-node-to-output` stage and propagated through `Output.write` and the frame contract. This is the correct combination of the two rejected extremes: semantics come from the source/render node, final coordinates come from the compositor, so there is still no per-renderer wrapping duplication. It is a deeper (renderer semantic) change and is evaluated as such in its own PR.
 
-**Decision: Route B.** T2's difficulty is concentrated in the _correctness_ of coordinate-to-text, and Route A solves that with the most fragile mechanism available (per-type serialization kept in lockstep with three wrappers). Route B eliminates that class of bug at the cost of a small, well-scoped patch, which the repo has already established a precedent for. If the maintainers reject deepening the Ink patch, we fall back to Route A and accept the per-renderer serialization burden; that is the main open question for review.
+The rejected alternative — an application-level per-renderer text model on stock Ink (map each history item's rendered subtree back to text) — is not pursued: it would duplicate Ink's wrap/clip/composite logic per renderer and drift as renderers change.
 
-## Architecture (Route B)
+## Architecture (PR 1)
 
 ### Module layout
 
 ```
 packages/cli/src/ui/selection/
-  screen-buffer.ts        # Reads the exposed cell grid; getCellAt(col,row), lineText(row), dimensions
-  selection-state.ts      # anchor/focus model, char/word/line modes, drag flag, off-screen accumulation
-  selection-text.ts       # cell range → plain text (skip spacers/gutters, rejoin soft wrap, trim EOL)
+  screen-buffer.ts        # Reads the exposed frame; getCellAt(col,row), lineCells(row), dimensions
+  selection-state.ts      # anchor/focus model (virtual-row space), char/word/line modes, drag flag
+  selection-text.ts       # cell range → plain text (skip wide-char spacers, trim trailing padding)
   use-text-selection.ts   # subscribes useMouseEvents; drives the state machine; copy-on-select
-  SelectionOverlay        # applies the highlight (see "Highlight rendering")
 packages/cli/src/ui/contexts/
-  SelectionContext.tsx    # broadcasts selection state + a "selection active" flag for key preemption
+  SelectionContext.tsx     # broadcasts selection state + a "selection active" flag for key preemption
 ```
 
-### Ink patch: expose the frame cell grid
+### Ink patch: a frame-buffer contract, not a raw array export
 
-The patch adds three things, kept as small as possible:
+The audit showed a read-only `Output.get()` accessor plus a post-commit `onFrame` callback is insufficient: `Ink.onRender()` serializes the frame _before_ invoking the `onRender` option, so a post-commit hook can observe the previous frame but cannot highlight the current one, and writing selection back through React state risks an extra frame or a render loop. Highlighting must happen inside the render, before serialization, and re-render must be scheduled through Ink's own throttle.
 
-1. In `Output.get()`, retain the composited cell grid (`row[][]`) on the `Output` instance instead of discarding it after string serialization.
-2. On the Ink renderer/instance, expose an accessor for the latest committed grid plus its `{ width, height }`, and an `onFrame` subscription that fires after each render commit so selection can invalidate cached lookups and re-derive highlighted text.
-3. A read-only, application-facing handle (via the already-exported `ink/dom` surface or a small dedicated export) so `screen-buffer.ts` can read the grid without reaching into Ink internals at call sites.
+The patch therefore defines a small bidirectional **frame controller**, reachable from the viewport via a handle on the root DOM node (Ink's `rootNode` is private and the public `Instance` has no frame API, so a dedicated bridge is required — a raw `ink/dom` export alone does not grant instance access):
 
-The grid is read-only from the application's perspective for coordinate queries. Highlighting writes back through the same patch point (below), not by mutating application state.
+```ts
+type FrameController = {
+  getFrame(): ReadonlyFrame | null;
+  setSelection(selection: ScreenSelection | null): void;
+  subscribe(listener: (frame: ReadonlyFrame) => void): () => void;
+};
+```
 
-### Event and coordinate pipeline
+- `getFrame()` returns an **immutable snapshot** of the latest composited frame (dimensions + cells) for coordinate queries.
+- `setSelection()` stores the selection range/theme, **deduplicates** (no-op if unchanged), and schedules **exactly one** repaint via Ink's throttled render invalidation — never by mutating committed frame state.
+- On the next render, between compositing (`output.ts`) and serialization, cells inside the selection get their background overridden with the theme selection color (foreground preserved). This transform **allocates new cell/style arrays** and does not mutate in place: `OutputCaches` reuses `StyledChar[]` across identical strings, so an in-place edit would leak the highlight onto other on-screen occurrences of the same text. The published snapshot is read-only.
+
+The patch is kept minimal and guarded by a test asserting the frame shape, so an Ink upgrade that changes `Output.get()` fails loudly. Upstreaming the hook is a follow-up.
+
+### Event, coordinate, and arbitration pipeline
 
 ```
 SGR bytes ─(KeypressContext reassembly)→ MouseEvent{ action, col, row, shift, meta }
-  left press            → startSelection(anchor)
-  left move (drag)      → extendSelection(focus) + edge auto-scroll
-  left release          → finishSelection → copy-on-select
-  double / triple click → selectWordAt / selectLineAt (≈500ms, 1-cell threshold)
-
-(col,row) terminal coords
-  → grid row/col   (VP alt-screen: near-identity; apply any frame offset once)
-  → virtual row    (gridRow + viewport scrollTop) — the stable anchor space
-  → ScreenBuffer.getCellAt → character / wide-char spacer / gutter marker
+  left press (in history viewport, not scrollbar) → startSelection(anchor)
+  left move while pressed                          → extendSelection(focus)
+  left release                                     → finishSelection → copy-on-select
+  double / triple click                            → selectWordAt / selectLineAt (≈500ms, 1-cell threshold)
 ```
 
-Selection anchors are stored in **virtual-row space** (`viewport scrollTop + gridRow`), not raw screen rows, so that scrolling during or after a drag keeps the selection pinned to content rather than to screen position. This is also what makes drag-to-scroll accumulation correct: as the viewport scrolls under a held drag, rows that leave the screen are accumulated (an off-screen-above/below text buffer) so the final copy includes content that scrolled out of view.
+Coordinate mapping (corrected per audit — the VP frame is **not** unconditionally top-anchored; `frameAnchor()` is top-anchored only when the frame fits and bottom-pinned with a negative anchor on overflow, which `layoutRowForEvent()` already corrects):
 
-### Highlight rendering
+```text
+layoutRow   = terminalRow - 1 - frameAnchor
+viewportRow = layoutRow - viewportRect.y      # viewportRect from viewport/root Yoga ref; not assumed 0
+virtualRow  = scrollTop + viewportRow
+```
 
-Ink has no overlay layer, so the highlight must come from the render itself. Under Route B the natural point is the same patch site that exposes the grid: after compositing, before serialization, cells whose virtual coordinate falls inside the selection get their background overridden with the theme's selection color (foreground preserved). This is a single extra transform over the grid per frame and keeps the highlight perfectly aligned with the text the coordinate query sees, because both read the same grid. Selection changes trigger one Ink repaint via the `onFrame`/state path.
+Before starting a selection, hit-test that `(col, layoutRow)` lies inside the history viewport content region and not in the scrollbar column, composer, or footer; presses elsewhere fall through to the existing scrollbar-drag / click-to-focus handlers. This arbitration is the contract between the new selection subscriber and the existing mouse subscribers.
+
+Anchors are stored in **virtual-row space** so a selection stays pinned to content, but in PR 1 any non-selection scroll/resize/streaming clears the selection (off-screen content is not cached), so virtual-row anchoring here is just consistent bookkeeping, not cross-screen persistence.
 
 ### Copy
 
-Copy reuses `copyToClipboard()`, which already chains platform tools (pbcopy / xclip → xsel / clip) and falls back to `writeOsc52()` for remote sessions, wrapping the sequence for tmux/screen. Two constraints carry into the UX:
+Copy reuses `copyToClipboard()` (pbcopy / xclip → xsel / clip, falling back to `writeOsc52()` for remote, wrapped for tmux/screen). One correction from the audit drives an API change: `writeOsc52()` **skips entirely and returns false** when the payload exceeds ~75 KB (`MAX_OSC52_BYTES`); it does not truncate, and `copyToClipboard(): Promise<void>` cannot report truncation. PR 1 changes the clipboard call to return a result and, when the only available channel is OSC 52 and the selection exceeds the cap, surfaces a **copy failure** ("selection too large to copy over remote channel") rather than reporting success. Local tools have no such cap. (UTF-8-safe truncation is possible but out of scope for v1.)
 
-- OSC 52 has a size cap (`MAX_OSC52_BYTES`, ~75 KB). A large selection copied over a pure-remote channel can be truncated; the copy path must detect this and surface it ("copied N chars; remote channel truncated to X") rather than silently losing the tail.
-- `copyOnSelect` (default on) copies on release/multi-click and keeps the highlight, mirroring iTerm2. When off, copy is manual via keybinding.
+`copyOnSelect` (default on) copies on release/multi-click and keeps the highlight. When off, copy is manual via keybinding.
 
 ### Keybindings and key preemption
 
-Existing bindings constrain the choices: `Ctrl+C` is `QUIT`, and `Ctrl+V`/`Cmd+V` are `PASTE_CLIPBOARD_IMAGE`. So:
+Existing bindings constrain choices: `Ctrl+C` is `QUIT`, `Ctrl+V`/`Cmd+V` are `PASTE_CLIPBOARD_IMAGE`, and `Ctrl+S` is already `SHOW_MORE_LINES`. So:
 
-- Copy: `Ctrl+Shift+C` (primary); `Cmd+C` on macOS where the terminal does not intercept it.
+- Copy: `Ctrl+Shift+C` (primary reliable binding); `Cmd+C` on macOS as best-effort where the terminal does not intercept it for its own Edit>Copy.
 - Clear selection: `Esc` when a selection exists.
 
-`KeypressContext` currently broadcasts to all subscribers with no priority. Selection needs "when a selection is active, keys act on the selection first." We add a lightweight preemption: `SelectionContext` exposes a `hasSelection` flag; a high-priority handler placed ahead of the broadcast consumes copy/clear keys, and for any other key clears the selection first (then lets the key through), mirroring how native terminals drop a selection as soon as you type. This is a small, contained addition rather than a general priority stack.
+`KeypressContext` broadcasts with no priority. Selection adds a lightweight preemption: `SelectionContext` exposes `hasSelection`; a high-priority handler ahead of the broadcast consumes copy/clear keys, and for any other key clears the selection first (then lets the key through), mirroring how native terminals drop a selection as you type.
 
-### Settings
+### Settings and escape hatch
 
 Add under `ui` in `settingsSchema.ts` (following the `vimMode` boolean pattern):
 
 - `ui.textSelection.enabled` (default `true`; effective only in VP mode).
 - `ui.textSelection.copyOnSelect` (default `true`).
 
-Retain a global escape hatch that fully disables the CLI's mouse ownership and hands the mouse back to the terminal for native selection/scrollback — covering patch defects, accessibility, and users who simply prefer native behavior. This complements, and does not replace, the per-feature toggle.
+Retain a global escape hatch that fully disables the CLI's mouse ownership and hands the mouse back to the terminal for native selection/scrollback — covering patch defects, accessibility, and users who prefer native behavior. Default off under a screen reader.
 
 ### Transient hints and "copied" feedback
 
-There is no general toast component. Following the existing `Footer` pattern (`ctrlCPressedOnce`), add a timed UIState field rendered in the footer:
+There is no general toast component. Following the existing `Footer` pattern (`ctrlCPressedOnce`), add a timed UIState field rendered in the footer: a "✓ copied N chars" confirmation after a successful copy (not written into history), and a drag hint pointing at Shift/Option native selection or the escape hatch when selection is disabled/unavailable.
 
-- A "✓ copied N chars" confirmation after a copy (transient, not written into history).
-- A drag hint when a left-drag is detected but selection is disabled or unavailable, pointing the user at Shift/Option native selection or the toggle — the same discoverability gap gemini-cli fills with its selection warning.
+## Wide characters and visual text (PR 1)
 
-## Coordinate mapping details
+- **Wide characters.** The frame marks wide cells with `fullWidth` and represents the trailing half as a spacer; `selection-text.ts` emits the wide character once and skips the spacer. Right-half clicks snap to the whole glyph, reusing the mid-cell snap logic in `visualClickToOffset`.
+- **Visual lines.** PR 1 copies exactly what is displayed: a soft-wrapped logical line copies as multiple visual lines, and gutter/decoration cells are included. Faithful logical text (rejoin, exclusion) is PR 2.
+- **Trailing padding.** Per-line trailing spaces padding to the frame width are trimmed.
 
-- **Alt-screen anchoring.** VP mode renders in the alternate screen, which is top-anchored and full-screen, so terminal row _r_ maps to grid row _r_ minus any fixed frame offset. This is where Route B pays off: the grid is already the scrolled, clipped, composited screen, so the query does not need to walk item offsets or reconstruct wrapping. The one-time offset is validated against `layoutRowForEvent`, which already encodes the alternate-screen frame-anchor correction used elsewhere.
-- **Viewport scroll.** The virtualized viewport applies `scrollTop` (and a negative top margin) to position content. Converting a grid row to a stable virtual row is `gridRow + scrollTop`; storing anchors in virtual-row space is what keeps selections stable across scrolling and enables off-screen accumulation.
-- **Streaming / re-render.** While output streams, frames change under a fixed selection. v1 policy: keep the selection anchored in virtual-row space; if the anchored content is still within the scrollable range, the highlight and copied text track it; if the model output invalidates the anchored region (content replaced, not just appended), clear the selection. Re-anchoring to logical content identity is deferred (open question).
+## Follow-up: semantic copy fidelity (PR 2)
 
-## Wide characters, soft wrap, and selected text
+To rejoin soft wraps and exclude decorations without per-renderer serialization, the frame is extended with semantics produced where they still exist — at wrap time — and propagated through compositing:
 
-- **Wide characters.** The grid marks wide cells with `fullWidth` and represents the trailing half as a spacer; `selection-text.ts` emits the wide character once and skips the spacer. Boundary snapping (a click on the right half selects the whole glyph) reuses the mid-cell snap logic already in `visualClickToOffset`.
-- **Soft wrap.** A logical line wrapped across several grid rows is rejoined when producing text, so a copied paragraph is one line, not several. The grid does not itself distinguish a soft wrap from a hard newline, so the rejoin uses the wrap width and the absence of intervening content to decide; this is the one place the text extraction needs care and gets dedicated tests.
-- **Gutters / decorations.** Cells that are pure decoration (line-number gutters, scrollbar column, list markers) are tagged non-selectable and skipped. Under Route B these are identified by column region and style, matching how the reference implementation excludes `noSelect` cells.
-- **Trailing whitespace.** Per-line trailing spaces (padding to the frame width) are trimmed from the extracted text.
+```ts
+type SelectableCell = {
+  value: string;
+  width: 1 | 2;
+  sourceId?: string;
+  logicalOffset?: number;
+  selectable: boolean;
+  breakAfter: 'none' | 'soft' | 'hard';
+};
+```
+
+- `breakAfter` is produced when `wrapText()` splits a line (soft) vs. when a source newline is present (hard); it cannot be inferred in `Output.get()`.
+- `selectable` is set by the app/renderer for gutters, the scrollbar column, and confirmed decorations — not guessed from style.
+- The compositor still determines final cell coverage, so visual coordinates stay uniform across renderers.
+- Selection extraction then rejoins soft-continuation runs while preserving true hard newlines, and skips `selectable: false` cells.
+
+Per-renderer copy rules must be decided as product rules, not by auto-excluding anything decoration-like: scrollbar excluded; diff line-number gutter excludable; diff `+/-` likely kept (users may want the full patch); markdown list/quote markers usually kept (content); table borders and tool-output prefix/status glyphs decided case by case. PR 2 also carries the cross-screen work (off-screen row snapshot/cache, edge auto-scroll, reverse drag) and the content/layout-version invalidation rules that let a selection survive scrolling.
 
 ## Edge cases and risks
 
-| Item                             | Risk                                             | Mitigation                                                                                        |
-| -------------------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
-| Wrapping consistency             | Historically the top hazard (three wrappers)     | Route B reads the composited grid; no per-type serialization                                      |
-| Ink patch maintenance            | Upgrades must re-apply; internal API drift       | Keep the patch minimal; add tests that assert grid shape; pursue an upstream Ink PR               |
-| Scroll/frame offset drift        | `scrollTop` / frame-anchor off-by-one            | Anchor in virtual-row space; integration tests across scroll positions; reuse `layoutRowForEvent` |
-| OSC 52 size cap                  | Remote large-selection truncation                | Detect and surface; prefer local tools when present                                               |
-| Performance                      | Large history + per-drag repaint                 | Highlight is an incremental grid transform; throttle drag (~16ms)                                 |
-| Non-VP mode                      | Enabling ownership would hijack native selection | Keep strictly VP-gated                                                                            |
-| Accessibility / screen reader    | Mouse ownership may interfere                    | Escape hatch + default off under screen reader                                                    |
-| Streaming under active selection | Content shifts beneath a selection               | Virtual-row anchoring; clear on content replacement (v1)                                          |
+| Item                      | Risk                                                 | Mitigation                                                                      |
+| ------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------- |
+| Highlight timing          | Post-commit hook can't highlight current frame       | Bidirectional `FrameController`; pre-serialization transform; throttled repaint |
+| Shared `StyledChar` reuse | In-place highlight leaks to identical on-screen text | Transform allocates new cell/style arrays; publish immutable snapshot           |
+| Render loop               | Selection→state→render feedback                      | `setSelection` dedups and schedules exactly one repaint via Ink throttle        |
+| Scroll/frame offset drift | `frameAnchor` bottom-pin, non-zero `viewportRect.y`  | Corrected formula; reuse `layoutRowForEvent`; integration tests per scroll pos  |
+| Mouse arbitration         | Scrollbar/composer/footer press starts selection     | Hit-test viewport content region; fall through otherwise                        |
+| OSC 52 size cap           | Oversized remote payload silently "succeeds"         | Clipboard API returns a result; surface copy failure over remote-only cap       |
+| Ink patch maintenance     | Upgrades must re-apply; internal API drift           | Minimal patch; frame-shape guard test; pursue upstream                          |
+| Performance               | Large history + per-drag repaint                     | Highlight is one immutable transform; repaint bounded by Ink `maxFps` (~30)     |
+| Non-VP mode               | Enabling ownership would hijack native selection     | Strictly VP-gated                                                               |
+| Streaming under selection | Content shifts beneath a selection                   | PR 1: clear on scroll/resize/streaming (visible-region only)                    |
 
 ## Milestones
 
-- **M0 — Patch spike (go/no-go).** Extend the Ink patch to expose the cell grid; a throwaway probe prints `getCellAt` results and verifies coordinates and wide characters map correctly. This is the feasibility gate for Route B; if the patch proves untenable, revisit Route A before proceeding.
-- **M1 — Selection state machine + coordinate mapping.** press/drag/release → cell range → `getSelectedText`. No highlight yet; prove copy of the correct text.
-- **M2 — Highlight rendering.** Selection background override through the patch site.
-- **M3 — Copy interactions.** copy-on-select + `Ctrl+Shift+C` + `Esc` + "copied" footer confirmation + key preemption.
-- **M4 — Word/line selection + edge auto-scroll + off-screen accumulation.**
-- **M5 — Settings + escape hatch + drag hint + docs.**
+PR 1 (this branch) — each milestone a separate, reviewable commit; no semantic-fidelity work mixed in:
 
-M0 is the decision point. Each milestone is a reviewable commit on this branch.
+- **M0 — Ink frame-buffer foundation (go/no-go).** The `FrameController` (getFrame/setSelection/subscribe), the pre-serialization immutable highlight transform, and throttled invalidation, with a minimal real consumer. This is the feasibility gate.
+- **M1 — Selection state machine + coordinate mapping (visible region).** press/drag/release → visual-cell range → `getSelectedText` → copy. No highlight yet.
+- **M2 — Highlight** via `setSelection`.
+- **M3 — Copy interactions.** copy-on-select + `Ctrl+Shift+C` + `Esc` + footer "copied" + key preemption + mouse arbitration + clipboard result/OSC 52 handling.
+- **M4 — Word/visual-line selection + settings + escape hatch + drag hint + docs.**
+
+PR 2 (follow-up) — cross-screen selection and semantic copy fidelity, as described above.
+
+## Merge gate (PR 1)
+
+- First highlight frame after press has no one-frame lag; selection updates never form a render loop.
+- The same string appearing at multiple screen positions highlights only the target cell (no shared `StyledChar` pollution).
+- CJK/emoji left/right half-cell boundaries are correct.
+- Coordinates are correct for short, full-screen, and overflow frames, and when other UI sits above/below the viewport.
+- Scrollbar, composer, and footer never start history selection.
+- Double/triple click and forward/backward drag are stable within the visible region.
+- Local clipboard, OSC 52 failure, and payload cap never falsely report "copied".
+- Static mode and non-VP mouse behavior show no regression.
+- Repaint frequency respects Ink's default `maxFps` (~30, ~33 ms); the throttle is Ink's, not an app-side 16 ms timer.
+- Real terminal/tmux E2E covers drag-select, highlight, and clipboard payload.
 
 ## Testing strategy
 
-- **Unit** — coordinate mapping (wide chars, soft wrap, scroll offset); `selection-text.ts` extraction; key-preemption handler; OSC 52 boundary handling.
-- **Snapshot** — `getSelectedText` over representative content: markdown, a diff, a table, and tool output, asserting the extracted text matches the visible text.
-- **Patch guard** — a test asserting the exposed grid's shape and dimensions, so an Ink upgrade that changes `Output.get()` fails loudly rather than silently breaking selection.
-- **E2E** — drive a real terminal (interactive tmux harness) to drag-select across wrapped lines and multiple history items, confirm the clipboard/OSC 52 payload. Follows the E2E test-plan workflow in `.qwen/e2e-tests/`.
+- **Unit** — coordinate mapping (wide chars, scroll offset, frame anchor); `selection-text.ts` visual extraction; key-preemption handler; mouse arbitration; clipboard result/OSC 52 boundary.
+- **Snapshot** — `getSelectedText` (visual) over markdown, a diff, a table, and tool output, asserting extracted text matches the _visible_ text.
+- **Patch guard** — asserts the exposed frame's shape/dimensions so an Ink upgrade breaks loudly.
+- **E2E** — interactive tmux harness: drag-select across wrapped visual lines and multiple items, confirm clipboard/OSC 52 payload. Follows the `.qwen/e2e-tests/` workflow.
 
 ## Rollout
 
-Ships behind `ui.textSelection.enabled` (default on in VP mode) with a global escape hatch to return the mouse to the terminal. Because the feature is VP-only and VP mode is itself opt-in (`ui.useTerminalBuffer` defaults off), the blast radius is limited to users who have already opted into VP mode.
+Ships behind `ui.textSelection.enabled` (default on in VP mode) with a global escape hatch. Because the feature is VP-only and VP mode is itself opt-in (`ui.useTerminalBuffer` defaults off), the blast radius is limited to users who have already opted into VP mode.
 
 ## Open questions
 
-- Is deepening the Ink patch acceptable to maintainers, or must this stay on stock Ink (forcing Route A)? This is the gating decision for the whole design.
-- Streaming under an active selection: is v1's "clear on content replacement" acceptable, or is logical-content re-anchoring required for the first release?
-- `Cmd+C` on macOS is frequently intercepted by the terminal's Edit menu; do we rely on `Ctrl+Shift+C` as the sole reliable manual-copy binding and treat `Cmd+C` as best-effort?
+- Is deepening the Ink patch to a frame controller acceptable to maintainers for PR 1, and the semantic-frame extension for PR 2? PR 2 is a renderer semantic change and should be evaluated at that risk level.
+- For PR 2's `selectable`/copy rules: confirm the per-renderer product decisions (diff `+/-`, table borders, tool-output glyphs) before implementation.
+- `Cmd+C` on macOS is frequently intercepted by the terminal's Edit menu; do we treat `Ctrl+Shift+C` as the sole guaranteed manual-copy binding and `Cmd+C` as best-effort?
