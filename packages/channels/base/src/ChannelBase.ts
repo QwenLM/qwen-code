@@ -3649,7 +3649,8 @@ export abstract class ChannelBase {
       );
     }
 
-    let memoryIntent = parseChannelMemoryIntent(envelope.text);
+    let memoryIntent: ResolvedChannelMemoryIntent | null =
+      parseChannelMemoryIntent(envelope.text);
     if (
       !memoryIntent &&
       this.shouldClassifyChannelMemoryIntent(envelope.text)
