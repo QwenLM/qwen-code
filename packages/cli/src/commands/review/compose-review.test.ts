@@ -19,6 +19,7 @@ import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import {
   composeReview,
   composeReviewCommand,
+  verdictLine,
   type ComposeReviewInput,
   type ComposeReviewResult,
 } from './compose-review.js';
@@ -901,5 +902,85 @@ describe('coverage is recomputed, never accepted', () => {
       modelId: MODEL,
     });
     expect(r.event).toBe('APPROVE');
+  });
+});
+
+// `verdictLine` is what Step 6 prints — the one place a verdict exists for the
+// user. It had no test, and a review of this change found the reason to want one.
+describe('verdictLine — the terminal verdict, and its dangling colon', () => {
+  const line = (over: Partial<ComposeReviewResult>): string =>
+    verdictLine({
+      event: 'COMMENT',
+      body: '',
+      baseEvent: 'COMMENT',
+      cappedBy: [],
+      downgraded: false,
+      ...over,
+    });
+
+  it('names a cap that took an Approve away', () => {
+    expect(
+      line({
+        event: 'COMMENT',
+        baseEvent: 'APPROVE',
+        cappedBy: ['unreviewed-dimension'],
+      }),
+    ).toBe(
+      'Verdict: Comment — an Approve was NOT available: a dimension nobody reviewed',
+    );
+  });
+
+  it('does not leave a dangling colon when a downgrade ALONE took the Approve', () => {
+    // The bug the review caught: `baseEvent` APPROVE, no cap state, `downgraded`
+    // true — the old code joined an empty `cappedBy` and printed
+    // "an Approve was NOT available:  — downgraded …", a colon over nothing.
+    const out = line({
+      event: 'COMMENT',
+      baseEvent: 'APPROVE',
+      cappedBy: [],
+      downgraded: true,
+    });
+    expect(out).toBe(
+      'Verdict: Comment — an Approve was NOT available: a presubmit check failed',
+    );
+    expect(out).not.toContain(':  ');
+    expect(out).not.toMatch(/:\s*—/);
+  });
+
+  it('lists a cap AND a downgrade together when both took the Approve', () => {
+    expect(
+      line({
+        event: 'COMMENT',
+        baseEvent: 'APPROVE',
+        cappedBy: ['uncoverable-chunk'],
+        downgraded: true,
+      }),
+    ).toBe(
+      'Verdict: Comment — an Approve was NOT available: part of the diff cannot be read at all; a presubmit check failed',
+    );
+  });
+
+  it('says a Suggestion-only Comment was downgraded, without claiming a lost Approve', () => {
+    // baseEvent COMMENT: there was no Approve to lose, but the presubmit still
+    // moved the event and the user should see it.
+    expect(
+      line({ event: 'COMMENT', baseEvent: 'COMMENT', downgraded: true }),
+    ).toBe('Verdict: Comment — downgraded by a presubmit check');
+  });
+
+  it('never names a cap on a Request changes — the blocker earned it, no cap softens it', () => {
+    expect(
+      line({
+        event: 'REQUEST_CHANGES',
+        baseEvent: 'REQUEST_CHANGES',
+        cappedBy: ['unreviewed-dimension'],
+      }),
+    ).toBe('Verdict: Request changes');
+  });
+
+  it('is bare for a clean Approve', () => {
+    expect(line({ event: 'APPROVE', baseEvent: 'APPROVE' })).toBe(
+      'Verdict: Approve',
+    );
   });
 });

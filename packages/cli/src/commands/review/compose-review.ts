@@ -560,14 +560,27 @@ export function verdictLine(r: ComposeReviewResult): string {
     'context-unavailable': "the PR's existing discussion could not be read",
   };
   let line = `Verdict: ${label[r.event]}`;
-  // A cap only ever takes an Approve away. Naming one on a Request changes — which
-  // a confirmed blocker earned, and which no cap can soften — would report a
-  // constraint that did not bind, and the reader would go looking for its effect.
+  // Why an Approve was not available — but only when one would otherwise have been.
+  // A cap and a presubmit downgrade are BOTH reasons, and either can be the sole
+  // one: a review with no cap state that the presubmit dropped from Approve to
+  // Comment has an empty `cappedBy` and `downgraded: true`. Joining `cappedBy`
+  // unconditionally then printed `an Approve was NOT available:  — downgraded …`,
+  // a dangling colon over nothing. Collect the reasons first, and say the clause
+  // only if there is a reason to say it.
+  //
+  // A cap never softens a Request changes — a confirmed blocker earned that, and
+  // naming a constraint that did not bind would send the reader looking for an
+  // effect that is not there — so this clause is gated on the base having been an
+  // Approve at all.
   if (r.baseEvent === 'APPROVE' && r.event !== 'APPROVE') {
-    line +=
-      ` — an Approve was NOT available: ` +
-      r.cappedBy.map((c) => why[c] ?? c).join('; ');
+    const reasons = r.cappedBy.map((c) => why[c] ?? c);
+    if (r.downgraded) reasons.push('a presubmit check failed');
+    line += ` — an Approve was NOT available: ${reasons.join('; ')}`;
+  } else if (r.downgraded) {
+    // The base was not an Approve (a Suggestion-only Comment, say), so there was no
+    // Approve to lose — but a presubmit downgrade still moved the event, and the
+    // user should see that it did.
+    line += ' — downgraded by a presubmit check';
   }
-  if (r.downgraded) line += ' — downgraded by a presubmit check';
   return line;
 }

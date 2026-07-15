@@ -554,7 +554,7 @@ export const submitCommand: CommandModule = {
         type: 'string',
         demandOption: true,
         describe:
-          'Path to the review JSON (commit_id / event / body / comments), as composed by `compose-review`',
+          'Path to the review JSON (commit_id / comments / state). event and body are computed here from state and the comments — do not include them.',
       })
       .option('skill-args', {
         type: 'string',
