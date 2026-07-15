@@ -43,7 +43,11 @@ test('isChanged: a view with no baseline (PR-added) always counts as changed', (
 
 test('isChanged: with a baseline, only meets threshold counts as changed', () => {
   assert.equal(isChanged({ hasBefore: true, changedPct: 0 }), false);
-  assert.equal(isChanged({ hasBefore: true, changedPct: 0.05 }), false);
+  // Below the threshold (relative, so it survives a threshold retune).
+  assert.equal(
+    isChanged({ hasBefore: true, changedPct: CHANGED_PCT_THRESHOLD / 2 }),
+    false,
+  );
   assert.equal(
     isChanged({ hasBefore: true, changedPct: CHANGED_PCT_THRESHOLD }),
     true,

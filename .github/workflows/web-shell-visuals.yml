@@ -61,7 +61,8 @@ jobs:
     name: 'Capture web-shell visuals (ubuntu-latest, Node 22.x)'
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 20
+    # ~2x the original: the job now also builds + renders the merge-base arm.
+    timeout-minutes: 30
     steps:
       - name: 'Checkout PR head'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -102,33 +103,52 @@ jobs:
           WEB_SHELL_VISUALS_OUTPUT_DIR: '${{ runner.temp }}/web-shell-visuals'
         run: 'npm run test:e2e:visuals --workspace=packages/web-shell'
 
-      # --- Before/after: render the PR base too, then keep only CHANGED views.
-      # The base is trusted `main` (github.event.pull_request.base.sha), so this
-      # adds no secret exposure to this untrusted-PR job — it only produces more
-      # image bytes. A diff against the base is what makes the preview
-      # feature-aware without understanding the PR: a PR with no visual impact
-      # composites nothing, a feature PR shows exactly the surface it moved.
-      - name: 'Check out the PR base (before render)'
+      # --- Before/after: render the PR's MERGE-BASE too, then keep only CHANGED
+      # views. The merge-base — NOT the base-branch tip — is the correct "before"
+      # for a `head.sha` render: a PR branch behind `main` would otherwise show
+      # other people's already-landed web-shell changes, reversed, as this PR's
+      # diff. The merge-base is trusted history, so this adds no secret exposure
+      # to the untrusted-PR job — it only produces more image bytes. Every base
+      # step is best-effort (continue-on-error): a flaky base build/render
+      # degrades to after-only (each view tagged NEW), never sinking the preview.
+      - name: 'Resolve the merge-base'
+        id: 'mergebase'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          BASE_SHA: '${{ github.event.pull_request.base.sha }}'
+          HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
+        run: |-
+          set -euo pipefail
+          # Read token suffices and works for fork PRs; fall back to the base tip
+          # if the compare API is briefly unavailable.
+          MB="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${BASE_SHA}...${HEAD_SHA}" --jq '.merge_base_commit.sha' 2>/dev/null || true)"
+          echo "sha=${MB:-$BASE_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "before (merge-base) = ${MB:-$BASE_SHA}; base tip = ${BASE_SHA}"
+
+      - name: 'Check out the merge-base (before render)'
+        continue-on-error: true
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          ref: '${{ github.event.pull_request.base.sha }}'
+          ref: '${{ steps.mergebase.outputs.sha }}'
           path: 'base'
           fetch-depth: 1
           persist-credentials: false
 
       - name: 'Install base dependencies'
+        continue-on-error: true
         working-directory: 'base'
         run: 'npm ci --prefer-offline --no-audit --progress=false'
 
-      # Best-effort: if the base fails to render, compose treats every after-shot
-      # as NEW (after-only) rather than sinking the whole preview. Playwright
-      # browsers are already installed on the runner and shared across checkouts.
+      # Screenshots only — the base flow videos are discarded (before-videos are
+      # never used), so rendering flows here would just burn CI minutes. `--`
+      # passes the spec through to `playwright test`. Playwright browsers are
+      # already installed on the runner and shared across checkouts.
       - name: 'Capture before (base) screenshots'
         working-directory: 'base'
         continue-on-error: true
         env:
           WEB_SHELL_VISUALS_OUTPUT_DIR: '${{ runner.temp }}/web-shell-before'
-        run: 'npm run test:e2e:visuals --workspace=packages/web-shell'
+        run: 'npm run test:e2e:visuals --workspace=packages/web-shell -- screenshots.spec.ts'
 
       - name: 'Compose before/after and keep only changed views'
         env:
@@ -141,12 +161,17 @@ jobs:
           # labelled "main | this PR" composite for the views that changed. The
           # composites REPLACE the raw after-shots as the published screenshots,
           # reusing the <view>-<theme>.png name the publish step already expects.
-          node .github/scripts/web-shell-visuals-compose.mjs \
-            "${BEFORE_DIR}" "${AFTER_DIR}" "${OUT_DIR}/composite"
-          rm -f "${OUT_DIR}/composite/manifest.json"
-          rm -rf "${OUT_DIR}/screenshots"
-          mv "${OUT_DIR}/composite" "${OUT_DIR}/screenshots"
-          echo "Changed views composited: $(find "${OUT_DIR}/screenshots" -name '*.png' | wc -l | tr -d ' ')"
+          if node .github/scripts/web-shell-visuals-compose.mjs \
+              "${BEFORE_DIR}" "${AFTER_DIR}" "${OUT_DIR}/composite"; then
+            rm -f "${OUT_DIR}/composite/manifest.json"
+            rm -rf "${OUT_DIR}/screenshots"
+            mv "${OUT_DIR}/composite" "${OUT_DIR}/screenshots"
+            echo "Changed views composited: $(find "${OUT_DIR}/screenshots" -name '*.png' | wc -l | tr -d ' ')"
+          else
+            # Degrade rather than sink: leave the raw after-shots in
+            # ${OUT_DIR}/screenshots so the PR still gets a (head-only) preview.
+            echo "::warning::compose failed; publishing raw after-shots without a before/after."
+          fi
 
       - name: 'Convert flow recordings to inline GIFs'
         env:

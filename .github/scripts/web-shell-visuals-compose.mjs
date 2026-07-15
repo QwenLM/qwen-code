@@ -25,14 +25,16 @@
  *   node web-shell-visuals-compose.mjs <beforeDir> <afterDir> <outDir>
  */
 
-import { chromium } from '@playwright/test';
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-// % of pixels that must differ for a view to count as "changed". Small but
-// non-zero so sub-pixel/AA jitter between two identical renders is ignored.
-export const CHANGED_PCT_THRESHOLD = 0.1;
+// % of pixels that must differ for a view to count as "changed". Kept low so a
+// small-but-real change (an icon swap ~24×24, a one-word label) still registers
+// — this is the exact failure mode the preview exists to catch. before/after
+// render on the same runner + fonts with `animations: 'disabled'`, so AA jitter
+// between two identical renders is ~0. At 1280×800, 0.02% ≈ 205 px.
+export const CHANGED_PCT_THRESHOLD = 0.02;
 // A pixel "differs" when |ΔR|+|ΔG|+|ΔB| exceeds this (ignores imperceptible AA).
 export const PER_PIXEL_DELTA = 30;
 // Display width of each panel in the stitched composite.
@@ -75,6 +77,17 @@ export function planWork(afterNames, beforeNames) {
 const dataUri = (path) =>
   `data:image/png;base64,${readFileSync(path).toString('base64')}`;
 
+// Minimal HTML-escape for values interpolated into the composite markup. The
+// view/theme come from PR-controlled filenames and render only in the capture
+// job's own Chromium (which already runs PR code — no boundary crossed), so
+// this is purely hygiene, keeping that safety argument obvious.
+const esc = (s) =>
+  String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
 // Self-describing composite: the before/after labels and the diff magnitude are
 // burned into the image, so it reads correctly even opened on its own.
 function compositeHtml({
@@ -94,7 +107,7 @@ function compositeHtml({
   return `<!doctype html><html><body style="margin:0;background:#e5e7eb">
     <div id="cap" style="display:inline-block;padding:16px;font-family:-apple-system,system-ui,sans-serif">
       <div style="font:600 14px system-ui;color:#111827;margin:0 2px 10px">
-        ${view} · ${theme}${hasBefore ? '' : ' · NEW'}
+        ${esc(view)} · ${esc(theme)}${hasBefore ? '' : ' · NEW'}
         <span style="color:#6b7280;font-weight:400"> — ${badge}</span>
       </div>
       <div style="display:flex;gap:12px;align-items:flex-start">
@@ -117,9 +130,16 @@ async function diffPct(page, beforeUri, afterUri) {
         new Promise((res) => {
           const img = new Image();
           img.onload = () => res(img);
+          // A truncated/corrupt PNG (a best-effort base render killed
+          // mid-write) must still settle, or page.evaluate would hang to the
+          // job timeout and take the artifacts with it.
+          img.onerror = () => res(null);
           img.src = src;
         });
       const [ia, ib] = await Promise.all([load(a), load(b)]);
+      // An undecodable image can't be compared → treat the view as fully
+      // changed (so it is shown, not silently dropped).
+      if (!ia || !ib) return 100;
       const w = Math.min(ia.width, ib.width);
       const h = Math.min(ia.height, ib.height);
       const c = document.createElement('canvas');
@@ -160,6 +180,11 @@ async function composeCli(beforeDir, afterDir, outDir) {
   };
   const work = planWork(list(afterDir), list(beforeDir));
 
+  // Lazy import so the pure exports (parseShot / isChanged / planWork) load
+  // WITHOUT @playwright/test — the dependency-free `github_ci_only` test step
+  // (no npm ci) imports this module for those helpers and would otherwise die
+  // with ERR_MODULE_NOT_FOUND on a top-level Playwright import.
+  const { chromium } = await import('@playwright/test');
   const browser = await chromium.launch();
   // deviceScaleFactor:2 keeps the burned-in labels crisp on retina/GitHub zoom.
   const page = await browser.newPage({ deviceScaleFactor: 2 });
@@ -204,7 +229,9 @@ async function composeCli(beforeDir, afterDir, outDir) {
     const tag = e.changed ? (e.hasBefore ? 'CHANGED' : 'NEW    ') : 'skip   ';
     process.stderr.write(`  ${tag} ${e.name} (${e.changedPct}% diff)\n`);
   }
-  // stdout = composited count (the workflow reads it to decide whether to post).
+  // stdout = composited count, for logs only. Nothing parses it: the workflow
+  // re-counts the written composites via `find`, and the post/no-post decision
+  // lives in the publish workflow.
   process.stdout.write(`${composited}\n`);
 }
 

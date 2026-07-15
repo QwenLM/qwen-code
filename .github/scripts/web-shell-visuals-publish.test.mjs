@@ -125,7 +125,7 @@ test('buildComment lists before/after composites, labels flows, escapes, links t
   assert.match(body, /<!-- qwen:web-shell-visuals -->/);
   assert.match(body, /session-transcript-light\.png/);
   assert.match(body, /session-transcript-dark\.png/);
-  assert.match(body, /Only views that \*\*changed\*\* are shown/); // before/after framing
+  assert.match(body, /Only \*\*screenshots\*\* that changed are shown/); // before/after framing
   assert.match(body, /model-switch\.gif/);
   assert.match(body, /Open the slash menu and switch model/); // flow label
   assert.match(body, /abc1234/);
@@ -150,7 +150,7 @@ test('buildComment says "no visual changes" when there are no composites', () =>
   const empty = buildComment([], { shortSha: 'abc1234' });
   assert.match(empty, /web-shell visual preview/);
   assert.doesNotMatch(empty, /<img /); // no screenshots, no flows
-  assert.match(empty, /No visual changes against `main`/);
+  assert.match(empty, /No screenshot changes against `main`/);
 });
 
 test('buildComment lists a lone composite as one wide image (no light/dark table)', () => {
