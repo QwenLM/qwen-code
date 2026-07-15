@@ -1,9 +1,11 @@
 name: 'Web-shell Visuals'
 
-# Auto-capture web-shell screenshots (light + dark) and short flow recordings
-# for PRs that touch the web-shell UI, then hand the images to the companion
-# `web-shell-visuals-publish.yml` (workflow_run) which posts them inline on the
-# PR.
+# For PRs that touch the web-shell UI, render its screenshots (light + dark)
+# against BOTH the PR base (`main`) and the PR head, diff them, and stitch a
+# "main | this PR" composite for the views that CHANGED (plus short flow
+# recordings). The images are handed to the companion
+# `web-shell-visuals-publish.yml` (workflow_run), which posts them inline on the
+# PR. A PR with no visual impact composites nothing → "no visual change".
 #
 # Security model: this workflow BUILDS AND RENDERS untrusted PR code, so it runs
 # on the `pull_request` trigger (fork PRs get a read-only token and NO secrets),
@@ -40,6 +42,8 @@ on:
       # rather than the whole tree.
       # The capture pipeline itself, so a workflow-only change is exercised.
       - '.github/workflows/web-shell-visuals.yml'
+      # The before/after compositor, so a compose-only change is exercised.
+      - '.github/scripts/web-shell-visuals-compose.mjs'
 
 permissions:
   contents: 'read'
@@ -93,10 +97,56 @@ jobs:
           echo "PLAYWRIGHT_PORT=${port}" >> "${GITHUB_ENV}"
           echo "Using web-shell Playwright port ${port}"
 
-      - name: 'Capture screenshots and flow recordings'
+      - name: 'Capture screenshots and flow recordings (after / PR head)'
         env:
           WEB_SHELL_VISUALS_OUTPUT_DIR: '${{ runner.temp }}/web-shell-visuals'
         run: 'npm run test:e2e:visuals --workspace=packages/web-shell'
+
+      # --- Before/after: render the PR base too, then keep only CHANGED views.
+      # The base is trusted `main` (github.event.pull_request.base.sha), so this
+      # adds no secret exposure to this untrusted-PR job — it only produces more
+      # image bytes. A diff against the base is what makes the preview
+      # feature-aware without understanding the PR: a PR with no visual impact
+      # composites nothing, a feature PR shows exactly the surface it moved.
+      - name: 'Check out the PR base (before render)'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ github.event.pull_request.base.sha }}'
+          path: 'base'
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: 'Install base dependencies'
+        working-directory: 'base'
+        run: 'npm ci --prefer-offline --no-audit --progress=false'
+
+      # Best-effort: if the base fails to render, compose treats every after-shot
+      # as NEW (after-only) rather than sinking the whole preview. Playwright
+      # browsers are already installed on the runner and shared across checkouts.
+      - name: 'Capture before (base) screenshots'
+        working-directory: 'base'
+        continue-on-error: true
+        env:
+          WEB_SHELL_VISUALS_OUTPUT_DIR: '${{ runner.temp }}/web-shell-before'
+        run: 'npm run test:e2e:visuals --workspace=packages/web-shell'
+
+      - name: 'Compose before/after and keep only changed views'
+        env:
+          BEFORE_DIR: '${{ runner.temp }}/web-shell-before/screenshots'
+          AFTER_DIR: '${{ runner.temp }}/web-shell-visuals/screenshots'
+          OUT_DIR: '${{ runner.temp }}/web-shell-visuals'
+        run: |-
+          set -euo pipefail
+          # Diff each <view>-<theme>.png against the base render and stitch a
+          # labelled "main | this PR" composite for the views that changed. The
+          # composites REPLACE the raw after-shots as the published screenshots,
+          # reusing the <view>-<theme>.png name the publish step already expects.
+          node .github/scripts/web-shell-visuals-compose.mjs \
+            "${BEFORE_DIR}" "${AFTER_DIR}" "${OUT_DIR}/composite"
+          rm -f "${OUT_DIR}/composite/manifest.json"
+          rm -rf "${OUT_DIR}/screenshots"
+          mv "${OUT_DIR}/composite" "${OUT_DIR}/screenshots"
+          echo "Changed views composited: $(find "${OUT_DIR}/screenshots" -name '*.png' | wc -l | tr -d ' ')"
 
       - name: 'Convert flow recordings to inline GIFs'
         env:

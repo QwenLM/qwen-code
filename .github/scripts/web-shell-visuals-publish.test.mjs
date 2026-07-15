@@ -109,7 +109,7 @@ test('selectImages bounds EXAMINED candidates so a junk flood cannot run forever
   assert.ok(warnings.some((w) => w.includes('candidate files')));
 });
 
-test('buildComment pairs light/dark, lists gifs, labels flows, escapes, links the run', () => {
+test('buildComment lists before/after composites, labels flows, escapes, links the run', () => {
   const body = buildComment(
     [
       'session-transcript-light.png',
@@ -125,13 +125,17 @@ test('buildComment pairs light/dark, lists gifs, labels flows, escapes, links th
   assert.match(body, /<!-- qwen:web-shell-visuals -->/);
   assert.match(body, /session-transcript-light\.png/);
   assert.match(body, /session-transcript-dark\.png/);
+  assert.match(body, /Only views that \*\*changed\*\* are shown/); // before/after framing
   assert.match(body, /model-switch\.gif/);
   assert.match(body, /Open the slash menu and switch model/); // flow label
   assert.match(body, /abc1234/);
   assert.match(body, /https:\/\/run\.example\/1/);
-  // Exactly one screenshot row: the single view with light+dark paired.
-  const rows = body.split('\n').filter((l) => l.startsWith('<tr><td'));
-  assert.equal(rows.length, 1);
+  // Each changed composite is listed as its own wide image (light + dark).
+  const shotImgs = body
+    .split('\n')
+    .filter((l) => /^<img /.test(l) && /\.png/.test(l));
+  assert.equal(shotImgs.length, 2);
+  assert.doesNotMatch(body, /<table>/); // composites are a list, not a table
 });
 
 test('buildComment does not leak Object.prototype members as flow labels', () => {
@@ -142,11 +146,17 @@ test('buildComment does not leak Object.prototype members as flow labels', () =>
   assert.match(body, /\*\*ToString\*\*/); // falls back to the prettified filename
 });
 
-test('buildComment is empty-safe and marks a missing pair with an em dash', () => {
-  const empty = buildComment([], {});
+test('buildComment says "no visual changes" when there are no composites', () => {
+  const empty = buildComment([], { shortSha: 'abc1234' });
   assert.match(empty, /web-shell visual preview/);
-  assert.doesNotMatch(empty, /<table>/); // no screenshots section
+  assert.doesNotMatch(empty, /<img /); // no screenshots, no flows
+  assert.match(empty, /No visual changes against `main`/);
+});
 
-  const onlyLight = buildComment(['home-light.png'], { rawBase: 'r' });
-  assert.match(onlyLight, /<td>—<\/td>/); // the missing dark cell
+test('buildComment lists a lone composite as one wide image (no light/dark table)', () => {
+  const body = buildComment(['home-light.png'], { rawBase: 'r' });
+  assert.match(body, /<img src="r\/home-light\.png" width="900"/);
+  assert.doesNotMatch(body, /<table>/); // composites are a flat list now
+  // A lone light shot no longer needs a dark-pair placeholder cell.
+  assert.doesNotMatch(body, /<td>/);
 });
