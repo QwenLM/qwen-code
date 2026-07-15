@@ -201,14 +201,21 @@ describe('runBuildTest', () => {
     expect(rep.note).toContain('no package to build');
   });
 
+  // The exec seam stands in for real `npm run`: these tests are about which packages
+  // get built, in what order, and how a result is classified — not about npm's own
+  // workspace resolution. Driving real npm here made the suite spawn dozens of slow
+  // subprocesses under parallelism and hang; the seam is deterministic and instant.
+  const wsOf = (command: string): string =>
+    /--workspace="([^"]+)"/.exec(command)?.[1] ?? '';
+  const okExec: NonNullable<Parameters<typeof runBuildTest>[0]['exec']> = (
+    command,
+  ) => ({ command, exitCode: 0, seconds: 1, timedOut: false, output: '' });
+
   it('scopes the build to the changed workspace and its dependents', () => {
     writeFileSync(
       join(root, 'package.json'),
       JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
     );
-    // `npm run build --workspace=<dir>` is what the command actually shells out to,
-    // and it resolves the workspace by directory — so a real (tiny) npm workspace
-    // is the honest fixture here.
     pkg('packages/core', {
       name: '@x/core',
       scripts: { build: 'exit 0', test: 'exit 0' },
@@ -226,6 +233,7 @@ describe('runBuildTest', () => {
       worktree: root,
       timeout: 60,
       install: false,
+      exec: okExec,
     });
     expect(rep.affected).toEqual(['packages/core']);
     // core changed, so leaf's compile is where a break would surface.
@@ -237,17 +245,14 @@ describe('runBuildTest', () => {
       'npm test --workspace="packages/core"',
     ]);
     expect(rep.ok).toBe(true);
-  }, 30_000);
+  });
 
   it('reports a build failure with its output, and does not call it ok', () => {
     writeFileSync(
       join(root, 'package.json'),
       JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
     );
-    pkg('packages/a', {
-      name: '@x/a',
-      scripts: { build: 'echo "error TS2345: nope" && exit 1' },
-    });
+    pkg('packages/a', { name: '@x/a', scripts: { build: 'exit 1' } });
     writePlan(['packages/a/src/x.ts']);
 
     const rep = runBuildTest({
@@ -255,17 +260,20 @@ describe('runBuildTest', () => {
       worktree: root,
       timeout: 60,
       install: false,
+      exec: (command) => ({
+        command,
+        exitCode: 1,
+        seconds: 1,
+        timedOut: false,
+        output: 'src/x.ts(1,1): error TS2345: nope',
+      }),
     });
     expect(rep.ok).toBe(false);
     expect(rep.build.at(-1)?.exitCode).toBe(1);
     expect(rep.build.at(-1)?.output).toContain('TS2345');
     expect(rep.note).toContain('Correlate');
-  }, 30_000);
+  });
 
-  // Spawns real `npm run` and uses `node -e` fixture scripts so it runs on Windows
-  // too (the merge-queue `test_windows` job runs through cmd.exe, where POSIX
-  // `touch`/`test -f` do not exist). The pure buildSetFor ordering is also covered,
-  // shell-free, in workspaces.test.ts.
   it('widens on a compiler-named workspace package, and leaves no false failure behind', () => {
     writeFileSync(
       join(root, 'package.json'),
@@ -273,27 +281,59 @@ describe('runBuildTest', () => {
     );
     // `leaf` needs `@x/templates` at compile time but declares no dependency on it
     // — exactly what a tsconfig `paths` entry into another package's sources does.
-    // It fails until the marker that `templates`' build drops appears.
+    // It fails until `templates` has been built.
     pkg('packages/templates', {
       name: '@x/templates',
-      scripts: {
-        build: `node -e "require('fs').writeFileSync('../../.templates-built','')"`,
-      },
+      scripts: { build: 'exit 0' },
     });
     pkg('packages/leaf', {
       name: '@x/leaf',
-      scripts: {
-        build: `node -e "if(!require('fs').existsSync('../../.templates-built')){console.log(\\"error TS2307: Cannot find module '@x/templates'\\");process.exit(2)}"`,
-        test: `node -e ""`,
-      },
+      scripts: { build: 'exit 0', test: 'exit 0' },
     });
     writePlan(['packages/leaf/src/x.ts']);
 
+    let templatesBuilt = false;
     const rep = runBuildTest({
       plan: planPath,
       worktree: root,
       timeout: 60,
       install: false,
+      exec: (command) => {
+        const ws = wsOf(command);
+        if (
+          command.startsWith('npm run build') &&
+          ws === 'packages/templates'
+        ) {
+          templatesBuilt = true;
+          return {
+            command,
+            exitCode: 0,
+            seconds: 1,
+            timedOut: false,
+            output: '',
+          };
+        }
+        if (
+          command.startsWith('npm run build') &&
+          ws === 'packages/leaf' &&
+          !templatesBuilt
+        ) {
+          return {
+            command,
+            exitCode: 2,
+            seconds: 1,
+            timedOut: false,
+            output: "error TS2307: Cannot find module '@x/templates'",
+          };
+        }
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
     });
 
     expect(rep.widenedWith).toEqual(['@x/templates']);
@@ -306,7 +346,7 @@ describe('runBuildTest', () => {
     // report. An agent told "a build failure in a changed file is a Critical" would
     // read it and file a public blocker on a PR whose build passes.
     expect(rep.build.filter((r) => r.exitCode !== 0)).toEqual([]);
-  }, 30_000);
+  });
 
   it('stops widening at the attempt cap when the compiler keeps naming new packages', () => {
     // The loop is bounded at `attempt <= 3` (four tries). A build that names a fresh
@@ -438,12 +478,13 @@ describe('runBuildTest', () => {
       worktree: root,
       timeout: 60,
       install: false,
+      exec: okExec,
     });
     // core changed; excluded depends on it but is negated out, so it is not built.
     expect(rep.buildSet).toContain('packages/core');
     expect(rep.buildSet).not.toContain('packages/excluded');
     expect(rep.ok).toBe(true);
-  }, 30_000);
+  });
 
   it('throws a descriptive error for a missing plan file', () => {
     expect(() =>
@@ -549,32 +590,33 @@ describe('runBuildTest', () => {
     expect(rep.note).toContain('nothing could be built');
   });
 
-  // `node -e "setTimeout(...)"` rather than `sleep 30`, so it runs on the Windows
-  // merge-queue job (cmd.exe has no `sleep`). The exec-seam timeout tests below cover
-  // the classification logic shell-free.
-  it('calls a deadline an infrastructure result, never a defect in the diff', () => {
+  it('records a build-command timeout in timedOut and frames it as infrastructure', () => {
     writeFileSync(
       join(root, 'package.json'),
       JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
     );
-    pkg('packages/a', {
-      name: '@x/a',
-      scripts: { build: `node -e "setTimeout(()=>{},30000)"` },
-    });
+    pkg('packages/a', { name: '@x/a', scripts: { build: 'exit 0' } });
     writePlan(['packages/a/src/x.ts']);
 
     const rep = runBuildTest({
       plan: planPath,
       worktree: root,
-      timeout: 1,
+      timeout: 60,
       install: false,
+      exec: (command) => ({
+        command,
+        exitCode: null,
+        seconds: 60,
+        timedOut: true,
+        output: '',
+      }),
     });
     expect(rep.timedOut).toEqual(['npm run build --workspace="packages/a"']);
     expect(rep.ok).toBe(false);
     // The whole point of the field: the agent must not file this as a Critical.
     expect(rep.note).toContain('infrastructure');
     expect(rep.note).not.toContain('Critical');
-  }, 30_000);
+  });
 
   it('aborts when the install times out, rather than building an incomplete tree', () => {
     // A timeout kills `npm ci` mid-download and leaves a PARTIAL node_modules.
