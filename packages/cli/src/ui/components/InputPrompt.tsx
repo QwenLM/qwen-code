@@ -61,6 +61,7 @@ import {
 import {
   isLiveAgentPanelVisibleEntry,
   LIVE_AGENT_PANEL_MAX_ROWS,
+  LIVE_AGENT_PANEL_VP_MAX_ROWS,
 } from './background-view/liveAgentPanelVisibility.js';
 import { panelDisplayOrder } from './background-view/agent-forest.js';
 import { FEEDBACK_DIALOG_KEYS } from '../FeedbackDialog.js';
@@ -271,12 +272,18 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   // `livePanelSelectedIndex - 1` indexes the same agent the user sees
   // highlighted. Filtering alone (snapshot order, newest-first, unsliced)
   // opened the wrong agent's detail on Enter.
+  // Window by the same cap the panel actually renders (VP mode caps to
+  // LIVE_AGENT_PANEL_VP_MAX_ROWS in DefaultAppLayout) so the keyboard
+  // selection can't address a row that is scrolled off screen.
+  const liveAgentPanelMaxRows = settings.merged.ui?.useTerminalBuffer
+    ? LIVE_AGENT_PANEL_VP_MAX_ROWS
+    : LIVE_AGENT_PANEL_MAX_ROWS;
   const getVisibleBgAgents = useCallback(
     () =>
       panelDisplayOrder(
         bgEntries.filter((e) => isLiveAgentPanelVisibleEntry(e, Date.now())),
-      ).slice(-LIVE_AGENT_PANEL_MAX_ROWS),
-    [bgEntries],
+      ).slice(-liveAgentPanelMaxRows),
+    [bgEntries, liveAgentPanelMaxRows],
   );
   const hasActiveToolConfirmation = useMemo(
     () =>

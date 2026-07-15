@@ -22,6 +22,13 @@ export const TERMINAL_VISIBLE_MS = 8000;
 // to the keyboard handler.
 export const LIVE_AGENT_PANEL_MAX_ROWS = 12;
 
+// VP (virtualized-viewport) mode shares the terminal height with the
+// conversation, so the panel is capped much lower there to leave room for
+// history. Referenced by both DefaultAppLayout (the rendered `maxRows`) and
+// InputPrompt (the keyboard candidate window) so the two stay in lockstep —
+// see LIVE_AGENT_PANEL_MAX_ROWS's note on the shared-window contract.
+export const LIVE_AGENT_PANEL_VP_MAX_ROWS = 3;
+
 export function isLiveAgentPanelVisibleEntry(
   entry: DialogEntry,
   nowMs: number,

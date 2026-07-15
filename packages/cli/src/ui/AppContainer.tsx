@@ -202,6 +202,7 @@ import {
 } from './hooks/useExtensionUpdates.js';
 import { useProviderUpdates } from './hooks/useProviderUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
+import { StreamingContext } from './contexts/StreamingContext.js';
 import {
   RenderModeProvider,
   type RenderMode,
@@ -2970,8 +2971,11 @@ export const AppContainer = (props: AppContainerProps) => {
     !isFeedbackDialogOpen &&
     streamingState !== StreamingState.WaitingForConfirmation;
   const stickyTodoWidth = Math.min(mainAreaWidth, 64);
-  const stickyTodoMaxVisibleItems =
-    getStickyTodoMaxVisibleItems(terminalHeight);
+  // Keep this in lockstep with DefaultAppLayout's rendered cap so the
+  // controls-height layout key predicts the panel's real footprint.
+  const stickyTodoMaxVisibleItems = useTerminalBuffer
+    ? Math.min(2, getStickyTodoMaxVisibleItems(terminalHeight))
+    : getStickyTodoMaxVisibleItems(terminalHeight);
   const stickyTodosLayoutKey = shouldShowStickyTodos
     ? getStickyTodosLayoutKey(
         stickyTodos,
@@ -3012,6 +3016,20 @@ export const AppContainer = (props: AppContainerProps) => {
     dialogsVisible,
     stickyTodosLayoutKey,
     liveAgentPanelLayoutKey,
+    // The composer's own height also shifts without any of the above changing:
+    // the loading block mounts/unmounts with streamingState, the full
+    // indicator vs. the narrow "esc to cancel" hint toggles on
+    // embeddedShellFocused, queued messages add rows, and the input area
+    // itself mounts/unmounts (isInputActive). Missing these, the footer is not
+    // re-measured during a pure streaming turn (buffer/todo/agent all steady),
+    // so controlsHeight stays too small, availableTerminalHeight too large, and
+    // the VP viewport bottom is clipped until some unrelated dep re-triggers the
+    // measure. elapsedTime and currentLoadingPhrase are intentionally excluded —
+    // they tick every ~1s / few seconds without changing the row count.
+    streamingState,
+    embeddedShellFocused,
+    messageQueue.length,
+    isInputActive,
   ]);
 
   // agentViewState is declared earlier (before handleFinalSubmit) so it
@@ -4496,10 +4514,19 @@ export const AppContainer = (props: AppContainerProps) => {
                 <TerminalOutputProvider value={writeRaw}>
                   <ShellFocusContext.Provider value={isFocused}>
                     {transcriptFreeze ? (
-                      <TranscriptView
-                        items={transcriptItems}
-                        useAlternateScreen={!useTerminalBuffer}
-                      />
+                      // TranscriptView renders as a sibling of <App/>, which
+                      // owns the StreamingContext.Provider — so the frozen
+                      // transcript subtree has no provider of its own. A
+                      // pending tool group captured in the snapshot can hold a
+                      // tool in the Executing state, whose spinner calls
+                      // useStreamingContext and would otherwise throw. Provide
+                      // the context here so the transcript renders.
+                      <StreamingContext.Provider value={streamingState}>
+                        <TranscriptView
+                          items={transcriptItems}
+                          useAlternateScreen={!useTerminalBuffer}
+                        />
+                      </StreamingContext.Provider>
                     ) : (
                       <App />
                     )}

@@ -21,7 +21,7 @@ import type { IndividualToolCallDisplay } from '../../types.js';
 // plumbing in isolation.
 vi.mock('../shared/ToolStatusIndicator.js', () => ({
   ToolStatusIndicator: () => <Text>•</Text>,
-  STATUS_INDICATOR_WIDTH: 2,
+  STATUS_INDICATOR_WIDTH: 3,
 }));
 
 const NOW = 1_700_000_000_000;
@@ -366,7 +366,7 @@ describe('estimateCompactToolGroupHeight', () => {
       description: '中文中文中文中文',
     });
 
-    expect(estimateCompactToolGroupHeight([tool], 12)).toBe(3);
+    expect(estimateCompactToolGroupHeight([tool], 12)).toBe(4);
   });
 });
 

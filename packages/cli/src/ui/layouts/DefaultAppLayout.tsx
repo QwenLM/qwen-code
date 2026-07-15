@@ -17,6 +17,7 @@ import { AgentTabBar } from '../components/agent-view/AgentTabBar.js';
 import { AgentChatView } from '../components/agent-view/AgentChatView.js';
 import { AgentComposer } from '../components/agent-view/AgentComposer.js';
 import { LiveAgentPanel } from '../components/background-view/LiveAgentPanel.js';
+import { LIVE_AGENT_PANEL_VP_MAX_ROWS } from '../components/background-view/liveAgentPanelVisibility.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useAgentViewState } from '../contexts/AgentViewContext.js';
@@ -33,9 +34,12 @@ export const DefaultAppLayout: React.FC = () => {
   const hasAgents = agents.size > 0;
   const isAgentTab = activeView !== 'main' && agents.has(activeView);
   const stickyTodoWidth = Math.min(uiState.mainAreaWidth, 64);
-  const stickyTodoMaxVisibleItems = getStickyTodoMaxVisibleItems(
-    uiState.terminalHeight,
-  );
+  // VP mode shares the viewport with the conversation, so cap the sticky
+  // todo panel tighter (at most 2 rows) to keep history visible. The legacy
+  // renderer keeps the height-derived default.
+  const stickyTodoMaxVisibleItems = uiState.useTerminalBuffer
+    ? Math.min(2, getStickyTodoMaxVisibleItems(uiState.terminalHeight))
+    : getStickyTodoMaxVisibleItems(uiState.terminalHeight);
   const dialogMaxHeight = getDialogMaxHeight(
     uiState.terminalHeight,
     uiState.staticExtraHeight,
@@ -135,7 +139,14 @@ export const DefaultAppLayout: React.FC = () => {
               panel wants the full terminal width.
             */}
             {!uiState.dialogsVisible && (
-              <LiveAgentPanel width={uiState.terminalWidth} />
+              <LiveAgentPanel
+                width={uiState.terminalWidth}
+                maxRows={
+                  uiState.useTerminalBuffer
+                    ? LIVE_AGENT_PANEL_VP_MAX_ROWS
+                    : undefined
+                }
+              />
             )}
           </Box>
         </>
