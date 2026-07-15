@@ -671,6 +671,32 @@ export class ContentRetryEvent implements BaseTelemetryEvent {
   }
 }
 
+export class ProtocolTagSanitizedEvent implements BaseTelemetryEvent {
+  'event.name': 'protocol_tag_sanitized';
+  'event.timestamp': string;
+  model: string;
+  prompt_id?: string;
+  response_id?: string;
+  tag_name: 'think' | 'thinking';
+  tool_call_count: number;
+
+  constructor(opts: {
+    model: string;
+    promptId?: string;
+    responseId?: string;
+    tagName: 'think' | 'thinking';
+    toolCallCount: number;
+  }) {
+    this['event.name'] = 'protocol_tag_sanitized';
+    this['event.timestamp'] = new Date().toISOString();
+    this.model = opts.model;
+    this.prompt_id = opts.promptId;
+    this.response_id = opts.responseId;
+    this.tag_name = opts.tagName;
+    this.tool_call_count = opts.toolCallCount;
+  }
+}
+
 /**
  * Phase 4b — HTTP-status retry telemetry. Emitted by `retryWithBackoff` (via
  * the `onRetry` callback opt-in) for HTTP 429 / 5xx retries at LLM call sites.
@@ -1075,6 +1101,7 @@ export type TelemetryEvent =
   | FileOperationEvent
   | InvalidChunkEvent
   | ContentRetryEvent
+  | ProtocolTagSanitizedEvent
   | ContentRetryFailureEvent
   | ApiRetryEvent
   | SubagentExecutionEvent

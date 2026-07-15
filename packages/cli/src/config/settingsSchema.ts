@@ -603,6 +603,23 @@ const SETTINGS_SCHEMA = {
           'Play terminal bell sound when response completes or needs approval.',
         showInDialog: true,
       },
+      notificationMode: {
+        type: 'enum',
+        label: 'Notification Mode',
+        category: 'General',
+        requiresRestart: false,
+        default: 'all',
+        description:
+          'Which unfocused-terminal events fire a bell/OS notification. ' +
+          '"all" fires on every tool approval prompt AND on task completion (current behavior). ' +
+          '"task-complete" suppresses the per-approval notification and only fires when a long task returns to idle. ' +
+          'Requires `terminalBell` to be enabled; otherwise no notifications fire regardless of mode.',
+        showInDialog: true,
+        options: [
+          { value: 'all', label: 'All (approvals + task completion)' },
+          { value: 'task-complete', label: 'Task completion only' },
+        ],
+      },
       preventSystemSleep: {
         type: 'boolean',
         label: 'Prevent System Sleep While Running',
@@ -1396,13 +1413,13 @@ const SETTINGS_SCHEMA = {
         ],
       },
       maxSessionTurns: {
-        type: 'number',
+        type: 'integer',
         label: 'Max Session Turns',
         category: 'Model',
         requiresRestart: false,
         default: -1,
         description:
-          'Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.',
+          'Maximum number of user/model/tool turns to keep in a session. Must be an integer; -1 means unlimited.',
         showInDialog: false,
       },
       maxWallTimeSeconds: {
@@ -1483,7 +1500,7 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
       },
       maxToolCallsPerTurn: {
-        type: 'number',
+        type: 'integer',
         label: 'Max Tool Calls Per Turn',
         category: 'Model',
         requiresRestart: false,
@@ -1863,7 +1880,7 @@ const SETTINGS_SCHEMA = {
         label: 'Enable Auto Skill',
         category: 'Memory',
         requiresRestart: false,
-        default: true,
+        default: false,
         description:
           'Enable background review for reusable project skills after tool-heavy sessions.',
         showInDialog: false,
@@ -2360,7 +2377,7 @@ const SETTINGS_SCHEMA = {
         label: 'Tool Approval Mode',
         category: 'Tools',
         requiresRestart: false,
-        default: ApprovalMode.DEFAULT,
+        default: ApprovalMode.AUTO,
         description:
           'Approval mode for tool usage. Controls how tools are approved before execution.',
         showInDialog: true,

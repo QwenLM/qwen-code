@@ -168,6 +168,14 @@
           "type": "boolean",
           "default": true
         },
+        "notificationMode": {
+          "description": "Which unfocused-terminal events fire a bell/OS notification. \"all\" fires on every tool approval prompt AND on task completion (current behavior). \"task-complete\" suppresses the per-approval notification and only fires when a long task returns to idle. Requires `terminalBell` to be enabled; otherwise no notifications fire regardless of mode. Options: all, task-complete",
+          "enum": [
+            "all",
+            "task-complete"
+          ],
+          "default": "all"
+        },
         "preventSystemSleep": {
           "description": "Prevent the system from sleeping while Qwen Code is streaming a model response or executing tools. Idle prompt time and permission prompts do not inhibit sleep.",
           "type": "boolean",
@@ -605,8 +613,8 @@
           ]
         },
         "maxSessionTurns": {
-          "description": "Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.",
-          "type": "number",
+          "description": "Maximum number of user/model/tool turns to keep in a session. Must be an integer; -1 means unlimited.",
+          "type": "integer",
           "default": -1
         },
         "maxWallTimeSeconds": {
@@ -650,7 +658,7 @@
         },
         "maxToolCallsPerTurn": {
           "description": "Hard cap on tool calls within a single turn (one model turn plus its tool-result continuations; blocking Stop-hook continuations such as /goal iterations start a fresh budget). An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.",
-          "type": "number",
+          "type": "integer",
           "default": 100
         },
         "skipStartupContext": {
@@ -843,7 +851,7 @@
         "enableAutoSkill": {
           "description": "Enable background review for reusable project skills after tool-heavy sessions.",
           "type": "boolean",
-          "default": true
+          "default": false
         },
         "autoSkillConfirm": {
           "description": "Ask for confirmation before auto-generated skills are added to the skill library. When off, auto-skills are saved immediately.",
@@ -1109,7 +1117,7 @@
             "auto",
             "yolo"
           ],
-          "default": "default"
+          "default": "auto"
         },
         "autoAccept": {
           "description": "Automatically accept and execute tool calls that are considered safe (e.g., read-only operations) without explicit user confirmation.",

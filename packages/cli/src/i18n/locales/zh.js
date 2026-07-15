@@ -462,6 +462,8 @@ export default {
   'Manage existing subagents (view, edit, delete).':
     '管理现有子智能体（查看、编辑、删除）',
   'Create a new subagent with guided setup.': '通过引导式设置创建新的子智能体',
+  'Create a reusable skill from a knowledge source (file, URL, conversation, or text).':
+    '从知识源（文件、URL、对话或文本）创建可复用的技能。',
 
   // ============================================================================
   // Agents - Management Dialog

@@ -160,6 +160,18 @@ test('opens slash menu, resume dialog, model dialog, and theme dialog @smoke', a
   await gotoSession(page, scenario, daemon);
   await fillComposer(page, '/');
   await expect(page.locator('[data-web-shell-slash-menu]')).toBeVisible();
+  const composingEscapePrevented = await page.evaluate(() => {
+    const event = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+      isComposing: true,
+    });
+    (document.activeElement ?? document.body).dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+  expect(composingEscapePrevented).toBe(false);
+  await expect(page.locator('[data-web-shell-slash-menu]')).toBeVisible();
 
   await submitLocalCommand(page, '/resume');
   await expect(page.locator('[data-web-shell-resume-dialog]')).toBeVisible();
@@ -257,7 +269,9 @@ for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
 
     const modeButton = page.locator('[data-web-shell-mode-button]');
     await modeButton.click();
-    const modeDropdown = modeButton.locator('..').locator(':scope > div');
+    const modeDropdown = page.locator(
+      '[data-web-shell-toolbar-popover][data-state="open"]',
+    );
     await expect(modeDropdown).toBeVisible();
     await expect
       .poll(async () => {
@@ -269,6 +283,15 @@ for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
         return dropdownBox.y + dropdownBox.height - buttonBox.y;
       })
       .toBeLessThanOrEqual(-3);
+
+    const modelButton = page.locator('[data-web-shell-model-button]');
+    await modelButton.click();
+    await expect(
+      page.locator('[data-web-shell-toolbar-popover] input[type="search"]'),
+    ).toBeVisible();
+    await modeButton.click();
+    await expect(modeDropdown).toBeVisible();
+    await expect(modeDropdown.locator('input[type="search"]')).toHaveCount(0);
     await page.keyboard.press('Escape');
 
     await replaceComposerText(page, 'Short draft');

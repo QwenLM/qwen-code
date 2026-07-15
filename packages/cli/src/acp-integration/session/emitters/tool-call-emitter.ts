@@ -20,8 +20,14 @@ import type {
   ToolKind,
 } from '@agentclientprotocol/sdk';
 import type { Part } from '@google/genai';
-import { ToolNames, Kind } from '@qwen-code/qwen-code-core';
+import {
+  formatVisionBridgeNoticeDisplay,
+  isVisionBridgeNoticeDisplay,
+  ToolNames,
+  Kind,
+} from '@qwen-code/qwen-code-core';
 import { buildTruncatedDiffPreviewText } from '../../../utils/truncatedDiffPreview.js';
+import { sanitizeTerminalText } from '../../../ui/utils/textUtils.js';
 
 const KIND_MAP: Record<Kind, ToolKind> = {
   [Kind.Read]: 'read',
@@ -198,6 +204,18 @@ export class ToolCallEmitter extends BaseEmitter {
     } else {
       // Normal case: transform message parts to ToolCallContent[]
       contentArray = this.transformPartsToToolCallContent(params.message);
+    }
+
+    if (isVisionBridgeNoticeDisplay(params.resultDisplay)) {
+      contentArray.unshift({
+        type: 'content',
+        content: {
+          type: 'text',
+          text: sanitizeTerminalText(
+            formatVisionBridgeNoticeDisplay(params.resultDisplay),
+          ),
+        },
+      });
     }
 
     // Build the update

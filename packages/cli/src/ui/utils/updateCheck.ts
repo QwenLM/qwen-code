@@ -15,6 +15,50 @@ const debugLogger = createDebugLogger('UPDATE_CHECK');
 
 export const FETCH_TIMEOUT_MS = 2000;
 
+/**
+ * Sentinel error thrown when `fetchInfo()` does not resolve within
+ * `FETCH_TIMEOUT_MS`. `update-notifier`'s `fetchInfo()` does not accept a
+ * timeout option, so slow / unreachable registries (corporate proxies, offline
+ * networks, DNS failures) would otherwise hang the check indefinitely or fall
+ * through to a stale configstore cache. Race the call against a bounded timer
+ * and surface a real error so `/update` can report "check failed" instead of
+ * silently returning "up to date". The `distTag` is carried on the message so
+ * an oncall reading logs can tell which registry endpoint stalled — the
+ * nightly path fires two concurrent fetches, and only one of them may be
+ * blocked (e.g. a corporate proxy that lets `nightly` through but not
+ * `latest`). Related: #6857.
+ */
+export class UpdateCheckTimeoutError extends Error {
+  readonly distTag?: string;
+  constructor(timeoutMs: number, distTag?: string) {
+    const suffix = distTag ? ` for ${distTag}` : '';
+    super(`update-notifier fetchInfo timed out after ${timeoutMs}ms${suffix}`);
+    this.name = 'UpdateCheckTimeoutError';
+    this.distTag = distTag;
+  }
+}
+
+async function fetchInfoWithTimeout(
+  notifier: { fetchInfo(): UpdateInfo | Promise<UpdateInfo> },
+  timeoutMs: number,
+  distTag?: string,
+): Promise<UpdateInfo> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve(notifier.fetchInfo()),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new UpdateCheckTimeoutError(timeoutMs, distTag)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 export interface UpdateObject {
   message: string;
   update: UpdateInfo;
@@ -77,9 +121,21 @@ export async function checkForUpdatesDetailed(): Promise<UpdateCheckResult> {
 
     if (isNightly) {
       const [nightlyUpdateInfo, latestUpdateInfo] = await Promise.all([
-        createNotifier('nightly').fetchInfo(),
-        createNotifier('latest').fetchInfo(),
+        fetchInfoWithTimeout(
+          createNotifier('nightly'),
+          FETCH_TIMEOUT_MS,
+          'nightly',
+        ),
+        fetchInfoWithTimeout(
+          createNotifier('latest'),
+          FETCH_TIMEOUT_MS,
+          'latest',
+        ),
       ]);
+
+      debugLogger.debug(
+        `fetchInfo returned nightly=${JSON.stringify(nightlyUpdateInfo)} latest=${JSON.stringify(latestUpdateInfo)} for current=${version}`,
+      );
 
       const bestUpdate = getBestAvailableUpdate(
         nightlyUpdateInfo,
@@ -99,7 +155,15 @@ export async function checkForUpdatesDetailed(): Promise<UpdateCheckResult> {
         };
       }
     } else {
-      const updateInfo = await createNotifier('latest').fetchInfo();
+      const updateInfo = await fetchInfoWithTimeout(
+        createNotifier('latest'),
+        FETCH_TIMEOUT_MS,
+        'latest',
+      );
+
+      debugLogger.debug(
+        `fetchInfo returned ${JSON.stringify(updateInfo)} for current=${version}`,
+      );
 
       if (updateInfo && semver.gt(updateInfo.latest, version)) {
         return {

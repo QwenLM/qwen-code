@@ -6,6 +6,9 @@ const baseURL =
 
 export default defineConfig({
   testDir: './client/e2e',
+  // The visuals suite (screenshot/video capture) runs under its own
+  // playwright.visuals.config.ts; keep it out of the smoke/e2e runs.
+  testIgnore: '**/visuals/**',
   outputDir: './client/e2e/test-results',
   timeout: 60_000,
   expect: {

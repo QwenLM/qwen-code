@@ -46,6 +46,7 @@ import {
   detectLoopSentinel,
   detectAutonomousSentinel,
   LoopTickResolver,
+  convertToFunctionErrorResponse,
   convertToFunctionResponse,
   createDuplicateProviderToolCallResponse,
   findRepeatedDuplicateProviderToolCall,
@@ -65,6 +66,7 @@ import {
   clampInlineMediaPart,
   Storage,
   ToolNames,
+  ToolErrorType,
   fireNotificationHook,
   firePermissionRequestHook,
   firePreToolUseHook,
@@ -130,6 +132,7 @@ import {
   normalizeParts,
   runVisionBridge,
   shouldRunVisionBridge,
+  formatVisionBridgeNotice,
   splitImageParts,
   approxBase64Bytes,
 } from '@qwen-code/qwen-code-core';
@@ -5378,6 +5381,8 @@ export class Session implements SessionContext {
 
           const execSpan = startToolExecutionSpan();
           let toolResult: ToolResult;
+          let isExecutionTimeout = false;
+          let aborted = false;
           // Shell liveness heartbeats: forwarded to the client as meta-only
           // tool_call_update frames so a headless gateway can tell a silent
           // command from a dead session. `toolSettled` gates out a heartbeat
@@ -5429,14 +5434,18 @@ export class Session implements SessionContext {
               toolSettled = true;
               sleepInhibitorHandle.release();
             }
-            const aborted = activeToolAbortSignal.aborted;
+            isExecutionTimeout =
+              toolResult.error?.type === ToolErrorType.EXECUTION_TIMEOUT;
+            aborted = activeToolAbortSignal.aborted && !isExecutionTimeout;
             endToolExecutionSpan(execSpan, {
               success: !toolResult.error && !aborted,
               error: aborted
                 ? 'tool_cancelled'
-                : toolResult.error
-                  ? 'tool_error'
-                  : undefined,
+                : isExecutionTimeout
+                  ? 'tool_timeout'
+                  : toolResult.error
+                    ? 'tool_error'
+                    : undefined,
               cancelled: aborted,
               ...heartbeatSpanAttributes(),
             });
@@ -5473,11 +5482,18 @@ export class Session implements SessionContext {
           }
 
           // Create response parts first (needed for emitResult and recordToolResult)
-          const responseParts = convertToFunctionResponse(
-            toolName,
-            callId,
-            toolResult.llmContent,
-          );
+          const responseParts = toolResult.error
+            ? convertToFunctionErrorResponse(
+                toolName,
+                callId,
+                toolResult.llmContent,
+                toolResult.error.message,
+              )
+            : convertToFunctionResponse(
+                toolName,
+                callId,
+                toolResult.llmContent,
+              );
 
           // A tool can fail "softly" by returning toolResult.error without
           // throwing, and can be cancelled mid-flight. Compute the real outcome
@@ -5486,7 +5502,6 @@ export class Session implements SessionContext {
           // hardcoding success — otherwise failed/cancelled daemon/ACP tools
           // are mislabeled as successful in telemetry, session replay, and the
           // client UI.
-          const aborted = activeToolAbortSignal.aborted;
           const status: 'success' | 'error' | 'cancelled' = aborted
             ? 'cancelled'
             : toolResult.error
@@ -6124,7 +6139,7 @@ export class Session implements SessionContext {
     if (bridgeResult.status !== 'skipped' || bridgeResult.egressOccurred) {
       try {
         await this.messageEmitter.emitAgentMessage(
-          this.#formatVisionBridgeNotice(bridgeResult),
+          formatVisionBridgeNotice(bridgeResult),
         );
       } catch (error) {
         debugLogger.debug(
@@ -6264,34 +6279,6 @@ export class Session implements SessionContext {
 
   #formatVoiceBridgeEgressNotice(modelId: string, audioCount: number): string {
     return `Sent ${audioCount} audio file(s) to ${modelId} for transcription, but no transcript was produced.`;
-  }
-
-  #formatVisionBridgeNotice(result: VisionBridgeResult): string {
-    const modelName = result.modelId ?? 'vision model';
-    const target = result.modelEndpoint
-      ? `${modelName} (${result.modelEndpoint})`
-      : modelName;
-    const egressNote = result.egressOccurred
-      ? ` Your image and prompt/context were sent to ${target}.`
-      : '';
-
-    if (result.status === 'failed') {
-      const reason = result.egressOccurred
-        ? 'the vision model request failed'
-        : 'the vision bridge could not run';
-      return `Vision bridge (${modelName}) failed: ${reason}.${egressNote} The image was not interpreted.`;
-    }
-
-    if (result.status === 'skipped') {
-      return `Vision bridge cancelled.${egressNote}`;
-    }
-
-    // On success the image was always sent, so disclose egress unconditionally.
-    const omitted =
-      result.omittedCount > 0
-        ? ` (${result.omittedCount} image(s) omitted)`
-        : '';
-    return `Converted ${result.convertedCount} image(s)${omitted} to text via ${target}. Your image and prompt/context were sent to that model.`;
   }
 
   async #resolveExtensionMentionParts(

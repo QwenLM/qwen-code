@@ -328,6 +328,112 @@ describe('ToolCallEmitter', () => {
       );
     });
 
+    it('places the vision bridge disclosure in ACP content on success', async () => {
+      const resultDisplay = {
+        type: 'vision_bridge_notice' as const,
+        summary: 'Transcribed PDF pages 20-23; remaining pages 24-25',
+        notice:
+          'Converted 4 images via qwen3-vl-plus (dashscope.aliyuncs.com).',
+      };
+
+      await emitter.emitResult({
+        toolName: 'read_file',
+        callId: 'call-pdf-success',
+        success: true,
+        message: createMockMessage('Page 20: transcribed content'),
+        resultDisplay,
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: 'completed',
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: `${resultDisplay.summary}\n${resultDisplay.notice}`,
+              },
+            },
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: 'Page 20: transcribed content',
+              },
+            },
+          ],
+          rawOutput: resultDisplay,
+        }),
+      );
+    });
+
+    it('sanitizes terminal controls in the ACP vision bridge disclosure', async () => {
+      const resultDisplay = {
+        type: 'vision_bridge_notice' as const,
+        summary: 'Transcribed evil\x1b]52;c;ZXZpbA==\x07\u202E.pdf pages 20-23',
+        notice: 'Converted via qwen3-vl-plus.',
+      };
+
+      await emitter.emitResult({
+        toolName: 'read_file',
+        callId: 'call-pdf-unsafe-name',
+        success: true,
+        message: createMockMessage('Page 20: transcribed content'),
+        resultDisplay,
+      });
+
+      const update = sendUpdateSpy.mock.calls[0][0] as {
+        content: Array<{ content?: { text?: string } }>;
+      };
+      const disclosure = update.content[0].content?.text;
+      expect(disclosure).toContain('evil');
+      expect(disclosure).not.toContain('\x1b');
+      expect(disclosure).not.toContain('\x07');
+      expect(disclosure).not.toContain('\u202e');
+    });
+
+    it('keeps the vision bridge disclosure in ACP content on failure', async () => {
+      const resultDisplay = {
+        type: 'vision_bridge_notice' as const,
+        summary: 'Failed to read PDF after rendering pages 20-23',
+        notice:
+          'Vision bridge (qwen3-vl-plus) failed after sending images to dashscope.aliyuncs.com.',
+      };
+
+      await emitter.emitResult({
+        toolName: 'read_file',
+        callId: 'call-pdf-failure',
+        success: false,
+        message: createMockMessage('Cannot extract text from PDF'),
+        resultDisplay,
+        error: new Error('No extractable text layer.'),
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: 'failed',
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: `${resultDisplay.summary}\n${resultDisplay.notice}`,
+              },
+            },
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: 'No extractable text layer.',
+              },
+            },
+          ],
+          rawOutput: resultDisplay,
+        }),
+      );
+    });
+
     it('emits structured artifacts without a wire trust marker', async () => {
       await emitter.emitResult({
         toolName: ToolNames.ARTIFACT,

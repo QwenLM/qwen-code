@@ -315,6 +315,7 @@ describe('AnthropicContentConverter', () => {
             type: 'tool_result',
             tool_use_id: 'call-1',
             content: 'boom',
+            is_error: true,
             cache_control: { type: 'ephemeral' },
           },
         ],
@@ -1200,6 +1201,210 @@ describe('AnthropicContentConverter', () => {
         assistant?.content as Array<{ type: string }>
       ).filter((b) => b.type === 'tool_use');
       expect(toolUseBlocks).toHaveLength(1);
+    });
+  });
+
+  describe('unsigned proxy thinking history', () => {
+    it('drops unsigned thinking while preserving visible content and signed blocks', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'First' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: 'unsigned', thought: true },
+                {
+                  text: 'empty signature',
+                  thought: true,
+                  thoughtSignature: '',
+                },
+                {
+                  text: 'signed',
+                  thought: true,
+                  thoughtSignature: 'real-signature',
+                },
+                { text: 'Visible answer' },
+              ],
+            },
+            { role: 'user', parts: [{ text: 'Second' }] },
+          ],
+        },
+        {
+          dropUnsignedAssistantThinking: true,
+          enableCacheControl: false,
+        },
+      );
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          {
+            type: 'thinking',
+            thinking: 'signed',
+            signature: 'real-signature',
+          },
+          { type: 'text', text: 'Visible answer' },
+        ],
+      });
+    });
+
+    it('drops a thinking-only turn and merges the surrounding user turns', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'First' }] },
+            {
+              role: 'model',
+              parts: [{ text: 'unsigned', thought: true }],
+            },
+            { role: 'user', parts: [{ text: 'Second' }] },
+          ],
+        },
+        {
+          dropUnsignedAssistantThinking: true,
+          enableCacheControl: false,
+        },
+      );
+
+      expect(messages).toEqual([
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'First' },
+            { type: 'text', text: 'Second' },
+          ],
+        },
+      ]);
+    });
+
+    it('fails locally when an unsigned thinking block belongs to a tool-use turn', () => {
+      expect(() =>
+        converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: [
+              { role: 'user', parts: [{ text: 'Run tool' }] },
+              {
+                role: 'model',
+                parts: [
+                  { text: 'unsigned', thought: true },
+                  { functionCall: { id: 't1', name: 'tool', args: {} } },
+                ],
+              },
+              {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 't1',
+                      name: 'tool',
+                      response: { output: 'ok' },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+          { dropUnsignedAssistantThinking: true },
+        ),
+      ).toThrow('proxy omitted the thinking signature');
+    });
+
+    it('drops unsigned thinking from a completed tool-use turn', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Run tool' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: 'unsigned', thought: true },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't1',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+            { role: 'model', parts: [{ text: 'Finished' }] },
+            { role: 'user', parts: [{ text: 'Next' }] },
+          ],
+        },
+        { dropUnsignedAssistantThinking: true },
+      );
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 't1', name: 'tool', input: {} }],
+      });
+    });
+
+    it('fails when an earlier step in the active tool loop has unsigned thinking', () => {
+      expect(() =>
+        converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: [
+              { role: 'user', parts: [{ text: 'Run tools' }] },
+              {
+                role: 'model',
+                parts: [
+                  { text: 'unsigned', thought: true },
+                  { functionCall: { id: 't1', name: 'first', args: {} } },
+                ],
+              },
+              {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 't1',
+                      name: 'first',
+                      response: { output: 'one' },
+                    },
+                  },
+                ],
+              },
+              {
+                role: 'model',
+                parts: [
+                  {
+                    text: 'signed',
+                    thought: true,
+                    thoughtSignature: 'real-signature',
+                  },
+                  { functionCall: { id: 't2', name: 'second', args: {} } },
+                ],
+              },
+              {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 't2',
+                      name: 'second',
+                      response: { output: 'two' },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+          { dropUnsignedAssistantThinking: true },
+        ),
+      ).toThrow('proxy omitted the thinking signature');
     });
   });
 
