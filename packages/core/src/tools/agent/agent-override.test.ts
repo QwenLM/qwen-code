@@ -498,6 +498,16 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     );
   });
 
+  it('rejects fractional maxSessionTurns from persisted launch flags', async () => {
+    const parent = await createParentWithRegistry();
+
+    await expect(
+      createApprovalModeOverride(parent, ApprovalMode.DEFAULT, {
+        persistedCliFlags: { maxSessionTurns: 0.5 },
+      }),
+    ).rejects.toThrow(/maxSessionTurns: must be an integer/);
+  });
+
   describe('TOOL_REGISTRY_REBUILT marker propagation', () => {
     // Reviewer raised a concern that
     // `Object.prototype.hasOwnProperty.call(base, 'getToolRegistry')`

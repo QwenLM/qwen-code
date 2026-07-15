@@ -1381,13 +1381,13 @@ const SETTINGS_SCHEMA = {
         ],
       },
       maxSessionTurns: {
-        type: 'number',
+        type: 'integer',
         label: 'Max Session Turns',
         category: 'Model',
         requiresRestart: false,
         default: -1,
         description:
-          'Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.',
+          'Maximum number of user/model/tool turns to keep in a session. Must be an integer; -1 means unlimited.',
         showInDialog: false,
       },
       maxWallTimeSeconds: {
@@ -1468,7 +1468,7 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
       },
       maxToolCallsPerTurn: {
-        type: 'number',
+        type: 'integer',
         label: 'Max Tool Calls Per Turn',
         category: 'Model',
         requiresRestart: false,
