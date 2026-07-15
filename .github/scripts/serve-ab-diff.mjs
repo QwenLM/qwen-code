@@ -17,7 +17,7 @@
  *   node serve-ab-diff.mjs <scenario> <beforeJson> <afterJson>
  */
 
-import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -133,7 +133,7 @@ export function renderTable(scenario, changes) {
   for (const c of changes) {
     const before = c.kind === 'added' ? '—' : fmt(c.before);
     const after = c.kind === 'removed' ? '—' : fmt(c.after);
-    const path = c.path || '(root)';
+    const path = (c.path || '(root)').replace(/`/g, '&#96;');
     out.push(`| \`${path}\` | ${before} | ${after} |`);
   }
   out.push('');
@@ -216,12 +216,11 @@ export function diffCaptureDirs(beforeDir, afterDir) {
   const sections = afterFiles.map((f) => {
     const scenario = f.replace(/\.json$/, '');
     const after = readJson(join(afterDir, f));
-    let before = {};
-    try {
-      before = readJson(join(beforeDir, f));
-    } catch {
-      // no baseline for this individual scenario
-    }
+    // A missing base file → no baseline for this scenario (fine); but an
+    // EXISTING but malformed base must surface (readJson throws) rather than be
+    // silently treated as {}, which would report every field as "added".
+    const beforePath = join(beforeDir, f);
+    const before = existsSync(beforePath) ? readJson(beforePath) : {};
     return { scenario, changes: diffJson(before, after) };
   });
   return { sections, baselineMissing, removed };
@@ -242,8 +241,9 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
     const total = baselineMissing
       ? 0
       : sections.reduce((n, s) => n + s.changes.length, 0);
-    // stdout = total changed fields (workflow reads it to decide whether to post).
-    process.stdout.write(`${total}\n`);
+    // Log only — nothing gates on this (the publisher posts whenever body.md
+    // exists); kept for the CI run log.
+    process.stderr.write(`serve-ab: ${total} changed field(s)\n`);
   } else {
     // Single scenario: `serve-ab-diff.mjs <scenario> <beforeJson> <afterJson>`.
     const [beforePath, afterPath] = rest;

@@ -67,11 +67,25 @@ jobs:
           HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
         run: |-
           set -euo pipefail
-          MB="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${BASE_SHA}...${HEAD_SHA}" --jq '.merge_base_commit.sha' 2>/dev/null || true)"
-          echo "sha=${MB:-$BASE_SHA}" >> "${GITHUB_OUTPUT}"
-          echo "before (merge-base) = ${MB:-$BASE_SHA}; base tip = ${BASE_SHA}"
+          # Retry, then emit an EMPTY sha and skip the before build (after-only)
+          # rather than falling back to the base-branch tip — the tip would show
+          # already-landed changes reversed, the exact bug the merge-base avoids.
+          MB=''
+          for attempt in 1 2 3; do
+            MB="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${BASE_SHA}...${HEAD_SHA}" --jq '.merge_base_commit.sha' 2>/dev/null || true)"
+            [ -n "${MB}" ] && break
+            sleep 2
+          done
+          echo "sha=${MB}" >> "${GITHUB_OUTPUT}"
+          if [ -n "${MB}" ]; then
+            echo "before (merge-base) = ${MB}"
+          else
+            echo "::warning::could not resolve the merge-base; skipping the before build (after-only)."
+          fi
 
       - name: 'Checkout the merge-base'
+        id: 'base_checkout'
+        if: "${{ steps.mergebase.outputs.sha != '' }}"
         continue-on-error: true
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -99,6 +113,7 @@ jobs:
       # Best-effort: if the base fails to build/drive, the diff treats every
       # after-field as new rather than sinking the whole preview.
       - name: 'Build + drive the PR base'
+        if: "${{ steps.base_checkout.outcome == 'success' }}"
         continue-on-error: true
         working-directory: 'base'
         run: |-

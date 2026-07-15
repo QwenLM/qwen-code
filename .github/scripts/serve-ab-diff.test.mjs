@@ -206,6 +206,19 @@ test('renderTable: escapes pipes + backticks so a value cannot break the table',
   assert.equal((row.match(/(?<!\\)\|/g) || []).length, 4);
 });
 
+test('diffCaptureDirs: a malformed capture surfaces a clear error (not silent {})', () => {
+  const before = mkdtempSync(join(tmpdir(), 'sa-before-'));
+  const after = mkdtempSync(join(tmpdir(), 'sa-after-'));
+  // Malformed HEAD capture → clear error, not a raw SyntaxError.
+  writeFileSync(join(after, 'health.json'), '{ not valid json');
+  assert.throws(() => diffCaptureDirs(before, after), /invalid JSON capture/);
+  // Existing-but-malformed BASE capture → also surfaces (not silently {} →
+  // "everything added").
+  writeFileSync(join(after, 'health.json'), JSON.stringify({ status: 'ok' }));
+  writeFileSync(join(before, 'health.json'), 'garbage');
+  assert.throws(() => diffCaptureDirs(before, after), /invalid JSON capture/);
+});
+
 test('diffCaptureDirs: a base-only (removed) scenario is surfaced, not dropped', () => {
   const before = mkdtempSync(join(tmpdir(), 'sa-before-'));
   const after = mkdtempSync(join(tmpdir(), 'sa-after-'));
