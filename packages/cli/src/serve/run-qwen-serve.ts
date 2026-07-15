@@ -49,6 +49,7 @@ import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 // closure check doesn't trace create-sub-session's transitive deps through
 // the run-qwen-serve chunk. The launcher is only needed after listen().
 import { PathMutexRegistry } from './fs/path-mutex-registry.js';
+import { isDeepHealthQuery } from './health-query.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
@@ -1206,7 +1207,7 @@ function createBootstrapServeApp(input: {
   }
   app.use(hostAllowlist(opts.hostname, getPort));
 
-  const healthHandler = (_req: Request, res: Response): void => {
+  const healthHandler = (req: Request, res: Response): void => {
     const runtimeError = getRuntimeError();
     if (runtimeError !== undefined) {
       res.status(503).json({
@@ -1218,6 +1219,11 @@ function createBootstrapServeApp(input: {
 
     if (onHealthServed) {
       res.once('finish', onHealthServed);
+    }
+    if (isDeepHealthQuery(req.query['deep'])) {
+      res.setHeader('Retry-After', '1');
+      res.status(503).json({ status: 'degraded' });
+      return;
     }
     res.status(200).json({ status: 'ok' });
   };

@@ -6,16 +6,17 @@
 
 import type { Application, Request, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { getDemoHtml } from '../demo.js';
+import { isDeepHealthQuery } from '../health-query.js';
 import { isLoopbackBind } from '../loopback-binds.js';
 import type { RateLimiterInstance } from '../rate-limit.js';
 import type { ServeOptions } from '../types.js';
+import type { WorkspaceRegistry } from '../workspace-registry.js';
 
 interface CreateHealthDemoRoutesDeps {
   opts: Pick<ServeOptions, 'hostname' | 'requireAuth'>;
   getPort: () => number;
-  bridge: AcpSessionBridge;
+  workspaceRegistry: WorkspaceRegistry;
   getActiveSseCount: () => number;
   getRateLimiter: () => RateLimiterInstance | undefined;
 }
@@ -28,7 +29,13 @@ interface HealthDemoRoutes {
 export function createHealthDemoRoutes(
   deps: CreateHealthDemoRoutesDeps,
 ): HealthDemoRoutes {
-  const { opts, getPort, bridge, getActiveSseCount, getRateLimiter } = deps;
+  const {
+    opts,
+    getPort,
+    workspaceRegistry,
+    getActiveSseCount,
+    getRateLimiter,
+  } = deps;
 
   // --- Demo page: mirrors the `/health` loopback-gating pattern.
   // On loopback binds, registered BEFORE bearerAuth so browsers can
@@ -72,37 +79,55 @@ export function createHealthDemoRoutes(
   // CORS deny + Host allowlist still apply to `/health` in both
   // cases.
   // Shared handler so loopback (pre-auth) and non-loopback (post-auth)
-  // routes return the same shape. `?deep=1` exposes bridge counters
-  // (`sessions`, `pendingPermissions`) for observability — it is
-  // INFORMATIONAL only, not a true liveness probe. Counter getters
-  // are size accessors that don't perform per-session/channel pings,
-  // so a wedged child (stuck on a request, leaked FD, etc.) won't
-  // change the response. We retain the try/catch + 503 as a
-  // defense-in-depth net for custom bridge impls whose getters MAY
-  // throw — but the real bridge's getters never do, so under normal
-  // operation the 503 path is unreachable. The docs
-  // (`docs/users/qwen-serve.md` + `qwen-serve-protocol.md`) clarify
-  // that deep is for counters, not health verification. Default (no
-  // query) stays cheap so high-frequency liveness probes don't load
-  // the bridge.
+  // routes return the same shape. `?deep=1` exposes daemon-wide bridge
+  // counters for observability, but the accessors don't ping child
+  // processes or channels, so this is not a true liveness probe. An
+  // unexpected registry or bridge read failure degrades the whole probe
+  // instead of returning partial totals. Default (no query) stays cheap so
+  // high-frequency liveness probes don't access runtime state.
   const healthHandler = (req: Request, res: Response): void => {
-    const deepQuery = req.query['deep'];
-    const deep = deepQuery === '1' || deepQuery === 'true' || deepQuery === '';
-    if (!deep) {
+    if (!isDeepHealthQuery(req.query['deep'])) {
       res.status(200).json({ status: 'ok' });
       return;
     }
     try {
-      const lastActivity = bridge.lastActivityAt;
+      const runtimes = workspaceRegistry.listManaged();
+      let sessions = 0;
+      let pendingPermissions = 0;
+      let activePrompts = 0;
+      let channelAlive = false;
+      let lastActivity: number | null = null;
+
+      for (const runtime of runtimes) {
+        const bridge = runtime.bridge;
+        const runtimeSessions = bridge.sessionCount;
+        const runtimePendingPermissions = bridge.pendingPermissionCount;
+        const runtimeActivePrompts = bridge.activePromptCount;
+        const runtimeChannelAlive = bridge.isChannelLive();
+        const runtimeLastActivity = bridge.lastActivityAt;
+
+        sessions += runtimeSessions;
+        pendingPermissions += runtimePendingPermissions;
+        activePrompts += runtimeActivePrompts;
+        channelAlive = channelAlive || runtimeChannelAlive;
+        if (
+          runtimeLastActivity !== null &&
+          (lastActivity === null || runtimeLastActivity > lastActivity)
+        ) {
+          lastActivity = runtimeLastActivity;
+        }
+      }
+
       const now = Date.now();
       const rateLimiter = getRateLimiter();
       res.status(200).json({
         status: 'ok',
-        sessions: bridge.sessionCount,
-        pendingPermissions: bridge.pendingPermissionCount,
-        activePrompts: bridge.activePromptCount,
+        workspaceCount: runtimes.length,
+        sessions,
+        pendingPermissions,
+        activePrompts,
         connectedClients: getActiveSseCount(),
-        channelAlive: bridge.isChannelLive(),
+        channelAlive,
         lastActivityAt:
           lastActivity !== null ? new Date(lastActivity).toISOString() : null,
         idleSinceMs: lastActivity !== null ? now - lastActivity : null,

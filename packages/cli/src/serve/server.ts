@@ -934,7 +934,7 @@ export function createServeApp(
   const healthDemoRoutes = createHealthDemoRoutes({
     opts,
     getPort,
-    bridge: primaryBridge,
+    workspaceRegistry,
     getActiveSseCount,
     getRateLimiter: () => rateLimiter,
   });

@@ -442,13 +442,25 @@ Both events live in the per-session SSE replay ring (they carry an `id`) so a cl
 
 Liveness probe. Default form returns `200 {"status":"ok"}` if the listener is up — cheap, no bridge access, suitable for high-frequency k8s/Compose liveness probes.
 
-Pass `?deep=1` (also accepts `?deep=true` or bare `?deep`) for a probe that exposes bridge **counters** (informational only, not a true liveness check):
+Pass `?deep=1` (also accepts `?deep=true` or bare `?deep`) for a daemon-wide probe that aggregates bridge **counters** across every managed workspace runtime, including a workspace that is still draining (informational only, not a true liveness check):
 
 ```json
-{ "status": "ok", "sessions": 3, "pendingPermissions": 1 }
+{
+  "status": "ok",
+  "workspaceCount": 2,
+  "sessions": 3,
+  "pendingPermissions": 1,
+  "activePrompts": 1,
+  "connectedClients": 2,
+  "channelAlive": true,
+  "lastActivityAt": "2026-07-15T08:30:00.000Z",
+  "idleSinceMs": 120000
+}
 ```
 
-> ⚠️ The deep probe is **informational**, not a real liveness verification. It reads counter accessors (`bridge.sessionCount`, `bridge.pendingPermissionCount`) which are simple Map-size getters; they don't ping individual child processes / channels and so won't detect a wedged-but-still-counted session. Use it for capacity dashboards (current concurrency vs. `--max-sessions`, queue depth) rather than as the trigger for "pull this daemon out of rotation". A `503 {"status":"degraded"}` response is theoretically possible if a custom bridge implementation's getters throw, but the real bridge's getters never do — under normal operation the deep probe always returns 200. For real liveness, rely on whether the listener accepts a TCP connection at all (i.e. the default `/health` without `?deep`).
+`sessions`, `pendingPermissions`, and `activePrompts` are sums. `lastActivityAt` is the latest non-null workspace activity time and `idleSinceMs` is derived from that same snapshot. `channelAlive` means at least one managed workspace channel is live; it does not mean every workspace is healthy. `connectedClients` and the optional `rateLimitHits` remain daemon-wide counters rather than per-workspace sums.
+
+> ⚠️ The deep probe is **informational**, not a real liveness verification or an atomic reclaim lease. It reads counter accessors which don't ping individual child processes / channels and so won't detect a wedged-but-still-counted session. `connectedClients` counts REST SSE connections, not every ACP transport. Use repeated samples and graceful shutdown for idle reclamation; use authenticated `/daemon/status` for transport and per-workspace diagnostics. If any managed runtime getter throws, deep health fails closed with `503 {"status":"degraded"}` rather than returning partial totals. During bootstrap, before the runtime registry is ready, it returns that 503 body with `Retry-After: 1`. For listener liveness, use the default `/health` without `?deep`.
 
 **Auth:** required **only on non-loopback binds**. On loopback (`127.0.0.1`, `::1`, `[::1]`) `/health` is registered before the bearer middleware so k8s/Compose probes inside the pod don't need to carry the token. On non-loopback (`--hostname 0.0.0.0` etc.) the route is registered after the bearer middleware and returns 401 without a valid token — otherwise an unauthenticated caller could probe arbitrary addresses to confirm a `qwen serve` exists, a low-severity info leak that combines poorly with port scanning. CORS deny + Host allowlist still apply on the loopback exemption.
 
