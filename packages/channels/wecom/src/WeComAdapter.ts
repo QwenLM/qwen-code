@@ -419,6 +419,8 @@ export class WeComChannel extends ChannelBase {
       text,
       messageId: rawMessageId ?? messageId,
       isGroup,
+      // WeCom only delivers group callbacks when the intelligent robot is
+      // mentioned, so each delivered group message is already mention-scoped.
       isMentioned: true,
       isReplyToBot:
         getString(getRecord(quote, 'from'), 'userid') === this.wecom.botId,

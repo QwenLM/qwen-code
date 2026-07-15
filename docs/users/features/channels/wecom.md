@@ -85,7 +85,7 @@ For groups, set `groupPolicy` to `"allowlist"` or `"open"`. WeCom only delivers 
 
 Earlier Qwen Code versions also applied the generic `requireMention` gate after WeCom delivered a group callback. Because the callback does not include separate mention metadata, `requireMention: true`—including the default value—could reject every delivered group message and make group chat appear nonfunctional.
 
-Qwen Code now relies on WeCom's mention-scoped delivery and does not apply a second mention decision. Existing WeCom configurations containing either `requireMention: true` or `requireMention: false` remain valid and do not produce configuration errors. Both values have the same behavior for WeCom, so the field can be removed. Other settings in the same group entry, such as `dispatchMode` and `groupHistoryLimit`, continue to apply.
+Qwen Code now relies on WeCom's mention-scoped delivery and does not apply a second mention decision. Existing WeCom configurations containing either `requireMention: true` or `requireMention: false` remain valid and do not produce configuration errors. Both values have the same behavior for WeCom, so the field can be removed. Other settings in the same group entry, such as `dispatchMode`, continue to apply. `groupHistoryLimit` remains accepted but cannot collect new WeCom history because unmentioned group messages are not delivered.
 
 ## Images and Files
 
