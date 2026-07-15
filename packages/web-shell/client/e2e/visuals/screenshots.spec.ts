@@ -162,6 +162,15 @@ for (const theme of THEMES) {
         page.getByRole('button', { name: 'Restore pane' }),
       ).toBeVisible();
       await captureScreenshot(page, `split-view-maximized-${theme}`);
+
+      // Restore the tiled layout (#6951): the solo pane returns to the split and
+      // the hidden pane reappears — so the maximize control is back on both
+      // panes. Captures the restore path so a regression there is caught too.
+      await page.getByRole('button', { name: 'Restore pane' }).click();
+      await expect(
+        page.getByRole('button', { name: 'Maximize pane' }).first(),
+      ).toBeVisible();
+      await captureScreenshot(page, `split-view-restored-${theme}`);
     });
 
     test(`sidebar attention`, async ({ page }, testInfo) => {
@@ -217,6 +226,13 @@ for (const theme of THEMES) {
       // itself is the PR's diff that the before/after preview surfaces.
       await expect(page.getByText('Deploy to staging')).toBeVisible();
       await expect(page.getByText('Refactor auth module')).toBeVisible();
+      // Assert all four sessions render (not just the two waiting ones), so a
+      // regression that truncates the running or idle session is caught. The
+      // running session is also the loaded one, so its name shows in the main
+      // view too — scope to the sidebar landmark to keep the match unambiguous.
+      const sidebar = page.getByRole('complementary');
+      await expect(sidebar.getByText('Run test suite')).toBeVisible();
+      await expect(sidebar.getByText('Draft release notes')).toBeVisible();
       await captureScreenshot(page, `sidebar-attention-${theme}`);
     });
 
