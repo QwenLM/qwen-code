@@ -11,6 +11,12 @@ import {
   QWEN_DAEMON_URL_ENV,
   QWEN_SERVER_TOKEN_ENV,
 } from '../../serve/channel-worker-env.js';
+import {
+  channelStartupFailureBody,
+  formatChannelStartupFailures,
+  safeChannelCommandErrorMessage,
+  sanitizeChannelCommandValue,
+} from './startup-failure-format.js';
 
 const DEFAULT_DAEMON_URL = 'http://127.0.0.1:4170';
 
@@ -25,6 +31,8 @@ interface ChannelSetResultLike {
       state: string;
       channels: string[];
       pid?: number;
+      startupFailures?: unknown;
+      startupFailuresTruncated?: unknown;
     }>;
   };
 }
@@ -101,9 +109,7 @@ export const setCommand: CommandModule<unknown, SetArgs> = {
       sdk = (await import('@qwen-code/sdk/daemon')) as unknown as DaemonSdkLike;
     } catch (error) {
       writeStderrLine(
-        `[Channel] Failed to load daemon SDK: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        `[Channel] Failed to load daemon SDK: ${safeChannelCommandErrorMessage(error)}`,
       );
       process.exit(1);
       return;
@@ -127,13 +133,25 @@ export const setCommand: CommandModule<unknown, SetArgs> = {
         `[Channel] Selection ${result.changed ? 'applied' : 'unchanged'} ` +
           `(replaced=${result.replaced}, partial=${result.partial}, workers=${workers || 'none'}).`,
       );
+      for (const worker of result.state.workers) {
+        for (const line of formatChannelStartupFailures(
+          worker,
+          worker.workspaceCwd,
+        )) {
+          writeStdoutLine(line);
+        }
+      }
       process.exit(0);
     } catch (error) {
+      const safeBaseUrl = sanitizeChannelCommandValue(baseUrl, 2048);
       writeStderrLine(
-        `[Channel] Set failed (${baseUrl}): ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        `[Channel] Set failed (${safeBaseUrl}): ${safeChannelCommandErrorMessage(error)}`,
       );
+      for (const line of formatChannelStartupFailures(
+        channelStartupFailureBody(error),
+      )) {
+        writeStderrLine(line);
+      }
       process.exit(1);
     }
   },

@@ -6,7 +6,15 @@
 
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
+import { sanitizeLogText } from '@qwen-code/channel-base';
 import { normalizeServeChannelSelection } from '../channel-selection.js';
+import {
+  MAX_CHANNEL_STARTUP_FAILURES,
+  MAX_CHANNEL_STARTUP_FAILURE_CHANNEL_LENGTH,
+  MAX_CHANNEL_STARTUP_FAILURE_CODE_LENGTH,
+  MAX_CHANNEL_STARTUP_FAILURE_MESSAGE_LENGTH,
+} from '../channel-worker-startup-ipc.js';
+import { normalizeWorkerDiagnostic } from '../channel-worker-diagnostics.js';
 import type {
   ChannelWorkerControlState,
   ChannelWorkerSetResult,
@@ -88,6 +96,100 @@ function parseSelection(
   }
 }
 
+function sanitizeControlDiagnostic(value: string, maxLength: number): string {
+  return sanitizeLogText(
+    redactLogCredentials(normalizeWorkerDiagnostic(value)),
+    maxLength,
+  );
+}
+
+function startupFailureResponseFields(error: unknown): {
+  startupFailures?: Array<{
+    workspaceCwd: string;
+    channel: string;
+    phase: 'connect';
+    code?: string;
+    message: string;
+  }>;
+  startupFailuresTruncated?: boolean;
+} {
+  if (!error || typeof error !== 'object') return {};
+  let rawFailures: unknown;
+  let rawTruncated: unknown;
+  try {
+    rawFailures = Reflect.get(error, 'startupFailures');
+    rawTruncated = Reflect.get(error, 'startupFailuresTruncated');
+  } catch {
+    return {};
+  }
+  if (!Array.isArray(rawFailures)) return {};
+  let limitedFailures: unknown[];
+  let rawFailureCount: number;
+  try {
+    limitedFailures = rawFailures.slice(0, MAX_CHANNEL_STARTUP_FAILURES);
+    rawFailureCount = rawFailures.length;
+  } catch {
+    return {};
+  }
+  const startupFailures = limitedFailures.flatMap((raw) => {
+    try {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+      const failure = raw as Record<string, unknown>;
+      if (
+        typeof failure['workspaceCwd'] !== 'string' ||
+        failure['workspaceCwd'].length === 0 ||
+        typeof failure['channel'] !== 'string' ||
+        failure['channel'].length === 0 ||
+        failure['phase'] !== 'connect' ||
+        typeof failure['message'] !== 'string' ||
+        failure['message'].length === 0 ||
+        (failure['code'] !== undefined &&
+          (typeof failure['code'] !== 'string' || failure['code'].length === 0))
+      ) {
+        return [];
+      }
+      const workspaceCwd = sanitizeControlDiagnostic(
+        failure['workspaceCwd'],
+        4096,
+      );
+      const channel = sanitizeControlDiagnostic(
+        failure['channel'],
+        MAX_CHANNEL_STARTUP_FAILURE_CHANNEL_LENGTH,
+      );
+      const message = sanitizeControlDiagnostic(
+        failure['message'],
+        MAX_CHANNEL_STARTUP_FAILURE_MESSAGE_LENGTH,
+      );
+      const code =
+        typeof failure['code'] === 'string'
+          ? sanitizeControlDiagnostic(
+              failure['code'],
+              MAX_CHANNEL_STARTUP_FAILURE_CODE_LENGTH,
+            )
+          : undefined;
+      if (!workspaceCwd || !channel || !message) return [];
+      return [
+        {
+          workspaceCwd,
+          channel,
+          phase: 'connect' as const,
+          ...(code ? { code } : {}),
+          message,
+        },
+      ];
+    } catch {
+      return [];
+    }
+  });
+  if (startupFailures.length === 0) return {};
+  const truncated =
+    rawTruncated === true || rawFailureCount > MAX_CHANNEL_STARTUP_FAILURES;
+  return {
+    startupFailures,
+    ...(truncated ? { startupFailuresTruncated: true } : {}),
+  };
+}
+
 function sendChannelControlError(
   res: Response,
   error: unknown,
@@ -154,7 +256,15 @@ function sendChannelControlError(
       : {}),
     ...(typeof controlError.rollbackError === 'string' &&
     controlError.rollbackError
-      ? { rollbackError: redactLogCredentials(controlError.rollbackError) }
+      ? {
+          rollbackError: sanitizeControlDiagnostic(
+            controlError.rollbackError,
+            512,
+          ),
+        }
+      : {}),
+    ...(code === 'channel_worker_start_failed'
+      ? startupFailureResponseFields(error)
       : {}),
     state: getState(),
   });

@@ -588,7 +588,12 @@ stale, kills it, records `staleHeartbeatAt`, and uses the same restart path.
 `runtime.channelWorker` may include additive operational fields:
 `requestedChannels`, `pid`, `startedAt`, `exitCode`, `signal`, `error`,
 `restartCount`, `lastExitAt`, `lastRestartAt`, `nextRestartAt`,
-`lastHeartbeatAt`, and `staleHeartbeatAt`. `restartCount` is the lifetime
+`lastHeartbeatAt`, `staleHeartbeatAt`, `startupFailures`, and
+`startupFailuresTruncated`. Each startup failure has `channel`, `phase`
+(currently `connect`), optional adapter-provided `code`, and a credential-
+redacted `message`. At most 64 failures are retained for the current worker
+generation; the truncation flag means more failures were observed. `code` is
+diagnostic and is not a stable cross-adapter classification. `restartCount` is the lifetime
 number of restart attempts made by this serve process; a running worker with
 `restartCount > 0` is healthy unless another issue applies. A running worker
 whose `requestedChannels` include names missing from `channels` reports
@@ -680,6 +685,14 @@ Strict writes against a daemon without a configured token return `401
 token_required` before control code runs. Once a request begins, disconnecting
 the HTTP client does not cancel the lifecycle transaction; clients may retry
 the same PUT safely.
+
+For `502 channel_worker_start_failed`, the response may also include
+`startupFailures[]` and `startupFailuresTruncated`. Each failure adds the
+trusted `workspaceCwd` of the attempted worker. These fields describe the
+failed transaction, while `state` describes the current state after rollback;
+a later GET does not retain the failed attempt. A partially connected worker
+instead returns success and exposes its failures in the worker snapshot. Boot-
+time all-failure still aborts `qwen serve` before a queryable daemon exists.
 
 `qwen channel status` without `--daemon-url` continues to read pidfile metadata;
 with `--daemon-url` it reads `GET /workspace/channel`. During a restart

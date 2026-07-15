@@ -14,6 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createServer } from 'node:net';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -35,12 +36,26 @@ let testRoot: string | undefined;
 
 interface ChannelWorkersStatus {
   runtime?: {
+    channelWorker?: {
+      workspaceCwd?: string;
+      state: string;
+      channels: string[];
+      startupFailures?: ChannelStartupFailure[];
+    };
     channelWorkers?: Array<{
       workspaceCwd: string;
       state: string;
       channels: string[];
     }>;
   };
+}
+
+interface ChannelStartupFailure {
+  workspaceCwd?: string;
+  channel: string;
+  phase: string;
+  code?: string;
+  message: string;
 }
 
 interface ChannelControlState {
@@ -52,7 +67,26 @@ interface ChannelControlState {
     state: string;
     channels: string[];
     pid?: number;
+    startupFailures?: ChannelStartupFailure[];
+    startupFailuresTruncated?: boolean;
   }>;
+}
+
+async function createClosedWebSocketUrl(): Promise<string> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    server.close();
+    throw new Error('failed to allocate a closed test port');
+  }
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+  return `ws://127.0.0.1:${address.port}`;
 }
 
 function writeJson(file: string, value: unknown): void {
@@ -333,6 +367,252 @@ describe('qwen serve multi-workspace channel workers', () => {
       selection: null,
       workers: [],
     });
+  }, 60_000);
+
+  it('returns partial startup failures from control and daemon status', async () => {
+    testRoot = realpathSync(
+      mkdtempSync(path.join(tmpdir(), 'qwen-serve-channel-partial-')),
+    );
+    const qwenHome = path.join(testRoot, 'qwen-home');
+    const runtimeDir = path.join(testRoot, 'runtime');
+    const workspace = path.join(testRoot, 'workspace');
+    mkdirSync(workspace);
+    mkdirSync(runtimeDir);
+    primaryServer = await createMockServer({ httpPort: 0, wsPort: 0 });
+    const unreachableWsUrl = await createClosedWebSocketUrl();
+
+    const extensionDir = path.join(qwenHome, 'extensions');
+    mkdirSync(extensionDir, { recursive: true });
+    symlinkSync(
+      path.join(REPO_ROOT, 'packages', 'channels', 'plugin-example'),
+      path.join(extensionDir, 'qwen-channel-plugin-example'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    writeJson(path.join(qwenHome, 'settings.json'), {
+      security: { folderTrust: { enabled: true } },
+    });
+    const trustedFoldersPath = path.join(qwenHome, 'trustedFolders.json');
+    writeJson(trustedFoldersPath, { [workspace]: 'TRUST_FOLDER' });
+    writeJson(path.join(workspace, '.qwen', 'settings.json'), {
+      channels: {
+        reachable: {
+          type: 'plugin-example',
+          serverWsUrl: primaryServer.wsUrl,
+          senderPolicy: 'open',
+          sessionScope: 'user',
+          cwd: workspace,
+        },
+        unreachable: {
+          type: 'plugin-example',
+          serverWsUrl: unreachableWsUrl,
+          senderPolicy: 'open',
+          sessionScope: 'user',
+          cwd: workspace,
+        },
+      },
+    });
+    daemon = spawn(
+      process.execPath,
+      [
+        CLI_BIN,
+        'serve',
+        '--hostname',
+        '127.0.0.1',
+        '--port',
+        '0',
+        '--no-web',
+        '--token',
+        TOKEN,
+        '--workspace',
+        workspace,
+      ],
+      {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          QWEN_HOME: qwenHome,
+          QWEN_RUNTIME_DIR: runtimeDir,
+          QWEN_CODE_TRUSTED_FOLDERS_PATH: trustedFoldersPath,
+          OPENAI_API_KEY: 'fake-key',
+          OPENAI_BASE_URL: 'http://127.0.0.1:9/v1',
+          OPENAI_MODEL: 'fake-model',
+          QWEN_MODEL: 'fake-model',
+        },
+      },
+    );
+    const port = await waitForListening(daemon);
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const authHeaders = {
+      Authorization: `Bearer ${TOKEN}`,
+      'Content-Type': 'application/json',
+    };
+
+    const enable = await fetch(`${baseUrl}/workspace/channel`, {
+      method: 'PUT',
+      headers: authHeaders,
+      body: JSON.stringify({ selection: { mode: 'all' } }),
+    });
+    const enabled = (await enable.json()) as {
+      partial: boolean;
+      state: ChannelControlState;
+    };
+    expect(enable.status).toBe(201);
+    expect(enabled).toMatchObject({
+      partial: true,
+      state: {
+        workers: [
+          expect.objectContaining({
+            workspaceCwd: workspace,
+            state: 'running',
+            channels: ['reachable'],
+            startupFailures: [
+              expect.objectContaining({
+                channel: 'unreachable',
+                phase: 'connect',
+                code: 'ECONNREFUSED',
+                message: expect.stringMatching(/\S/u),
+              }),
+            ],
+          }),
+        ],
+      },
+    });
+    await primaryServer.waitForConnection(15_000);
+
+    const controlResponse = await fetch(`${baseUrl}/workspace/channel`, {
+      headers: authHeaders,
+    });
+    const control = (await controlResponse.json()) as ChannelControlState;
+    expect(control.workers[0]?.startupFailures).toEqual(
+      enabled.state.workers[0]?.startupFailures,
+    );
+
+    const statusResponse = await fetch(`${baseUrl}/daemon/status`, {
+      headers: authHeaders,
+    });
+    const status = (await statusResponse.json()) as ChannelWorkersStatus;
+    expect(status.runtime?.channelWorker).toMatchObject({
+      state: 'running',
+      channels: ['reachable'],
+      startupFailures: [
+        expect.objectContaining({
+          channel: 'unreachable',
+          phase: 'connect',
+          code: 'ECONNREFUSED',
+          message: expect.stringMatching(/\S/u),
+        }),
+      ],
+    });
+  }, 60_000);
+
+  it('returns attempted failures on 502 and does not retain them after rollback', async () => {
+    testRoot = realpathSync(
+      mkdtempSync(path.join(tmpdir(), 'qwen-serve-channel-failed-')),
+    );
+    const qwenHome = path.join(testRoot, 'qwen-home');
+    const runtimeDir = path.join(testRoot, 'runtime');
+    const workspace = path.join(testRoot, 'workspace');
+    mkdirSync(workspace);
+    mkdirSync(runtimeDir);
+    const unreachableWsUrl = await createClosedWebSocketUrl();
+
+    const extensionDir = path.join(qwenHome, 'extensions');
+    mkdirSync(extensionDir, { recursive: true });
+    symlinkSync(
+      path.join(REPO_ROOT, 'packages', 'channels', 'plugin-example'),
+      path.join(extensionDir, 'qwen-channel-plugin-example'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    writeJson(path.join(qwenHome, 'settings.json'), {
+      security: { folderTrust: { enabled: true } },
+    });
+    const trustedFoldersPath = path.join(qwenHome, 'trustedFolders.json');
+    writeJson(trustedFoldersPath, { [workspace]: 'TRUST_FOLDER' });
+    writeJson(path.join(workspace, '.qwen', 'settings.json'), {
+      channels: {
+        unreachable: {
+          type: 'plugin-example',
+          serverWsUrl: unreachableWsUrl,
+          senderPolicy: 'open',
+          sessionScope: 'user',
+          cwd: workspace,
+        },
+      },
+    });
+    daemon = spawn(
+      process.execPath,
+      [
+        CLI_BIN,
+        'serve',
+        '--hostname',
+        '127.0.0.1',
+        '--port',
+        '0',
+        '--no-web',
+        '--token',
+        TOKEN,
+        '--workspace',
+        workspace,
+      ],
+      {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          QWEN_HOME: qwenHome,
+          QWEN_RUNTIME_DIR: runtimeDir,
+          QWEN_CODE_TRUSTED_FOLDERS_PATH: trustedFoldersPath,
+          OPENAI_API_KEY: 'fake-key',
+          OPENAI_BASE_URL: 'http://127.0.0.1:9/v1',
+          OPENAI_MODEL: 'fake-model',
+          QWEN_MODEL: 'fake-model',
+        },
+      },
+    );
+    const port = await waitForListening(daemon);
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const authHeaders = {
+      Authorization: `Bearer ${TOKEN}`,
+      'Content-Type': 'application/json',
+    };
+
+    const enable = await fetch(`${baseUrl}/workspace/channel`, {
+      method: 'PUT',
+      headers: authHeaders,
+      body: JSON.stringify({ selection: { mode: 'all' } }),
+    });
+    const failed = (await enable.json()) as {
+      code: string;
+      rolledBack?: boolean;
+      state: ChannelControlState;
+      startupFailures?: ChannelStartupFailure[];
+    };
+    expect(enable.status).toBe(502);
+    expect(failed).toMatchObject({
+      code: 'channel_worker_start_failed',
+      rolledBack: true,
+      state: { enabled: false, workers: [] },
+      startupFailures: [
+        expect.objectContaining({
+          workspaceCwd: workspace,
+          channel: 'unreachable',
+          phase: 'connect',
+          code: 'ECONNREFUSED',
+          message: expect.stringMatching(/\S/u),
+        }),
+      ],
+    });
+
+    const currentResponse = await fetch(`${baseUrl}/workspace/channel`, {
+      headers: authHeaders,
+    });
+    const current = (await currentResponse.json()) as ChannelControlState;
+    expect(current).toMatchObject({
+      enabled: false,
+      selection: null,
+      transition: 'idle',
+      workers: [],
+    });
+    expect(JSON.stringify(current)).not.toContain('startupFailures');
   }, 60_000);
 
   it('starts real workers for primary and secondary workspaces', async () => {

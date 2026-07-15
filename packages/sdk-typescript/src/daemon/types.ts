@@ -2310,6 +2310,20 @@ export interface DaemonReloadResponse {
   childError?: string;
 }
 
+/** A bounded, credential-redacted adapter startup diagnostic. */
+export interface DaemonChannelStartupFailure {
+  channel: string;
+  /** The daemon currently emits only `connect`; this is widened for evolution. */
+  phase: string;
+  code?: string;
+  message: string;
+}
+
+export interface DaemonChannelStartupAttemptFailure
+  extends DaemonChannelStartupFailure {
+  workspaceCwd: string;
+}
+
 /**
  * Mirrors the daemon's ChannelWorkerSnapshot. `state` and `signal` are
  * widened to string to avoid coupling the wire type to the daemon's unions.
@@ -2330,6 +2344,8 @@ export interface DaemonChannelWorkerSnapshot {
   nextRestartAt?: string;
   lastHeartbeatAt?: string;
   staleHeartbeatAt?: string;
+  startupFailures?: DaemonChannelStartupFailure[];
+  startupFailuresTruncated?: boolean;
 }
 
 export type DaemonChannelSelection =
@@ -2369,6 +2385,16 @@ export interface DaemonChannelSetResult {
 export interface DaemonChannelStopResult {
   changed: boolean;
   state: DaemonChannelControlState;
+}
+
+export interface DaemonChannelWorkerStartErrorResponse {
+  error: string;
+  code: 'channel_worker_start_failed';
+  rolledBack?: boolean;
+  rollbackError?: string;
+  state: DaemonChannelControlState;
+  startupFailures?: DaemonChannelStartupAttemptFailure[];
+  startupFailuresTruncated?: boolean;
 }
 
 /**

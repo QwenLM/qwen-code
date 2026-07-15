@@ -9,6 +9,10 @@ import {
   QWEN_DAEMON_TOKEN_ENV,
   QWEN_SERVER_TOKEN_ENV,
 } from '../../serve/channel-worker-env.js';
+import {
+  formatChannelStartupFailures,
+  safeChannelCommandErrorMessage,
+} from './startup-failure-format.js';
 
 interface StatusArgs {
   'daemon-url'?: string;
@@ -67,6 +71,8 @@ export const statusCommand: CommandModule<unknown, StatusArgs> = {
                 state: string;
                 channels: string[];
                 pid?: number;
+                startupFailures?: unknown;
+                startupFailuresTruncated?: unknown;
               }>;
             }>;
           };
@@ -96,13 +102,17 @@ export const statusCommand: CommandModule<unknown, StatusArgs> = {
               worker.pid !== undefined ? `; pid=${worker.pid}` : ''
             }`,
           );
+          for (const line of formatChannelStartupFailures(
+            worker,
+            worker.workspaceCwd,
+          )) {
+            writeStdoutLine(line);
+          }
         }
         process.exit(0);
       } catch (error) {
         writeStderrLine(
-          `Failed to read daemon channel status: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
+          `Failed to read daemon channel status: ${safeChannelCommandErrorMessage(error)}`,
         );
         process.exit(1);
       }

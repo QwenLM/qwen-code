@@ -12,7 +12,10 @@ import type {
   ChannelWorkerSupervisor,
   CreateChannelWorkerSupervisorOptions,
 } from './channel-worker-supervisor.js';
-import { ChannelWorkerStopError } from './channel-worker-supervisor.js';
+import {
+  ChannelWorkerStartupError,
+  ChannelWorkerStopError,
+} from './channel-worker-supervisor.js';
 import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
 import type {
   WorkspaceRegistry,
@@ -1060,6 +1063,72 @@ describe('createChannelWorkerGroup', () => {
     expect(recorded[1]!.supervisor.stop).toHaveBeenCalledTimes(1);
     expect(recorded[0]!.supervisor.start).toHaveBeenCalledTimes(2);
     expect(group.snapshots()[0]!.workspaceCwd).toBe(PRIMARY);
+  });
+
+  it('preserves attempted startup failures when rollback restoration also fails', async () => {
+    const registry = fakeRegistry([fakeRuntime(PRIMARY, true)]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const createSupervisorWithFailure = (
+      opts: CreateChannelWorkerSupervisorOptions,
+    ) => {
+      const supervisor = createSupervisor(opts);
+      if (
+        opts.selection.mode === 'names' &&
+        opts.selection.names.includes('replacement')
+      ) {
+        supervisor.start.mockRejectedValueOnce(
+          new ChannelWorkerStartupError('replacement failed', {
+            workspaceCwd: opts.workspace,
+            startupFailures: [
+              {
+                channel: 'replacement',
+                phase: 'connect',
+                code: 'ECONNREFUSED',
+                message: 'connection refused',
+              },
+            ],
+          }),
+        );
+      }
+      return supervisor;
+    };
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+      ],
+      registry,
+      createSupervisor: createSupervisorWithFailure,
+      shared,
+    });
+    await group.start();
+    recorded[0]!.supervisor.start.mockRejectedValueOnce(
+      new Error('old worker restore failed'),
+    );
+
+    const error = await group
+      .reconcile([
+        {
+          workspaceCwd: PRIMARY,
+          selection: { mode: 'names', names: ['replacement'] },
+        },
+      ])
+      .catch((value: unknown) => value);
+
+    expect(error).toMatchObject({
+      rolledBack: false,
+      rollbackError: 'old worker restore failed',
+      startupFailures: [
+        {
+          workspaceCwd: PRIMARY,
+          channel: 'replacement',
+          phase: 'connect',
+          code: 'ECONNREFUSED',
+          message: 'connection refused',
+        },
+      ],
+    });
   });
 
   it('attempts to restore every stopped worker after a rollback failure', async () => {
