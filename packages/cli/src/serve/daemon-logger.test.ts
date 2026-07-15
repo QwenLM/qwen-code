@@ -17,6 +17,9 @@ import {
   rmSync,
   realpathSync,
   lstatSync,
+  lutimesSync,
+  symlinkSync,
+  utimesSync,
 } from 'node:fs';
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import {
@@ -1088,6 +1091,57 @@ describe('initDaemonLogger fallback retention', () => {
     await fallback.close();
     await stable.close();
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'does not follow fallback log symlinks when selecting retained history',
+    async () => {
+      const stable = await createLogger({
+        boundWorkspace: '/w',
+        baseDir: tmp,
+        runId: '11111111111111111111111111111111',
+        stderr: () => {},
+        policy: { stableAcquireBudgetMs: 0 },
+      });
+      const runsDir = path.join(tmp, 'daemon', 'runs');
+      const symlinkFamily = path.join(
+        runsDir,
+        'run-22222222222222222222222222222222',
+      );
+      const regularFamily = path.join(
+        runsDir,
+        'run-33333333333333333333333333333333',
+      );
+      await fsPromises.mkdir(symlinkFamily, { recursive: true, mode: 0o700 });
+      await fsPromises.mkdir(regularFamily, { mode: 0o700 });
+
+      const externalTarget = path.join(tmp, 'external.log');
+      writeFileSync(externalTarget, 'external\n');
+      const symlinkLog = path.join(symlinkFamily, 'daemon.log');
+      symlinkSync(externalTarget, symlinkLog);
+      const regularLog = path.join(regularFamily, 'daemon.log');
+      writeFileSync(regularLog, 'regular\n');
+      const old = new Date('2020-01-01T00:00:00.000Z');
+      const newer = new Date('2021-01-01T00:00:00.000Z');
+      const externalFuture = new Date('2030-01-01T00:00:00.000Z');
+      lutimesSync(symlinkLog, old, old);
+      utimesSync(regularLog, newer, newer);
+      utimesSync(externalTarget, externalFuture, externalFuture);
+
+      const fallback = await createLogger({
+        boundWorkspace: '/w',
+        baseDir: tmp,
+        runId: '44444444444444444444444444444444',
+        stderr: () => {},
+        policy: { stableAcquireBudgetMs: 0 },
+      });
+
+      expect(fallback.getStatus().mode).toBe('fallback');
+      expect(existsSync(symlinkFamily)).toBe(false);
+      expect(existsSync(regularFamily)).toBe(true);
+      await fallback.close();
+      await stable.close();
+    },
+  );
 
   it('refuses a new fallback family when cleanup fails', async () => {
     const stable = await createLogger({

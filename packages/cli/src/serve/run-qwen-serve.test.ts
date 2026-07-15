@@ -4786,6 +4786,8 @@ describe('runQwenServe runtime startup failures', () => {
     delete process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
     delete process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
     const boundWorkspace = canonicalizeWorkspace(tmpDir);
+    const blockedLogBaseDir = path.join(tmpDir, 'blocked-log-base');
+    fs.writeFileSync(blockedLogBaseDir, 'not a directory');
     vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() => {
       throw new Error('runtime boom');
     });
@@ -4799,7 +4801,7 @@ describe('runQwenServe runtime startup failures', () => {
         maxSessions: 1,
         serveWebShell: false,
       },
-      { resolveOnListen: true },
+      { resolveOnListen: true, daemonLogBaseDir: blockedLogBaseDir },
     );
 
     try {
@@ -4865,6 +4867,11 @@ describe('runQwenServe runtime startup failures', () => {
       const body = (await res.json()) as {
         status?: string;
         issues?: Array<{ code?: string; severity?: string }>;
+        daemon?: {
+          runId?: string;
+          logMode?: string;
+          logHealth?: string;
+        };
         runtime?: { loading?: boolean; error?: string };
       };
       expect(body).toMatchObject({
@@ -4874,7 +4881,16 @@ describe('runQwenServe runtime startup failures', () => {
             code: 'daemon_runtime_failed',
             severity: 'error',
           }),
+          expect.objectContaining({
+            code: 'daemon_log_degraded',
+            severity: 'warning',
+          }),
         ]),
+        daemon: {
+          runId: expect.stringMatching(/^[0-9a-f]{32}$/),
+          logMode: 'stderr-only',
+          logHealth: 'degraded',
+        },
         runtime: { loading: false, error: 'runtime boom' },
       });
 
@@ -4889,6 +4905,20 @@ describe('runQwenServe runtime startup failures', () => {
       expect(sameOriginBody).toMatchObject({
         v: 1,
         detail: 'full',
+        issues: expect.arrayContaining([
+          expect.objectContaining({
+            code: 'daemon_log_degraded',
+            severity: 'warning',
+          }),
+        ]),
+        daemon: {
+          runId: body.daemon?.runId,
+          logMode: 'stderr-only',
+          logHealth: 'degraded',
+          logIssues: ['init_failed'],
+          logDroppedRecords: 0,
+          logDroppedBytes: 0,
+        },
         security: { allowOriginMode: 'none' },
         limits: {
           maxSessions: 1,
@@ -4931,6 +4961,7 @@ describe('runQwenServe runtime startup failures', () => {
           },
         },
       });
+      expect(sameOriginBody.daemon).not.toHaveProperty('logPath');
     } finally {
       if (originalClientMcpOverWs === undefined) {
         delete process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];

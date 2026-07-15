@@ -628,10 +628,10 @@ async function fallbackActivityMtime(
   familyDir: string,
 ): Promise<number> {
   try {
-    return (await fs.stat(nodePath.join(familyDir, 'daemon.log'))).mtimeMs;
+    return (await fs.lstat(nodePath.join(familyDir, 'daemon.log'))).mtimeMs;
   } catch (error) {
     if (!isErrno(error, 'ENOENT')) throw error;
-    return (await fs.stat(familyDir)).mtimeMs;
+    return (await fs.lstat(familyDir)).mtimeMs;
   }
 }
 
