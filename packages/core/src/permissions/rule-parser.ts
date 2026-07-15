@@ -1011,8 +1011,9 @@ export function resolvePathPattern(
  * Uses picomatch for the actual glob matching, following gitignore semantics:
  *   - `*` matches files in a single directory (does not cross `/`)
  *   - `**` matches recursively across directories
- * Both the lexical absolute path and its canonical filesystem destination are
- * considered. For new files, the closest existing ancestor is canonicalized.
+ * When `matchMode` is `'canonical'`, both the lexical absolute path and its
+ * canonical filesystem destination are considered. For new files, the closest
+ * existing ancestor is canonicalized.
  *
  * @param specifier - The raw specifier from the rule (e.g. "./secrets/**")
  * @param filePath - The absolute path of the file being accessed

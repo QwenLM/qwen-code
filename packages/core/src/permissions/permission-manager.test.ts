@@ -2456,6 +2456,33 @@ describe('PermissionManager', () => {
         }),
       ).toBe(true);
     });
+
+    it('matches an ask rule through a symlinked path', () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
+      try {
+        const protectedDir = path.join(root, 'protected');
+        const link = path.join(root, 'link');
+        fs.mkdirSync(protectedDir);
+        fs.symlinkSync(protectedDir, link, 'dir');
+        pm = new PermissionManager(
+          makeConfig({
+            permissionsAsk: ['Edit(/protected/**)'],
+            projectRoot: root,
+            cwd: root,
+          }),
+        );
+        pm.initialize();
+
+        expect(
+          pm.hasMatchingAskRule({
+            toolName: 'edit',
+            filePath: path.join(link, 'file.txt'),
+          }),
+        ).toBe(true);
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    });
   });
 });
 
@@ -2979,6 +3006,33 @@ describe('PermissionManager.findMatchingDenyRule', () => {
     });
     // rule.raw preserves the original rule string as written in config
     expect(result).toBe('ShellTool');
+  });
+
+  it('matches a deny rule through a symlinked path', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
+    try {
+      const protectedDir = path.join(root, 'protected');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(protectedDir);
+      fs.symlinkSync(protectedDir, link, 'dir');
+      const pm = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Edit(/protected/**)'],
+          projectRoot: root,
+          cwd: root,
+        }),
+      );
+      pm.initialize();
+
+      expect(
+        pm.findMatchingDenyRule({
+          toolName: 'edit',
+          filePath: path.join(link, 'file.txt'),
+        }),
+      ).toBe('Edit(/protected/**)');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
