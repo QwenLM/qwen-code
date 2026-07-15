@@ -2501,7 +2501,7 @@ fn diagnose_config_paths_section() -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
     let paths: &[(&str, String)] = &[
         ("user data dir",   format!("{home}/.cua-driver")),
-        ("config cache",    format!("{home}/Library/Caches/cua-driver")),
+        ("config cache",    format!("{home}/Library/Caches/qwen-cua-driver")),
         ("telemetry id",    format!("{home}/.cua-driver/.telemetry_id")),
         ("updater plist",   format!("{home}/Library/LaunchAgents/com.trycua.cua_driver_updater.plist")),
         ("daemon plist",    format!("{home}/Library/LaunchAgents/com.trycua.cua_driver_daemon.plist")),
