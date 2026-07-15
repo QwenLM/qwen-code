@@ -2,7 +2,10 @@ import { PROMPT_UNSAFE_INVISIBLES } from './sanitize.js';
 
 export type ChannelMemoryIntent =
   | { kind: 'remember'; text: string }
-  | { kind: 'list' }
+  | { kind: 'list'; page: number }
+  | { kind: 'inspect'; id: string }
+  | { kind: 'remove'; id: string }
+  | { kind: 'update'; id: string; text: string }
   | { kind: 'clear_request' }
   | { kind: 'clear_confirm' };
 
@@ -22,6 +25,25 @@ const LIST_PATTERNS: RegExp[] = [
   /^这个聊天你记住了什么[?？]?$/u,
   /^what do you remember[?？]?$/iu,
 ];
+
+const LIST_PAGE_PATTERNS: RegExp[] = [
+  /^查看第\s*(\d+)\s*页记忆$/u,
+  /^show memory page\s+(\d+)$/iu,
+];
+
+const INSPECT_PATTERNS: RegExp[] = [
+  /^查看记忆\s+(\S+)$/u,
+  /^show memory\s+(\S+)$/iu,
+];
+
+const REMOVE_PATTERNS: RegExp[] = [/^忘掉\s+(\S+)$/u, /^forget\s+(\S+)$/iu];
+
+const UPDATE_PATTERNS: RegExp[] = [
+  /^把\s+(\S+)\s+改成\s*(.+)$/su,
+  /^update\s+(\S+)\s+to\s+(.+)$/isu,
+];
+
+const MEMORY_ID_PATTERN = /^m-[a-f0-9]{12}$/u;
 
 const CLEAR_REQUEST_PATTERNS: RegExp[] = [
   /^清空记忆$/u,
@@ -50,14 +72,43 @@ export function parseChannelMemoryIntent(
       return { kind: 'clear_confirm' };
     }
   }
+  for (const pattern of REMOVE_PATTERNS) {
+    const match = trimmed.match(pattern);
+    if (match?.[1] && MEMORY_ID_PATTERN.test(match[1])) {
+      return { kind: 'remove', id: match[1] };
+    }
+  }
+  for (const pattern of UPDATE_PATTERNS) {
+    const match = trimmed.match(pattern);
+    const id = match?.[1];
+    const updated = match?.[2]?.trim();
+    if (id && updated && MEMORY_ID_PATTERN.test(id)) {
+      return { kind: 'update', id, text: updated };
+    }
+  }
   for (const pattern of CLEAR_REQUEST_PATTERNS) {
     if (pattern.test(trimmed)) {
       return { kind: 'clear_request' };
     }
   }
+  for (const pattern of INSPECT_PATTERNS) {
+    const match = trimmed.match(pattern);
+    if (match?.[1] && MEMORY_ID_PATTERN.test(match[1])) {
+      return { kind: 'inspect', id: match[1] };
+    }
+  }
+  for (const pattern of LIST_PAGE_PATTERNS) {
+    const match = trimmed.match(pattern);
+    if (match?.[1]) {
+      const page = Number(match[1]);
+      return Number.isSafeInteger(page) && page > 0
+        ? { kind: 'list', page }
+        : null;
+    }
+  }
   for (const pattern of LIST_PATTERNS) {
     if (pattern.test(trimmed)) {
-      return { kind: 'list' };
+      return { kind: 'list', page: 1 };
     }
   }
   for (const pattern of REMEMBER_PATTERNS) {

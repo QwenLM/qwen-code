@@ -4764,6 +4764,152 @@ describe('CoreToolScheduler cancellation during executing with live output', () 
     abortController.abort();
     await schedulePromise;
   });
+
+  it('forwards shell heartbeats without replacing liveOutput', async () => {
+    class HeartbeatInvocation extends BaseToolInvocation<
+      { id: string },
+      ToolResult
+    > {
+      getDescription(): string {
+        return `Heartbeat tool ${this.params.id}`;
+      }
+
+      async execute(
+        signal: AbortSignal,
+        updateOutput?: (output: ToolResultDisplay) => void,
+      ): Promise<ToolResult> {
+        updateOutput?.('real output');
+        updateOutput?.({ type: 'shell_progress', elapsedMs: 10_000 });
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) return resolve();
+          const onAbort = () => {
+            signal.removeEventListener('abort', onAbort);
+            resolve();
+          };
+          signal.addEventListener('abort', onAbort, { once: true });
+        });
+        return { llmContent: 'done', returnDisplay: 'done' };
+      }
+    }
+
+    class HeartbeatTool extends BaseDeclarativeTool<
+      { id: string },
+      ToolResult
+    > {
+      constructor() {
+        super(
+          'heartbeat-tool',
+          'Heartbeat Tool',
+          'Emits a heartbeat and waits for abort',
+          Kind.Other,
+          {
+            type: 'object',
+            properties: { id: { type: 'string' } },
+            required: ['id'],
+          },
+          true,
+          true,
+        );
+      }
+      protected createInvocation(params: { id: string }) {
+        return new HeartbeatInvocation(params);
+      }
+    }
+
+    const tool = new HeartbeatTool();
+    const mockToolRegistry = {
+      getTool: () => tool,
+      ensureTool: async () => tool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => tool,
+      getToolByDisplayName: () => tool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const outputUpdateHandler = vi.fn();
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getToolRegistry: () => mockToolRegistry,
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      isInteractive: () => true,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      outputUpdateHandler,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const abortController = new AbortController();
+    const schedulePromise = scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: 'heartbeat-tool',
+          args: { id: 'x' },
+          isClientInitiated: true,
+          prompt_id: 'prompt-heartbeat',
+        },
+      ],
+      abortController.signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(outputUpdateHandler).toHaveBeenCalledTimes(2);
+    });
+
+    // Both the display chunk and the heartbeat reach the handler...
+    expect(outputUpdateHandler.mock.calls[0][1]).toBe('real output');
+    expect(outputUpdateHandler.mock.calls[1][1]).toMatchObject({
+      type: 'shell_progress',
+      elapsedMs: 10_000,
+    });
+
+    // ...but liveOutput only ever holds the display chunk.
+    const liveOutputs = onToolCallsUpdate.mock.calls
+      .map((call) => call[0][0] as ToolCall)
+      .filter(
+        (call): call is ExecutingToolCall =>
+          call.status === 'executing' && call.liveOutput !== undefined,
+      )
+      .map((call) => call.liveOutput);
+    expect(liveOutputs).toContain('real output');
+    expect(
+      liveOutputs.some(
+        (out) =>
+          typeof out === 'object' &&
+          out !== null &&
+          (out as { type?: string }).type === 'shell_progress',
+      ),
+    ).toBe(false);
+
+    abortController.abort();
+    await schedulePromise;
+  });
 });
 
 describe('CoreToolScheduler request queueing', () => {
