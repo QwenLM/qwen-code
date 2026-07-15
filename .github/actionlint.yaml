@@ -1,5 +1,6 @@
 self-hosted-runner:
   labels:
     - 'ecs-qwen'
+    - 'ecs-qwen-jit-canary'
 
 config-variables: null

@@ -26,6 +26,7 @@ on:
         type: 'choice'
         options:
           - 'self-hosted'
+          - 'jit-canary'
           - 'hosted'
 
 concurrency:
@@ -110,8 +111,12 @@ jobs:
         run: |-
           ubuntu_runner='["ubuntu-latest"]'
           if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
-            if [[ "${ECS_DISABLED}" != "true" && "${DISPATCH_LINUX_RUNNER}" == "self-hosted" ]]; then
-              ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
+            if [[ "${ECS_DISABLED}" != "true" ]]; then
+              if [[ "${DISPATCH_LINUX_RUNNER}" == "self-hosted" ]]; then
+                ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
+              elif [[ "${DISPATCH_LINUX_RUNNER}" == "jit-canary" ]]; then
+                ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen-jit-canary"]'
+              fi
             fi
           elif [[ "${ECS_DISABLED}" != "true" && ( "${SAME_REPO}" == "true" || "${EVENT_NAME}" == "merge_group" ) ]]; then
             ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
