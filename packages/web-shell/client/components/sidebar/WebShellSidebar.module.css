@@ -796,11 +796,35 @@
 
 .sessionMetaSlot {
   position: relative;
+  flex: 0 0 auto;
   height: 30px;
   margin-left: auto;
   display: flex;
   align-items: center;
   justify-content: flex-end;
+}
+
+.sessionAttention {
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--success-color) 10%, transparent);
+  color: color-mix(in srgb, var(--success-color) 72%, transparent);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.sessionAttentionUserInput {
+  background: color-mix(in srgb, var(--agent-blue-500) 10%, transparent);
+  color: color-mix(in srgb, var(--agent-blue-500) 72%, transparent);
+}
+
+.sessionAttention + .sessionLoading {
+  margin-left: 10px;
 }
 
 .sessionRow:hover .sessionMetaSlot,
@@ -830,12 +854,17 @@
 
 .sessionRow:hover:not(.runningSession) .sessionTime,
 .sessionRow:focus-within:not(.runningSession) .sessionTime,
+.sessionRow:hover:not(.runningSession) .sessionAttention,
+.sessionRow:focus-within:not(.runningSession) .sessionAttention,
 .sessionMetaSlot:hover .sessionTime,
 .sessionMetaSlot:hover .sessionLoading,
+.sessionMetaSlot:hover .sessionAttention,
 .sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionTime,
 .sessionMetaSlot:has([data-state='open']) .sessionTime,
 .sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionLoading,
-.sessionMetaSlot:has([data-state='open']) .sessionLoading {
+.sessionMetaSlot:has([data-state='open']) .sessionLoading,
+.sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionAttention,
+.sessionMetaSlot:has([data-state='open']) .sessionAttention {
   opacity: 0;
 }
 
