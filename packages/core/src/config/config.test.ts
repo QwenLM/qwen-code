@@ -5405,6 +5405,31 @@ describe('Server Config (config.ts)', () => {
         expect(config.getMaxToolCallsPerTurn()).toBe(Number.POSITIVE_INFINITY);
       },
     );
+
+    it.each([0.5, Number.NaN, Number.POSITIVE_INFINITY])(
+      'should reject an invalid maxToolCallsPerTurn value: %s',
+      (capValue) => {
+        expect(
+          () => new Config({ ...baseParams, maxToolCallsPerTurn: capValue }),
+        ).toThrow(/maxToolCallsPerTurn: must be an integer/);
+      },
+    );
+  });
+
+  describe('getMaxSessionTurns', () => {
+    it.each([-42, -1, 0, 42])('should accept %d', (maxSessionTurns) => {
+      const config = new Config({ ...baseParams, maxSessionTurns });
+      expect(config.getMaxSessionTurns()).toBe(maxSessionTurns);
+    });
+
+    it.each([0.5, Number.NaN, Number.POSITIVE_INFINITY])(
+      'should reject an invalid value: %s',
+      (maxSessionTurns) => {
+        expect(() => new Config({ ...baseParams, maxSessionTurns })).toThrow(
+          /maxSessionTurns: must be an integer/,
+        );
+      },
+    );
   });
 
   describe('getClearContextOnIdle', () => {

@@ -334,6 +334,27 @@ export function shouldDrainMessageQueue({
   );
 }
 
+export function getSpeculativeToolResult(response: unknown): {
+  text: string;
+  status: ToolCallStatus;
+} {
+  const responseRecord =
+    typeof response === 'object' && response
+      ? (response as Record<string, unknown>)
+      : undefined;
+  const hasError =
+    responseRecord !== undefined &&
+    Object.prototype.hasOwnProperty.call(responseRecord, 'error');
+  const result = responseRecord
+    ? (responseRecord[hasError ? 'error' : 'output'] ??
+      JSON.stringify(responseRecord))
+    : String(response ?? '');
+  return {
+    text: String(result),
+    status: hasError ? ToolCallStatus.Error : ToolCallStatus.Success,
+  };
+}
+
 function getResponseCandidateTokens(
   pendingGeminiHistoryItems: HistoryItemWithoutId[],
 ): number {
@@ -2263,11 +2284,7 @@ export const AppContainer = (props: AppContainerProps) => {
                       const name = tc.functionCall?.name ?? 'unknown';
                       const args = tc.functionCall?.args ?? {};
                       const resp = toolResults[i]?.functionResponse?.response;
-                      const resultText =
-                        typeof resp === 'object' && resp
-                          ? ((resp as Record<string, unknown>)['output'] ??
-                            JSON.stringify(resp))
-                          : String(resp ?? '');
+                      const speculativeResult = getSpeculativeToolResult(resp);
                       return {
                         callId: `spec-${name}-${i}`,
                         name,
@@ -2275,8 +2292,8 @@ export const AppContainer = (props: AppContainerProps) => {
                           Object.entries(args)
                             .map(([k, v]) => `${k}: ${String(v).slice(0, 80)}`)
                             .join(', ') || name,
-                        resultDisplay: String(resultText).slice(0, 500),
-                        status: ToolCallStatus.Success,
+                        resultDisplay: speculativeResult.text.slice(0, 500),
+                        status: speculativeResult.status,
                         confirmationDetails: undefined,
                       };
                     });

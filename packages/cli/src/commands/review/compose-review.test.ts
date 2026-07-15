@@ -15,15 +15,18 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import {
   composeReview,
   composeReviewCommand,
+  verdictLine,
   type ComposeReviewInput,
   type ComposeReviewResult,
 } from './compose-review.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
+  writeStderrLine: vi.fn(),
 }));
 
 const MODEL = 'test-model';
@@ -46,13 +49,23 @@ afterEach(() => {
 
 const DIFF = '/abs/diff.txt';
 
-/** Write a plan with two chunks, and return its path. */
+/**
+ * Write a plan with two chunks, and return its path.
+ *
+ * A territory fan-out captured cross-repo, with no deletions: the smallest plan
+ * whose roster is exactly the chunks plus the test matrix. `coveredPlan()` below
+ * satisfies that one. A plan that requires nothing is not a plan any capture
+ * command writes, and coverage now reads the roster out of it.
+ */
 function plan(): string {
   const p = join(dir, 'plan.json');
   writeFileSync(
     p,
     JSON.stringify({
       diffPathAbsolute: DIFF,
+      srcDiffLines: 5000,
+      diffLines: 5000,
+      files: [{ path: 'a.ts', kind: 'source', removedLines: 0, heavy: false }],
       chunks: [
         { id: 1, startLine: 1, endLine: 100 },
         { id: 2, startLine: 101, endLine: 200 },
@@ -72,8 +85,13 @@ function plan(): string {
 function transcript(
   id: string,
   launchPrompt: string,
-  opts: { toolCalls?: number; text?: string } = {},
+  opts: { toolCalls?: number; text?: string; opens?: string[] } = {},
 ): void {
+  const pointedAtBriefs = [
+    ...launchPrompt.matchAll(/read_file\(file_path="([^"]*\.brief\.md)"\)/g),
+  ].map((m) => m[1]);
+  const working = (opts.toolCalls ?? 0) > 0;
+  const opens = opts.opens ?? (working ? pointedAtBriefs : []);
   const base = { agentId: id, agentName: 'general-purpose', sessionId: 'S1' };
   const lines: string[] = [
     JSON.stringify({
@@ -111,6 +129,35 @@ function transcript(
       }),
     );
   }
+  for (const path of opens) {
+    lines.push(
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            { functionCall: { name: 'read_file', args: { file_path: path } } },
+          ],
+        },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: 'brief' },
+              },
+            },
+          ],
+        },
+      }),
+    );
+  }
   lines.push(
     JSON.stringify({
       ...base,
@@ -127,9 +174,43 @@ function transcript(
   );
 }
 
-/** A prompt the CLI would have built: it names the diff and the read. */
+/**
+ * A prompt the CLI would have built: it names the diff and the read of THIS
+ * chunk's lines. The offsets are the chunk's own, as `agent-prompt` emits them —
+ * coverage is attributed from the range delivered, not from the words `chunk N`.
+ */
 function goodPrompt(chunk: number): string {
-  return `You are reviewing chunk ${chunk} of 2.\nread_file(file_path="${DIFF}", offset=0, limit=100)`;
+  const offset = (chunk - 1) * 100;
+  const brief = briefPath(join(dir, 'plan.json'), `chunk-${chunk}`);
+  return (
+    `You are reviewing chunk ${chunk} of 2.\n` +
+    `read_file(file_path="${brief}")\n` +
+    `read_file(file_path="${DIFF}", offset=${offset}, limit=100)`
+  );
+}
+
+/** Lay down the CLI's record of the prompt it built for `chunk`. */
+function recordBuilt(planPath: string, chunk: number): void {
+  const d = promptRecordDir(planPath);
+  mkdirSync(d, { recursive: true });
+  writeFileSync(join(d, `chunk-${chunk}.txt`), goodPrompt(chunk));
+  writeFileSync(briefPath(planPath, `chunk-${chunk}`), `chunk-${chunk} brief`);
+}
+
+/**
+ * The one whole-diff agent this plan's roster requires, built and launched.
+ *
+ * Its prompt names no line ranges, so it grants no coverage — a review may not
+ * certify lines on the strength of "somebody had the file open".
+ */
+function recordMatrix(planPath: string): void {
+  const d = promptRecordDir(planPath);
+  mkdirSync(d, { recursive: true });
+  const brief = briefPath(planPath, 'test-matrix');
+  writeFileSync(brief, 'The test-matrix brief.');
+  const launch = `You are the test-coverage matrix agent.\nread_file(file_path="${brief}")\nread_file(file_path="${DIFF}")`;
+  writeFileSync(join(d, 'test-matrix.txt'), launch);
+  transcript('tm', launch, { toolCalls: 2, opens: [brief] });
 }
 
 /** The prompt the orchestrator actually sent, 23 times: no diff anywhere. */
@@ -141,7 +222,11 @@ function blindPrompt(chunk: number): string {
 function coveredPlan(): string {
   transcript('a1', goodPrompt(1), { toolCalls: 3 });
   transcript('a2', goodPrompt(2), { toolCalls: 2 });
-  return plan();
+  const p = plan();
+  recordBuilt(p, 1);
+  recordBuilt(p, 2);
+  recordMatrix(p);
+  return p;
 }
 
 /** Agents given the diff, that never opened it — and said so at length. */
@@ -817,5 +902,111 @@ describe('coverage is recomputed, never accepted', () => {
       modelId: MODEL,
     });
     expect(r.event).toBe('APPROVE');
+  });
+});
+
+// `verdictLine` is what Step 6 prints — the one place a verdict exists for the
+// user. It had no test, and a review of this change found the reason to want one.
+describe('verdictLine — the terminal verdict, and its dangling colon', () => {
+  const line = (over: Partial<ComposeReviewResult>): string =>
+    verdictLine({
+      event: 'COMMENT',
+      body: '',
+      baseEvent: 'COMMENT',
+      cappedBy: [],
+      downgraded: false,
+      downgradedFrom: null,
+      ...over,
+    });
+
+  it('names a cap that took an Approve away', () => {
+    expect(
+      line({
+        event: 'COMMENT',
+        baseEvent: 'APPROVE',
+        cappedBy: ['unreviewed-dimension'],
+      }),
+    ).toBe(
+      'Verdict: Comment — an Approve was NOT available: a dimension nobody reviewed',
+    );
+  });
+
+  it('does not leave a dangling colon when a downgrade ALONE took the Approve', () => {
+    // The bug the review caught: `baseEvent` APPROVE, no cap state, `downgraded`
+    // true — the old code joined an empty `cappedBy` and printed
+    // "an Approve was NOT available:  — downgraded …", a colon over nothing.
+    const out = line({
+      event: 'COMMENT',
+      baseEvent: 'APPROVE',
+      cappedBy: [],
+      downgraded: true,
+      downgradedFrom: 'Approve',
+    });
+    expect(out).toBe(
+      'Verdict: Comment — an Approve was NOT available: a presubmit check failed',
+    );
+    expect(out).not.toContain(':  ');
+    expect(out).not.toMatch(/:\s*—/);
+  });
+
+  it('lists a cap AND a downgrade together when both took the Approve', () => {
+    expect(
+      line({
+        event: 'COMMENT',
+        baseEvent: 'APPROVE',
+        cappedBy: ['uncoverable-chunk'],
+        downgraded: true,
+        downgradedFrom: 'Approve',
+      }),
+    ).toBe(
+      'Verdict: Comment — an Approve was NOT available: part of the diff cannot be read at all; a presubmit check failed',
+    );
+  });
+
+  it('says a Suggestion-only Comment was downgraded, without claiming a lost Approve', () => {
+    // baseEvent COMMENT: there was no Approve to lose, but the presubmit still
+    // moved the event and the user should see it.
+    expect(
+      line({
+        event: 'COMMENT',
+        baseEvent: 'COMMENT',
+        downgraded: true,
+        downgradedFrom: null,
+      }),
+    ).toBe('Verdict: Comment — downgraded by a presubmit check');
+  });
+
+  it('says a Request changes downgraded to Comment still has blockers', () => {
+    // The case a review caught: a presubmit downgrade (self-PR, failing CI) moves a
+    // REQUEST_CHANGES — a review with confirmed Criticals — down to COMMENT. Printed
+    // as a bare "Comment — downgraded", an operator reads "nothing blocking" while
+    // blockers were posted inline. `downgradedFrom` distinguishes it from a
+    // Suggestion-only Comment; `baseEvent` cannot (a cap may already have softened
+    // the RC before the downgrade ran).
+    const out = line({
+      event: 'COMMENT',
+      baseEvent: 'REQUEST_CHANGES',
+      downgraded: true,
+      downgradedFrom: 'Request changes',
+    });
+    expect(out).toContain('Request changes');
+    expect(out).toContain('blockers are still posted');
+    expect(out).not.toBe('Verdict: Comment — downgraded by a presubmit check');
+  });
+
+  it('never names a cap on a Request changes — the blocker earned it, no cap softens it', () => {
+    expect(
+      line({
+        event: 'REQUEST_CHANGES',
+        baseEvent: 'REQUEST_CHANGES',
+        cappedBy: ['unreviewed-dimension'],
+      }),
+    ).toBe('Verdict: Request changes');
+  });
+
+  it('is bare for a clean Approve', () => {
+    expect(line({ event: 'APPROVE', baseEvent: 'APPROVE' })).toBe(
+      'Verdict: Approve',
+    );
   });
 });

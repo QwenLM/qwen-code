@@ -4419,6 +4419,16 @@ describe('Session', () => {
           .find((ev) => ev.function_name === 'read_file');
         expect(toolEvent?.status).toBe('error');
         expect(toolEvent?.success).toBe(false);
+        const followUp = vi.mocked(mockChat.sendMessageStream).mock
+          .calls[1][1] as {
+          message: Part[];
+        };
+        expect(followUp.message[0].functionResponse?.response).toEqual({
+          error: 'nope',
+        });
+        expect(
+          followUp.message[0].functionResponse?.response,
+        ).not.toHaveProperty('output');
         expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
           expect.objectContaining({
             sessionId: 'test-session-id',
@@ -11852,6 +11862,68 @@ describe('Session', () => {
         isOutputMarkdown: true,
       };
     }
+
+    it('keeps a structured timeout as an error after a later parent abort', async () => {
+      const parentController = new AbortController();
+      const messageBus = {
+        request: vi.fn().mockResolvedValue({ success: true, output: {} }),
+      };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      const execute = vi.fn().mockImplementation(
+        () =>
+          new Promise<core.ToolResult>((resolve) => {
+            resolve({
+              llmContent: 'Command timed out.\npartial output',
+              returnDisplay: 'Command timed out.\npartial output',
+              error: {
+                message: 'Command timed out.',
+                type: core.ToolErrorType.EXECUTION_TIMEOUT,
+              },
+            });
+            parentController.abort();
+          }),
+      );
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool(core.ToolNames.READ_FILE, execute),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(parentController.signal, 'prompt-timeout', [
+        {
+          id: 'timeout_call',
+          name: core.ToolNames.READ_FILE,
+          args: { file_path: 'a.ts' },
+        },
+      ]);
+
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        error: 'Command timed out.\npartial output',
+      });
+      expect(result.parts[0].functionResponse?.response).not.toHaveProperty(
+        'output',
+      );
+      expect(messageBus.request).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventName: 'PostToolUseFailure',
+          input: expect.objectContaining({ is_interrupt: false }),
+        }),
+        expect.anything(),
+      );
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        result.parts,
+        expect.objectContaining({
+          status: 'error',
+          errorType: core.ToolErrorType.EXECUTION_TIMEOUT,
+        }),
+      );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({ status: 'failed' }),
+        }),
+      );
+    });
 
     it('refreshes managed memory instructions after successful ACP tool writes', async () => {
       const execute = vi.fn().mockResolvedValue({

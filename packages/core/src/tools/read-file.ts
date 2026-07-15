@@ -117,8 +117,8 @@ class ReadFileToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Returns 'ask' for paths outside the workspace/qwen-managed temp/userSkills
-   * directories, so that external file reads require user confirmation.
+   * Returns 'ask' for paths outside the workspace/temp/userSkills directories,
+   * so that external file reads require user confirmation.
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
     const filePath = path.resolve(this.params.file_path);

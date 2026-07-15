@@ -41,6 +41,7 @@ import type {
 } from './coreToolScheduler.js';
 import {
   CoreToolScheduler,
+  convertToFunctionErrorResponse,
   convertToFunctionResponse,
   extractToolFilePaths,
 } from './coreToolScheduler.js';
@@ -909,6 +910,7 @@ describe('CoreToolScheduler', () => {
     const previousTimeout = process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'];
     process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'] = '30';
     try {
+      const parentController = new AbortController();
       let toolSawAbort = false;
       // A tool that never settles on its own — it resolves only once its
       // AbortSignal fires, proving the timeout actually cancels the tool
@@ -918,6 +920,7 @@ describe('CoreToolScheduler', () => {
           new Promise<ToolResult>((resolve) => {
             signal?.addEventListener('abort', () => {
               toolSawAbort = true;
+              parentController.abort();
               resolve({
                 llmContent: 'aborted late',
                 returnDisplay: 'aborted late',
@@ -944,7 +947,7 @@ describe('CoreToolScheduler', () => {
             prompt_id: 'prompt-timeout',
           },
         ],
-        new AbortController().signal,
+        parentController.signal,
       );
 
       const completedCall = (
@@ -958,6 +961,139 @@ describe('CoreToolScheduler', () => {
         expect(completedCall.response.error?.message).toContain('timed out');
       }
       expect(toolSawAbort).toBe(true);
+    } finally {
+      if (previousTimeout === undefined) {
+        delete process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'];
+      } else {
+        process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'] = previousTimeout;
+      }
+    }
+  });
+
+  it('keeps a tool-produced timeout as an error after a later parent abort', async () => {
+    const parentController = new AbortController();
+    const execute = vi.fn().mockImplementation(
+      () =>
+        new Promise<ToolResult>((resolve) => {
+          resolve({
+            llmContent: 'Command timed out.\npartial output',
+            returnDisplay: 'Command timed out.\npartial output',
+            error: {
+              message: 'Command timed out.',
+              type: ToolErrorType.EXECUTION_TIMEOUT,
+            },
+          });
+          parentController.abort();
+        }),
+    );
+    const toolsByName = new Map<string, MockTool>([
+      ['shell', new MockTool({ name: 'shell', execute })],
+    ]);
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockImplementation(async (request: { eventName: string }) =>
+          request.eventName === 'PostToolUseFailure'
+            ? {
+                type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+                correlationId: 'failure-hook',
+                success: true,
+                output: {
+                  hookSpecificOutput: {
+                    additionalContext: 'inspect the partial output',
+                  },
+                },
+              }
+            : {
+                type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+                correlationId: 'pre-hook',
+                success: true,
+                output: { decision: 'allow' },
+              },
+        ),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        messageBus,
+        disableHooks: false,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'shell-timeout',
+          name: 'shell',
+          args: { command: 'sleep 10' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-timeout',
+        },
+      ],
+      parentController.signal,
+    );
+
+    const completedCall = (
+      onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+    )[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.error?.message).toBe('Command timed out.');
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.EXECUTION_TIMEOUT,
+      );
+      expect(completedCall.response.resultDisplay).toContain('partial output');
+      expect(
+        completedCall.response.responseParts[0].functionResponse?.response,
+      ).toEqual({
+        error:
+          'Command timed out.\npartial output\n\ninspect the partial output',
+      });
+      expect(
+        completedCall.response.responseParts[0].functionResponse?.response,
+      ).not.toHaveProperty('output');
+    }
+    expect(messageBus.request).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventName: 'PostToolUseFailure',
+        input: expect.objectContaining({
+          error: 'Command timed out.',
+          is_interrupt: false,
+        }),
+      }),
+      expect.anything(),
+    );
+  });
+
+  it('keeps parent cancellation when the scheduler timeout fires later', async () => {
+    const previousTimeout = process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'];
+    process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'] = '30';
+    try {
+      const parentController = new AbortController();
+      const execute = vi.fn(() => new Promise<ToolResult>(() => {}));
+      const toolsByName = new Map<string, MockTool>([
+        ['read_file', new MockTool({ name: 'read_file', execute })],
+      ]);
+      const { scheduler, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({ toolsByName });
+
+      setTimeout(() => parentController.abort(), 5);
+      await scheduler.schedule(
+        [
+          {
+            callId: 'parent-first',
+            name: 'read_file',
+            args: { file_path: 'a.ts' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-parent-first',
+          },
+        ],
+        parentController.signal,
+      );
+
+      const completedCall = (
+        onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+      )[0];
+      expect(completedCall.status).toBe('cancelled');
     } finally {
       if (previousTimeout === undefined) {
         delete process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'];
@@ -1591,6 +1727,83 @@ describe('CoreToolScheduler', () => {
     );
     // Smaller output stays untouched (batch back under budget after offload).
     expect(outputOf('smallBatchTool')).toBe('b'.repeat(3000));
+  });
+
+  it('offloads timeout error detail while preserving failure metadata', async () => {
+    const timeoutResult = (detail: string): ToolResult => ({
+      llmContent: detail,
+      returnDisplay: 'partial output',
+      error: {
+        message: 'Command timed out.',
+        type: ToolErrorType.EXECUTION_TIMEOUT,
+      },
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        'bigTimeoutTool',
+        new MockTool({
+          name: 'bigTimeoutTool',
+          execute: vi.fn().mockResolvedValue(timeoutResult('a'.repeat(9000))),
+        }),
+      ],
+      [
+        'smallTimeoutTool',
+        new MockTool({
+          name: 'smallTimeoutTool',
+          execute: vi.fn().mockResolvedValue(timeoutResult('b'.repeat(3000))),
+        }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        toolOutputBatchBudget: 10_000,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'big-timeout',
+          name: 'bigTimeoutTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p',
+        },
+        {
+          callId: 'small-timeout',
+          name: 'smallTimeoutTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const calls = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    const big = calls.find((call) => call.request.name === 'bigTimeoutTool');
+    const small = calls.find(
+      (call) => call.request.name === 'smallTimeoutTool',
+    );
+    expect(big?.status).toBe('error');
+    expect(small?.status).toBe('error');
+    if (big?.status === 'error' && small?.status === 'error') {
+      const bigResponse =
+        big.response.responseParts[0].functionResponse?.response;
+      expect(bigResponse?.['error']).toContain(
+        'Tool output was too large and has been truncated',
+      );
+      expect(bigResponse).not.toHaveProperty('output');
+      expect(big.response.error?.message).toBe('Command timed out.');
+      expect(big.response.errorType).toBe(ToolErrorType.EXECUTION_TIMEOUT);
+      expect(
+        small.response.responseParts[0].functionResponse?.response,
+      ).toEqual({ error: 'b'.repeat(3000) });
+    }
   });
 
   it('preserves PostToolBatch additionalContext in the offload preview tail', async () => {
@@ -4205,6 +4418,85 @@ describe('convertToFunctionResponse', () => {
         },
       },
     ]);
+  });
+});
+
+describe('convertToFunctionErrorResponse', () => {
+  const toolName = 'testTool';
+  const callId = 'call1';
+
+  it('moves converted text to error and removes output', () => {
+    const [part] = convertToFunctionErrorResponse(
+      toolName,
+      callId,
+      'timeout detail\npartial output',
+      'timeout summary',
+    );
+
+    expect(part.functionResponse).toEqual({
+      name: toolName,
+      id: callId,
+      response: { error: 'timeout detail\npartial output' },
+    });
+    expect(part.functionResponse?.response).not.toHaveProperty('output');
+  });
+
+  it('uses the fallback for empty converted content', () => {
+    const [part] = convertToFunctionErrorResponse(
+      toolName,
+      callId,
+      '',
+      'timeout summary',
+    );
+
+    expect(part.functionResponse?.response).toEqual({
+      error: 'timeout summary',
+    });
+  });
+
+  it.each([[] satisfies Part[], {} satisfies Part])(
+    'uses the fallback instead of the success placeholder for %j',
+    (content) => {
+      const [part] = convertToFunctionErrorResponse(
+        toolName,
+        callId,
+        content,
+        'actual failure',
+      );
+
+      expect(part.functionResponse?.response).toEqual({
+        error: 'actual failure',
+      });
+    },
+  );
+
+  it('prefers an existing error and preserves media and response fields', () => {
+    const content = {
+      functionResponse: {
+        id: callId,
+        name: toolName,
+        response: {
+          error: 'existing error',
+          output: 'must be removed',
+          code: 408,
+        },
+        parts: [{ inlineData: { mimeType: 'image/png', data: 'base64...' } }],
+      },
+    } satisfies Part;
+
+    const [part] = convertToFunctionErrorResponse(
+      toolName,
+      callId,
+      content,
+      'fallback',
+    );
+
+    expect(part.functionResponse).toEqual({
+      id: callId,
+      name: toolName,
+      response: { error: 'existing error', code: 408 },
+      parts: [{ inlineData: { mimeType: 'image/png', data: 'base64...' } }],
+    });
   });
 });
 

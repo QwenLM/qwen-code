@@ -142,6 +142,15 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(result.approvalMode).toBe('yolo');
   });
 
+  it('falls back to auto when no approval mode is configured', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({});
+
+    const result = await provider(workspace, false);
+
+    expect(result.approvalMode).toBe('auto');
+  });
+
   it('normalizes legacy workspace approval mode spelling', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({
@@ -161,9 +170,9 @@ describe('createWorkspaceProvidersStatusProvider', () => {
 
     const result = await provider(workspace, false);
 
-    expect(result.approvalMode).toBe('default');
+    expect(result.approvalMode).toBe('auto');
     expect(coreMock.debugLogger.warn).toHaveBeenCalledWith(
-      '[workspace-providers-status] unrecognized approvalMode "auto-edt", falling back to default',
+      '[workspace-providers-status] unrecognized approvalMode "auto-edt", falling back to auto',
     );
   });
 

@@ -328,6 +328,7 @@ export * from './memory/channel-memory.js';
 export * from './memory/remember.js';
 export * from './memory/refresh.js';
 export * from './memory/dream.js';
+export * from './memory/learn-skill-agent.js';
 // Issue : write helper for hierarchical context files,
 // re-exported so the `qwen serve` daemon can mutate workspace memory
 // via `POST /workspace/memory` without depending on internal paths.
