@@ -340,6 +340,61 @@ describe('agent-prompt (command boundary)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('lets --role reverse-audit --chunk N through and keys the record by its chunk', () => {
+    // The unit tests build the launch prompt directly, bypassing the guard and the
+    // key derivation. This drives the real handler: the guard must let the one legal
+    // role+chunk combo through, the record key must carry the chunk — the delivery
+    // check finds the recorded prompt by that key — and the brief it points at must
+    // read that chunk alone, so brief and launch prompt agree on one chunk's range.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-ra-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      expect(() =>
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan,
+          role: 'reverse-audit',
+          chunk: 14,
+        }),
+      ).not.toThrow();
+      const recorded = readRecordedPrompts(plan);
+      expect([...recorded.keys()]).toEqual(['reverse-audit--chunk-14']);
+      const briefText = readFileSync(
+        briefPath(plan, 'reverse-audit--chunk-14'),
+        'utf8',
+      );
+      expect(briefText).toContain('offset=4024, limit=176'); // chunk 14 only
+      expect(briefText).not.toContain('offset=3807'); // not chunk 13
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('drives the verify role end-to-end through the handler', () => {
+    // verify is covered via buildRoleBrief / buildRoleLaunchPrompt directly; this is
+    // the one new role whose full handler path — brief write, record key, and the
+    // `output: 'verdicts'` branch of tail() — was not driven end-to-end.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-verify-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      expect(() =>
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan,
+          role: 'verify',
+        }),
+      ).not.toThrow();
+      const recorded = readRecordedPrompts(plan);
+      expect([...recorded.keys()]).toEqual(['verify']);
+      const briefText = readFileSync(briefPath(plan, 'verify'), 'utf8');
+      // The verdict branch: Exclusion Criteria yes, finding format no.
+      expect(briefText).toContain('What is NOT a finding');
+      expect(briefText).not.toContain('**Anchor:**');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 // The half of the fan-out this command did not cover. Measured against one real
@@ -388,24 +443,89 @@ describe('buildWholeDiffBlock — the agents that walk the whole diff', () => {
   });
 
   it.each([
-    ['none of the three', {}],
-    ['chunk + whole-diff', { chunk: 13, 'whole-diff': true }],
-    ['chunk + role', { chunk: 13, role: '2' }],
-    ['whole-diff + role', { 'whole-diff': true, role: '2' }],
-    ['all three', { chunk: 13, 'whole-diff': true, role: '2' }],
-  ])('rejects a call that names %s', (_, extra) => {
-    // Three mutually exclusive modes: a territory chunk, a named role, or the
-    // bare whole-diff block. A run that named none used to fall through to the
-    // chunk builder with `undefined` and blame the plan for "no chunk undefined";
+    ['none of the three', {}, /exactly one of/],
+    [
+      'chunk + whole-diff',
+      { chunk: 13, 'whole-diff': true },
+      /--whole-diff builds the diff-reading block alone/,
+    ],
+    [
+      'a non-reverse role + chunk',
+      { chunk: 13, role: '2' },
+      // The message names the set it read from `acceptsChunk`, not a hardcoded role.
+      /only for a per-chunk role \(reverse-audit\); role "2" does not take --chunk/,
+    ],
+    [
+      'whole-diff + role',
+      { 'whole-diff': true, role: '2' },
+      /--whole-diff builds the diff-reading block alone/,
+    ],
+    [
+      'whole-diff + file',
+      { 'whole-diff': true, file: 'foo.ts' },
+      /--whole-diff builds the diff-reading block alone/,
+    ],
+    [
+      // A stray --file on a role that does not read a file would key its record by
+      // that file, colliding with — and masking — a real file-keyed record.
+      'reverse-audit + chunk + a stray file',
+      { role: 'reverse-audit', chunk: 14, file: 'foo.ts' },
+      /role "reverse-audit" does not take --file/,
+    ],
+    [
+      'all three',
+      { chunk: 13, 'whole-diff': true, role: '2' },
+      /--whole-diff builds the diff-reading block alone/,
+    ],
+  ])('rejects a call that names %s', (_, extra, pattern) => {
+    // A territory chunk, a named role, or the bare whole-diff block — one primary
+    // mode. A run that named none used to blame the plan for "no chunk undefined";
     // a run that named two would silently pick one. The guard runs before the plan
-    // is read, so the message is about the call, and it covers every bad shape —
-    // not just the two the first version tested.
+    // is read, so the message is about the call, and it names the specific bad shape.
     expect(() =>
       (agentPromptCommand.handler as (a: unknown) => void)({
         plan: '/nonexistent/plan.json',
         ...extra,
       }),
-    ).toThrow(/exactly one of/);
+    ).toThrow(pattern as RegExp);
+  });
+
+  it('accepts --role reverse-audit --chunk N — the one legal role+chunk combo', () => {
+    // A Step 3B reverse-audit agent owns one chunk's territory. The guard lets that
+    // one through, and the launch prompt reads exactly that chunk's range — not the
+    // whole diff, which is what makes a large-PR reverse auditor context-starved.
+    const p = buildRoleLaunchPrompt(PLAN, 'reverse-audit', '/t/ra.brief.md', {
+      chunk: 14,
+    });
+    // Chunk 14 is lines 4025-4200 → offset 4024, limit 176.
+    expect(p).toContain('offset=4024, limit=176');
+    // and NOT chunk 13's or chunk 15's range.
+    expect(p).not.toContain('offset=3807');
+  });
+
+  it('rejects --role reverse-audit --chunk N when the plan has no such chunk', () => {
+    // The happy path uses chunk 14, which the fixture has. A wrong chunk must name
+    // what the plan actually holds — not emit offset=NaN, and not credit an empty read.
+    expect(() =>
+      buildRoleLaunchPrompt(PLAN, 'reverse-audit', '/t/ra.brief.md', {
+        chunk: 999,
+      }),
+    ).toThrow(/the plan has no chunk 999/);
+    // Through the handler the brief is built first, and rejects it the same way.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-ra-bad-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      expect(() =>
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan,
+          role: 'reverse-audit',
+          chunk: 999,
+        }),
+      ).toThrow(/the plan has no chunk 999/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -844,5 +964,67 @@ describe('an invariant agent reads its file, not the whole review', () => {
     expect(p).toContain('offset=0, limit=400');
     expect(p).toContain('offset=400, limit=400');
     expect(p).toContain('offset=800, limit=400');
+  });
+});
+
+// Step 4 and Step 5 agents: their methodology now lives in code, not in prose the
+// orchestrator retypes each run. The rules pinned here are the ones a paraphrase
+// would have dropped — and one of them (the documented-intent gate) is the exact
+// rule a real run skipped when it auto-posted a false "leaks tokens" Critical.
+describe('verify and reverse-audit briefs — the Step 4/5 methodology, in code', () => {
+  it('the verify brief carries the reject-a-Critical high bar and the documented-intent gate', () => {
+    const p = buildRoleBrief(PLAN, 'verify');
+    // The verdict is a trace, not a vote.
+    expect(p).toMatch(/trac(e|ing) it through the real code/i);
+    // Rejecting a Critical needs quoted contradicting code, floors at low otherwise.
+    expect(p).toContain('quote the specific code that contradicts');
+    expect(p).toMatch(/floor is `confirmed \(low confidence\)`/);
+    // The documented-intent gate — the rule the token-leak false positive skipped.
+    expect(p).toContain('documented intent');
+    expect(p).toMatch(/documentation does not make a harm safe/);
+    // Agent 0 findings are not disproved by a green test.
+    expect(p).toMatch(/do not reject an issue-fidelity/i);
+  });
+
+  it('the verify brief is a verdict role: Exclusion Criteria yes, finding format no', () => {
+    const p = buildRoleBrief(PLAN, 'verify');
+    expect(p).toContain('What is NOT a finding'); // the Exclusion Criteria heading
+    // It rules on findings; it does not file them, so no finding-format block.
+    expect(p).not.toContain('**Anchor:**');
+  });
+
+  it('the reverse-audit brief hunts gaps and demands a substantive receipt', () => {
+    const p = buildRoleBrief(PLAN, 'reverse-audit');
+    expect(p).toMatch(/find the \*\*gaps\*\*/);
+    expect(p).toMatch(/Report only Critical or Suggestion/i);
+    expect(p).toContain('say what you examined'); // the substantive-return receipt
+    // It DOES file findings, so it keeps the finding format.
+    expect(p).toContain('**Anchor:**');
+  });
+
+  it('scopes a per-chunk reverse-audit brief to its one chunk, not the whole diff', () => {
+    // The brief is what the agent is told to obey. If it listed every chunk and said
+    // "walk it chunk by chunk", a `--chunk 14` auditor would read the whole diff the
+    // per-chunk design exists to spare it. Its brief reads chunk 14's range alone —
+    // the same range its launch prompt reads.
+    const scoped = buildRoleBrief(PLAN, 'reverse-audit', { chunk: 14 });
+    expect(scoped).toContain('offset=4024, limit=176'); // chunk 14
+    expect(scoped).not.toContain('offset=3807'); // not chunk 13
+    expect(scoped).not.toContain('offset=4200'); // not chunk 15
+    expect(scoped).toContain('chunk 14');
+    expect(scoped).not.toMatch(/Walk it chunk by chunk/);
+    // A whole-diff (3A) reverse audit, with no chunk, still walks every chunk.
+    const whole = buildRoleBrief(PLAN, 'reverse-audit');
+    expect(whole).toContain('offset=3807');
+    expect(whole).toContain('offset=4024, limit=176');
+    expect(whole).toMatch(/Walk it chunk by chunk/);
+  });
+
+  it('both point the agent at its brief file and give it diff reads', () => {
+    for (const role of ['verify', 'reverse-audit'] as const) {
+      const launch = buildRoleLaunchPrompt(PLAN, role, `/t/${role}.brief.md`);
+      expect(launch).toContain(`read_file(file_path="/t/${role}.brief.md")`);
+      expect(launch).toContain(PLAN.diffPathAbsolute);
+    }
   });
 });
