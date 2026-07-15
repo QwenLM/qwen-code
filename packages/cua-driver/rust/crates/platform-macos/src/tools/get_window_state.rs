@@ -185,7 +185,7 @@ impl Tool for GetWindowStateTool {
         // surface the path instead of embedding base64; otherwise embed base64.
         let max_dim = effective_max_dim;
         // Returns (b64_or_path, final_w, final_h, Option<original_w>, is_file_path)
-        let screenshot = if should_capture {
+        let (screenshot, screenshot_error) = if should_capture {
             let out_file = screenshot_out_file.clone();
             let res = tokio::task::spawn_blocking(move || -> anyhow::Result<(Option<String>, Option<String>, u32, u32, Option<u32>)> {
                 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
@@ -211,20 +211,37 @@ impl Tool for GetWindowStateTool {
                     } else {
                         self.state.resize_registry.clear_ratio(pid);
                     }
-                    Some((b64, file_path, w, h))
+                    (Some((b64, file_path, w, h)), None)
                 }
                 Ok(Err(e)) => {
                     tracing::warn!("Screenshot failed for window {window_id}: {e}");
-                    None
+                    (None, Some(e.to_string()))
                 }
                 Err(e) => {
                     tracing::warn!("Screenshot task error for window {window_id}: {e}");
-                    None
+                    (None, Some(format!("screenshot task failed: {e}")))
                 }
             }
         } else {
-            None
+            (None, None)
         };
+
+        let element_count = self.state.element_cache.element_count(pid, window_id);
+        if should_capture && screenshot.is_none() && element_count == 0 {
+            let error = screenshot_error.as_deref().unwrap_or("unknown screenshot failure");
+            return ToolResult::error(format!(
+                "get_window_state could not produce usable perception for pid={pid} \
+                 window_id={window_id}: screenshot failed ({error}) and the AX tree \
+                 had no actionable elements"
+            ))
+            .with_structured(serde_json::json!({
+                "code": "perception_unavailable",
+                "pid": pid,
+                "window_id": window_id,
+                "element_count": element_count,
+                "screenshot_error": error,
+            }));
+        }
 
         // Capture screenshot dimensions before consuming.
         let screenshot_dims = screenshot.as_ref().map(|(_, _, w, h)| (*w, *h));
@@ -251,8 +268,12 @@ impl Tool for GetWindowStateTool {
             content.push(Content::text(summary));
         } else if let Some(ref r) = tree_result {
             let element_count = self.state.element_cache.element_count(pid, window_id);
+            let screenshot_note = screenshot_error
+                .as_deref()
+                .map(|error| format!(" screenshot_error={error}"))
+                .unwrap_or_default();
             content.push(Content::text(format!(
-                "window_id={window_id} pid={pid} elements={element_count}\n\n{}",
+                "window_id={window_id} pid={pid} elements={element_count}{screenshot_note}\n\n{}",
                 r.tree_markdown
             )));
         }
@@ -261,7 +282,6 @@ impl Tool for GetWindowStateTool {
             return ToolResult::error("No content produced (neither AX tree nor screenshot succeeded)");
         }
 
-        let element_count = self.state.element_cache.element_count(pid, window_id);
         let tree_md = tree_result.as_ref().map(|r| r.tree_markdown.clone()).unwrap_or_default();
 
         // Surface 6: register a snapshot in the global token registry so
@@ -348,6 +368,14 @@ impl Tool for GetWindowStateTool {
         }
         if let Some(ref fp) = screenshot_file_path {
             structured["screenshot_file_path"] = serde_json::json!(fp);
+        }
+        if let Some(error) = screenshot_error {
+            structured["degraded"] = serde_json::json!(true);
+            structured["degraded_reason"] = serde_json::json!(
+                "screenshot_unavailable: the AX elements remain usable, but visual \
+                 cross-checking is unavailable for this response."
+            );
+            structured["screenshot_error"] = serde_json::json!(error);
         }
         ToolResult { content, is_error: None, structured_content: Some(structured) }
     }

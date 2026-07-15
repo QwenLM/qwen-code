@@ -67,6 +67,10 @@ extern "C" {
         attribute: CFStringRef,
         value: CFTypeRef,
     ) -> AXError;
+    pub fn AXUIElementSetMessagingTimeout(
+        element: AXUIElementRef,
+        timeout_in_seconds: f32,
+    ) -> AXError;
     pub fn AXUIElementGetTypeID() -> CFTypeID;
     pub fn AXIsProcessTrusted() -> bool;
     /// `AXIsProcessTrustedWithOptions(options)` — when called with
@@ -291,6 +295,10 @@ pub unsafe fn copy_children(element: AXUIElementRef) -> Vec<AXUIElementRef> {
 pub unsafe fn perform_action(element: AXUIElementRef, action_name: &str) -> AXError {
     let action = CFStr::new(action_name);
     AXUIElementPerformAction(element, action.as_concrete_TypeRef())
+}
+
+pub unsafe fn set_messaging_timeout(element: AXUIElementRef, timeout_in_seconds: f32) -> AXError {
+    AXUIElementSetMessagingTimeout(element, timeout_in_seconds)
 }
 
 /// Set an AX attribute to a CFString value.

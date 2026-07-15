@@ -2,7 +2,6 @@
 
 pub mod nsworkspace;
 
-use std::process::Command;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,76 +30,43 @@ pub struct AppInfo {
 }
 
 /// Enumerate running apps with NSApplicationActivationPolicyRegular.
-/// Uses `osascript` to query System Events — no Accessibility permission needed.
 pub fn list_running_apps() -> Vec<AppInfo> {
-    // Use `ps` + NSWorkspace via a brief Swift one-liner via swift-sh is heavy;
-    // instead use the Obj-C bridge via `osascript`.
-    // Fallback: parse `ps -axo pid,command` and cross-reference with bundle IDs.
-    // Better: use a native call via core-foundation bindings.
     list_running_apps_native()
 }
 
 fn list_running_apps_native() -> Vec<AppInfo> {
-    // Use `lsappinfo list` which is a macOS system tool available on all versions.
-    // Alternatively we can use NSWorkspace via objc2 — but for simplicity and
-    // to match the Swift reference, we use a subprocess call to `osascript`.
-    let script = r#"
-set output to ""
-tell application "System Events"
-    set appList to every application process whose background only is false
-    repeat with proc in appList
-        set procName to name of proc
-        set procPid to unix id of proc
-        set bundleId to bundle identifier of proc
-        if bundleId is missing value then set bundleId to ""
-        set isFront to "0"
-        if frontmost of proc then set isFront to "1"
-        set output to output & procName & "|" & procPid & "|" & bundleId & "|" & isFront & linefeed
-    end repeat
-end tell
-return output
-"#;
+    use objc2_app_kit::{NSApplicationActivationPolicy, NSWorkspace};
 
-    let out = Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output();
-
-    match out {
-        Err(_) => vec![],
-        Ok(o) => {
-            let text = String::from_utf8_lossy(&o.stdout);
-            parse_osascript_app_list(&text)
-        }
+    unsafe {
+        let apps = NSWorkspace::sharedWorkspace().runningApplications();
+        (0..apps.len())
+            .filter_map(|index| apps.get(index))
+            .filter(|app| app.activationPolicy() == NSApplicationActivationPolicy::Regular)
+            .filter_map(|app| {
+                let pid = app.processIdentifier();
+                let name = app.localizedName()?.to_string();
+                if pid == 0 || name.is_empty() {
+                    return None;
+                }
+                let launch_path = app
+                    .bundleURL()
+                    .and_then(|url| url.path())
+                    .map(|path| path.to_string());
+                Some(AppInfo {
+                    name,
+                    pid,
+                    bundle_id: app.bundleIdentifier().map(|id| id.to_string()),
+                    running: true,
+                    active: app.isActive(),
+                    last_used: launch_path
+                        .as_deref()
+                        .and_then(|path| fs_last_used(std::path::Path::new(path))),
+                    launch_path,
+                    kind: Some("desktop".to_owned()),
+                })
+            })
+            .collect()
     }
-}
-
-fn parse_osascript_app_list(text: &str) -> Vec<AppInfo> {
-    let mut apps = Vec::new();
-    for line in text.lines() {
-        let parts: Vec<&str> = line.splitn(4, '|').collect();
-        if parts.len() < 2 { continue; }
-        let name = parts[0].trim().to_owned();
-        let pid: i32 = parts[1].trim().parse().unwrap_or(0);
-        let bundle_id = if parts.len() > 2 && !parts[2].trim().is_empty() {
-            Some(parts[2].trim().to_owned())
-        } else {
-            None
-        };
-        let active = parts.get(3).map(|s| s.trim() == "1").unwrap_or(false);
-        if name.is_empty() || pid == 0 { continue; }
-        apps.push(AppInfo {
-            name,
-            pid,
-            bundle_id,
-            running: true,
-            active,
-            launch_path: None,
-            kind: Some("desktop".to_owned()),
-            last_used: None,
-        });
-    }
-    apps
 }
 
 /// Launch an app by bundle ID via NSWorkspace, background only (no focus
@@ -329,24 +295,9 @@ pub(crate) fn locate_by_name(name: &str) -> Option<AppLocator> {
     resolve_bundle_id_to_locator(name)
 }
 
-/// Read `CFBundleIdentifier` from an `.app` bundle's `Info.plist`.
-/// Falls back to shelling out to `plutil` (already used elsewhere in
-/// this file) to avoid pulling in a plist crate just for this.
+/// Read `CFBundleIdentifier` from an `.app` bundle via Core Foundation.
 fn bundle_id_for_app_path(app_path: &str) -> Option<String> {
-    let plist = format!("{app_path}/Contents/Info.plist");
-    let out = Command::new("plutil")
-        .args(["-extract", "CFBundleIdentifier", "raw", "-o", "-", &plist])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let bid = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if bid.is_empty() {
-        None
-    } else {
-        Some(bid)
-    }
+    bundle_string(std::path::Path::new(app_path), "CFBundleIdentifier")
 }
 
 /// Return all apps: running apps merged with installed-but-not-running apps.
@@ -463,39 +414,15 @@ pub(crate) fn unix_secs_to_rfc3339(secs: i64) -> String {
 }
 
 fn read_app_plist(plist_path: &std::path::Path) -> Option<AppInfo> {
-    let bundle_id_out = Command::new("plutil")
-        .args(["-extract", "CFBundleIdentifier", "raw", "-o", "-",
-               plist_path.to_str()?])
-        .output().ok()?;
-    if !bundle_id_out.status.success() { return None; }
-    let bundle_id = String::from_utf8_lossy(&bundle_id_out.stdout).trim().to_string();
-    if bundle_id.is_empty() { return None; }
-
-    let name_out = Command::new("plutil")
-        .args(["-extract", "CFBundleDisplayName", "raw", "-o", "-",
-               plist_path.to_str()?])
-        .output().ok();
-    let name = name_out
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
+    let app_path = plist_path.parent()?.parent()?;
+    let bundle_id = bundle_string(app_path, "CFBundleIdentifier")?;
+    let name = bundle_string(app_path, "CFBundleDisplayName")
+        .or_else(|| bundle_string(app_path, "CFBundleName"))
         .unwrap_or_else(|| {
-            // Fallback: CFBundleName.
-            Command::new("plutil")
-                .args(["-extract", "CFBundleName", "raw", "-o", "-",
-                       plist_path.to_str().unwrap_or("")])
-                .output().ok()
-                .filter(|o| o.status.success())
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| {
-                    plist_path.parent()
-                        .and_then(|p| p.parent())
-                        .and_then(|p| p.file_stem())
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("")
-                        .to_string()
-                })
+            app_path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_owned()
         });
 
     if name.is_empty() { return None; }
@@ -510,6 +437,18 @@ fn read_app_plist(plist_path: &std::path::Path) -> Option<AppInfo> {
         kind: None,
         last_used: None,
     })
+}
+
+fn bundle_string(app_path: &std::path::Path, key: &str) -> Option<String> {
+    use core_foundation::{bundle::CFBundle, string::CFString, url::CFURL};
+
+    let url = CFURL::from_path(app_path, true)?;
+    let bundle = CFBundle::new(url)?;
+    let info = bundle.info_dictionary();
+    let key = CFString::new(key);
+    let value = info.find(&key)?;
+    let value = value.downcast::<CFString>()?.to_string();
+    (!value.is_empty()).then_some(value)
 }
 
 /// Return the pid of the current frontmost application via
@@ -561,25 +500,13 @@ pub fn bundle_id_for_pid(pid: i32) -> Option<String> {
 }
 
 /// Return the localized application name for a running process by PID.
-/// Uses `ps -p {pid} -o comm=` which gives the command name without path.
-/// Returns `None` if the PID is unknown or the command fails.
 pub fn get_app_name_for_pid(pid: i32) -> Option<String> {
-    let out = Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "comm="])
-        .output()
-        .ok()?;
-    let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if raw.is_empty() {
-        return None;
+    use objc2_app_kit::NSRunningApplication;
+    unsafe {
+        NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?
+            .localizedName()
+            .map(|name| name.to_string())
     }
-    // Strip path prefix: "/Applications/Safari.app/Contents/MacOS/Safari" → "Safari"
-    Some(
-        std::path::Path::new(&raw)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(&raw)
-            .to_string(),
-    )
 }
 
 /// Format the app list in the same text style as libs/cua-driver.

@@ -135,6 +135,7 @@ pub fn walk_tree_bounded(
         if app_elem.is_null() {
             return TreeWalkResult { tree_markdown: String::new(), nodes, truncated: false };
         }
+        let _ = set_messaging_timeout(app_elem, 5.0);
 
         // Chromium/Electron apps (Arc, VS Code, Electron shells) ship their
         // web-content AX tree OFF and only build it once an assistive client

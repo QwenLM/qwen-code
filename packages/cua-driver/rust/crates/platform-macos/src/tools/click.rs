@@ -747,6 +747,7 @@ fn perform_ax_click(
 ) -> anyhow::Result<(String, bool, bool)> {
     let ax_action = map_action(action_str);
     let element = element_ptr as AXUIElementRef;
+    let _ = unsafe { crate::ax::bindings::set_messaging_timeout(element, 5.0) };
 
     // Capture advertised actions BEFORE dispatching so we can detect silent no-ops
     // (AX returns success even when the element doesn't advertise the action).

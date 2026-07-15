@@ -10,28 +10,78 @@
 //! approach is simpler to implement correctly and is reliable across OS versions.
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use std::process::Command;
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+    time::{Duration, Instant},
+};
+
+const SCREENSHOT_TIMEOUT_SECS_DEFAULT: u64 = 15;
+
+fn screenshot_timeout() -> Duration {
+    let seconds = std::env::var("CUA_DRIVER_RS_SCREENSHOT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(SCREENSHOT_TIMEOUT_SECS_DEFAULT);
+    Duration::from_secs(seconds)
+}
+
+struct CaptureFile(PathBuf);
+
+impl CaptureFile {
+    fn new(kind: &str) -> Self {
+        Self(std::env::temp_dir().join(format!(
+            "qwen-cua-driver-{kind}-{}-{}.png",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        )))
+    }
+
+    fn path(&self) -> &Path { &self.0 }
+}
+
+impl Drop for CaptureFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn run_screencapture(args: &[String], target: &str) -> anyhow::Result<()> {
+    let mut child = Command::new("screencapture").args(args).spawn()?;
+    let timeout = screenshot_timeout();
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break status,
+            None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                anyhow::bail!(
+                    "screencapture timed out after {}s for {target}; process terminated",
+                    timeout.as_secs()
+                );
+            }
+        }
+    };
+    if !status.success() {
+        anyhow::bail!("screencapture failed for {target} (status {status})");
+    }
+    Ok(())
+}
 
 /// Capture a window by its `window_id` (CGWindowID).
 /// Returns raw PNG bytes or an error.
 pub fn screenshot_window_bytes(window_id: u32) -> anyhow::Result<Vec<u8>> {
-    let tmp_path = format!("/tmp/cua-driver-rs-capture-{}.png", window_id);
-
-    let status = Command::new("screencapture")
-        .args([
-            "-l", &window_id.to_string(),
-            "-x",  // no sound
-            "-o",  // no shadow
-            &tmp_path,
-        ])
-        .status()?;
-
-    if !status.success() {
-        anyhow::bail!("screencapture failed for window {window_id}");
-    }
-
-    let bytes = std::fs::read(&tmp_path)?;
-    let _ = std::fs::remove_file(&tmp_path);
+    let capture = CaptureFile::new(&format!("window-{window_id}"));
+    let args = vec![
+        "-l".to_owned(), window_id.to_string(),
+        "-x".to_owned(), "-o".to_owned(),
+        capture.path().to_string_lossy().into_owned(),
+    ];
+    run_screencapture(&args, &format!("window {window_id}"))?;
+    let bytes = std::fs::read(capture.path())?;
 
     if bytes.is_empty() {
         anyhow::bail!("screencapture produced empty output for window {window_id}");
@@ -51,19 +101,10 @@ pub fn screenshot_window(window_id: u32) -> anyhow::Result<(String, u32, u32)> {
 /// Capture the full main display.
 /// Returns raw PNG bytes or an error.
 pub fn screenshot_display_bytes() -> anyhow::Result<Vec<u8>> {
-    // Use a pid-unique path so concurrent cua-driver processes don't step on each other.
-    let tmp_path = format!("/tmp/cua-driver-rs-display-{}.png", std::process::id());
-
-    let status = Command::new("screencapture")
-        .args(["-x", &*tmp_path])
-        .status()?;
-
-    if !status.success() {
-        anyhow::bail!("screencapture failed for main display");
-    }
-
-    let bytes = std::fs::read(&tmp_path)?;
-    let _ = std::fs::remove_file(&tmp_path);
+    let capture = CaptureFile::new("display");
+    let args = vec!["-x".to_owned(), capture.path().to_string_lossy().into_owned()];
+    run_screencapture(&args, "main display")?;
+    let bytes = std::fs::read(capture.path())?;
 
     if bytes.is_empty() {
         anyhow::bail!("screencapture produced empty output for main display");
