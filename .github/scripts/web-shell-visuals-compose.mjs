@@ -7,10 +7,10 @@
 /**
  * Before/after compositor for the web-shell visuals preview.
  *
- * Given a `before/` (rendered from the PR's merge-base, i.e. `main`) and an
+ * Given a `before/` (rendered from the PR's merge-base — the PR base) and an
  * `after/` (rendered from the PR head) set of `<view>-<theme>.png` screenshots,
  * pixel-diff each pair and, for the views that actually CHANGED, stitch a
- * single labelled "main (before) | this PR (after)" composite into `outDir`
+ * single labelled "PR base (before) | this PR (after)" composite into `outDir`
  * (reusing the `<view>-<theme>.png` name so the publish step lists it as-is).
  *
  * Unchanged views are dropped — so a PR with no visual impact produces no
@@ -190,39 +190,45 @@ async function composeCli(beforeDir, afterDir, outDir) {
   // with ERR_MODULE_NOT_FOUND on a top-level Playwright import.
   const { chromium } = await import('@playwright/test');
   const browser = await chromium.launch();
-  // deviceScaleFactor:2 keeps the burned-in labels crisp on retina/GitHub zoom.
-  const page = await browser.newPage({ deviceScaleFactor: 2 });
   const manifest = [];
-  for (const { name, hasBefore } of work) {
-    const { view, theme } = parseShot(name);
-    const afterUri = dataUri(join(afterDir, name));
-    const beforeUri = hasBefore ? dataUri(join(beforeDir, name)) : null;
-    const changedPct = hasBefore
-      ? await diffPct(page, beforeUri, afterUri)
-      : 100;
-    const changed = isChanged({ hasBefore, changedPct });
-    manifest.push({
-      name,
-      view,
-      theme,
-      hasBefore,
-      changedPct: Number(changedPct.toFixed(2)),
-      changed,
-    });
-    if (!changed) continue;
-    await page.setContent(
-      compositeHtml({
+  // Always close the browser, even if a diff/screenshot rejects mid-loop (an
+  // evaluate timeout or CDP disconnect on a corrupt/oversized PNG) — otherwise
+  // a ~200 MB Chromium child would leak for the rest of the CI job.
+  try {
+    // deviceScaleFactor:2 keeps the burned-in labels crisp on retina/GitHub zoom.
+    const page = await browser.newPage({ deviceScaleFactor: 2 });
+    for (const { name, hasBefore } of work) {
+      const { view, theme } = parseShot(name);
+      const afterUri = dataUri(join(afterDir, name));
+      const beforeUri = hasBefore ? dataUri(join(beforeDir, name)) : null;
+      const changedPct = hasBefore
+        ? await diffPct(page, beforeUri, afterUri)
+        : 100;
+      const changed = isChanged({ hasBefore, changedPct });
+      manifest.push({
+        name,
         view,
         theme,
         hasBefore,
-        changedPct,
-        beforeUri,
-        afterUri,
-      }),
-    );
-    await page.locator('#cap').screenshot({ path: join(outDir, name) });
+        changedPct: Number(changedPct.toFixed(2)),
+        changed,
+      });
+      if (!changed) continue;
+      await page.setContent(
+        compositeHtml({
+          view,
+          theme,
+          hasBefore,
+          changedPct,
+          beforeUri,
+          afterUri,
+        }),
+      );
+      await page.locator('#cap').screenshot({ path: join(outDir, name) });
+    }
+  } finally {
+    await browser.close();
   }
-  await browser.close();
 
   writeFileSync(
     join(outDir, 'manifest.json'),
