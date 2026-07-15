@@ -17,6 +17,7 @@ import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/webui/daemon-
 import type { CommandDisplayCategoryOrder } from '../utils/commandDisplay';
 import type { SkillInfo } from '../completions/slashCompletion';
 import { useI18n } from '../i18n';
+import { useWebShellPortalRoot } from '../portalRoot';
 import {
   useWebShellCustomization,
   type WebShellComposerInput,
