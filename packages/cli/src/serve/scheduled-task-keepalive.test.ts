@@ -251,6 +251,13 @@ describe('scheduled-task keepalive', () => {
       task({ id: 'a', sessionId: 'sess-1' }),
       task({ id: 'b', sessionId: 'sess-2' }),
     ]);
+    const readMetadata = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadata')
+      .mockResolvedValue({
+        sourceType: 'scheduled_task',
+        sourceId: 'a',
+      });
+    const loadRequests: unknown[] = [];
     const reviving = {
       recordHeartbeat: (id: string) => {
         if (id === 'sess-1') throw new Error('not resident');
@@ -258,6 +265,7 @@ describe('scheduled-task keepalive', () => {
       },
       loadSession: async (req: { sessionId: string }) => {
         loads.push(req.sessionId);
+        loadRequests.push(req);
       },
       spawnOrAttach: async () => {
         throw new Error('not mocked');
@@ -278,6 +286,16 @@ describe('scheduled-task keepalive', () => {
     // scheduler; sess-2 was resident and still got its heartbeat.
     expect(loads).toEqual(['sess-1']);
     expect(beats).toEqual(['sess-2']);
+    expect(loadRequests).toEqual([
+      {
+        sessionId: 'sess-1',
+        workspaceCwd: workspace,
+        historyReplay: 'response',
+        sourceType: 'scheduled_task',
+        sourceId: 'a',
+      },
+    ]);
+    readMetadata.mockRestore();
   });
 
   it('a failed revive is swallowed and does not block siblings', async () => {
@@ -399,18 +417,42 @@ describe('scheduled-task keepalive', () => {
       task({ id: 'c', sessionId: 'sess-1' }), // same session as 'a'
       task({ id: 'd' }), // unbound
     ]);
-    const loaded: string[] = [];
+    const readMetadata = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadata')
+      .mockImplementation(async (sessionId) => ({
+        sourceType: 'scheduled_task',
+        sourceId: `task-for-${sessionId}`,
+      }));
+    const loaded: Array<{
+      sessionId: string;
+      sourceType?: string;
+      sourceId?: string;
+    }> = [];
     const res = await rehydrateScheduledTaskSessions({
       bridge: {
         loadSession: async (req) => {
-          loaded.push(req.sessionId);
+          loaded.push(req);
         },
       },
       boundWorkspace: workspace,
     });
-    expect(loaded.sort()).toEqual(['sess-1', 'sess-2']);
+    expect(loaded).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sessionId: 'sess-1',
+          sourceType: 'scheduled_task',
+          sourceId: 'task-for-sess-1',
+        }),
+        expect.objectContaining({
+          sessionId: 'sess-2',
+          sourceType: 'scheduled_task',
+          sourceId: 'task-for-sess-2',
+        }),
+      ]),
+    );
     expect(res.loaded.sort()).toEqual(['sess-1', 'sess-2']);
     expect(res.failed).toEqual([]);
+    readMetadata.mockRestore();
   });
 
   it('rehydrate records a gone session as failed but keeps loading siblings', async () => {
@@ -527,6 +569,8 @@ describe('scheduled-task keepalive', () => {
     expect(spawns[0]).toEqual({
       workspaceCwd: workspace,
       sessionScope: 'thread',
+      sourceType: 'scheduled_task',
+      sourceId: 'unbound-1',
     });
     expect(names).toHaveLength(1);
     expect(names[0]![0]).toBe('new-sess-1');

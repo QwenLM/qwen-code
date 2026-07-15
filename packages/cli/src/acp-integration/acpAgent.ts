@@ -264,6 +264,7 @@ import {
   type ServeWorkspaceExtensionsStatus,
   IDLE_HOOK_EVENTS,
 } from '@qwen-code/acp-bridge/status';
+import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
   LOAD_REPLAY_BULK_MODE,
@@ -6729,6 +6730,41 @@ class QwenAgent implements Agent {
           ok = await recording.recordParentSession(parentSessionId);
         }
         return { sessionId, parentSessionId, persisted: ok };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionSource: {
+        const sessionId = params['sessionId'];
+        const sourceType = params['sourceType'];
+        const sourceId = params['sourceId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const source = parseSessionSource(sourceType, sourceId);
+        if ('error' in source || source.sourceType === undefined) {
+          throw RequestError.invalidParams(
+            undefined,
+            'error' in source ? source.error : 'Invalid or missing sourceType',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const recording = session.getConfig().getChatRecordingService();
+        let ok = false;
+        if (recording) {
+          ok = await recording.recordSessionSource(
+            source.sourceType,
+            source.sourceId,
+          );
+        }
+        return {
+          sessionId,
+          sourceType: source.sourceType,
+          ...(source.sourceId !== undefined
+            ? { sourceId: source.sourceId }
+            : {}),
+          persisted: ok,
+        };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionClose: {
         const sessionId = params['sessionId'];
