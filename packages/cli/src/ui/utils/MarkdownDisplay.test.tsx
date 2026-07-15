@@ -151,6 +151,119 @@ describe('<MarkdownDisplay />', () => {
       expect(lastFrame() ?? '').toContain('line 60');
     });
 
+    it('clips a non-pending message when enforceHeightBudget is set (#6867)', () => {
+      // Regression for #6867: the `exit_plan_mode` confirmation dialog renders
+      // a non-pending plan body inside MainContent's `maxHeight` +
+      // `overflow="hidden"` wrapper. Ink clips the BOTTOM (newest content) so
+      // without a height-aware pre-slice, a long plan silently loses its tail
+      // (including the option buttons rendered after it). `enforceHeightBudget`
+      // lets bounded-container callers opt into the same slice the streaming
+      // path uses.
+      const text = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join(
+        eol,
+      );
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={false}
+          availableTerminalHeight={10}
+          enforceHeightBudget
+        />,
+      );
+      const output = lastFrame() ?? '';
+      const lineCount = output.split('\n').length;
+      // Budget = availableTerminalHeight - 2 headroom = 8; the slice keeps
+      // roughly that many content lines and a single truncation-cue row is
+      // appended, so the total stays within the terminal's row budget. Without
+      // the fix this would render all 60 lines.
+      expect(lineCount).toBeLessThanOrEqual(10);
+      // Head of the plan is preserved.
+      expect(output).toContain('line 1');
+      // Tail is dropped.
+      expect(output).not.toContain('line 60');
+    });
+
+    it('shows a truncation cue when a non-streaming plan is clipped (#6867)', () => {
+      // Without a visible cue, a model-authored plan could hide dangerous
+      // steps past the viewport budget and users would approve them blind.
+      // For a COMPLETE plan (enforceHeightBudget + !isPending), the cue must
+      // appear so approvers know content is missing.
+      const text = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join(
+        eol,
+      );
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={false}
+          availableTerminalHeight={10}
+          enforceHeightBudget
+        />,
+      );
+      const output = lastFrame() ?? '';
+      // Cue names the count of dropped source lines and the reason.
+      expect(output).toMatch(/\d+ more lines? not shown/);
+      expect(output).toContain('viewport too small');
+    });
+
+    it('does not show a truncation cue when streaming (isPending=true)', () => {
+      // While streaming, the tail IS still on its way (incremental commit
+      // pushes it into <Static> in real time). Emitting "N more lines not
+      // shown" during streaming would be misleading — content is not missing,
+      // just not here yet. Guards against the cue leaking into the streaming
+      // path.
+      const text = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join(
+        eol,
+      );
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={true}
+          availableTerminalHeight={10}
+        />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).not.toMatch(/more lines? not shown/);
+    });
+
+    it('does not show a truncation cue when nothing was actually dropped', () => {
+      // A short plan that fits under the budget must not display the cue.
+      const text = 'a short plan line';
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={false}
+          availableTerminalHeight={10}
+          enforceHeightBudget
+        />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('a short plan line');
+      expect(output).not.toMatch(/more lines? not shown/);
+    });
+
+    it('leaves a non-pending message full when enforceHeightBudget is false', () => {
+      // Committed non-pending renders (transcript, tool result markdown) must
+      // stay uncapped. Guards against enforceHeightBudget defaulting to true
+      // or the isPending gate being accidentally dropped.
+      const text = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join(
+        eol,
+      );
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={false}
+          availableTerminalHeight={10}
+          enforceHeightBudget={false}
+        />,
+      );
+      expect(lastFrame() ?? '').toContain('line 60');
+    });
+
     it('handles a code fence spanning the clip boundary', () => {
       // The head-slice can cut between an opening fence and its close; the
       // parser's EOF inCodeBlock flush then renders the (unclosed) block. The
