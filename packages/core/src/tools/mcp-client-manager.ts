@@ -2392,6 +2392,13 @@ export class McpClientManager {
                   `Sent SIGTERM to ${signaled}/${descendants.length} descendants ` +
                     `of pid ${rootPid} for timed-out server '${serverName}'`,
                 );
+                if (signaled < descendants.length) {
+                  debugLogger.warn(
+                    `Partial signal for timed-out server '${serverName}': ` +
+                      `${signaled}/${descendants.length} descendants of pid ${rootPid} signaled. ` +
+                      'Remaining processes may leak.',
+                  );
+                }
               }
             } else {
               debugLogger.debug(
