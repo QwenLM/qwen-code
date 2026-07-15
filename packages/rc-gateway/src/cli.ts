@@ -69,6 +69,7 @@ import { MatrixRestApi } from './bridges/matrix/restApi.js';
 import { IdleSessionToggles } from './idle/sessionToggles.js';
 import type { IdleStatusResolver } from './routes/idleToggle.js';
 import { SessionEventPump } from './webpush/pump.js';
+import { AgentRegistry } from './agents/agentRegistry.js';
 import {
   DEFAULT_RATE_TABLE,
   RateTableHolder,
@@ -412,6 +413,12 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // The ingester is created after the app (it needs `audit`); attribution +
   // broadcaster exist now so they can be passed into the app deps.
   const usageStore = await openUsageStore();
+  // Agent observability (add-agent-observability): persisted registry of
+  // spawned-agent records, booted before createGatewayApp so agent routes
+  // mount from the very first request.
+  const agentRegistry = await AgentRegistry.open(
+    join(homedir(), '.qwen', 'rc', 'agents.json'),
+  );
   const rates = new RateTableHolder(DEFAULT_RATE_TABLE);
   if (usageStore) {
     try {
@@ -428,7 +435,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // capability route reads its live state through this closure.
   let mdnsAdvertiser: MdnsAdvertiser | undefined;
 
-  const { app, notifier, audit, ownerEvents, bridgeRegistry } =
+  const { app, notifier, audit, ownerEvents, bridgeRegistry, agentLifecycle } =
     createGatewayApp({
       daemon: handle.daemon,
       store,
@@ -481,7 +488,33 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
             usageIngester?.notePromptBoundary(sid);
           }
         : undefined,
+      agents: {
+        registry: agentRegistry,
+        costFor: usageStore
+          ? (sid) => usageStore.sessionTotals(sid).costMicrocentsSesTotal
+          : undefined,
+      },
     });
+
+  // Startup reconciliation (design: "Reconciliation"): running/blocked agent
+  // records whose daemon session is gone become `orphaned` — surfaced in
+  // GET /rc/agents, never silently dropped. Best-effort: an unreachable
+  // daemon at boot leaves records untouched for the next start.
+  try {
+    const caps = await handle.daemon.capabilities();
+    const live = caps.workspaceCwd
+      ? await handle.daemon.listWorkspaceSessions(caps.workspaceCwd)
+      : [];
+    const orphaned = await agentRegistry.reconcile(
+      live.map((s) => s.sessionId),
+    );
+    if (orphaned.length > 0) {
+      // eslint-disable-next-line no-console
+      console.warn(`agents: marked ${orphaned.length} record(s) orphaned`);
+    }
+  } catch {
+    // Daemon unreachable at boot → reconcile on the next start.
+  }
 
   // Now that `audit` exists, build the ingester. usage_tick emissions fan through
   // the broadcaster (relay registration lands in the next slice; until then they
@@ -924,7 +957,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // The session-event pump runs when EITHER push is configured OR cost tracking
   // is on (cost ingestion must see every session_update, independent of push).
   let pump: SessionEventPump | undefined;
-  if (notifier || usageIngester) {
+  if (notifier || usageIngester || agentLifecycle) {
     pump = new SessionEventPump(handle.daemon, notifier, {
       enforcer, // already notifier-gated (undefined when push off) → no auto-vote change
       // Idle suggestions previously rode on the push pump (they only ran when a
@@ -932,10 +965,17 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       // NOT newly activate idle suggestions — enabling cost tracking must not change
       // idle behavior. So gate the idle hook on `notifier`, not just `onSessionIdle`.
       ...(onSessionIdle && notifier ? { onSessionIdle } : {}),
-      ...(usageIngester
+      ...(usageIngester || agentLifecycle
         ? {
-            onEvent: (sid, ev) =>
-              usageIngester!.ingest(sid, ev.data, sessionAttribution.get(sid)),
+            onEvent: (sid: string, ev: { type: string; data: unknown }) => {
+              usageIngester?.ingest(sid, ev.data, sessionAttribution.get(sid));
+              // Fire-and-forget: lifecycle transitions must never block or
+              // break the pump's subscribe loop.
+              void agentLifecycle?.handleSessionEvent(sid, {
+                type: ev.type,
+                data: ev.data,
+              });
+            },
           }
         : {}),
     });
