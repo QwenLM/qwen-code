@@ -3218,6 +3218,42 @@ describe('PermissionManager — compound shell write attribution', () => {
     ).toBe(false);
   });
 
+  it('does not treat canonical-only allow matches as relevant', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
+    try {
+      const allowedDir = path.join(root, 'allowed');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(allowedDir);
+      fs.writeFileSync(path.join(allowedDir, 'file.txt'), 'allowed');
+      fs.symlinkSync(allowedDir, link, 'dir');
+
+      const pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Edit(/allowed/**)'],
+          cwd: root,
+          projectRoot: root,
+        }),
+      );
+      pm.initialize();
+
+      expect(
+        pm.hasRelevantRules({
+          toolName: 'edit',
+          filePath: path.join(link, 'file.txt'),
+        }),
+      ).toBe(false);
+      expect(
+        pm.hasRelevantRules({
+          toolName: 'run_shell_command',
+          command: `echo allowed > ${path.join(link, 'file.txt')}`,
+          cwd: root,
+        }),
+      ).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('hasRelevantRules sees protected writes after sibling shell-wrapper segments', () => {
     const pm = new PermissionManager(
       makeConfig({

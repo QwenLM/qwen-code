@@ -712,9 +712,11 @@ export class PermissionManager {
           }
         : undefined;
 
-    const allRules = [
+    const allowRules = [
       ...this.sessionRules.allow,
       ...this.persistentRules.allow,
+    ];
+    const restrictiveRules = [
       ...this.sessionRules.ask,
       ...this.persistentRules.ask,
       ...this.sessionRules.deny,
@@ -747,8 +749,13 @@ export class PermissionManager {
             pathCtx,
             undefined,
           ] as const;
-          return allRules.some((rule) =>
-            matchesRule(rule, ...opMatchArgs, undefined, 'canonical'),
+          return (
+            restrictiveRules.some((rule) =>
+              matchesRule(rule, ...opMatchArgs, undefined, 'canonical'),
+            ) ||
+            allowRules.some((rule) =>
+              matchesRule(rule, ...opMatchArgs, undefined),
+            )
           );
         })
       ) {
@@ -775,8 +782,10 @@ export class PermissionManager {
       toolParams,
     ] as const;
 
-    return allRules.some((rule) =>
-      matchesRule(rule, ...matchArgs, 'canonical'),
+    return (
+      restrictiveRules.some((rule) =>
+        matchesRule(rule, ...matchArgs, 'canonical'),
+      ) || allowRules.some((rule) => matchesRule(rule, ...matchArgs))
     );
   }
 
