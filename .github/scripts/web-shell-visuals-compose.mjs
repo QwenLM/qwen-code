@@ -253,5 +253,10 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
     );
     process.exit(2);
   }
-  composeCli(beforeDir, afterDir, outDir);
+  composeCli(beforeDir, afterDir, outDir).catch((err) => {
+    // Surface a clean diagnostic + non-zero exit instead of an
+    // UnhandledPromiseRejectionWarning (e.g. a missing @playwright/test).
+    process.stderr.write(`${err?.stack ?? err}\n`);
+    process.exit(1);
+  });
 }
