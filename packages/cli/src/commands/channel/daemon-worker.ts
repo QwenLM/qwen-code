@@ -85,6 +85,7 @@ interface DaemonSessionClientStaticLike {
       modelServiceId?: string;
       sessionScope: 'thread';
       approvalMode?: string;
+      sourceType?: string;
     },
     clientId?: string,
   ): Promise<DaemonChannelSessionClient>;
@@ -166,7 +167,7 @@ export function createDaemonSessionFactory({
     }
     return await DaemonSessionClient.createOrAttach(
       client,
-      daemonReq,
+      { ...daemonReq, sourceType: 'channel' },
       clientId,
     );
   };
