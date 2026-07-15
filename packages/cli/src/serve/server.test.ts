@@ -12199,6 +12199,42 @@ describe('createServeApp', () => {
       expect(JSON.stringify(response.body)).not.toContain('provider-secret');
     });
 
+    it('omits startup failure fields when every entry is malformed', async () => {
+      const state = running();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerControl: () => state,
+        setChannelWorkerSelection: vi.fn(async () => {
+          throw new ChannelWorkerControlError(
+            'channel_worker_start_failed',
+            'Channel worker failed to start.',
+            {
+              startupFailures: [
+                {
+                  workspaceCwd: WS_BOUND,
+                  channel: 42,
+                  phase: 'connect',
+                  message: 'malformed',
+                } as never,
+              ],
+              startupFailuresTruncated: true,
+            },
+          );
+        }),
+        stopChannelWorker: vi.fn(async () => ({ changed: false, state })),
+        reloadChannelWorker: vi.fn(async () => state.workers[0]!),
+      });
+
+      const response = await auth(request(app).put('/workspace/channel')).send({
+        selection: { mode: 'all' },
+      });
+
+      expect(response.status).toBe(502);
+      expect(response.body).not.toHaveProperty('startupFailures');
+      expect(response.body).not.toHaveProperty('startupFailuresTruncated');
+    });
+
     it('exposes partial startup failures in current control snapshots', async () => {
       const state = running();
       state.workers[0] = {
