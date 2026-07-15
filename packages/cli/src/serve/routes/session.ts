@@ -551,9 +551,7 @@ export function registerSessionRoutes(
             workspaceCwd: target.workspaceCwd,
             sessionId,
             format,
-            ...(target.archiveState
-              ? { archiveState: target.archiveState }
-              : {}),
+            archiveState: target.archiveState,
             config: { getChannel: () => 'daemon' },
           });
         },

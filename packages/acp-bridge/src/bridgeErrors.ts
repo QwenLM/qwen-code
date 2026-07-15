@@ -74,6 +74,7 @@ export class SessionArchivedError extends Error {
   }
 }
 
+// Used by daemon archived-export routes; ACP itself does not throw this error.
 export class SessionNotArchivedError extends Error {
   readonly sessionId: string;
 

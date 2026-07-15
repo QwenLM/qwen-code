@@ -25,7 +25,10 @@ import {
   getResumeTokenCounts,
   type ConversationRecord,
 } from './sessionService.js';
-import { SESSION_TRANSCRIPT_MAX_INDEX_BYTES } from './session-transcript-reader.js';
+import {
+  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+  SessionTranscriptTooLargeError,
+} from './session-transcript-reader.js';
 import {
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   stableSessionArtifactId,
@@ -506,6 +509,28 @@ describe('SessionService', () => {
           maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
         }),
       ).resolves.toBeDefined();
+    });
+
+    it('rejects an archived session above the requested size limit', async () => {
+      const snapshotSize = SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1;
+      statSyncSpy.mockReturnValue({
+        size: snapshotSize,
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+
+      const load = sessionService.loadArchivedSession(sessionIdB, {
+        maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+      });
+
+      await expect(load).rejects.toEqual(
+        new SessionTranscriptTooLargeError(
+          sessionIdB,
+          snapshotSize,
+          SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+        ),
+      );
+      expect(vi.mocked(jsonl.read)).not.toHaveBeenCalled();
     });
 
     it('rejects invalid archived session ids before accessing storage', async () => {
