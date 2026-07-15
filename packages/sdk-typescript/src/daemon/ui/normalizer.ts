@@ -39,7 +39,11 @@ import {
  */
 type NormalizedEventBase = Pick<
   DaemonUiEvent,
-  'eventId' | 'serverTimestamp' | 'originatorClientId' | 'rawEvent'
+  | 'eventId'
+  | 'serverTimestamp'
+  | 'sourceRecordIds'
+  | 'originatorClientId'
+  | 'rawEvent'
 >;
 
 const DAEMON_ERROR_KIND_SET = new Set<string>(DAEMON_ERROR_KINDS);
@@ -541,9 +545,11 @@ function createBase(
   opts: NormalizeDaemonEventOptions,
 ): NormalizedEventBase {
   const serverTimestamp = extractServerTimestamp(event);
+  const sourceRecordIds = extractSourceRecordIds(event);
   return {
     ...(event.id !== undefined ? { eventId: event.id } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
+    ...(sourceRecordIds ? { sourceRecordIds } : {}),
     ...(event.originatorClientId
       ? { originatorClientId: event.originatorClientId }
       : {}),
@@ -774,7 +780,30 @@ function extractUpdateMeta(
   update: Record<string, unknown>,
 ): Record<string, unknown> | undefined {
   const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
-  return meta ? { ...meta } : undefined;
+  if (!meta) return undefined;
+  const { qwenTranscript: _qwenTranscript, ...displayMeta } = meta;
+  return Object.keys(displayMeta).length > 0 ? displayMeta : undefined;
+}
+
+function extractSourceRecordIds(
+  event: DaemonEvent,
+): readonly string[] | undefined {
+  if (!isRecord(event.data)) return undefined;
+  const update = getSessionUpdatePayload(event.data);
+  const meta =
+    update && isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const transcript =
+    meta && isRecord(meta['qwenTranscript'])
+      ? meta['qwenTranscript']
+      : undefined;
+  const values = transcript?.['sourceRecordIds'];
+  if (!Array.isArray(values)) return undefined;
+  const ids = [
+    ...new Set(
+      values.filter((value): value is string => typeof value === 'string'),
+    ),
+  ];
+  return ids.length > 0 ? ids : undefined;
 }
 
 /**

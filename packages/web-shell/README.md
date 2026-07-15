@@ -136,6 +136,33 @@ export function App() {
 > **注意**：不要在已有 `DaemonSessionProvider` 下使用
 > `WebShellWithProviders`，否则会创建嵌套的重复 Provider。
 
+### 3. 只读 ChatRecord JSONL
+
+`WebShellTranscript` 只接收已经投影完成的 blocks，不连接 daemon，也不提供 composer、
+审批或 session mutation。浏览器宿主可以逐行解析 JSONL，再通过 SDK 的 opt-in facade
+投影：
+
+```tsx
+import { projectChatRecordsToDaemonTranscript } from '@qwen-code/sdk/daemon/transcript';
+import { WebShellTranscript } from '@qwen-code/web-shell';
+
+const records = jsonl
+  .split(/\r?\n/)
+  .filter((line) => line.trim())
+  .map((line) => JSON.parse(line) as unknown);
+const projection = projectChatRecordsToDaemonTranscript(records);
+
+<WebShellTranscript
+  blocks={projection.blocks}
+  theme="dark"
+  language="zh-CN"
+  style={{ height: 640 }}
+/>;
+```
+
+宿主应显示 `projection.diagnostics`，并在 `complete=false` 或 `truncated=true` 时提示
+历史可能不完整。组件需要一个可用高度；自定义 renderer 的副作用仍由宿主负责。
+
 ## Props
 
 ### WebShellWithProviders

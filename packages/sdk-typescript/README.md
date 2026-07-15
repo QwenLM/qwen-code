@@ -173,6 +173,40 @@ for await (const event of session.events()) {
 }
 ```
 
+### Offline daemon transcript projection
+
+The opt-in browser-safe transcript entry converts already-parsed append-only
+ChatRecord values into the same block model used by daemon clients. It does not
+read files, parse JSONL text, start a daemon, or access network or browser
+storage.
+
+```typescript
+import { projectChatRecordsToDaemonTranscript } from '@qwen-code/sdk/daemon/transcript';
+
+const projection = projectChatRecordsToDaemonTranscript(records);
+if (!projection.complete) {
+  console.warn(projection.diagnostics);
+}
+renderTranscript(projection.blocks);
+```
+
+Projection is synchronous and scans all records and message parts. `maxBlocks`
+limits retained output blocks, not computation. As a conservative browser
+guideline, project up to roughly 1,000 ordinary records on the main thread;
+move larger or unusually text-heavy inputs to a Web Worker and call the same
+entry there.
+
+Baseline measured on 2026-07-15 with Node.js 24 after five warm-up runs, using
+three persisted local transcripts and the minified browser bundle:
+
+| Parsed records | Output blocks | Median time | Median heap delta |
+| -------------- | ------------- | ----------- | ----------------- |
+| 2              | 0             | 0.07 ms     | 18 KiB            |
+| 66             | 39            | 1.04 ms     | 899 KiB           |
+| 641            | 77            | 4.13 ms     | 4.8 MiB           |
+
+These numbers are a regression baseline, not a cross-device latency guarantee.
+
 ### Message Types
 
 The SDK provides type guards to identify different message types:

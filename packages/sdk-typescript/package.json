@@ -22,6 +22,11 @@
       "import": "./dist/daemon/transports.js",
       "require": "./dist/daemon/transports.cjs"
     },
+    "./daemon/transcript": {
+      "types": "./dist/daemon/transcript.d.ts",
+      "import": "./dist/daemon/transcript.js",
+      "require": "./dist/daemon/transcript.cjs"
+    },
     "./package.json": "./package.json"
   },
   "bin": {
@@ -64,6 +69,7 @@
   },
   "devDependencies": {
     "@qwen-code/acp-bridge": "file:../acp-bridge",
+    "@qwen-code/qwen-code-core": "file:../core",
     "@types/node": "^22.0.0",
     "@typescript-eslint/eslint-plugin": "^7.13.0",
     "@typescript-eslint/parser": "^7.13.0",

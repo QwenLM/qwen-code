@@ -85,6 +85,8 @@ export interface DaemonUiEventBase {
    * the SDK reads the field whether the daemon emits it today or not.
    */
   serverTimestamp?: number;
+  /** Ordered persisted ChatRecord identities that contributed to this event. */
+  sourceRecordIds?: readonly string[];
   originatorClientId?: string;
   rawEvent?: DaemonEvent;
 }
@@ -772,6 +774,8 @@ export interface DaemonTranscriptBlockBase {
    * display: clients viewing the same session see the same value.
    */
   serverTimestamp?: number;
+  /** Ordered persisted ChatRecord identities that contributed to this block. */
+  sourceRecordIds?: readonly string[];
   /**
    * Same as the previous `createdAt` semantics — client-local clock at the
    * moment the block was first observed. Renamed for clarity:
@@ -983,6 +987,13 @@ export interface DaemonTranscriptState
 export interface DaemonTranscriptReducerOptions {
   maxBlocks?: number;
   now?: number;
+  onTruncation?: (detail: DaemonTranscriptTruncationDetail) => void;
+}
+
+export interface DaemonTranscriptTruncationDetail {
+  kind: 'blocks' | 'text';
+  blockId?: string;
+  sourceRecordIds?: readonly string[];
 }
 
 export interface DaemonTranscriptStore {

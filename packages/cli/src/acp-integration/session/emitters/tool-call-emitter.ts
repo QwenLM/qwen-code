@@ -14,14 +14,12 @@ import type {
   SubagentMeta,
 } from '../types.js';
 import { hasFullSessionContext } from '../types.js';
-import type {
-  ToolCallContent,
-  ToolCallLocation,
-  ToolKind,
-} from '@agentclientprotocol/sdk';
-import type { Part } from '@google/genai';
+import type { ToolCallLocation, ToolKind } from '@agentclientprotocol/sdk';
 import { ToolNames, Kind } from '@qwen-code/qwen-code-core';
-import { buildTruncatedDiffPreviewText } from '../../../utils/truncatedDiffPreview.js';
+import {
+  createTranscriptToolCallResultUpdate,
+  createTranscriptToolCallStartUpdate,
+} from '@qwen-code/acp-bridge/transcriptReplay';
 
 const KIND_MAP: Record<Kind, ToolKind> = {
   [Kind.Read]: 'read',
@@ -83,25 +81,21 @@ export class ToolCallEmitter extends BaseEmitter {
       params.subagentMeta,
     );
 
-    await this.sendUpdate({
-      sessionUpdate: 'tool_call',
-      toolCallId: params.callId,
-      status: params.status || 'pending',
-      title,
-      content: [],
-      locations,
-      kind,
-      rawInput: params.args ?? {},
-      _meta: {
+    await this.sendUpdate(
+      createTranscriptToolCallStartUpdate({
         toolName: params.toolName,
-        ...params.subagentMeta,
-        provenance: provenance.provenance,
-        ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
-        ...(BaseEmitter.toEpochMs(params.timestamp) != null && {
-          timestamp: BaseEmitter.toEpochMs(params.timestamp),
-        }),
-      },
-    });
+        callId: params.callId,
+        status: params.status || 'pending',
+        args: params.args,
+        metadata: { title, locations, kind },
+        timestamp: params.timestamp,
+        extra: {
+          ...params.subagentMeta,
+          provenance: provenance.provenance,
+          ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
+        },
+      }),
+    );
 
     return true;
   }
@@ -130,59 +124,27 @@ export class ToolCallEmitter extends BaseEmitter {
       return; // Skip tool_call_update for TodoWriteTool
     }
 
-    // Determine content for the update
-    let contentArray: ToolCallContent[] = [];
-
-    // Special case: diff result from edit tools (format from resultDisplay)
-    const diffContent = this.extractDiffContent(params.resultDisplay);
-    if (diffContent) {
-      contentArray = [diffContent];
-    } else if (params.error) {
-      // Error case: show error message
-      contentArray = [
-        {
-          type: 'content',
-          content: { type: 'text', text: params.error.message },
-        },
-      ];
-    } else {
-      // Normal case: transform message parts to ToolCallContent[]
-      contentArray = this.transformPartsToToolCallContent(params.message);
-    }
-
-    // Build the update
     const provenance = ToolCallEmitter.resolveToolProvenance(
       params.toolName,
       params.subagentMeta,
     );
-    const update: Parameters<typeof this.sendUpdate>[0] = {
-      sessionUpdate: 'tool_call_update',
-      toolCallId: params.callId,
-      status: params.success ? 'completed' : 'failed',
-      content: contentArray,
-      _meta: {
+    await this.sendUpdate(
+      createTranscriptToolCallResultUpdate({
         toolName: params.toolName,
-        ...params.subagentMeta,
-        provenance: provenance.provenance,
-        ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
-        ...(BaseEmitter.toEpochMs(params.timestamp) != null && {
-          timestamp: BaseEmitter.toEpochMs(params.timestamp),
-        }),
-        ...(params.artifacts && params.artifacts.length > 0
-          ? { artifacts: params.artifacts }
-          : {}),
-      },
-    };
-
-    // Add rawOutput from resultDisplay
-    if (
-      params.resultDisplay !== undefined &&
-      !this.isTruncatedSessionDiffDisplay(params.resultDisplay)
-    ) {
-      (update as Record<string, unknown>)['rawOutput'] = params.resultDisplay;
-    }
-
-    await this.sendUpdate(update);
+        callId: params.callId,
+        success: params.success,
+        message: params.message,
+        resultDisplay: params.resultDisplay,
+        errorMessage: params.error?.message,
+        artifacts: params.artifacts,
+        timestamp: params.timestamp,
+        extra: {
+          ...params.subagentMeta,
+          provenance: provenance.provenance,
+          ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
+        },
+      }),
+    );
   }
 
   /**
@@ -204,20 +166,19 @@ export class ToolCallEmitter extends BaseEmitter {
       toolName,
       subagentMeta,
     );
-    await this.sendUpdate({
-      sessionUpdate: 'tool_call_update',
-      toolCallId: callId,
-      status: 'failed',
-      content: [
-        { type: 'content', content: { type: 'text', text: error.message } },
-      ],
-      _meta: {
+    await this.sendUpdate(
+      createTranscriptToolCallResultUpdate({
         toolName,
-        ...subagentMeta,
-        provenance: provenance.provenance,
-        ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
-      },
-    });
+        callId,
+        success: false,
+        errorMessage: error.message,
+        extra: {
+          ...subagentMeta,
+          provenance: provenance.provenance,
+          ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
+        },
+      }),
+    );
   }
 
   /**
@@ -356,94 +317,5 @@ export class ToolCallEmitter extends BaseEmitter {
       return 'switch_mode';
     }
     return KIND_MAP[kind] ?? 'other';
-  }
-
-  // ==================== Private Helpers ====================
-
-  /**
-   * Extracts diff content from resultDisplay if it's a diff type (edit tool result).
-   * Returns null if not a diff.
-   */
-  private extractDiffContent(resultDisplay: unknown): ToolCallContent | null {
-    if (!resultDisplay || typeof resultDisplay !== 'object') return null;
-
-    const obj = resultDisplay as Record<string, unknown>;
-
-    // Check if this is a diff display (edit tool result)
-    if ('fileName' in obj && 'newContent' in obj) {
-      if (this.isTruncatedSessionDiffDisplay(resultDisplay)) {
-        return {
-          type: 'content',
-          content: {
-            type: 'text',
-            text: buildTruncatedDiffPreviewText(obj),
-          },
-        };
-      }
-
-      return {
-        type: 'diff',
-        path: obj['fileName'] as string,
-        oldText: (obj['originalContent'] as string) ?? '',
-        newText: obj['newContent'] as string,
-      };
-    }
-
-    return null;
-  }
-
-  private isTruncatedSessionDiffDisplay(resultDisplay: unknown): boolean {
-    if (!resultDisplay || typeof resultDisplay !== 'object') return false;
-
-    const obj = resultDisplay as Record<string, unknown>;
-    return (
-      obj['truncatedForSession'] === true &&
-      'fileName' in obj &&
-      'newContent' in obj
-    );
-  }
-
-  /**
-   * Transforms Part[] to ToolCallContent[].
-   * Extracts text from functionResponse parts and text parts.
-   */
-  private transformPartsToToolCallContent(parts: Part[]): ToolCallContent[] {
-    const result: ToolCallContent[] = [];
-
-    for (const part of parts) {
-      // Handle text parts
-      if ('text' in part && part.text) {
-        result.push({
-          type: 'content',
-          content: { type: 'text', text: part.text },
-        });
-      }
-
-      // Handle functionResponse parts - stringify the response
-      if ('functionResponse' in part && part.functionResponse) {
-        try {
-          const resp = part.functionResponse.response as Record<
-            string,
-            unknown
-          >;
-          const outputField = resp['output'];
-          const errorField = resp['error'];
-          const responseText =
-            typeof outputField === 'string'
-              ? outputField
-              : typeof errorField === 'string'
-                ? errorField
-                : JSON.stringify(resp);
-          result.push({
-            type: 'content',
-            content: { type: 'text', text: responseText },
-          });
-        } catch {
-          // Ignore serialization errors
-        }
-      }
-    }
-
-    return result;
   }
 }
