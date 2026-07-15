@@ -17,6 +17,10 @@ export interface StubDaemon {
   eventsAbortedByClient: boolean;
   /** Session id passed to the most recent POST /session/:id/end request. */
   lastEndedSessionId: string | undefined;
+  /** Number of POST /session calls the stub has served. */
+  createdSessionCount: number;
+  /** Body of the most recent POST /session request. */
+  lastCreateSessionBody: unknown;
   close: () => Promise<void>;
 }
 
@@ -55,6 +59,8 @@ export interface StubDaemonOptions {
   capabilitiesStatus?: number;
   /** Status for POST /session/:id/end (default 200). Non-200 → { error }. */
   endSessionStatus?: number;
+  /** Status for POST /session (default 200). Non-200 → { error }. */
+  createSessionStatus?: number;
 }
 
 /** Start a minimal daemon-shaped SSE server on an ephemeral loopback port. */
@@ -69,6 +75,8 @@ export async function startStubDaemon(
     lastEventIdHeader: undefined as string | undefined,
     eventsAbortedByClient: false,
     lastEndedSessionId: undefined as string | undefined,
+    createdSessionCount: 0,
+    lastCreateSessionBody: undefined as unknown,
   };
   const app = express();
   app.use(express.json());
@@ -188,6 +196,21 @@ export async function startStubDaemon(
     }
   });
 
+  app.post('/session', (req, res) => {
+    const status = opts.createSessionStatus ?? 200;
+    state.lastCreateSessionBody = req.body;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
+    state.createdSessionCount += 1;
+    res.status(200).json({
+      sessionId: `stub-agent-${state.createdSessionCount}`,
+      workspaceCwd: opts.workspaceCwd ?? '/stub/workspace',
+      attached: false,
+    });
+  });
+
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
@@ -202,6 +225,12 @@ export async function startStubDaemon(
     },
     get lastEndedSessionId() {
       return state.lastEndedSessionId;
+    },
+    get createdSessionCount() {
+      return state.createdSessionCount;
+    },
+    get lastCreateSessionBody() {
+      return state.lastCreateSessionBody;
     },
     close: () =>
       new Promise<void>((resolve, reject) =>
