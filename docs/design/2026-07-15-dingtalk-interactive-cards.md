@@ -89,7 +89,7 @@ if request is ask_user_question and active has runId + ownerId:
 format and send the existing permission message
 ```
 
-Every path that removes a pending permission settles the controller exactly once. This includes permission commands, a direct responder call, daemon `permissionResolved`, timeout, session cleanup, task cancellation, and bridge replacement. `answered_elsewhere` is distinct from request or run destruction so an adapter never labels a cancelled question as answered on another surface.
+Every path that removes a pending permission settles the controller exactly once. This includes permission commands, a direct responder call, daemon `permissionResolved`, timeout, session cleanup, task cancellation, and bridge replacement. `answered_elsewhere` is reserved for an independent `permissionResolved` received while no local responder claim is in flight; it is distinct from request or run destruction so an adapter never labels a cancelled question as answered on another surface.
 
 The hook is only eligible for the current Channel-owned `ActivePrompt`. When no such prompt, `runId`, or owner exists, `ChannelBase` does not construct the context or invoke the hook; it treats presentation as `unsupported` and continues the existing permission path. A run started by CLI, Web, IDE, SDK, or another client therefore creates neither DingTalk card. The initial design does not add cross-client run ownership or identity federation.
 
@@ -189,19 +189,22 @@ The callback order is authoritative:
 
 The card never displays submission success before the responder accepts the answer:
 
-| Event                      | Local state             | Card projection                                                                     |
-| -------------------------- | ----------------------- | ----------------------------------------------------------------------------------- |
-| `respond(...) === true`    | `submitted`             | Submitted and disabled                                                              |
-| `respond(...) === false`   | `externally_resolved`   | Non-interactive `card_status=cancelled`, “Handled in another client”                |
-| `respond(...)` throws      | Remains non-terminal    | Non-success and non-interactive; existing settlement or timeout finishes the record |
-| User cancellation accepted | `cancelled`             | Cancelled and disabled                                                              |
-| Timeout                    | `expired`               | Expired and disabled                                                                |
-| Request or run destroyed   | `cancelled`             | Cancelled or Stopped and disabled                                                   |
-| Duplicate or late callback | Existing terminal state | Acknowledge and ignore                                                              |
+| Event                            | Local state             | Card projection                                                         |
+| -------------------------------- | ----------------------- | ----------------------------------------------------------------------- |
+| `respond(...) === true`          | `submitted`             | Submitted and disabled                                                  |
+| `respond(...) === false`         | `cancelled`             | Non-interactive `card_status=cancelled`, “Permission no longer pending” |
+| `respond(...)` throws            | `cancelled`             | Non-interactive failure projection, disabled, and not retryable         |
+| Independent `permissionResolved` | `externally_resolved`   | Non-interactive `card_status=cancelled`, “Handled in another client”    |
+| User cancellation accepted       | `cancelled`             | Cancelled and disabled                                                  |
+| Timeout                          | `expired`               | Expired and disabled                                                    |
+| Request or run destroyed         | `cancelled`             | Cancelled or Stopped and disabled                                       |
+| Duplicate or late callback       | Existing terminal state | Acknowledge and ignore                                                  |
 
-The `externally_resolved` local state is intentionally projected onto an existing non-interactive template state; the initial design does not require a template change.
+The `externally_resolved` local state is entered only from an independent settlement event, not inferred from a `false` responder result. `false` means only that the permission response was not accepted: the request mapping may be absent, its session may be gone, or another surface may already have won. It therefore uses the existing cancelled projection with the neutral “Permission no longer pending” message.
 
-The existing daemon bridge consumes the request-to-session mapping even when `respondToPermission()` throws, so the adapter must not release the claim and promise a callback retry: a second attempt returns `false` and could be misreported as externally resolved. On a thrown responder, DingTalk logs the failure, makes a best-effort non-success projection, and leaves final cleanup to the existing settlement signal, another subscribed surface, or timeout. This adds neither a retry queue nor a new business-state/error taxonomy.
+The existing daemon bridge consumes the request-to-session mapping when `respondToPermission()` throws, and `ChannelBase` removes the pending request on the same path. A later daemon `permissionResolved` is no longer a reliable cleanup signal because the bridge may reject it as an unknown request. DingTalk therefore logs the failure, removes its pending record, retains the terminal tombstone, and immediately makes a best-effort non-success projection. It does not release the claim or promise callback retry.
+
+`AcpBridge` emits `permissionResolved` synchronously before a successful `respondToPermission()` returns. While the DingTalk responder claim is in flight, the adapter therefore defers only an `answered_elsewhere` settlement projection until the responder result is known. A `true` result wins as `submitted`; `false` and throws use the terminal rows above. A settlement received without a local responder claim remains `externally_resolved`. Timeout, request/run cancellation, and task terminal events are not deferred and still take precedence. This arbitration reuses the transient claim and adds no public processing state, retry queue, or error taxonomy.
 
 An instance update is a UI projection, not the permission transaction. If the responder succeeds but the subsequent card update fails, the permission remains resolved, the local record remains terminal, duplicate callbacks remain rejected, and the adapter logs the failed UI projection.
 
@@ -253,8 +256,9 @@ The initial design does not add a background retry queue and does not retain a p
 | Question card disabled or creation fails      | Send readable semantic Markdown, state that the question was cancelled and can be retried, cancel the original request, return `handled`, and log the template-aware failure. |
 | No current Channel-owned active run           | Treat presentation as `unsupported`; skip both DingTalk cards and preserve the existing permission path.                                                                      |
 | Exact-run cancellation returns `false`        | Release the transient claim only if the same record remains current and non-terminal; keep the status card active so Stop can be retried.                                     |
-| Question responder throws                     | Do not advertise callback retry; keep a non-success projection and let existing settlement or timeout close the record.                                                       |
-| Another surface answers first                 | Settle as `answered_elsewhere`; project the card as handled elsewhere.                                                                                                        |
+| Question responder returns `false`            | Finish with the existing cancelled projection and a neutral “Permission no longer pending” message.                                                                           |
+| Question responder throws                     | Remove the pending record, finish the claimed record as cancelled, retain a tombstone, project non-success immediately, and do not advertise callback retry.                  |
+| Another surface answers first                 | When no local responder claim is in flight, settle as `answered_elsewhere` and project the card as handled elsewhere.                                                         |
 | Request/run is destroyed                      | Settle as request/run cancellation; project the card as cancelled or Stopped.                                                                                                 |
 | Another IM adapter owns the session           | Return `unsupported` and preserve its existing permission message and commands.                                                                                               |
 | Ordinary permission                           | Keep `/approve`, `/approve-always`, and `/deny` unchanged.                                                                                                                    |
@@ -275,7 +279,7 @@ The initial design does not add a background retry queue and does not retain a p
 | Other IM adapters                                          | No direct code or behavior change; inherit `unsupported`.                              |
 | Ordinary permissions                                       | No change on any client.                                                               |
 
-Permission resolution remains first-responder-wins. The transient DingTalk claim only serializes callbacks for one card; it does not replace shared settlement arbitration. If another surface wins, DingTalk becomes `externally_resolved`; if DingTalk wins, the other surfaces observe the original permission resolution and close their presentation.
+Permission resolution remains first-responder-wins. The transient DingTalk claim only serializes callbacks for one card and arbitrates a matching settlement that arrives during its responder call; it does not replace shared settlement. If an independent settlement arrives without a local claim, DingTalk becomes `externally_resolved`. If DingTalk's responder returns `true`, DingTalk becomes `submitted` and the matching `permissionResolved` is cleanup rather than evidence that another surface won.
 
 ## Chapter 2: Current impact on other IM adapters
 
