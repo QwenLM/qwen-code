@@ -12138,7 +12138,7 @@ describe('createServeApp', () => {
       expect(setSelection).not.toHaveBeenCalled();
     });
 
-    it('returns typed start failure details with credential redaction', async () => {
+    it('filters and redacts typed start failure details', async () => {
       const state = running();
       const app = createServeApp(tokenOpts, undefined, {
         bridge: fakeBridge(),
@@ -12160,6 +12160,12 @@ describe('createServeApp', () => {
                   message:
                     'Authorization: Bearer provider-secret connection refused',
                 },
+                {
+                  workspaceCwd: WS_BOUND,
+                  channel: 42,
+                  phase: 'connect',
+                  message: 'malformed',
+                } as never,
               ],
               startupFailuresTruncated: true,
             },

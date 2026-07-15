@@ -412,6 +412,46 @@ describe('createChannelWorkerSupervisor', () => {
     expect(child.send).toHaveBeenCalledTimes(MAX_CHANNEL_STARTUP_FAILURES + 1);
   });
 
+  it('rejects a 65th startup failure without a truncation marker', async () => {
+    const child = new FakeChild();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    for (let index = 0; index < MAX_CHANNEL_STARTUP_FAILURES; index += 1) {
+      child.emit('message', {
+        type: 'channel_startup_failure',
+        failure: {
+          channel: `channel-${index}`,
+          phase: 'connect',
+          message: `failure-${index}`,
+        },
+      });
+    }
+    child.emit('message', {
+      type: 'channel_startup_failure',
+      failure: {
+        channel: 'channel-overflow',
+        phase: 'connect',
+        message: 'overflow',
+      },
+    });
+
+    const error = await started.catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(ChannelWorkerStartupError);
+    expect((error as Error).message).toContain('too many startup failures.');
+    expect((error as ChannelWorkerStartupError).startupFailures).toHaveLength(
+      MAX_CHANNEL_STARTUP_FAILURES,
+    );
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(child.send).toHaveBeenCalledTimes(MAX_CHANNEL_STARTUP_FAILURES);
+  });
+
   it('clears startup failure details when a new generation starts', async () => {
     const firstChild = new FakeChild();
     const secondChild = new FakeChild();

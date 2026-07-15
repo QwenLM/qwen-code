@@ -1128,6 +1128,40 @@ describe('runChannelDaemonWorker', () => {
     await handle.close();
   });
 
+  it('converts finite numeric connection error codes to strings', async () => {
+    const sdk = createSdk();
+    const reportStartup = vi.fn().mockResolvedValue(undefined);
+    mockCreateChannel.mockResolvedValueOnce({
+      connect: vi.fn().mockRejectedValue(
+        Object.assign(new Error('port unreachable'), {
+          code: 443,
+        }),
+      ),
+      disconnect: vi.fn(),
+      name: 'telegram',
+    });
+
+    await expect(
+      runChannelDaemonWorker({
+        daemonUrl: 'http://127.0.0.1:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        loadDaemonSdk: async () => sdk,
+        reportStartup,
+      }),
+    ).rejects.toThrow('No channels connected.');
+
+    expect(reportStartup).toHaveBeenCalledWith({
+      type: 'channel_startup_failure',
+      failure: {
+        channel: 'telegram',
+        phase: 'connect',
+        code: '443',
+        message: 'port unreachable',
+      },
+    });
+  });
+
   it('keeps an acknowledged failure when the next channel connect hangs', async () => {
     const sdk = createSdk();
     const controller = new AbortController();
