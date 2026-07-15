@@ -414,6 +414,26 @@ describe('languageUtils', () => {
       expect(i18n.detectSystemLanguage).not.toHaveBeenCalled();
     });
 
+    it('should migrate an existing fixed-language file when setting is explicitly auto', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(
+        `# Output language preference: Chinese
+<!-- qwen-code:llm-output-language: Chinese -->
+`,
+      );
+
+      initializeLlmOutputLanguage('auto');
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining(
+          "Respond in the same language as the user's input.",
+        ),
+        'utf-8',
+      );
+      expect(i18n.detectSystemLanguage).not.toHaveBeenCalled();
+    });
+
     it('should normalize Chinese locale and create Chinese rule file', () => {
       vi.mocked(fs.existsSync).mockReturnValue(false);
 

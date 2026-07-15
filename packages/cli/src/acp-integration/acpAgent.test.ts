@@ -728,6 +728,8 @@ import {
 } from '@qwen-code/acp-bridge/status';
 import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import {
+  isAutoLanguage,
+  resolveOutputLanguage,
   updateOutputLanguageFile,
   writeOutputLanguageAndRegisterPath,
 } from '../utils/languageUtils.js';
@@ -10619,6 +10621,8 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(isAutoLanguage).mockReturnValue(false);
+    vi.mocked(resolveOutputLanguage).mockImplementation((v: string) => v);
     mockConnectionState.reset();
     capturedAgentFactory = undefined;
 
@@ -11184,6 +11188,96 @@ describe('sessionLanguage multi-session propagation', () => {
 
     // Session C registered the global path
     expect(cfgC.setOutputLanguageFilePath).toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('preserves auto output language when syncing across sessions', async () => {
+    vi.mocked(isAutoLanguage).mockImplementation((value) => value === 'auto');
+
+    const cfgA = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-a'),
+      getOutputLanguageFilePath: vi
+        .fn()
+        .mockReturnValue('/proj-a/.qwen/output-language.md'),
+    });
+    const cfgB = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-b'),
+      getOutputLanguageFilePath: vi
+        .fn()
+        .mockReturnValue('/proj-b/.qwen/output-language.md'),
+    });
+
+    const sessionConfigs = [cfgA, cfgB];
+    let sessionIdx = 0;
+
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: { mcpServers: {} },
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings);
+
+    vi.mocked(loadCliConfig).mockImplementation(async () => {
+      const cfg = sessionConfigs[sessionIdx] ?? cfgB;
+      return cfg as unknown as Config;
+    });
+
+    vi.mocked(Session).mockImplementation(() => {
+      const cfg = sessionConfigs[sessionIdx] ?? cfgB;
+      const id = (cfg.getSessionId as ReturnType<typeof vi.fn>)();
+      const mock = {
+        getId: vi.fn().mockReturnValue(id),
+        getConfig: vi.fn().mockReturnValue(cfg),
+        sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+        installRewriter: vi.fn(),
+        startCronScheduler: vi.fn(),
+        dispose: vi.fn(),
+      };
+      sessionIdx++;
+      return mock as unknown as InstanceType<typeof Session>;
+    });
+
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      { merged: { mcpServers: {} } } as unknown as LoadedSettings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/proj-a', mcpServers: [] });
+    await agent.newSession({ cwd: '/proj-b', mcpServers: [] });
+
+    vi.mocked(resolveOutputLanguage).mockClear();
+    vi.mocked(updateOutputLanguageFile).mockClear();
+    vi.mocked(writeOutputLanguageAndRegisterPath).mockClear();
+
+    await agent.extMethod('qwen/control/session/language', {
+      sessionId: 's-a',
+      language: 'auto',
+      syncOutputLanguage: true,
+    });
+
+    expect(writeOutputLanguageAndRegisterPath).toHaveBeenCalledWith(
+      'auto',
+      cfgA,
+    );
+    expect(updateOutputLanguageFile).toHaveBeenCalledWith(
+      'auto',
+      '/proj-b/.qwen/output-language.md',
+    );
+    expect(resolveOutputLanguage).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
