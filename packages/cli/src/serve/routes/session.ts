@@ -2096,6 +2096,7 @@ export function registerSessionRoutes(
             );
             await write(
               formatGenerationSse('error', {
+                type: 'error',
                 code: 'generation_failed',
                 message: 'Generation failed',
               }),

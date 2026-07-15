@@ -11149,6 +11149,7 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.text).toContain('event: started');
       expect(res.text).toContain('event: error');
+      expect(res.text).toContain('"type":"error"');
       expect(res.text).toContain('"code":"generation_failed"');
     });
 
