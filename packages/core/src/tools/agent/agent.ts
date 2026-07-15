@@ -112,6 +112,7 @@ import {
 } from '../../agents/agent-transcript.js';
 import type { BackgroundSlotReservation } from '../../agents/background-tasks.js';
 import { getGitBranch } from '../../utils/gitUtils.js';
+import { buildModelIdContext, resolveModelId } from '../../utils/modelId.js';
 
 // Memoize git branch per cwd for the agent-launch path. `getGitBranch`
 // shells out to `git rev-parse` synchronously; caching avoids the per-launch
@@ -2240,6 +2241,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     let restoreParentPM: () => void = () => {};
     let backgroundSlotReservation: BackgroundSlotReservation | undefined;
     let backgroundSlotReservationConsumed = false;
+    // Concrete model ID the sub-agent will run with, resolved from its model
+    // selector once subagentConfig is loaded. Used to enforce per-model
+    // background-agent concurrency caps (agents.maxParallelAgentsByModel).
+    let subagentModelId: string | undefined;
     const releaseBackgroundSlotReservation = () => {
       if (backgroundSlotReservation && !backgroundSlotReservationConsumed) {
         this.config
@@ -2357,8 +2362,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       }
 
       if (!isFork && shouldRunInBackground) {
+        // Resolve the concrete model the sub-agent will run with so the
+        // registry can apply a per-model cap. `subagentConfig.model` is a
+        // selector (omitted/"inherit"/"fast"/modelId/authType:modelId);
+        // resolveModelId maps it to the actual model ID, falling back to the
+        // parent's current model when the sub-agent inherits.
+        subagentModelId = resolveModelId(
+          subagentConfig.model,
+          buildModelIdContext(this.config),
+        )?.modelId;
         const registry = this.config.getBackgroundTaskRegistry();
-        backgroundSlotReservation = registry.tryReserveBackgroundSlot();
+        backgroundSlotReservation =
+          registry.tryReserveBackgroundSlot(subagentModelId);
         if (!backgroundSlotReservation) {
           const queuedCount = registry.getQueuedCount();
           const queueText =
@@ -2374,8 +2389,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             },
             updateOutput,
           );
-          backgroundSlotReservation =
-            await registry.waitForBackgroundSlot(signal);
+          backgroundSlotReservation = await registry.waitForBackgroundSlot(
+            signal,
+            subagentModelId,
+          );
         }
         this.updateDisplay(
           {
@@ -2802,6 +2819,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               agentId: hookOpts.agentId,
               description: this.params.description,
               subagentType: subagentConfig.name,
+              // Concrete model ID for per-model concurrency accounting; the
+              // slot reservation above was taken against this same model.
+              model: subagentModelId,
               isBackgrounded: true,
               status: 'running',
               startTime: Date.now(),

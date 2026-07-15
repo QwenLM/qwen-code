@@ -532,7 +532,7 @@ export class BackgroundAgentResumeService {
     // entry back to paused, so an at-capacity revive fails cleanly instead of
     // stranding the entry as paused.
     try {
-      registry.assertCanStartBackgroundAgent();
+      registry.assertCanStartBackgroundAgent(entry.model);
     } catch (error) {
       debugLogger.warn(
         `[BackgroundAgentResume] Cannot revive "${agentId}": ` +
@@ -579,7 +579,7 @@ export class BackgroundAgentResumeService {
       );
     }
     try {
-      registry.assertCanStartBackgroundAgent();
+      registry.assertCanStartBackgroundAgent(entry.model);
     } catch (error) {
       debugLogger.warn(
         `[BackgroundAgentResume] Cannot revive "${agentId}": ` +
