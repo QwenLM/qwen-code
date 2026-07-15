@@ -502,15 +502,17 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // daemon at boot leaves records untouched for the next start.
   try {
     const caps = await handle.daemon.capabilities();
-    const live = caps.workspaceCwd
-      ? await handle.daemon.listWorkspaceSessions(caps.workspaceCwd)
-      : [];
-    const orphaned = await agentRegistry.reconcile(
-      live.map((s) => s.sessionId),
-    );
-    if (orphaned.length > 0) {
-      // eslint-disable-next-line no-console
-      console.warn(`agents: marked ${orphaned.length} record(s) orphaned`);
+    // Skip reconciliation if workspaceCwd is absent: undefined capability means
+    // "unknown", not "no sessions". Must not false-orphan running agents.
+    if (caps.workspaceCwd) {
+      const live = await handle.daemon.listWorkspaceSessions(caps.workspaceCwd);
+      const orphaned = await agentRegistry.reconcile(
+        live.map((s) => s.sessionId),
+      );
+      if (orphaned.length > 0) {
+        // eslint-disable-next-line no-console
+        console.warn(`agents: marked ${orphaned.length} record(s) orphaned`);
+      }
     }
   } catch {
     // Daemon unreachable at boot → reconcile on the next start.
