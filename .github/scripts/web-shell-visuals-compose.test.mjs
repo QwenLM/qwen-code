@@ -80,3 +80,12 @@ test('planWork is robust to a missing before set (first-ever PR → all NEW)', (
     [false, false],
   );
 });
+
+test('planWork tolerates null/undefined args (exercises the ?? [] guards)', () => {
+  assert.deepEqual(planWork(null, null), []);
+  assert.deepEqual(planWork(undefined, undefined), []);
+  // after present, before nullish → every shot is NEW.
+  assert.deepEqual(planWork(['a-light.png'], null), [
+    { name: 'a-light.png', hasBefore: false },
+  ]);
+});

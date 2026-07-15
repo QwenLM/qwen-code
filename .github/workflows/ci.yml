@@ -333,6 +333,15 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'npm run check:serve-fast-path-bundle'
 
+      # The `github_ci_only` profile runs the .github/scripts helper tests, but a
+      # `full` PR that touches those scripts skips that path and `npm run
+      # test:ci` (vitest) does not collect `node:test` files — so run them here
+      # too, or a compositor/publisher change could pass CI without its
+      # regression tests. Linux-only (they're platform-independent).
+      - name: 'Run .github/scripts helper tests'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'node --test .github/scripts/pr-safety-precheck.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs'
+
       - name: 'Run tests and generate reports'
         id: 'unit_tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
