@@ -194,3 +194,29 @@ test('diffCaptureDirs: absent base + present head → baselineMissing (not "no c
   assert.match(body, /baseline could not be built/);
   assert.doesNotMatch(body, /No response changes/);
 });
+
+test('renderTable: escapes pipes + backticks so a value cannot break the table', () => {
+  const md = renderTable('x', [
+    { path: 'note', kind: 'changed', before: 'a|b', after: '`c`' },
+  ]);
+  assert.match(md, /a\\\|b/); // pipe backslash-escaped
+  assert.match(md, /&#96;c&#96;/); // backtick entity-encoded
+  const row = md.split('\n').find((l) => l.includes('`note`'));
+  // Exactly the 4 cell separators — the escaped `\|` is not counted.
+  assert.equal((row.match(/(?<!\\)\|/g) || []).length, 4);
+});
+
+test('diffCaptureDirs: a base-only (removed) scenario is surfaced, not dropped', () => {
+  const before = mkdtempSync(join(tmpdir(), 'sa-before-'));
+  const after = mkdtempSync(join(tmpdir(), 'sa-after-'));
+  writeFileSync(join(before, 'health.json'), JSON.stringify({ status: 'ok' }));
+  writeFileSync(join(after, 'health.json'), JSON.stringify({ status: 'ok' }));
+  writeFileSync(join(before, 'capabilities.json'), JSON.stringify({ v: 1 })); // gone in head
+  const { removed } = diffCaptureDirs(before, after);
+  assert.deepEqual(removed, ['capabilities']);
+  const body = buildComment([], { shortSha: 'x', removed });
+  assert.match(
+    body,
+    /Present in the base but absent from this PR: `capabilities`/,
+  );
+});

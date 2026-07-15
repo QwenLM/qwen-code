@@ -98,7 +98,13 @@ export function diffJson(before, after, path = '', out = [], opts = {}) {
   return out;
 }
 
-const fmt = (v) => (v === undefined ? '—' : '`' + JSON.stringify(v) + '`');
+const fmt = (v) => {
+  if (v === undefined) return '—';
+  // Escape pipes (which split a GFM table cell) and backticks (which close the
+  // code span) so an arbitrary daemon value can't break the table layout.
+  const s = JSON.stringify(v).replace(/\|/g, '\\|').replace(/`/g, '&#96;');
+  return '`' + s + '`';
+};
 
 /** Markdown before/after table for one scenario's diff (or a no-change note). */
 export function renderTable(scenario, changes) {
@@ -147,6 +153,14 @@ export function buildComment(sections, ctx = {}) {
     out.push('— _Qwen Code · serve A/B_');
     return out.join('\n') + '\n';
   }
+  if (ctx.removed?.length) {
+    out.push(
+      `⚠️ _Present in the base but absent from this PR: ${ctx.removed
+        .map((s) => '`' + s + '`')
+        .join(', ')} (removed or failed to capture)._`,
+    );
+    out.push('');
+  }
   const changed = sections.filter((s) => s.changes.length > 0);
   if (changed.length === 0) {
     out.push(
@@ -177,8 +191,16 @@ export function diffCaptureDirs(beforeDir, afterDir) {
     }
   };
   const afterFiles = jsonFiles(afterDir).sort();
-  const baselineMissing =
-    afterFiles.length > 0 && jsonFiles(beforeDir).length === 0;
+  const beforeFiles = jsonFiles(beforeDir);
+  const baselineMissing = afterFiles.length > 0 && beforeFiles.length === 0;
+  const afterSet = new Set(afterFiles);
+  // Scenarios present in the base but gone from the head — a removed or broken
+  // scenario would otherwise vanish silently and lower the "across N" count,
+  // masking the regression.
+  const removed = beforeFiles
+    .filter((f) => !afterSet.has(f))
+    .map((f) => f.replace(/\.json$/, ''))
+    .sort();
   const sections = afterFiles.map((f) => {
     const scenario = f.replace(/\.json$/, '');
     const after = JSON.parse(readFileSync(join(afterDir, f), 'utf8'));
@@ -190,17 +212,20 @@ export function diffCaptureDirs(beforeDir, afterDir) {
     }
     return { scenario, changes: diffJson(before, after) };
   });
-  return { sections, baselineMissing };
+  return { sections, baselineMissing, removed };
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const [cmd, ...rest] = process.argv.slice(2);
   if (cmd === 'comment') {
     const [beforeDir, afterDir, shortSha, bodyFile] = rest;
-    const { sections, baselineMissing } = diffCaptureDirs(beforeDir, afterDir);
+    const { sections, baselineMissing, removed } = diffCaptureDirs(
+      beforeDir,
+      afterDir,
+    );
     writeFileSync(
       bodyFile,
-      buildComment(sections, { shortSha, baselineMissing }),
+      buildComment(sections, { shortSha, baselineMissing, removed }),
     );
     const total = baselineMissing
       ? 0

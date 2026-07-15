@@ -133,7 +133,18 @@ export async function driveCli(cliEntry, outDir) {
     };
     for (const s of SCENARIOS) {
       // Run any setup requests (e.g. create a session) before the capture.
-      for (const step of s.setup ?? []) await doRequest(step);
+      for (const step of s.setup ?? []) {
+        const r = await doRequest(step);
+        // A failed setup (e.g. POST /session non-2xx) would let the capture
+        // reflect wrong state (0 sessions) and silently mask or fake a diff —
+        // fail loudly instead.
+        if (!r.ok) {
+          const body = await r.text().catch(() => '');
+          throw new Error(
+            `setup ${step.method} ${step.path} failed (HTTP ${r.status}) for "${s.name}": ${body.slice(0, 200)}`,
+          );
+        }
+      }
       const res = await doRequest(s);
       const text = await res.text();
       let json;
@@ -150,6 +161,15 @@ export async function driveCli(cliEntry, outDir) {
     }
   } finally {
     daemon.kill('SIGTERM');
+    // Await exit so a hung daemon (pending async / open WebSockets) can't
+    // linger; escalate to SIGKILL if it doesn't stop promptly.
+    await new Promise((resolve) => {
+      daemon.on('exit', resolve);
+      setTimeout(() => {
+        daemon.kill('SIGKILL');
+        resolve();
+      }, 5000);
+    });
   }
 }
 
