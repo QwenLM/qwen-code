@@ -198,6 +198,8 @@ function MermaidBlock({ code }: { code: string }) {
     setZoom((z) => Math.max(ZOOM_MIN, Math.round((z - ZOOM_STEP) * 100) / 100));
   };
   const resetZoomAndPan = useCallback(() => {
+    dragRef.current = null;
+    setIsDragging(false);
     setZoom(1);
     setOffset({ x: 0, y: 0 });
   }, []);
@@ -242,11 +244,18 @@ function MermaidBlock({ code }: { code: string }) {
 
     window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('mouseup', onMouseUp);
+    window.addEventListener('blur', onMouseUp);
     return () => {
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
+      window.removeEventListener('blur', onMouseUp);
     };
   }, [isDragging]);
+
+  useEffect(() => {
+    setZoom(1);
+    setOffset({ x: 0, y: 0 });
+  }, [code]);
 
   useEffect(() => {
     let cancelled = false;
@@ -264,6 +273,7 @@ function MermaidBlock({ code }: { code: string }) {
             suppressErrorRendering: true,
             flowchart: {
               wrappingWidth: 300,
+              useMaxWidth: false,
             },
           });
           lastMermaidTheme = mermaidTheme;
