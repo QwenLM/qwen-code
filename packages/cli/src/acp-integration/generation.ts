@@ -88,9 +88,7 @@ export async function executeGeneration(
     if (
       !thinkingEmitted &&
       chunk.candidates?.some((candidate) =>
-        candidate.content?.parts?.some(
-          (part) => part.thought && Boolean(part.text),
-        ),
+        candidate.content?.parts?.some((part) => part.thought === true),
       )
     ) {
       thinkingEmitted = true;

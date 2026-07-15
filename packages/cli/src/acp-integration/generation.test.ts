@@ -15,9 +15,7 @@ function createConfig(fastModel: string | undefined) {
     _promptId: string,
   ) {
     yield {
-      candidates: [
-        { content: { parts: [{ text: 'private reasoning', thought: true }] } },
-      ],
+      candidates: [{ content: { parts: [{ thought: true }] } }],
     };
     yield {
       candidates: [{ content: { parts: [{ text: 'Hello' }] } }],

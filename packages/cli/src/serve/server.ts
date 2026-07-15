@@ -677,6 +677,12 @@ export function createServeApp(
       persistSettingAvailable: deps.persistSetting !== undefined,
       sessionArtifactsPersistenceAvailable:
         deps.sessionArtifactsPersistenceAvailable !== false,
+      sessionGenerationAvailable: () =>
+        workspaceRegistry
+          .list()
+          .every(
+            (runtime) => runtime.bridge.generateSessionContent !== undefined,
+          ),
       // Registry injection supplies the primary workspace service through the
       // runtime, so it has the same reload surface as legacy deps.workspace.
       reloadAvailable:

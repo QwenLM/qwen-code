@@ -2087,8 +2087,13 @@ export function registerSessionRoutes(
           for await (const event of stream) {
             await write(formatGenerationSse(event.type, event));
           }
-        } catch {
+        } catch (err) {
           if (!abort.signal.aborted && !res.destroyed) {
+            daemonLog?.error(
+              'session generation failed',
+              err instanceof Error ? err : new Error(String(err)),
+              { sessionId, clientId },
+            );
             await write(
               formatGenerationSse('error', {
                 code: 'generation_failed',

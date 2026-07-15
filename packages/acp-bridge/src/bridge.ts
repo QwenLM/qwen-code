@@ -1533,6 +1533,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       sessionId: string;
       connection: ClientSideConnection;
       queue: GenerationStreamQueue<BridgeGenerationStreamEvent>;
+      settled: boolean;
     }
   >();
   const inFlightExtensionRefreshes = new Map<
@@ -1856,6 +1857,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           const request = generationRequests.get(event.requestId);
           if (!request || request.sessionId !== sessionId) return;
           if (request.queue.push(event)) return;
+          request.settled = true;
           generationRequests.delete(event.requestId);
           request.queue.fail(new Error('Generation stream consumer too slow'));
           void request.connection
@@ -6172,13 +6174,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         sessionId,
         connection: entry.connection,
         queue,
+        settled: false,
       };
       generationRequests.set(requestId, request);
 
-      let settled = false;
       const cancel = () => {
-        if (settled) return;
-        settled = true;
+        if (request.settled) return;
+        request.settled = true;
         generationRequests.delete(requestId);
         queue.close();
         void entry.connection
@@ -6207,7 +6209,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         getTransportClosedReject(entry),
       ])
         .then((raw) => {
-          if (settled) return;
+          if (request.settled) return;
           const response = raw as Record<string, unknown>;
           const model = response['model'];
           const modelSource = response['modelSource'];
@@ -6233,10 +6235,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           else queue.fail(new Error('Generation stream consumer too slow'));
         })
         .catch((error: unknown) => {
-          if (!settled) queue.fail(error);
+          if (!request.settled) queue.fail(error);
         })
         .finally(() => {
-          settled = true;
+          request.settled = true;
           signal.removeEventListener('abort', cancel);
           generationRequests.delete(requestId);
         });
