@@ -403,7 +403,12 @@ export function coverageFromTranscripts(
     // Every role, territory agents included. Their brief is where the severity
     // definitions, the paging rule, the uncoverable rule and the project rules live.
     const brief = briefPath(planPath, req.key);
-    const opened = agent.successfulCallArgs.some((a) => a.includes(brief));
+    // The brief as a whole JSON string value (`successfulCallArgs` are already
+    // serialized args): a bare substring would credit `${brief}.bak` for the brief,
+    // the same trap `parseTranscript` avoids for the diff path.
+    const opened = agent.successfulCallArgs.some((a) =>
+      a.includes(JSON.stringify(brief)),
+    );
     if (!opened) {
       unreadBriefs.push(
         `${roleLabel(req)} — never opened its brief (${brief}), so it reviewed ` +
@@ -496,10 +501,16 @@ export function verificationGaps(
     const b = built.get(key);
     if (b === undefined || b.trim() === '') return false;
     const brief = briefPath(planPath, key);
+    // Match the brief as a whole JSON string value, quotes included — the same
+    // lesson `parseTranscript` learned for the diff path: a bare substring credits
+    // `…/x.brief.md.bak` for `…/x.brief.md`. `successfulCallArgs` are already
+    // `JSON.stringify(args)`, so the quoted path is what a real read of the brief
+    // leaves in them.
+    const needle = JSON.stringify(brief);
     return records.some(
       (r) =>
         wasDeliveredVerbatim(r.launchPrompt, b) &&
-        r.successfulCallArgs.some((a) => a.includes(brief)),
+        r.successfulCallArgs.some((a) => a.includes(needle)),
     );
   };
 
@@ -508,9 +519,11 @@ export function verificationGaps(
   // the diff complete, least of all a clean one (a zero-finding review is exactly
   // when a second look matters most). 3A records it under `reverse-audit`; 3B under
   // `reverse-audit--chunk-N`, one per chunk. The floor is one: at least one auditor
-  // ran and read its brief.
+  // ran and read its brief. Matched on the role name and the universal `--` key
+  // separator rather than the exact `--chunk-<n>` shape, so a change to how the
+  // chunk suffix is spelled does not silently drop every per-chunk key here.
   const reverseKeys = [...built.keys()].filter(
-    (k) => k === 'reverse-audit' || /^reverse-audit--chunk-\d+$/.test(k),
+    (k) => k === 'reverse-audit' || k.startsWith('reverse-audit--'),
   );
   if (!reverseKeys.some(ranAndReadBrief)) {
     gaps.push(

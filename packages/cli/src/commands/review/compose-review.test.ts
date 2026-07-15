@@ -106,7 +106,11 @@ function recordStep45(
       `You are review agent \`${key}\`.\n` +
       `read_file(file_path="${brief}")\n` +
       `read_file(file_path="${DIFF}")`;
-    writeFileSync(join(d, `${key}.txt`), launch);
+    // Match production (`prompt-record.ts`): the record filename is the
+    // percent-encoded key. A no-op for `verify`/`reverse-audit`, but a future role
+    // whose name `encodeURIComponent` transforms would otherwise be written to a
+    // name the reader never looks for.
+    writeFileSync(join(d, `${encodeURIComponent(key)}.txt`), launch);
     transcript(`v-${key.replace(/[^a-z0-9]/gi, '_')}`, launch, {
       toolCalls: 2,
       opens: [brief],
@@ -999,6 +1003,34 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
       modelId: MODEL,
     });
     expect(r.event).toBe('APPROVE');
+  });
+
+  it('requires a verifier for a body Critical that is not pre-confirmed', () => {
+    // A non-deterministic Critical that could not be anchored still posts (in the
+    // body) and still had to be verified — so a missing verifier is disclosed even
+    // with no inline findings.
+    const r = composeReview({
+      bodyCriticals: ['a real blocker that could not be anchored'],
+      planPath: coveredPlan(['reverse-audit']), // verifier absent
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toMatch(/verification — the review posts findings/);
+  });
+
+  it('does not require a verifier for a deterministic [build]/[test] body Critical', () => {
+    // A `[build]`/`[test]` finding is pre-confirmed and skips verification by design,
+    // so a review whose only finding is one must not be told its findings were
+    // unverified — that would post a false disclosure on a correct review.
+    const r = composeReview({
+      bodyCriticals: ['[build] `npm run build` failed: TS2345 in x.ts'],
+      planPath: coveredPlan(['reverse-audit']), // verifier absent, none needed
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).not.toMatch(/verification/);
   });
 });
 

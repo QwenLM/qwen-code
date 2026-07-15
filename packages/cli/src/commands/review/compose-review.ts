@@ -268,19 +268,6 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       for (const label of cov.unreadBriefs) {
         unreviewed.push(label);
       }
-      // Step 4 (verify) and Step 5 (reverse audit) ran, and read their briefs?
-      // `check-coverage` proves Step 3, but it runs at Step 3D — before these exist
-      // — and their count is not in the plan, so its roster cannot reach them. This
-      // is the floor that does: only `compose-review` asks it, and `compose-review`
-      // runs only at high effort, which is the only effort at which verify and
-      // reverse audit run at all. Reverse audit is required on every high-effort
-      // review; verify is required once the review has findings to verify.
-      const verification = verificationGaps(
-        input.planPath,
-        { postsFindings: criticalsInline + suggestionsInline > 0 },
-        input.env,
-      );
-      for (const gap of verification.gaps) unreviewed.push(gap);
     } catch (err) {
       // Two different failures, and they must not wear each other's message. A
       // malformed plan is the caller's mistake and says so; missing transcripts
@@ -294,6 +281,35 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
           : `the plan could not be used (${(err as Error).message})`;
       unreviewed.push(
         `coverage — ${why}, so this run cannot show that any of the diff was read`,
+      );
+    }
+
+    // Step 4 (verify) and Step 5 (reverse audit) ran, and read their briefs?
+    // `check-coverage` proves Step 3, but it runs at Step 3D — before these exist —
+    // and their count is not in the plan, so its roster cannot reach them. This is
+    // the floor that does, and only `compose-review` asks it, which runs only at
+    // high effort — the only effort at which verify and reverse audit run at all.
+    // Reverse audit is required on every high-effort review; verify once the review
+    // has non-deterministic findings to verify. Deterministic `[build]`/`[test]`
+    // findings are pre-confirmed and skip verification by design, so they do not
+    // demand a verifier — including a body Critical that carries their source tag.
+    // Its own try, so a read failure here says so rather than wearing the coverage
+    // message, and does not undo a coverage pass a line above it.
+    try {
+      const findingsToVerify =
+        criticalsInline +
+        suggestionsInline +
+        bodyCriticals.filter((c) => !/\[(?:build|test)\]/i.test(c)).length;
+      const verification = verificationGaps(
+        input.planPath,
+        { postsFindings: findingsToVerify > 0 },
+        input.env,
+      );
+      for (const gap of verification.gaps) unreviewed.push(gap);
+    } catch (err) {
+      unreviewed.push(
+        `verification — could not check that Step 4 and Step 5 ran ` +
+          `(${(err as Error).message})`,
       );
     }
   }

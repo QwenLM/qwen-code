@@ -1030,4 +1030,15 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     const r = verificationGaps(p, { postsFindings: true }, ENV);
     expect(r.gaps.join(' ')).toMatch(/verification — its prompt was built/);
   });
+
+  it('flags a verifier whose prompt was built but never launched', () => {
+    // The other half of `ranAndReadBrief`: `built.get('verify')` returns content,
+    // but no transcript matches it. Same gap message as opensBrief:false, but it
+    // fails at the transcript-matching term, not the brief-open one.
+    const p = plan();
+    step45(p, 'reverse-audit');
+    step45(p, 'verify', { launch: false });
+    const r = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(r.gaps.join(' ')).toMatch(/verification — its prompt was built/);
+  });
 });
