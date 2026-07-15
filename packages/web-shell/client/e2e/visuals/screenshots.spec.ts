@@ -147,6 +147,62 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `split-view-maximized-${theme}`);
     });
 
+    test(`sidebar attention`, async ({ page }, testInfo) => {
+      const stamp = '2026-07-03T00:00:00.000Z';
+      const base = {
+        workspaceCwd: '/tmp/qwen-web-shell-e2e',
+        createdAt: stamp,
+        updatedAt: stamp,
+        clientCount: 1,
+      };
+      const scenario = createWebShellDaemonScenario({
+        sessionId: 'sess-running',
+        displayName: 'Run test suite',
+        sessions: [
+          {
+            ...base,
+            sessionId: 'sess-approval',
+            displayName: 'Deploy to staging',
+            hasActivePrompt: true,
+            isWaitingForPermission: true,
+          },
+          {
+            ...base,
+            sessionId: 'sess-question',
+            displayName: 'Refactor auth module',
+            hasActivePrompt: true,
+            isWaitingForUserQuestion: true,
+          },
+          {
+            ...base,
+            sessionId: 'sess-running',
+            displayName: 'Run test suite',
+            hasActivePrompt: true,
+          },
+          {
+            ...base,
+            sessionId: 'sess-idle',
+            displayName: 'Draft release notes',
+            clientCount: 0,
+            hasActivePrompt: false,
+          },
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      // The sidebar lists every session; #6956 adds an attention pill to the
+      // ones waiting on the user. Assert on session names (present on both
+      // `main` and the PR) so the frame is the same shape either way — the pill
+      // itself is the PR's diff that the before/after preview surfaces.
+      await expect(page.getByText('Deploy to staging')).toBeVisible();
+      await expect(page.getByText('Refactor auth module')).toBeVisible();
+      await captureScreenshot(page, `sidebar-attention-${theme}`);
+    });
+
     test(`slash menu`, async ({ page }, testInfo) => {
       const scenario = createWebShellDaemonScenario();
       const daemon = await installScenario(
