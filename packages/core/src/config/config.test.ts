@@ -4301,6 +4301,28 @@ describe('Server Config (config.ts)', () => {
     expect(config.getUserMemory()).toContain('MEMORY.md is currently empty');
   });
 
+  it('refreshHierarchicalMemory should omit managed auto-memory prompt when disabled', async () => {
+    const config = new Config({
+      ...baseParams,
+      enableManagedAutoMemory: false,
+    });
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+    vi.mocked(readAutoMemoryIndex).mockResolvedValue(null);
+
+    await config.refreshHierarchicalMemory();
+
+    expect(config.getUserMemory()).toContain('Project rules');
+    expect(config.getUserMemory()).not.toContain('# auto memory');
+    expect(readAutoMemoryIndex).not.toHaveBeenCalled();
+  });
+
   it('refreshHierarchicalMemory should only use explicit inputs in bare mode', async () => {
     const config = new Config({
       ...baseParams,
@@ -4336,13 +4358,13 @@ describe('Server Config (config.ts)', () => {
       expect(config.isManagedMemoryAvailable()).toBe(false);
     });
 
-    it('returns true even when enableManagedAutoMemory is false', () => {
+    it('returns false when enableManagedAutoMemory is false', () => {
       const config = new Config({
         ...baseParams,
         enableManagedAutoMemory: false,
         bareMode: false,
       });
-      expect(config.isManagedMemoryAvailable()).toBe(true);
+      expect(config.isManagedMemoryAvailable()).toBe(false);
     });
   });
 

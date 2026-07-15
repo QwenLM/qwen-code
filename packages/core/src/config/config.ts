@@ -5687,7 +5687,7 @@ export class Config {
   }
 
   isManagedMemoryAvailable(): boolean {
-    return !this.getBareMode();
+    return this.enableManagedAutoMemory && !this.getBareMode();
   }
 
   getManagedAutoDreamEnabled(): boolean {
