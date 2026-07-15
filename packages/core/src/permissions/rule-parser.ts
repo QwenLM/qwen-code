@@ -1097,9 +1097,13 @@ function realpathNearestExisting(filePath: string): string | undefined {
         !isNodeError(error) ||
         (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')
       ) {
+      if (
+        !isNodeError(error) ||
+        (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')
+      ) {
+        debugLogger.debug(`realpathNearestExisting: abandoning "${current}" due to ${isNodeError(error) ? error.code : 'non-Node error'}`);
         return undefined;
       }
-    }
 
     try {
       if (fs.lstatSync(current).isSymbolicLink()) {
