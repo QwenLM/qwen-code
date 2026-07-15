@@ -2284,6 +2284,45 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('plans Chinese filtered preference lists against current entries without mutation', async () => {
+      const entries = [
+        { id: 'm-a31f0d82c7e4', text: 'English responses.' },
+        { id: 'm-b82c4e190a6f', text: '中文回复。' },
+        { id: 'm-c93d5f20b7a8', text: 'Use staging.' },
+      ];
+      const channelMemory = createChannelMemory(entries);
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'list',
+          targetIds: ['m-b82c4e190a6f'],
+          confidence: 0.88,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(
+        envelope({ text: '只看中文偏好', senderId: 'alice' }),
+      );
+
+      expect(
+        memoryIntentClassifier.classifyChannelMemoryIntent,
+      ).toHaveBeenCalledWith('只看中文偏好', entries);
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: 'Channel memory (page 1/1):\nm-b82c4e190a6f  中文回复。',
+        },
+      ]);
+      expect(channelMemory.addChannelMemoryEntries).not.toHaveBeenCalled();
+      expect(channelMemory.updateChannelMemoryEntry).not.toHaveBeenCalled();
+      expect(channelMemory.removeChannelMemoryEntries).not.toHaveBeenCalled();
+      expect(channelMemory.clearChannelMemory).not.toHaveBeenCalled();
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
     it('reports no match for empty target IDs without mutating', async () => {
       const channelMemory = createChannelMemory([
         { id: 'm-a31f0d82c7e4', text: 'Use staging.' },
