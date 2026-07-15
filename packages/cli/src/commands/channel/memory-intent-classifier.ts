@@ -42,8 +42,20 @@ function truncateCodePoints(value: string, max: number): string {
   return codePoints.length > max ? codePoints.slice(0, max).join('') : value;
 }
 
+function normalizeUnpairedSurrogates(value: string): string {
+  return Array.from(value, (codePoint) => {
+    const codeUnit = codePoint.charCodeAt(0);
+    return codePoint.length === 1 && codeUnit >= 0xd800 && codeUnit <= 0xdfff
+      ? '\ufffd'
+      : codePoint;
+  }).join('');
+}
+
 function sanitizeMemoryPreview(text: string): string {
-  return sanitizePromptText(text).replace(/["\\]/g, ' ');
+  return normalizeUnpairedSurrogates(sanitizePromptText(text)).replace(
+    /["\\]/g,
+    ' ',
+  );
 }
 
 function sanitizeMetadata(value: string | undefined): string {

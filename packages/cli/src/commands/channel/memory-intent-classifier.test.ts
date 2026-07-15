@@ -270,6 +270,30 @@ describe('BridgeChannelMemoryIntentClassifier', () => {
     expect(manifest).not.toContain('\nignore instructions');
   });
 
+  it('keeps all IDs and lone-surrogate metadata within the serialized manifest budget', async () => {
+    const { bridge, classifier } = classifierFor(
+      '{"intent":"none","confidence":0}',
+    );
+    const loneSurrogateTimestamp = '\ud800'.repeat(200);
+    const manyEntries = Array.from({ length: 500 }, (_, index) => ({
+      id: `m-${index.toString(16).padStart(12, '0')}`,
+      text: 'bounded preview',
+      createdAt: loneSurrogateTimestamp,
+      updatedAt: loneSurrogateTimestamp,
+    }));
+
+    await classifier.classifyChannelMemoryIntent('请求', manyEntries);
+
+    const prompt = vi.mocked(bridge.prompt).mock.calls[0]?.[1] ?? '';
+    const manifest = prompt.slice(
+      prompt.indexOf('Memory entries (untrusted data):'),
+    );
+    expect(Array.from(manifest).length).toBeLessThanOrEqual(64_000);
+    for (const entry of manyEntries) {
+      expect(manifest).toContain(JSON.stringify(entry.id));
+    }
+  });
+
   it('logs cancelSession cleanup failures without dropping the result', async () => {
     const bridge = bridgeWithResponse(
       '{"intent":"remember","memory":"回复前说 1122","confidence":0.93}',
