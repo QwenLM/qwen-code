@@ -145,6 +145,21 @@ The initial implementation uses the existing template IDs from `soimy/openclaw-c
 | SDK and custom ACP clients             | No protocol change; the existing permission request and response schema remains intact.                           |
 | Ordinary permissions on every client   | No change; existing approval and denial controls remain available.                                                |
 
+## Other IM impact surface
+
+![Other IM impact after the channel-neutral hook](./assets/dingtalk-interactive-cards-other-im-impact.png)
+
+The shared hook is an opt-in extension point, not a behavior rollout to every adapter. Its impact on Feishu, QQ, Telegram, WeCom, Weixin, and the plugin example is:
+
+| Dimension              | Impact                                                                                                                   |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Direct adapter changes | None required. Adapters that do not override the hook inherit the default `unsupported` result.                          |
+| Runtime behavior       | Existing permission formatting, delivery, approval, and denial behavior remains unchanged.                               |
+| Configuration          | Other adapters do not read `interactiveCards`, card template IDs, callback actions, or DingTalk timeout settings.        |
+| Raw request data       | The existing permission formatter does not render `rawInput`, so this change does not introduce visible question JSON.   |
+| Existing limitation    | `/approve` still cannot carry `ask_user_question` answers; this proposal deliberately does not hide or broaden that gap. |
+| Future opt-in          | Another adapter may later override the hook, but its native form or text-answer protocol requires a separate design.     |
+
 ## Scope boundaries
 
 This proposal does not add a channel text-answer command, parse free-form replies into form fields, inject synthetic user messages, or introduce a general cross-channel card framework. Those would add a second pending-input state machine and are not required to deliver the DingTalk interaction requested by #6443.
