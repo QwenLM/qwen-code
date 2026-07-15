@@ -1,0 +1,30 @@
+/**
+ * Per-workspace accent palette, mirrored from the sidebar session-group colors
+ * (WebShellSidebar.module.css) so the two surfaces speak the same color
+ * language. Each class only sets the `--ws-accent` custom property, which the
+ * consuming component reads to tint a dot, divider, or chip. Shared between the
+ * split-view pane header (ChatPane) and the composer workspace chip
+ * (WorkspaceIndicator) so a workspace looks the same in both places.
+ *
+ * Class names deliberately match the `DaemonSessionGroupPresetColor` values so
+ * a consumer can select one with `accentStyles[color]`.
+ */
+
+.red {
+  --ws-accent: #ff5a5f;
+}
+.orange {
+  --ws-accent: #ff8a2a;
+}
+.yellow {
+  --ws-accent: #f6c431;
+}
+.green {
+  --ws-accent: #69c987;
+}
+.blue {
+  --ws-accent: var(--agent-blue-500);
+}
+.purple {
+  --ws-accent: var(--agent-purple-600);
+}

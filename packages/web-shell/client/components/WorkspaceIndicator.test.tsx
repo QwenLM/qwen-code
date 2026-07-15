@@ -97,6 +97,58 @@ describe('WorkspaceIndicator', () => {
     vi.useRealTimers();
   });
 
+  it('tints the chip with the workspace accent so it stays distinct when compact', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <WorkspaceIndicator
+          name="api"
+          title="/work/api"
+          ariaLabel="Workspace: api"
+          color="blue"
+          compact
+        />,
+      );
+    });
+
+    const chip = container.querySelector<HTMLElement>(
+      '[data-web-shell-workspace]',
+    );
+    if (!chip) throw new Error('workspace chip was not rendered');
+    // The accent (color-name class + the accented modifier) rides on the chip
+    // even in compact mode, where the name is hidden — so the icon-only chip is
+    // still distinguishable per workspace instead of a generic folder.
+    expect(chip.className).toContain('workspaceChipCompact');
+    expect(chip.className).toContain('blue');
+    expect(chip.className).toContain('workspaceChipAccented');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('adds no accent classes when no color is given', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <WorkspaceIndicator name="api" title="/work/api" ariaLabel="ws" />,
+      );
+    });
+
+    const chip = container.querySelector<HTMLElement>(
+      '[data-web-shell-workspace]',
+    );
+    expect(chip?.className).not.toContain('workspaceChipAccented');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
   it('localizes the accessible workspace label', () => {
     expect(getTranslator('en')('workspace.paneLabel', { name: 'api' })).toBe(
       'Workspace: api',
