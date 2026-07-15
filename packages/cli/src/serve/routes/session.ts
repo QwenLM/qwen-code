@@ -61,6 +61,7 @@ import {
 } from '../server/session-list.js';
 import {
   archiveDaemonSessions,
+  assertSessionArchived,
   assertSessionLoadable,
   deleteDaemonSessions,
   logSessionArchiveWarning,
@@ -521,6 +522,7 @@ export function registerSessionRoutes(
       route: string;
       workspaceCwd: string;
       workspaceQualified?: boolean;
+      archiveState?: SessionArchiveState;
     },
   ): Promise<void> => {
     const sessionId = requireSessionId(req, res);
@@ -540,11 +542,16 @@ export function registerSessionRoutes(
       const result = await archiveCoordinator.runSharedMany(
         [sessionId],
         async () => {
-          await assertSessionLoadable(target.workspaceCwd, sessionId);
+          if (target.archiveState === 'archived') {
+            await assertSessionArchived(target.workspaceCwd, sessionId);
+          } else {
+            await assertSessionLoadable(target.workspaceCwd, sessionId);
+          }
           return exportSessionTranscript({
             workspaceCwd: target.workspaceCwd,
             sessionId,
             format,
+            archiveState: target.archiveState,
             config: { getChannel: () => 'daemon' },
           });
         },
@@ -1405,6 +1412,21 @@ export function registerSessionRoutes(
       workspaceQualified: true,
     });
   });
+
+  app.get(
+    '/workspaces/:workspace/session/:id/archive/export',
+    async (req, res) => {
+      const route = 'GET /workspaces/:workspace/session/:id/archive/export';
+      const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+      if (!runtime) return;
+      await handleSessionExport(req, res, {
+        route,
+        workspaceCwd: runtime.workspaceCwd,
+        workspaceQualified: true,
+        archiveState: 'archived',
+      });
+    },
+  );
 
   app.get('/session/:id/transcript', async (req, res) => {
     const route = 'GET /session/:id/transcript';
