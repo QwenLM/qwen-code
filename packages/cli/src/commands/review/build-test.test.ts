@@ -92,10 +92,12 @@ describe('runBuildTest', () => {
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), 'bt-'));
-    // A COMPLETE node_modules — the `.package-lock.json` marker npm writes only when
-    // the tree is fully materialised — so the install is skipped and no network is
-    // touched. (Gating on the marker, not the bare directory, is what stops a partial
-    // tree from being mistaken for a finished install.)
+    // An npm repo (root `package-lock.json`) with a COMPLETE node_modules — the
+    // `.package-lock.json` marker npm writes only when the tree is fully materialised
+    // — so the install is skipped and no network is touched. (The install runs only
+    // for an npm repo whose marker is missing; gating on the marker, not the bare
+    // directory, is what stops a partial tree from being mistaken for a finished one.)
+    writeFileSync(join(root, 'package-lock.json'), '{}');
     mkdirSync(join(root, 'node_modules'), { recursive: true });
     writeFileSync(join(root, 'node_modules', '.package-lock.json'), '{}');
   });
@@ -199,6 +201,102 @@ describe('runBuildTest', () => {
     expect(rep.test).toEqual([]);
     expect(rep.ok).toBe(true);
     expect(rep.note).toContain('no package to build');
+  });
+
+  it('builds and tests a single-package npm repo (no `workspaces` field)', () => {
+    // The most common npm repo shape. Without single-root support it would classify
+    // as `unsupported` and get no npm build/test path at all.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'solo',
+        scripts: { build: 'exit 0', test: 'exit 0' },
+      }),
+    );
+    writePlan(['src/index.ts']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+    expect(rep.toolchain).toBe('npm');
+    expect(rep.affected).toEqual(['.']);
+    expect(rep.buildSet).toEqual(['.']);
+    // The root package takes NO `--workspace`.
+    expect(calls).toContain('npm run build');
+    expect(calls).toContain('npm test');
+    expect(calls.some((c) => c.includes('--workspace'))).toBe(false);
+    expect(rep.ok).toBe(true);
+  });
+
+  it('is `unsupported` for a single-package repo with no build/test script', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'solo', scripts: { lint: 'exit 0' } }),
+    );
+    writePlan(['src/index.ts']);
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      install: false,
+    });
+    expect(rep.toolchain).toBe('unsupported');
+    expect(rep.note).toContain('Fall back');
+  });
+
+  it('does not run `npm ci` on a yarn/bun repo (no package-lock.json) with a tree', () => {
+    // `workspaces` is also yarn/bun syntax; those write no `package-lock.json`, so
+    // `npm ci` would fail-fast and mislabel a usable node_modules as a failed install.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    // Remove the npm lockfile the beforeEach wrote (and the completeness marker) —
+    // this is a yarn/bun tree, present but not npm's.
+    rmSync(join(root, 'package-lock.json'), { force: true });
+    rmSync(join(root, 'node_modules', '.package-lock.json'), { force: true });
+    pkg('packages/a', {
+      name: '@x/a',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writePlan(['packages/a/src/x.ts']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: true,
+      exec: (command) => {
+        calls.push(command);
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+    // No `npm ci` — the existing tree is trusted; the build ran and passed.
+    expect(calls.some((c) => c.startsWith('npm ci'))).toBe(false);
+    expect(rep.install).toBeNull();
+    expect(rep.ok).toBe(true);
+    expect(rep.build.length).toBeGreaterThan(0);
   });
 
   // The exec seam stands in for real `npm run`: these tests are about which packages
@@ -495,6 +593,18 @@ describe('runBuildTest', () => {
         install: false,
       }),
     ).toThrow(/cannot read the plan/);
+  });
+
+  it('throws a descriptive error for a plan that is valid JSON but not an object', () => {
+    const bad = join(root, 'bad.json');
+    writeFileSync(bad, 'null');
+    expect(() =>
+      runBuildTest({ plan: bad, worktree: root, timeout: 5, install: false }),
+    ).toThrow(/not a JSON object/);
+    writeFileSync(bad, '[1,2,3]');
+    expect(() =>
+      runBuildTest({ plan: bad, worktree: root, timeout: 5, install: false }),
+    ).toThrow(/not a JSON object/);
   });
 
   it('carries on when the install exits non-zero but leaves a usable tree', () => {

@@ -15,6 +15,7 @@ import {
   buildSetFor,
   hasUnmodeledWorkspaceGlob,
   readWorkspaceGlobs,
+  readRootPackage,
   type WorkspacePackage,
 } from './workspaces.js';
 
@@ -102,6 +103,43 @@ describe('readWorkspaceGlobs', () => {
     writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'r' }));
     expect(readWorkspaceGlobs(root)).toEqual([]);
     expect(readWorkspaceGlobs(join(root, 'nope'))).toEqual([]);
+    rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe('readRootPackage', () => {
+  it('returns the root as a single `.` package when it has a build/test script', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ws-'));
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'solo',
+        scripts: { build: 'tsc', lint: 'eslint' },
+      }),
+    );
+    const p = readRootPackage(root);
+    expect(p).toEqual({
+      dir: '.',
+      name: 'solo',
+      scripts: ['build', 'lint'],
+      deps: [],
+    });
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('returns null when the root has no build or test script', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ws-'));
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'solo', scripts: { lint: 'eslint' } }),
+    );
+    expect(readRootPackage(root)).toBeNull();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('returns null (never throws) when there is no readable package.json', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ws-'));
+    expect(readRootPackage(root)).toBeNull();
     rmSync(root, { recursive: true, force: true });
   });
 });

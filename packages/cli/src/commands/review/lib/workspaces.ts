@@ -141,6 +141,32 @@ export function readWorkspaceGlobs(root: string): string[] {
   }
 }
 
+/**
+ * The root package itself, when there are no workspaces — a single-package repo.
+ *
+ * The most common npm repo shape has no `workspaces` field at all. Treating it as
+ * one root package (dir `.`) keeps the install, the scoped deadline, and the
+ * timeout-as-data semantics for that case, instead of dropping it to a fallback
+ * that no longer installs. Returns null when the root has no build/test script to
+ * run — there is nothing to scope, and the brief's precedence list takes over.
+ */
+export function readRootPackage(root: string): WorkspacePackage | null {
+  let pkg: { name?: unknown; scripts?: Record<string, unknown> };
+  try {
+    pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+  const scripts = Object.keys(pkg.scripts ?? {});
+  if (!scripts.includes('build') && !scripts.includes('test')) return null;
+  return {
+    dir: '.',
+    name: typeof pkg.name === 'string' && pkg.name ? pkg.name : 'root',
+    scripts,
+    deps: [],
+  };
+}
+
 /** Expand the globs against the tree: every workspace package that exists. */
 export function readWorkspacePackages(root: string): WorkspacePackage[] {
   const globs = readWorkspaceGlobs(root);

@@ -46,10 +46,20 @@ import {
   affectedWorkspaces,
   buildSetFor,
   hasUnmodeledWorkspaceGlob,
+  readRootPackage,
   readWorkspaceGlobs,
   readWorkspacePackages,
   type WorkspacePackage,
 } from './lib/workspaces.js';
+
+/** The build command for a dir: the root package takes no `--workspace`. */
+function buildCommand(dir: string): string {
+  return dir === '.' ? 'npm run build' : `npm run build --workspace="${dir}"`;
+}
+/** The test command for a dir: the root package takes no `--workspace`. */
+function testCommand(dir: string): string {
+  return dir === '.' ? 'npm test' : `npm test --workspace="${dir}"`;
+}
 
 /** A command this run actually executed, and what it did. */
 export interface CommandResult {
@@ -209,14 +219,24 @@ interface BuildTestArgs {
 
 /** The changed files, from whichever plan report produced them. */
 function changedFilesFrom(planPath: string): string[] {
-  let report: { files?: Array<{ path?: unknown }> };
+  let parsed: unknown;
   try {
-    report = JSON.parse(readFileSync(planPath, 'utf8'));
+    parsed = JSON.parse(readFileSync(planPath, 'utf8'));
   } catch (err) {
     throw new Error(
       `build-test: cannot read the plan ${planPath}: ${(err as Error).message}`,
     );
   }
+  // A plan that parses to `null`, a number, or an array would otherwise reach
+  // `report.files` and throw a raw `TypeError` past the descriptive-error path the
+  // neighbouring cases get. Name the real problem instead.
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(
+      `build-test: the plan ${planPath} is not a JSON object (got ` +
+        `${parsed === null ? 'null' : Array.isArray(parsed) ? 'an array' : typeof parsed}).`,
+    );
+  }
+  const report = parsed as { files?: Array<{ path?: unknown }> };
   const files = Array.isArray(report.files) ? report.files : [];
   return files
     .map((f) => f?.path)
@@ -230,19 +250,33 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   const changed = changedFilesFrom(args.plan);
 
   const globs = readWorkspaceGlobs(root);
-  const packages = readWorkspacePackages(root);
+  let packages = readWorkspacePackages(root);
+
+  // A workspace-less `package.json` with a build/test script is the most common npm
+  // repo shape — treat the root as a single package so it keeps the install, the
+  // deadline, and timeout-as-data, instead of dropping to a precedence list that no
+  // longer installs. Its build/test commands take no `--workspace` (dir `.`).
+  let singleRoot = false;
+  const unmodeled = globs.length > 0 && hasUnmodeledWorkspaceGlob(globs);
+  if (!unmodeled && globs.length === 0) {
+    const rootPkg = readRootPackage(root);
+    if (rootPkg) {
+      packages = [rootPkg];
+      singleRoot = true;
+    }
+  }
 
   // `unsupported` when there is nothing to scope, OR when the layout uses a glob
   // shape the walker does not model (`packages/**`, `foo-*`, `*/lib`). The second
-  // is the load-bearing addition: without it, a diff inside an unmodeled workspace
-  // resolves to an EMPTY affected set and the report says "no package to build" — a
-  // confident false green for the review's one deterministic check. Falling back to
-  // the brief's precedence list is the safe direction.
-  // The unmodeled-glob check comes FIRST: `packages/**` also makes
-  // `readWorkspacePackages` find nothing, so ordering it after the empty-packages
-  // check would mislabel it "no workspaces here" instead of naming the real reason.
-  const unmodeled = globs.length > 0 && hasUnmodeledWorkspaceGlob(globs);
-  if (unmodeled || globs.length === 0 || packages.length === 0) {
+  // is load-bearing: without it, a diff inside an unmodeled workspace resolves to an
+  // EMPTY affected set and the report says "no package to build" — a confident false
+  // green for the review's one deterministic check. Falling back to the brief's
+  // precedence list is the safe direction. The unmodeled check comes FIRST because
+  // `packages/**` also makes `readWorkspacePackages` find nothing.
+  if (
+    unmodeled ||
+    (!singleRoot && (globs.length === 0 || packages.length === 0))
+  ) {
     return {
       toolchain: 'unsupported',
       affected: [],
@@ -258,12 +292,19 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
           '(e.g. `**`, an inner `*`, or a `foo-*` prefix), so it cannot safely decide ' +
           'which packages the diff touches. Fall back to the build/test precedence in ' +
           'your brief, and give each command a deadline it can actually meet.'
-        : 'No npm workspaces here, so there is nothing to scope. Fall back to the ' +
-          'build/test precedence in your brief, and give each command a deadline it can actually meet.',
+        : 'No npm package here to scope (no workspaces, and the root has no build/test ' +
+          'script). Fall back to the build/test precedence in your brief — installing ' +
+          'dependencies first — and give each command a deadline it can actually meet.',
     };
   }
 
-  const affected = affectedWorkspaces(changed, globs);
+  // A single-root repo builds and tests its one package whenever the diff changes
+  // anything; a workspace repo maps the changed files to the workspaces they live in.
+  const affected = singleRoot
+    ? changed.length > 0
+      ? ['.']
+      : []
+    : affectedWorkspaces(changed, globs);
   if (affected.length === 0) {
     return {
       toolchain: 'npm',
@@ -322,29 +363,49 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   // that left no tree at all.
   //
   // Whether to install is gated on npm's **completeness marker**, not the bare
-  // directory. `npm ci` (and `install`) write `node_modules/.package-lock.json` only
-  // once the tree is fully materialised, so a partial tree — left by a timeout here,
-  // or by the agent's own shell-tool kill one level up — has the directory but not
-  // the marker. Gating on the directory would let every later run *skip* the install
-  // and build against that partial tree; gating on the marker reinstalls it.
+  // directory. `npm ci` writes `node_modules/.package-lock.json` only once the tree
+  // is fully materialised, so a partial tree — left by a timeout here, or by the
+  // agent's own shell-tool kill one level up — has the directory but not the marker.
+  // Gating on the directory would let every later run *skip* the install and build
+  // against that partial tree; gating on the marker reinstalls it.
+  //
+  // But `npm ci` is only right for an npm repo. `workspaces` is also yarn/bun/pnpm
+  // syntax, and those write no `package-lock.json`, so `npm ci` would fail-fast on
+  // the missing lockfile and mislabel a perfectly usable `node_modules` as a failed
+  // install. So install only when there IS a `package-lock.json` (an npm repo) whose
+  // tree is incomplete; a non-npm repo that already has a tree is trusted — the build
+  // is the authoritative signal, by this command's own argument.
+  const npmLock = existsSync(join(root, 'package-lock.json'));
   const installComplete = (): boolean =>
     existsSync(join(root, 'node_modules', '.package-lock.json'));
-  if (args.install && !installComplete()) {
+  if (args.install && npmLock && !installComplete()) {
     const install = exec('npm ci --no-audit --no-fund', root, perCommandMs);
     results.install = install;
     if (install.timedOut) results.timedOut.push(install.command);
     // A timeout leaves a partial tree — remove it, so this is not mistaken next time
-    // for a complete install to build against.
+    // for a complete install to build against. `spawnSync`'s SIGTERM only kills the
+    // direct shell; the orphaned `npm`/`node` grandchildren keep writing the tree, so
+    // `rmSync` can race them and throw `ENOTEMPTY` — which must not replace the whole
+    // report with a raw error. Best-effort with retries; the marker gate below still
+    // decides the outcome.
     if (install.timedOut) {
-      rmSync(join(root, 'node_modules'), { recursive: true, force: true });
+      try {
+        rmSync(join(root, 'node_modules'), {
+          recursive: true,
+          force: true,
+          maxRetries: 3,
+        });
+      } catch {
+        // Best effort — a partial tree left behind is caught by the marker gate.
+      }
     }
     if (install.timedOut || !installComplete()) {
       results.ok = false;
       results.note = install.timedOut
         ? `\`${install.command}\` ran out of time (${args.timeout}s) and left an ` +
-          'incomplete `node_modules` (now removed), so nothing could be built or tested ' +
-          'against it. This is an infrastructure result, not a defect in the diff — ' +
-          'report it as informational.'
+          'incomplete `node_modules`, so nothing could be built or tested against it. ' +
+          'This is an infrastructure result, not a defect in the diff — report it as ' +
+          'informational.'
         : 'The install failed and left no usable `node_modules`, so nothing could be ' +
           'built or tested. This is an environment failure, not a defect in the diff — ' +
           'report it as informational.';
@@ -370,9 +431,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
         built.add(dir); // Nothing to build is not a failure to build.
         continue;
       }
-      // Quote the workspace: `shell: true` would split a dir containing a space or a
-      // shell metacharacter into separate tokens and target the wrong workspace.
-      const r = exec(`npm run build --workspace="${dir}"`, root, perCommandMs);
+      const r = exec(buildCommand(dir), root, perCommandMs);
       results.build.push(r);
       if (r.timedOut) results.timedOut.push(r.command);
       if (r.exitCode !== 0) {
@@ -418,12 +477,9 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     // was too small, which is this command's mistake, not the author's. Left in
     // `build[]`, an agent told "a build failure in a changed file is a Critical"
     // reads `packages/vscode-ide-companion rc=2` and files exactly that — a public
-    // blocker on a PR whose build passes. Drop it from `timedOut` too: a build that
-    // both ran out of time and named a missing workspace package would otherwise
-    // survive the retry only in `timedOut`, and an `ok: true` report would still
-    // instruct the agent to note an infrastructure event that did not happen.
+    // blocker on a PR whose build passes. (A timed-out failure cannot reach here — it
+    // is terminal above — so only `build[]`, never `timedOut`, can hold it.)
     results.build = results.build.filter((r) => r !== failure);
-    results.timedOut = results.timedOut.filter((c) => c !== failure.command);
 
     for (const name of missing) widened.add(name);
     for (const name of missing) {
@@ -446,7 +502,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   for (const dir of affected) {
     const pkg = byDir.get(dir);
     if (!pkg?.scripts.includes('test')) continue;
-    const r = exec(`npm test --workspace="${dir}"`, root, perCommandMs);
+    const r = exec(testCommand(dir), root, perCommandMs);
     results.test.push(r);
     if (r.timedOut) results.timedOut.push(r.command);
     if (r.exitCode !== 0) results.ok = false;
@@ -516,7 +572,9 @@ export const buildTestCommand: CommandModule = {
       .option('worktree', {
         type: 'string',
         demandOption: true,
-        describe: "The PR worktree to build in (never the user's checkout)",
+        describe:
+          'The tree to build in — the PR worktree for a PR review, or the project ' +
+          'root for a local review. Never a PR-mode build of the main checkout.',
       })
       .option('out', {
         type: 'string',
@@ -524,10 +582,13 @@ export const buildTestCommand: CommandModule = {
       })
       .option('timeout', {
         type: 'number',
-        default: 600,
+        default: 300,
         describe:
-          'Per-command deadline in seconds. The old 120s was five seconds short ' +
-          "of this repo's own cold build, so every review timed out.",
+          'Per-command deadline in seconds. Kept strictly below the 600s (600000ms) ' +
+          "tool timeout the agent's brief welds onto the whole call, so a single hung " +
+          "command's own deadline fires — and build-test reports it as data — before " +
+          'the outer shell kill would discard the report. (A giant PR whose commands ' +
+          'sum past the tool ceiling is a separate, acknowledged follow-up.)',
       })
       .option('install', {
         type: 'boolean',

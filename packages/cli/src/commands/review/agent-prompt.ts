@@ -750,8 +750,17 @@ export function buildRoleBrief(
     // and the plan already describes. Without this fallback the block below never
     // emits in local mode, yet the brief still opens with "run build-test, below"
     // and forbids `npm run build` by hand: an agent handed a mandate and no command.
+    //
+    // The `.` fallback is gated on `pr === undefined` (local mode). A PR-mode report
+    // that unexpectedly lacked `worktreePath` must NOT fall back to the cwd — that is
+    // the user's own checkout, and building it would attribute a build of the wrong
+    // tree to the PR. In PR mode with no worktree, emit no block at all.
     const buildTree =
-      typeof wt === 'string' && wt ? resolve(wt) : opts.planPath ? '.' : null;
+      typeof wt === 'string' && wt
+        ? resolve(wt)
+        : pr === undefined && opts.planPath
+          ? '.'
+          : null;
 
     // The build/test command, welded in with absolute paths. The brief names
     // `build-test`; this is the invocation, so the agent does not have to guess the

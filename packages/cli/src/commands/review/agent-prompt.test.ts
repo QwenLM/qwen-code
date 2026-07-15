@@ -635,6 +635,16 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).not.toContain('undefined');
   });
 
+  it('emits NO build-test block in PR mode when the worktree is missing', () => {
+    // A PR-mode report (prNumber set) that unexpectedly lacks worktreePath must not
+    // fall back to the cwd — that is the user's own checkout, and building it would
+    // attribute a build of the wrong tree to the PR. Better no block than the wrong tree.
+    const prNoWt = { ...PLAN, prNumber: '42', ownerRepo: 'o/r' }; // no worktreePath
+    const p = buildRoleBrief(prNoWt, '7', { planPath: '/abs/tmp/plan.json' });
+    expect(p).not.toMatch(/--plan \/abs\/tmp\/plan\.json/);
+    expect(p).not.toMatch(/qwen review build-test \\/);
+  });
+
   it('welds a long tool timeout into the build-test invocation', () => {
     // The command runs install + builds + tests in one process; the agent's default
     // 120s shell timeout would kill it — the very failure this command prevents, one
