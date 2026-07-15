@@ -2060,6 +2060,22 @@ describe('McpClientManager', () => {
       expect(mockedMcpClient.disconnect).toHaveBeenCalledOnce();
     });
 
+    it('skips signaling when a stdio transport has no descendants', async () => {
+      const mockedMcpClient = makeTimedOutClient(101);
+      vi.mocked(listDescendantPids).mockClear();
+      vi.mocked(sigtermPids).mockClear();
+
+      await runTimedOutDiscovery(mockedMcpClient, {
+        command: 'node',
+        args: [],
+        discoveryTimeoutMs: 100,
+      });
+
+      expect(listDescendantPids).toHaveBeenCalledWith(101);
+      expect(sigtermPids).not.toHaveBeenCalled();
+      expect(mockedMcpClient.disconnect).toHaveBeenCalledOnce();
+    });
+
     it('still disconnects when descendant enumeration fails', async () => {
       const mockedMcpClient = makeTimedOutClient(101);
       vi.mocked(listDescendantPids).mockClear();
