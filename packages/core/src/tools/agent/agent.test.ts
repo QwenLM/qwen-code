@@ -1523,6 +1523,66 @@ describe('AgentTool', () => {
       }
     }, 20000);
 
+    it('keeps a working_dir launch in the foreground when the flag is omitted', async () => {
+      // The default-background rule excludes caller-owned worktree launches
+      // (`this.params.working_dir === undefined` in backgroundRequested). Guard
+      // the core dispatch directly so a future refactor that drops the
+      // working_dir exclusion is caught here, not only in the UI classifiers.
+      vi.useRealTimers();
+      const repo = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wd-fg-')),
+      );
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repo });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+
+        const wt = path.join(repo, '.qwen', 'tmp', 'review-pr-1');
+        fs.mkdirSync(path.dirname(wt), { recursive: true });
+        execFileSync(
+          'git',
+          ['worktree', 'add', '-b', 'review-pr-1', wt, 'HEAD'],
+          { cwd: repo },
+        );
+
+        vi.mocked(config.getProjectRoot).mockReturnValue(repo);
+        vi.mocked(config.getTargetDir).mockReturnValue(repo);
+        vi.mocked(config.getCwd).mockReturnValue(repo);
+        vi.mocked(config.getWorkingDir).mockReturnValue(repo);
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          working_dir: wt,
+          // run_in_background intentionally omitted.
+        });
+        const result = await invocation.execute();
+
+        // Foreground: the omitted flag must NOT route a caller-owned worktree
+        // launch through the background registry path.
+        expect(partToString(result.llmContent)).not.toContain(
+          'Background agent launched',
+        );
+        expect(
+          vi.mocked(mockSubagentManager.createAgentHeadless),
+        ).toHaveBeenCalled();
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
+
     it('rejects working_dir that is not a registered worktree of this repo', async () => {
       vi.useRealTimers();
       const repo = fs.realpathSync(

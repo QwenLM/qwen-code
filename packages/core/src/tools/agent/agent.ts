@@ -2352,7 +2352,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const backgroundRequested =
         this.params.run_in_background ??
         (subagentConfig.background === true ||
-          (!isForkRequested && this.params.working_dir === undefined));
+          (!isForkRequested &&
+            this.params.working_dir === undefined &&
+            // A `name` passed without an active team falls through to a regular
+            // one-shot agent above; keep it foreground so both UI classifiers
+            // (which exclude `name`) stay consistent with core dispatch.
+            this.params.name === undefined));
       const shouldRunInBackground = backgroundRequested && isTopLevelSession();
       if (this.params.working_dir !== undefined && shouldRunInBackground) {
         // A caller-owned worktree has no lifecycle coupling to a backgrounded

@@ -40,7 +40,12 @@ export function isBackgroundSubAgentToolCall(tool: ACPToolCall): boolean {
     isTopLevelQwenAgent &&
     args?.run_in_background === undefined &&
     args?.working_dir === undefined &&
-    args?.name === undefined;
+    args?.name === undefined &&
+    // Core keeps fork fallbacks in the foreground (`!isForkRequested` in
+    // AgentTool.execute), so an omitted-flag `subagent_type: "fork"` call must
+    // not be classified as background here.
+    (typeof args?.subagent_type !== 'string' ||
+      args.subagent_type.toLowerCase() !== 'fork');
   const explicitlyBackground =
     args?.run_in_background === true &&
     (name !== 'agent' || isTopLevelQwenAgent);
