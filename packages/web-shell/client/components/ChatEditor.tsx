@@ -14,6 +14,7 @@ import { Tooltip as TooltipPrimitive } from 'radix-ui';
 import { DAEMON_APPROVAL_MODES } from '@qwen-code/webui/daemon-react-sdk';
 import type { CommandInfo } from '../adapters/types';
 import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonSessionGroupPresetColor } from '@qwen-code/sdk/daemon';
 import type { CommandDisplayCategoryOrder } from '../utils/commandDisplay';
 import type { SkillInfo } from '../completions/slashCompletion';
 import { useI18n } from '../i18n';
@@ -127,6 +128,11 @@ interface ChatEditorProps {
   workspaceName?: string;
   /** Full workspace cwd, used as the chip's tooltip. */
   workspaceTitle?: string;
+  /**
+   * Stable per-workspace accent color for the chip, so it stays distinguishable
+   * from other panes' chips even when it collapses to an icon on a narrow split.
+   */
+  workspaceColor?: DaemonSessionGroupPresetColor;
   chatWidthMode?: '1000' | 'wide';
   showChatWidthToggle?: boolean;
   chatWidthToggleMin?: number;
@@ -1129,6 +1135,7 @@ export const ChatEditor = memo(
       gitBranch,
       workspaceName,
       workspaceTitle,
+      workspaceColor,
       chatWidthMode = '1000',
       showChatWidthToggle = true,
       chatWidthToggleMin,
@@ -2087,6 +2094,7 @@ export const ChatEditor = memo(
                     <WorkspaceIndicator
                       name={workspaceName}
                       title={workspaceTitle ?? workspaceName}
+                      color={workspaceColor}
                       compact={!showWorkspaceLabel}
                       ariaLabel={t('workspace.paneLabel', {
                         name: workspaceName,
