@@ -1989,7 +1989,7 @@ export async function runQwenServe(
   };
 
   // Resolve the bound workspace list. The first explicit workspace remains the
-  // primary workspace for legacy APIs; later workspaces are sessions-only
+  // primary workspace for legacy APIs; later workspaces are isolated secondary
   // runtimes.
   const workspaceInputs = rawWorkspaces.map((workspace) => ({
     raw: workspace,

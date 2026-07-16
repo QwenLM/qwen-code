@@ -63,7 +63,7 @@ Pick the path that matches your goal:
 ## Glossary
 
 - **ACP** - Agent Client Protocol. JSON-RPC over stdio spoken between the daemon bridge and the ACP child process. This is not the HTTP protocol that clients use against the daemon.
-- **ACP child** - the child process the daemon spawns (`qwen --acp`) to host the actual agent runtime. The bridge multiplexes one ACP child across many connected clients.
+- **ACP child** - the `qwen --acp` child that hosts one workspace's agent runtime. Production attempts to preheat the primary bridge and retries on first use after failure; a trusted secondary starts its child on demand, while an untrusted secondary does not. The owning bridge multiplexes sessions and clients onto that child.
 - **acp-bridge** - the `@qwen-code/acp-bridge` package (`packages/acp-bridge/`). Owns session multiplexing, the permission mediator, the event bus, and the channel factory.
 - **BridgeClient** - `packages/acp-bridge/src/bridgeClient.ts`. Wraps one ACP `ClientSideConnection`, and handles `requestPermission`, `sendPrompt`, and `cancelSession`.
 - **Channel factory** - pluggable strategy for spawning or attaching to an ACP child. The default `spawnChannel` runs `qwen --acp` as a subprocess; `inMemoryChannel` runs it in-process for tests.
@@ -78,7 +78,7 @@ Pick the path that matches your goal:
 - **PoolEntry** - `packages/core/src/tools/mcp-pool-entry.ts`. One entry in `McpTransportPool`: one MCP transport, a refcount of attached sessions, and an idle drain timer.
 - **Session scope** - `single` (one ACP session shared by all clients) or `thread` (one session per conversation thread). The default is `single`.
 - **SSE** - Server-Sent Events. The daemon outbound event channel (`GET /session/:id/events`).
-- **Workspace** - a directory registered at daemon boot (`--workspace` or `cwd`). `workspaceCwd` is the primary workspace; when `multi_workspace_sessions` is advertised, `workspaces[]` lists additional sessions-only runtimes.
+- **Workspace** - a directory registered at daemon boot, restored from the registration store, or added dynamically. `workspaceCwd` is the legacy primary default; `workspaces[]` is the catalog of isolated runtimes and their trust/removal metadata.
 
 ## Implementation source anchors
 

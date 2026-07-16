@@ -283,14 +283,17 @@ function extractLoadReplayResponse(state: BridgeSessionState): {
  * Stage 1 HTTP->ACP bridge factory + supporting helpers.
  *
  * Architecture:
- *   - **1 daemon = 1 workspace**: every bridge instance is bound to a
+ *   - **1 bridge = 1 workspace runtime**: every bridge instance is bound to a
  *     single canonical workspace path at construction
  *     (`BridgeOptions.boundWorkspace`). All `spawnOrAttach` calls must
  *     target that workspace; cross-workspace requests throw
- *     `WorkspaceMismatchError`. Multi-workspace deployments use multiple
- *     daemon processes (one per workspace, supervised externally).
- *   - One `qwen --acp` child total; multiple sessions multiplex onto it
- *     via `connection.newSession()`. Sessions share the child's process /
+ *     `WorkspaceMismatchError`. A multi-workspace daemon owns one bridge per
+ *     registered runtime and selects the bridge before dispatch.
+ *   - At most one `qwen --acp` child per bridge. Secondary daemon routing
+ *     admits only trusted runtime-backed work and starts the child on demand;
+ *     the primary may be preheated for legacy compatibility. Multiple sessions
+ *     multiplex onto the child via
+ *     `connection.newSession()`. Sessions share its process /
  *     OAuth state / `FileReadCache` / hierarchy-memory parse.
  *   - HTTP request bodies are forwarded as ACP NDJSON over the child's stdin.
  *   - Child stdout NDJSON notifications publish onto each session's
@@ -311,11 +314,10 @@ interface ChannelInfo {
   connection: ClientSideConnection;
   /** Shared BridgeClient — its methods route ACP params by sessionId. */
   client: BridgeClient;
-  // Under "1 daemon = 1 workspace" the module-scope `boundWorkspace`
-  // is the single source of truth and every channel inherits it.
-  // Per-channel storage would suggest variance the model doesn't
-  // allow; keeping it out makes the single-workspace invariant visible
-  // at the type level.
+  // One bridge owns one workspace runtime, so module-scope `boundWorkspace` is
+  // the source of truth and every channel in this bridge inherits it.
+  // Per-channel storage would suggest variance the bridge doesn't allow;
+  // keeping it out makes the runtime boundary visible at the type level.
   /**
    * Live session ids multiplexed on this channel. Updated when
    * `doSpawn` registers a new session and when `killSession` /
@@ -1316,7 +1318,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   const persistApprovalMode = opts.persistApprovalMode;
   const telemetry = opts.telemetry ?? NOOP_BRIDGE_TELEMETRY;
 
-  // Single-workspace model: the bridge hosts AT MOST one
+  // Per-workspace bridge model: the bridge hosts AT MOST one
   // ATTACH-AVAILABLE channel and one default attach-target entry.
   // Multi-session multiplexing happens through `channelInfo.sessionIds`;
   // the `defaultEntry` slot is the FIRST session created (the one a

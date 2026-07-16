@@ -71,7 +71,7 @@ interface DaemonCapabilitiesLike {
   features: string[];
   workspaceCwd?: string;
   /**
-   * Registered runtimes on a multi-workspace daemon (Phase 2a `/capabilities`).
+   * Registered runtimes advertised by a multi-workspace daemon.
    * Absent on legacy single-workspace daemons, where `workspaceCwd` is used.
    */
   workspaces?: Array<{

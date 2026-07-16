@@ -3719,11 +3719,11 @@ describe('createAcpSessionBridge', () => {
   });
 
   it('rejects cross-workspace requests with WorkspaceMismatchError (#3803 §02)', async () => {
-    // Per #3803 §02 (1 daemon = 1 workspace), `spawnOrAttach` calls
-    // whose canonical `workspaceCwd` doesn't match `boundWorkspace`
+    // One bridge owns one workspace runtime, so `spawnOrAttach` calls whose
+    // canonical `workspaceCwd` doesn't match `boundWorkspace`
     // throw `WorkspaceMismatchError`. The server route translates
     // this to a 400 with `code: 'workspace_mismatch'` so clients can
-    // route to (or spawn) a daemon for the other workspace.
+    // select or register the correct runtime.
     const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async () => {
       const h = makeChannel();
@@ -3784,6 +3784,10 @@ describe('createAcpSessionBridge', () => {
     const err = new WorkspaceMismatchError('/work/bound', normal);
     expect(err.requested).toBe(normal);
     expect(err.requested.endsWith('…[truncated]')).toBe(false);
+    expect(err.message).toContain('Select a registered runtime');
+    expect(err.message).toContain(
+      'will not fall back to the primary workspace',
+    );
   });
 
   it('creates fresh session per call under sessionScope:thread (Stage 1.5 multi-session: shares channel)', async () => {
@@ -4111,8 +4115,7 @@ describe('createAcpSessionBridge', () => {
   });
 
   it('shutdown kills the live channel and its multiplexed sessions', async () => {
-    // Stage 1.5 multi-session under single-workspace mode (#3803 §02):
-    // a daemon hosts one channel with N sessions multiplexed on it.
+    // One workspace bridge hosts one channel with N sessions multiplexed on it.
     // Shutdown kills that one channel and tears down every multiplexed
     // session.
     const handles: ChannelHandle[] = [];
@@ -4141,8 +4144,8 @@ describe('createAcpSessionBridge', () => {
     // live-channel reference BEFORE awaiting the child's SIGTERM
     // grace. A mid-drain double-Ctrl+C invoked `killAllSync`, found
     // nothing to force-kill, and `process.exit(1)` orphaned the
-    // child. Under #3803 §02 the bridge has at most one channel, but
-    // the invariant is the same: `channelInfo` MUST stay set until
+    // child. The bridge has at most one channel, but the invariant is the
+    // same: `channelInfo` MUST stay set until
     // `channel.exited` fires (OS-level reap), not be eagerly cleared
     // by `shutdown()`.
     const killSyncInvoked: string[] = [];
