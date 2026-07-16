@@ -2873,6 +2873,28 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('keeps a pending clear after an unmatched update confirmation', async () => {
+      const channelMemory = createChannelMemory();
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(envelope({ text: '清空记忆', senderId: 'alice' }));
+      await ch.handleInbound(
+        envelope({ text: '确认更新记忆', senderId: 'alice' }),
+      );
+
+      expect(channelMemory.clearChannelMemory).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending channel memory update. Start a new update request first.',
+      );
+
+      await ch.handleInbound(
+        envelope({ text: '确认清空记忆', senderId: 'alice' }),
+      );
+
+      expect(channelMemory.clearChannelMemory).toHaveBeenCalledTimes(1);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
     it('natural group clear uses the current group target and requires confirmation', async () => {
       const channelMemory = createChannelMemory();
       const ch = createChannel(

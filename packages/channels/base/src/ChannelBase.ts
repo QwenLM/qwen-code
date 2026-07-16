@@ -118,6 +118,26 @@ type ResolvedChannelMemoryIntent =
   | { kind: 'natural_update'; id: string; text: string; expectedText: string }
   | { kind: 'natural_remove'; id: string; expectedText: string };
 
+type PendingChannelMemoryMutationInput =
+  | { kind: 'clear' }
+  | {
+      kind: 'update';
+      id: string;
+      expectedText: string;
+      proposedText: string;
+    }
+  | {
+      kind: 'remove';
+      id: string;
+      expectedText: string;
+    };
+
+type PendingChannelMemoryMutation = PendingChannelMemoryMutationInput & {
+  expiresAt: number;
+};
+
+type PendingChannelMemoryMutationKind = PendingChannelMemoryMutation['kind'];
+
 export interface ChannelBaseOptions {
   router?: SessionRouter;
   proxy?: string;
@@ -270,7 +290,10 @@ export abstract class ChannelBase {
    * so a cleared session can't be resurrected by an already-queued prompt.
    */
   private sessionGenerations: Map<string, number> = new Map();
-  private pendingClears: Map<string, number> = new Map();
+  private pendingChannelMemoryMutations = new Map<
+    string,
+    PendingChannelMemoryMutation
+  >();
 
   /** Per-session active prompt tracking for dispatch modes. */
   private activePrompts: Map<string, ActivePrompt> = new Map();
@@ -2825,11 +2848,25 @@ export abstract class ChannelBase {
     }
 
     if (intent.kind === 'clear_request') {
-      this.setPendingClear(this.clearPendingKey(envelope));
+      this.setPendingChannelMemoryMutation(envelope, { kind: 'clear' });
       await this.sendMessage(
         envelope.chatId,
         'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
       );
+      return;
+    }
+
+    if (intent.kind === 'update_confirm' || intent.kind === 'remove_confirm') {
+      const kind = intent.kind === 'update_confirm' ? 'update' : 'remove';
+      const pending = this.takePendingChannelMemoryMutation(envelope, kind);
+      if (!pending) {
+        await this.sendMessage(
+          envelope.chatId,
+          kind === 'update'
+            ? 'No pending channel memory update. Start a new update request first.'
+            : 'No pending channel memory removal. Start a new removal request first.',
+        );
+      }
       return;
     }
 
@@ -2996,10 +3033,8 @@ export abstract class ChannelBase {
     }
 
     if (intent.kind === 'clear_confirm') {
-      const pendingKey = this.clearPendingKey(envelope);
-      const expiresAt = this.pendingClears.get(pendingKey);
-      this.pendingClears.delete(pendingKey);
-      if (expiresAt === undefined || expiresAt < Date.now()) {
+      const pending = this.takePendingChannelMemoryMutation(envelope, 'clear');
+      if (!pending) {
         await this.sendMessage(
           envelope.chatId,
           'No pending clear request. Say "清空记忆" first.',
@@ -3047,20 +3082,55 @@ export abstract class ChannelBase {
     );
   }
 
-  private clearPendingKey(envelope: Envelope): string {
+  private channelMemoryPendingKey(envelope: Envelope): string {
     return `${this.name}:${envelope.chatId}:${envelope.threadId ?? ''}:${
       envelope.senderId ?? ''
     }`;
   }
 
-  private setPendingClear(key: string): void {
+  private setPendingChannelMemoryMutation(
+    envelope: Envelope,
+    mutation: PendingChannelMemoryMutationInput,
+  ): void {
     const now = Date.now();
-    for (const [pendingKey, expiresAt] of this.pendingClears) {
-      if (expiresAt < now) {
-        this.pendingClears.delete(pendingKey);
+    for (const [pendingKey, pending] of this.pendingChannelMemoryMutations) {
+      if (pending.expiresAt < now) {
+        this.pendingChannelMemoryMutations.delete(pendingKey);
       }
     }
-    this.pendingClears.set(key, now + 60_000);
+    this.deletePendingChannelMemoryMutation(envelope);
+    this.pendingChannelMemoryMutations.set(
+      this.channelMemoryPendingKey(envelope),
+      { ...mutation, expiresAt: now + 60_000 },
+    );
+  }
+
+  private takePendingChannelMemoryMutation<
+    K extends PendingChannelMemoryMutationKind,
+  >(
+    envelope: Envelope,
+    kind: K,
+  ): Extract<PendingChannelMemoryMutation, { kind: K }> | undefined {
+    const key = this.channelMemoryPendingKey(envelope);
+    const pending = this.pendingChannelMemoryMutations.get(key);
+    if (!pending) {
+      return undefined;
+    }
+    if (pending.expiresAt < Date.now()) {
+      this.pendingChannelMemoryMutations.delete(key);
+      return undefined;
+    }
+    if (pending.kind !== kind) {
+      return undefined;
+    }
+    this.pendingChannelMemoryMutations.delete(key);
+    return pending as Extract<PendingChannelMemoryMutation, { kind: K }>;
+  }
+
+  private deletePendingChannelMemoryMutation(envelope: Envelope): void {
+    this.pendingChannelMemoryMutations.delete(
+      this.channelMemoryPendingKey(envelope),
+    );
   }
 
   private async classifyChannelMemoryIntent(
