@@ -61,6 +61,107 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `session-transcript-${theme}`);
     });
 
+    test(`extensions manager`, async ({ page }, testInfo) => {
+      // Seed a few extensions so the full-page manager renders real cards —
+      // enabled + disabled, marketplace + local, with varied capability counts
+      // — instead of its empty state. `capabilities` is required on every entry.
+      const scenario = createWebShellDaemonScenario({
+        extensions: {
+          extensions: [
+            {
+              kind: 'extension',
+              id: 'context7',
+              name: 'context7',
+              displayName: 'Context7',
+              description:
+                'Up-to-date library docs injected into your prompts.',
+              version: '1.4.0',
+              isActive: true,
+              path: '/ext/context7',
+              source: 'marketplace',
+              capabilities: {
+                mcpServerCount: 1,
+                skillCount: 0,
+                agentCount: 0,
+                hookCount: 0,
+                commandCount: 0,
+                contextFileCount: 0,
+                channelCount: 0,
+                hasSettings: true,
+              },
+            },
+            {
+              kind: 'extension',
+              id: 'playwright',
+              name: 'playwright',
+              displayName: 'Playwright',
+              description: 'Drive a real browser for end-to-end checks.',
+              version: '0.9.2',
+              isActive: true,
+              path: '/ext/playwright',
+              source: 'marketplace',
+              capabilities: {
+                mcpServerCount: 1,
+                skillCount: 1,
+                agentCount: 0,
+                hookCount: 0,
+                commandCount: 2,
+                contextFileCount: 0,
+                channelCount: 0,
+                hasSettings: false,
+              },
+            },
+            {
+              kind: 'extension',
+              id: 'local-notes',
+              name: 'local-notes',
+              displayName: 'Local Notes',
+              description: 'A scratchpad extension loaded from disk.',
+              version: '0.1.0',
+              isActive: false,
+              path: '/ext/local-notes',
+              source: 'local',
+              capabilities: {
+                mcpServerCount: 0,
+                skillCount: 0,
+                agentCount: 0,
+                hookCount: 0,
+                commandCount: 1,
+                contextFileCount: 1,
+                channelCount: 0,
+                hasSettings: false,
+              },
+            },
+          ],
+        },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      // Open the full-page Extensions manager via the `/extensions` command.
+      // Gate on the page heading — a stable structural role, unlike card text a
+      // refactor could reshape or that could also match a toast/sidebar — to
+      // prove the manager PAGE (not a transcript/dialog) is reachable, then
+      // confirm seeded cards rendered via their button role — both an enabled
+      // marketplace one and the disabled, local-source one, so a regression
+      // that hides `isActive: false` or local rows fails an assertion rather
+      // than only differing in the (visually reviewed) screenshot.
+      await submitLocalCommand(page, '/extensions');
+      await expect(
+        page.getByRole('heading', { name: 'Manage Extensions' }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole('button', { name: 'Context7' }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole('button', { name: 'Local Notes' }),
+      ).toBeVisible();
+      await captureScreenshot(page, `extensions-manager-${theme}`);
+    });
+
     test(`mermaid diagram`, async ({ page }, testInfo) => {
       const scenario = createWebShellDaemonScenario({
         events: [
