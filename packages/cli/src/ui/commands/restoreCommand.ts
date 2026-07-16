@@ -148,7 +148,9 @@ async function restoreAction(
     }
 
     if (toolCallData.clientHistory) {
-      await config?.getGeminiClient()?.setHistory(toolCallData.clientHistory);
+      await config
+        ?.getGeminiClient()
+        ?.setHistory(toolCallData.clientHistory);
     }
 
     return {

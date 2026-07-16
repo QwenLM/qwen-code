@@ -6,6 +6,8 @@ Qwen Code allows you to configure multiple model providers through the `modelPro
 
 Use `modelProviders` to declare models per provider id that the `/model` picker can switch between. Each key is a provider id and its value is **an array of model definitions** (`ModelConfig[]`). For built-in providers the key must be a valid auth type (`openai`, `anthropic`, `gemini`, `vertex-ai`); a custom provider id (e.g. `idealab`) is allowed as long as you map it to a protocol via the top-level [`providerProtocol`](#custom-provider-ids-providerprotocol) setting. Each model entry requires an `id`; `envKey` is **optional and recommended** (when omitted, it falls back to the auth type's default env key, e.g. `OPENAI_API_KEY` for `openai`), with optional `name`, `description`, `baseUrl`, and `generationConfig`. Credentials are never persisted in settings; the runtime reads them from `process.env[envKey]`. Qwen OAuth models remain hard-coded and cannot be overridden.
 
+`capabilities.vision` declares that a model accepts image input. `capabilities.agent` opts an image-capable vision model into full-turn routing when it is selected as `visionModel`, so the same model handles tool calls and continuations for that turn. Full-turn routing requires `capabilities.agent` to be explicitly `true`; `false` or an omitted value keeps the existing Vision Bridge transcription flow.
+
 > [!note]
 >
 > Earlier previews wrapped each provider's models in a `{ "protocol": ..., "models": [...] }` object. That shape has been reverted — the current value is the bare `ModelConfig[]` array shown throughout this page. A wrapped entry in an already-migrated (`$version: 4`) settings file is silently skipped, so update any old configs to the array form.
@@ -217,7 +219,8 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
         "envKey": "GEMINI_API_KEY",
         "baseUrl": "https://generativelanguage.googleapis.com",
         "capabilities": {
-          "vision": true
+          "vision": true,
+          "agent": true
         },
         "generationConfig": {
           "timeout": 60000,

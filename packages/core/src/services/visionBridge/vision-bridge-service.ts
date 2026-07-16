@@ -7,6 +7,7 @@
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { Config } from '../../config/config.js';
 import type { InputModalities } from '../../core/contentGenerator.js';
+import type { FullTurnModelRoute } from '../../core/baseLlmClient.js';
 import { defaultModalities } from '../../core/modalityDefaults.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { runSideQuery } from '../../utils/sideQuery.js';
@@ -34,12 +35,17 @@ export interface VisionModelCandidate {
   baseUrl?: string;
   modalities?: InputModalities;
   isVision?: boolean;
+  capabilities?: { agent?: boolean };
+  fastOnly?: boolean;
+  voiceOnly?: boolean;
 }
 
 /** The model/endpoint selected for a vision bridge call. */
 export interface VisionBridgeModelSelection {
   id: string;
+  authType?: string;
   baseUrl?: string;
+  agentCapable?: true;
 }
 
 /**
@@ -55,8 +61,34 @@ export function isImageCapable(model: VisionModelCandidate): boolean {
   );
 }
 
+export function isFullTurnVisionCapable(
+  model: VisionModelCandidate,
+): boolean {
+  return (
+    !model.fastOnly &&
+    !model.voiceOnly &&
+    model.capabilities?.agent === true &&
+    isImageCapable(model)
+  );
+}
+
 function toSelection(model: VisionModelCandidate): VisionBridgeModelSelection {
-  return { id: model.id, ...(model.baseUrl && { baseUrl: model.baseUrl }) };
+  return {
+    id: model.id,
+    ...(model.authType && { authType: model.authType }),
+    ...(model.baseUrl && { baseUrl: model.baseUrl }),
+    ...(isFullTurnVisionCapable(model) && { agentCapable: true }),
+  };
+}
+
+function selectionModelSelector(selection: VisionBridgeModelSelection): string {
+  const qualifiedId =
+    selection.authType && !selection.id.startsWith(`${selection.authType}:`)
+      ? `${selection.authType}:${selection.id}`
+      : selection.id;
+  return selection.baseUrl
+    ? `${qualifiedId}\0${selection.baseUrl}`
+    : qualifiedId;
 }
 
 /**
@@ -79,7 +111,11 @@ export function selectVisionBridgeModel(
   primaryProvider: { authType?: string; baseUrl?: string } = {},
 ): VisionBridgeModelSelection | undefined {
   const candidates = models.filter(
-    (m) => m.id !== primaryModelId && isImageCapable(m),
+    (m) =>
+      m.id !== primaryModelId &&
+      !m.fastOnly &&
+      !m.voiceOnly &&
+      isImageCapable(m),
   );
   if (candidates.length === 0) return undefined;
   // Match the primary's endpoint when it has one; otherwise fall back to the
@@ -114,6 +150,80 @@ export function shouldRunVisionBridge(
     config.getEffectiveInputModalities?.()?.image !== true &&
     config.getDefaultVisionBridgeModel?.() !== undefined
   );
+}
+
+export type FullTurnVisionRouteResolution =
+  | { status: 'not-eligible' }
+  | {
+      status: 'ready';
+      selection: VisionBridgeModelSelection;
+      route: FullTurnModelRoute;
+    }
+  | { status: 'failed'; selection: VisionBridgeModelSelection };
+
+/** Resolve a full-turn route only for an explicitly agent-capable image model. */
+export async function resolveFullTurnVisionRoute(
+  config: Pick<
+    Config,
+    | 'getEffectiveInputModalities'
+    | 'getDefaultVisionBridgeModel'
+    | 'getBaseLlmClient'
+  >,
+): Promise<FullTurnVisionRouteResolution> {
+  if (config.getEffectiveInputModalities()?.image === true) {
+    return { status: 'not-eligible' };
+  }
+  const selection = config.getDefaultVisionBridgeModel();
+  if (selection?.agentCapable !== true) {
+    return { status: 'not-eligible' };
+  }
+
+  const selector = selectionModelSelector(selection);
+  try {
+    const resolved = await config
+      .getBaseLlmClient()
+      .resolveForModel(selector, { failClosed: true });
+    return {
+      status: 'ready',
+      selection,
+      route: {
+        model: resolved.model,
+        contentGenerator: resolved.contentGenerator,
+        contentGeneratorConfig: {
+          ...resolved.contentGeneratorConfig,
+          modalities: {
+            ...resolved.contentGeneratorConfig.modalities,
+            image: true,
+          },
+        },
+      },
+    };
+  } catch (error) {
+    debugLogger.warn(
+      `full-turn vision route resolution failed for ${selection.id}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return { status: 'failed', selection };
+  }
+}
+
+/** User-facing disclosure for an exact full-turn image route. */
+export function formatFullTurnVisionNotice(
+  selection: VisionBridgeModelSelection,
+): string {
+  const endpoint = hostOf(selection.baseUrl);
+  const target = endpoint ? `${selection.id} (${endpoint})` : selection.id;
+  return `Routing the current image turn to ${target}. Your image and prompt/context will be sent to that model, and tool continuations will stay there until the turn ends.`;
+}
+
+/** Safe failure text that never exposes provider errors or forwards the image. */
+export function formatFullTurnVisionFailureNotice(
+  selection: VisionBridgeModelSelection,
+): string {
+  const endpoint = hostOf(selection.baseUrl);
+  const target = endpoint ? `${selection.id} (${endpoint})` : selection.id;
+  return `Full-turn vision routing via ${target} could not start. The image was not sent to the primary model.`;
 }
 
 /**
@@ -430,7 +540,7 @@ export async function runVisionBridge(params: {
   const selection = config.getDefaultVisionBridgeModel?.();
   const modelId = selection?.id;
   const baseUrl = selection?.baseUrl;
-  const modelForApi = baseUrl && modelId ? `${modelId}\0${baseUrl}` : modelId;
+  const modelForApi = selection ? selectionModelSelector(selection) : undefined;
   if (!modelForApi || !modelId) {
     return failure(
       'no image-capable model is available for the vision bridge',

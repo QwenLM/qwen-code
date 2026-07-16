@@ -1292,6 +1292,35 @@ describe('MemoryPressureMonitor', () => {
       expect(monitor.getConsecutiveFailures()).toBe(0);
     });
 
+    it('skips compaction while a full-turn media route is active', async () => {
+      const getHistoryShallow = vi.fn(() => [
+        { role: 'user', parts: [{ text: 'keep routed history intact' }] },
+      ]);
+      const setHistory = vi.fn();
+      const monitor = new MemoryPressureMonitor(
+        createMockConfig({
+          geminiClient: {
+            isInitialized: () => true,
+            getChat: () => ({
+              getPendingFullTurnRouteIdentity: () => ({
+                model: 'vision-agent',
+              }),
+              getHistoryShallow,
+              setHistory,
+            }),
+          },
+        }),
+        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
+      );
+
+      setMemUsage(10 * 1024 * 1024 * 1024);
+      monitor.performCheck();
+      await drainCleanupMeasurement();
+
+      expect(getHistoryShallow).not.toHaveBeenCalled();
+      expect(setHistory).not.toHaveBeenCalled();
+    });
+
     it('handles empty history without errors', async () => {
       const setHistory = vi.fn();
       const monitor = new MemoryPressureMonitor(

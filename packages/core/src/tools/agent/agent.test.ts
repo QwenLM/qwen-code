@@ -2538,6 +2538,56 @@ describe('AgentTool', () => {
       );
     });
 
+    it('removes media before seeding a fork with parent history', async () => {
+      vi.mocked(config.getGeminiClient).mockReturnValue({
+        getHistory: vi.fn().mockReturnValue([
+          {
+            role: 'user',
+            parts: [
+              { inlineData: { mimeType: 'image/png', data: 'raw-image' } },
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  response: { output: 'loaded' },
+                  parts: [
+                    {
+                      inlineData: {
+                        mimeType: 'image/jpeg',
+                        data: 'raw-tool-image',
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          { role: 'model', parts: [{ text: 'done' }] },
+        ]),
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi
+            .fn()
+            .mockReturnValue({ systemInstruction: 'parent' }),
+        }),
+      } as unknown as ReturnType<Config['getGeminiClient']>);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'fork task',
+        prompt: 'continue',
+        subagent_type: 'fork',
+      });
+      await invocation.execute();
+
+      const promptConfig = vi.mocked(AgentHeadless.create).mock.calls[0]?.[2];
+      const serialized = JSON.stringify(promptConfig?.initialMessages);
+      expect(serialized).toContain('[image: image/png]');
+      expect(serialized).toContain('[image: image/jpeg]');
+      expect(serialized).not.toContain('raw-image');
+      expect(serialized).not.toContain('raw-tool-image');
+      await vi.runAllTimersAsync();
+    });
+
     it('stops the per-subagent ToolRegistry after the fork body finishes', async () => {
       // Regression: foreground-fork fires the body via
       // `void runInForkContext(...)` and returns a placeholder

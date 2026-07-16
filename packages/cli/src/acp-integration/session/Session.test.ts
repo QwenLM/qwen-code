@@ -26,6 +26,8 @@ import type {
   Config,
   Extension,
   GeminiChat,
+  FullTurnModelRoute,
+  FullTurnModelRouteIdentity,
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
@@ -48,6 +50,7 @@ import { MessageType } from '../../ui/types.js';
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 const debugLoggerDebugSpy = vi.hoisted(() => vi.fn());
 const runVisionBridgeSpy = vi.hoisted(() => vi.fn());
+const resolveFullTurnVisionRouteSpy = vi.hoisted(() => vi.fn());
 const refreshMemoryAfterManagedWriteSpy = vi.hoisted(() => vi.fn());
 const transcribeVoiceAudioSpy = vi.hoisted(() => vi.fn());
 // Records every LoopTickResolver construction's deps so a test can assert what
@@ -68,6 +71,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     generatePromptSuggestion: vi.fn(),
     logPromptSuggestion: vi.fn(),
     runVisionBridge: runVisionBridgeSpy,
+    resolveFullTurnVisionRoute: resolveFullTurnVisionRouteSpy,
     refreshMemoryAfterManagedWrite: refreshMemoryAfterManagedWriteSpy,
     // Transparent recording wrapper: records the constructor deps, then behaves
     // exactly like the real resolver (subclass → instanceof + methods preserved).
@@ -281,6 +285,8 @@ describe('Session', () => {
     recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
     setTitleRecordedCallback: ReturnType<typeof vi.fn>;
+    recordFullTurnRoute: ReturnType<typeof vi.fn>;
+    recordMediaScrubCheckpoint: ReturnType<typeof vi.fn>;
   };
   let mockFileHistoryService: {
     makeSnapshot: ReturnType<typeof vi.fn>;
@@ -292,6 +298,7 @@ describe('Session', () => {
     getChat: ReturnType<typeof vi.fn>;
     isInitialized: ReturnType<typeof vi.fn>;
     tryCompressChat: ReturnType<typeof vi.fn>;
+    setHistory: ReturnType<typeof vi.fn>;
   };
   let mockBackgroundTaskRegistry: {
     setNotificationCallback: ReturnType<typeof vi.fn>;
@@ -376,6 +383,19 @@ describe('Session', () => {
     return request?.message ?? [];
   }
 
+  function makeVisionAgentRoute(): FullTurnModelRoute {
+    return {
+      model: 'vision-agent',
+      contentGenerator: {},
+      contentGeneratorConfig: {
+        model: 'vision-agent',
+        authType: AuthType.USE_OPENAI,
+        contextWindowSize: 123_456,
+        modalities: { image: true },
+      },
+    } as FullTurnModelRoute;
+  }
+
   function textParts(parts: Part[]): string[] {
     return parts.flatMap((part) =>
       typeof part.text === 'string' ? [part.text] : [],
@@ -395,6 +415,9 @@ describe('Session', () => {
 
   beforeEach(() => {
     runVisionBridgeSpy.mockReset();
+    resolveFullTurnVisionRouteSpy
+      .mockReset()
+      .mockResolvedValue({ status: 'not-eligible' });
     refreshMemoryAfterManagedWriteSpy.mockReset();
     refreshMemoryAfterManagedWriteSpy.mockResolvedValue(false);
     transcribeVoiceAudioSpy.mockReset();
@@ -408,6 +431,8 @@ describe('Session', () => {
       });
 
     const getHistoryMock = vi.fn().mockReturnValue([]);
+    let pendingFullTurnRouteIdentity: FullTurnModelRouteIdentity | undefined;
+    let pendingFullTurnRoute: FullTurnModelRoute | undefined;
     mockChat = {
       sendMessageStream: vi.fn(),
       addHistory: vi.fn(),
@@ -423,6 +448,20 @@ describe('Session', () => {
       truncateHistory: vi.fn(),
       stripThoughtsFromHistory: vi.fn(),
       stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+      replaceHistoricalMediaWithReferences: vi.fn(),
+      prepareHistoricalMediaForContinuation: vi.fn((parts) => parts),
+      setPendingFullTurnRoute: vi.fn((identity, route) => {
+        pendingFullTurnRouteIdentity = identity;
+        pendingFullTurnRoute = route;
+      }),
+      getPendingFullTurnRouteIdentity: vi.fn(
+        () => pendingFullTurnRouteIdentity,
+      ),
+      getPendingFullTurnRoute: vi.fn(() => pendingFullTurnRoute),
+      clearPendingFullTurnRoute: vi.fn(() => {
+        pendingFullTurnRouteIdentity = undefined;
+        pendingFullTurnRoute = undefined;
+      }),
     } as unknown as GeminiChat;
     mockGeminiClient = {
       getChat: vi.fn().mockReturnValue(mockChat),
@@ -432,6 +471,7 @@ describe('Session', () => {
         newTokenCount: 0,
         compressionStatus: core.CompressionStatus.NOOP,
       }),
+      setHistory: vi.fn(),
     };
     mockBackgroundTaskRegistry = {
       setNotificationCallback: vi.fn(),
@@ -454,6 +494,8 @@ describe('Session', () => {
       recordFileHistorySnapshot: vi.fn(),
       rewindRecording: vi.fn(),
       setTitleRecordedCallback: vi.fn(),
+      recordFullTurnRoute: vi.fn(),
+      recordMediaScrubCheckpoint: vi.fn(),
     };
     mockFileHistoryService = {
       makeSnapshot: vi.fn().mockResolvedValue(undefined),
@@ -651,6 +693,172 @@ describe('Session', () => {
       // fire its own internal prompt() here.
       await Promise.resolve();
       expect(promptSpy).not.toHaveBeenCalled();
+    });
+
+    it('reacquires an exact vision route before continuing an orphaned image prompt', async () => {
+      mockChat.getHistory = vi.fn().mockReturnValue([
+        {
+          role: 'user',
+          parts: [
+            { text: 'inspect this' },
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'private-image',
+              },
+            },
+          ],
+        },
+      ]);
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'vision-agent',
+        agentCapable: true,
+      });
+      const route = makeVisionAgentRoute();
+      mockChat.getPendingFullTurnRoute = vi.fn().mockReturnValue(route);
+      mockChat.getPendingFullTurnRouteIdentity = vi.fn().mockReturnValue({
+        model: route.model,
+        authType: AuthType.USE_OPENAI,
+      });
+      resolveFullTurnVisionRouteSpy.mockResolvedValue({
+        status: 'ready',
+        route,
+        selection: { id: 'vision-agent', agentCapable: true },
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [],
+        _meta: { 'qwen.daemon.continueLastTurn': true },
+      } as unknown as Parameters<typeof session.prompt>[0]);
+
+      expect(runVisionBridgeSpy).not.toHaveBeenCalled();
+      expect(firstSentMessage()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            inlineData: expect.objectContaining({ data: 'private-image' }),
+          }),
+        ]),
+      );
+      expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+        'vision-agent',
+        expect.any(Object),
+        expect.any(String),
+        { modelRoute: route },
+      );
+    });
+
+    it('keeps the persisted exact route when retrying a plain image prompt', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      const route = makeVisionAgentRoute();
+      mockChat.getPendingFullTurnRoute = vi.fn().mockReturnValue(route);
+      mockChat.getPendingFullTurnRouteIdentity = vi.fn().mockReturnValue({
+        model: route.model,
+        authType: AuthType.USE_OPENAI,
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'retry this image' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'retry-image',
+          },
+        ],
+        retry: true,
+      } as unknown as Parameters<typeof session.prompt>[0]);
+
+      expect(resolveFullTurnVisionRouteSpy).not.toHaveBeenCalled();
+      expect(runVisionBridgeSpy).not.toHaveBeenCalled();
+      expect(firstSentMessage()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            inlineData: expect.objectContaining({ data: 'retry-image' }),
+          }),
+        ]),
+      );
+      expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+        route.model,
+        expect.any(Object),
+        expect.any(String),
+        { modelRoute: route },
+      );
+    });
+
+    it('reacquires the image route when continuing an interrupted tool turn', async () => {
+      mockChat.getHistory = vi.fn().mockReturnValue([
+        {
+          role: 'user',
+          parts: [
+            { text: 'inspect this' },
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'private-image',
+              },
+            },
+          ],
+        },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-1',
+                name: 'read_file',
+                args: { path: '/tmp/example.png' },
+              },
+            },
+          ],
+        },
+      ]);
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'vision-agent',
+        agentCapable: true,
+      });
+      const route = makeVisionAgentRoute();
+      mockChat.getPendingFullTurnRoute = vi.fn().mockReturnValue(route);
+      mockChat.getPendingFullTurnRouteIdentity = vi.fn().mockReturnValue({
+        model: route.model,
+        authType: AuthType.USE_OPENAI,
+      });
+      resolveFullTurnVisionRouteSpy.mockResolvedValue({
+        status: 'ready',
+        route,
+        selection: { id: 'vision-agent', agentCapable: true },
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [],
+        _meta: { 'qwen.daemon.continueLastTurn': true },
+      } as unknown as Parameters<typeof session.prompt>[0]);
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+        'vision-agent',
+        expect.objectContaining({
+          message: expect.arrayContaining([
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({ id: 'call-1' }),
+            }),
+          ]),
+        }),
+        expect.any(String),
+        { modelRoute: route },
+      );
     });
 
     it('classifies a turn with dangling tool calls as interrupted_turn', async () => {
@@ -1085,7 +1293,7 @@ describe('Session', () => {
       session.restoreHistory(snapshot);
 
       expect(snapshot).toEqual(history);
-      expect(mockChat.setHistory).toHaveBeenCalledWith(history);
+      expect(mockGeminiClient.setHistory).toHaveBeenCalledWith(history);
       expect(mockChat.getHistory).not.toHaveBeenCalled();
     });
 
@@ -3162,6 +3370,372 @@ describe('Session', () => {
       const sent = firstSentMessage();
       expect(textParts(sent)).toContain('[transcribed image]');
       expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+    });
+
+    it('routes slash-command image prompts through the vision bridge', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      vi.mocked(
+        nonInteractiveCliCommands.handleSlashCommand,
+      ).mockResolvedValueOnce({
+        type: 'submit_prompt',
+        content: [
+          { text: 'look at this' },
+          {
+            inlineData: {
+              mimeType: 'image/png',
+              data: 'iVBORw0KGgo=',
+            },
+          },
+        ],
+      });
+      runVisionBridgeSpy.mockResolvedValue({
+        applied: true,
+        status: 'ok',
+        parts: [{ text: 'look at this' }, { text: '[slash image]' }],
+        transcript: '[slash image]',
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'qwen3.7-plus',
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: '/vision' }],
+      });
+
+      expect(resolveFullTurnVisionRouteSpy).toHaveBeenCalledOnce();
+      expect(runVisionBridgeSpy).toHaveBeenCalledOnce();
+      expect(textParts(firstSentMessage())).toContain('[slash image]');
+      expect(firstSentMessage().some((part) => 'inlineData' in part)).toBe(
+        false,
+      );
+    });
+
+    it('routes slash-command image prompts through the exact agent model', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'vision-agent',
+        agentCapable: true,
+      });
+      const route = makeVisionAgentRoute();
+      resolveFullTurnVisionRouteSpy.mockResolvedValue({
+        status: 'ready',
+        route,
+        selection: { id: 'vision-agent', agentCapable: true },
+      });
+      vi.mocked(
+        nonInteractiveCliCommands.handleSlashCommand,
+      ).mockResolvedValueOnce({
+        type: 'submit_prompt',
+        content: [
+          { text: 'look at this' },
+          {
+            inlineData: {
+              mimeType: 'image/png',
+              data: 'iVBORw0KGgo=',
+            },
+          },
+        ],
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      mockChat.replaceHistoricalMediaWithReferences = vi
+        .fn()
+        .mockReturnValueOnce(true);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: '/vision' }],
+      });
+
+      expect(runVisionBridgeSpy).not.toHaveBeenCalled();
+      expect(firstSentMessage().some((part) => 'inlineData' in part)).toBe(
+        true,
+      );
+      expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+        'vision-agent',
+        expect.any(Object),
+        expect.any(String),
+        { modelRoute: route },
+      );
+      expect(
+        mockChatRecordingService.recordMediaScrubCheckpoint.mock
+          .invocationCallOrder[0],
+      ).toBeLessThan(
+        mockChatRecordingService.recordFullTurnRoute.mock
+          .invocationCallOrder[0]!,
+      );
+      expect(
+        mockChatRecordingService.recordFullTurnRoute.mock
+          .invocationCallOrder[0],
+      ).toBeLessThan(
+        mockChatRecordingService.recordUserMessage.mock.invocationCallOrder[0]!,
+      );
+    });
+
+    it('routes unknown slash image prompts through the exact agent model', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'vision-agent',
+        agentCapable: true,
+      });
+      const route = makeVisionAgentRoute();
+      resolveFullTurnVisionRouteSpy.mockResolvedValue({
+        status: 'ready',
+        route,
+        selection: { id: 'vision-agent', agentCapable: true },
+      });
+      vi.mocked(
+        nonInteractiveCliCommands.handleSlashCommand,
+      ).mockResolvedValueOnce({ type: 'no_command' });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: '/unknown' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+      });
+
+      expect(runVisionBridgeSpy).not.toHaveBeenCalled();
+      expect(firstSentMessage().some((part) => 'inlineData' in part)).toBe(
+        true,
+      );
+      expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+        'vision-agent',
+        expect.any(Object),
+        expect.any(String),
+        { modelRoute: route },
+      );
+    });
+
+    it('routes an agent-capable image prompt exactly for that ACP prompt only', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'vision-agent',
+        agentCapable: true,
+      });
+      const route = makeVisionAgentRoute();
+      resolveFullTurnVisionRouteSpy.mockResolvedValue({
+        status: 'ready',
+        route,
+        selection: { id: 'vision-agent', agentCapable: true },
+      });
+      const messageBus = {
+        request: vi.fn().mockResolvedValue({ success: true, output: {} }),
+      };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.hasHooksForEvent = vi
+        .fn()
+        .mockImplementation((eventName: string) => eventName === 'Stop');
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'read_file',
+        kind: core.Kind.Read,
+        build: vi.fn().mockReturnValue({
+          params: { path: '/tmp/test.txt' },
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'file contents',
+            returnDisplay: 'file contents',
+          }),
+        }),
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                usageMetadata: {
+                  promptTokenCount: 42,
+                  totalTokenCount: 42,
+                },
+                functionCalls: [
+                  {
+                    id: 'call-1',
+                    name: 'read_file',
+                    args: { path: '/tmp/test.txt' },
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(createEmptyStream());
+      mockClient.extMethod = vi.fn().mockResolvedValue({
+        items: [
+          {
+            content: [
+              { type: 'text', text: 'also inspect this' },
+              {
+                type: 'image',
+                mimeType: 'image/png',
+                data: 'mid-turn-image',
+              },
+            ],
+            displayText: 'also inspect this',
+          },
+        ],
+      });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+      });
+
+      expect(runVisionBridgeSpy).not.toHaveBeenCalled();
+      expect(firstSentMessage().some((part) => 'inlineData' in part)).toBe(
+        true,
+      );
+      const sendMessageStream = vi.mocked(mockChat.sendMessageStream);
+      expect(sendMessageStream.mock.calls[0]?.[3]).toEqual({
+        modelRoute: route,
+      });
+      expect(sendMessageStream.mock.calls[1]?.[0]).toBe('vision-agent');
+      expect(sendMessageStream.mock.calls[1]?.[3]).toEqual({
+        modelRoute: route,
+      });
+      expect(mockGeminiClient.tryCompressChat).not.toHaveBeenCalled();
+      expect(
+        (sendMessageStream.mock.calls[1]?.[1] as { message: Part[] }).message,
+      ).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            functionResponse: expect.objectContaining({ name: 'read_file' }),
+          }),
+          expect.objectContaining({
+            inlineData: expect.objectContaining({ data: 'mid-turn-image' }),
+          }),
+        ]),
+      );
+      expect(agentMessageChunks()).toContainEqual(
+        expect.stringContaining('current image turn'),
+      );
+      expect(
+        mockChat.replaceHistoricalMediaWithReferences,
+      ).toHaveBeenCalledTimes(2);
+      expect(messageBus.request).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventName: 'Stop',
+          input: expect.objectContaining({ context_limit: 123_456 }),
+        }),
+        expect.anything(),
+      );
+
+      resolveFullTurnVisionRouteSpy.mockResolvedValue({
+        status: 'not-eligible',
+      });
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'next text turn' }],
+      });
+      expect(sendMessageStream.mock.calls[2]?.[3]).toBeUndefined();
+      expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledOnce();
+    });
+
+    it('fails an ACP image prompt closed when the exact route cannot resolve', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'vision-agent',
+        agentCapable: true,
+      });
+      resolveFullTurnVisionRouteSpy.mockResolvedValue({
+        status: 'failed',
+        selection: { id: 'vision-agent', agentCapable: true },
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'look at this' },
+            {
+              type: 'image',
+              mimeType: 'image/png',
+              data: 'iVBORw0KGgo=',
+            },
+          ],
+        }),
+      ).rejects.toThrow('not sent to the primary model');
+
+      expect(runVisionBridgeSpy).not.toHaveBeenCalled();
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    });
+
+    it('scrubs live routed media but keeps retry affinity after a stream failure', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'vision-agent',
+        agentCapable: true,
+      });
+      const route = makeVisionAgentRoute();
+      resolveFullTurnVisionRouteSpy.mockResolvedValue({
+        status: 'ready',
+        route,
+        selection: { id: 'vision-agent', agentCapable: true },
+      });
+      mockChat.getPendingFullTurnRouteIdentity = vi
+        .fn()
+        .mockReturnValue(undefined);
+      mockChat.setPendingFullTurnRoute = vi.fn();
+      mockChat.clearPendingFullTurnRoute = vi.fn();
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        (async function* () {
+          throw new Error('route stream failed');
+        })(),
+      );
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'look at this' },
+            {
+              type: 'image',
+              mimeType: 'image/png',
+              data: 'private-image',
+            },
+          ],
+        }),
+      ).rejects.toThrow('route stream failed');
+
+      expect(
+        mockChat.replaceHistoricalMediaWithReferences,
+      ).toHaveBeenCalledTimes(2);
+      expect(
+        mockChatRecordingService.recordMediaScrubCheckpoint,
+      ).not.toHaveBeenCalled();
+      expect(mockChat.clearPendingFullTurnRoute).not.toHaveBeenCalled();
     });
 
     it('strips image parts when the vision bridge is cancelled before applying', async () => {
@@ -10358,6 +10932,68 @@ describe('Session', () => {
 
           expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
           expect(result.stopReason).toBe('end_turn');
+        });
+
+        it('does not persist a blocked routed image as resumable input', async () => {
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: { decision: 'block', reason: 'Blocked by hook' },
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+          mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+          const route = makeVisionAgentRoute();
+          mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+            id: route.model,
+            agentCapable: true,
+          });
+          resolveFullTurnVisionRouteSpy.mockResolvedValue({
+            status: 'ready',
+            route,
+            selection: { id: route.model, agentCapable: true },
+          });
+          let pendingIdentity:
+            | { model: string; authType: AuthType }
+            | undefined;
+          mockChat.getPendingFullTurnRouteIdentity = vi.fn(
+            () => pendingIdentity,
+          );
+          mockChat.setPendingFullTurnRoute = vi.fn((identity) => {
+            pendingIdentity = identity;
+          });
+          mockChat.clearPendingFullTurnRoute = vi.fn(() => {
+            pendingIdentity = undefined;
+          });
+          mockChat.sendMessageStream = vi.fn();
+
+          const result = await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [
+              { type: 'text', text: 'blocked image prompt' },
+              {
+                type: 'image',
+                mimeType: 'image/png',
+                data: 'blocked-image',
+              },
+            ],
+          });
+
+          expect(result.stopReason).toBe('end_turn');
+          expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+          expect(
+            mockChatRecordingService.recordUserMessage,
+          ).not.toHaveBeenCalled();
+          expect(
+            mockChatRecordingService.recordMediaScrubCheckpoint,
+          ).toHaveBeenCalledOnce();
+          expect(mockChat.clearPendingFullTurnRoute).toHaveBeenCalledOnce();
+          expect(await session.continueLastTurn()).toEqual({
+            accepted: false,
+            interruption: 'none',
+          });
         });
       });
 

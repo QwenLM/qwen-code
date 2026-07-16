@@ -19,6 +19,7 @@ import type {
   ToolCall,
   Status as CoreStatus,
   EditorType,
+  FullTurnModelRoute,
 } from '@qwen-code/qwen-code-core';
 import {
   CoreToolScheduler,
@@ -42,6 +43,7 @@ const debugLogger = createDebugLogger('REACT_TOOL_SCHEDULER');
 export type ScheduleFn = (
   request: ToolCallRequestInfo | ToolCallRequestInfo[],
   signal: AbortSignal,
+  modelRoute?: FullTurnModelRoute,
 ) => void;
 export type MarkToolsAsSubmittedFn = (callIds: string[]) => void;
 
@@ -217,8 +219,9 @@ export function useReactToolScheduler(
     (
       request: ToolCallRequestInfo | ToolCallRequestInfo[],
       signal: AbortSignal,
+      modelRoute?: FullTurnModelRoute,
     ) => {
-      void scheduler.schedule(request, signal);
+      void scheduler.schedule(request, signal, modelRoute);
     },
     [scheduler],
   );

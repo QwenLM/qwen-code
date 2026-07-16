@@ -8,6 +8,7 @@ import type { Content, Part, Schema } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { reportError } from '../utils/errorReporting.js';
+import { slimCompactionInput } from '../services/compactionInputSlimming.js';
 
 const debugLogger = createDebugLogger('GOAL_JUDGE');
 
@@ -239,7 +240,7 @@ function collectTranscript(
     const client = config.getGeminiClient();
     if (!client.isInitialized()) return fallbackTranscript(lastAssistantText);
     const full = client.getHistoryTail(TRANSCRIPT_TAIL_MESSAGES);
-    const tail = full.map(capContent);
+    const tail = slimCompactionInput(full.map(capContent)).slimmedHistory;
     if (tail.length === 0) return fallbackTranscript(lastAssistantText);
     // If the live history's last assistant text doesn't include the supplied
     // `lastAssistantText`, splice it in — the Stop hook can fire before the

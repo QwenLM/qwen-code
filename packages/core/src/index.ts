@@ -57,6 +57,15 @@ export * from './output/types.js';
 // ============================================================================
 
 export * from './core/client.js';
+export {
+  getFullTurnModelRouteIdentity,
+  type FullTurnModelRoute,
+  type FullTurnModelRouteIdentity,
+} from './core/baseLlmClient.js';
+export {
+  runWithRuntimeContentGenerator,
+  type RuntimeContentGeneratorView,
+} from './agents/runtime/agent-context.js';
 export * from './core/contentGenerator.js';
 export * from './core/reasoning-effort.js';
 export * from './core/coreToolScheduler.js';
@@ -208,6 +217,7 @@ export {
   computeThresholds,
   type CompactionThresholds,
 } from './services/chatCompressionService.js';
+export { slimCompactionInput } from './services/compactionInputSlimming.js';
 export * from './services/chatRecordingService.js';
 export * from './services/cronScheduler.js';
 export type { DurableCronTask, CronTaskRun } from './services/cronTasksFile.js';

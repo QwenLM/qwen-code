@@ -202,6 +202,37 @@ describe('restoreCommand', () => {
       expect(mockSetHistory).not.toHaveBeenCalled();
       expect(mockRewind).not.toHaveBeenCalled();
     });
+
+    it('restores media preserved by a native multimodal checkpoint', async () => {
+      const toolCallData = {
+        clientHistory: [
+          {
+            role: 'user',
+            parts: [
+              { text: 'inspect this' },
+              {
+                inlineData: {
+                  mimeType: 'image/png',
+                  data: 'private-checkpoint-image',
+                },
+              },
+            ],
+          },
+        ],
+        toolCall: { name: 'run_shell_command', args: 'ls' },
+      };
+      await fs.writeFile(
+        path.join(checkpointsDir, 'legacy-image.json'),
+        JSON.stringify(toolCallData),
+      );
+
+      await restoreCommand(mockConfig)?.action?.(mockContext, 'legacy-image');
+
+      expect(mockSetHistory).toHaveBeenCalledOnce();
+      expect(JSON.stringify(mockSetHistory.mock.calls[0]?.[0])).toContain(
+        'private-checkpoint-image',
+      );
+    });
   });
 
   it('should reject legacy checkpoint format with commitHash', async () => {

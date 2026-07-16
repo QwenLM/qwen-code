@@ -1294,7 +1294,7 @@ const SETTINGS_SCHEMA = {
     requiresRestart: false,
     default: '',
     description:
-      'Image-capable model used as the vision bridge: when a text-only main model receives an image, it is transcribed by this model first. Set with /model --vision. Leave empty to auto-pick a same-provider vision model.',
+      'Image-capable model used when a text-only main model receives an image. Only an image-capable model that explicitly declares capabilities.agent: true handles the full agent turn; all others use Vision Bridge transcription. Set with /model --vision. Leave empty to auto-pick a same-provider vision model.',
     showInDialog: true,
   },
 

@@ -8,10 +8,12 @@ import type { Content } from '@google/genai';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 
-const { mockGetCacheSafeParams, mockRunForkedAgent } = vi.hoisted(() => ({
-  mockGetCacheSafeParams: vi.fn(),
-  mockRunForkedAgent: vi.fn(),
-}));
+const { mockGetCacheSafeParams, mockRunForkedAgent, mockRunSideQuery } =
+  vi.hoisted(() => ({
+    mockGetCacheSafeParams: vi.fn(),
+    mockRunForkedAgent: vi.fn(),
+    mockRunSideQuery: vi.fn(),
+  }));
 
 vi.mock('../utils/forkedAgent.js', async (importOriginal) => {
   const actual =
@@ -22,6 +24,10 @@ vi.mock('../utils/forkedAgent.js', async (importOriginal) => {
     runForkedAgent: mockRunForkedAgent,
   };
 });
+
+vi.mock('../utils/sideQuery.js', () => ({
+  runSideQuery: mockRunSideQuery,
+}));
 
 import {
   generatePromptSuggestion,
@@ -40,6 +46,114 @@ describe('generatePromptSuggestion', () => {
   beforeEach(() => {
     mockGetCacheSafeParams.mockReset();
     mockRunForkedAgent.mockReset();
+    mockRunSideQuery.mockReset();
+  });
+
+  it('removes top-level and tool-nested media before a side query', async () => {
+    const historyWithMedia: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          { text: 'inspect these' },
+          { inlineData: { mimeType: 'image/png', data: 'raw-image' } },
+          {
+            fileData: {
+              mimeType: 'application/pdf',
+              fileUri: 'file:///private/report.pdf',
+            },
+          },
+        ],
+      },
+      { role: 'model', parts: [{ text: 'I inspected them.' }] },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'read_file',
+              response: { output: 'image loaded' },
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: 'image/jpeg',
+                    data: 'raw-tool-image',
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      },
+      { role: 'model', parts: [{ text: 'Done.' }] },
+    ];
+    mockRunSideQuery.mockResolvedValue({ text: 'run tests' });
+    const config = {
+      getFastModel: vi.fn(() => 'fast-model'),
+      getModel: vi.fn(() => 'main-model'),
+    } as unknown as Config;
+
+    await generatePromptSuggestion(
+      config,
+      historyWithMedia,
+      new AbortController().signal,
+    );
+
+    const options = mockRunSideQuery.mock.calls[0]?.[1] as {
+      contents: Content[];
+    };
+    const serialized = JSON.stringify(options.contents);
+    expect(serialized).toContain('[image: image/png]');
+    expect(serialized).toContain('[image: image/jpeg]');
+    expect(serialized).toContain('[document: application/pdf]');
+    expect(serialized).not.toContain('raw-image');
+    expect(serialized).not.toContain('raw-tool-image');
+    expect(serialized).not.toContain('file:///private/report.pdf');
+    expect(JSON.stringify(historyWithMedia)).toContain('raw-tool-image');
+  });
+
+  it('removes media from cache-shared history without mutating the snapshot', async () => {
+    const cacheHistory: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          { inlineData: { mimeType: 'image/png', data: 'cached-image' } },
+        ],
+      },
+      { role: 'model', parts: [{ text: 'Looked.' }] },
+      { role: 'user', parts: [{ text: 'continue' }] },
+      { role: 'model', parts: [{ text: 'Finished.' }] },
+    ];
+    const cacheSafe = {
+      generationConfig: {},
+      history: cacheHistory,
+      model: 'main-model',
+      version: 1,
+    };
+    mockGetCacheSafeParams.mockReturnValue(cacheSafe);
+    mockRunForkedAgent.mockResolvedValue({
+      text: null,
+      jsonResult: { suggestion: 'run tests' },
+      usage: { inputTokens: 10, outputTokens: 3, cacheHitTokens: 0 },
+    });
+    const config = {
+      getFastModel: vi.fn(() => undefined),
+      getModel: vi.fn(() => 'main-model'),
+    } as unknown as Config;
+
+    await generatePromptSuggestion(
+      config,
+      conversationHistory,
+      new AbortController().signal,
+      { enableCacheSharing: true },
+    );
+
+    const call = mockRunForkedAgent.mock.calls[0]?.[0] as {
+      cacheSafeParams: { history: Content[] };
+    };
+    const serialized = JSON.stringify(call.cacheSafeParams.history);
+    expect(serialized).toContain('[image: image/png]');
+    expect(serialized).not.toContain('cached-image');
+    expect(JSON.stringify(cacheSafe.history)).toContain('cached-image');
   });
 
   it('passes cache-safe model in cache mode when no explicit or fast model exists', async () => {

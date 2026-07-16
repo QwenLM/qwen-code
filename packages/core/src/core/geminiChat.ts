@@ -69,11 +69,13 @@ import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
 import {
   resolveCompactionTuning,
   resolveSlimmingConfig,
+  slimCompactionInput,
 } from '../services/compactionInputSlimming.js';
 import {
   InMemoryImagePayloadStore,
   buildReattachParts,
   countAllInlineImages,
+  prepareImagePayloadsForRequest,
   replaceImagePayloadsInPlace,
 } from '../services/image-payload-references.js';
 import {
@@ -108,8 +110,22 @@ import {
   setToolCallPreparations,
 } from './tool-call-preparation.js';
 import { InvalidStreamError } from './invalid-stream-error.js';
+import type {
+  FullTurnModelRoute,
+  FullTurnModelRouteIdentity,
+} from './baseLlmClient.js';
+import {
+  runWithRuntimeContentGenerator,
+  wrapAsyncGeneratorWithRuntimeContentGenerator,
+} from '../agents/runtime/agent-context.js';
 
 export { InvalidStreamError };
+
+export interface GeminiChatSendOptions {
+  modelRoute?: FullTurnModelRoute;
+  /** Internal marker: exact routes must never enter the configured fallback chain. */
+  exactRoute?: boolean;
+}
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
 
@@ -972,7 +988,10 @@ function validateHistory(history: Content[]) {
  * filters or recitation). Extracting valid turns from the history
  * ensures that subsequent requests could be accepted by the model.
  */
-function extractCuratedHistory(comprehensiveHistory: Content[]): Content[] {
+function extractCuratedHistory(
+  comprehensiveHistory: Content[],
+  preserveUserBoundary?: Content,
+): Content[] {
   if (comprehensiveHistory === undefined || comprehensiveHistory.length === 0) {
     return [];
   }
@@ -981,7 +1000,11 @@ function extractCuratedHistory(comprehensiveHistory: Content[]): Content[] {
   let i = 0;
   while (i < length) {
     if (comprehensiveHistory[i].role === 'user') {
-      appendCuratedContent(curatedHistory, comprehensiveHistory[i]);
+      if (comprehensiveHistory[i] === preserveUserBoundary) {
+        curatedHistory.push(comprehensiveHistory[i]);
+      } else {
+        appendCuratedContent(curatedHistory, comprehensiveHistory[i]);
+      }
       i++;
     } else {
       const modelOutput: Content[] = [];
@@ -999,6 +1022,18 @@ function extractCuratedHistory(comprehensiveHistory: Content[]): Content[] {
     }
   }
   return curatedHistory;
+}
+
+function mergeAdjacentUserContents(contents: Content[]): Content[] {
+  const merged: Content[] = [];
+  for (const content of contents) {
+    if (content.role === 'user') {
+      appendCuratedContent(merged, content);
+    } else {
+      merged.push(content);
+    }
+  }
+  return merged;
 }
 
 function appendCuratedContent(
@@ -1528,6 +1563,10 @@ export class GeminiChat {
     | null = null;
 
   private readonly imagePayloadStore = new InMemoryImagePayloadStore();
+  private pendingFullTurnRouteIdentity?: FullTurnModelRouteIdentity;
+  private pendingFullTurnRoute?: FullTurnModelRoute;
+  private pendingFullTurnRouteHistoryStart?: number;
+  private readonly pendingFullTurnImageIds = new Set<string>();
 
   /**
    * Monotonically counts user-content pushes that survived into history.
@@ -1607,25 +1646,56 @@ export class GeminiChat {
    * defensive deep copy for caller mutation safety.
    */
   private getRequestHistory(currentUserContent?: Content): Content[] {
-    const curatedHistory = extractCuratedHistory(this.history);
+    const curatedHistory = extractCuratedHistory(
+      this.history,
+      currentUserContent,
+    );
+    if (this.pendingFullTurnRouteIdentity) {
+      return mergeAdjacentUserContents(
+        curatedHistory.map(copyContentContainer),
+      );
+    }
     const { maxRecentImages, imagePayloadThreshold } = resolveCompactionTuning(
       this.config.getChatCompression(),
     );
-    if (countAllInlineImages(curatedHistory) >= imagePayloadThreshold) {
-      const skipEntry = currentUserContent
-        ? curatedHistory.find(
-            (c) =>
-              c === currentUserContent ||
-              (c.role === 'user' &&
-                currentUserContent.parts?.some((p) => c.parts?.includes(p))),
-          )
-        : undefined;
+    const inlineImageCount = countAllInlineImages(curatedHistory);
+    const currentModelAcceptsImages =
+      this.config.getContentGeneratorConfig()?.modalities?.image === true;
+    const skipEntry = currentUserContent
+      ? curatedHistory.find(
+          (c) =>
+            c === currentUserContent ||
+            (c.role === 'user' &&
+              currentUserContent.parts?.some((p) => c.parts?.includes(p))),
+        )
+      : undefined;
+
+    if (!currentModelAcceptsImages) {
+      replaceImagePayloadsInPlace(
+        curatedHistory,
+        this.imagePayloadStore,
+        skipEntry,
+      );
+      return mergeAdjacentUserContents(
+        curatedHistory.map((content) =>
+          copyContentContainer(
+            content === skipEntry
+              ? content
+              : (slimCompactionInput([content]).slimmedHistory[0] ?? content),
+          ),
+        ),
+      );
+    }
+
+    if (inlineImageCount >= imagePayloadThreshold) {
       const replaced = replaceImagePayloadsInPlace(
         curatedHistory,
         this.imagePayloadStore,
         skipEntry,
       );
-      const requestHistory = curatedHistory.map(copyContentContainer);
+      const requestHistory = mergeAdjacentUserContents(
+        curatedHistory.map(copyContentContainer),
+      );
       const reattachParts = buildReattachParts(replaced, maxRecentImages);
       if (reattachParts.length > 0) {
         const last = requestHistory.at(-1);
@@ -1637,7 +1707,7 @@ export class GeminiChat {
       }
       return requestHistory;
     }
-    return curatedHistory.map(copyContentContainer);
+    return mergeAdjacentUserContents(curatedHistory.map(copyContentContainer));
   }
 
   /**
@@ -1691,6 +1761,13 @@ export class GeminiChat {
     signal?: AbortSignal,
     options?: TryCompressOptions,
   ): Promise<ChatCompressionInfo> {
+    if (this.pendingFullTurnRouteIdentity) {
+      return {
+        originalTokenCount: this.lastPromptTokenCount,
+        newTokenCount: this.lastPromptTokenCount,
+        compressionStatus: CompressionStatus.NOOP,
+      };
+    }
     const service = new ChatCompressionService();
     const { newHistory, info } = await service.compress(this, {
       promptId,
@@ -1882,7 +1959,18 @@ export class GeminiChat {
     model: string,
     params: SendMessageParameters,
     prompt_id: string,
+    options?: GeminiChatSendOptions,
   ): Promise<AsyncGenerator<StreamEvent>> {
+    if (options?.modelRoute) {
+      const route = options.modelRoute;
+      const stream = await runWithRuntimeContentGenerator(route, () =>
+        this.sendMessageStream(route.model, params, prompt_id, {
+          exactRoute: true,
+        }),
+      );
+      return wrapAsyncGeneratorWithRuntimeContentGenerator(route, stream);
+    }
+
     await this.sendPromise;
 
     let streamDoneResolver: () => void;
@@ -2921,6 +3009,7 @@ export class GeminiChat {
 
           if (
             fallbackModels.length > 0 &&
+            !options?.exactRoute &&
             !isUnattendedMode() &&
             !streamYieldedAnyChunk
           ) {
@@ -3113,6 +3202,7 @@ export class GeminiChat {
             }
           } else if (
             fallbackModels.length > 0 &&
+            !options?.exactRoute &&
             !isUnattendedMode() &&
             streamYieldedAnyChunk
           ) {
@@ -3296,6 +3386,94 @@ export class GeminiChat {
     // Deep copy the history to avoid mutating the history outside of the
     // chat session.
     return structuredClone(history);
+  }
+
+  /** Remove route-scoped media bytes once their logical turn has ended. */
+  replaceHistoricalMediaWithReferences(): boolean {
+    const start = this.pendingFullTurnRouteHistoryStart;
+    const replaced =
+      start === undefined
+        ? replaceImagePayloadsInPlace(this.history, this.imagePayloadStore)
+        : [
+            ...replaceImagePayloadsInPlace(
+              this.history.slice(0, start),
+              this.imagePayloadStore,
+            ),
+            ...replaceImagePayloadsInPlace(
+              this.history.slice(start),
+              this.imagePayloadStore,
+            ).map((image) => {
+              this.pendingFullTurnImageIds.add(image.id);
+              return image;
+            }),
+          ];
+    const slimmed = slimCompactionInput(this.history).slimmedHistory;
+    const changed = replaced.length > 0 || slimmed !== this.history;
+    this.setHistory(slimmed);
+    return changed;
+  }
+
+  setPendingFullTurnRoute(
+    identity: FullTurnModelRouteIdentity,
+    route?: FullTurnModelRoute,
+    historyStartContent?: Content,
+  ): void {
+    const current = this.pendingFullTurnRouteIdentity;
+    if (
+      !current ||
+      current.model !== identity.model ||
+      current.baseUrl !== identity.baseUrl ||
+      current.authType !== identity.authType
+    ) {
+      const historyStart = historyStartContent
+        ? this.history.indexOf(historyStartContent)
+        : this.history.length;
+      this.pendingFullTurnRouteHistoryStart =
+        historyStart < 0 ? this.history.length : historyStart;
+      this.pendingFullTurnImageIds.clear();
+    }
+    this.pendingFullTurnRouteIdentity = identity;
+    this.pendingFullTurnRoute = route;
+  }
+
+  getPendingFullTurnRoute(): FullTurnModelRoute | undefined {
+    return this.pendingFullTurnRoute;
+  }
+
+  getPendingFullTurnRouteIdentity(): FullTurnModelRouteIdentity | undefined {
+    return this.pendingFullTurnRouteIdentity;
+  }
+
+  clearPendingFullTurnRoute(): void {
+    this.pendingFullTurnRouteIdentity = undefined;
+    this.pendingFullTurnRoute = undefined;
+    this.pendingFullTurnRouteHistoryStart = undefined;
+    this.pendingFullTurnImageIds.clear();
+  }
+
+  preparePendingFullTurnMediaForContinuation(parts: Part[]): Part[] {
+    return this.prepareHistoricalMediaForContinuation(
+      parts,
+      this.history.slice(
+        this.pendingFullTurnRouteHistoryStart ?? this.history.length,
+      ),
+    );
+  }
+
+  /** Reattach in-memory image references when retrying an interrupted turn. */
+  prepareHistoricalMediaForContinuation(
+    parts: Part[],
+    sourceHistory: Content[],
+  ): Part[] {
+    const current: Content = { role: 'user', parts };
+    const prepared = prepareImagePayloadsForRequest([current], {
+      maxRecentImages: 0,
+      preserveImagePartsForContentIndex: 0,
+      referenceContents: [...sourceHistory, current],
+      allowedReferencedImageIds: this.pendingFullTurnImageIds,
+      store: this.imagePayloadStore,
+    });
+    return prepared[0]?.parts ?? parts;
   }
 
   /**

@@ -51,6 +51,13 @@ import {
 } from './utils/errors.js';
 
 // Mock core modules
+const visionRouteMocks = vi.hoisted(() => ({
+  resolve: vi.fn(),
+  runBridge: vi.fn(),
+  runWithRuntime: vi.fn(
+    async <T>(_route: unknown, fn: () => Promise<T>): Promise<T> => fn(),
+  ),
+}));
 vi.mock('./ui/hooks/atCommandProcessor.js');
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
@@ -73,6 +80,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       getMetrics: vi.fn(),
       getMetricsForSession: vi.fn(),
     },
+    resolveFullTurnVisionRoute: visionRouteMocks.resolve,
+    runVisionBridge: visionRouteMocks.runBridge,
+    runWithRuntimeContentGenerator: visionRouteMocks.runWithRuntime,
   };
 });
 
@@ -212,6 +222,15 @@ describe('runNonInteractive', () => {
     // handleError tests in the never-resolving promise (5s vitest timeout).
     _resetCleanupFunctionsForTest();
     _resetExitLatchForTest();
+    visionRouteMocks.resolve.mockReset().mockResolvedValue({
+      status: 'not-eligible',
+    });
+    visionRouteMocks.runBridge.mockReset();
+    visionRouteMocks.runWithRuntime
+      .mockReset()
+      .mockImplementation(
+        async <T>(_route: unknown, fn: () => Promise<T>): Promise<T> => fn(),
+      );
 
     mockCoreExecuteToolCall = vi.mocked(executeToolCall);
     mockShutdownTelemetry = vi.mocked(shutdownTelemetry);
@@ -291,6 +310,8 @@ describe('runNonInteractive', () => {
       getIdeMode: vi.fn().mockReturnValue(false),
       getFullContext: vi.fn().mockReturnValue(false),
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      getEffectiveInputModalities: vi.fn().mockReturnValue({ image: false }),
+      getDefaultVisionBridgeModel: vi.fn().mockReturnValue(undefined),
       getDebugMode: vi.fn().mockReturnValue(false),
       getOutputFormat: vi.fn().mockReturnValue('text'),
       getJsonSchema: vi.fn().mockReturnValue(undefined),
@@ -1947,6 +1968,183 @@ describe('runNonInteractive', () => {
 
     // 6. Assert the final output is correct
     expect(processStdoutSpy).toHaveBeenCalledWith('Summary complete.\n');
+  });
+
+  it('keeps an agent-capable image turn on the exact route through tool continuation', async () => {
+    setupMetricsMock();
+    const imagePart: Part = {
+      inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+    };
+    const route = {
+      model: 'vision-agent',
+      contentGenerator: {},
+      contentGeneratorConfig: { model: 'vision-agent' },
+    };
+    const { handleAtCommand } = await import(
+      './ui/hooks/atCommandProcessor.js'
+    );
+    vi.mocked(handleAtCommand).mockResolvedValue({
+      processedQuery: [{ text: 'inspect this' }, imagePart],
+      shouldProceed: true,
+    });
+    vi.mocked(mockConfig.getDefaultVisionBridgeModel).mockReturnValue({
+      id: 'vision-agent',
+      agentCapable: true,
+    });
+    visionRouteMocks.resolve.mockResolvedValue({
+      status: 'ready',
+      selection: { id: 'vision-agent', agentCapable: true },
+      route,
+    });
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [{ text: 'tool result' }],
+    });
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-vision',
+              name: 'testTool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-vision-route',
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'done' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect @image.png',
+      'prompt-vision-route',
+    );
+
+    expect(visionRouteMocks.runBridge).not.toHaveBeenCalled();
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      1,
+      [{ text: 'inspect this' }, imagePart],
+      expect.any(AbortSignal),
+      'prompt-vision-route',
+      expect.objectContaining({
+        type: SendMessageType.UserQuery,
+        modelRoute: route,
+      }),
+    );
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      2,
+      [{ text: 'tool result' }],
+      expect.any(AbortSignal),
+      'prompt-vision-route',
+      expect.objectContaining({
+        type: SendMessageType.ToolResult,
+        modelRoute: route,
+      }),
+    );
+    expect(visionRouteMocks.runWithRuntime).toHaveBeenCalledWith(
+      route,
+      expect.any(Function),
+    );
+  });
+
+  it('uses Vision Bridge for an image model without agent capability', async () => {
+    setupMetricsMock();
+    const imagePart: Part = {
+      inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+    };
+    const { handleAtCommand } = await import(
+      './ui/hooks/atCommandProcessor.js'
+    );
+    vi.mocked(handleAtCommand).mockResolvedValue({
+      processedQuery: [{ text: 'inspect this' }, imagePart],
+      shouldProceed: true,
+    });
+    vi.mocked(mockConfig.getDefaultVisionBridgeModel).mockReturnValue({
+      id: 'vision-only',
+    });
+    visionRouteMocks.runBridge.mockResolvedValue({
+      applied: true,
+      status: 'ok',
+      parts: [{ text: 'inspect this' }, { text: 'image transcription' }],
+      convertedCount: 1,
+      omittedCount: 0,
+      modelId: 'vision-only',
+      egressOccurred: true,
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        {
+          type: GeminiEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 1 },
+          },
+        },
+      ]),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect @image.png',
+      'prompt-vision-bridge',
+    );
+
+    expect(visionRouteMocks.runBridge).toHaveBeenCalledOnce();
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+      [{ text: 'inspect this' }, { text: 'image transcription' }],
+      expect.any(AbortSignal),
+      'prompt-vision-bridge',
+      expect.not.objectContaining({ modelRoute: expect.anything() }),
+    );
+  });
+
+  it('fails closed before sending an image when the full-turn route cannot resolve', async () => {
+    setupMetricsMock();
+    const { handleAtCommand } = await import(
+      './ui/hooks/atCommandProcessor.js'
+    );
+    vi.mocked(handleAtCommand).mockResolvedValue({
+      processedQuery: [
+        { text: 'inspect this' },
+        { inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' } },
+      ],
+      shouldProceed: true,
+    });
+    vi.mocked(mockConfig.getDefaultVisionBridgeModel).mockReturnValue({
+      id: 'vision-agent',
+      agentCapable: true,
+    });
+    visionRouteMocks.resolve.mockResolvedValue({
+      status: 'failed',
+      selection: { id: 'vision-agent', agentCapable: true },
+    });
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'inspect @image.png',
+        'prompt-vision-failed',
+      ),
+    ).rejects.toThrow('not sent to the primary model');
+
+    expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
+    expect(visionRouteMocks.runBridge).not.toHaveBeenCalled();
   });
 
   it('should process input and write JSON output with stats', async () => {

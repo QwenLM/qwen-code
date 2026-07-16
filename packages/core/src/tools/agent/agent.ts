@@ -53,6 +53,7 @@ import {
   writeWorktreeSessionMarker,
 } from '../../services/gitWorktreeService.js';
 import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
+import { slimCompactionInput } from '../../services/compactionInputSlimming.js';
 import { WorkspaceContext } from '../../utils/workspaceContext.js';
 import {
   childLaunchDepth,
@@ -1482,10 +1483,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     toolConfig: ToolConfig;
   }> {
     const geminiClient = this.config.getGeminiClient();
-    const rawHistory = geminiClient
-      ? (geminiClient.getHistoryShallow?.(true) ??
-        geminiClient.getHistory(true))
-      : [];
+    const rawHistory = slimCompactionInput(
+      geminiClient
+        ? (geminiClient.getHistoryShallow?.(true) ??
+            geminiClient.getHistory(true))
+        : [],
+    ).slimmedHistory;
 
     // Build the history that will seed the fork's chat. Must end with a
     // model message so agent-headless can send the task_prompt as a user

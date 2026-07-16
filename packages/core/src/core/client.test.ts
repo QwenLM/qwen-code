@@ -31,7 +31,7 @@ import {
   type ContentGenerator,
   type ContentGeneratorConfig,
 } from './contentGenerator.js';
-import { BaseLlmClient } from './baseLlmClient.js';
+import { BaseLlmClient, type FullTurnModelRoute } from './baseLlmClient.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import { GeminiChat } from './geminiChat.js';
 import type { Config } from '../config/config.js';
@@ -98,7 +98,10 @@ import {
   setActiveGoal,
 } from '../goals/activeGoalStore.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
-import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import {
+  getRuntimeContentGenerator,
+  runWithAgentContext,
+} from '../agents/runtime/agent-context.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -706,6 +709,214 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(resumedClient.getChat().getLastPromptTokenCount()).toBe(200);
       expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(200, 80);
+    });
+
+    it.each([
+      [
+        'eligible',
+        {
+          capabilities: { agent: true, vision: true },
+          modalities: { image: true },
+        },
+        true,
+      ],
+      [
+        'agent-disabled',
+        {
+          capabilities: { agent: false, vision: true },
+          modalities: { image: true },
+        },
+        false,
+      ],
+      [
+        'image-disabled',
+        {
+          capabilities: { agent: true, vision: false },
+          modalities: { image: false },
+        },
+        false,
+      ],
+      [
+        'fast-only',
+        {
+          capabilities: { agent: true, vision: true },
+          modalities: { image: true },
+          fastOnly: true,
+        },
+        false,
+      ],
+    ])(
+      'restores a persisted full-turn route only when the model remains %s',
+      async (_case, modelFlags, eligible) => {
+        const identity = {
+          model: 'vision-agent',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://vision.example/v1',
+        };
+        vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+          conversation: {
+            sessionId: 'resumed-session-id',
+            projectHash: 'project-hash',
+            startTime: new Date(0).toISOString(),
+            lastUpdated: new Date(0).toISOString(),
+            messages: [
+              {
+                uuid: 'route-marker',
+                parentUuid: null,
+                sessionId: 'resumed-session-id',
+                timestamp: new Date(0).toISOString(),
+                type: 'system',
+                subtype: 'full_turn_route',
+                systemPayload: identity,
+              },
+            ],
+          },
+          filePath: '/test/session.jsonl',
+          lastCompletedUuid: null,
+        } as unknown as ReturnType<Config['getResumedSessionData']>);
+        vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([
+          {
+            id: identity.model,
+            label: identity.model,
+            authType: AuthType.USE_OPENAI,
+            baseUrl: identity.baseUrl,
+            ...modelFlags,
+          },
+        ]);
+        const resolveForModel = vi
+          .spyOn(mockConfig.getBaseLlmClient(), 'resolveForModel')
+          .mockResolvedValue({
+            model: identity.model,
+            contentGenerator: mockContentGenerator,
+            contentGeneratorConfig: {
+              model: identity.model,
+              authType: AuthType.USE_OPENAI,
+              baseUrl: identity.baseUrl,
+              modalities: { image: true },
+            },
+            retryAuthType: AuthType.USE_OPENAI,
+          });
+
+        const resumedClient = new GeminiClient(mockConfig);
+        await resumedClient.initialize();
+
+        expect(
+          resumedClient.getChat().getPendingFullTurnRouteIdentity(),
+        ).toEqual(identity);
+        expect(Boolean(resumedClient.getChat().getPendingFullTurnRoute())).toBe(
+          eligible,
+        );
+        expect(resolveForModel).toHaveBeenCalledTimes(eligible ? 1 : 0);
+      },
+    );
+
+    it('keeps resumed pending images retryable after another failure scrub', async () => {
+      const identity = {
+        model: 'vision-agent',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://vision.example/v1',
+      };
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'resumed-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [
+            {
+              uuid: 'settled-user',
+              parentUuid: null,
+              sessionId: 'resumed-session-id',
+              timestamp: new Date(0).toISOString(),
+              type: 'user',
+              message: {
+                role: 'user',
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: 'image/png',
+                      data: 'settled-image',
+                    },
+                  },
+                ],
+              },
+            },
+            {
+              uuid: 'settled-model',
+              parentUuid: 'settled-user',
+              sessionId: 'resumed-session-id',
+              timestamp: new Date(1).toISOString(),
+              type: 'assistant',
+              message: { role: 'model', parts: [{ text: 'settled' }] },
+            },
+            {
+              uuid: 'route-marker',
+              parentUuid: 'settled-model',
+              sessionId: 'resumed-session-id',
+              timestamp: new Date(2).toISOString(),
+              type: 'system',
+              subtype: 'full_turn_route',
+              systemPayload: identity,
+            },
+            {
+              uuid: 'pending-user',
+              parentUuid: 'route-marker',
+              sessionId: 'resumed-session-id',
+              timestamp: new Date(3).toISOString(),
+              type: 'user',
+              message: {
+                role: 'user',
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: 'image/png',
+                      data: 'pending-image',
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+      vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([
+        {
+          id: identity.model,
+          label: identity.model,
+          authType: identity.authType,
+          baseUrl: identity.baseUrl,
+          capabilities: { agent: true, vision: true },
+          modalities: { image: true },
+        },
+      ]);
+      vi.spyOn(
+        mockConfig.getBaseLlmClient(),
+        'resolveForModel',
+      ).mockResolvedValue({
+        model: identity.model,
+        contentGenerator: mockContentGenerator,
+        contentGeneratorConfig: {
+          model: identity.model,
+          authType: identity.authType,
+          baseUrl: identity.baseUrl,
+          modalities: { image: true },
+        },
+        retryAuthType: identity.authType,
+      });
+
+      const resumedClient = new GeminiClient(mockConfig);
+      await resumedClient.initialize();
+      const chat = resumedClient.getChat();
+
+      chat.replaceHistoricalMediaWithReferences();
+      const secondRetry = chat.preparePendingFullTurnMediaForContinuation([
+        { text: 'retry again' },
+      ]);
+
+      expect(JSON.stringify(secondRetry)).toContain('pending-image');
+      expect(JSON.stringify(secondRetry)).not.toContain('settled-image');
     });
 
     it('seeds recently completed tools from resumed history', async () => {
@@ -2207,6 +2418,48 @@ describe('Gemini Client (client.ts)', () => {
       client.setHistory([{ role: 'user', parts: [{ text: 'replaced' }] }]);
 
       expect(cacheClear).toHaveBeenCalled();
+    });
+
+    it('setHistory closes a pending full-turn route before installing restored history', () => {
+      const clearPendingFullTurnRoute = vi.fn();
+      const setHistory = vi.fn();
+      client['chat'] = {
+        getPendingFullTurnRouteIdentity: vi.fn().mockReturnValue({
+          model: 'vision-agent',
+          authType: AuthType.USE_OPENAI,
+        }),
+        clearPendingFullTurnRoute,
+        setHistory,
+      } as unknown as GeminiChat;
+      const recordMediaScrubCheckpoint = vi.fn();
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+        recordMediaScrubCheckpoint,
+      } as unknown as ReturnType<Config['getChatRecordingService']>);
+      const restoredHistory: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'restored-checkpoint-image',
+              },
+            },
+          ],
+        },
+      ];
+
+      client.setHistory(restoredHistory);
+
+      expect(clearPendingFullTurnRoute).toHaveBeenCalledOnce();
+      expect(recordMediaScrubCheckpoint).toHaveBeenCalledOnce();
+      expect(setHistory).toHaveBeenCalledWith(restoredHistory);
+      expect(JSON.stringify(setHistory.mock.calls[0]?.[0])).toContain(
+        'restored-checkpoint-image',
+      );
+      expect(
+        clearPendingFullTurnRoute.mock.invocationCallOrder[0],
+      ).toBeLessThan(setHistory.mock.invocationCallOrder[0]!);
     });
 
     /**
@@ -4061,6 +4314,365 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   describe('sendMessageStream', () => {
+    it('passes an exact full-turn route to Turn ahead of model overrides', async () => {
+      const route: FullTurnModelRoute = {
+        model: 'vision-agent',
+        contentGenerator: mockContentGenerator,
+        contentGeneratorConfig: {
+          model: 'vision-agent',
+          authType: AuthType.USE_OPENAI,
+          modalities: { image: true },
+        },
+      };
+      mockTurnRunFn.mockReturnValue((async function* () {})());
+      const signal = new AbortController().signal;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'inspect image' }],
+        signal,
+        'prompt-exact-route',
+        {
+          type: SendMessageType.UserQuery,
+          modelOverride: 'skill-model',
+          modelRoute: route,
+        },
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'vision-agent',
+        expect.any(Array),
+        signal,
+        route,
+      );
+    });
+
+    it('scrubs historical media before opening a new full-turn route', async () => {
+      const route: FullTurnModelRoute = {
+        model: 'vision-agent',
+        contentGenerator: mockContentGenerator,
+        contentGeneratorConfig: {
+          model: 'vision-agent',
+          authType: AuthType.USE_OPENAI,
+          modalities: { image: true },
+        },
+      };
+      const chat = client.getChat();
+      chat.setHistory([
+        {
+          role: 'user',
+          parts: [{ inlineData: { mimeType: 'image/png', data: 'old-image' } }],
+        },
+        { role: 'model', parts: [{ text: 'old response' }] },
+      ]);
+      const recordMediaScrubCheckpoint = vi.fn();
+      const recordFullTurnRoute = vi.fn();
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+        recordUserMessage: vi.fn(),
+        recordMediaScrubCheckpoint,
+        recordFullTurnRoute,
+        recordAttributionSnapshot: vi.fn(),
+      } as unknown as ReturnType<Config['getChatRecordingService']>);
+      let historyAtRun: Content[] | undefined;
+      let requestAtRun: unknown;
+      mockTurnRunFn.mockImplementation((_model, request) => {
+        historyAtRun = chat.getHistory();
+        requestAtRun = request;
+        return (async function* () {})();
+      });
+
+      await fromAsync(
+        client.sendMessageStream(
+          [
+            { text: 'inspect current image' },
+            { inlineData: { mimeType: 'image/png', data: 'current-image' } },
+          ],
+          new AbortController().signal,
+          'prompt-new-route-boundary',
+          { type: SendMessageType.UserQuery, modelRoute: route },
+        ),
+      );
+
+      expect(JSON.stringify(historyAtRun)).not.toContain('old-image');
+      expect(JSON.stringify(historyAtRun)).toMatch(
+        /\[Image #[a-f0-9]{12}: image\/png, \d+ bytes\]/,
+      );
+      expect(JSON.stringify(requestAtRun)).toContain('current-image');
+      expect(
+        recordMediaScrubCheckpoint.mock.invocationCallOrder[0],
+      ).toBeLessThan(recordFullTurnRoute.mock.invocationCallOrder[0]!);
+    });
+
+    it.each([SendMessageType.ToolResult, SendMessageType.Hook])(
+      'does not microcompact an active full-turn route on %s',
+      async (type) => {
+        const route: FullTurnModelRoute = {
+          model: 'vision-agent',
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: {
+            model: 'vision-agent',
+            authType: AuthType.USE_OPENAI,
+            modalities: { image: true },
+          },
+        };
+        const microcompact = vi.spyOn(
+          client as unknown as {
+            microcompactHistoryBeforeSend: (
+              timestamp: number | null,
+              options?: { sizeOnly?: boolean },
+            ) => Promise<boolean>;
+          },
+          'microcompactHistoryBeforeSend',
+        );
+        mockTurnRunFn.mockReturnValue((async function* () {})());
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'continue routed turn' }],
+            new AbortController().signal,
+            `prompt-${type}`,
+            { type, modelRoute: route },
+          ),
+        );
+
+        expect(microcompact).not.toHaveBeenCalled();
+      },
+    );
+
+    it('fails closed before an un-routed image Retry can reach the primary', async () => {
+      const route: FullTurnModelRoute = {
+        model: 'vision-agent',
+        contentGenerator: mockContentGenerator,
+        contentGeneratorConfig: {
+          model: 'vision-agent',
+          authType: AuthType.USE_OPENAI,
+          modalities: { image: true },
+        },
+      };
+      const chat = client.getChat();
+      chat.setPendingFullTurnRoute(
+        { model: route.model, authType: AuthType.USE_OPENAI },
+        route,
+      );
+      const replaceMedia = vi.spyOn(
+        chat,
+        'replaceHistoricalMediaWithReferences',
+      );
+      const recordMediaScrubCheckpoint = vi.fn();
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+        recordMediaScrubCheckpoint,
+        recordAttributionSnapshot: vi.fn(),
+      } as unknown as ReturnType<Config['getChatRecordingService']>);
+      await expect(
+        fromAsync(
+          client.sendMessageStream(
+            [
+              { text: 'retry image without route' },
+              {
+                inlineData: { mimeType: 'image/png', data: 'private-image' },
+              },
+            ],
+            new AbortController().signal,
+            'prompt-unrouted-retry',
+            { type: SendMessageType.Retry },
+          ),
+        ),
+      ).rejects.toThrow(/exact route/);
+
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+      expect(replaceMedia).not.toHaveBeenCalled();
+      expect(recordMediaScrubCheckpoint).not.toHaveBeenCalled();
+      expect(chat.getPendingFullTurnRouteIdentity()).toBeDefined();
+    });
+
+    it('reattaches only the pending turn images for an exact-route Retry', async () => {
+      const route: FullTurnModelRoute = {
+        model: 'vision-agent',
+        contentGenerator: mockContentGenerator,
+        contentGeneratorConfig: {
+          model: 'vision-agent',
+          authType: AuthType.USE_OPENAI,
+          modalities: { image: true },
+        },
+      };
+      const chat = client.getChat();
+      chat.setHistory([
+        {
+          role: 'user',
+          parts: [
+            {
+              inlineData: { mimeType: 'image/png', data: 'settled-image' },
+            },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'settled' }] },
+      ]);
+      chat.replaceHistoricalMediaWithReferences();
+      chat.setPendingFullTurnRoute(
+        { model: route.model, authType: AuthType.USE_OPENAI },
+        route,
+      );
+      chat.addHistory({
+        role: 'user',
+        parts: [
+          { text: 'inspect' },
+          { inlineData: { mimeType: 'image/png', data: 'pending-image' } },
+          {
+            fileData: {
+              mimeType: 'image/png',
+              fileUri: 'https://pending.example/shot.png',
+            },
+          },
+        ],
+      });
+      chat.addHistory({
+        role: 'model',
+        parts: [{ functionCall: { id: 'call-1', name: 'screenshot' } }],
+      });
+      chat.replaceHistoricalMediaWithReferences();
+
+      const recordMediaScrubCheckpoint = vi.fn();
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+        recordMediaScrubCheckpoint,
+        recordAttributionSnapshot: vi.fn(),
+      } as unknown as ReturnType<Config['getChatRecordingService']>);
+      mockTurnRunFn.mockReturnValue((async function* () {})());
+
+      await fromAsync(
+        client.sendMessageStream(
+          [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'screenshot',
+                response: { output: 'done' },
+              },
+            },
+            {
+              inlineData: { mimeType: 'image/png', data: 'pending-image' },
+            },
+          ],
+          new AbortController().signal,
+          'prompt-routed-retry',
+          { type: SendMessageType.Retry, modelRoute: route },
+        ),
+      );
+
+      const request = mockTurnRunFn.mock.calls.at(-1)?.[1];
+      const serializedRequest = JSON.stringify(request);
+      expect(serializedRequest.match(/pending-image/g)).toHaveLength(1);
+      expect(serializedRequest).toContain('https://pending.example/shot.png');
+      expect(serializedRequest).not.toContain('settled-image');
+      expect(JSON.stringify(chat.getHistory())).not.toContain('pending-image');
+      expect(JSON.stringify(chat.getHistory())).not.toContain(
+        'https://pending.example/shot.png',
+      );
+      expect(chat.getPendingFullTurnRouteIdentity()).toBeUndefined();
+      expect(recordMediaScrubCheckpoint).toHaveBeenCalledOnce();
+    });
+
+    it('resets the media boundary for a fresh UserQuery on the same route', async () => {
+      const route: FullTurnModelRoute = {
+        model: 'vision-agent',
+        contentGenerator: mockContentGenerator,
+        contentGeneratorConfig: {
+          model: 'vision-agent',
+          authType: AuthType.USE_OPENAI,
+          modalities: { image: true },
+        },
+      };
+      const chat = client.getChat();
+      chat.setPendingFullTurnRoute(
+        { model: route.model, authType: AuthType.USE_OPENAI },
+        route,
+      );
+      chat.addHistory({
+        role: 'user',
+        parts: [
+          { inlineData: { mimeType: 'image/png', data: 'previous-turn' } },
+        ],
+      });
+      chat.replaceHistoricalMediaWithReferences();
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+        recordUserMessage: vi.fn(),
+        recordFullTurnRoute: vi.fn(),
+        recordMediaScrubCheckpoint: vi.fn(),
+        recordAttributionSnapshot: vi.fn(),
+      } as unknown as ReturnType<Config['getChatRecordingService']>);
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          throw new Error('new turn failed');
+        })(),
+      );
+
+      await expect(
+        fromAsync(
+          client.sendMessageStream(
+            [
+              { text: 'new turn' },
+              { inlineData: { mimeType: 'image/png', data: 'current-turn' } },
+            ],
+            new AbortController().signal,
+            'prompt-new-same-route',
+            { type: SendMessageType.UserQuery, modelRoute: route },
+          ),
+        ),
+      ).rejects.toThrow('new turn failed');
+
+      const retry = chat.preparePendingFullTurnMediaForContinuation([
+        { inlineData: { mimeType: 'image/png', data: 'current-turn' } },
+      ]);
+      expect(JSON.stringify(retry)).not.toContain('previous-turn');
+      expect(JSON.stringify(retry).match(/current-turn/g)).toHaveLength(1);
+    });
+
+    it('settles the previous route before a matching teammate turn', async () => {
+      const route: FullTurnModelRoute = {
+        model: 'vision-agent',
+        contentGenerator: mockContentGenerator,
+        contentGeneratorConfig: {
+          model: 'vision-agent',
+          authType: AuthType.USE_OPENAI,
+          modalities: { image: true },
+        },
+      };
+      const chat = client.getChat();
+      chat.setPendingFullTurnRoute(
+        { model: route.model, authType: AuthType.USE_OPENAI },
+        route,
+      );
+      const replaceMedia = vi.spyOn(
+        chat,
+        'replaceHistoricalMediaWithReferences',
+      );
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+        recordNotification: vi.fn(),
+        recordFullTurnRoute: vi.fn(),
+        recordMediaScrubCheckpoint: vi.fn(),
+        recordAttributionSnapshot: vi.fn(),
+      } as unknown as ReturnType<Config['getChatRecordingService']>);
+      mockTurnRunFn.mockReturnValue((async function* () {})());
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'teammate update' }],
+          new AbortController().signal,
+          'prompt-routed-teammate',
+          { type: SendMessageType.Teammate, modelRoute: route },
+        ),
+      );
+
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        route.model,
+        expect.any(Array),
+        expect.any(AbortSignal),
+        route,
+      );
+      expect(replaceMedia).toHaveBeenCalled();
+    });
+
     it('should merge editor context into the user request when ideMode is enabled', async () => {
       // Arrange
       vi.mocked(ideContextStore.get).mockReturnValue({
@@ -5434,6 +6046,51 @@ hello
             config: mockConfig,
           }),
         );
+      });
+
+      it('removes media before passing live history to skill review', async () => {
+        mockMemoryManager.scheduleSkillReview.mockReturnValue({
+          status: 'skipped',
+          skippedReason: 'below_threshold',
+        });
+        vi.mocked(mockChat.getHistory!).mockReturnValue([
+          {
+            role: 'user',
+            parts: [
+              { inlineData: { mimeType: 'image/png', data: 'raw-image' } },
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  response: { output: 'loaded' },
+                  parts: [
+                    {
+                      fileData: {
+                        mimeType: 'image/jpeg',
+                        fileUri: 'https://private.example/image.jpg',
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          } as unknown as Content,
+          { role: 'model', parts: [{ text: 'Done' }] },
+        ]);
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'a query' }],
+            new AbortController().signal,
+            'prompt-id-autoskill-media',
+          ),
+        );
+
+        const call = mockMemoryManager.scheduleSkillReview.mock.calls[0]?.[0];
+        const serialized = JSON.stringify(call?.history);
+        expect(serialized).toContain('[image: image/png]');
+        expect(serialized).toContain('[image: image/jpeg]');
+        expect(serialized).not.toContain('raw-image');
+        expect(serialized).not.toContain('https://private.example/image.jpg');
       });
 
       it('should reset toolCallCount and push promise when review is scheduled', async () => {
@@ -7492,6 +8149,95 @@ Other open files:
             type: GeminiEventType.StopHookLoop,
           }),
         );
+      });
+
+      it('keeps Stop hooks and their blocking continuation on the exact model route', async () => {
+        const route: FullTurnModelRoute = {
+          model: 'vision-agent',
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: {
+            model: 'vision-agent',
+            authType: AuthType.USE_OPENAI,
+            contextWindowSize: 2_000,
+            modalities: { image: true },
+          },
+        };
+        const seenRuntimeViews: Array<
+          ReturnType<typeof getRuntimeContentGenerator>
+        > = [];
+        const mockMessageBus = {
+          request: vi
+            .fn()
+            .mockImplementationOnce(async () => {
+              seenRuntimeViews.push(getRuntimeContentGenerator());
+              return {
+                output: { decision: 'block', reason: 'Keep working' },
+                stopHookCount: 1,
+              };
+            })
+            .mockImplementationOnce(async () => {
+              seenRuntimeViews.push(getRuntimeContentGenerator());
+              return {};
+            }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'Stop',
+        );
+        vi.mocked(mockConfig.getSkipNextSpeakerCheck).mockReturnValue(true);
+        vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+          500,
+        );
+        const replaceHistoricalMediaWithReferences = vi.fn();
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getHistory: vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'not done' }] },
+            ]),
+          replaceHistoricalMediaWithReferences,
+        } as unknown as GeminiChat;
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'not done' };
+          })(),
+        );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'Inspect this image' }],
+            new AbortController().signal,
+            'prompt-routed-stop-hook',
+            { type: SendMessageType.UserQuery, modelRoute: route },
+          ),
+        );
+
+        expect(seenRuntimeViews).toEqual([route, route]);
+        expect(mockMessageBus.request).toHaveBeenNthCalledWith(
+          1,
+          expect.objectContaining({
+            eventName: 'Stop',
+            input: expect.objectContaining({
+              context_usage: 0.25,
+              context_limit: 2_000,
+              input_tokens: 500,
+            }),
+          }),
+          expect.anything(),
+        );
+        expect(mockTurnRunFn).toHaveBeenNthCalledWith(
+          2,
+          'vision-agent',
+          expect.any(Array),
+          expect.any(AbortSignal),
+          route,
+        );
+        expect(replaceHistoricalMediaWithReferences).toHaveBeenCalled();
       });
 
       it('should skip messageBus.request for UserPromptSubmit when hasHooksForEvent returns false', async () => {

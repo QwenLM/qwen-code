@@ -21,6 +21,7 @@ import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
   SessionService,
   buildApiHistoryFromConversation,
+  getPendingFullTurnRouteState,
   getResumePromptTokenCount,
   getResumeTokenCounts,
   type ConversationRecord,
@@ -2366,6 +2367,81 @@ describe('SessionService', () => {
     });
   });
 
+  describe('getPendingFullTurnRouteState', () => {
+    it('returns the API-history boundary at the pending route marker', () => {
+      const assistant: ChatRecord = {
+        ...recordB2,
+        sessionId: sessionIdA,
+        parentUuid: recordA1.uuid,
+      };
+      const routeMarker: ChatRecord = {
+        ...recordA1,
+        uuid: 'route-marker',
+        parentUuid: assistant.uuid,
+        type: 'system',
+        subtype: 'full_turn_route',
+        message: undefined,
+        systemPayload: {
+          model: 'vision-agent',
+          authType: 'openai',
+        },
+      };
+      const pendingUser: ChatRecord = {
+        ...recordA1,
+        uuid: 'pending-user',
+        parentUuid: routeMarker.uuid,
+        message: {
+          role: 'user',
+          parts: [{ text: 'inspect the image' }],
+        },
+      };
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: recordA1.timestamp,
+        lastUpdated: pendingUser.timestamp,
+        messages: [recordA1, assistant, routeMarker, pendingUser],
+      };
+
+      expect(getPendingFullTurnRouteState(conversation)).toEqual({
+        identity: routeMarker.systemPayload,
+        historyStart: 2,
+      });
+    });
+
+    it('clears a route marker when the active branch is rewound', () => {
+      const routeMarker: ChatRecord = {
+        ...recordA1,
+        uuid: 'route-marker',
+        type: 'system',
+        subtype: 'full_turn_route',
+        message: undefined,
+        systemPayload: {
+          model: 'vision-agent',
+          authType: 'openai',
+          baseUrl: 'https://vision.example/v1',
+        },
+      };
+      const rewind: ChatRecord = {
+        ...recordA1,
+        uuid: 'rewind-route',
+        parentUuid: routeMarker.uuid,
+        type: 'system',
+        subtype: 'rewind',
+        message: undefined,
+      };
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: routeMarker.timestamp,
+        lastUpdated: rewind.timestamp,
+        messages: [routeMarker, rewind],
+      };
+
+      expect(getPendingFullTurnRouteState(conversation)).toBeUndefined();
+    });
+  });
+
   describe('buildApiHistoryFromConversation', () => {
     it('should return linear messages when no compression checkpoint exists', () => {
       const assistantA1: ChatRecord = {
@@ -2385,6 +2461,115 @@ describe('SessionService', () => {
       const history = buildApiHistoryFromConversation(conversation);
 
       expect(history).toEqual([recordA1.message, assistantA1.message]);
+    });
+
+    it('scrubs media before a checkpoint but preserves a later interrupted turn', () => {
+      const before: ChatRecord = {
+        ...recordA1,
+        message: {
+          role: 'user',
+          parts: [
+            {
+              inlineData: { mimeType: 'image/png', data: 'settled-image' },
+            },
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: 'image/png',
+                      data: 'settled-tool-image',
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      };
+      const marker: ChatRecord = {
+        ...recordB2,
+        uuid: 'media-scrub',
+        parentUuid: before.uuid,
+        type: 'system',
+        subtype: 'media_scrub',
+        message: undefined,
+      };
+      const after: ChatRecord = {
+        ...recordA1,
+        uuid: 'after-image',
+        parentUuid: marker.uuid,
+        message: {
+          role: 'user',
+          parts: [
+            {
+              inlineData: { mimeType: 'image/png', data: 'pending-image' },
+            },
+          ],
+        },
+      };
+
+      const history = buildApiHistoryFromConversation({
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: before.timestamp,
+        lastUpdated: after.timestamp,
+        messages: [before, marker, after],
+      });
+      const serialized = JSON.stringify(history);
+      expect(serialized).not.toContain('settled-image');
+      expect(serialized).not.toContain('settled-tool-image');
+      expect(serialized).toContain('pending-image');
+    });
+
+    it('applies a media scrub checkpoint after a compression snapshot', () => {
+      const compressionRecord: ChatRecord = {
+        ...recordB2,
+        uuid: 'compression-with-image',
+        type: 'system',
+        subtype: 'chat_compression',
+        systemPayload: {
+          info: {
+            originalTokenCount: 100,
+            newTokenCount: 50,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+          compressedHistory: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  fileData: {
+                    mimeType: 'image/png',
+                    fileUri: 'file:///private/image.png',
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      };
+      const marker: ChatRecord = {
+        ...recordB2,
+        uuid: 'media-scrub-after-compression',
+        parentUuid: compressionRecord.uuid,
+        type: 'system',
+        subtype: 'media_scrub',
+        message: undefined,
+      };
+
+      const history = buildApiHistoryFromConversation({
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: compressionRecord.timestamp,
+        lastUpdated: marker.timestamp,
+        messages: [compressionRecord, marker],
+      });
+      expect(JSON.stringify(history)).not.toContain(
+        'file:///private/image.png',
+      );
     });
 
     it('does not deep-clone stored messages when rebuilding resume API history', () => {

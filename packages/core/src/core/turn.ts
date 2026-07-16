@@ -37,6 +37,7 @@ import {
 import type { LoopType } from '../telemetry/types.js';
 import type { ActiveGoal } from '../goals/activeGoalStore.js';
 import { getProviderToolCallId } from './toolCallIdUtils.js';
+import type { FullTurnModelRoute } from './baseLlmClient.js';
 
 const ERROR_REPORT_HISTORY_TAIL_COUNT = 8;
 const ERROR_REPORT_TEXT_PREVIEW_CHARS = 200;
@@ -447,20 +448,22 @@ export class Turn {
     model: string,
     req: PartListUnion,
     signal: AbortSignal,
+    modelRoute?: FullTurnModelRoute,
   ): AsyncGenerator<ServerGeminiStreamEvent> {
     try {
       // Note: This assumes `sendMessageStream` yields events like
       // { type: StreamEventType.RETRY } or { type: StreamEventType.CHUNK, value: GenerateContentResponse }
-      const responseStream = await this.chat.sendMessageStream(
-        model,
-        {
-          message: req,
-          config: {
-            abortSignal: signal,
-          },
+      const params = {
+        message: req,
+        config: {
+          abortSignal: signal,
         },
-        this.prompt_id,
-      );
+      };
+      const responseStream = modelRoute
+        ? await this.chat.sendMessageStream(model, params, this.prompt_id, {
+            modelRoute,
+          })
+        : await this.chat.sendMessageStream(model, params, this.prompt_id);
 
       for await (const streamEvent of responseStream) {
         if (signal?.aborted) {

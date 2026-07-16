@@ -450,6 +450,48 @@ describe('judgeGoal', () => {
     expect(contents.slice(0, tail.length)).toEqual(tail);
   });
 
+  it('removes top-level and tool-nested media from the judge transcript', async () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          { inlineData: { mimeType: 'image/png', data: 'raw-image' } },
+          {
+            functionResponse: {
+              name: 'read_file',
+              response: { output: 'loaded' },
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: 'image/jpeg',
+                    data: 'raw-tool-image',
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      } as unknown as Content,
+      { role: 'model', parts: [{ text: 'done' }] },
+    ];
+    const client = makeMockClient({ history });
+    const config = makeConfig({ client, fastModel: 'text-judge' });
+
+    await judgeGoal(config, {
+      condition: 'finish',
+      lastAssistantText: 'done',
+      signal: new AbortController().signal,
+    });
+
+    const [contents] = client.generateContent.mock.calls[0] as [Content[]];
+    const serialized = JSON.stringify(contents);
+    expect(serialized).toContain('[image: image/png]');
+    expect(serialized).toContain('[image: image/jpeg]');
+    expect(serialized).not.toContain('raw-image');
+    expect(serialized).not.toContain('raw-tool-image');
+    expect(JSON.stringify(history)).toContain('raw-tool-image');
+  });
+
   it('appends lastAssistantText as a model turn when history does not contain it', async () => {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'go' }] },

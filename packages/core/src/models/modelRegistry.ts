@@ -250,7 +250,17 @@ export class ModelRegistry {
     if (!models) return undefined;
 
     if (baseUrl) {
-      return models.get(modelRegistryKey(modelId, baseUrl));
+      const exact = models.get(modelRegistryKey(modelId, baseUrl));
+      if (exact) return exact;
+
+      // Models registered without an explicit baseUrl use the plain id as
+      // their storage key, but resolution fills the provider default URL.
+      // Exact runtime-route restoration addresses the resolved URL, so match
+      // that canonical value as well.
+      for (const model of models.values()) {
+        if (model.id === modelId && model.baseUrl === baseUrl) return model;
+      }
+      return undefined;
     }
 
     // Try plain id key first (models registered without explicit baseUrl)
@@ -308,6 +318,12 @@ export class ModelRegistry {
       shouldUseCanonicalModalities(config.id)
     ) {
       generationConfig.modalities = defaultModalities(config.id);
+    }
+    if (config.capabilities?.vision === true) {
+      generationConfig.modalities = {
+        ...generationConfig.modalities,
+        image: true,
+      };
     }
 
     return {

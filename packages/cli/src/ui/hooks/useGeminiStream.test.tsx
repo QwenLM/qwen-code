@@ -23,6 +23,7 @@ import type {
   EditorType,
   GeminiClient,
   AnyToolInvocation,
+  FullTurnModelRoute,
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
@@ -46,6 +47,7 @@ const mockSendMessageStream = vi
   .mockReturnValue((async function* () {})());
 const mockStartChat = vi.fn();
 const mockRunVisionBridge = vi.hoisted(() => vi.fn());
+const mockResolveFullTurnVisionRoute = vi.hoisted(() => vi.fn());
 
 const MockedGeminiClientClass = vi.hoisted(() =>
   vi.fn().mockImplementation(function (this: any, _config: any) {
@@ -53,6 +55,9 @@ const MockedGeminiClientClass = vi.hoisted(() =>
     this.startChat = mockStartChat;
     this.sendMessageStream = mockSendMessageStream;
     this.addHistory = vi.fn();
+    this.getChat = vi.fn().mockReturnValue({
+      replaceHistoricalMediaWithReferences: vi.fn(),
+    });
     this.consumePendingMemoryTaskPromises = vi.fn().mockReturnValue([]);
     this.recordCompletedToolCall = vi.fn();
     // Default to the fast-path accessor returning an empty Set so the
@@ -110,6 +115,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     setActiveGoal: mockSetActiveGoal,
     clearActiveGoal: mockClearActiveGoal,
     runVisionBridge: mockRunVisionBridge,
+    resolveFullTurnVisionRoute: mockResolveFullTurnVisionRoute,
     refreshMemoryAfterManagedWrite: mockRefreshMemoryAfterManagedWrite,
   };
 });
@@ -283,6 +289,9 @@ describe('useGeminiStream', () => {
       .mockReturnValue((async function* () {})());
     handleAtCommandSpy = vi.spyOn(atCommandProcessor, 'handleAtCommand');
     mockRunVisionBridge.mockReset();
+    mockResolveFullTurnVisionRoute
+      .mockReset()
+      .mockResolvedValue({ status: 'not-eligible' });
   });
 
   afterEach(() => {
@@ -451,7 +460,7 @@ describe('useGeminiStream', () => {
         modelId: 'vm',
         egressOccurred: true,
       });
-      const { result, mockSendMessageStream } = renderTestHook();
+      const { result } = renderTestHook();
       await act(async () => {
         await result.current.submitQuery('@img.png describe');
       });
@@ -486,6 +495,406 @@ describe('useGeminiStream', () => {
       );
       expect(String(visionNotice?.[0]?.text)).not.toContain(
         '[transcribed image]',
+      );
+    });
+
+    it('keeps an exact full-turn route for retry, then clears it on the next user turn', async () => {
+      enableBridge();
+      const route = {
+        model: 'vision-agent',
+        contentGenerator: {},
+        contentGeneratorConfig: {
+          model: 'vision-agent',
+          authType: AuthType.USE_OPENAI,
+          modalities: { image: true },
+        },
+      } as FullTurnModelRoute;
+      mockResolveFullTurnVisionRoute.mockResolvedValue({
+        status: 'ready',
+        route,
+        selection: {
+          id: 'vision-agent',
+          baseUrl: 'https://vision.example.com/v1',
+          agentCapable: true,
+        },
+      });
+      mockSendMessageStream
+        .mockReturnValueOnce(
+          (async function* () {
+            yield* [];
+            throw new Error('vision route failed');
+          })(),
+        )
+        .mockReturnValueOnce((async function* () {})())
+        .mockReturnValueOnce((async function* () {})());
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+      await waitFor(() =>
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1),
+      );
+
+      expect(mockRunVisionBridge).not.toHaveBeenCalled();
+      expect(
+        JSON.stringify(mockSendMessageStream.mock.calls[0]?.[0]),
+      ).toContain('inlineData');
+      expect(mockSendMessageStream.mock.calls[0]?.[3]).toEqual(
+        expect.objectContaining({ modelRoute: route }),
+      );
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.VISION_NOTICE,
+          text: expect.stringContaining('current image turn'),
+        }),
+        expect.any(Number),
+      );
+
+      mockHandleSlashCommand.mockResolvedValueOnce({ type: 'handled' });
+      await act(async () => {
+        await result.current.submitQuery('/help');
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        await result.current.retryLastPrompt();
+      });
+      expect(mockSendMessageStream.mock.calls[1]?.[3]).toEqual(
+        expect.objectContaining({ modelRoute: route }),
+      );
+
+      handleAtCommandSpy.mockResolvedValue({
+        processedQuery: [{ text: 'next text turn' }],
+        shouldProceed: true,
+      } as unknown as Awaited<
+        ReturnType<typeof atCommandProcessor.handleAtCommand>
+      >);
+      await act(async () => {
+        await result.current.submitQuery('next text turn');
+      });
+      expect(mockSendMessageStream.mock.calls[2]?.[3]).not.toHaveProperty(
+        'modelRoute',
+      );
+    });
+
+    it('schedules tools with the active full-turn route', async () => {
+      enableBridge();
+      const route = {
+        model: 'vision-agent',
+        contentGenerator: {},
+        contentGeneratorConfig: { model: 'vision-agent' },
+      } as FullTurnModelRoute;
+      mockResolveFullTurnVisionRoute.mockResolvedValue({
+        status: 'ready',
+        route,
+        selection: { id: 'vision-agent', agentCapable: true },
+      });
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'route-tool',
+              name: 'read_file',
+              args: { path: '/tmp/file' },
+              isClientInitiated: false,
+              prompt_id: 'route-prompt',
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png inspect');
+      });
+
+      expect(mockScheduleToolCalls).toHaveBeenCalledWith(
+        [expect.objectContaining({ callId: 'route-tool' })],
+        expect.any(AbortSignal),
+        route,
+      );
+    });
+
+    it('keeps mid-turn images on the active full-turn route', async () => {
+      enableBridge();
+      const route = {
+        model: 'vision-agent',
+        contentGenerator: {},
+        contentGeneratorConfig: { model: 'vision-agent' },
+      } as FullTurnModelRoute;
+      mockResolveFullTurnVisionRoute.mockResolvedValue({
+        status: 'ready',
+        route,
+        selection: { id: 'vision-agent', agentCapable: true },
+      });
+      mockSendMessageStream
+        .mockReturnValueOnce(
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'route-tool',
+                name: 'read_file',
+                args: { path: '/tmp/file' },
+                isClientInitiated: false,
+                prompt_id: 'route-prompt',
+              },
+            };
+          })(),
+        )
+        .mockReturnValueOnce((async function* () {})());
+      const midTurnImage: Part = {
+        inlineData: { mimeType: 'image/png', data: 'mid-turn-image' },
+      };
+      const resolveAtCommandQuerySpy = vi
+        .spyOn(atCommandProcessor, 'resolveAtCommandQuery')
+        .mockResolvedValue({
+          processedQuery: [{ text: 'inspect second image' }, midTurnImage],
+          shouldProceed: true,
+        });
+      const midTurnDrainRef = {
+        current: vi.fn().mockReturnValue(['inspect @/tmp/second.png']),
+      };
+      let completeTools:
+        | ((tools: TrackedToolCall[]) => Promise<void>)
+        | undefined;
+      mockUseReactToolScheduler.mockImplementation((onComplete) => {
+        completeTools = onComplete;
+        return [
+          [],
+          mockScheduleToolCalls,
+          mockCancelAllToolCalls,
+          mockMarkToolsAsSubmitted,
+        ];
+      });
+      const client = new MockedGeminiClientClass(mockConfig);
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          client,
+          [],
+          mockAddItem,
+          mockConfig,
+          true,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+          midTurnDrainRef,
+        ),
+      );
+
+      await act(async () => {
+        await result.current.submitQuery('@img.png inspect');
+      });
+      await act(async () => {
+        await completeTools?.([
+          {
+            request: {
+              callId: 'route-tool',
+              name: 'read_file',
+              args: { path: '/tmp/file' },
+              isClientInitiated: false,
+              prompt_id: 'route-prompt',
+            },
+            status: 'success',
+            response: {
+              callId: 'route-tool',
+              responseParts: [
+                {
+                  functionResponse: {
+                    id: 'route-tool',
+                    name: 'read_file',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+              errorType: undefined,
+            },
+            responseSubmittedToGemini: false,
+            tool: { displayName: 'Read File' },
+            invocation: {
+              getDescription: () => 'Read file',
+            } as unknown as AnyToolInvocation,
+          } as TrackedCompletedToolCall,
+        ]);
+      });
+
+      expect(mockRunVisionBridge).not.toHaveBeenCalled();
+      expect(mockResolveFullTurnVisionRoute).toHaveBeenCalledOnce();
+      expect(resolveAtCommandQuerySpy).toHaveBeenCalledOnce();
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      expect(mockSendMessageStream.mock.calls[1]?.[0]).toEqual(
+        expect.arrayContaining([midTurnImage]),
+      );
+      expect(mockSendMessageStream.mock.calls[1]?.[3]).toEqual(
+        expect.objectContaining({ modelRoute: route }),
+      );
+    });
+
+    it('scrubs routed media when every pending tool is cancelled', async () => {
+      enableBridge();
+      const route = {
+        model: 'vision-agent',
+        contentGenerator: {},
+        contentGeneratorConfig: { model: 'vision-agent' },
+      } as FullTurnModelRoute;
+      mockResolveFullTurnVisionRoute.mockResolvedValue({
+        status: 'ready',
+        route,
+        selection: { id: 'vision-agent', agentCapable: true },
+      });
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'route-tool',
+              name: 'read_file',
+              args: { path: '/tmp/file' },
+              isClientInitiated: false,
+              prompt_id: 'route-prompt',
+            },
+          };
+        })(),
+      );
+      let completedTools:
+        | ((tools: TrackedToolCall[]) => Promise<void>)
+        | undefined;
+      mockUseReactToolScheduler.mockImplementation((onComplete) => {
+        completedTools = onComplete;
+        return [
+          [],
+          mockScheduleToolCalls,
+          mockCancelAllToolCalls,
+          mockMarkToolsAsSubmitted,
+        ];
+      });
+      const client = new MockedGeminiClientClass(mockConfig);
+      const replaceHistoricalMediaWithReferences = client.getChat()
+        .replaceHistoricalMediaWithReferences as Mock;
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          client,
+          [],
+          mockAddItem,
+          mockConfig,
+          true,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+      await act(async () => {
+        await result.current.submitQuery('@img.png inspect');
+      });
+      await act(async () => {
+        await completedTools?.([
+          {
+            request: {
+              callId: 'route-tool',
+              name: 'read_file',
+              args: { path: '/tmp/file' },
+              isClientInitiated: false,
+              prompt_id: 'route-prompt',
+            },
+            status: 'cancelled',
+            response: {
+              callId: 'route-tool',
+              responseParts: [{ text: 'cancelled' }],
+              errorType: undefined,
+            },
+            responseSubmittedToGemini: false,
+            tool: { displayName: 'Read File' },
+            invocation: {
+              getDescription: () => 'Read file',
+            } as unknown as AnyToolInvocation,
+          } as TrackedCancelledToolCall,
+        ]);
+      });
+
+      expect(replaceHistoricalMediaWithReferences).toHaveBeenCalledOnce();
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    it('routes image content produced by a slash command through the full-turn gate', async () => {
+      enableBridge();
+      const route = {
+        model: 'vision-agent',
+        contentGenerator: {},
+        contentGeneratorConfig: {
+          model: 'vision-agent',
+          modalities: { image: true },
+        },
+      } as FullTurnModelRoute;
+      mockResolveFullTurnVisionRoute.mockResolvedValue({
+        status: 'ready',
+        route,
+        selection: { id: 'vision-agent', agentCapable: true },
+      });
+      mockHandleSlashCommand.mockResolvedValueOnce({
+        type: 'submit_prompt',
+        content: [{ text: 'inspect' }, imagePart],
+      });
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('/inspect-image');
+      });
+
+      expect(mockRunVisionBridge).not.toHaveBeenCalled();
+      expect(mockSendMessageStream.mock.calls[0]?.[0]).toEqual([
+        { text: 'inspect' },
+        imagePart,
+      ]);
+      expect(mockSendMessageStream.mock.calls[0]?.[3]).toEqual(
+        expect.objectContaining({ modelRoute: route }),
+      );
+    });
+
+    it('stops before sending when an eligible exact route cannot resolve', async () => {
+      enableBridge();
+      mockResolveFullTurnVisionRoute.mockResolvedValue({
+        status: 'failed',
+        selection: { id: 'vision-agent', agentCapable: true },
+      });
+
+      const { result, mockSendMessageStream } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+
+      expect(mockRunVisionBridge).not.toHaveBeenCalled();
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: expect.stringContaining('not sent to the primary model'),
+        }),
+        expect.any(Number),
       );
     });
 
@@ -1206,6 +1615,15 @@ describe('useGeminiStream', () => {
         recordMidTurnUserMessage: vi.fn(),
       })),
     });
+    mockResolveFullTurnVisionRoute.mockResolvedValue({
+      status: 'ready',
+      route: {
+        model: 'vision-agent',
+        contentGenerator: {},
+        contentGeneratorConfig: { model: 'vision-agent' },
+      },
+      selection: { id: 'vision-agent', agentCapable: true },
+    });
     mockRunVisionBridge.mockResolvedValue({
       applied: true,
       status: 'ok',
@@ -1320,6 +1738,7 @@ describe('useGeminiStream', () => {
       parts: [resolvedTextPart, resolvedImagePart],
       signal: expect.any(AbortSignal),
     });
+    expect(mockResolveFullTurnVisionRoute).not.toHaveBeenCalled();
     expect(mockAddItem).toHaveBeenCalledWith(
       expect.objectContaining({
         type: MessageType.VISION_NOTICE,

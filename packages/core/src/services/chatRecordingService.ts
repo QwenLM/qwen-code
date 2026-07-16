@@ -38,6 +38,7 @@ import type {
   SessionArtifactEventRecordPayload,
   SessionArtifactSnapshotRecordPayload,
 } from './session-artifact-persistence.js';
+import type { FullTurnModelRouteIdentity } from '../core/baseLlmClient.js';
 
 const debugLogger = createDebugLogger('CHAT_RECORDING');
 
@@ -244,6 +245,8 @@ export interface ChatRecord {
   /** Optional subtype for distinguishing non-standard records */
   subtype?:
     | 'chat_compression'
+    | 'media_scrub'
+    | 'full_turn_route'
     | 'slash_command'
     | 'ui_telemetry'
     | 'at_command'
@@ -298,6 +301,7 @@ export interface ChatRecord {
    */
   systemPayload?:
     | ChatCompressionRecordPayload
+    | FullTurnRouteRecordPayload
     | SlashCommandRecordPayload
     | UiTelemetryRecordPayload
     | AtCommandRecordPayload
@@ -381,6 +385,8 @@ export interface ChatCompressionRecordPayload {
    */
   compressedHistory: Content[];
 }
+
+export type FullTurnRouteRecordPayload = FullTurnModelRouteIdentity;
 
 export interface SlashCommandRecordPayload {
   /** Whether this record represents the invocation or the resulting output. */
@@ -1270,6 +1276,41 @@ export class ChatRecordingService {
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving chat compression record:', error);
+    }
+  }
+
+  /**
+   * Marks all model-facing media recorded before this point as settled. Resume
+   * reconstruction replaces those payloads with placeholders while preserving
+   * any later, interrupted turn for exact-route recovery.
+   */
+  recordMediaScrubCheckpoint(): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'media_scrub',
+      };
+
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error saving media scrub checkpoint:', error);
+    }
+  }
+
+  /** Persists exact retry affinity before a routed image turn is recorded. */
+  recordFullTurnRoute(payload: FullTurnRouteRecordPayload): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'full_turn_route',
+        systemPayload: payload,
+      };
+
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error saving full-turn route:', error);
     }
   }
 

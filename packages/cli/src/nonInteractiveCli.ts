@@ -10,6 +10,7 @@ import type {
   Config,
   CronJob,
   CronScheduler,
+  FullTurnModelRoute,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
 } from '@qwen-code/qwen-code-core';
@@ -46,6 +47,15 @@ import {
   canonicalToolName,
   parsePositiveIntegerEnv,
   partitionByConcurrencySafety,
+  formatFullTurnVisionFailureNotice,
+  formatFullTurnVisionNotice,
+  formatVisionBridgeNotice,
+  hasImageParts,
+  resolveFullTurnVisionRoute,
+  runVisionBridge,
+  runWithRuntimeContentGenerator,
+  shouldRunVisionBridge,
+  splitImageParts,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -603,6 +613,7 @@ export async function runNonInteractive(
     // First-turn SendMessageType override for continuation turns; null means
     // the regular options.sendMessageType / UserQuery selection applies.
     let continueSendType: SendMessageType | null = null;
+    let restoredContinuationRoute: FullTurnModelRoute | undefined;
 
     try {
       process.stdout.on('error', stdoutErrorHandler);
@@ -662,7 +673,32 @@ export async function runNonInteractive(
           return 0;
         }
 
-        initialPartList = recoveryPlan.continuation.parts;
+        const chat = geminiClient.getChat();
+        const pendingRouteIdentity = chat.getPendingFullTurnRouteIdentity?.();
+        restoredContinuationRoute = chat.getPendingFullTurnRoute?.();
+        if (pendingRouteIdentity && !restoredContinuationRoute) {
+          throw new FatalInputError(
+            `Cannot safely continue the interrupted image turn because its exact route (${pendingRouteIdentity.model}) is unavailable.`,
+          );
+        }
+        const sourceHasImages = recoveryPlan.continuation.sourceHistory.some(
+          (content) => hasImageParts(content.parts ?? []),
+        );
+        if (
+          !pendingRouteIdentity &&
+          sourceHasImages &&
+          config.getEffectiveInputModalities?.().image !== true
+        ) {
+          throw new FatalInputError(
+            'Cannot safely continue an interrupted image turn without its original exact route identity.',
+          );
+        }
+        initialPartList = restoredContinuationRoute
+          ? chat.prepareHistoricalMediaForContinuation(
+              recoveryPlan.continuation.parts,
+              recoveryPlan.continuation.sourceHistory,
+            )
+          : recoveryPlan.continuation.parts;
         if (recoveryPlan.continuation.mode === 'retry_user_parts') {
           continueSendType = SendMessageType.Retry;
         } else {
@@ -837,6 +873,66 @@ export async function runNonInteractive(
         }
       }
 
+      let modelRoute = restoredContinuationRoute;
+      const initialPromptHasImages = hasImageParts(initialPartList);
+      if (
+        !modelRoute &&
+        initialPromptHasImages &&
+        shouldRunVisionBridge(config)
+      ) {
+        const routeResult = await resolveFullTurnVisionRoute(config);
+        if (routeResult.status === 'ready') {
+          modelRoute = routeResult.route;
+          const notice = formatFullTurnVisionNotice(routeResult.selection);
+          if (outputFormat === OutputFormat.TEXT) {
+            process.stderr.write(`${notice}\n`);
+          } else {
+            adapter.emitSystemMessage('full_turn_vision_route', { notice });
+          }
+        } else if (routeResult.status === 'failed') {
+          const message = formatFullTurnVisionFailureNotice(
+            routeResult.selection,
+          );
+          if (outputFormat !== OutputFormat.TEXT) {
+            adapter.emitSystemMessage('full_turn_vision_route_failed', {
+              message,
+            });
+          }
+          throw new FatalInputError(message);
+        } else {
+          const originalParts = initialPartList;
+          try {
+            const bridgeResult = await runVisionBridge({
+              config,
+              parts: originalParts,
+              signal: abortController.signal,
+            });
+            if (
+              bridgeResult.status !== 'skipped' ||
+              bridgeResult.egressOccurred
+            ) {
+              const notice = formatVisionBridgeNotice(bridgeResult);
+              if (outputFormat === OutputFormat.TEXT) {
+                process.stderr.write(`${notice}\n`);
+              } else {
+                adapter.emitSystemMessage('vision_bridge', { notice });
+              }
+            }
+            initialPartList =
+              bridgeResult.applied && bridgeResult.parts != null
+                ? bridgeResult.parts
+                : splitImageParts(originalParts).nonImageParts;
+          } catch (error) {
+            debugLogger.warn(
+              `vision bridge failed before image replacement: ${String(
+                error instanceof Error ? error.message : error,
+              )}`,
+            );
+            initialPartList = splitImageParts(originalParts).nonImageParts;
+          }
+        }
+      }
+
       const initialParts = normalizePartList(initialPartList);
       let currentMessages: Content[] = [{ role: 'user', parts: initialParts }];
 
@@ -952,6 +1048,16 @@ export async function runNonInteractive(
       let loopDetected = false;
       let loopDetectedMessage = formatLoopDetectedMessage(undefined);
 
+      const settleFullTurnRoute = () => {
+        if (!modelRoute) return;
+        const chat = geminiClient.getChat();
+        const changed = chat.replaceHistoricalMediaWithReferences();
+        if (changed || chat.getPendingFullTurnRouteIdentity?.()) {
+          config.getChatRecordingService()?.recordMediaScrubCheckpoint();
+        }
+        chat.clearPendingFullTurnRoute?.();
+      };
+
       // Shared terminal block for the structured-output success
       // contract. Both the main-turn loop and the drain-turn post-loop
       // previously reproduced this block verbatim
@@ -963,6 +1069,7 @@ export async function runNonInteractive(
       // no-op), so unconditional invocation is safe even when the drain
       // path already finalized monitors before reaching here.
       const emitStructuredSuccess = async (): Promise<0> => {
+        settleFullTurnRoute();
         registry.abortAll();
         // `abortAll()` marks each task `cancelled` synchronously, but
         // the matching `task_notification` is emitted later by the
@@ -999,6 +1106,7 @@ export async function runNonInteractive(
       };
 
       const emitLoopDetectedResult = async (): Promise<1> => {
+        settleFullTurnRoute();
         registry.abortAll();
         flushQueuedNotificationsToSdk(localQueue);
         finalizeOneShotMonitors();
@@ -1061,6 +1169,7 @@ export async function runNonInteractive(
       const processToolCallBatch = async (
         batchRequests: ToolCallRequestInfo[],
         setModelOverride: (override: string | undefined) => void,
+        toolRoute?: FullTurnModelRoute,
       ): Promise<ToolCallBatchResult> => {
         const toolResponseParts: Part[] = [];
         const structuredOutputActive =
@@ -1249,17 +1358,16 @@ export async function runNonInteractive(
               )
             : createToolProgressHandler(requestInfo, adapter);
 
-          const response = await executeToolCall(
-            config,
-            requestInfo,
-            abortController.signal,
-            {
+          const execute = () =>
+            executeToolCall(config, requestInfo, abortController.signal, {
               outputUpdateHandler,
               ...(toolCallUpdateCallback && {
                 onToolCallsUpdate: toolCallUpdateCallback,
               }),
-            },
-          );
+            });
+          const response = toolRoute
+            ? await runWithRuntimeContentGenerator(toolRoute, execute)
+            : await execute();
           debugLogger.debug(
             `[runNonInteractive] tool call ${requestInfo.callId} (${requestInfo.name}) settled${
               response.error ? ' with error' : ''
@@ -1548,6 +1656,7 @@ export async function runNonInteractive(
           {
             type: sendType,
             modelOverride,
+            ...(modelRoute && { modelRoute }),
             ...(isFirstTurn &&
               options.notificationDisplayText && {
                 notificationDisplayText: options.notificationDisplayText,
@@ -1633,11 +1742,15 @@ export async function runNonInteractive(
           const {
             responseParts: toolResponseParts,
             repeatedDuplicateProviderToolCall,
-          } = await processToolCallBatch(toolCallRequests, (override) => {
-            if (!inlineModelOverrideActive) {
-              modelOverride = override;
-            }
-          });
+          } = await processToolCallBatch(
+            toolCallRequests,
+            (override) => {
+              if (!inlineModelOverrideActive && !modelRoute) {
+                modelOverride = override;
+              }
+            },
+            modelRoute,
+          );
 
           if (structuredSubmission !== undefined) {
             // Single-shot terminal contract; aborts in-flight background

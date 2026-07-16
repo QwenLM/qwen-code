@@ -71,6 +71,35 @@ export function runWithRuntimeContentGenerator<T>(
   return storage.run({ ...current, runtimeView: view }, fn);
 }
 
+/** Consume an async generator with the runtime model view restored per step. */
+export async function* wrapAsyncGeneratorWithRuntimeContentGenerator<
+  TYield,
+  TReturn = void,
+>(
+  view: RuntimeContentGeneratorView,
+  generator: AsyncGenerator<TYield, TReturn>,
+): AsyncGenerator<TYield, TReturn> {
+  let completed = false;
+  try {
+    while (true) {
+      const next = await runWithRuntimeContentGenerator(view, () =>
+        generator.next(),
+      );
+      if (next.done) {
+        completed = true;
+        return next.value;
+      }
+      yield next.value;
+    }
+  } finally {
+    if (!completed) {
+      await runWithRuntimeContentGenerator(view, () =>
+        generator.return(undefined as TReturn),
+      );
+    }
+  }
+}
+
 export function getCurrentAgentId(): string | null {
   return storage.getStore()?.agentId ?? null;
 }

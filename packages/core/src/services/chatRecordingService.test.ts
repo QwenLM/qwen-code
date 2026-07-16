@@ -143,6 +143,23 @@ describe('ChatRecordingService', () => {
       expect(user2.parentUuid).toBe('00000000-0000-0000-0000-000000000002');
     });
 
+    it('keeps a media scrub checkpoint on the active record chain', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'image turn' }]);
+      chatRecordingService.recordMediaScrubCheckpoint();
+      chatRecordingService.recordUserMessage([{ text: 'next turn' }]);
+      await chatRecordingService.flush();
+
+      const calls = vi.mocked(jsonl.writeLine).mock.calls;
+      const marker = calls[1][1] as ChatRecord;
+      const nextUser = calls[2][1] as ChatRecord;
+      expect(marker).toMatchObject({
+        type: 'system',
+        subtype: 'media_scrub',
+        parentUuid: '00000000-0000-0000-0000-000000000001',
+      });
+      expect(nextUser.parentUuid).toBe(marker.uuid);
+    });
+
     it('should record mid-turn user messages with a mergeable subtype', async () => {
       const modelFacingParts: Part[] = [
         {

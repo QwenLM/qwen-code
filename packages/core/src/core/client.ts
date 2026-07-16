@@ -36,6 +36,10 @@ import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
 import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
 import { createSessionStartProfiler } from './session-start-profiler.js';
+import {
+  getFullTurnModelRouteIdentity,
+  type FullTurnModelRoute,
+} from './baseLlmClient.js';
 
 const debugLogger = createDebugLogger('CLIENT');
 
@@ -59,6 +63,8 @@ import {
 // Services
 import { LoopDetectionService } from '../services/loopDetectionService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
+import { slimCompactionInput } from '../services/compactionInputSlimming.js';
+import { isFullTurnVisionCapable } from '../services/visionBridge/vision-bridge-service.js';
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
@@ -103,6 +109,7 @@ import {
 import type { DeferredToolSummary } from '../tools/tool-registry.js';
 import {
   buildApiHistoryFromConversation,
+  getPendingFullTurnRouteState,
   replayUiTelemetryFromConversation,
 } from '../services/sessionService.js';
 import { reportError } from '../utils/errorReporting.js';
@@ -119,6 +126,7 @@ import { escapeSystemReminderTags } from '../utils/xml.js';
 import { ApiRetryEvent } from '../telemetry/types.js';
 import { logApiRetry } from '../telemetry/loggers.js';
 import { shouldUsePlanOnlyReminderInSubagentContext } from '../agents/runtime/subagent-plan-tool-policy.js';
+import { runWithRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
 
 // Hook types and utilities
 import {
@@ -168,6 +176,8 @@ export interface SendMessageOptions {
   notificationDisplayText?: string;
   /** Model override from skill execution. When present, overrides the session model for this turn. */
   modelOverride?: string;
+  /** Exact provider/runtime route for the current logical turn. */
+  modelRoute?: FullTurnModelRoute;
 }
 
 const EMPTY_RELEVANT_AUTO_MEMORY_RESULT: RelevantAutoMemoryPromptResult = {
@@ -334,6 +344,73 @@ export class GeminiClient {
         sessionStartSource ?? SessionStartSource.Resume,
       );
       const chat = this.getChat();
+      const pendingRouteState = getPendingFullTurnRouteState(
+        resumedSessionData.conversation,
+      );
+      const pendingRouteIdentity = pendingRouteState?.identity;
+      if (pendingRouteIdentity) {
+        const historyStartContent =
+          resumedHistory[pendingRouteState.historyStart];
+        const configuredRoute = this.config
+          .getAllConfiguredModels()
+          .find(
+            (model) =>
+              model.id === pendingRouteIdentity.model &&
+              (!pendingRouteIdentity.authType ||
+                model.authType === pendingRouteIdentity.authType) &&
+              (!pendingRouteIdentity.baseUrl ||
+                model.baseUrl === pendingRouteIdentity.baseUrl),
+          );
+        const qualifiedModel =
+          pendingRouteIdentity.authType &&
+          !pendingRouteIdentity.model.startsWith(
+            `${pendingRouteIdentity.authType}:`,
+          )
+            ? `${pendingRouteIdentity.authType}:${pendingRouteIdentity.model}`
+            : pendingRouteIdentity.model;
+        const selector = pendingRouteIdentity.baseUrl
+          ? `${qualifiedModel}\0${pendingRouteIdentity.baseUrl}`
+          : qualifiedModel;
+        try {
+          if (!configuredRoute || !isFullTurnVisionCapable(configuredRoute)) {
+            throw new Error('model is no longer eligible for full-turn vision');
+          }
+          const resolved = await this.config
+            .getBaseLlmClient()
+            .resolveForModel(selector, { failClosed: true });
+          if (
+            pendingRouteIdentity.authType &&
+            resolved.contentGeneratorConfig.authType !==
+              pendingRouteIdentity.authType
+          ) {
+            throw new Error('auth type changed');
+          }
+          chat.setPendingFullTurnRoute(
+            pendingRouteIdentity,
+            {
+              model: resolved.model,
+              contentGenerator: resolved.contentGenerator,
+              contentGeneratorConfig: {
+                ...resolved.contentGeneratorConfig,
+                modalities: {
+                  ...resolved.contentGeneratorConfig.modalities,
+                  image: true,
+                },
+              },
+            },
+            historyStartContent,
+          );
+        } catch (error) {
+          debugLogger.warn(
+            `Could not restore exact full-turn route ${pendingRouteIdentity.model}: ${getErrorMessage(error)}`,
+          );
+          chat.setPendingFullTurnRoute(
+            pendingRouteIdentity,
+            undefined,
+            historyStartContent,
+          );
+        }
+      }
       if (resumeTokenCounts) {
         chat.seedResumeTokenCounts(
           resumeTokenCounts.promptTokenCount,
@@ -575,7 +652,12 @@ export class GeminiClient {
   }
 
   setHistory(history: Content[]) {
-    this.getChat().setHistory(history);
+    const chat = this.getChat();
+    if (chat.getPendingFullTurnRouteIdentity?.()) {
+      chat.clearPendingFullTurnRoute?.();
+      this.config.getChatRecordingService()?.recordMediaScrubCheckpoint();
+    }
+    chat.setHistory(history);
     // Replacing history wholesale drops any prior read_file tool
     // results the FileReadCache still believes the model has seen.
     // Without clearing, a follow-up Read of an unchanged file would
@@ -1573,7 +1655,9 @@ export class GeminiClient {
     ) {
       const projectRoot = this.config.getProjectRoot();
       const sessionId = this.config.getSessionId();
-      const history = this.getHistoryShallow();
+      const history = slimCompactionInput(
+        this.getHistoryShallow(),
+      ).slimmedHistory;
       const mgr = this.config.getMemoryManager();
       const autoSkillEnabled = this.config.getAutoSkillEnabled();
 
@@ -1637,7 +1721,9 @@ export class GeminiClient {
 
     const projectRoot = this.config.getProjectRoot();
     const sessionId = this.config.getSessionId();
-    const history = this.getHistoryShallow();
+    const history = slimCompactionInput(
+      this.getHistoryShallow(),
+    ).slimmedHistory;
     const mgr = this.config.getMemoryManager();
 
     if (!this.config.getManagedAutoMemoryEnabled()) {
@@ -1819,6 +1905,50 @@ export class GeminiClient {
     turns: number = MAX_TURNS,
   ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
+    const startsIndependentTurn =
+      messageType === SendMessageType.UserQuery ||
+      messageType === SendMessageType.Cron ||
+      messageType === SendMessageType.Notification ||
+      messageType === SendMessageType.Teammate;
+    const chat = this.getChat();
+    const pendingRouteIdentity = chat.getPendingFullTurnRouteIdentity?.();
+    const incomingRouteIdentity = options?.modelRoute
+      ? getFullTurnModelRouteIdentity(options.modelRoute)
+      : undefined;
+    const continuesPendingRoute =
+      !startsIndependentTurn &&
+      pendingRouteIdentity &&
+      incomingRouteIdentity &&
+      pendingRouteIdentity.model === incomingRouteIdentity.model &&
+      pendingRouteIdentity.baseUrl === incomingRouteIdentity.baseUrl &&
+      pendingRouteIdentity.authType === incomingRouteIdentity.authType;
+    if (pendingRouteIdentity && !continuesPendingRoute) {
+      if (startsIndependentTurn) {
+        chat.replaceHistoricalMediaWithReferences?.();
+        this.config.getChatRecordingService()?.recordMediaScrubCheckpoint();
+        chat.clearPendingFullTurnRoute?.();
+      } else {
+        throw new Error(
+          `Cannot safely continue the interrupted image turn because its exact route (${pendingRouteIdentity.model}) was not provided.`,
+        );
+      }
+    }
+    if (options?.modelRoute) {
+      const identity = incomingRouteIdentity!;
+      const pendingIdentity = chat.getPendingFullTurnRouteIdentity?.();
+      if (
+        !pendingIdentity ||
+        pendingIdentity.model !== identity.model ||
+        pendingIdentity.baseUrl !== identity.baseUrl ||
+        pendingIdentity.authType !== identity.authType
+      ) {
+        if (chat.replaceHistoricalMediaWithReferences?.()) {
+          this.config.getChatRecordingService()?.recordMediaScrubCheckpoint();
+        }
+        this.config.getChatRecordingService()?.recordFullTurnRoute(identity);
+      }
+      chat.setPendingFullTurnRoute?.(identity, options.modelRoute);
+    }
     let strippedRetryEntries: Content[] = [];
     // Snapshot of GeminiChat's user-content push counter, taken right after the
     // strip. The Retry's re-submitted content is the first thing the send
@@ -1860,6 +1990,11 @@ export class GeminiClient {
     };
 
     if (messageType === SendMessageType.Retry) {
+      if (continuesPendingRoute) {
+        request = chat.preparePendingFullTurnMediaForContinuation(
+          createUserContent(request).parts ?? [],
+        );
+      }
       strippedRetryEntries = this.stripOrphanedUserEntriesFromHistory() ?? [];
       pushCountAfterStrip = currentPushCount();
       // The matching dangling-`functionCall` repair runs inside
@@ -1916,7 +2051,9 @@ export class GeminiClient {
             originalPrompt: promptText,
           },
         };
-        return new Turn(this.getChat(), prompt_id);
+        const blockedTurn = new Turn(this.getChat(), prompt_id);
+        this.replaceCompletedFullTurnMedia(options?.modelRoute, blockedTurn);
+        return blockedTurn;
       }
 
       // Add additional context from hooks to the request
@@ -1944,11 +2081,7 @@ export class GeminiClient {
     // Notifications start a fresh Turn with a new prompt_id, so the loop
     // detector must reset — otherwise a prior turn's count can trip
     // LoopDetected early on the notification turn.
-    const isTopLevelInteraction =
-      messageType === SendMessageType.UserQuery ||
-      messageType === SendMessageType.Cron ||
-      messageType === SendMessageType.Notification ||
-      messageType === SendMessageType.Teammate;
+    const isTopLevelInteraction = startsIndependentTurn;
     if (isTopLevelInteraction) {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
@@ -1983,6 +2116,7 @@ export class GeminiClient {
     // uncaught-exception exits too; created (when the hook is registered)
     // right before the turn's streaming loop below.
     let messageDisplay: MessageDisplayDispatcher | null = null;
+    let activeTurn: Turn | undefined;
     try {
       if (
         messageType === SendMessageType.UserQuery ||
@@ -2086,7 +2220,7 @@ export class GeminiClient {
         if (messageType === SendMessageType.UserQuery || compacted) {
           this.lastHookMicrocompactionTimestamp = Date.now();
         }
-      } else if (messageType === SendMessageType.Hook) {
+      } else if (messageType === SendMessageType.Hook && !options?.modelRoute) {
         this.lastHookMicrocompactionTimestamp ??=
           this.lastApiCompletionTimestamp ?? Date.now();
         const checkpoint = this.lastHookMicrocompactionTimestamp;
@@ -2248,9 +2382,13 @@ export class GeminiClient {
       }
 
       const turn = new Turn(this.getChat(), prompt_id);
+      activeTurn = turn;
 
       // Determine the model to use for this turn
-      const model = options?.modelOverride ?? this.config.getModel();
+      const model =
+        options?.modelRoute?.model ??
+        options?.modelOverride ??
+        this.config.getModel();
 
       // Assemble the outgoing request. IDE context is merged into the
       // user prompt's first text part, then on UserQuery / Cron turns
@@ -2341,10 +2479,12 @@ export class GeminiClient {
           // text as a separate user message after the tool messages.
           requestToSend = [...requestToSend, toolResultMemory.prompt];
         }
-        await this.microcompactHistoryBeforeSend(null, {
-          sizeOnly: true,
-          pendingContent: createUserContent(requestToSend),
-        });
+        if (!options?.modelRoute) {
+          await this.microcompactHistoryBeforeSend(null, {
+            sizeOnly: true,
+            pendingContent: createUserContent(requestToSend),
+          });
+        }
       }
 
       const activeGoalAtTurnStart = getActiveGoal(this.config.getSessionId());
@@ -2394,7 +2534,9 @@ export class GeminiClient {
             )
           : null;
 
-      const resultStream = turn.run(model, requestToSend, signal);
+      const resultStream = options?.modelRoute
+        ? turn.run(model, requestToSend, signal, options.modelRoute)
+        : turn.run(model, requestToSend, signal);
       let didUpdateIdeContextState = false;
       try {
         for await (const event of resultStream) {
@@ -2559,27 +2701,32 @@ export class GeminiClient {
           this.getLastModelMessageText() || '[no response text]';
 
         const contextUsage = buildContextUsage(
-          this.config.getContentGeneratorConfig()?.contextWindowSize ??
+          options?.modelRoute?.contentGeneratorConfig.contextWindowSize ??
+            this.config.getContentGeneratorConfig()?.contextWindowSize ??
             DEFAULT_TOKEN_LIMIT,
           uiTelemetryService.getLastPromptTokenCount(),
         );
 
-        const response = await messageBus.request<
-          HookExecutionRequest,
-          HookExecutionResponse
-        >(
-          {
-            type: MessageBusType.HOOK_EXECUTION_REQUEST,
-            eventName: 'Stop',
-            input: {
-              stop_hook_active: true,
-              last_assistant_message: responseText,
-              ...contextUsage,
+        const requestStopHook = () =>
+          messageBus.request<HookExecutionRequest, HookExecutionResponse>(
+            {
+              type: MessageBusType.HOOK_EXECUTION_REQUEST,
+              eventName: 'Stop',
+              input: {
+                stop_hook_active: true,
+                last_assistant_message: responseText,
+                ...contextUsage,
+              },
+              signal,
             },
-            signal,
-          },
-          MessageBusType.HOOK_EXECUTION_RESPONSE,
-        );
+            MessageBusType.HOOK_EXECUTION_RESPONSE,
+          );
+        const response = options?.modelRoute
+          ? await runWithRuntimeContentGenerator(
+              options.modelRoute,
+              requestStopHook,
+            )
+          : await requestStopHook();
 
         // Stop hook callbacks can mutate active goal state during request().
         // Capture it before cancellation returns so clear events are not lost.
@@ -2668,7 +2815,9 @@ export class GeminiClient {
               value: warning,
             };
             debugLogger.warn(warning);
+            this.replaceCompletedFullTurnMedia(options?.modelRoute, turn);
             if (isTopLevelInteraction) endInteractionSpan('ok');
+            normalCompletion = true;
             return turn;
           }
 
@@ -2710,6 +2859,7 @@ export class GeminiClient {
             {
               type: SendMessageType.Hook,
               modelOverride: options?.modelOverride,
+              modelRoute: options?.modelRoute,
               stopHookState: {
                 iterationCount: currentIterationCount,
                 reasons: currentReasons,
@@ -2717,6 +2867,7 @@ export class GeminiClient {
             },
             hookTurnBudget,
           );
+          this.replaceCompletedFullTurnMedia(options?.modelRoute, hookTurn);
           if (isTopLevelInteraction)
             endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
           // Preserve the pending prefetch: the inner Hook turn we just
@@ -2741,10 +2892,9 @@ export class GeminiClient {
         try {
           const chat = this.getChat();
           const maxHistoryForCache = 40;
-          const cachedHistory = this.getHistoryTailShallow(
-            maxHistoryForCache,
-            true,
-          );
+          const cachedHistory = slimCompactionInput(
+            this.getHistoryTailShallow(maxHistoryForCache, true),
+          ).slimmedHistory;
           saveCacheSafeParams(
             chat.getGenerationConfig(),
             cachedHistory,
@@ -2755,6 +2905,7 @@ export class GeminiClient {
         }
 
         if (this.config.getSkipNextSpeakerCheck()) {
+          this.replaceCompletedFullTurnMedia(options?.modelRoute, turn);
           this.runManagedAutoMemoryBackgroundTasks(messageType);
           if (arenaAgentClient) {
             await arenaAgentClient.reportCompleted();
@@ -2786,6 +2937,7 @@ export class GeminiClient {
             { ...options, type: SendMessageType.Hook },
             boundedTurns - 1,
           );
+          this.replaceCompletedFullTurnMedia(options?.modelRoute, continueTurn);
           if (isTopLevelInteraction)
             endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
           // Preserve the pending prefetch: same reasoning as the
@@ -2796,6 +2948,7 @@ export class GeminiClient {
           return continueTurn;
         }
 
+        this.replaceCompletedFullTurnMedia(options?.modelRoute, turn);
         this.runManagedAutoMemoryBackgroundTasks(messageType);
 
         if (arenaAgentClient) {
@@ -2811,6 +2964,9 @@ export class GeminiClient {
 
       if (isTopLevelInteraction) {
         endInteractionSpan(signal?.aborted ? 'cancelled' : 'ok');
+      }
+      if (signal?.aborted) {
+        this.replaceCompletedFullTurnMedia(options?.modelRoute, turn, true);
       }
       // Reached the bottom of the try — this turn ended cleanly. Preserve
       // any still-pending memory prefetch so the next ToolResult turn can
@@ -2829,6 +2985,13 @@ export class GeminiClient {
       // `return turn`. Catches uncaught exceptions and guards against
       // future early-return sites that forget to call cancel.
       if (!normalCompletion) {
+        if (activeTurn) {
+          this.replaceCompletedFullTurnMedia(
+            options?.modelRoute,
+            activeTurn,
+            true,
+          );
+        }
         this.cancelPendingMemoryPrefetch();
       }
       if (isTopLevelInteraction) {
@@ -2836,6 +2999,22 @@ export class GeminiClient {
           errorMessage: 'unexpected exit',
         });
       }
+    }
+  }
+
+  private replaceCompletedFullTurnMedia(
+    modelRoute: FullTurnModelRoute | undefined,
+    turn: Turn,
+    force = false,
+  ): void {
+    if (!modelRoute || (!force && turn.pendingToolCalls.length > 0)) return;
+    const chat = this.getChat();
+    const changed = chat.replaceHistoricalMediaWithReferences();
+    if (!force) {
+      if (changed || chat.getPendingFullTurnRouteIdentity?.()) {
+        this.config.getChatRecordingService()?.recordMediaScrubCheckpoint();
+      }
+      chat.clearPendingFullTurnRoute?.();
     }
   }
 

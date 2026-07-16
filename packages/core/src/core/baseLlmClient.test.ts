@@ -842,7 +842,7 @@ describe('BaseLlmClient', () => {
       expect(mockCreateContentGenerator).not.toHaveBeenCalled();
     });
 
-    it('builds a per-model generator when model differs and is registered under another authType', async () => {
+    it('returns the exact target config with a cross-provider generator', async () => {
       // Main authType is QWEN_OAUTH; fast model only resolves under USE_ANTHROPIC.
       getResolvedModel.mockImplementation((authType: string, model: string) => {
         if (authType === AuthType.QWEN_OAUTH) return undefined;
@@ -855,12 +855,19 @@ describe('BaseLlmClient', () => {
         }
         return undefined;
       });
+      const targetConfig = {
+        model: fastModel,
+        authType: AuthType.USE_ANTHROPIC,
+        baseUrl: 'https://api.anthropic.com',
+      };
+      mockBuildAgentContentGeneratorConfig.mockReturnValue(targetConfig);
 
       const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
 
       const resolved = await c.resolveForModel(fastModel);
 
       expect(resolved.contentGenerator).toBe(fastContentGenerator);
+      expect(resolved.contentGeneratorConfig).toBe(targetConfig);
       expect(resolved.retryAuthType).toBe(AuthType.USE_ANTHROPIC);
       expect(mockBuildAgentContentGeneratorConfig).toHaveBeenCalledWith(
         crossProviderConfig,
@@ -870,7 +877,10 @@ describe('BaseLlmClient', () => {
           baseUrl: 'https://api.anthropic.com',
         }),
       );
-      expect(mockCreateContentGenerator).toHaveBeenCalledTimes(1);
+      expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+        targetConfig,
+        crossProviderConfig,
+      );
     });
 
     it('resolves same-id model selectors by baseUrl when provided', async () => {
@@ -1027,6 +1037,41 @@ describe('BaseLlmClient', () => {
       await expect(
         c.resolveForModel(fastModel, { failClosed: true }),
       ).rejects.toThrow(/missing credential/i);
+    });
+
+    it('isolates concurrent fail-open and fail-closed generator creation failures', async () => {
+      getResolvedModel.mockImplementation((authType: string, model: string) =>
+        authType === AuthType.USE_ANTHROPIC && model === fastModel
+          ? {
+              authType: AuthType.USE_ANTHROPIC,
+              envKey: 'ANTHROPIC_API_KEY',
+              baseUrl: 'https://api.anthropic.com',
+            }
+          : undefined,
+      );
+      let rejectCreation!: (error: Error) => void;
+      const creation = new Promise<ContentGenerator>((_resolve, reject) => {
+        rejectCreation = reject;
+      });
+      mockCreateContentGenerator.mockReturnValue(creation);
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      const failOpen = c.resolveForModel(fastModel);
+      const failClosedOutcome = c
+        .resolveForModel(fastModel, { failClosed: true })
+        .then(
+          (value) => ({ value }),
+          (error: unknown) => ({ error }),
+        );
+
+      expect(mockCreateContentGenerator).toHaveBeenCalledTimes(2);
+      rejectCreation(new Error('missing credential'));
+      await expect(failOpen).resolves.toMatchObject({
+        contentGenerator: mockContentGenerator,
+      });
+      await expect(failClosedOutcome).resolves.toMatchObject({
+        error: expect.objectContaining({ message: 'missing credential' }),
+      });
     });
 
     it('falls back to the main generator for an unregistered model when failClosed is not set', async () => {

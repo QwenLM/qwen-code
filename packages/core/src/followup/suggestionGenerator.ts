@@ -11,9 +11,14 @@
 
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
-import { getCacheSafeParams, runForkedAgent } from '../utils/forkedAgent.js';
+import {
+  getCacheSafeParams,
+  runForkedAgent,
+  type CacheSafeParams,
+} from '../utils/forkedAgent.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { slimCompactionInput } from '../services/compactionInputSlimming.js';
 
 const debugLogger = createDebugLogger('FOLLOWUP');
 
@@ -107,10 +112,18 @@ export async function generatePromptSuggestion(
       `Generating suggestion: cacheSharing=${!!cacheSafe}, model=${modelOverride || '(default)'}`,
     );
     const raw = cacheSafe
-      ? await generateViaForkedQuery(config, abortSignal, modelOverride)
+      ? await generateViaForkedQuery(
+          config,
+          {
+            ...cacheSafe,
+            history: slimCompactionInput(cacheSafe.history).slimmedHistory,
+          },
+          abortSignal,
+          modelOverride,
+        )
       : await generateViaBaseLlm(
           config,
-          conversationHistory,
+          slimCompactionInput(conversationHistory).slimmedHistory,
           abortSignal,
           modelOverride,
         );
@@ -144,11 +157,10 @@ export async function generatePromptSuggestion(
 /** Generate suggestion via cache-aware forked query */
 async function generateViaForkedQuery(
   config: Config,
+  cacheSafeParams: CacheSafeParams,
   abortSignal: AbortSignal,
   modelOverride?: string,
 ): Promise<string | null> {
-  const cacheSafeParams = getCacheSafeParams();
-  if (!cacheSafeParams) return null;
   const model = modelOverride ?? config.getFastModel() ?? cacheSafeParams.model;
   const result = await runForkedAgent({
     config,

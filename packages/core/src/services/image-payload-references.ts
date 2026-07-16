@@ -20,6 +20,7 @@ export interface StoredImagePayload {
   id: string;
   mimeType: string;
   data: string;
+  fileUri?: string;
   bytes: number;
   displayName?: string;
 }
@@ -81,10 +82,7 @@ export function replaceImagePayloadsInPlace(
     if (!content.parts) continue;
     for (let i = 0; i < content.parts.length; i++) {
       const part = content.parts[i]!;
-      if (
-        part.inlineData?.mimeType?.startsWith('image/') &&
-        part.inlineData.data
-      ) {
+      if (isStorableImagePart(part)) {
         const stored = store.put(part);
         replaced.push(stored);
         content.parts[i] = { text: imageReferenceText(stored) };
@@ -92,16 +90,24 @@ export function replaceImagePayloadsInPlace(
       }
       const nested = getFunctionResponseParts(part);
       if (!nested) continue;
+      let updatedNested: Part[] | undefined;
       for (let j = 0; j < nested.length; j++) {
         const inner = nested[j]!;
-        if (
-          inner.inlineData?.mimeType?.startsWith('image/') &&
-          inner.inlineData.data
-        ) {
+        if (isStorableImagePart(inner)) {
           const stored = store.put(inner);
           replaced.push(stored);
-          nested[j] = { text: imageReferenceText(stored) };
+          updatedNested ??= [...nested];
+          updatedNested[j] = { text: imageReferenceText(stored) };
         }
+      }
+      if (updatedNested) {
+        content.parts[i] = {
+          ...part,
+          functionResponse: {
+            ...part.functionResponse,
+            parts: updatedNested,
+          },
+        } as Part;
       }
     }
   }
@@ -144,10 +150,20 @@ export function prepareImagePayloadsForRequest(
     maxRecentImages: number;
     preserveImagePartsForContentIndex?: number;
     preserveLastUserImagePartCount?: number;
+    referenceContents?: Content[];
+    allowedReferencedImageIds?: ReadonlySet<string>;
     store: ImagePayloadStore;
   },
 ): Content[] {
-  const referencedIds = collectReferencedImageIds(contents.at(-1));
+  const referencedIds = new Set<string>();
+  for (const content of options.referenceContents ?? [contents.at(-1)]) {
+    collectReferencedImageIds(content, referencedIds);
+  }
+  if (options.allowedReferencedImageIds) {
+    for (const id of referencedIds) {
+      if (!options.allowedReferencedImageIds.has(id)) referencedIds.delete(id);
+    }
+  }
   const collected: CollectedImage[] = [];
   const transformed = contents.map((content, index) => {
     if (index === options.preserveImagePartsForContentIndex) {
@@ -192,6 +208,9 @@ export function prepareImagePayloadsForRequest(
       reattachById.set(stored.id, stored);
     }
   }
+  for (const content of transformed) {
+    removeAlreadyAttachedImages(content.parts ?? [], reattachById);
+  }
 
   if (reattachById.size === 0) {
     return transformed;
@@ -220,7 +239,7 @@ function transformPart(
   store: ImagePayloadStore,
   collected: CollectedImage[],
 ): Part {
-  if (part.inlineData?.mimeType?.startsWith('image/') && part.inlineData.data) {
+  if (isStorableImagePart(part)) {
     const stored = store.put(part);
     collected.push({ stored });
     return { text: imageReferenceText(stored) };
@@ -243,17 +262,30 @@ function transformPart(
   return part;
 }
 
-function collectReferencedImageIds(content: Content | undefined): Set<string> {
-  const ids = new Set<string>();
-  for (const part of content?.parts ?? []) {
+function collectReferencedImageIds(
+  content: Content | undefined,
+  ids: Set<string>,
+): void {
+  collectReferencedImageIdsFromParts(content?.parts ?? [], ids);
+}
+
+function collectReferencedImageIdsFromParts(
+  parts: Part[],
+  ids: Set<string>,
+): void {
+  for (const part of parts) {
     const text = part.text;
-    if (!text) continue;
-    for (const match of text.matchAll(IMAGE_REFERENCE_PATTERN)) {
-      const id = match[1];
-      if (id) ids.add(id.toLowerCase());
+    if (text) {
+      for (const match of text.matchAll(IMAGE_REFERENCE_PATTERN)) {
+        const id = match[1];
+        if (id) ids.add(id.toLowerCase());
+      }
+    }
+    const nested = getFunctionResponseParts(part);
+    if (nested) {
+      collectReferencedImageIdsFromParts(nested, ids);
     }
   }
-  return ids;
 }
 
 function recentUniqueImages(
@@ -275,25 +307,53 @@ function recentUniqueImages(
   return recent.reverse();
 }
 
+function isStorableImagePart(part: Part): boolean {
+  return Boolean(
+    (part.inlineData?.mimeType?.startsWith('image/') && part.inlineData.data) ||
+      (part.fileData?.mimeType?.startsWith('image/') && part.fileData.fileUri),
+  );
+}
+
+function removeAlreadyAttachedImages(
+  parts: Part[],
+  images: Map<string, StoredImagePayload>,
+): void {
+  for (const part of parts) {
+    if (isStorableImagePart(part)) {
+      images.delete(imagePartToStoredPayload(part).id);
+    }
+    const nested = getFunctionResponseParts(part);
+    if (nested) removeAlreadyAttachedImages(nested, images);
+  }
+}
+
 function imagePartToStoredPayload(part: Part): StoredImagePayload {
   const data = part.inlineData?.data ?? '';
-  const mimeType = part.inlineData?.mimeType ?? 'application/octet-stream';
+  const fileUri = part.fileData?.fileUri;
+  const mimeType =
+    part.inlineData?.mimeType ??
+    part.fileData?.mimeType ??
+    'application/octet-stream';
   const hash = createHash('sha256')
+    .update(fileUri ? 'file' : 'inline')
+    .update('\0')
     .update(mimeType)
     .update('\0')
-    .update(data)
+    .update(fileUri ?? data)
     .digest('hex');
   return {
     id: hash.slice(0, IMAGE_ID_LENGTH),
     mimeType,
     data,
-    bytes: approxBase64Bytes(data),
-    displayName: part.inlineData?.displayName,
+    ...(fileUri && { fileUri }),
+    bytes: fileUri ? 0 : approxBase64Bytes(data),
+    displayName: part.inlineData?.displayName ?? part.fileData?.displayName,
   };
 }
 
 function imageReferenceText(stored: StoredImagePayload): string {
-  return `[Image #${stored.id}: ${safeImageMimeType(stored.mimeType)}, ${stored.bytes} bytes]`;
+  const size = stored.fileUri ? 'file URI' : `${stored.bytes} bytes`;
+  return `[Image #${stored.id}: ${safeImageMimeType(stored.mimeType)}, ${size}]`;
 }
 
 function safeImageMimeType(mimeType: string): string {
@@ -303,6 +363,15 @@ function safeImageMimeType(mimeType: string): string {
 }
 
 function storedImageToPart(stored: StoredImagePayload): Part {
+  if (stored.fileUri) {
+    return {
+      fileData: {
+        mimeType: stored.mimeType,
+        fileUri: stored.fileUri,
+        displayName: stored.displayName,
+      },
+    };
+  }
   return {
     inlineData: {
       mimeType: stored.mimeType,

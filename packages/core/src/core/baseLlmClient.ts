@@ -15,7 +15,10 @@ import type {
   Schema,
 } from '@google/genai';
 import type { Config } from '../config/config.js';
-import type { ContentGenerator } from './contentGenerator.js';
+import type {
+  ContentGenerator,
+  ContentGeneratorConfig,
+} from './contentGenerator.js';
 import { AuthType, createContentGenerator } from './contentGenerator.js';
 import type { ResolvedModelConfig } from '../models/types.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
@@ -33,6 +36,7 @@ import { logApiRetry } from '../telemetry/loggers.js';
 import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 
 const DEFAULT_MAX_ATTEMPTS = 7;
 
@@ -49,16 +53,38 @@ function splitModelBaseUrl(model: string): { model: string; baseUrl?: string } {
   };
 }
 
+/** Exact provider/runtime route for one complete agent turn. */
+export interface FullTurnModelRoute extends RuntimeContentGeneratorView {
+  model: string;
+}
+
+export interface FullTurnModelRouteIdentity {
+  model: string;
+  baseUrl?: string;
+  authType?: string;
+}
+
+export function getFullTurnModelRouteIdentity(
+  route: FullTurnModelRoute,
+): FullTurnModelRouteIdentity {
+  return {
+    model: route.model,
+    ...(route.contentGeneratorConfig.baseUrl
+      ? { baseUrl: route.contentGeneratorConfig.baseUrl }
+      : {}),
+    ...(route.contentGeneratorConfig.authType
+      ? { authType: route.contentGeneratorConfig.authType }
+      : {}),
+  };
+}
+
 /**
- * The pair of generator and retry-authType to use for a request targeting
- * a specific model. When the requested model differs from the main session
- * model, both fields are resolved against that model's provider so that
- * per-model `extra_body` / `samplingParams` / reasoning settings — and
- * provider-specific retry/quota behaviour — do not leak from the main
- * session.
+ * The generator, config, and retry metadata resolved for a requested model.
+ * This may represent a fail-open fallback and is not an exact full-turn route.
  */
 export interface ResolvedGeneratorForModel {
   contentGenerator: ContentGenerator;
+  contentGeneratorConfig: ContentGeneratorConfig;
   retryAuthType: string | undefined;
   retryErrorCodes?: readonly number[];
   model: string;
@@ -200,7 +226,7 @@ export class BaseLlmClient {
    */
   private readonly perModelGeneratorCache = new Map<
     string,
-    Promise<ContentGenerator>
+    Promise<RuntimeContentGeneratorView>
   >();
 
   constructor(
@@ -534,18 +560,20 @@ export class BaseLlmClient {
     ) {
       return {
         contentGenerator: this.getCurrentContentGenerator(),
+        contentGeneratorConfig: mainGeneratorConfig,
         retryAuthType: mainAuthType,
         retryErrorCodes: mainRetryErrorCodes,
         model: requestModel,
       };
     }
 
-    const contentGenerator = await this.createContentGeneratorForModel(
-      requested.model,
-      selector,
-      opts?.failClosed ?? false,
-      requested.baseUrl,
-    );
+    const { contentGenerator, contentGeneratorConfig } =
+      await this.createRuntimeViewForModel(
+        requested.model,
+        selector,
+        opts?.failClosed ?? false,
+        requested.baseUrl,
+      );
     const resolvedModel = this.resolveModelAcrossAuthTypes(
       requested.model,
       selector,
@@ -558,6 +586,7 @@ export class BaseLlmClient {
 
     return {
       contentGenerator,
+      contentGeneratorConfig,
       retryAuthType,
       retryErrorCodes,
       model: resolvedModel?.id ?? requestModel,
@@ -618,17 +647,18 @@ export class BaseLlmClient {
     return undefined;
   }
 
-  private async createContentGeneratorForModel(
+  private async createRuntimeViewForModel(
     model: string,
     selector: ResolvedModelId | undefined,
     failClosed = false,
     modelBaseUrl?: string,
-  ): Promise<ContentGenerator> {
-    const cacheKey = selector
+  ): Promise<RuntimeContentGeneratorView> {
+    const routeKey = selector
       ? modelBaseUrl === undefined
         ? `${selector.authType ?? ''}:${selector.modelId}`
         : `${selector.authType ?? ''}:${selector.modelId}\0${modelBaseUrl}`
       : model;
+    const cacheKey = `${routeKey}:${failClosed ? 'closed' : 'open'}`;
     const cached = this.perModelGeneratorCache.get(cacheKey);
     if (cached) return cached;
 
@@ -656,7 +686,10 @@ export class BaseLlmClient {
       // runtime view from AsyncLocalStorage, which can differ between calls
       // (e.g. inside a subagent vs. on the main session). Caching here would
       // pin the first-call view's generator under this selector key.
-      return this.getCurrentContentGenerator();
+      return {
+        contentGenerator: this.getCurrentContentGenerator(),
+        contentGeneratorConfig: this.config.getContentGeneratorConfig(),
+      };
     }
 
     const generatorPromise = (async () => {
@@ -674,7 +707,13 @@ export class BaseLlmClient {
           },
         );
 
-        return await createContentGenerator(targetConfig, this.config);
+        return {
+          contentGenerator: await createContentGenerator(
+            targetConfig,
+            this.config,
+          ),
+          contentGeneratorConfig: targetConfig,
+        };
       } catch (err: unknown) {
         this.perModelGeneratorCache.delete(cacheKey);
         if (failClosed) {
@@ -690,7 +729,10 @@ export class BaseLlmClient {
           `Failed to create content generator for model "${model}", falling back to main generator.`,
           err instanceof Error ? err.message : String(err),
         );
-        return this.getCurrentContentGenerator();
+        return {
+          contentGenerator: this.getCurrentContentGenerator(),
+          contentGeneratorConfig: this.config.getContentGeneratorConfig(),
+        };
       }
     })();
 

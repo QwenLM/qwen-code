@@ -14,6 +14,7 @@ import {
   isTopLevelSession,
   runWithAgentContext,
   runWithRuntimeContentGenerator,
+  wrapAsyncGeneratorWithRuntimeContentGenerator,
   spawnBlockReason,
   type RuntimeContentGeneratorView,
 } from './agent-context.js';
@@ -139,6 +140,36 @@ describe('agent-context (runtimeView)', () => {
       return getRuntimeContentGenerator();
     });
     expect(outerAgain).toBe(outer);
+  });
+
+  it('restores the view for every async-generator step and cleanup', async () => {
+    const view = makeView('vision-route');
+    const seen: Array<RuntimeContentGeneratorView | undefined> = [];
+    async function* source() {
+      try {
+        seen.push(getRuntimeContentGenerator());
+        yield 1;
+        seen.push(getRuntimeContentGenerator());
+        await Promise.resolve();
+        seen.push(getRuntimeContentGenerator());
+        yield 2;
+      } finally {
+        seen.push(getRuntimeContentGenerator());
+      }
+    }
+
+    const wrapped = wrapAsyncGeneratorWithRuntimeContentGenerator(
+      view,
+      source(),
+    );
+    expect(await wrapped.next()).toEqual({ done: false, value: 1 });
+    expect(getRuntimeContentGenerator()).toBeUndefined();
+    expect(await wrapped.next()).toEqual({ done: false, value: 2 });
+    expect(getRuntimeContentGenerator()).toBeUndefined();
+    expect(await wrapped.next()).toEqual({ done: true, value: undefined });
+
+    expect(seen).toEqual([view, view, view, view]);
+    expect(getRuntimeContentGenerator()).toBeUndefined();
   });
 });
 

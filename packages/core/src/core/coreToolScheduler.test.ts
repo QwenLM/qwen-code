@@ -64,7 +64,11 @@ import { WriteFileTool } from '../tools/write-file.js';
 import { ShellTool, ShellToolInvocation } from '../tools/shell.js';
 import type { ShellToolParams } from '../tools/shell.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
-import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import {
+  getRuntimeContentGenerator,
+  runWithAgentContext,
+  type RuntimeContentGeneratorView,
+} from '../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
 
 type ToolSpanRecord = {
@@ -794,6 +798,41 @@ describe('CoreToolScheduler', () => {
       onToolCallsUpdate,
     };
   }
+
+  it('executes scheduled tools inside the supplied runtime route', async () => {
+    const runtimeView: RuntimeContentGeneratorView = {
+      contentGenerator: {} as RuntimeContentGeneratorView['contentGenerator'],
+      contentGeneratorConfig: { model: 'vision-agent' },
+    };
+    const seen: Array<RuntimeContentGeneratorView | undefined> = [];
+    const execute = vi.fn(async () => {
+      await Promise.resolve();
+      seen.push(getRuntimeContentGenerator());
+      return { llmContent: 'done', returnDisplay: 'done' };
+    });
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([
+        ['routedTool', new MockTool({ name: 'routedTool', execute })],
+      ]),
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'routed-call',
+          name: 'routedTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'routed-prompt',
+        },
+      ],
+      new AbortController().signal,
+      runtimeView,
+    );
+
+    expect(seen).toEqual([runtimeView]);
+    expect(getRuntimeContentGenerator()).toBeUndefined();
+  });
 
   it('dispatches legacy tool names through their canonical registered tools', async () => {
     const canonicalNamesByLegacyName = new Map(
@@ -8329,6 +8368,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     args?: Record<string, unknown>;
     abortController?: AbortController;
     tools?: MockTool[];
+    runtimeView?: RuntimeContentGeneratorView;
   }): Promise<{
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
@@ -8349,6 +8389,7 @@ describe('CoreToolScheduler telemetry spans', () => {
         },
       ],
       abortController.signal,
+      options.runtimeView,
     );
     return { ...built, abortController };
   }
@@ -8428,6 +8469,40 @@ describe('CoreToolScheduler telemetry spans', () => {
     const blocked = getBlockedSpans();
     expect(blocked).toHaveLength(1);
     expect(blocked[0].ended).toBe(true);
+  });
+
+  it('restores the runtime route when an ask is approved outside its async context', async () => {
+    const runtimeView: RuntimeContentGeneratorView = {
+      contentGenerator: {} as RuntimeContentGeneratorView['contentGenerator'],
+      contentGeneratorConfig: { model: 'vision-agent' },
+    };
+    const seen: Array<RuntimeContentGeneratorView | undefined> = [];
+    const execute = vi.fn(async () => {
+      await Promise.resolve();
+      seen.push(getRuntimeContentGenerator());
+      return { llmContent: 'ok', returnDisplay: 'ok' };
+    });
+    const { onToolCallsUpdate, onAllToolCallsComplete } = await scheduleWithAsk(
+      {
+        messageBus: askMessageBus(),
+        execute,
+        runtimeView,
+      },
+    );
+
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    expect(getRuntimeContentGenerator()).toBeUndefined();
+    await waiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    expect(seen).toEqual([runtimeView]);
   });
 
   it('cancels the tool without executing when the user declines an ask', async () => {

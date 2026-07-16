@@ -25,7 +25,10 @@ import type { ReasoningEffort } from '../core/reasoning-effort.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 import type { VisionBridgeModelSelection } from '../services/visionBridge/vision-bridge-service.js';
-import { selectVisionBridgeModel } from '../services/visionBridge/vision-bridge-service.js';
+import {
+  isImageCapable,
+  selectVisionBridgeModel,
+} from '../services/visionBridge/vision-bridge-service.js';
 import type { AnyToolInvocation } from '../tools/tools.js';
 import type { ArenaManager } from '../agents/arena/ArenaManager.js';
 import { ArenaAgentClient } from '../agents/arena/ArenaAgentClient.js';
@@ -3610,9 +3613,12 @@ export class Config {
     }
     return {
       id: parsedSetting.selector,
+      ...(match.authType && { authType: match.authType }),
       ...((parsedSetting.baseUrl ?? match.baseUrl) && {
         baseUrl: parsedSetting.baseUrl ?? match.baseUrl,
       }),
+      ...(isImageCapable(match) &&
+        match.capabilities?.agent === true && { agentCapable: true }),
     };
   }
 

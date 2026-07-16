@@ -21,6 +21,7 @@ import {
   ArenaSessionStatus,
   AuthType,
   createDebugLogger,
+  slimCompactionInput,
   stripStartupContext,
   type Config,
   type ArenaModelConfig,
@@ -195,7 +196,9 @@ function executeArenaCommand(
   let chatHistory;
   try {
     const fullHistory = config.getGeminiClient().getChat().getHistoryShallow();
-    chatHistory = stripStartupContext(fullHistory);
+    chatHistory = slimCompactionInput(
+      stripStartupContext(fullHistory),
+    ).slimmedHistory;
   } catch {
     debugLogger.debug('Could not retrieve chat history for arena agents');
   }

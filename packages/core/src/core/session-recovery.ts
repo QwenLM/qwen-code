@@ -34,6 +34,8 @@ export interface SessionRecoveryContinuation {
   mode: 'retry_user_parts' | 'tool_result_parts';
   parts: Part[];
   displayText: string;
+  /** History belonging to this unfinished logical turn only. */
+  sourceHistory: Content[];
 }
 
 export interface SessionRecoveryPlan {
@@ -104,6 +106,37 @@ function buildVisibleNotice(
   }
 
   return 'Previous session appears to have stopped during tool execution.';
+}
+
+function getInterruptedTurnSourceHistory(
+  history: Content[],
+  kind: 'interrupted_prompt' | 'interrupted_turn',
+): Content[] {
+  if (kind === 'interrupted_prompt') {
+    let start = history.length - 1;
+    while (start > 0 && history[start - 1]?.role === 'user') start--;
+    const trailingUsers = history.slice(start);
+    if (
+      !trailingUsers.some((content) =>
+        (content.parts ?? []).some((part) => part.functionResponse),
+      )
+    ) {
+      return structuredClone(trailingUsers);
+    }
+  }
+
+  let start = history.length - 1;
+  for (let index = history.length - 2; index >= 0; index--) {
+    const content = history[index];
+    if (
+      content?.role === 'model' &&
+      !(content.parts ?? []).some((part) => part.functionCall)
+    ) {
+      break;
+    }
+    start = index;
+  }
+  return structuredClone(history.slice(start));
 }
 
 export function buildSessionRecoveryPlan({
@@ -185,6 +218,10 @@ export function buildSessionRecoveryPlanFromApiHistory({
       mode: 'retry_user_parts',
       parts: interruption.parts,
       displayText: 'Continue interrupted user prompt',
+      sourceHistory: getInterruptedTurnSourceHistory(
+        originalApiHistory,
+        'interrupted_prompt',
+      ),
     };
     return {
       planId,
@@ -208,6 +245,10 @@ export function buildSessionRecoveryPlanFromApiHistory({
       ORPHAN_TOOL_USE_REPAIR_REASON,
     ),
     displayText: 'Continue interrupted tool turn',
+    sourceHistory: getInterruptedTurnSourceHistory(
+      originalApiHistory,
+      'interrupted_turn',
+    ),
   };
 
   return {

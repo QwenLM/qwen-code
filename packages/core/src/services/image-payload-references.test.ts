@@ -184,6 +184,99 @@ describe('prepareImagePayloadsForRequest', () => {
     ]);
   });
 
+  it('does not reattach an image already present in the preserved request', () => {
+    const store = new InMemoryImagePayloadStore();
+    const source: Content[] = [
+      {
+        role: 'user',
+        parts: [{ inlineData: { mimeType: 'image/png', data: 'same-shot' } }],
+      },
+    ];
+    const [stored] = replaceImagePayloadsInPlace(source, store);
+
+    const prepared = prepareImagePayloadsForRequest(
+      [
+        {
+          role: 'user',
+          parts: [{ inlineData: { mimeType: 'image/png', data: 'same-shot' } }],
+        },
+      ],
+      {
+        maxRecentImages: 0,
+        preserveImagePartsForContentIndex: 0,
+        referenceContents: source,
+        allowedReferencedImageIds: new Set([stored!.id]),
+        store,
+      },
+    );
+
+    expect(imageParts(prepared).map((part) => part.inlineData?.data)).toEqual([
+      'same-shot',
+    ]);
+  });
+
+  it('limits reference reattachment to the pending-turn allowlist', () => {
+    const store = new InMemoryImagePayloadStore();
+    const settled: Content[] = [toolImageTurn('settled-shot')];
+    const pending: Content[] = [toolImageTurn('pending-shot')];
+    const [settledImage] = replaceImagePayloadsInPlace(settled, store);
+    const [pendingImage] = replaceImagePayloadsInPlace(pending, store);
+    const references: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          {
+            text: `retry Image #${settledImage!.id} and Image #${pendingImage!.id}`,
+          },
+        ],
+      },
+    ];
+
+    const prepared = prepareImagePayloadsForRequest(references, {
+      maxRecentImages: 0,
+      referenceContents: references,
+      allowedReferencedImageIds: new Set([pendingImage!.id]),
+      store,
+    });
+
+    expect(imageParts(prepared).map((part) => part.inlineData?.data)).toEqual([
+      'pending-shot',
+    ]);
+  });
+
+  it('stores and reattaches image fileData for an interrupted route', () => {
+    const store = new InMemoryImagePayloadStore();
+    const source: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          {
+            fileData: {
+              mimeType: 'image/png',
+              fileUri: 'https://files.example/shot.png',
+            },
+          },
+        ],
+      },
+    ];
+    const [stored] = replaceImagePayloadsInPlace(source, store);
+
+    const prepared = prepareImagePayloadsForRequest(
+      [{ role: 'user', parts: [{ text: 'retry' }] }],
+      {
+        maxRecentImages: 0,
+        referenceContents: source,
+        allowedReferencedImageIds: new Set([stored!.id]),
+        store,
+      },
+    );
+
+    expect(JSON.stringify(source)).not.toContain('files.example');
+    expect(
+      prepared.at(-1)?.parts?.find((part) => part.fileData)?.fileData?.fileUri,
+    ).toBe('https://files.example/shot.png');
+  });
+
   it('does not echo tool-controlled image metadata into text references', () => {
     const store = new InMemoryImagePayloadStore();
     const prepared = prepareImagePayloadsForRequest(
@@ -269,6 +362,20 @@ describe('replaceImagePayloadsInPlace', () => {
     expect(countAllInlineImages(contents)).toBe(1);
     expect(JSON.stringify(contents)).toContain('"data":"current-shot"');
     expect(JSON.stringify(contents)).not.toContain('"data":"old-shot"');
+  });
+
+  it('does not mutate a shared nested function-response payload', () => {
+    const store = new InMemoryImagePayloadStore();
+    const recorded = toolImageTurn('queued-shot');
+    const historyCopy: Content = {
+      ...recorded,
+      parts: [...(recorded.parts ?? [])],
+    };
+
+    replaceImagePayloadsInPlace([historyCopy], store);
+
+    expect(JSON.stringify(historyCopy)).not.toContain('"data":"queued-shot"');
+    expect(JSON.stringify(recorded)).toContain('"data":"queued-shot"');
   });
 });
 

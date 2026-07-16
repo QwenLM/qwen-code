@@ -20,6 +20,7 @@ import type {
   ChatCompressionRecordPayload,
   ChatRecord,
   FileHistorySnapshotRecordPayload,
+  FullTurnRouteRecordPayload,
   TitleSource,
   UiTelemetryRecordPayload,
 } from './chatRecordingService.js';
@@ -47,6 +48,7 @@ import {
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
 import { SessionTranscriptTooLargeError } from './session-transcript-reader.js';
+import { slimCompactionInput } from './compactionInputSlimming.js';
 
 const debugLogger = createDebugLogger('SESSION');
 
@@ -207,6 +209,34 @@ export interface ResumedSessionData {
    * when the chain was intact.
    */
   historyGaps?: HistoryGap[];
+}
+
+export function getPendingFullTurnRouteState(
+  conversation: ConversationRecord,
+): { identity: FullTurnRouteRecordPayload; historyStart: number } | undefined {
+  let pending:
+    | { identity: FullTurnRouteRecordPayload; recordIndex: number }
+    | undefined;
+  for (const [recordIndex, record] of conversation.messages.entries()) {
+    if (record.type !== 'system') continue;
+    if (record.subtype === 'media_scrub' || record.subtype === 'rewind') {
+      pending = undefined;
+      continue;
+    }
+    if (record.subtype !== 'full_turn_route') continue;
+    const payload = record.systemPayload as
+      | FullTurnRouteRecordPayload
+      | undefined;
+    if (payload && typeof payload.model === 'string' && payload.model) {
+      pending = { identity: payload, recordIndex };
+    }
+  }
+  if (!pending) return undefined;
+  const historyStart = buildApiHistoryFromConversation({
+    ...conversation,
+    messages: conversation.messages.slice(0, pending.recordIndex + 1),
+  }).length;
+  return { identity: pending.identity, historyStart };
 }
 
 /**
@@ -2100,29 +2130,19 @@ export function buildApiHistoryFromConversation(
     }
   });
 
-  if (compressedHistory && lastCompressionIndex >= 0) {
-    const baseHistory: Content[] = compressedHistory.map(
-      copyContentForApiHistory,
-    );
+  let result: Content[] =
+    compressedHistory && lastCompressionIndex >= 0
+      ? compressedHistory.map(copyContentForApiHistory)
+      : [];
+  const startIndex = lastCompressionIndex >= 0 ? lastCompressionIndex + 1 : 0;
 
-    // Append everything after the compression record (newer turns)
-    for (let i = lastCompressionIndex + 1; i < messages.length; i++) {
-      const record = messages[i];
-      if (record.type === 'system') continue;
-      appendApiHistoryRecord(baseHistory, record);
+  for (let i = startIndex; i < messages.length; i++) {
+    const record = messages[i];
+    if (record.type === 'system' && record.subtype === 'media_scrub') {
+      result = slimCompactionInput(result).slimmedHistory;
+      continue;
     }
-
-    if (stripThoughtsFromHistory) {
-      return baseHistory
-        .map(stripThoughtsFromContent)
-        .filter((content): content is Content => content !== null);
-    }
-    return baseHistory;
-  }
-
-  // Fallback: return linear messages as Content[]
-  const result: Content[] = [];
-  for (const record of messages) {
+    if (record.type === 'system') continue;
     appendApiHistoryRecord(result, record);
   }
 

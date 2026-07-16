@@ -44,6 +44,8 @@ import {
   getToolCallPreparations,
   setToolCallPreparations,
 } from './tool-call-preparation.js';
+import { getRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
+import type { FullTurnModelRoute } from './baseLlmClient.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -168,10 +170,13 @@ describe('GeminiChat', async () => {
       getTelemetryLogPromptsEnabled: () => true,
       getUsageStatisticsEnabled: () => true,
       getDebugMode: () => false,
-      getContentGeneratorConfig: vi.fn().mockReturnValue({
-        authType: 'gemini', // Ensure this is set for fallback tests
-        model: 'test-model',
-      }),
+      getContentGeneratorConfig: vi.fn().mockImplementation(
+        () =>
+          getRuntimeContentGenerator()?.contentGeneratorConfig ?? {
+            authType: 'gemini', // Ensure this is set for fallback tests
+            model: 'test-model',
+          },
+      ),
       getModel: vi.fn().mockReturnValue('gemini-pro'),
       setModel: vi.fn(),
       getProjectRoot: vi.fn().mockReturnValue('/test/project/root'),
@@ -183,7 +188,13 @@ describe('GeminiChat', async () => {
       getToolRegistry: vi.fn().mockReturnValue({
         getTool: vi.fn(),
       }),
-      getContentGenerator: vi.fn().mockReturnValue(mockContentGenerator),
+      getContentGenerator: vi
+        .fn()
+        .mockImplementation(
+          () =>
+            getRuntimeContentGenerator()?.contentGenerator ??
+            mockContentGenerator,
+        ),
       getBaseLlmClient: vi.fn().mockReturnValue(undefined),
       getModelFallbacks: vi.fn().mockReturnValue([]),
       getChatCompression: vi.fn().mockReturnValue(undefined),
@@ -1638,6 +1649,11 @@ describe('GeminiChat', async () => {
     });
 
     it('keeps historical image refs stable and reattaches only recent image bytes', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'test-model',
+        modalities: { image: true },
+      });
       vi.mocked(mockConfig.getChatCompression).mockReturnValue({
         maxRecentImagesToRetain: 1,
         imagePayloadThreshold: 1,
@@ -5334,6 +5350,500 @@ describe('GeminiChat', async () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it('uses the exact model route generator and preserves raw images', async () => {
+      const routeGenerator = {
+        ...mockContentGenerator,
+        generateContentStream: vi
+          .fn()
+          .mockResolvedValue(streamResponse(stopResponse([{ text: 'seen' }]))),
+      } as unknown as ContentGenerator;
+      const route: FullTurnModelRoute = {
+        model: 'vision-agent',
+        contentGenerator: routeGenerator,
+        contentGeneratorConfig: {
+          authType: AuthType.USE_OPENAI,
+          model: 'vision-agent',
+          baseUrl: 'https://vision.example.com/v1',
+          modalities: { image: true },
+        },
+      };
+      const imagePart: Part = {
+        inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+      };
+
+      const stream = await chat.sendMessageStream(
+        route.model,
+        { message: [{ text: 'inspect' }, imagePart] },
+        'prompt-exact-vision-route',
+        { modelRoute: route },
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+      expect(routeGenerator.generateContentStream).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: 'vision-agent',
+          contents: expect.arrayContaining([
+            expect.objectContaining({
+              parts: expect.arrayContaining([imagePart]),
+            }),
+          ]),
+        }),
+        'prompt-exact-vision-route',
+      );
+    });
+
+    it('preserves all pending-route images instead of applying the retention threshold', async () => {
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        maxRecentImagesToRetain: 1,
+        imagePayloadThreshold: 1,
+      });
+      const compress = vi.spyOn(ChatCompressionService.prototype, 'compress');
+      const routeGenerator = {
+        ...mockContentGenerator,
+        generateContentStream: vi
+          .fn()
+          .mockResolvedValue(streamResponse(stopResponse([{ text: 'seen' }]))),
+      } as unknown as ContentGenerator;
+      const route: FullTurnModelRoute = {
+        model: 'vision-agent',
+        contentGenerator: routeGenerator,
+        contentGeneratorConfig: {
+          authType: AuthType.USE_OPENAI,
+          model: 'vision-agent',
+          modalities: { image: true },
+        },
+      };
+      chat.setHistory([
+        {
+          role: 'user',
+          parts: [{ inlineData: { mimeType: 'image/png', data: 'first' } }],
+        },
+        { role: 'model', parts: [{ text: 'first seen' }] },
+        {
+          role: 'user',
+          parts: [{ inlineData: { mimeType: 'image/png', data: 'second' } }],
+        },
+        { role: 'model', parts: [{ text: 'second seen' }] },
+      ]);
+      chat.setPendingFullTurnRoute(
+        { model: route.model, authType: AuthType.USE_OPENAI },
+        route,
+      );
+
+      const stream = await chat.sendMessageStream(
+        route.model,
+        { message: 'continue' },
+        'prompt-preserve-route-images',
+        { modelRoute: route },
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      const contents = vi.mocked(routeGenerator.generateContentStream).mock
+        .calls[0]?.[0].contents;
+      expect(JSON.stringify(contents)).toContain('"data":"first"');
+      expect(JSON.stringify(contents)).toContain('"data":"second"');
+      expect(compress).not.toHaveBeenCalled();
+    });
+
+    it('surfaces exact-route context overflow without reactive compression', async () => {
+      const overflow = new Error(
+        'prompt is too long: 135000 tokens > 128000 maximum',
+      );
+      const compress = vi.spyOn(ChatCompressionService.prototype, 'compress');
+      const routeGenerator = {
+        ...mockContentGenerator,
+        generateContentStream: vi.fn().mockRejectedValue(overflow),
+      } as unknown as ContentGenerator;
+      const route: FullTurnModelRoute = {
+        model: 'vision-agent',
+        contentGenerator: routeGenerator,
+        contentGeneratorConfig: {
+          authType: AuthType.USE_OPENAI,
+          model: 'vision-agent',
+          modalities: { image: true },
+        },
+      };
+      chat.setPendingFullTurnRoute(
+        { model: route.model, authType: AuthType.USE_OPENAI },
+        route,
+      );
+
+      const stream = await chat.sendMessageStream(
+        route.model,
+        { message: 'continue' },
+        'prompt-exact-route-overflow',
+        { modelRoute: route },
+      );
+
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            /* consume */
+          }
+        })(),
+      ).rejects.toThrow(overflow);
+      expect(compress).not.toHaveBeenCalled();
+      expect(routeGenerator.generateContentStream).toHaveBeenCalledOnce();
+    });
+
+    it('does not replay routed image bytes to the text-only primary on the next turn', async () => {
+      const routeGenerator = {
+        ...mockContentGenerator,
+        generateContentStream: vi
+          .fn()
+          .mockResolvedValue(streamResponse(stopResponse([{ text: 'seen' }]))),
+      } as unknown as ContentGenerator;
+      const route: FullTurnModelRoute = {
+        model: 'vision-agent',
+        contentGenerator: routeGenerator,
+        contentGeneratorConfig: {
+          authType: AuthType.USE_OPENAI,
+          model: 'vision-agent',
+          modalities: { image: true },
+        },
+      };
+
+      const imageStream = await chat.sendMessageStream(
+        route.model,
+        {
+          message: [
+            { text: 'inspect' },
+            { inlineData: { mimeType: 'image/png', data: 'private-image' } },
+            {
+              fileData: {
+                mimeType: 'image/jpeg',
+                fileUri: 'https://private.example/image.jpg',
+              },
+            },
+          ],
+        },
+        'prompt-routed-image',
+        { modelRoute: route },
+      );
+      for await (const _ of imageStream) {
+        /* consume */
+      }
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamResponse(stopResponse([{ text: 'continued' }])),
+      );
+      const textStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'continue' },
+        'prompt-primary-text',
+      );
+      for await (const _ of textStream) {
+        /* consume */
+      }
+
+      const routedRequest = vi.mocked(routeGenerator.generateContentStream).mock
+        .calls[0]?.[0];
+      expect(JSON.stringify(routedRequest?.contents)).toContain(
+        '"data":"private-image"',
+      );
+      expect(JSON.stringify(routedRequest?.contents)).toContain(
+        'https://private.example/image.jpg',
+      );
+
+      const primaryRequest = vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mock.calls[0]?.[0];
+      const serializedPrimary = JSON.stringify(primaryRequest?.contents);
+      expect(serializedPrimary).not.toContain('private-image');
+      expect(serializedPrimary).not.toContain(
+        'https://private.example/image.jpg',
+      );
+      expect(serializedPrimary).not.toContain('inlineData');
+      expect(serializedPrimary).not.toContain('fileData');
+      expect(serializedPrimary).toMatch(
+        /\[Image #[a-f0-9]{12}: image\/png, \d+ bytes\]/,
+      );
+      expect(serializedPrimary).toMatch(
+        /\[Image #[a-f0-9]{12}: image\/jpeg, file URI\]/,
+      );
+    });
+
+    it('scrubs an orphaned image user entry before merging a new text prompt', async () => {
+      chat.setHistory([
+        {
+          role: 'user',
+          parts: [
+            { text: 'interrupted image prompt' },
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'orphaned-private-image',
+              },
+            },
+          ],
+        },
+      ]);
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamResponse(stopResponse([{ text: 'continued' }])),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'new text prompt' },
+        'prompt-after-orphaned-image',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
+        .calls[0]?.[0];
+      const serialized = JSON.stringify(request?.contents);
+      expect(serialized).toContain('new text prompt');
+      expect(serialized).not.toContain('orphaned-private-image');
+      expect(serialized).not.toContain('inlineData');
+    });
+
+    it('does not replay route-scoped media after switching to another image provider', async () => {
+      const firstGenerator = {
+        ...mockContentGenerator,
+        generateContentStream: vi
+          .fn()
+          .mockResolvedValue(streamResponse(stopResponse([{ text: 'seen' }]))),
+      } as unknown as ContentGenerator;
+      const firstRoute: FullTurnModelRoute = {
+        model: 'first-vision-agent',
+        contentGenerator: firstGenerator,
+        contentGeneratorConfig: {
+          authType: AuthType.USE_OPENAI,
+          model: 'first-vision-agent',
+          baseUrl: 'https://first.example.com/v1',
+          modalities: { image: true },
+        },
+      };
+      const firstStream = await chat.sendMessageStream(
+        firstRoute.model,
+        {
+          message: [
+            { inlineData: { mimeType: 'image/png', data: 'private-image' } },
+            {
+              fileData: {
+                mimeType: 'image/jpeg',
+                fileUri: 'https://private.example/image.jpg',
+              },
+            },
+          ],
+        },
+        'prompt-first-provider',
+        { modelRoute: firstRoute },
+      );
+      for await (const _ of firstStream) {
+        /* consume */
+      }
+
+      chat.replaceHistoricalMediaWithReferences();
+
+      const secondGenerator = {
+        ...mockContentGenerator,
+        generateContentStream: vi
+          .fn()
+          .mockResolvedValue(
+            streamResponse(stopResponse([{ text: 'continued' }])),
+          ),
+      } as unknown as ContentGenerator;
+      const secondRoute: FullTurnModelRoute = {
+        model: 'second-vision-agent',
+        contentGenerator: secondGenerator,
+        contentGeneratorConfig: {
+          authType: AuthType.USE_OPENAI,
+          model: 'second-vision-agent',
+          baseUrl: 'https://second.example.com/v1',
+          modalities: { image: true },
+        },
+      };
+      const secondStream = await chat.sendMessageStream(
+        secondRoute.model,
+        { message: 'continue' },
+        'prompt-second-provider',
+        { modelRoute: secondRoute },
+      );
+      for await (const _ of secondStream) {
+        /* consume */
+      }
+
+      const secondRequest = vi.mocked(secondGenerator.generateContentStream)
+        .mock.calls[0]?.[0];
+      const serialized = JSON.stringify(secondRequest?.contents);
+      expect(serialized).not.toContain('private-image');
+      expect(serialized).not.toContain('https://private.example/image.jpg');
+      expect(serialized).not.toContain('inlineData');
+      expect(serialized).not.toContain('fileData');
+      expect(serialized).toMatch(
+        /\[Image #[a-f0-9]{12}: image\/png, \d+ bytes\]/,
+      );
+      expect(serialized).toMatch(
+        /\[Image #[a-f0-9]{12}: image\/jpeg, file URI\]/,
+      );
+    });
+
+    it('preserves raw continuation images after an exact route is restored', () => {
+      const image: Part = {
+        inlineData: { mimeType: 'image/png', data: 'persisted-image' },
+      };
+
+      const prepared = chat.prepareHistoricalMediaForContinuation(
+        [{ text: 'retry' }, image],
+        [{ role: 'user', parts: [{ text: 'retry' }, image] }],
+      );
+
+      expect(prepared).toContainEqual(image);
+    });
+
+    it('does not reattach an older settled image to an unrelated continuation', () => {
+      chat.setHistory([
+        {
+          role: 'user',
+          parts: [
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'older-settled-image',
+              },
+            },
+          ],
+        },
+      ]);
+      chat.replaceHistoricalMediaWithReferences();
+      const settledId = JSON.stringify(chat.getHistory()).match(
+        /Image #([a-f0-9]{12})/,
+      )?.[1];
+      expect(settledId).toBeDefined();
+
+      const prepared = chat.prepareHistoricalMediaForContinuation(
+        [
+          { text: `inspect Image #${settledId}` },
+          { functionResponse: { id: 'new-call', name: 'read_file' } },
+        ],
+        [
+          {
+            role: 'user',
+            parts: [{ text: `inspect Image #${settledId}` }],
+          },
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'new-call', name: 'read_file' } }],
+          },
+        ],
+      );
+
+      expect(JSON.stringify(prepared)).not.toContain('older-settled-image');
+      expect(prepared.some((part) => part.inlineData)).toBe(false);
+    });
+
+    it('keeps ordinary retries on the exact model route', async () => {
+      const capacityError = Object.assign(
+        new Error('temporarily unavailable'),
+        {
+          status: 503,
+        },
+      );
+      const routeGenerateContentStream = vi
+        .fn()
+        .mockRejectedValueOnce(capacityError)
+        .mockResolvedValueOnce(
+          streamResponse(stopResponse([{ text: 'recovered' }])),
+        );
+      const route: FullTurnModelRoute = {
+        model: 'vision-agent',
+        contentGenerator: {
+          ...mockContentGenerator,
+          generateContentStream: routeGenerateContentStream,
+        } as unknown as ContentGenerator,
+        contentGeneratorConfig: {
+          authType: AuthType.USE_OPENAI,
+          model: 'vision-agent',
+          modalities: { image: true },
+        },
+      };
+      const resolveForModel = vi.fn();
+      vi.mocked(mockConfig.getModelFallbacks).mockReturnValue([
+        'ordinary-fallback',
+      ]);
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel,
+      } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+      mockRetryWithBackoff.mockImplementation(async (apiCall, options) => {
+        try {
+          return await apiCall();
+        } catch (error) {
+          expect(options?.shouldRetryOnError?.(error)).toBe(true);
+          return apiCall();
+        }
+      });
+
+      const stream = await chat.sendMessageStream(
+        route.model,
+        { message: [{ inlineData: { mimeType: 'image/png', data: 'raw' } }] },
+        'prompt-exact-vision-retry',
+        { modelRoute: route },
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(routeGenerateContentStream).toHaveBeenCalledTimes(2);
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+      expect(resolveForModel).not.toHaveBeenCalled();
+      expect(mockRetryWithBackoff).toHaveBeenCalledWith(
+        expect.any(Function),
+        expect.objectContaining({ authType: AuthType.USE_OPENAI }),
+      );
+    });
+
+    it('does not enter the configured fallback chain from an exact model route', async () => {
+      const capacityError = Object.assign(new Error('vision unavailable'), {
+        status: 503,
+      });
+      const routeGenerator = {
+        ...mockContentGenerator,
+        generateContentStream: vi.fn().mockRejectedValue(capacityError),
+      } as unknown as ContentGenerator;
+      const route: FullTurnModelRoute = {
+        model: 'vision-agent',
+        contentGenerator: routeGenerator,
+        contentGeneratorConfig: {
+          authType: AuthType.USE_OPENAI,
+          model: 'vision-agent',
+          maxRetries: 0,
+          modalities: { image: true },
+        },
+      };
+      const resolveForModel = vi.fn();
+      vi.mocked(mockConfig.getModelFallbacks).mockReturnValue([
+        'ordinary-fallback',
+      ]);
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel,
+      } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+
+      const stream = await chat.sendMessageStream(
+        route.model,
+        { message: [{ inlineData: { mimeType: 'image/png', data: 'raw' } }] },
+        'prompt-exact-vision-failure',
+        { modelRoute: route },
+      );
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            /* consume */
+          }
+        })(),
+      ).rejects.toBe(capacityError);
+
+      expect(resolveForModel).not.toHaveBeenCalled();
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
     });
 
     it('does not enter the fallback chain in unattended retry mode', async () => {

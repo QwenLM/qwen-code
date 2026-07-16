@@ -1029,9 +1029,74 @@ describe('Server Config (config.ts)', () => {
       ]);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
         id: 'vl-anthropic',
+        authType: AuthType.USE_ANTHROPIC,
         baseUrl: 'https://api.anthropic.com',
       });
     });
+
+    it('retains provider identity for a bare cross-provider namesake', () => {
+      const config = new Config({ ...baseParams, visionModel: 'shared-model' });
+      stubProvider(config, [
+        {
+          id: 'shared-model',
+          authType: AuthType.USE_ANTHROPIC,
+          isVision: true,
+          capabilities: { agent: true },
+        },
+      ]);
+
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'shared-model',
+        authType: AuthType.USE_ANTHROPIC,
+        agentCapable: true,
+      });
+    });
+
+    it('propagates full-turn capability from an explicit image-capable agent model', () => {
+      const config = new Config({ ...baseParams, visionModel: 'vl-agent' });
+      stubProvider(config, [
+        {
+          id: 'vl-agent',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+          capabilities: { agent: true },
+        },
+      ]);
+
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-agent',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://primary.example.com',
+        agentCapable: true,
+      });
+    });
+
+    it.each([
+      ['agent capability is false', true, false],
+      ['agent capability is omitted', true, undefined],
+      ['the agent model is not image-capable', false, true],
+    ])(
+      'does not enable full-turn routing when %s',
+      (_label, isVision, agent) => {
+        const config = new Config({ ...baseParams, visionModel: 'vl-bridge' });
+        stubProvider(config, [
+          {
+            id: 'vl-bridge',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://primary.example.com',
+            isVision,
+            capabilities: { agent },
+          },
+        ]);
+
+        expect(config.getDefaultVisionBridgeModel()).toEqual({
+          id: 'vl-bridge',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+        });
+      },
+    );
 
     it('falls back to same-provider auto-select when the explicit model is not configured', () => {
       const config = new Config({ ...baseParams, visionModel: 'ghost-model' });
@@ -1047,6 +1112,7 @@ describe('Server Config (config.ts)', () => {
       // same-provider candidate is auto-picked instead.
       expect(config.getDefaultVisionBridgeModel()).toEqual({
         id: 'vl-same-provider',
+        authType: AuthType.USE_OPENAI,
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -1063,7 +1129,28 @@ describe('Server Config (config.ts)', () => {
       ]);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
         id: 'vl-same-provider',
+        authType: AuthType.USE_OPENAI,
         baseUrl: 'https://primary.example.com',
+      });
+    });
+
+    it('propagates full-turn capability from an auto-selected agent model', () => {
+      const config = new Config({ ...baseParams });
+      stubProvider(config, [
+        {
+          id: 'vl-agent',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+          capabilities: { agent: true },
+        },
+      ]);
+
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-agent',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://primary.example.com',
+        agentCapable: true,
       });
     });
 
@@ -1090,6 +1177,7 @@ describe('Server Config (config.ts)', () => {
       ]);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
         id: 'anthropic:vl-shared',
+        authType: AuthType.USE_ANTHROPIC,
         baseUrl: 'https://api.anthropic.com',
       });
     });
@@ -1115,6 +1203,7 @@ describe('Server Config (config.ts)', () => {
       ]);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
         id: 'openai:qwen3.7-plus',
+        authType: AuthType.USE_OPENAI,
         baseUrl: 'https://token-plan.example.com/v1',
       });
     });
@@ -1146,6 +1235,7 @@ describe('Server Config (config.ts)', () => {
       ]);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
         id: 'vl-same-provider',
+        authType: AuthType.USE_OPENAI,
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -1165,6 +1255,7 @@ describe('Server Config (config.ts)', () => {
       expect(() => config.getDefaultVisionBridgeModel()).not.toThrow();
       expect(config.getDefaultVisionBridgeModel()).toEqual({
         id: 'vl-same-provider',
+        authType: AuthType.USE_OPENAI,
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -1186,6 +1277,7 @@ describe('Server Config (config.ts)', () => {
 
       expect(config.getDefaultVisionBridgeModel()).toEqual({
         id: 'vl-same-provider',
+        authType: AuthType.USE_OPENAI,
         baseUrl: 'https://primary.example.com',
       });
       expect(warn).toHaveBeenCalledWith(
@@ -1216,6 +1308,7 @@ describe('Server Config (config.ts)', () => {
       ]);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
         id: 'vl-same-provider',
+        authType: AuthType.USE_OPENAI,
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -1239,12 +1332,14 @@ describe('Server Config (config.ts)', () => {
       // Pinned first.
       expect(config.getDefaultVisionBridgeModel()).toEqual({
         id: 'vl-anthropic',
+        authType: AuthType.USE_ANTHROPIC,
         baseUrl: 'https://api.anthropic.com',
       });
       // Cleared with '' — JSDoc promises a fall back to auto-select.
       config.setVisionModel('');
       expect(config.getDefaultVisionBridgeModel()).toEqual({
         id: 'vl-same-provider',
+        authType: AuthType.USE_OPENAI,
         baseUrl: 'https://primary.example.com',
       });
       // undefined clears too.
@@ -1252,6 +1347,7 @@ describe('Server Config (config.ts)', () => {
       config.setVisionModel(undefined);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
         id: 'vl-same-provider',
+        authType: AuthType.USE_OPENAI,
         baseUrl: 'https://primary.example.com',
       });
     });

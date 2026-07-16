@@ -27,6 +27,7 @@ import {
   type GeminiErrorEventValue,
   type StopFailureErrorType,
   type ActiveGoal,
+  type FullTurnModelRoute,
   GeminiEventType as ServerGeminiEventType,
   SendMessageType,
   createDebugLogger,
@@ -53,6 +54,9 @@ import {
   runVisionBridge,
   shouldRunVisionBridge,
   formatVisionBridgeNotice,
+  formatFullTurnVisionNotice,
+  formatFullTurnVisionFailureNotice,
+  resolveFullTurnVisionRoute,
   hasImageParts,
   splitImageParts,
   generateToolUseSummary,
@@ -65,6 +69,7 @@ import {
   findRepeatedDuplicateProviderToolCall,
   AutonomousLoopTickResolver,
   refreshMemoryAfterManagedWrite,
+  slimCompactionInput,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -451,6 +456,9 @@ export const useGeminiStream = (
   const turnCancelledRef = useRef(false);
   const isSubmittingQueryRef = useRef(false);
   const lastPromptRef = useRef<PartListUnion | null>(null);
+  const lastPromptModelRouteRef = useRef<FullTurnModelRoute | undefined>(
+    undefined,
+  );
   // Records the USER history item that THIS turn's prepareQueryForGemini
   // added (if any). Reset to null at the start of every turn (including
   // Retry, which bypasses prepareQueryForGemini). Cron / Notification /
@@ -532,6 +540,7 @@ export const useGeminiStream = (
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
   const submitPromptOnCompleteRef = useRef<(() => Promise<void>) | null>(null);
   const modelOverrideRef = useRef<string | undefined>(undefined);
+  const modelRouteRef = useRef<FullTurnModelRoute | undefined>(undefined);
   // True when the current turn's model override came from an explicit inline
   // `/model <id> <prompt>`. Skill-tool overrides must not clobber a user's
   // explicit choice mid-turn, so this takes precedence until the next user turn.
@@ -777,6 +786,21 @@ export const useGeminiStream = (
     }
   }, [streamingState, config, history]);
 
+  const replaceCompletedRoutedMedia = useCallback(
+    (persist = true) => {
+      if (!modelRouteRef.current) return;
+      const chat = geminiClient.getChat();
+      const changed = chat.replaceHistoricalMediaWithReferences();
+      if (persist) {
+        if (changed || chat.getPendingFullTurnRouteIdentity?.()) {
+          config.getChatRecordingService()?.recordMediaScrubCheckpoint();
+        }
+        chat.clearPendingFullTurnRoute?.();
+      }
+    },
+    [config, geminiClient],
+  );
+
   const cancelOngoingRequest = useCallback(() => {
     if (streamingState !== StreamingState.Responding) {
       return;
@@ -804,6 +828,12 @@ export const useGeminiStream = (
     turnCancelledRef.current = true;
     isSubmittingQueryRef.current = false;
     abortControllerRef.current?.abort();
+    // During an active model request GeminiClient's abort cleanup owns this
+    // boundary. Once it has yielded tool calls, no generator remains to remove
+    // the route-scoped media when the user cancels the tool phase.
+    if (activeModelStreamsRef.current === 0) {
+      replaceCompletedRoutedMedia(false);
+    }
     // Aborting a tick-in-flight ends any self-paced /loop: drop pending loop
     // wakeups so the loop doesn't resume after the cancelled tick. Only clears
     // session wakeups (never cron jobs); lazily-creating an empty scheduler
@@ -889,6 +919,7 @@ export const useGeminiStream = (
     pendingHistoryItemRef,
     setShellInputFocused,
     clearRetryCountdown,
+    replaceCompletedRoutedMedia,
     config,
     getPromptCount,
   ]);
@@ -898,16 +929,49 @@ export const useGeminiStream = (
       parts: PartListUnion | null,
       timestamp: number,
       signal: AbortSignal,
+      allowFullTurnRoute = true,
     ): Promise<{ parts: PartListUnion | null; shouldProceed: boolean }> => {
-      if (
-        parts === null ||
-        !hasImageParts(parts) ||
-        !shouldRunVisionBridge(config)
-      ) {
+      if (parts === null || !hasImageParts(parts)) {
+        return { parts, shouldProceed: true };
+      }
+
+      // A full-turn route is already locked for this logical turn. Preserve
+      // newly arriving media so the same exact model receives it with the
+      // next ToolResult instead of leaking it through a one-shot bridge.
+      if (modelRouteRef.current) {
+        return { parts, shouldProceed: true };
+      }
+
+      if (!shouldRunVisionBridge(config)) {
         return { parts, shouldProceed: true };
       }
 
       debugLogger.debug('vision bridge: gate matched, running conversion');
+      if (allowFullTurnRoute) {
+        const routeResult = await resolveFullTurnVisionRoute(config);
+        if (routeResult.status === 'ready') {
+          modelRouteRef.current = routeResult.route;
+          addItem(
+            {
+              type: MessageType.VISION_NOTICE,
+              text: formatFullTurnVisionNotice(routeResult.selection),
+            },
+            timestamp,
+          );
+          return { parts, shouldProceed: true };
+        }
+        if (routeResult.status === 'failed') {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: formatFullTurnVisionFailureNotice(routeResult.selection),
+            },
+            timestamp,
+          );
+          return { parts: null, shouldProceed: false };
+        }
+      }
+
       const bridgeResult = await runVisionBridge({ config, parts, signal });
       debugLogger.debug(
         `vision bridge: status=${bridgeResult.status} applied=${bridgeResult.applied} model=${bridgeResult.modelId ?? '(none)'}`,
@@ -1021,7 +1085,15 @@ export const useGeminiStream = (
               return { queryToSend: null, shouldProceed: false };
             }
             case 'submit_prompt': {
-              localQueryToSendToGemini = slashCommandResult.content;
+              const bridgeResult = await applyVisionBridgeIfNeeded(
+                slashCommandResult.content,
+                userMessageTimestamp,
+                abortSignal,
+              );
+              if (!bridgeResult.shouldProceed) {
+                return { queryToSend: null, shouldProceed: false };
+              }
+              localQueryToSendToGemini = bridgeResult.parts;
               submitPromptOnCompleteRef.current =
                 slashCommandResult.onComplete ?? null;
               // Per-turn model override (e.g. inline `/model <id> <prompt>`).
@@ -2255,7 +2327,15 @@ export const useGeminiStream = (
         }
 
         if (executableToolCallRequests.length > 0) {
-          scheduleToolCalls(executableToolCallRequests, signal);
+          if (modelRouteRef.current) {
+            scheduleToolCalls(
+              executableToolCallRequests,
+              signal,
+              modelRouteRef.current,
+            );
+          } else {
+            scheduleToolCalls(executableToolCallRequests, signal);
+          }
         }
       }
       return StreamProcessingStatus.Completed;
@@ -2395,6 +2475,9 @@ export const useGeminiStream = (
           }
           clearModelOverride(modelOverrideRef, inlineModelOverrideActiveRef);
         }
+        if (submitType !== SendMessageType.Retry) {
+          modelRouteRef.current = undefined;
+        }
         // Commit any pending retry error to history (without hint) since the
         // user is starting a new conversation turn.
         // Clear both countdown-based errors AND static errors (those without
@@ -2463,7 +2546,11 @@ export const useGeminiStream = (
         }
 
         const finalQueryToSend = queryToSend;
-        lastPromptRef.current = finalQueryToSend;
+        // History owns and later scrubs nested functionResponse media in place.
+        // Keep retry input detached so a failed routed ToolResult can resend
+        // the original image bytes to the same exact route.
+        lastPromptRef.current = structuredClone(finalQueryToSend);
+        lastPromptModelRouteRef.current = modelRouteRef.current;
         lastPromptErroredRef.current = false;
 
         if (
@@ -2483,7 +2570,9 @@ export const useGeminiStream = (
                 prompt_id,
                 config.getContentGeneratorConfig()?.authType,
                 queryToSend,
-                modelOverrideRef.current ?? config.getModel(),
+                modelRouteRef.current?.model ??
+                  modelOverrideRef.current ??
+                  config.getModel(),
               ),
             );
           }
@@ -2533,6 +2622,9 @@ export const useGeminiStream = (
               type: submitType,
               notificationDisplayText: metadata?.notificationDisplayText,
               modelOverride: modelOverrideRef.current,
+              ...(modelRouteRef.current && {
+                modelRoute: modelRouteRef.current,
+              }),
             },
           );
 
@@ -2718,6 +2810,7 @@ export const useGeminiStream = (
 
     clearRetryCountdown();
 
+    modelRouteRef.current = lastPromptModelRouteRef.current;
     await submitQuery(lastPrompt, SendMessageType.Retry);
   }, [streamingState, addItem, clearRetryCountdown, submitQuery]);
 
@@ -2946,6 +3039,7 @@ export const useGeminiStream = (
         geminiTools.length === 0 &&
         pendingDuplicateResponseParts.length === 0
       ) {
+        replaceCompletedRoutedMedia();
         return;
       }
 
@@ -2956,6 +3050,7 @@ export const useGeminiStream = (
         markToolsAsSubmitted(
           geminiTools.map((toolCall) => toolCall.request.callId),
         );
+        replaceCompletedRoutedMedia(false);
         return;
       }
 
@@ -2984,6 +3079,7 @@ export const useGeminiStream = (
           (toolCall) => toolCall.request.callId,
         );
         markToolsAsSubmitted(callIdsToMarkAsSubmitted);
+        replaceCompletedRoutedMedia();
         return;
       }
 
@@ -3126,6 +3222,7 @@ export const useGeminiStream = (
 
       // Don't continue if model was switched due to quota error
       if (modelSwitchedFromQuotaError) {
+        replaceCompletedRoutedMedia(false);
         return;
       }
 
@@ -3228,6 +3325,7 @@ export const useGeminiStream = (
               resolvedMidTurnQuery,
               midTurnTimestamp + index,
               midTurnAbort.signal,
+              false,
             );
             if (!bridgeResult.shouldProceed) {
               if (midTurnAbort.signal.aborted) {
@@ -3271,6 +3369,7 @@ export const useGeminiStream = (
         turnCancelledRef.current ||
         abortControllerRef.current?.signal.aborted
       ) {
+        replaceCompletedRoutedMedia(false);
         return;
       }
 
@@ -3288,6 +3387,7 @@ export const useGeminiStream = (
       dualOutput,
       onDebugMessage,
       applyVisionBridgeIfNeeded,
+      replaceCompletedRoutedMedia,
     ],
   );
 
@@ -3359,7 +3459,11 @@ export const useGeminiStream = (
             const toolName = toolCall.request.name;
             const fileName = path.basename(filePath);
             const toolCallWithSnapshotFileName = `${timestamp}-${fileName}-${toolName}.json`;
-            const clientHistory = geminiClient?.getHistoryShallow();
+            const rawClientHistory = geminiClient?.getHistoryShallow();
+            const clientHistory =
+              rawClientHistory && modelRouteRef.current
+                ? slimCompactionInput(rawClientHistory).slimmedHistory
+                : rawClientHistory;
             const toolCallWithSnapshotFilePath = path.join(
               checkpointDir,
               toolCallWithSnapshotFileName,

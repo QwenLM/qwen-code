@@ -7,6 +7,7 @@
 import type { CacheSafeParams } from './forkedAgent.js';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
+import { slimCompactionInput } from '../services/compactionInputSlimming.js';
 
 const logger = createDebugLogger('btw');
 
@@ -39,7 +40,9 @@ export function buildBtwCacheSafeParams(
     const generationConfig = chat.getGenerationConfig();
     if (!generationConfig) return null;
     const maxHistoryEntries = 40;
-    const history = geminiClient.getHistoryTail(maxHistoryEntries, true);
+    const history = slimCompactionInput(
+      geminiClient.getHistoryTail(maxHistoryEntries, true),
+    ).slimmedHistory;
     return {
       generationConfig: structuredClone(generationConfig),
       history,

@@ -226,6 +226,32 @@ describe('ModelRegistry', () => {
       expect(model?.generationConfig.modalities).toEqual(explicitModalities);
     });
 
+    it('projects an explicit vision capability into generator modalities', () => {
+      const registry = new ModelRegistry({
+        openai: [
+          {
+            id: 'custom-vision-agent',
+            name: 'Custom Vision Agent',
+            baseUrl: 'https://example.invalid',
+            generationConfig: { modalities: { image: false } },
+            capabilities: { vision: true, agent: true },
+          },
+        ],
+      });
+
+      const model = registry.getModel(
+        AuthType.USE_OPENAI,
+        'custom-vision-agent',
+      );
+      expect(model?.generationConfig.modalities).toEqual({ image: true });
+      expect(
+        registry
+          .getModelsForAuthType(AuthType.USE_OPENAI)
+          .find((candidate) => candidate.id === 'custom-vision-agent')
+          ?.modalities,
+      ).toEqual({ image: true });
+    });
+
     it('returns text-only ({}) for models with no multimodal default', () => {
       const registry = new ModelRegistry({
         openai: [
@@ -542,6 +568,18 @@ describe('ModelRegistry', () => {
         'https://proxy.example.com/v1',
       );
       expect(proxy?.name).toBe('GPT-4 Proxy');
+    });
+
+    it('retrieves an implicit provider URL by its resolved exact baseUrl', () => {
+      const registry = new ModelRegistry({
+        openai: [{ id: 'gpt-4o', name: 'GPT-4o Default' }],
+      });
+
+      const resolved = registry.getModel(AuthType.USE_OPENAI, 'gpt-4o');
+      expect(resolved?.baseUrl).toBe('https://api.openai.com/v1');
+      expect(
+        registry.getModel(AuthType.USE_OPENAI, 'gpt-4o', resolved?.baseUrl),
+      ).toBe(resolved);
     });
 
     it('should return first match when getModel is called without baseUrl', () => {

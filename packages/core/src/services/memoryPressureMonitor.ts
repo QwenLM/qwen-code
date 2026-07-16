@@ -715,6 +715,12 @@ export class MemoryPressureMonitor extends EventEmitter {
             break;
           }
           const chat = client.getChat();
+          if (chat.getPendingFullTurnRouteIdentity?.()) {
+            debugLogger.debug(
+              '[COMPACT_HISTORY] skipped: full-turn media route is active',
+            );
+            break;
+          }
           const history = chat.getHistoryShallow?.() ?? chat.getHistory();
           const settings = this.coreConfig.getClearContextOnIdle();
           const projectRoot = this.coreConfig.getProjectRoot();

@@ -9,7 +9,9 @@ import type { Part } from '@google/genai';
 import {
   formatVisionBridgeNoticeDisplay,
   formatVisionBridgeNotice,
+  formatFullTurnVisionNotice,
   isVisionBridgeNoticeDisplay,
+  resolveFullTurnVisionRoute,
   runVisionBridge,
   selectVisionBridgeModel,
   isImageCapable,
@@ -892,7 +894,11 @@ describe('selectVisionBridgeModel (same-provider only)', () => {
     // dashscope endpoint and must win.
     expect(
       selectVisionBridgeModel('qwen-text-max', models, { baseUrl: dashscope }),
-    ).toEqual({ id: 'qwen3.7-plus', baseUrl: dashscope });
+    ).toEqual({
+      id: 'qwen3.7-plus',
+      authType: 'openai',
+      baseUrl: dashscope,
+    });
   });
 
   it('never reaches across providers: undefined when the only vision model is on a different endpoint', () => {
@@ -947,6 +953,204 @@ describe('selectVisionBridgeModel (same-provider only)', () => {
       { baseUrl: dashscope },
     );
     expect(picked?.id).toBe('custom-text-name');
+  });
+
+  it('marks only explicitly agent-capable image models for full-turn routing', () => {
+    expect(
+      selectVisionBridgeModel(
+        'primary',
+        [
+          { id: 'primary', baseUrl: dashscope },
+          {
+            id: 'vision-agent',
+            baseUrl: dashscope,
+            modalities: { image: true },
+            capabilities: { agent: true },
+          },
+        ],
+        { baseUrl: dashscope },
+      ),
+    ).toEqual({
+      id: 'vision-agent',
+      baseUrl: dashscope,
+      agentCapable: true,
+    });
+
+    expect(
+      selectVisionBridgeModel(
+        'primary',
+        [
+          { id: 'primary', baseUrl: dashscope },
+          {
+            id: 'vision-only',
+            baseUrl: dashscope,
+            modalities: { image: true },
+            capabilities: { agent: false },
+          },
+        ],
+        { baseUrl: dashscope },
+      ),
+    ).toEqual({ id: 'vision-only', baseUrl: dashscope });
+  });
+});
+
+describe('resolveFullTurnVisionRoute', () => {
+  const routeConfig = (
+    image: boolean,
+    selection: {
+      id: string;
+      authType?: string;
+      baseUrl?: string;
+      agentCapable?: true;
+    },
+    resolveForModel = vi.fn(),
+  ) =>
+    ({
+      getEffectiveInputModalities: () => ({ image }),
+      getDefaultVisionBridgeModel: () => selection,
+      getBaseLlmClient: () => ({ resolveForModel }),
+    }) as unknown as Config;
+
+  it('marks a custom capability-selected route image-capable for tool continuations', async () => {
+    const baseUrl = 'https://vision.example.com/v1';
+    const contentGenerator = {};
+    const contentGeneratorConfig = {
+      model: 'custom-vision-agent',
+      authType: 'openai',
+      baseUrl,
+      // Unknown custom names resolve to text-only defaults even when the model
+      // was selected through capabilities.vision + capabilities.agent.
+      modalities: {},
+    };
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGenerator,
+      contentGeneratorConfig,
+      retryAuthType: 'openai',
+      model: 'custom-vision-agent',
+    });
+    const selection = selectVisionBridgeModel(
+      'primary',
+      [
+        { id: 'primary', baseUrl },
+        {
+          id: 'openai:custom-vision-agent',
+          baseUrl,
+          isVision: true,
+          modalities: {},
+          capabilities: { agent: true },
+        },
+      ],
+      { baseUrl },
+    );
+    expect(selection).toEqual({
+      id: 'openai:custom-vision-agent',
+      baseUrl,
+      agentCapable: true,
+    });
+    if (!selection) throw new Error('expected a full-turn vision selection');
+
+    const result = await resolveFullTurnVisionRoute(
+      routeConfig(false, selection, resolveForModel),
+    );
+
+    expect(resolveForModel).toHaveBeenCalledWith(
+      'openai:custom-vision-agent\0https://vision.example.com/v1',
+      { failClosed: true },
+    );
+    expect(result).toEqual({
+      status: 'ready',
+      selection,
+      route: {
+        model: 'custom-vision-agent',
+        contentGenerator,
+        contentGeneratorConfig: {
+          ...contentGeneratorConfig,
+          modalities: { image: true },
+        },
+      },
+    });
+    expect(contentGeneratorConfig.modalities).toEqual({});
+  });
+
+  it('keeps the bridge path without an explicit agent capability', async () => {
+    const resolveForModel = vi.fn();
+    const result = await resolveFullTurnVisionRoute(
+      routeConfig(false, { id: 'vision-only' }, resolveForModel),
+    );
+
+    expect(result).toEqual({ status: 'not-eligible' });
+    expect(resolveForModel).not.toHaveBeenCalled();
+  });
+
+  it('qualifies a bare exact route with its selected provider', async () => {
+    const resolveForModel = vi.fn().mockResolvedValue({
+      model: 'shared-model',
+      contentGenerator: {},
+      contentGeneratorConfig: {
+        model: 'shared-model',
+        authType: 'anthropic',
+        modalities: { image: true },
+      },
+    });
+
+    await resolveFullTurnVisionRoute(
+      routeConfig(
+        false,
+        {
+          id: 'shared-model',
+          authType: 'anthropic',
+          agentCapable: true,
+        },
+        resolveForModel,
+      ),
+    );
+
+    expect(resolveForModel).toHaveBeenCalledWith('anthropic:shared-model', {
+      failClosed: true,
+    });
+  });
+
+  it('leaves an image-capable primary on its direct route', async () => {
+    const resolveForModel = vi.fn();
+    const result = await resolveFullTurnVisionRoute(
+      routeConfig(
+        true,
+        { id: 'vision-agent', agentCapable: true },
+        resolveForModel,
+      ),
+    );
+
+    expect(result).toEqual({ status: 'not-eligible' });
+    expect(resolveForModel).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the exact route cannot be resolved', async () => {
+    const selection = {
+      id: 'vision-agent',
+      agentCapable: true as const,
+    };
+    const result = await resolveFullTurnVisionRoute(
+      routeConfig(
+        false,
+        selection,
+        vi.fn().mockRejectedValue(new Error('secret provider failure')),
+      ),
+    );
+
+    expect(result).toEqual({ status: 'failed', selection });
+  });
+
+  it('formats a full-turn disclosure without claiming transcription', () => {
+    const notice = formatFullTurnVisionNotice({
+      id: 'vision-agent',
+      baseUrl: 'https://vision.example.com/v1',
+      agentCapable: true,
+    });
+
+    expect(notice).toContain('vision-agent (vision.example.com)');
+    expect(notice).toMatch(/current image turn/i);
+    expect(notice).toMatch(/tool continuation/i);
+    expect(notice).not.toMatch(/transcrib/i);
   });
 });
 

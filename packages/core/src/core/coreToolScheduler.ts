@@ -142,6 +142,11 @@ import {
 } from '../telemetry/index.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
+import {
+  getRuntimeContentGenerator,
+  runWithRuntimeContentGenerator,
+  type RuntimeContentGeneratorView,
+} from '../agents/runtime/agent-context.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 
@@ -1314,6 +1319,7 @@ export class CoreToolScheduler {
   private requestQueue: Array<{
     request: ToolCallRequestInfo | ToolCallRequestInfo[];
     signal: AbortSignal;
+    runtimeView?: RuntimeContentGeneratorView;
     resolve: () => void;
     reject: (reason?: Error) => void;
   }> = [];
@@ -1966,6 +1972,7 @@ export class CoreToolScheduler {
   schedule(
     request: ToolCallRequestInfo | ToolCallRequestInfo[],
     signal: AbortSignal,
+    runtimeView?: RuntimeContentGeneratorView,
   ): Promise<void> {
     if (this.isRunning() || this.isScheduling) {
       return new Promise((resolve, reject) => {
@@ -1985,6 +1992,7 @@ export class CoreToolScheduler {
         this.requestQueue.push({
           request,
           signal,
+          runtimeView,
           resolve: () => {
             signal.removeEventListener('abort', abortHandler);
             resolve();
@@ -1996,7 +2004,18 @@ export class CoreToolScheduler {
         });
       });
     }
-    return this._schedule(request, signal);
+    return this.scheduleWithRuntimeView(request, signal, runtimeView);
+  }
+
+  private scheduleWithRuntimeView(
+    request: ToolCallRequestInfo | ToolCallRequestInfo[],
+    signal: AbortSignal,
+    runtimeView?: RuntimeContentGeneratorView,
+  ): Promise<void> {
+    const run = () => this._schedule(request, signal, runtimeView);
+    return runtimeView
+      ? runWithRuntimeContentGenerator(runtimeView, run)
+      : run();
   }
 
   /**
@@ -2038,6 +2057,7 @@ export class CoreToolScheduler {
   private async _schedule(
     request: ToolCallRequestInfo | ToolCallRequestInfo[],
     signal: AbortSignal,
+    runtimeView?: RuntimeContentGeneratorView,
   ): Promise<void> {
     this.isScheduling = true;
     try {
@@ -2755,14 +2775,19 @@ export class CoreToolScheduler {
               onConfirm: (
                 outcome: ToolConfirmationOutcome,
                 payload?: ToolConfirmationPayload,
-              ) =>
-                this.handleConfirmationResponse(
-                  reqInfo.callId,
-                  originalOnConfirm,
-                  outcome,
-                  signal,
-                  payload,
-                ),
+              ) => {
+                const confirm = () =>
+                  this.handleConfirmationResponse(
+                    reqInfo.callId,
+                    originalOnConfirm,
+                    outcome,
+                    signal,
+                    payload,
+                  );
+                return runtimeView
+                  ? runWithRuntimeContentGenerator(runtimeView, confirm)
+                  : confirm();
+              },
             };
             this.setStatusInternal(
               reqInfo.callId,
@@ -3472,6 +3497,7 @@ export class CoreToolScheduler {
   ): void {
     const { callId, name: toolName } = scheduledCall.request;
     const canonicalName = canonicalToolName(toolName);
+    const runtimeView = getRuntimeContentGenerator();
 
     this.bouncedAwaitingApproval.add(callId);
 
@@ -3482,16 +3508,21 @@ export class CoreToolScheduler {
         reason ||
         `A PreToolUse hook requested confirmation before running ${toolName}.`,
       hideAlwaysAllow: true,
-      onConfirm: (outcome, payload) =>
-        this.handleConfirmationResponse(
-          callId,
-          // No real tool onConfirm — for this synthetic prompt all of the
-          // approve/deny handling lives in handleConfirmationResponse.
-          async () => {},
-          outcome,
-          signal,
-          payload,
-        ),
+      onConfirm: (outcome, payload) => {
+        const confirm = () =>
+          this.handleConfirmationResponse(
+            callId,
+            // No real tool onConfirm — for this synthetic prompt all of the
+            // approve/deny handling lives in handleConfirmationResponse.
+            async () => {},
+            outcome,
+            signal,
+            payload,
+          );
+        return runtimeView
+          ? runWithRuntimeContentGenerator(runtimeView, confirm)
+          : confirm();
+      },
     };
 
     this.setStatusInternal(callId, 'awaiting_approval', confirmationDetails);
@@ -4672,7 +4703,11 @@ export class CoreToolScheduler {
           // Always drain the queue, even if completion callbacks throw.
           if (this.requestQueue.length > 0) {
             const next = this.requestQueue.shift()!;
-            this._schedule(next.request, next.signal)
+            this.scheduleWithRuntimeView(
+              next.request,
+              next.signal,
+              next.runtimeView,
+            )
               .then(next.resolve)
               .catch(next.reject);
           }
