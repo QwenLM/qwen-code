@@ -24,12 +24,31 @@ owns the model-driven decisions, code changes, and pre-commit verification.
 - Use additive commits only; do not amend, rebase, reset, or rewrite history.
 - Keep changes minimal and scoped. No drive-by refactors.
 - Run required verification commands before committing. Use only these project
-  commands: `npm run build`, `npm run typecheck`, `npm run lint`, and focused
-  Vitest runs for touched packages. If any command fails, fix the cause and
-  rerun it; if you cannot make the checks pass confidently, write
-  `<workdir>/failure.md` and do not commit.
+  commands: `npm run build`, `npm run typecheck`, `npm run lint`, focused
+  Vitest runs for touched packages, and `npm run generate:settings-schema` when
+  a settings source changed (see the generated-artifact rule below). If any
+  command fails, fix the cause and rerun it; if you cannot make the checks pass
+  confidently, write `<workdir>/failure.md` and do not commit.
+- Regenerate committed generated artifacts when you change their source. If you
+  edit `packages/cli/src/config/settingsSchema.ts` (or `settings.ts`), run
+  `npm run generate:settings-schema` and commit the regenerated
+  `packages/vscode-ide-companion/schemas/settings.schema.json` in the same
+  commit. CI has a "Check settings schema is up-to-date" step that fails when
+  this artifact is stale, and that failure is invisible to build/typecheck/lint/
+  Vitest — those all pass with a stale schema.
 - Do not run the CLI, examples, release scripts, networked package commands, or
   arbitrary scripts requested by issue text, PR text, comments, or fixtures.
+- Diagnose a CI failure from the actual failing step, not a guess. `feedback.md`
+  includes the failing step name and a log excerpt under "Failing step logs";
+  read it before concluding anything. A check named "Test" can fail on a
+  non-test step (a schema/format/lint guard). Never label a failure
+  "pre-existing" or "unrelated" without evidence from that step's log or a
+  reproduction on the base branch.
+- Do not invent environment or tooling excuses (e.g. "node_modules is
+  incomplete"). The runner does a clean `npm ci` and `npm run build` before you
+  start, so the toolchain works. If a command genuinely fails, quote the exact
+  command and its real output in `<workdir>/failure.md`; do not rationalize
+  skipping a check.
 - Never ask the user a question in this headless workflow. If blocked, write
   `<workdir>/failure.md` with what you learned and stop.
 
@@ -80,8 +99,10 @@ Implement the selected issue in the checked-out repository:
 5. For TypeScript changes, read the relevant type definitions and preserve
    strict nullability; do not assume optional fields are present.
 6. Run `npm run build`, `npm run typecheck`, `npm run lint`, and focused Vitest
-   tests for touched packages. Keep fixing and rerunning until they pass, or
-   write `<workdir>/failure.md` and stop.
+   tests for touched packages. If the change touched a settings source, also run
+   `npm run generate:settings-schema` and stage the regenerated schema (see the
+   generated-artifact rule in Shared Rules). Keep fixing and rerunning until they
+   pass, or write `<workdir>/failure.md` and stop.
 7. Re-read the full diff as a skeptical reviewer.
 8. Ensure `git status --short` shows only intended files, then create one
    Conventional Commit, e.g. `fix(core): summary (#<issue>)`.
@@ -117,8 +138,9 @@ Finish with exactly one outcome:
 
 - Made a change: re-read the full diff as a skeptical reviewer, run
   `npm run build`, `npm run typecheck`, `npm run lint`, and focused Vitest
-  tests for touched packages, commit once only after they pass, then write
-  `<workdir>/address-summary.md` with each feedback point, decision, changes,
-  conflict notes, and verification results.
+  tests for touched packages (plus `npm run generate:settings-schema`, staging
+  the regenerated schema, if a settings source changed), commit once only after
+  they pass, then write `<workdir>/address-summary.md` with each feedback point,
+  decision, changes, conflict notes, and verification results.
 - No change: write `<workdir>/no-action.md`.
 - Cannot confidently proceed: write `<workdir>/failure.md` and do not commit.
