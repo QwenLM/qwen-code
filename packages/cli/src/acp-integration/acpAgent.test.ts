@@ -3633,6 +3633,98 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('session model selectors distinguish the same model id on different endpoints', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    Object.assign(innerConfig, {
+      getModel: vi.fn().mockReturnValue('shared-model'),
+      getAuthType: vi.fn().mockReturnValue('api-key'),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({
+        authType: 'api-key',
+        model: 'shared-model',
+        baseUrl: 'https://two.example/v1',
+      }),
+      getAllConfiguredModels: vi.fn().mockReturnValue([
+        {
+          id: 'shared-model',
+          label: 'Provider One',
+          authType: 'api-key',
+          baseUrl: 'https://one.example/v1',
+          registryBaseUrl: 'https://one.example/v1',
+        },
+        {
+          id: 'shared-model',
+          label: 'Provider Two',
+          authType: 'api-key',
+          baseUrl: 'https://two.example/v1',
+          registryBaseUrl: 'https://two.example/v1',
+        },
+      ]),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const session = (await agent.newSession({
+      cwd: '/tmp',
+      mcpServers: [],
+    })) as {
+      models: {
+        currentModelId: string;
+        availableModels: Array<{ modelId: string }>;
+      };
+      configOptions: Array<{
+        id: string;
+        currentValue: string;
+        options: Array<{ value: string }>;
+      }>;
+    };
+    const context = (await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionContext,
+      { sessionId },
+    )) as {
+      state: {
+        models: {
+          currentModelId: string;
+          availableModels: Array<{ modelId: string }>;
+        };
+      };
+    };
+    const modelIds = session.models.availableModels.map(
+      (model) => model.modelId,
+    );
+    const modelOption = session.configOptions.find(
+      (option) => option.id === 'model',
+    );
+
+    expect(new Set(modelIds)).toHaveLength(2);
+    expect(modelIds).toEqual([
+      expect.stringMatching(/^qwen-route:v1:/),
+      expect.stringMatching(/^qwen-route:v1:/),
+    ]);
+    expect(modelOption?.options.map((option) => option.value)).toEqual(
+      modelIds,
+    );
+    expect(session.models.currentModelId).toBe(modelIds[1]);
+    expect(modelOption?.currentValue).toBe(modelIds[1]);
+    expect(
+      context.state.models.availableModels.map((model) => model.modelId),
+    ).toEqual(modelIds);
+    expect(context.state.models.currentModelId).toBe(modelIds[1]);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('status ext methods expose live session context and supported commands', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);

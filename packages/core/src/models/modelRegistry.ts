@@ -216,7 +216,7 @@ export class ModelRegistry {
     const models = this.modelsByAuthType.get(authType);
     if (!models) return [];
 
-    return Array.from(models.values()).map((model) => ({
+    return Array.from(models.entries()).map(([key, model]) => ({
       id: model.id,
       label: model.name,
       description: model.description,
@@ -229,6 +229,9 @@ export class ModelRegistry {
       // always defined on `ResolvedModelConfig` — no fallback needed here.
       modalities: model.generationConfig.modalities,
       baseUrl: model.baseUrl,
+      ...(key === model.id
+        ? {}
+        : { registryBaseUrl: key.slice(model.id.length + 1) }),
       envKey: model.envKey,
       fastOnly: model.fastOnly,
       voiceOnly: model.voiceOnly,

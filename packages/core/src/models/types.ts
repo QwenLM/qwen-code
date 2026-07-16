@@ -121,6 +121,8 @@ export interface AvailableModel {
   contextWindowSize?: number;
   modalities?: InputModalities;
   baseUrl?: string;
+  /** Exact optional baseUrl used in the model registry key, before defaults. */
+  registryBaseUrl?: string;
   envKey?: string;
 
   /** When true, this model only appears in the fast model selector */

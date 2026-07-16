@@ -4,11 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AuthType, type Config } from '@qwen-code/qwen-code-core';
+import { createHash } from 'node:crypto';
+import {
+  AuthType,
+  type AvailableModel,
+  type Config,
+} from '@qwen-code/qwen-code-core';
 import { z } from 'zod';
 
 /**
- * ACP model IDs are represented as `${modelId}(${authType})` in the ACP protocol.
+ * ACP model IDs use `${modelId}(${authType})` when that route is unique.
+ * Colliding routes receive an opaque selector from `buildAcpModelOptions`.
  *
  * NOTE: The VSCode webview side mirrors this encoding contract in
  * `packages/vscode-ide-companion/src/webview/utils/discontinuedModel.ts` to
@@ -18,6 +24,111 @@ import { z } from 'zod';
  */
 export function formatAcpModelId(modelId: string, authType: AuthType): string {
   return `${modelId}(${authType})`;
+}
+
+export interface AcpModelOption {
+  model: AvailableModel;
+  modelId: string;
+  effectiveModelId: string;
+}
+
+export function buildAcpModelOptions(
+  models: readonly AvailableModel[],
+): AcpModelOption[] {
+  const candidates = models
+    .filter((model) => model.fastOnly !== true && model.voiceOnly !== true)
+    .map((model) => {
+      const effectiveModelId =
+        model.isRuntimeModel && model.runtimeSnapshotId
+          ? model.runtimeSnapshotId
+          : model.id;
+      return {
+        model,
+        effectiveModelId,
+        legacyModelId: formatAcpModelId(effectiveModelId, model.authType),
+      };
+    });
+  const counts = new Map<string, number>();
+  for (const candidate of candidates) {
+    counts.set(
+      candidate.legacyModelId,
+      (counts.get(candidate.legacyModelId) ?? 0) + 1,
+    );
+  }
+  const discriminatorCounts = new Map<string, number>();
+
+  return candidates.map(({ model, effectiveModelId, legacyModelId }) => {
+    const discriminator = [
+      legacyModelId,
+      model.label,
+      model.envKey ?? null,
+    ] as const;
+    const discriminatorKey = JSON.stringify(discriminator);
+    const occurrence = discriminatorCounts.get(discriminatorKey) ?? 0;
+    discriminatorCounts.set(discriminatorKey, occurrence + 1);
+
+    return {
+      model,
+      effectiveModelId,
+      modelId:
+        counts.get(legacyModelId) === 1
+          ? legacyModelId
+          : `qwen-route:v1:${createHash('sha256')
+              .update(JSON.stringify([...discriminator, occurrence]))
+              .digest('base64url')
+              .slice(0, 16)}`,
+    };
+  });
+}
+
+export function resolveAcpModelOption(
+  input: string,
+  models: readonly AvailableModel[],
+): {
+  modelId: string;
+  authType: AuthType;
+  baseUrl?: string;
+  isRuntime: boolean;
+} | null {
+  const matched = buildAcpModelOptions(models).find(
+    (option) => option.modelId === input.trim(),
+  );
+  if (!matched) return null;
+  return {
+    modelId: matched.effectiveModelId,
+    authType: matched.model.authType,
+    ...(matched.model.registryBaseUrl !== undefined
+      ? { baseUrl: matched.model.registryBaseUrl }
+      : {}),
+    isRuntime: matched.model.isRuntimeModel === true,
+  };
+}
+
+export function getCurrentAcpModelId(
+  options: readonly AcpModelOption[],
+  modelId: string,
+  authType?: AuthType,
+  baseUrl?: string,
+): string {
+  if (!modelId || !authType) return modelId;
+  const matching = options.filter(
+    (option) =>
+      option.effectiveModelId === modelId && option.model.authType === authType,
+  );
+  const exact = matching.find(
+    (option) => option.model.registryBaseUrl === baseUrl,
+  );
+  if (exact) return exact.modelId;
+  if (matching[0]?.model.isRuntimeModel) return matching[0].modelId;
+  if (baseUrl !== undefined) {
+    const implicit = matching.find(
+      (option) =>
+        option.model.registryBaseUrl === undefined &&
+        option.model.baseUrl === baseUrl,
+    );
+    return implicit?.modelId ?? modelId;
+  }
+  return matching[0]?.modelId ?? formatAcpModelId(modelId, authType);
 }
 
 export function sanitizeProviderBaseUrl(baseUrl: string): string {
