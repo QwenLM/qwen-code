@@ -416,6 +416,31 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     );
   });
 
+  it('keeps empty runtime overlays isolated from daemon env', async () => {
+    workspaceRegistry.add(
+      makeRuntime({
+        id: 'empty-overlay-id',
+        cwd: '/ws-empty',
+        primary: false,
+        trusted: true,
+        bridge: makeBridge(),
+        env: { mode: 'runtime-overlay', overlayKeys: [] },
+      }),
+    );
+
+    const response = await sendWsRequest('/workspaces/empty-overlay-id/acp', {
+      jsonrpc: '2.0',
+      id: 4,
+      method: '_qwen/workspace/setup-github',
+      params: { consent: true },
+    });
+
+    expect(response['result']).toMatchObject({ workspaceCwd: '/ws-empty' });
+    expect(setupGithubMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ cwd: '/ws-empty', proxy: undefined }),
+    );
+  });
+
   it('routes initialize to a trusted secondary workspace by encoded cwd', async () => {
     const res = await postInitialize(
       `/workspaces/${encodeURIComponent('/ws-b')}/acp`,
