@@ -1373,64 +1373,114 @@ describe('LoopDetectionService', () => {
     });
   });
 
-  describe('Turn Tool Call Cap (Always-On Circuit Breaker)', () => {
+  describe('Turn Tool Call Cap (Adaptive)', () => {
     // The cap is configurable via model.maxToolCallsPerTurn; the service
     // reads the resolved Config getter with no fallback of its own, so the
     // pinned mock below is the single source of the cap in these tests.
-    const TURN_TOOL_CALL_CAP = 100;
+    //
+    // The configured value is a *soft* cap: diverse (productive) calls are
+    // allowed past it up to a hard cap (soft * 3); only a stuck-repetition
+    // signal halts at the soft cap. A small soft cap keeps the tests compact.
+    const SOFT_CAP = 10;
+    const HARD_CAP = SOFT_CAP * 3;
     let capConfig: Config;
 
     beforeEach(() => {
-      capConfig = makeConfig(TURN_TOOL_CALL_CAP);
+      capConfig = makeConfig(SOFT_CAP);
       service = new LoopDetectionService(capConfig);
     });
 
-    it('should not fire when total calls are below the cap', () => {
+    const retryEvent = {
+      type: GeminiEventType.Retry,
+    } as ServerGeminiStreamEvent;
+    const finishedEvent = {
+      type: GeminiEventType.Finished,
+      value: { reason: 'STOP' },
+    } as unknown as ServerGeminiStreamEvent;
+
+    it('does not fire at or below the soft cap', () => {
       service.reset('');
-      for (let i = 0; i < TURN_TOOL_CALL_CAP; i++) {
-        const isLoop = service.checkAlwaysOnSafeties(
-          createToolCallRequestEvent('any_tool', { i }),
-        );
-        expect(isLoop).toBe(false);
+      for (let i = 0; i < SOFT_CAP; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('any_tool', { i }),
+          ),
+        ).toBe(false);
       }
     });
 
-    it('should fire on the call that exceeds the cap', () => {
+    it('does not fire on diverse calls above the soft cap (productive turn)', () => {
+      // Mirrors session 80db472f turn 8: a large implementation turn that
+      // makes ~100 distinct calls without repeating any. The old blunt cap
+      // halted this at the soft cap; the adaptive cap lets it continue.
       service.reset('');
-      for (let i = 0; i < TURN_TOOL_CALL_CAP; i++) {
+      for (let i = 0; i < HARD_CAP - 1; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('any_tool', { i }),
+          ),
+        ).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+      expect(service.getLastLoopType()).toBeNull();
+    });
+
+    it('fires at the hard cap regardless of diversity', () => {
+      // The hard cap is the backstop for a runaway that varies its arguments
+      // on every call (which no repetition signal catches).
+      service.reset('');
+      for (let i = 0; i < HARD_CAP; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(createToolCallRequestEvent('t', { i })),
+        ).toBe(false);
+      }
+      expect(
         service.checkAlwaysOnSafeties(
-          createToolCallRequestEvent('any_tool', { i }),
+          createToolCallRequestEvent('t', { last: true }),
+        ),
+      ).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
+    });
+
+    it('fires at the soft cap when a stuck-repetition signal is present', () => {
+      // One (tool,args) call repeated GLOBAL_DUPLICATE_THRESHOLD times
+      // (non-consecutively, so the consecutive-identical guard does not fire
+      // first) makes the turn "stuck": exceeding the soft cap halts.
+      service.reset('');
+      let fired = false;
+      // Interleave the repeated key X with distinct calls so X never repeats
+      // back-to-back. X reaches the threshold exactly as the total crosses the
+      // soft cap, so the next call after the soft cap fires.
+      for (
+        let i = 0;
+        i < SOFT_CAP + GLOBAL_DUPLICATE_THRESHOLD && !fired;
+        i++
+      ) {
+        const isRepeat = i % 2 === 0;
+        const args = isRepeat ? { stuck: true } : { distinct: i };
+        fired = service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('any_tool', args),
         );
       }
-      const isLoop = service.checkAlwaysOnSafeties(
-        createToolCallRequestEvent('any_tool', { extra: true }),
-      );
-      expect(isLoop).toBe(true);
+      expect(fired).toBe(true);
       expect(loggers.logLoopDetected).toHaveBeenCalledTimes(1);
-      // The turn cap reports its own loop type, not consecutive-identical.
       expect(loggers.logLoopDetected).toHaveBeenCalledWith(
         capConfig,
-        expect.objectContaining({
-          loop_type: 'turn_tool_call_cap',
-        }),
+        expect.objectContaining({ loop_type: 'turn_tool_call_cap' }),
       );
       expect(service.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
     });
 
-    it('fires at the built-in default cap (the resolved getter value)', () => {
+    it('fires at the built-in default soft cap value', () => {
+      // Documents that the default soft cap is DEFAULT_MAX_TOOL_CALLS_PER_TURN
+      // and that diverse calls are allowed past it (no fire at default+1).
       const svc = new LoopDetectionService(mockConfig);
       svc.reset('');
-      for (let i = 0; i < DEFAULT_MAX_TOOL_CALLS_PER_TURN; i++) {
+      for (let i = 0; i < DEFAULT_MAX_TOOL_CALLS_PER_TURN + 1; i++) {
         expect(
           svc.checkAlwaysOnSafeties(createToolCallRequestEvent('t', { i })),
         ).toBe(false);
       }
-      expect(
-        svc.checkAlwaysOnSafeties(
-          createToolCallRequestEvent('t', { last: true }),
-        ),
-      ).toBe(true);
-      expect(svc.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
     });
 
     it('never fires when the cap is disabled (Config resolves <= 0 to Infinity)', () => {
@@ -1452,7 +1502,7 @@ describe('LoopDetectionService', () => {
       // (it used to fire regardless, contradicting the dialog text).
       service.reset('');
       service.disableForSession();
-      for (let i = 0; i < TURN_TOOL_CALL_CAP + 10; i++) {
+      for (let i = 0; i < HARD_CAP + 10; i++) {
         expect(
           service.checkAlwaysOnSafeties(
             createToolCallRequestEvent('any_tool', { i }),
@@ -1462,25 +1512,19 @@ describe('LoopDetectionService', () => {
       expect(loggers.logLoopDetected).not.toHaveBeenCalled();
     });
 
-    const retryEvent = {
-      type: GeminiEventType.Retry,
-    } as ServerGeminiStreamEvent;
-    const finishedEvent = {
-      type: GeminiEventType.Finished,
-      value: { reason: 'STOP' },
-    } as unknown as ServerGeminiStreamEvent;
-
     it('rolls back a failed attempt on retry so its calls do not count', () => {
       service.reset('');
-      // Attempt makes 60 calls, then the API retries (no round-trip committed
+      // Attempt makes 6 calls, then the API retries (no round-trip committed
       // yet, so the rollback floor is 0).
-      for (let i = 0; i < 60; i++) {
+      for (let i = 0; i < 6; i++) {
         service.checkAlwaysOnSafeties(createToolCallRequestEvent('t', { i }));
       }
       service.checkAlwaysOnSafeties(retryEvent);
-      // The 60 discarded calls must not count: a full cap's worth of fresh
-      // calls stays under the limit, and only the (cap+1)-th fires.
-      for (let i = 0; i < TURN_TOOL_CALL_CAP; i++) {
+      // The 6 discarded calls must not count: a full hard cap's worth of fresh
+      // diverse calls stays under the limit, and only the (hardCap+1)-th fires.
+      // (If the rollback had failed, the 6 prior calls would push the fire
+      // earlier and this loop would observe a fire before the end.)
+      for (let i = 0; i < HARD_CAP; i++) {
         expect(
           service.checkAlwaysOnSafeties(
             createToolCallRequestEvent('t', { j: i }),
@@ -1497,21 +1541,23 @@ describe('LoopDetectionService', () => {
 
     it('preserves committed round-trip counts when a later attempt retries', () => {
       service.reset('');
-      // Round-trip 1: 60 calls, then Finished commits them as the floor.
-      for (let i = 0; i < 60; i++) {
+      // Round-trip 1: 6 calls, then Finished commits them as the floor.
+      for (let i = 0; i < 6; i++) {
         service.checkAlwaysOnSafeties(createToolCallRequestEvent('t', { i }));
       }
       service.checkAlwaysOnSafeties(finishedEvent);
-      // Round-trip 2: 30 calls, then a retry discards only these 30.
-      for (let i = 0; i < 30; i++) {
+      // Round-trip 2: 4 calls, then a retry discards only these 4.
+      for (let i = 0; i < 4; i++) {
         service.checkAlwaysOnSafeties(
           createToolCallRequestEvent('t', { k: i }),
         );
       }
       service.checkAlwaysOnSafeties(retryEvent);
-      // Total is back to the committed 60 (NOT zero): 40 more reach exactly the
-      // cap without firing, and the next call trips it.
-      for (let i = 0; i < TURN_TOOL_CALL_CAP - 60; i++) {
+      // Total is back to the committed 6 (NOT zero): the hard cap is reached
+      // after exactly (hardCap - 6) more diverse calls, and the next fires.
+      // (If the commit had been lost, total would restart at 0 and the fire
+      // would land later, failing the no-fire loop below.)
+      for (let i = 0; i < HARD_CAP - 6; i++) {
         expect(
           service.checkAlwaysOnSafeties(
             createToolCallRequestEvent('t', { m: i }),
@@ -1528,9 +1574,9 @@ describe('LoopDetectionService', () => {
     it('still accumulates across committed round-trips to trip the cap', () => {
       service.reset('');
       let fired = false;
-      // 11 calls/round-trip; the cap (100) is crossed partway through.
-      for (let rt = 0; rt < 12 && !fired; rt++) {
-        for (let i = 0; i < 11 && !fired; i++) {
+      // 4 diverse calls/round-trip; the hard cap is crossed partway through.
+      for (let rt = 0; rt < 10 && !fired; rt++) {
+        for (let i = 0; i < 4 && !fired; i++) {
           fired = service.checkAlwaysOnSafeties(
             createToolCallRequestEvent('t', { rt, i }),
           );
