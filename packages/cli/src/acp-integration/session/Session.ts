@@ -4485,7 +4485,10 @@ export class Session implements SessionContext {
                 }
               }
             } catch (error) {
-              if (ac.signal.aborted) return;
+              if (ac.signal.aborted) {
+                this.todoStopGuard.suspend();
+                return;
+              }
               this.todoStopGuard.pauseForTrustedRetry();
               cronHadError = true;
               debugLogger.error('Error processing cron prompt:', error);
@@ -4917,6 +4920,7 @@ export class Session implements SessionContext {
           await this.#emitBackgroundNotificationEndTurn(stopReason);
         } catch (error) {
           if (ac.signal.aborted) {
+            this.todoStopGuard.suspend();
             await this.#emitBackgroundNotificationEndTurn('cancelled');
             return;
           }

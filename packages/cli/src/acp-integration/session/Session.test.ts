@@ -14549,6 +14549,30 @@ describe('Session', () => {
       });
     }
 
+    function createDeferredAbortStream() {
+      let markStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      let rejectStream!: (reason?: unknown) => void;
+      const gate = new Promise<never>((_resolve, reject) => {
+        rejectStream = reject;
+      });
+      async function* stream() {
+        markStarted();
+        yield await gate;
+      }
+      return {
+        responseStream: stream(),
+        started,
+        abort() {
+          const error = new Error('aborted');
+          error.name = 'AbortError';
+          rejectStream(error);
+        },
+      };
+    }
+
     it('is off by default', async () => {
       installPendingTodoTool();
       queuePendingTodoThenNaturalStops();
@@ -18378,6 +18402,51 @@ describe('Session', () => {
       );
     });
 
+    it('suspends an armed guard when a background notification stream aborts', async () => {
+      rebuildSessionWithGuard();
+      const aborting = createDeferredAbortStream();
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(aborting.responseStream);
+
+      await runGuardPrompt();
+      const callback =
+        mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.at(
+          -1,
+        )?.[0] as (
+          displayText: string,
+          modelText: string,
+          meta: { agentId: string; status: string },
+        ) => void;
+      callback('background done', '<task-notification />', {
+        agentId: 'automatic-agent',
+        status: 'completed',
+      });
+
+      await aborting.started;
+      const internals = session as unknown as {
+        notificationAbortController: AbortController | null;
+        notificationProcessing: boolean;
+        todoStopGuard: {
+          blocksUnrelatedAutomaticTurns: boolean;
+          observeTodoWrite(resultDisplay: unknown, allowArm: boolean): boolean;
+        };
+      };
+      internals.todoStopGuard.observeTodoWrite(
+        { type: 'todo_list', todos: pendingTodos },
+        true,
+      );
+      expect(internals.todoStopGuard.blocksUnrelatedAutomaticTurns).toBe(true);
+      internals.notificationAbortController?.abort();
+      aborting.abort();
+
+      await vi.waitFor(() => {
+        expect(internals.notificationProcessing).toBe(false);
+      });
+      expect(internals.todoStopGuard.blocksUnrelatedAutomaticTurns).toBe(false);
+    });
+
     it('lets an independent cron turn arm its own guard', async () => {
       const scheduler = {
         hasPendingWork: true,
@@ -18433,6 +18502,56 @@ describe('Session', () => {
             params.update._meta?.['source'] === 'todo_stop_guard',
         );
       expect(guardUpdates).toHaveLength(3);
+    });
+
+    it('suspends an armed guard when a cron stream aborts', async () => {
+      const scheduler = {
+        hasPendingWork: true,
+        enableDurable: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn(
+          (
+            callback: (job: {
+              prompt: string;
+              cronExpr: string;
+              missed?: boolean;
+            }) => void,
+          ) => callback({ prompt: 'scheduled work', cronExpr: '* * * * *' }),
+        ),
+        stop: vi.fn(),
+        list: vi.fn().mockReturnValue([]),
+        getExitSummary: vi.fn().mockReturnValue(undefined),
+      };
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      rebuildSessionWithGuard();
+      const aborting = createDeferredAbortStream();
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(aborting.responseStream);
+
+      await runGuardPrompt();
+      await aborting.started;
+      const internals = session as unknown as {
+        cronAbortController: AbortController | null;
+        cronProcessing: boolean;
+        todoStopGuard: {
+          blocksUnrelatedAutomaticTurns: boolean;
+          observeTodoWrite(resultDisplay: unknown, allowArm: boolean): boolean;
+        };
+      };
+      internals.todoStopGuard.observeTodoWrite(
+        { type: 'todo_list', todos: pendingTodos },
+        true,
+      );
+      expect(internals.todoStopGuard.blocksUnrelatedAutomaticTurns).toBe(true);
+      internals.cronAbortController?.abort();
+      aborting.abort();
+
+      await vi.waitFor(() => {
+        expect(internals.cronProcessing).toBe(false);
+      });
+      expect(internals.todoStopGuard.blocksUnrelatedAutomaticTurns).toBe(false);
     });
 
     it('treats a queued pre-prompt wakeup as part of the new baseline', async () => {
