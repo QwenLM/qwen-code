@@ -233,9 +233,13 @@ describe('qwen-autofix workflow', () => {
       reviewScanJob.indexOf('N_FAILED_CHECKS='),
     );
     expect(reviewScanJob).toContain('echo "targets=[]" >> "${GITHUB_OUTPUT}"');
-    expect(reviewScanJob).toContain(
-      'recent pending checks; skipping until verification finishes',
-    );
+    expect(reviewScanJob).toContain('active checks in flight; skipping until');
+    // Staleness bound must sit above legitimate check runtimes (review-address is
+    // capped at 120m) so an active run is never aged out mid-flight.
+    expect(reviewScanJob).toContain('PENDING_STALE_MIN=240');
+    // Round is the max across markers so a terminal handoff marker is honored
+    // regardless of its timestamp.
+    expect(reviewScanJob).toContain('map(.round) | max // 0');
   });
 
   it('falls back to existing issue backlog only when review has no target', () => {
@@ -1083,13 +1087,22 @@ describe('qwen-autofix workflow', () => {
     );
     expect(reviewAddressReportStep).toContain('"${DRY_RUN}" != "true"');
     // Handoff no longer requires the agent to have written handoff.md: an infra
-    // or agent crash before the verify gate (OUTCOME unset, JOB_STATUS failure)
+    // or agent crash before the verify gate (OUTCOME unset, JOB_STATUS != success)
     // must still post a handoff + marker so the loop never goes silent.
     expect(reviewAddressReportStep).toContain('POST_HANDOFF=true');
     expect(reviewAddressReportStep).toContain('"${JOB_STATUS:-}" != "success"');
+    // ...but a published run (OUTCOME fixed/noop) must NOT post a handoff, even if
+    // a later always() step fails the job — otherwise it contradicts the success.
+    expect(reviewAddressReportStep).toContain('"${OUTCOME:-unknown}" != "fixed"');
+    expect(reviewAddressReportStep).toContain('"${OUTCOME:-unknown}" != "noop"');
+    // Terminal round when feedback was never read (empty NEWEST) so the scan skips
+    // instead of re-handing-off every tick.
+    expect(reviewAddressReportStep).toContain('MARK_ROUND="${MAX_ROUNDS}"');
     expect(reviewAddressReportStep).toContain(
-      '<!-- autofix-eval ts=${MARK_TS} acted=false round=${NEXT_ROUND} -->',
+      '<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} -->',
     );
+    // Prefer the actionable failure.md over the generic handoff.md wrapper.
+    expect(reviewAddressReportStep).toContain('for f in failure.md handoff.md');
     expect(reviewAddressReportStep).toContain(
       'Could not address the latest feedback automatically',
     );
@@ -1105,6 +1118,60 @@ describe('qwen-autofix workflow', () => {
     );
     expect(reviewAddressReportStep).toContain('human should take over');
     expect(reviewAddressReportStep).toContain("sed 's/<!--[^>]*-->//g'");
+  });
+
+  it('replays the handoff decision and terminal-round transitions under bash', () => {
+    // The agent step is bounded below the 120-minute job timeout so a runaway
+    // agent fails the STEP, not the job, leaving the always() report step time to
+    // run (a job-level timeout would cancel that step too and go silent).
+    // 120 is the review-address job timeout (unique; other jobs use 5/15/180).
+    expect(workflow).toContain('timeout-minutes: 120');
+    const addressStep =
+      workflow.match(
+        /- name: 'Triage and address'[\s\S]*?(?=\n {6}- name: )/,
+      )?.[0] ?? '';
+    expect(addressStep).toContain('timeout-minutes: 80');
+
+    // Replay the ACTUAL POST_HANDOFF decision extracted from the workflow so the
+    // state transitions are exercised, not merely string-matched.
+    const decision = reviewAddressReportStep.match(
+      /(POST_HANDOFF=false\n[\s\S]*?\n\s*fi\n\s*fi)\n\s*if \[\[ "\$\{POST_HANDOFF\}" == "true" \]\]/,
+    )?.[1];
+    expect(decision).toBeTruthy();
+    const runPostHandoff = (env) =>
+      execFileSync(
+        'bash',
+        ['-c', `${decision}\nprintf '%s' "$POST_HANDOFF"`],
+        { env: { ...process.env, ...env }, encoding: 'utf8' },
+      );
+    const base = { DRY_RUN: 'false', GITHUB_TOKEN: 'x' };
+    // A published run (fixed/noop) must NOT hand off even if a later always() step
+    // failed the job — otherwise it contradicts the already-reported success.
+    expect(runPostHandoff({ ...base, OUTCOME: 'fixed', JOB_STATUS: 'failure' })).toBe('false');
+    expect(runPostHandoff({ ...base, OUTCOME: 'noop', JOB_STATUS: 'failure' })).toBe('false');
+    expect(runPostHandoff({ ...base, OUTCOME: 'fixed', JOB_STATUS: 'success' })).toBe('false');
+    // Dry-run never hands off.
+    expect(runPostHandoff({ ...base, DRY_RUN: 'true', OUTCOME: 'failed', JOB_STATUS: 'failure' })).toBe('false');
+    // Real non-success ends DO hand off: verify failure, pre-verify crash (empty
+    // OUTCOME), and cancellation / job timeout.
+    expect(runPostHandoff({ ...base, OUTCOME: 'failed', JOB_STATUS: 'failure' })).toBe('true');
+    expect(runPostHandoff({ ...base, OUTCOME: '', JOB_STATUS: 'failure' })).toBe('true');
+    expect(runPostHandoff({ ...base, OUTCOME: '', JOB_STATUS: 'cancelled' })).toBe('true');
+
+    // Terminal-round transition: feedback read (NEWEST set) → normal increment;
+    // feedback never read (empty) → MAX_ROUNDS so the scan skips instead of
+    // re-handing-off forever.
+    const markRound = reviewAddressReportStep.match(
+      /(if \[\[ -n "\$\{NEWEST:-\}" \]\]; then\n[\s\S]*?\n\s*fi)/,
+    )?.[1];
+    expect(markRound).toBeTruthy();
+    const runMarkRound = (env) =>
+      execFileSync('bash', ['-c', `${markRound}\nprintf '%s' "$MARK_ROUND"`], {
+        env: { ...process.env, MAX_ROUNDS: '5', ROUND: '2', ...env },
+        encoding: 'utf8',
+      });
+    expect(runMarkRound({ NEWEST: '2026-07-16T00:00:00Z' })).toBe('3');
+    expect(runMarkRound({ NEWEST: '' })).toBe('5');
   });
 
   it('writes agent output to a log and marks loop guard failures for handoff', () => {

@@ -1007,11 +1007,14 @@ jobs:
             PR_META="$(gh pr view "${PR}" --repo "${REPO}" \
               --json statusCheckRollup,createdAt 2> /dev/null || echo '{}')"
             CHECKS_JSON="$(jq -c '.statusCheckRollup // []' <<< "${PR_META}")"
-            # Only block on checks that started recently. A check wedged in a
-            # pending state (e.g. a review workflow that never reports back) would
-            # otherwise skip this PR forever; ignore anything pending longer than
-            # PENDING_STALE_MIN so a stuck check can't strand the PR.
-            PENDING_STALE_MIN=30
+            # A check that never reports back would otherwise skip this PR forever,
+            # so ignore ones stuck far past any legitimate runtime. The bound must
+            # sit ABOVE real check durations in this repo — review-pr can take ~50m
+            # and review-address is capped at 120m — so an active run keeps
+            # blocking and is never aged out mid-flight (which would enqueue the PR
+            # against a live check and double-process the feedback). A check with
+            # no startedAt (queued but never started) is treated as not-blocking.
+            PENDING_STALE_MIN=240
             PENDING_CUTOFF="$(date -u -d "${PENDING_STALE_MIN} minutes ago" +%Y-%m-%dT%H:%M:%SZ)"
             HAS_PENDING_CHECKS="$(jq -r --arg cut "${PENDING_CUTOFF}" '
               [ .[]
@@ -1021,7 +1024,7 @@ jobs:
               | length > 0
             ' <<< "${CHECKS_JSON}")"
             if [[ "${HAS_PENDING_CHECKS}" == "true" ]]; then
-              echo "⏳ #${PR}: recent pending checks; skipping until verification finishes (checks pending >${PENDING_STALE_MIN}m are treated as stuck and ignored)"
+              echo "⏳ #${PR}: active checks in flight; skipping until they finish (only checks stuck >${PENDING_STALE_MIN}m past their start are treated as dead and ignored)"
               continue
             fi
             # Pre-first-eval floor: the PR's creation time. Feedback cannot predate
@@ -1043,7 +1046,10 @@ jobs:
                 | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+) -->") ] | .[]
                 | {ts: .[0], round: (.[2] | tonumber)} ]' "${WORKDIR}/ic.json")"
             EVAL_WM="$(jq -r 'map(.ts) | max // ""' <<< "${MARKERS}")"
-            ROUND="$(jq -r '(sort_by(.ts) | last | .round) // 0' <<< "${MARKERS}")"
+            # Highest round across markers, not last-by-ts: a terminal handoff
+            # marker (round = MAX_ROUNDS) must make the scan skip regardless of its
+            # timestamp, and normal rounds increase monotonically anyway.
+            ROUND="$(jq -r 'map(.round) | max // 0' <<< "${MARKERS}")"
 
             # Effective watermark = what the agent has actually evaluated (its last
             # eval marker's newest-feedback timestamp), NOT the last push. A bot
@@ -1365,6 +1371,12 @@ jobs:
 
       - name: 'Triage and address'
         id: 'address'
+        # Bound the agent well below the 120-minute job timeout so a runaway agent
+        # fails THIS step (not the whole job), leaving the always() verify and
+        # report steps time to run and post a handoff. A job-level timeout would
+        # cancel those steps too and leave the loop silent. 80 leaves ~40 minutes
+        # of headroom for setup (install/build) plus verify + report.
+        timeout-minutes: 80
         env:
           PR: '${{ env.PR }}'
           ISSUE: '${{ env.ISSUE }}'
@@ -1632,18 +1644,20 @@ jobs:
             done
           } >> "${GITHUB_STEP_SUMMARY}"
 
-          # Always leave a visible handoff + eval marker on any non-success end —
-          # a verify failure, an infra/agent crash before the verify gate ran
-          # (OUTCOME unset, no failure.md/handoff.md), OR a cancellation such as
-          # the 120-minute job timeout (job.status = "cancelled"). Without this the
-          # loop goes SILENT: no comment, no marker, so the next scan re-targets
-          # the same feedback with the same round forever and the maintainer sees
-          # nothing. Writing a marker advances the round (and, once feedback was
-          # read, the watermark) so it hands off to a human instead of respinning.
-          # This step only runs on failure()/cancelled()/dry-run, and dry-run is
-          # excluded here, so "not success" means a real failure or cancellation.
+          # Leave a visible handoff + eval marker when the address did NOT publish a
+          # result — a verify failure, or an agent/infra crash or timeout before the
+          # verify gate ran. Without it the loop goes SILENT (no comment, no marker)
+          # and the next scan re-targets the same feedback forever.
+          #
+          # SUPPRESS entirely once "Push and report" already handled this run
+          # (OUTCOME fixed or noop). That step is also always()-gated and runs even
+          # if a LATER always() step (e.g. artifact upload) fails the job; without
+          # this guard, such a late failure would flip JOB_STATUS to failure and
+          # post a contradictory acted=false handoff on top of the published fix.
+          # (A genuine push failure leaves OUTCOME=fixed but writes no marker, so
+          # the next scan simply retries — it does not need a handoff here.)
           POST_HANDOFF=false
-          if [[ "${DRY_RUN}" != "true" && -n "${GITHUB_TOKEN:-}" ]]; then
+          if [[ "${DRY_RUN}" != "true" && -n "${GITHUB_TOKEN:-}" && "${OUTCOME:-unknown}" != "fixed" && "${OUTCOME:-unknown}" != "noop" ]]; then
             if [[ "${OUTCOME:-unknown}" == "failed" || "${JOB_STATUS:-}" != "success" ]]; then
               POST_HANDOFF=true
             fi
@@ -1662,16 +1676,28 @@ jobs:
               echo "::error::CI_DEV_BOT_PAT authenticates as ${bot_actor}; expected ${AUTOFIX_BOT}."
               exit 1
             fi
-            # Prefer the agent's own explanation; fall back to a generic notice
-            # when the run died before it could write one.
+            # Prefer the agent's detailed failure.md over the generic handoff.md
+            # (run-agent.mjs writes a wrapper handoff.md whenever it wrote a
+            # failure.md; failure.md carries the actionable diagnosis a maintainer
+            # needs). Fall back to a generic notice only if it wrote neither.
             DETAIL_FILE=''
-            for f in handoff.md failure.md; do
+            for f in failure.md handoff.md; do
               if [[ -s "${WORKDIR}/${f}" ]]; then DETAIL_FILE="${WORKDIR}/${f}"; break; fi
             done
+            # If feedback was actually read (prepare ran), stamp its newest ts so
+            # the watermark advances and the same feedback is not re-selected next
+            # scan. If the crash happened before prepare, NEWEST is empty and the
+            # watermark cannot advance — mark the round terminal (MAX_ROUNDS) so the
+            # scan's max-round guard skips this PR instead of re-handing-off every
+            # tick, without pretending the unread feedback was evaluated.
             MARK_TS="${NEWEST:-${WATERMARK}}"
-            NEXT_ROUND="$(( ROUND + 1 ))"
+            if [[ -n "${NEWEST:-}" ]]; then
+              MARK_ROUND="$(( ROUND + 1 ))"
+            else
+              MARK_ROUND="${MAX_ROUNDS}"
+            fi
             {
-              echo "🤖 Could not address the latest feedback automatically (round ${NEXT_ROUND}/${MAX_ROUNDS}). A human should take over this PR."
+              echo "🤖 Could not address the latest feedback automatically (round ${MARK_ROUND}/${MAX_ROUNDS}). A human should take over this PR."
               echo
               if [[ -n "${DETAIL_FILE}" ]]; then
                 echo "**What I found before stopping:**"
@@ -1683,7 +1709,7 @@ jobs:
               echo
               echo "Run log: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
               echo
-              echo "<!-- autofix-eval ts=${MARK_TS} acted=false round=${NEXT_ROUND} -->"
+              echo "<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} -->"
             } > "${WORKDIR}/report.md"
             gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md" || echo "::warning::Failed to post handoff comment on PR #${PR}"
           fi
