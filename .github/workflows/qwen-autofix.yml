@@ -1002,7 +1002,6 @@ jobs:
             else
               ISSUE="${PR}"
             fi
-            HEAD_SHA="$(gh api "repos/${REPO}/pulls/${PR}" --jq '.head.sha')"
             # One PR fetch for both the check rollup and the creation time (used
             # as the watermark floor below) — avoids a second round-trip per PR.
             PR_META="$(gh pr view "${PR}" --repo "${REPO}" \
@@ -1028,15 +1027,15 @@ jobs:
               echo "⏳ #${PR}: active checks in flight; skipping until they finish (only checks stuck >${PENDING_STALE_MIN}m past their start are treated as dead and ignored)"
               continue
             fi
-            # Pre-first-eval floor: the PR's creation time. Feedback cannot predate
-            # the PR, and unlike the head commit date this never advances when the
-            # branch is synced with main ("Update branch"/base merge), so an early
-            # base-sync merge cannot bury a comment made before the first eval.
-            # Fall back to the head commit date only if createdAt is unavailable.
+            # Pre-first-eval floor: the PR's IMMUTABLE creation time. Feedback
+            # cannot predate the PR, and unlike the head commit date this never
+            # advances when the branch is synced with main ("Update branch"/base
+            # merge), so an early base-sync merge cannot bury a comment made before
+            # the first eval. If the metadata query failed (empty), fall back to an
+            # EMPTY floor — over-inclusive (evaluates all feedback once, then the
+            # first eval writes a marker) but never buries. NEVER fall back to the
+            # mutable head commit date: a base-sync HEAD would recreate the burial.
             CREATED_WM="$(jq -r '.createdAt // ""' <<< "${PR_META}")"
-            if [[ -z "${CREATED_WM}" ]]; then
-              CREATED_WM="$(gh api "repos/${REPO}/commits/${HEAD_SHA}" --jq '.commit.committer.date' 2> /dev/null || echo '')"
-            fi
 
             gh api "repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json"
             # Eval markers the bot left after a previous evaluation carry the
@@ -1457,6 +1456,23 @@ jobs:
 
           git checkout "${BRANCH}"
 
+          # Settings-schema freshness is a STRUCTURAL guard, checked BEFORE the
+          # no-op/unchanged return: on a stale-schema PR the agent can wrongly
+          # write no-action.md, and without this the no-op path would report the
+          # feedback as evaluated (acted=false) while CI stays red — the exact bug
+          # this PR fixes. So it runs on EVERY path. Uses the core dist already
+          # built in the install step; the generator reads settingsSchema.ts via
+          # tsx. Mirrors CI's "Check settings schema is up-to-date" step, which is
+          # invisible to build/typecheck/lint/vitest.
+          SCHEMA_FILE='packages/vscode-ide-companion/schemas/settings.schema.json'
+          npm run generate:settings-schema
+          if [[ -n "$(git status --porcelain "${SCHEMA_FILE}")" ]]; then
+            echo "❌ ${SCHEMA_FILE} is out of date. Run: npm run generate:settings-schema"
+            git --no-pager diff -- "${SCHEMA_FILE}" || true
+            echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+            exit 1
+          fi
+
           if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
             # No new commit. That is only legitimate as a deliberate no-action.
             if [[ -s "${WORKDIR}/no-action.md" ]]; then
@@ -1480,19 +1496,6 @@ jobs:
           npm run build
           npm run typecheck
           npm run lint
-
-          # Mirror CI's settings-schema freshness gate: regenerating must not
-          # change the committed artifact. Catches a settingsSchema.ts edit that
-          # forgot to regenerate settings.schema.json — invisible to
-          # build/typecheck/lint/vitest but a hard CI failure.
-          SCHEMA_FILE='packages/vscode-ide-companion/schemas/settings.schema.json'
-          npm run generate:settings-schema
-          if [[ -n "$(git status --porcelain "${SCHEMA_FILE}")" ]]; then
-            echo "❌ ${SCHEMA_FILE} is out of date. Run: npm run generate:settings-schema"
-            git --no-pager diff -- "${SCHEMA_FILE}" || true
-            echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-            exit 1
-          fi
 
           # Test changed/related files for the packages this PR touches.
           # --changed follows the import graph so transitive breakage is caught.
@@ -1690,19 +1693,29 @@ jobs:
             # scan. If the crash happened before prepare, NEWEST is empty and the
             # watermark cannot advance — mark the round terminal (MAX_ROUNDS) so the
             # scan's max-round guard skips this PR instead of re-handing-off every
-            # tick, without pretending the unread feedback was evaluated.
-            MARK_TS="${NEWEST:-${WATERMARK}}"
+            # tick, without pretending the unread feedback was evaluated. The final
+            # "unknown" fallback guards a cascading API failure that left WATERMARK
+            # empty too: an empty ts= would not match the scan's `ts=([^ ]+)` regex,
+            # so the terminal marker would be ignored and the PR re-handed-off.
+            MARK_TS="${NEWEST:-${WATERMARK:-unknown}}"
             if [[ -n "${NEWEST:-}" ]]; then
               MARK_ROUND="$(( ROUND + 1 ))"
+              HEADLINE="🤖 Could not address the latest feedback automatically (round ${MARK_ROUND}/${MAX_ROUNDS}). A human should take over this PR."
             else
+              # Crashed/timed out before reading the feedback: mark terminal so the
+              # scan skips, but say so plainly — do NOT imply MAX_ROUNDS attempts
+              # were made when zero rounds of evaluation actually happened.
               MARK_ROUND="${MAX_ROUNDS}"
+              HEADLINE="🤖 AutoFix could not start evaluation — it crashed or timed out before reading the feedback, so no fix was attempted. A human should take over (re-trigger if the failure looks transient)."
             fi
             {
-              echo "🤖 Could not address the latest feedback automatically (round ${MARK_ROUND}/${MAX_ROUNDS}). A human should take over this PR."
+              echo "${HEADLINE}"
               echo
               if [[ -n "${DETAIL_FILE}" ]]; then
                 echo "**What I found before stopping:**"
-                head -c 1500 "${DETAIL_FILE}" | sed 's/<!--[^>]*-->//g'
+                # -c drops any partial multi-byte sequence a byte-level head -c may
+                # have split, so the comment body stays valid UTF-8.
+                head -c 1500 "${DETAIL_FILE}" | iconv -f utf-8 -t utf-8 -c | sed 's/<!--[^>]*-->//g'
               else
                 echo "AutoFix failed before producing a verified commit (the run crashed or timed out before it could explain why)."
               fi

@@ -240,6 +240,11 @@ describe('qwen-autofix workflow', () => {
     // Round is the max across markers so a terminal handoff marker is honored
     // regardless of its timestamp.
     expect(reviewScanJob).toContain('map(.round) | max // 0');
+    // Never fall back to the mutable head commit date for the pre-first-eval
+    // floor (a base-sync HEAD would recreate feedback burial); use the immutable
+    // createdAt, or an empty floor if the metadata query failed.
+    expect(reviewScanJob).not.toContain('commit.committer.date');
+    expect(reviewScanJob).toContain('.createdAt // ""');
   });
 
   it('falls back to existing issue backlog only when review has no target', () => {
@@ -952,6 +957,20 @@ describe('qwen-autofix workflow', () => {
       expect(step).not.toContain('Fix does not touch any package');
       expect(step).not.toContain('PR does not touch any package');
     }
+    // The review gate's schema freshness check is a STRUCTURAL guard: it must run
+    // BEFORE the no-op/unchanged return, so a stale-schema PR the agent wrongly
+    // no-ops fails (outcome=failed) instead of being reported as evaluated while
+    // CI stays red (the motivating bug).
+    const reviewVerifyGate = verificationGateSteps.find((s) =>
+      s.includes('outcome=noop'),
+    );
+    expect(reviewVerifyGate).toBeTruthy();
+    expect(
+      reviewVerifyGate.indexOf('npm run generate:settings-schema'),
+    ).toBeGreaterThanOrEqual(0);
+    expect(
+      reviewVerifyGate.indexOf('npm run generate:settings-schema'),
+    ).toBeLessThan(reviewVerifyGate.indexOf('outcome=noop'));
   });
 
   it('passes model credentials directly to qwen subprocesses', () => {
@@ -1101,6 +1120,16 @@ describe('qwen-autofix workflow', () => {
     expect(reviewAddressReportStep).toContain(
       '<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} -->',
     );
+    // The ts fallback must be non-empty even under cascading API failure (empty
+    // WATERMARK), or the scan's `ts=([^ ]+)` regex would not match the terminal
+    // marker and the PR would be re-handed-off every cycle.
+    expect(reviewAddressReportStep).toContain(
+      'MARK_TS="${NEWEST:-${WATERMARK:-unknown}}"',
+    );
+    // A pre-prepare crash must NOT claim MAX_ROUNDS attempts were made.
+    expect(reviewAddressReportStep).toContain('could not start evaluation');
+    // Truncate UTF-8 safely so a split multi-byte sequence can't corrupt the body.
+    expect(reviewAddressReportStep).toContain('iconv -f utf-8 -t utf-8 -c');
     // Prefer the actionable failure.md over the generic handoff.md wrapper.
     expect(reviewAddressReportStep).toContain('for f in failure.md handoff.md');
     expect(reviewAddressReportStep).toContain(
