@@ -215,6 +215,7 @@ export function createDaemonWorkspaceService(
     persistDisabledSkills,
     persistSetting,
     persistSettings,
+    skillInstallEnv,
     voiceEnv,
     voiceSettingsScope,
     preheatAcpChild: preheatAcpChildOnBridge,
@@ -782,7 +783,11 @@ export function createDaemonWorkspaceService(
       _ctx: WorkspaceRequestContext,
       request: WorkspaceSkillInstallRequest,
     ): Promise<WorkspaceSkillMutationResult> {
-      const result = await installWorkspaceSkill(boundWorkspace, request);
+      const result = await installWorkspaceSkill(
+        boundWorkspace,
+        request,
+        skillInstallEnv?.['GH_TOKEN'] ?? skillInstallEnv?.['GITHUB_TOKEN'],
+      );
       await refreshWorkspaceSkillsAfterMutation();
       return result;
     },

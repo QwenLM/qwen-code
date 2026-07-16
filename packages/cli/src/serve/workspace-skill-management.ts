@@ -197,8 +197,7 @@ function githubRequestError(
   );
 }
 
-async function fetchBytes(url: string): Promise<Buffer> {
-  const githubToken = process.env['GH_TOKEN'] ?? process.env['GITHUB_TOKEN'];
+async function fetchBytes(url: string, githubToken?: string): Promise<Buffer> {
   const response = await fetch(url, {
     headers: {
       Accept: 'application/vnd.github+json',
@@ -228,6 +227,7 @@ async function downloadGitHubDirectory(
   repo: string,
   ref: string,
   directory: string,
+  githubToken?: string,
   relativeRoot = '',
   depth = 0,
   files: SkillPackageFile[] = [],
@@ -240,7 +240,6 @@ async function downloadGitHubDirectory(
     .map(encodeURIComponent)
     .join('/');
   const apiUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents${encodedDirectory ? `/${encodedDirectory}` : ''}?ref=${encodeURIComponent(ref)}`;
-  const githubToken = process.env['GH_TOKEN'] ?? process.env['GITHUB_TOKEN'];
   const response = await fetch(apiUrl, {
     headers: {
       Accept: 'application/vnd.github+json',
@@ -273,6 +272,7 @@ async function downloadGitHubDirectory(
         repo,
         ref,
         itemPath,
+        githubToken,
         relativePath,
         depth + 1,
         files,
@@ -291,7 +291,10 @@ async function downloadGitHubDirectory(
           502,
         );
       }
-      files.push({ relativePath, content: await fetchBytes(downloadUrl) });
+      files.push({
+        relativePath,
+        content: await fetchBytes(downloadUrl, githubToken),
+      });
       if (files.length > MAX_FILES)
         skillError('invalid_skill_package', 'Skill package has too many files');
       if (
@@ -360,6 +363,7 @@ async function downloadGitHubDirectoryWithGit(
 
 async function downloadGitHubSkill(
   sourceUrl: string,
+  githubToken?: string,
 ): Promise<SkillPackageFile[]> {
   let url: URL;
   try {
@@ -374,7 +378,10 @@ async function downloadGitHubSkill(
       skillError('invalid_skill_source', 'GitHub URL must point to SKILL.md');
     }
     return [
-      { relativePath: 'SKILL.md', content: await fetchBytes(url.toString()) },
+      {
+        relativePath: 'SKILL.md',
+        content: await fetchBytes(url.toString(), githubToken),
+      },
     ];
   }
   if (url.hostname !== 'github.com') {
@@ -408,7 +415,13 @@ async function downloadGitHubSkill(
   }
   const directory = filePath.slice(0, -1).join('/');
   try {
-    return await downloadGitHubDirectory(owner, repo, ref, directory);
+    return await downloadGitHubDirectory(
+      owner,
+      repo,
+      ref,
+      directory,
+      githubToken,
+    );
   } catch (error) {
     if (
       !(error instanceof WorkspaceSkillManagementError) ||
@@ -530,10 +543,13 @@ async function filesFromZip(content: Buffer): Promise<SkillPackageFile[]> {
 
 async function filesFromSource(
   source: WorkspaceSkillInstallSource,
+  githubToken?: string,
 ): Promise<SkillPackageFile[]> {
   try {
     if (source.type === 'github')
-      return normalizePackageFiles(await downloadGitHubSkill(source.url));
+      return normalizePackageFiles(
+        await downloadGitHubSkill(source.url, githubToken),
+      );
     if (source.type === 'folder')
       return normalizePackageFiles(await filesFromFolder(source.path));
     const archive = decodeBase64(source.contentBase64);
@@ -658,9 +674,10 @@ async function ensureDirectoryWithoutSymlinks(
 export async function installWorkspaceSkill(
   workspace: string,
   request: WorkspaceSkillInstallRequest,
+  githubToken?: string,
 ): Promise<WorkspaceSkillMutationResult> {
   const skillName = validateWorkspaceSkillName(request.name);
-  const files = await filesFromSource(request.source);
+  const files = await filesFromSource(request.source, githubToken);
   const baseDir = skillBaseDir(workspace, request.scope);
   await ensureDirectoryWithoutSymlinks(baseDir);
   const destination = path.join(baseDir, skillName);

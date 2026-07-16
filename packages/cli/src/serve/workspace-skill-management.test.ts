@@ -44,7 +44,6 @@ async function temporaryDirectory(label: string): Promise<string> {
 
 afterEach(async () => {
   vi.unstubAllGlobals();
-  vi.unstubAllEnvs();
   vi.restoreAllMocks();
   await Promise.all(
     temporaryDirectories
@@ -130,7 +129,6 @@ describe('workspace Skill management', () => {
 
   it('installs a Skill from a GitHub SKILL.md URL', async () => {
     const workspace = await temporaryDirectory('qwen-skill-workspace-');
-    vi.stubEnv('GH_TOKEN', 'github-token');
     vi.stubGlobal(
       'fetch',
       vi
@@ -154,14 +152,18 @@ describe('workspace Skill management', () => {
         ),
     );
 
-    const result = await installWorkspaceSkill(workspace, {
-      name: 'github-skill',
-      scope: 'workspace',
-      source: {
-        type: 'github',
-        url: 'https://github.com/owner/repo/blob/main/SKILL.md',
+    const result = await installWorkspaceSkill(
+      workspace,
+      {
+        name: 'github-skill',
+        scope: 'workspace',
+        source: {
+          type: 'github',
+          url: 'https://github.com/owner/repo/blob/main/SKILL.md',
+        },
       },
-    });
+      'github-token',
+    );
 
     await expect(fs.readFile(result.installedPath!, 'utf8')).resolves.toContain(
       'name: github-skill',

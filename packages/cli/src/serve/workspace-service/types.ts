@@ -474,6 +474,9 @@ export interface DaemonWorkspaceServiceDeps {
   /** Runtime-local environment used by workspace Voice operations. */
   voiceEnv?: Readonly<Record<string, string | undefined>>;
 
+  /** Runtime-local environment used to authenticate GitHub Skill installs. */
+  skillInstallEnv?: Readonly<Record<string, string | undefined>>;
+
   /** Force Voice settings writes into this scope for workspace-qualified ACP. */
   voiceSettingsScope?: SettingScope;
 
