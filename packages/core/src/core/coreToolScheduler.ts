@@ -1146,10 +1146,16 @@ interface CoreToolSchedulerOptions {
 
 // ─── Tool Concurrency Helpers ────────────────────────────────
 
-interface ToolBatch {
+/**
+ * A batch of items grouped by concurrency safety: `concurrent` batches may run
+ * their `calls` in parallel; non-concurrent batches run one at a time.
+ */
+export interface ConcurrencyBatch<T> {
   concurrent: boolean;
-  calls: ScheduledToolCall[];
+  calls: T[];
 }
+
+type ToolBatch = ConcurrencyBatch<ScheduledToolCall>;
 
 /**
  * State for the per-batch signal.abort listener registered in
@@ -1213,24 +1219,35 @@ function isConcurrencySafe(call: ScheduledToolCall): boolean {
 }
 
 /**
- * Partition tool calls into consecutive batches by concurrency safety.
+ * Partition items into consecutive batches by concurrency safety: consecutive
+ * safe items are merged into a single parallel batch, and each unsafe item
+ * forms its own sequential batch. Order is preserved.
  *
- * Consecutive safe tools are merged into a single parallel batch.
- * Each unsafe tool forms its own sequential batch.
+ * Shared by the interactive scheduler ({@link partitionToolCalls}) and the
+ * headless runner (`partitionHeadlessToolCalls` in nonInteractiveCli) via the
+ * {@link isToolCallConcurrencySafe} predicate, so the two runtimes partition
+ * using one algorithm and can't silently diverge.
  *
  * Example: [Read, Read, Edit, Read] → [[Read,Read](parallel), [Edit](seq), [Read](seq)]
  */
-function partitionToolCalls(calls: ScheduledToolCall[]): ToolBatch[] {
-  return calls.reduce<ToolBatch[]>((batches, call) => {
-    const safe = isConcurrencySafe(call);
+export function partitionByConcurrencySafety<T>(
+  items: T[],
+  isSafe: (item: T) => boolean,
+): Array<ConcurrencyBatch<T>> {
+  return items.reduce<Array<ConcurrencyBatch<T>>>((batches, item) => {
+    const safe = isSafe(item);
     const lastBatch = batches[batches.length - 1];
     if (safe && lastBatch?.concurrent) {
-      lastBatch.calls.push(call);
+      lastBatch.calls.push(item);
     } else {
-      batches.push({ concurrent: safe, calls: [call] });
+      batches.push({ concurrent: safe, calls: [item] });
     }
     return batches;
   }, []);
+}
+
+function partitionToolCalls(calls: ScheduledToolCall[]): ToolBatch[] {
+  return partitionByConcurrencySafety(calls, isConcurrencySafe);
 }
 
 export class CoreToolScheduler {

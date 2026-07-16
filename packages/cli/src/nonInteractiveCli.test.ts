@@ -1258,6 +1258,127 @@ describe('runNonInteractive', () => {
 
       void run;
     });
+
+    it('partitions a mixed batch: parallel reads, sequential edit, parallel reads', async () => {
+      setupMetricsMock();
+      // read → Kind.Read (safe), edit → Kind.Edit (unsafe). The batch
+      // [r1,r2,e1,r3,r4] partitions to [r1,r2](parallel), [e1](sequential),
+      // [r3,r4](parallel).
+      vi.mocked(mockToolRegistry.getTool).mockImplementation(
+        (name: string) =>
+          ({
+            kind: name.startsWith('read') ? Kind.Read : Kind.Edit,
+          }) as unknown as ReturnType<typeof mockToolRegistry.getTool>,
+      );
+
+      const startOrder: string[] = [];
+      const resolvers: Record<string, () => void> = {};
+      mockCoreExecuteToolCall.mockImplementation(
+        (_config: unknown, req: { callId: string }) =>
+          new Promise((resolve) => {
+            startOrder.push(req.callId);
+            resolvers[req.callId] = () =>
+              resolve({ responseParts: [{ text: `resp-${req.callId}` }] });
+          }),
+      );
+
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            ...toolCallEvents(['r1', 'r2'], 'read', 'p-mixed'),
+            ...toolCallEvents(['e1'], 'edit', 'p-mixed'),
+            ...toolCallEvents(['r3', 'r4'], 'read', 'p-mixed'),
+          ]),
+        )
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+      const run = runNonInteractive(mockConfig, mockSettings, 'go', 'p-mixed');
+
+      // Batch 1: r1 and r2 launch together; the edit and later reads wait.
+      await vi.waitFor(() => expect(startOrder).toEqual(['r1', 'r2']));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(startOrder).toEqual(['r1', 'r2']);
+      resolvers['r1']();
+      resolvers['r2']();
+
+      // Batch 2: the edit runs alone; r3/r4 must not start until it settles.
+      await vi.waitFor(() => expect(startOrder).toEqual(['r1', 'r2', 'e1']));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(startOrder).toEqual(['r1', 'r2', 'e1']);
+      resolvers['e1']();
+
+      // Batch 3: r3 and r4 launch together.
+      await vi.waitFor(() =>
+        expect(startOrder).toEqual(['r1', 'r2', 'e1', 'r3', 'r4']),
+      );
+      resolvers['r3']();
+      resolvers['r4']();
+      await run;
+
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(5);
+    });
+
+    it('throttles a parallel batch to QWEN_CODE_MAX_TOOL_CONCURRENCY in flight', async () => {
+      setupMetricsMock();
+      const prev = process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+      process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = '2';
+      try {
+        vi.mocked(mockToolRegistry.getTool).mockReturnValue({
+          kind: Kind.Read,
+        } as unknown as ReturnType<typeof mockToolRegistry.getTool>);
+
+        let active = 0;
+        let maxActive = 0;
+        const startOrder: string[] = [];
+        const resolvers: Record<string, () => void> = {};
+        mockCoreExecuteToolCall.mockImplementation(
+          (_config: unknown, req: { callId: string }) =>
+            new Promise((resolve) => {
+              startOrder.push(req.callId);
+              active += 1;
+              maxActive = Math.max(maxActive, active);
+              resolvers[req.callId] = () => {
+                active -= 1;
+                resolve({ responseParts: [{ text: `resp-${req.callId}` }] });
+              };
+            }),
+        );
+
+        mockGeminiClient.sendMessageStream
+          .mockReturnValueOnce(
+            createStreamFromEvents(
+              toolCallEvents(['c1', 'c2', 'c3', 'c4'], 'read', 'p-cap'),
+            ),
+          )
+          .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+        const run = runNonInteractive(mockConfig, mockSettings, 'go', 'p-cap');
+
+        // Cap = 2: only c1 and c2 start; c3 waits on Promise.race(inFlight).
+        await vi.waitFor(() => expect(startOrder).toEqual(['c1', 'c2']));
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(startOrder).toEqual(['c1', 'c2']);
+        // Freeing one slot admits the next call, one at a time.
+        resolvers['c1']();
+        await vi.waitFor(() => expect(startOrder).toEqual(['c1', 'c2', 'c3']));
+        resolvers['c2']();
+        await vi.waitFor(() =>
+          expect(startOrder).toEqual(['c1', 'c2', 'c3', 'c4']),
+        );
+        resolvers['c3']();
+        resolvers['c4']();
+        await run;
+
+        expect(maxActive).toBe(2);
+        expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(4);
+      } finally {
+        if (prev === undefined) {
+          delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+        } else {
+          process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = prev;
+        }
+      }
+    });
   });
 
   it('should ignore duplicate provider tool-call ids across rounds', async () => {

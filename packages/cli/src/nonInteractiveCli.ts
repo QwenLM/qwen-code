@@ -6,6 +6,7 @@
 
 import type {
   BackgroundTaskStatus,
+  ConcurrencyBatch,
   Config,
   CronJob,
   CronScheduler,
@@ -43,6 +44,7 @@ import {
   findRepeatedDuplicateProviderToolCall,
   isToolCallConcurrencySafe,
   parsePositiveIntegerEnv,
+  partitionByConcurrencySafety,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -302,39 +304,32 @@ export interface RunNonInteractiveOptions {
   continueInterrupted?: boolean;
 }
 
-interface HeadlessToolBatch {
-  /** When true, the calls in this batch may execute concurrently. */
-  concurrent: boolean;
-  calls: ToolCallRequestInfo[];
-}
-
 /**
  * Partition headless tool-call requests into consecutive batches by
- * concurrency safety, mirroring the interactive scheduler's
- * `partitionToolCalls` (CoreToolScheduler). Consecutive concurrency-safe
- * calls (independent sub-agents, read-only shells, pure reads) merge into a
- * single parallel batch; every unsafe call (edits, writes, mutating shells)
- * forms its own sequential batch. Request order is preserved.
+ * concurrency safety, mirroring the interactive scheduler
+ * (CoreToolScheduler). Consecutive concurrency-safe calls (independent
+ * sub-agents, read-only shells, pure reads) merge into a single parallel
+ * batch; every unsafe call (edits, writes, mutating shells) forms its own
+ * sequential batch. Request order is preserved.
  *
- * Kinds are resolved from the tool registry; an unregistered tool resolves to
- * `undefined`, which {@link isToolCallConcurrencySafe} treats as unsafe.
+ * Reuses core's `partitionByConcurrencySafety` so the headless and
+ * interactive runtimes share one partition algorithm and can't diverge on
+ * which tool sets they parallelize. Kinds are resolved from the tool
+ * registry; an unregistered tool resolves to `undefined`, which
+ * {@link isToolCallConcurrencySafe} treats as unsafe.
  */
 function partitionHeadlessToolCalls(
   requests: ToolCallRequestInfo[],
   config: Config,
-): HeadlessToolBatch[] {
+): Array<ConcurrencyBatch<ToolCallRequestInfo>> {
   const registry = config.getToolRegistry();
-  return requests.reduce<HeadlessToolBatch[]>((batches, request) => {
-    const kind = registry.getTool(request.name)?.kind;
-    const safe = isToolCallConcurrencySafe(request.name, kind, request.args);
-    const last = batches[batches.length - 1];
-    if (safe && last?.concurrent) {
-      last.calls.push(request);
-    } else {
-      batches.push({ concurrent: safe, calls: [request] });
-    }
-    return batches;
-  }, []);
+  return partitionByConcurrencySafety(requests, (request) =>
+    isToolCallConcurrencySafe(
+      request.name,
+      registry.getTool(request.name)?.kind,
+      request.args,
+    ),
+  );
 }
 
 /**
@@ -1215,10 +1210,19 @@ export async function runNonInteractive(
         // returning the in-flight promise. Budget ticking and abort
         // checks are the caller's responsibility (sequenced before the
         // launch) so --max-tool-calls stays exact even in a parallel
-        // batch.
-        const launchToolCall = (
+        // batch. `async` so a synchronous throw while building the
+        // callbacks (e.g. getInputFormat / getToolCallUpdateCallback)
+        // surfaces as a rejected promise that Promise.allSettled collects
+        // below, instead of aborting the launch loop and leaving the
+        // already-launched siblings as unawaited fire-and-forget. The
+        // launch/settle debug lines identify which call in a parallel batch
+        // is slow or stuck (the serial path made that obvious for free).
+        const launchToolCall = async (
           requestInfo: ToolCallRequestInfo,
         ): Promise<ToolCallResponseInfo> => {
+          debugLogger.debug(
+            `[runNonInteractive] launching tool call ${requestInfo.callId} (${requestInfo.name})`,
+          );
           const inputFormat =
             typeof config.getInputFormat === 'function'
               ? config.getInputFormat()
@@ -1241,12 +1245,23 @@ export async function runNonInteractive(
               )
             : createToolProgressHandler(requestInfo, adapter);
 
-          return executeToolCall(config, requestInfo, abortController.signal, {
-            outputUpdateHandler,
-            ...(toolCallUpdateCallback && {
-              onToolCallsUpdate: toolCallUpdateCallback,
-            }),
-          });
+          const response = await executeToolCall(
+            config,
+            requestInfo,
+            abortController.signal,
+            {
+              outputUpdateHandler,
+              ...(toolCallUpdateCallback && {
+                onToolCallsUpdate: toolCallUpdateCallback,
+              }),
+            },
+          );
+          debugLogger.debug(
+            `[runNonInteractive] tool call ${requestInfo.callId} (${requestInfo.name}) settled${
+              response.error ? ' with error' : ''
+            }`,
+          );
+          return response;
         };
 
         // Emit + record a completed tool call in the caller's order.
@@ -1330,14 +1345,19 @@ export async function runNonInteractive(
             }> = [];
             const inFlight = new Set<Promise<void>>();
             for (const requestInfo of batch.calls) {
-              executedRequests.add(requestInfo);
               if (!isBudgetExempt(requestInfo)) {
                 budgetEnforcer.tickToolCall();
               }
               // A tick that trips the budget (or an external SIGINT) aborts
               // here; stop launching and route the abort after the
-              // already-launched calls settle.
+              // already-launched calls settle. Mark the request executed
+              // only once it is actually launched, so a
+              // budget-tripped-but-unlaunched call still lands in
+              // unexecutedCalls and gets a synthetic skipped-output response
+              // (matters only if routeAbort ever becomes resumable — today it
+              // throws before that synthesis runs).
               if (abortController.signal.aborted) break;
+              executedRequests.add(requestInfo);
               const promise = launchToolCall(requestInfo);
               launched.push({ requestInfo, promise });
               // Track a never-rejecting settle marker for the in-flight
@@ -1384,11 +1404,11 @@ export async function runNonInteractive(
             // Sequential batch (a single tool, or a side-effecting tool):
             // identical to the pre-parallelisation behaviour.
             for (const requestInfo of batch.calls) {
-              executedRequests.add(requestInfo);
               if (!isBudgetExempt(requestInfo)) {
                 budgetEnforcer.tickToolCall();
               }
               if (abortController.signal.aborted) await routeAbort();
+              executedRequests.add(requestInfo);
               const toolResponse = await launchToolCall(requestInfo);
               if (finalizeToolCall(requestInfo, toolResponse)) {
                 sessionEnded = true;
