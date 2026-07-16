@@ -23,7 +23,7 @@ import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useAgentViewState } from '../contexts/AgentViewContext.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { StreamingState } from '../types.js';
-import { getStickyTodoMaxVisibleItems } from '../utils/todoSnapshot.js';
+import { getStickyTodoMaxVisibleItemsForMode } from '../utils/todoSnapshot.js';
 import { getDialogMaxHeight } from '../utils/layoutUtils.js';
 
 export const DefaultAppLayout: React.FC = () => {
@@ -34,12 +34,10 @@ export const DefaultAppLayout: React.FC = () => {
   const hasAgents = agents.size > 0;
   const isAgentTab = activeView !== 'main' && agents.has(activeView);
   const stickyTodoWidth = Math.min(uiState.mainAreaWidth, 64);
-  // VP mode shares the viewport with the conversation, so cap the sticky
-  // todo panel tighter (at most 2 rows) to keep history visible. The legacy
-  // renderer keeps the height-derived default.
-  const stickyTodoMaxVisibleItems = uiState.useTerminalBuffer
-    ? Math.min(2, getStickyTodoMaxVisibleItems(uiState.terminalHeight))
-    : getStickyTodoMaxVisibleItems(uiState.terminalHeight);
+  const stickyTodoMaxVisibleItems = getStickyTodoMaxVisibleItemsForMode(
+    uiState.terminalHeight,
+    uiState.useTerminalBuffer,
+  );
   const dialogMaxHeight = getDialogMaxHeight(
     uiState.terminalHeight,
     uiState.staticExtraHeight,

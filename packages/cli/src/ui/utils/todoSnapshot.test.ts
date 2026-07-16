@@ -9,7 +9,9 @@ import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 import {
   STICKY_TODO_MAX_VISIBLE_ITEMS,
+  STICKY_TODO_VP_MAX_VISIBLE_ITEMS,
   getStickyTodoMaxVisibleItems,
+  getStickyTodoMaxVisibleItemsForMode,
   getStickyTodos,
   getStickyTodosLayoutKey,
   getStickyTodosRenderKey,
@@ -375,5 +377,29 @@ describe('sticky todo layout helpers', () => {
       STICKY_TODO_MAX_VISIBLE_ITEMS,
     );
     expect(getStickyTodoMaxVisibleItems(0)).toBe(STICKY_TODO_MAX_VISIBLE_ITEMS);
+  });
+
+  describe('getStickyTodoMaxVisibleItemsForMode', () => {
+    it('caps at STICKY_TODO_VP_MAX_VISIBLE_ITEMS in VP mode', () => {
+      // Tall terminal would normally allow more items, but VP caps tighter.
+      expect(getStickyTodoMaxVisibleItemsForMode(80, true)).toBe(
+        STICKY_TODO_VP_MAX_VISIBLE_ITEMS,
+      );
+      expect(getStickyTodoMaxVisibleItemsForMode(40, true)).toBe(
+        STICKY_TODO_VP_MAX_VISIBLE_ITEMS,
+      );
+    });
+
+    it('uses height-derived count in non-VP mode', () => {
+      expect(getStickyTodoMaxVisibleItemsForMode(80, false)).toBe(
+        getStickyTodoMaxVisibleItems(80),
+      );
+    });
+
+    it('respects height-derived floor when VP cap exceeds it', () => {
+      // Very short terminal: height-derived count is 1, which is already
+      // below the VP cap, so the result is 1 regardless of mode.
+      expect(getStickyTodoMaxVisibleItemsForMode(8, true)).toBe(1);
+    });
   });
 });

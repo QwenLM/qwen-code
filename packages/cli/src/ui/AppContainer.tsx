@@ -81,7 +81,7 @@ import {
 import { loadLowlight } from './utils/lowlightLoader.js';
 import {
   getStickyTodos,
-  getStickyTodoMaxVisibleItems,
+  getStickyTodoMaxVisibleItemsForMode,
   getStickyTodosLayoutKey,
   getStickyTodosRenderKey,
 } from './utils/todoSnapshot.js';
@@ -2971,11 +2971,10 @@ export const AppContainer = (props: AppContainerProps) => {
     !isFeedbackDialogOpen &&
     streamingState !== StreamingState.WaitingForConfirmation;
   const stickyTodoWidth = Math.min(mainAreaWidth, 64);
-  // Keep this in lockstep with DefaultAppLayout's rendered cap so the
-  // controls-height layout key predicts the panel's real footprint.
-  const stickyTodoMaxVisibleItems = useTerminalBuffer
-    ? Math.min(2, getStickyTodoMaxVisibleItems(terminalHeight))
-    : getStickyTodoMaxVisibleItems(terminalHeight);
+  const stickyTodoMaxVisibleItems = getStickyTodoMaxVisibleItemsForMode(
+    terminalHeight,
+    useTerminalBuffer,
+  );
   const stickyTodosLayoutKey = shouldShowStickyTodos
     ? getStickyTodosLayoutKey(
         stickyTodos,
@@ -3016,16 +3015,9 @@ export const AppContainer = (props: AppContainerProps) => {
     dialogsVisible,
     stickyTodosLayoutKey,
     liveAgentPanelLayoutKey,
-    // The composer's own height also shifts without any of the above changing:
-    // the loading block mounts/unmounts with streamingState, the full
-    // indicator vs. the narrow "esc to cancel" hint toggles on
-    // embeddedShellFocused, queued messages add rows, and the input area
-    // itself mounts/unmounts (isInputActive). Missing these, the footer is not
-    // re-measured during a pure streaming turn (buffer/todo/agent all steady),
-    // so controlsHeight stays too small, availableTerminalHeight too large, and
-    // the VP viewport bottom is clipped until some unrelated dep re-triggers the
-    // measure. elapsedTime and currentLoadingPhrase are intentionally excluded —
-    // they tick every ~1s / few seconds without changing the row count.
+    // Composer height also shifts with these; without them the footer isn't
+    // re-measured during a streaming turn and the VP viewport bottom clips.
+    // (elapsedTime/currentLoadingPhrase excluded: they tick without changing rows.)
     streamingState,
     embeddedShellFocused,
     messageQueue.length,

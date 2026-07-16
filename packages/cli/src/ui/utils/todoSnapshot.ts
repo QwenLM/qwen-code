@@ -27,6 +27,7 @@ type SnapshotSearchResult = TodoSnapshotSearchResult | undefined;
 // leave the inline result visible when the sticky panel appears.
 const MIN_HISTORY_ITEMS_AFTER_TODO_BEFORE_STICKY = 2;
 export const STICKY_TODO_MAX_VISIBLE_ITEMS = 5;
+export const STICKY_TODO_VP_MAX_VISIBLE_ITEMS = 2;
 const STICKY_TODO_ROWS_PER_VISIBLE_ITEM = 5;
 
 const STICKY_TODO_STATUS_PRIORITY: Record<TodoItem['status'], number> = {
@@ -203,4 +204,17 @@ export function getStickyTodoMaxVisibleItems(terminalHeight: number): number {
   return clampStickyTodoVisibleItems(
     terminalHeight / STICKY_TODO_ROWS_PER_VISIBLE_ITEM,
   );
+}
+
+// Single source of truth for the sticky-todo cap across render + layout-key
+// sites. VP mode caps at STICKY_TODO_VP_MAX_VISIBLE_ITEMS; other modes use the
+// height-derived default.
+export function getStickyTodoMaxVisibleItemsForMode(
+  terminalHeight: number,
+  useTerminalBuffer: boolean,
+): number {
+  const base = getStickyTodoMaxVisibleItems(terminalHeight);
+  return useTerminalBuffer
+    ? Math.min(STICKY_TODO_VP_MAX_VISIBLE_ITEMS, base)
+    : base;
 }
