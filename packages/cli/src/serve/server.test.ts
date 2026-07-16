@@ -12355,7 +12355,7 @@ describe('createServeApp', () => {
       expect(setSelection).not.toHaveBeenCalled();
     });
 
-    it('returns typed start failure details with credential redaction', async () => {
+    it('filters and redacts typed start failure details', async () => {
       const state = running();
       const app = createServeApp(tokenOpts, undefined, {
         bridge: fakeBridge(),
@@ -12364,10 +12364,27 @@ describe('createServeApp', () => {
         setChannelWorkerSelection: vi.fn(async () => {
           throw new ChannelWorkerControlError(
             'channel_worker_start_failed',
-            'token=start-secret',
+            '\u001b[31mtoken=start-secret\tfailed\u001b[0m',
             {
               rolledBack: false,
               rollbackError: 'token=rollback-secret',
+              startupFailures: [
+                {
+                  workspaceCwd: WS_BOUND,
+                  channel: 'telegram',
+                  phase: 'connect',
+                  code: 'ECONNREFUSED',
+                  message:
+                    'Authorization: Bearer provider-secret connection refused',
+                },
+                {
+                  workspaceCwd: WS_BOUND,
+                  channel: 42,
+                  phase: 'connect',
+                  message: 'malformed',
+                } as never,
+              ],
+              startupFailuresTruncated: true,
             },
           );
         }),
@@ -12381,12 +12398,112 @@ describe('createServeApp', () => {
 
       expect(response.status).toBe(502);
       expect(response.body).toMatchObject({
+        error: 'token=<redacted>',
         code: 'channel_worker_start_failed',
         rolledBack: false,
+        startupFailuresTruncated: true,
+        startupFailures: [
+          {
+            workspaceCwd: WS_BOUND,
+            channel: 'telegram',
+            phase: 'connect',
+            code: 'ECONNREFUSED',
+          },
+        ],
         state,
       });
       expect(JSON.stringify(response.body)).not.toContain('start-secret');
       expect(JSON.stringify(response.body)).not.toContain('rollback-secret');
+      expect(JSON.stringify(response.body)).not.toContain('provider-secret');
+    });
+
+    it('omits startup failure fields when every entry is malformed', async () => {
+      const state = running();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerControl: () => state,
+        setChannelWorkerSelection: vi.fn(async () => {
+          throw new ChannelWorkerControlError(
+            'channel_worker_start_failed',
+            'Channel worker failed to start.',
+            {
+              startupFailures: [
+                {
+                  workspaceCwd: WS_BOUND,
+                  channel: 42,
+                  phase: 'connect',
+                  message: 'malformed',
+                } as never,
+              ],
+              startupFailuresTruncated: true,
+            },
+          );
+        }),
+        stopChannelWorker: vi.fn(async () => ({ changed: false, state })),
+        reloadChannelWorker: vi.fn(async () => state.workers[0]!),
+      });
+
+      const response = await auth(request(app).put('/workspace/channel')).send({
+        selection: { mode: 'all' },
+      });
+
+      expect(response.status).toBe(502);
+      expect(response.body).not.toHaveProperty('startupFailures');
+      expect(response.body).not.toHaveProperty('startupFailuresTruncated');
+    });
+
+    it('exposes partial startup failures in current control snapshots', async () => {
+      const state = running();
+      state.workers[0] = {
+        ...state.workers[0]!,
+        channels: ['telegram'],
+        requestedChannels: ['telegram', 'feishu'],
+        startupFailures: [
+          {
+            channel: 'feishu',
+            phase: 'connect',
+            code: 'ECONNREFUSED',
+            message: 'connection refused',
+          },
+        ],
+      };
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerControl: () => state,
+        setChannelWorkerSelection: vi.fn(async () => ({
+          changed: true,
+          replaced: false,
+          partial: true,
+          state,
+        })),
+        stopChannelWorker: vi.fn(async () => ({ changed: false, state })),
+        reloadChannelWorker: vi.fn(async () => state.workers[0]!),
+      });
+
+      const put = await auth(request(app).put('/workspace/channel')).send({
+        selection: { mode: 'all' },
+      });
+      const get = await auth(request(app).get('/workspace/channel'));
+
+      expect(put.status).toBe(200);
+      expect(put.body).toMatchObject({
+        partial: true,
+        state: {
+          workers: [
+            expect.objectContaining({
+              startupFailures: [
+                expect.objectContaining({
+                  channel: 'feishu',
+                  message: 'connection refused',
+                }),
+              ],
+            }),
+          ],
+        },
+      });
+      expect(get.body).toEqual(state);
     });
 
     it('maps untrusted workspace failures to 403', async () => {

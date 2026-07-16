@@ -3834,6 +3834,39 @@ describe('DaemonClient', () => {
       });
     });
 
+    it('preserves structured startup failure bodies on 502 responses', async () => {
+      const body = {
+        error: 'Channel worker exited before ready.',
+        code: 'channel_worker_start_failed',
+        rolledBack: true,
+        state: {
+          enabled: false,
+          selection: null,
+          transition: 'idle',
+          workers: [],
+        },
+        startupFailures: [
+          {
+            workspaceCwd: '/work',
+            channel: 'telegram',
+            phase: 'connect',
+            code: 'ECONNREFUSED',
+            message: 'connection refused',
+          },
+        ],
+      };
+      const { fetch } = recordingFetch(() => jsonResponse(502, body));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const error = await client
+        .setChannelWorkerSelection({ mode: 'all' })
+        .catch((value: unknown) => value);
+
+      expect(error).toBeInstanceOf(DaemonHttpError);
+      expect((error as DaemonHttpError).status).toBe(502);
+      expect((error as DaemonHttpError).body).toEqual(body);
+    });
+
     it('DELETEs idempotently and maps HTTP failures', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, {
