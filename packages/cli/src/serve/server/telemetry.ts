@@ -15,6 +15,7 @@ import type { NextFunction, Request, Response } from 'express';
 import {
   CLIENT_ID_HEADER,
   CLIENT_ID_RE,
+  getDeferredRuntimeRequestTiming,
   MAX_CLIENT_ID_LENGTH,
 } from './request-helpers.js';
 
@@ -368,7 +369,8 @@ export function daemonTelemetryMiddleware(
       CLIENT_ID_RE.test(rawClientId)
         ? rawClientId
         : undefined;
-    const startMs = Date.now();
+    const deferredRuntime = getDeferredRuntimeRequestTiming(req);
+    const startMs = deferredRuntime?.startedAt.getTime() ?? Date.now();
     void withDaemonRequestSpan(
       {
         method: req.method,
@@ -379,6 +381,13 @@ export function daemonTelemetryMiddleware(
           ? { permissionRequestId: route.permissionRequestId }
           : {}),
         ...(clientId ? { clientId } : {}),
+        ...(deferredRuntime?.waitMs !== undefined
+          ? {
+              startTime: deferredRuntime.startedAt,
+              deferredRuntimeWaitMs: deferredRuntime.waitMs,
+              deferredRuntimePath: deferredRuntime.path,
+            }
+          : {}),
       },
       async (span) =>
         await new Promise<void>((resolve, reject) => {
@@ -388,7 +397,12 @@ export function daemonTelemetryMiddleware(
             done = true;
             recordDaemonHttpResponse(span, res.statusCode);
             const durationMs = Date.now() - startMs;
-            recordDaemonHttpRequest(durationMs, route.route, res.statusCode);
+            recordDaemonHttpRequest(
+              durationMs,
+              route.route,
+              res.statusCode,
+              deferredRuntime?.path,
+            );
             // Exclude the dashboard's own status poll from the metrics-ring
             // request rate/latency, or the Requests chart shows a baseline of
             // ≥1/window with no external traffic (the dashboard counting itself)

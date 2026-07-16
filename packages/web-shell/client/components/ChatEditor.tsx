@@ -1576,7 +1576,10 @@ export const ChatEditor = memo(
     const modeLabel = getModeLabel(currentMode, t);
 
     const currentModelLabel = currentModel
-      ? getModelDisplayName(currentModel)
+      ? (availableModels.find((model) => model.id === currentModel)?.label ??
+        (currentModel.startsWith('qwen-route:')
+          ? ''
+          : getModelDisplayName(currentModel)))
       : '';
     const { modelLabel, modelLabelReady } = resolveToolbarModelLabel({
       currentModelLabel,

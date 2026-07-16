@@ -243,6 +243,15 @@ things a reviewer of _this_ codebase must check — not general advice.
   set by any caller is a dead switch (`options.foo ?? true` always takes the
   default). Decide severity at the read site; never explain an unpopulated field
   with author intent you cannot observe.
+- **Classify every added or changed daemon route by ownership.** Name whether it
+  is process-global, legacy-primary, selected-runtime, live-session-owner, or
+  persisted-workspace scoped, and verify every downstream consumer matches that
+  scope.
+- **Verify workspace-scoped routes stay inside the resolved runtime.** Check the
+  environment, bridge, service, filesystem, trust boundary, and failure paths.
+  Each unknown, untrusted, ambiguous, bootstrapping, draining, or removed state
+  must follow its declared failure semantics and must never fall back to the
+  primary runtime.
 - **Match the house style when judging.** ESM only; no `any`; no relative imports
   between packages; `kebab-case.ts` for `.ts` in `packages/core` and `packages/cli`,
   `PascalCase.tsx` for React components; tests collocated as `file.test.ts`.

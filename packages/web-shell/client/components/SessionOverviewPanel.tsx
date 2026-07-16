@@ -31,6 +31,7 @@ import {
   SESSION_ORGANIZATION_FEATURE,
 } from '../constants/sessions';
 import { ErrorBoundary } from './ErrorBoundary';
+import { getModelDisplayName } from '../utils/modelDisplay';
 import styles from './SessionOverviewPanel.module.css';
 
 // The list is cheap to poll (it's the same endpoint the sidebar already hits),
@@ -95,7 +96,11 @@ export function deriveSessionCards(
       label: session.displayName?.trim() || session.sessionId.slice(0, 8),
       status: needsApproval ? 'needsApproval' : running ? 'running' : 'idle',
       clientCount: session.clientCount ?? status?.clientCount ?? 0,
-      model: status?.currentModelId,
+      model: status?.currentModelId?.startsWith('qwen-route:')
+        ? undefined
+        : status?.currentModelId
+          ? getModelDisplayName(status.currentModelId)
+          : undefined,
       updatedAt: session.updatedAt || session.createdAt,
       color: session.color,
       isCurrent: session.sessionId === currentSessionId,

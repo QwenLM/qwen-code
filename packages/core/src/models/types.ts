@@ -102,6 +102,8 @@ export interface ResolvedModelConfig extends ModelConfig {
   envKey?: string;
   /** API base URL (always present, has default per authType) */
   baseUrl: string;
+  /** Exact optional baseUrl used in the registry key, before defaults. */
+  registryBaseUrl?: string;
   /** Generation config (always present, merged with defaults) */
   generationConfig: ModelGenerationConfig;
   /** Capabilities (always present, defaults to {}) */
@@ -121,6 +123,8 @@ export interface AvailableModel {
   contextWindowSize?: number;
   modalities?: InputModalities;
   baseUrl?: string;
+  /** Exact optional baseUrl used in the model registry key, before defaults. */
+  registryBaseUrl?: string;
   envKey?: string;
 
   /** When true, this model only appears in the fast model selector */
