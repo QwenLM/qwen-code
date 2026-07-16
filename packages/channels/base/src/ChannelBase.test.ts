@@ -2064,7 +2064,7 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
-    it('plans a natural update against current entries and uses the selected text for CAS', async () => {
+    it('proposes a natural update before confirming it with the selected text for CAS', async () => {
       const target = {
         channelName: 'test-chan',
         chatId: 'chat1',
@@ -2101,6 +2101,23 @@ describe('ChannelBase', () => {
       ).toHaveBeenCalledWith('把刚才那条记忆改成 Use production.', [
         { id: 'm-a31f0d82c7e4', text: 'Use staging.' },
       ]);
+      expect(channelMemory.updateChannelMemoryEntry).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: [
+            'Update channel memory m-a31f0d82c7e4?',
+            'Before: Use staging.',
+            'After: Use production.',
+            'Say "确认更新记忆" or "confirm memory update" within 60 seconds.',
+          ].join('\n'),
+        },
+      ]);
+
+      await ch.handleInbound(
+        envelope({ text: '确认更新记忆', senderId: 'alice' }),
+      );
+
       expect(channelMemory.updateChannelMemoryEntry).toHaveBeenCalledWith(
         target,
         {
@@ -2109,13 +2126,14 @@ describe('ChannelBase', () => {
           expectedText: 'Use staging.',
         },
       );
-      expect(ch.sent).toEqual([
-        { chatId: 'chat1', text: 'Channel memory m-a31f0d82c7e4 updated.' },
-      ]);
+      expect(ch.sent.at(-1)).toEqual({
+        chatId: 'chat1',
+        text: 'Channel memory m-a31f0d82c7e4 updated.',
+      });
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
-    it('does not retry or invalidate session context after a natural update CAS conflict', async () => {
+    it('consumes a natural update proposal after a CAS conflict without retrying or invalidating context', async () => {
       const channelMemory = createChannelMemory([
         { id: 'm-a31f0d82c7e4', text: 'Use staging.' },
       ]);
@@ -2148,25 +2166,40 @@ describe('ChannelBase', () => {
         }),
       );
 
+      expect(channelMemory.updateChannelMemoryEntry).not.toHaveBeenCalled();
+
+      ch.sent = [];
+      await ch.handleInbound(
+        envelope({ text: '确认更新记忆', senderId: 'alice' }),
+      );
+
       expect(channelMemory.updateChannelMemoryEntry).toHaveBeenCalledTimes(1);
       expect(ch.sent).toEqual([
         {
           chatId: 'chat1',
-          text: 'Failed to update channel memory: An error occurred while accessing channel memory.',
+          text: 'That channel memory entry changed since it was selected. View channel memory and start the operation again.',
         },
       ]);
 
       ch.sent = [];
-      await ch.handleInbound(envelope({ text: 'second', senderId: 'alice' }));
+      await ch.handleInbound(
+        envelope({ text: '确认更新记忆', senderId: 'alice' }),
+      );
 
-      expect(channelMemory.readChannelMemory).toHaveBeenCalledTimes(1);
+      expect(channelMemory.updateChannelMemoryEntry).toHaveBeenCalledTimes(1);
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: 'No pending channel memory update. Start a new update request first.',
+        },
+      ]);
       expect(stderrSpy).toHaveBeenCalledWith(
         expect.stringContaining('Channel memory entry changed'),
       );
       stderrSpy.mockRestore();
     });
 
-    it('plans a natural removal against current entries and uses the selected text for CAS', async () => {
+    it('proposes a natural removal before confirming it with the selected text for CAS', async () => {
       const target = {
         channelName: 'test-chan',
         chatId: 'chat1',
@@ -2191,6 +2224,22 @@ describe('ChannelBase', () => {
         envelope({ text: '删掉刚才那条记忆', senderId: 'alice' }),
       );
 
+      expect(channelMemory.removeChannelMemoryEntries).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: [
+            'Remove channel memory m-a31f0d82c7e4?',
+            'Use staging.',
+            'Say "确认删除记忆" or "confirm memory removal" within 60 seconds.',
+          ].join('\n'),
+        },
+      ]);
+
+      await ch.handleInbound(
+        envelope({ text: '确认删除记忆', senderId: 'alice' }),
+      );
+
       expect(channelMemory.removeChannelMemoryEntries).toHaveBeenCalledWith(
         target,
         {
@@ -2198,11 +2247,246 @@ describe('ChannelBase', () => {
           expectedTextById: { 'm-a31f0d82c7e4': 'Use staging.' },
         },
       );
-      expect(ch.sent).toEqual([
-        { chatId: 'chat1', text: 'Channel memory m-a31f0d82c7e4 removed.' },
-      ]);
+      expect(ch.sent.at(-1)).toEqual({
+        chatId: 'chat1',
+        text: 'Channel memory m-a31f0d82c7e4 removed.',
+      });
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
+
+    it('consumes a natural removal proposal after a CAS conflict without retrying', async () => {
+      const channelMemory = createChannelMemory([
+        { id: 'm-a31f0d82c7e4', text: 'Use staging.' },
+      ]);
+      channelMemory.removeChannelMemoryEntries.mockRejectedValue(
+        new Error('Channel memory entry changed'),
+      );
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'remove',
+          targetIds: ['m-a31f0d82c7e4'],
+          confidence: 0.92,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(
+        envelope({ text: '删掉刚才那条记忆', senderId: 'alice' }),
+      );
+      await ch.handleInbound(
+        envelope({ text: '确认删除记忆', senderId: 'alice' }),
+      );
+      await ch.handleInbound(
+        envelope({ text: '确认删除记忆', senderId: 'alice' }),
+      );
+
+      expect(channelMemory.removeChannelMemoryEntries).toHaveBeenCalledTimes(1);
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: [
+            'Remove channel memory m-a31f0d82c7e4?',
+            'Use staging.',
+            'Say "确认删除记忆" or "confirm memory removal" within 60 seconds.',
+          ].join('\n'),
+        },
+        {
+          chatId: 'chat1',
+          text: 'That channel memory entry changed since it was selected. View channel memory and start the operation again.',
+        },
+        {
+          chatId: 'chat1',
+          text: 'No pending channel memory removal. Start a new removal request first.',
+        },
+      ]);
+    });
+
+    it('consumes a natural update proposal after a storage failure', async () => {
+      const channelMemory = createChannelMemory([
+        { id: 'm-a31f0d82c7e4', text: 'Use staging.' },
+      ]);
+      channelMemory.updateChannelMemoryEntry.mockRejectedValue(
+        new Error('unsafe\\nbackend failure'),
+      );
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'update',
+          targetIds: ['m-a31f0d82c7e4'],
+          memory: 'Use production.',
+          confidence: 0.92,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '把刚才那条记忆改成 Use production.',
+          senderId: 'alice',
+        }),
+      );
+      await ch.handleInbound(
+        envelope({ text: '确认更新记忆', senderId: 'alice' }),
+      );
+      await ch.handleInbound(
+        envelope({ text: '确认更新记忆', senderId: 'alice' }),
+      );
+
+      expect(channelMemory.updateChannelMemoryEntry).toHaveBeenCalledTimes(1);
+      expect(ch.sent.slice(-2)).toEqual([
+        {
+          chatId: 'chat1',
+          text: 'Failed to update channel memory: An error occurred while accessing channel memory.',
+        },
+        {
+          chatId: 'chat1',
+          text: 'No pending channel memory update. Start a new update request first.',
+        },
+      ]);
+    });
+
+    it('consumes a natural update proposal before concurrent confirmations complete', async () => {
+      const channelMemory = createChannelMemory([
+        { id: 'm-a31f0d82c7e4', text: 'Use staging.' },
+      ]);
+      let resolveMutation: ((value: { changed: true }) => void) | undefined;
+      channelMemory.updateChannelMemoryEntry.mockImplementation(
+        () =>
+          new Promise((resolve: (value: { changed: true }) => void) => {
+            resolveMutation = resolve;
+          }),
+      );
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'update',
+          targetIds: ['m-a31f0d82c7e4'],
+          memory: 'Use production.',
+          confidence: 0.92,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '把刚才那条记忆改成 Use production.',
+          senderId: 'alice',
+        }),
+      );
+      const firstConfirmation = ch.handleInbound(
+        envelope({ text: '确认更新记忆', senderId: 'alice' }),
+      );
+      const secondConfirmation = ch.handleInbound(
+        envelope({ text: '确认更新记忆', senderId: 'alice' }),
+      );
+
+      await vi.waitFor(() => {
+        expect(channelMemory.updateChannelMemoryEntry).toHaveBeenCalledTimes(1);
+      });
+      resolveMutation?.({ changed: true });
+      await Promise.all([firstConfirmation, secondConfirmation]);
+
+      expect(channelMemory.updateChannelMemoryEntry).toHaveBeenCalledTimes(1);
+      expect(ch.sent.at(-2)).toEqual({
+        chatId: 'chat1',
+        text: 'No pending channel memory update. Start a new update request first.',
+      });
+      expect(ch.sent.at(-1)).toEqual({
+        chatId: 'chat1',
+        text: 'Channel memory m-a31f0d82c7e4 updated.',
+      });
+    });
+
+    it('invalidates injected memory only after confirming a natural update', async () => {
+      const channelMemory = createChannelMemory([
+        { id: 'm-a31f0d82c7e4', text: 'Use staging.' },
+      ]);
+      channelMemory.readChannelMemory.mockResolvedValue('Use staging.');
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'update',
+          targetIds: ['m-a31f0d82c7e4'],
+          memory: 'Use production.',
+          confidence: 0.92,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(envelope({ text: 'first', senderId: 'alice' }));
+      await ch.handleInbound(
+        envelope({
+          text: '把刚才那条记忆改成 Use production.',
+          senderId: 'alice',
+        }),
+      );
+      await ch.handleInbound(
+        envelope({ text: '确认更新记忆', senderId: 'alice' }),
+      );
+      await ch.handleInbound(envelope({ text: 'second', senderId: 'alice' }));
+
+      expect(channelMemory.readChannelMemory).toHaveBeenCalledTimes(2);
+    });
+
+    it.each([
+      { exactText: '把 m-a31f0d82c7e4 改成Use production.' },
+      { exactText: '忘掉 m-a31f0d82c7e4' },
+    ])(
+      'lets an exact mutation cancel an older natural proposal',
+      async ({ exactText }) => {
+        const channelMemory = createChannelMemory([
+          { id: 'm-a31f0d82c7e4', text: 'Use staging.' },
+        ]);
+        const memoryIntentClassifier = {
+          classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+            intent: 'update',
+            targetIds: ['m-a31f0d82c7e4'],
+            memory: 'Use production.',
+            confidence: 0.92,
+          }),
+        };
+        const ch = createChannel(
+          { allowedUsers: ['alice'] },
+          { channelMemory, memoryIntentClassifier },
+        );
+
+        await ch.handleInbound(
+          envelope({
+            text: '把刚才那条记忆改成 Use production.',
+            senderId: 'alice',
+          }),
+        );
+        await ch.handleInbound(
+          envelope({ text: exactText, senderId: 'alice' }),
+        );
+        await ch.handleInbound(
+          envelope({ text: '确认更新记忆', senderId: 'alice' }),
+        );
+
+        expect(
+          memoryIntentClassifier.classifyChannelMemoryIntent,
+        ).toHaveBeenCalledTimes(1);
+        expect(channelMemory.updateChannelMemoryEntry).toHaveBeenCalledTimes(
+          exactText.includes('改成') ? 1 : 0,
+        );
+        expect(channelMemory.removeChannelMemoryEntries).toHaveBeenCalledTimes(
+          exactText.includes('改成') ? 0 : 1,
+        );
+        expect(ch.sent.at(-1)).toEqual({
+          chatId: 'chat1',
+          text: 'No pending channel memory update. Start a new update request first.',
+        });
+      },
+    );
 
     it('inspects a unique natural memory match', async () => {
       const channelMemory = createChannelMemory([

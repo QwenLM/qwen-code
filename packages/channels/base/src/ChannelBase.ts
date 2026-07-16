@@ -2857,16 +2857,106 @@ export abstract class ChannelBase {
     }
 
     if (intent.kind === 'update_confirm' || intent.kind === 'remove_confirm') {
-      const kind = intent.kind === 'update_confirm' ? 'update' : 'remove';
-      const pending = this.takePendingChannelMemoryMutation(envelope, kind);
+      const pending =
+        intent.kind === 'update_confirm'
+          ? this.takePendingChannelMemoryMutation(envelope, 'update')
+          : this.takePendingChannelMemoryMutation(envelope, 'remove');
       if (!pending) {
         await this.sendMessage(
           envelope.chatId,
-          kind === 'update'
+          intent.kind === 'update_confirm'
             ? 'No pending channel memory update. Start a new update request first.'
             : 'No pending channel memory removal. Start a new removal request first.',
         );
+        return;
       }
+
+      const channelMemory = await this.getChannelMemory(envelope);
+      if (!channelMemory) return;
+      const isUpdate = pending.kind === 'update';
+      let changed: boolean;
+      try {
+        if (isUpdate) {
+          ({ changed } = await channelMemory.updateChannelMemoryEntry(
+            this.channelMemoryTarget(envelope),
+            {
+              id: pending.id,
+              text: pending.proposedText,
+              expectedText: pending.expectedText,
+            },
+          ));
+        } else {
+          ({ changed } = await channelMemory.removeChannelMemoryEntries(
+            this.channelMemoryTarget(envelope),
+            {
+              ids: [pending.id],
+              expectedTextById: { [pending.id]: pending.expectedText },
+            },
+          ));
+        }
+      } catch (error) {
+        const message = this.channelMemoryErrorMessage(error);
+        this.logChannelMemoryError(
+          isUpdate ? 'update' : 'remove',
+          envelope,
+          message,
+        );
+        await this.sendMessage(
+          envelope.chatId,
+          message === 'Channel memory entry changed'
+            ? 'That channel memory entry changed since it was selected. View channel memory and start the operation again.'
+            : `Failed to ${isUpdate ? 'update' : 'remove'} channel memory: ${this.channelMemoryUserErrorMessage()}`,
+        );
+        return;
+      }
+      if (!changed) {
+        await this.sendMessage(
+          envelope.chatId,
+          `No channel memory entry ${pending.id}.`,
+        );
+        return;
+      }
+      this.invalidateSessionContext(envelope);
+      await this.sendMessage(
+        envelope.chatId,
+        `Channel memory ${pending.id} ${isUpdate ? 'updated' : 'removed'}.`,
+      );
+      return;
+    }
+
+    if (intent.kind === 'natural_update') {
+      this.setPendingChannelMemoryMutation(envelope, {
+        kind: 'update',
+        id: intent.id,
+        expectedText: intent.expectedText,
+        proposedText: intent.text,
+      });
+      await this.sendMessage(
+        envelope.chatId,
+        [
+          `Update channel memory ${intent.id}?`,
+          `Before: ${sanitizePromptText(intent.expectedText).trim()}`,
+          `After: ${sanitizePromptText(intent.text).trim()}`,
+          'Say "确认更新记忆" or "confirm memory update" within 60 seconds.',
+        ].join('\n'),
+      );
+      return;
+    }
+
+    if (intent.kind === 'natural_remove') {
+      this.setPendingChannelMemoryMutation(envelope, {
+        kind: 'remove',
+        id: intent.id,
+        expectedText: intent.expectedText,
+      });
+      await this.sendMessage(
+        envelope.chatId,
+        [
+          `Remove channel memory ${intent.id}?`,
+          sanitizePromptText(intent.expectedText).trim(),
+          'Say "确认删除记忆" or "confirm memory removal" within 60 seconds.',
+        ].join('\n'),
+      );
       return;
     }
 
@@ -2971,37 +3061,21 @@ export abstract class ChannelBase {
       return;
     }
 
-    if (
-      intent.kind === 'update' ||
-      intent.kind === 'remove' ||
-      intent.kind === 'natural_update' ||
-      intent.kind === 'natural_remove'
-    ) {
+    if (intent.kind === 'update' || intent.kind === 'remove') {
       let changed: boolean;
-      const isUpdate =
-        intent.kind === 'update' || intent.kind === 'natural_update';
+      const isUpdate = intent.kind === 'update';
       const id = intent.id;
+      this.deletePendingChannelMemoryMutation(envelope);
       try {
         if (isUpdate) {
           ({ changed } = await channelMemory.updateChannelMemoryEntry(
             this.channelMemoryTarget(envelope),
-            intent.kind === 'natural_update'
-              ? {
-                  id: intent.id,
-                  text: intent.text,
-                  expectedText: intent.expectedText,
-                }
-              : { id: intent.id, text: intent.text },
+            { id: intent.id, text: intent.text },
           ));
         } else {
           ({ changed } = await channelMemory.removeChannelMemoryEntries(
             this.channelMemoryTarget(envelope),
-            intent.kind === 'natural_remove'
-              ? {
-                  ids: [intent.id],
-                  expectedTextById: { [intent.id]: intent.expectedText },
-                }
-              : { ids: [intent.id] },
+            { ids: [intent.id] },
           ));
         }
       } catch (error) {
