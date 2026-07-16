@@ -480,6 +480,23 @@ describe('--findings — fold the list in, print one block, record the block alo
     expect(wasDeliveredVerbatim(printed, recorded)).toBe(true);
   });
 
+  it('a Step 3B per-chunk reverse auditor takes --chunk and --findings together', () => {
+    // The one valid triple: reverse-audit declares both acceptsChunk and
+    // acceptsFindings, and Step 5 3B launches `--role reverse-audit --chunk N
+    // --findings <cumulative>` per chunk per round. The findings fold above the
+    // chunk-scoped prompt; the record is that chunk's block, findings-free, keyed by
+    // the chunk. (PLAN's chunks are 13/14/15 — chunk 14 is offset 4024, limit 176.)
+    const { printed, plan } = run({ role: 'reverse-audit', chunk: 14 });
+    expect(printed).toContain('Already confirmed — do not re-report these');
+    expect(printed).toContain('foo.ts:10 — the collision drops arguments');
+    expect(printed).toContain('offset=4024, limit=176'); // this chunk's range only
+    expect(printed).not.toContain('offset=3807'); // not chunk 13's
+    const recorded = readRecordedPrompts(plan).get('reverse-audit--chunk-14')!;
+    expect(recorded).not.toContain('foo.ts:10');
+    expect(recorded).toContain('offset=4024, limit=176');
+    expect(wasDeliveredVerbatim(printed, recorded)).toBe(true);
+  });
+
   it('an empty findings file tells the reverse auditor nothing is confirmed yet', () => {
     const dir = tmp('ap-find0-');
     const plan = join(dir, 'plan.json');
