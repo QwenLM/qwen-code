@@ -1057,6 +1057,8 @@ export interface ConfigParameters {
   ideMode?: boolean;
   authType?: AuthType;
   generationConfig?: Partial<ContentGeneratorConfig>;
+  /** Exact initial model registry baseUrl; null selects an implicit route. */
+  initialModelRegistryBaseUrl?: string | null;
   /**
    * Optional source map for generationConfig fields (e.g. CLI/env/settings attribution).
    * This is used to produce per-field source badges in the UI.
@@ -2159,6 +2161,7 @@ export class Config {
         baseUrl: params.generationConfig?.baseUrl,
       },
       generationConfigSources: params.generationConfigSources,
+      initialRegistryBaseUrl: params.initialModelRegistryBaseUrl,
       onModelChange: this.handleModelChange.bind(this),
     });
 
@@ -3350,6 +3353,10 @@ export class Config {
     return (
       this.getContentGeneratorConfig()?.model || this.modelsConfig.getModel()
     );
+  }
+
+  getCurrentModelRegistryBaseUrl(): string | null | undefined {
+    return this.modelsConfig.getCurrentRegistryBaseUrl();
   }
 
   /**

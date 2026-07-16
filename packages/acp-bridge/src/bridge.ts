@@ -191,6 +191,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function getCanonicalModelId(response: unknown, fallback: string): string {
+  if (!isRecord(response) || !isRecord(response['_meta'])) return fallback;
+  const modelSwitch = response['_meta']['qwenModelSwitch'];
+  if (!isRecord(modelSwitch)) return fallback;
+  const modelId = modelSwitch['modelId'];
+  return typeof modelId === 'string' ? modelId : fallback;
+}
+
 function isBulkReplayUpdate(value: unknown): value is SessionUpdate {
   if (!isRecord(value)) return false;
   const updateType = value['sessionUpdate'];
@@ -2520,7 +2528,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // model_switched right beside the model_switch_failed below.
       let succeeded = false;
       try {
-        await Promise.race([
+        const result = await Promise.race([
           withTimeout(
             conn.unstable_setSessionModel({
               sessionId: entry.sessionId,
@@ -2536,7 +2544,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           type: 'settings_changed',
           data: {
             key: 'model.name',
-            value: modelId,
+            value: getCanonicalModelId(result, modelId),
           },
           ...(originatorClientId ? { originatorClientId } : {}),
         });
@@ -3566,10 +3574,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // `{ currentModelId: null, currentApprovalMode: null }` and the SDK reducer's
   // `!= null` guard would leave the client unseeded — defeating A5's primary
   // (initial-attach) use case. The agent's `currentModelId` is already the
-  // canonical `model(authType)` form (acpAgent `formatAcpModelId`), matching
-  // what `reconcileAfterRoundtrip` reads back, so seeding it keeps the model
-  // comparison format-stable. Mode ids pass the same `KNOWN_APPROVAL_MODES`
-  // backstop the demux/reconcile paths use.
+  // advertised selector (legacy or opaque), matching what
+  // `reconcileAfterRoundtrip` reads back, so seeding it keeps the comparison
+  // format-stable. Mode ids pass the same `KNOWN_APPROVAL_MODES` backstop the
+  // demux/reconcile paths use.
   const seedSnapshotCaches = (
     entry: SessionEntry,
     resp: {
@@ -6300,20 +6308,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ),
             transportClosed,
           ]);
-          // Cache the model id as received from the caller. The bridge
-          // layer does not have access to the CLI's `formatAcpModelId`
-          // (which requires `authType`), so it cannot canonicalize here.
-          // In practice callers always send canonical ids (from
-          // `buildAvailableModels`); any residual raw→canonical drift is
-          // corrected by the `reconcileAfterRoundtrip` below, which reads
-          // the agent's authoritative canonical id and re-publishes if it
-          // differs.
+          // Cache the advertised selector as received from the caller. Any
+          // drift is corrected by `reconcileAfterRoundtrip`, which reads the
+          // agent's authoritative selector and re-publishes if it differs.
           publishModelSwitched(entry, req.modelId, originatorClientId);
           broadcastWorkspaceEvent({
             type: 'settings_changed',
             data: {
               key: 'model.name',
-              value: req.modelId,
+              value: getCanonicalModelId(result, req.modelId),
             },
             ...(originatorClientId ? { originatorClientId } : {}),
           });
