@@ -964,6 +964,9 @@ describe('qwen-autofix workflow', () => {
       expect(step).toContain('npm run generate:settings-schema');
       // Must NOT rely on the generator's --check (reverted from main by #7031).
       expect(step).not.toContain('generate:settings-schema -- --check');
+      // Guard a generator CRASH so set -e can't abort before outcome=failed is set.
+      expect(step).toContain('if ! npm run generate:settings-schema; then');
+      expect(step).toContain('Settings schema generator failed');
       expect(step).toContain(
         'packages/vscode-ide-companion/schemas/settings.schema.json',
       );

@@ -790,7 +790,15 @@ jobs:
           # generator, which ignores args and would make --check fail-open). Stale
           # schemas are invisible to build/typecheck/lint/vitest.
           SCHEMA_FILE='packages/vscode-ide-companion/schemas/settings.schema.json'
-          npm run generate:settings-schema
+          # Guard the generator itself: if it CRASHES (e.g. a type error the agent
+          # introduced in the schema source), set -eo pipefail would abort this step
+          # before outcome=failed is written, leaving OUTCOME unset. Set it here so
+          # the failure is explicit, not inferred from job.status.
+          if ! npm run generate:settings-schema; then
+            echo "❌ Settings schema generator failed to run."
+            echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+            exit 1
+          fi
           if [[ -n "$(git status --porcelain "${SCHEMA_FILE}")" ]]; then
             echo "❌ ${SCHEMA_FILE} is out of date. Run: npm run generate:settings-schema"
             git --no-pager diff -- "${SCHEMA_FILE}" || true
@@ -1485,7 +1493,15 @@ jobs:
           # `git status`, not the commit-level no-op git-diff below, and it is
           # restored on failure.
           SCHEMA_FILE='packages/vscode-ide-companion/schemas/settings.schema.json'
-          npm run generate:settings-schema
+          # Guard the generator itself: if it CRASHES (e.g. a type error the agent
+          # introduced in the schema source), set -eo pipefail would abort this step
+          # before outcome=failed is written, leaving OUTCOME unset. Set it here so
+          # the failure is explicit, not inferred from job.status.
+          if ! npm run generate:settings-schema; then
+            echo "❌ Settings schema generator failed to run."
+            echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+            exit 1
+          fi
           if [[ -n "$(git status --porcelain "${SCHEMA_FILE}")" ]]; then
             echo "❌ ${SCHEMA_FILE} is out of date. Run: npm run generate:settings-schema"
             git --no-pager diff -- "${SCHEMA_FILE}" || true
