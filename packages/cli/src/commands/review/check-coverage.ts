@@ -39,6 +39,7 @@ import {
   coverageFromTranscripts,
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
+import { promptRecordDir } from './lib/prompt-record.js';
 
 interface CheckCoverageArgs {
   plan: string;
@@ -129,7 +130,8 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
     );
   }
   // The one failure no other check in this file can see. Every other question is
-  // asked of an agent that ran; an agent that never ran leaves nothing to ask.
+  // asked of an agent whose transcript exists; a brief that never arrived leaves
+  // nothing to ask it of.
   if (report.missingRoles.length > 0) {
     writeStderrLine(
       // No count: when no role was briefed at all, `missingRoles` collapses to one
@@ -144,7 +146,14 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         `be certified clean. Build each prompt with \`qwen review agent-prompt ` +
         `--role <n>\` — the role number is in each label above, and a per-file ` +
         `role takes \`--file <path>\` — then launch an agent with what it prints, ` +
-        `verbatim.`,
+        `verbatim.\n` +
+        // Where it looked, because "the builder never ran" and "the builder ran
+        // against a different --plan" are indistinguishable from a missing file and
+        // are fixed differently. The record dir hangs off the plan path as given, so
+        // a relative --plan resolves against the caller's cwd — and Steps 2-6 are
+        // run from inside the worktree. Printing the directory turns a silent
+        // disagreement about where the records live into one a reader can see.
+        `Looked for them in: ${promptRecordDir(args.plan)}`,
     );
   }
   if (report.unreadBriefs.length > 0) {

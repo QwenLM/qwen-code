@@ -15,7 +15,7 @@
 // This version reads the harness's own records. The tests are driven by the
 // shapes those records actually take.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   mkdtempSync,
   rmSync,
@@ -35,6 +35,15 @@ import {
 } from './lib/coverage.js';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import { requiredAgents, type RosterPlan } from './lib/roster.js';
+import { checkCoverageCommand } from './check-coverage.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
+
+// Only the stderr test below drives the command handler; the rest of this file
+// exercises the pure function, which prints nothing.
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: vi.fn(),
+  writeStderrLine: vi.fn(),
+}));
 
 let dir: string;
 let ENV: NodeJS.ProcessEnv;
@@ -807,6 +816,47 @@ describe('the roster — who should have been here', () => {
     // The author is told what they lost, not which internal command to go run.
     expect(r.missingRoles[0]).not.toContain('agent-prompt');
     expect(r.missingRoles[0]).not.toMatch(/--role/);
+  });
+
+  it('tells the operator where it looked, so a wrong --plan is not a missing file', () => {
+    // "The builder never ran" and "the builder ran against a different --plan" reach
+    // this check as the same thing: an absent record. They are fixed differently, so
+    // the report has to hand over the one fact that separates them. The record dir
+    // hangs off the plan path as given — a relative --plan resolves against the
+    // caller's cwd, and the skill runs Steps 2-6 from inside the worktree, so the
+    // two are not always the same directory. This goes to stderr, which the
+    // orchestrator reads; the PR author never sees a path to a temp dir.
+    const p = planPr();
+    for (const f of readdirSync(promptRecordDir(p))) {
+      rmSync(join(promptRecordDir(p), f), { force: true });
+    }
+    transcript('sec', wholeDiff(), { calls: 8 });
+
+    const prevDir = process.env['QWEN_CODE_PROJECT_DIR'];
+    const prevSession = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_PROJECT_DIR'] = ENV['QWEN_CODE_PROJECT_DIR'];
+    process.env['QWEN_CODE_SESSION_ID'] = ENV['QWEN_CODE_SESSION_ID'];
+    const prevExit = process.exitCode;
+    try {
+      vi.mocked(writeStderrLine).mockClear();
+      (checkCoverageCommand.handler as (a: Record<string, unknown>) => void)({
+        plan: p,
+        out: join(dir, 'cov.json'),
+      });
+
+      const roleError = vi
+        .mocked(writeStderrLine)
+        .mock.calls.map((c) => String(c[0]))
+        .find((l) => l.includes('required briefs never reached'));
+      expect(roleError).toBeDefined();
+      expect(roleError).toContain(`Looked for them in: ${promptRecordDir(p)}`);
+    } finally {
+      process.exitCode = prevExit;
+      if (prevDir === undefined) delete process.env['QWEN_CODE_PROJECT_DIR'];
+      else process.env['QWEN_CODE_PROJECT_DIR'] = prevDir;
+      if (prevSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = prevSession;
+    }
   });
 
   it('catches a prompt that was built and then never used', () => {
