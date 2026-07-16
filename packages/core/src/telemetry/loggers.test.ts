@@ -19,6 +19,7 @@ import {
   GeminiClient,
   ToolConfirmationOutcome,
   ToolErrorType,
+  ToolNames,
   ToolRegistry,
 } from '../index.js';
 import { EditTool } from '../tools/edit.js';
@@ -812,6 +813,7 @@ describe('loggers', () => {
         status: 'success',
         request: {
           name: 'test-function',
+          providerName: ToolNames.DEFERRED_TOOL_CALL,
           args: {
             arg1: 'value1',
             arg2: 2,
@@ -859,6 +861,7 @@ describe('loggers', () => {
           'event.name': EVENT_TOOL_CALL,
           'event.timestamp': '2025-01-01T00:00:00.000Z',
           function_name: 'test-function',
+          'tool.provider_name': ToolNames.DEFERRED_TOOL_CALL,
           function_args: JSON.stringify(
             {
               arg1: 'value1',

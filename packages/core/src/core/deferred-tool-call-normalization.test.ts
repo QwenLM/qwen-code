@@ -158,6 +158,12 @@ describe('normalizeDeferredToolCallRequest', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.providerName).toBe(ToolNames.DEFERRED_TOOL_CALL);
+      const attemptedTarget = (args as Record<string, unknown>)['name'];
+      expect(result.targetName).toBe(
+        typeof attemptedTarget === 'string' && attemptedTarget.trim()
+          ? attemptedTarget
+          : undefined,
+      );
       expect(result.errorType).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
       expect(result.error.message).toContain(message);
     }
@@ -166,7 +172,7 @@ describe('normalizeDeferredToolCallRequest', () => {
   it('rejects a missing target tool', async () => {
     const result = await normalizeDeferredToolCallRequest(
       request(ToolNames.DEFERRED_TOOL_CALL, {
-        name: ToolNames.CRON_CREATE,
+        name: 'task',
         arguments: {},
       }),
       createRegistry(),
@@ -174,6 +180,7 @@ describe('normalizeDeferredToolCallRequest', () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
+      expect(result.targetName).toBe(ToolNames.AGENT);
       expect(result.errorType).toBe(ToolErrorType.TOOL_NOT_REGISTERED);
       expect(result.error.message).toContain('is not available');
     }

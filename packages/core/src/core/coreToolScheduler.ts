@@ -2234,6 +2234,9 @@ export class CoreToolScheduler {
         // matching during the rollout.
         const toolSpan = startToolSpan(canonicalName, {
           'tool.call_id': reqInfo.callId,
+          ...(reqInfo.providerName
+            ? { 'tool.provider_name': reqInfo.providerName }
+            : {}),
           call_id: reqInfo.callId,
           tool_name: canonicalName,
         });
@@ -3343,6 +3346,9 @@ export class CoreToolScheduler {
       const canonical = canonicalToolName(toolName);
       toolSpan = startToolSpan(canonical, {
         'tool.call_id': callId,
+        ...(scheduledCall.request.providerName
+          ? { 'tool.provider_name': scheduledCall.request.providerName }
+          : {}),
         call_id: callId, // legacy alias — see _schedule for context
         tool_name: canonical, // legacy alias — see _schedule for context
       });

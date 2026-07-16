@@ -1328,11 +1328,29 @@ describe('Gemini Client (client.ts)', () => {
 
     it('does not restore proxy presentations from failed deferred_tool_call history', async () => {
       const reg = getRegistryMock();
+      const cronCreateSchema = {
+        name: 'cron_create',
+        description: 'schedule',
+        parametersJsonSchema: {
+          type: 'object',
+          properties: {
+            schedule: { type: 'string' },
+          },
+          required: ['schedule'],
+        },
+      };
       reg.getDeferredToolSummary.mockReturnValue([
         { name: 'cron_create', description: 'schedule' },
       ]);
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search'
+          ? ({} as never)
+          : n === 'cron_create'
+            ? ({ schema: cronCreateSchema } as never)
+            : null,
+      );
+      reg.isProxyEligibleDeferredTool.mockImplementation(
+        (n: string) => n === 'cron_create',
       );
       reg.markProxySchemaPresented.mockClear();
 
@@ -1366,9 +1384,17 @@ describe('Gemini Client (client.ts)', () => {
         },
       ]);
 
-      expect(reg.markProxySchemaPresented).not.toHaveBeenCalledWith(
-        expect.objectContaining({ name: 'cron_create' }),
-      );
+      expect(reg.markProxySchemaPresented).not.toHaveBeenCalled();
+      const restoredSchemaText = client
+        .getHistory()
+        .flatMap((entry) => entry.parts ?? [])
+        .map((part) => part.text ?? '')
+        .find((text) =>
+          text.includes(
+            'Current schemas for deferred tools restored from session history',
+          ),
+        );
+      expect(restoredSchemaText).toBeUndefined();
     });
 
     it('does not pair an unmatched response id with a no-id proxy call on resume', async () => {

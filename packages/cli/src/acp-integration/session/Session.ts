@@ -37,6 +37,7 @@ import type {
   DeferredToolPresentation,
   VisionBridgeResult,
   MemoryWriteCandidate,
+  ToolErrorType,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -4644,6 +4645,7 @@ export class Session implements SessionContext {
     let args = (fc.args ?? {}) as Record<string, unknown>;
     let responseToolName = fc.name ?? 'unknown_tool';
     let telemetryToolName = fc.name ?? '';
+    let telemetryProviderName: string | undefined;
     if (toolLoopState?.loopDetected) {
       return {
         parts: [
@@ -4678,19 +4680,23 @@ export class Session implements SessionContext {
       removeAgentToolAbortPropagation = undefined;
     };
 
-    const errorResponse = (error: Error) => {
+    const errorResponse = (error: Error, errorType?: ToolErrorType) => {
       const durationMs = Date.now() - startTime;
       logToolCall(this.config, {
         'event.name': 'tool_call',
         'event.timestamp': new Date().toISOString(),
         prompt_id: promptId,
         function_name: telemetryToolName,
+        ...(telemetryProviderName
+          ? { 'tool.provider_name': telemetryProviderName }
+          : {}),
         function_args: args,
         duration_ms: durationMs,
         // An aborted signal means the call was cancelled, not a genuine error.
         status: activeToolAbortSignal.aborted ? 'cancelled' : 'error',
         success: false,
         error: error.message,
+        ...(errorType ? { error_type: errorType } : {}),
         tool_type: isMcpTool ? 'mcp' : 'native',
       });
 
@@ -4711,6 +4717,7 @@ export class Session implements SessionContext {
       opts?: {
         recordInvalidToolParams?: boolean;
         stopAfterPermissionCancel?: boolean;
+        errorType?: ToolErrorType;
       },
     ) => {
       spanError = error.message;
@@ -4719,13 +4726,13 @@ export class Session implements SessionContext {
         await this.toolCallEmitter.emitError(callId, toolName, error);
       }
 
-      const errorParts = errorResponse(error);
+      const errorParts = errorResponse(error, opts?.errorType);
       this.config.getChatRecordingService()?.recordToolResult(errorParts, {
         callId,
         status: 'error',
         resultDisplay: undefined,
         error,
-        errorType: undefined,
+        errorType: opts?.errorType,
       });
       const loopDetected =
         opts?.recordInvalidToolParams === true &&
@@ -4765,8 +4772,12 @@ export class Session implements SessionContext {
     );
     if (!normalizedRequest.ok) {
       responseToolName = normalizedRequest.providerName;
-      return earlyErrorResponse(normalizedRequest.error, responseToolName, {
+      telemetryProviderName = normalizedRequest.providerName;
+      telemetryToolName =
+        normalizedRequest.targetName ?? normalizedRequest.providerName;
+      return earlyErrorResponse(normalizedRequest.error, telemetryToolName, {
         recordInvalidToolParams: true,
+        errorType: normalizedRequest.errorType,
       });
     }
 
@@ -4775,6 +4786,7 @@ export class Session implements SessionContext {
     args = effectiveRequest.args;
     responseToolName = providerToolName(effectiveRequest);
     telemetryToolName = toolName;
+    telemetryProviderName = effectiveRequest.providerName;
     const tool =
       normalizedRequest.resolvedTool ?? toolRegistry.getTool(toolName);
     isMcpTool = tool instanceof DiscoveredMCPTool;
@@ -4789,6 +4801,9 @@ export class Session implements SessionContext {
 
     const toolSpan = startToolSpan(toolName, {
       'tool.call_id': callId,
+      ...(telemetryProviderName
+        ? { 'tool.provider_name': telemetryProviderName }
+        : {}),
       // Dual-emit the legacy call_id/tool_name aliases like CoreToolScheduler
       // (coreToolScheduler.ts) so pre-Phase-2 dashboards keyed off call_id keep
       // matching daemon/ACP tool spans during the migration window.
@@ -5539,6 +5554,9 @@ export class Session implements SessionContext {
             'event.name': 'tool_call',
             'event.timestamp': new Date().toISOString(),
             function_name: toolName,
+            ...(telemetryProviderName
+              ? { 'tool.provider_name': telemetryProviderName }
+              : {}),
             function_args: args,
             duration_ms: durationMs,
             status,

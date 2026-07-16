@@ -132,3 +132,13 @@ tmp/
 # Auto-generated computer-use marker can also appear under nested packages.
 **/.qwen/computer-use/
 .playwright-mcp/
+
+
+notebook
+skills/
+docs/debug/
+.agents
+local-review/
+.cspell.json
+latest
+packages/cli/workspace/my-project/.qwen/debug/

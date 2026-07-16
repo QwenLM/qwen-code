@@ -26,6 +26,7 @@ import {
   HookCallEvent,
   SkillLaunchEvent,
 } from '../types.js';
+import type { ToolCallEvent } from '../types.js';
 import type { RumEvent, RumPayload } from './event-types.js';
 
 const debugLoggerSpy = vi.hoisted(() => ({
@@ -359,6 +360,32 @@ describe('QwenLogger', () => {
   });
 
   describe('event handlers', () => {
+    it('records the provider-facing name for proxied tool calls', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+      const event = {
+        function_name: 'cron_create',
+        'tool.provider_name': 'deferred_tool_call',
+        prompt_id: 'prompt-1',
+        response_id: 'response-1',
+        success: true,
+        duration_ms: 12,
+      } as ToolCallEvent;
+
+      logger.logToolCallEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'tool',
+          name: 'tool_call#cron_create',
+          properties: expect.objectContaining({
+            tool_name: 'cron_create',
+            'tool.provider_name': 'deferred_tool_call',
+          }),
+        }),
+      );
+    });
+
     it('should log IDE connection events', () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
       const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');

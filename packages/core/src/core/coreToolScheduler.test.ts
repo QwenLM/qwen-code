@@ -12647,6 +12647,14 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     expect(ensureTool).toHaveBeenCalledWith(StrictStringTool.Name);
     expect(authorizedBuild).toHaveBeenCalledWith({ value: 'valid' });
     expect(replacementBuild).not.toHaveBeenCalled();
+    expect(
+      toolSpanRecords.findLast(
+        (record) => record.attributes['call_id'] === 'proxy-once',
+      )?.attributes,
+    ).toMatchObject({
+      tool_name: StrictStringTool.Name,
+      'tool.provider_name': ToolNames.DEFERRED_TOOL_CALL,
+    });
   });
 
   it('should keep retry counts for deferred_tool_call normalization failures', async () => {

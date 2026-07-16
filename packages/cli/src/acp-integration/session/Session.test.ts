@@ -11121,6 +11121,10 @@ describe('Session', () => {
     });
 
     it('executes the deferred tool instance authorized by normalization', async () => {
+      const logToolCallSpy = vi
+        .spyOn(core, 'logToolCall')
+        .mockImplementation(() => {});
+      const startToolSpanSpy = vi.spyOn(core, 'startToolSpan');
       const authorizedExecute = vi.fn().mockResolvedValue({
         llmContent: 'authorized tool executed',
         returnDisplay: 'authorized tool executed',
@@ -11188,6 +11192,155 @@ describe('Session', () => {
       expect(replacementExecute).not.toHaveBeenCalled();
       expect(result.parts[0]?.functionResponse?.name).toBe(
         core.ToolNames.DEFERRED_TOOL_CALL,
+      );
+      expect(startToolSpanSpy).toHaveBeenCalledWith(
+        core.ToolNames.CRON_CREATE,
+        expect.objectContaining({
+          tool_name: core.ToolNames.CRON_CREATE,
+          'tool.provider_name': core.ToolNames.DEFERRED_TOOL_CALL,
+        }),
+      );
+      expect(
+        logToolCallSpy.mock.calls
+          .map(
+            ([, event]) =>
+              event as {
+                function_name?: string;
+                'tool.provider_name'?: string;
+              },
+          )
+          .find((event) => event.function_name === core.ToolNames.CRON_CREATE),
+      ).toMatchObject({
+        function_name: core.ToolNames.CRON_CREATE,
+        'tool.provider_name': core.ToolNames.DEFERRED_TOOL_CALL,
+      });
+    });
+
+    it('preserves normalization failure target and error type', async () => {
+      const logToolCallSpy = vi
+        .spyOn(core, 'logToolCall')
+        .mockImplementation(() => {});
+      mockToolRegistry.ensureTool.mockResolvedValue(undefined);
+      const toolLoopState = {
+        totalToolCalls: 0,
+        invalidToolParamErrors: new Map<string, number>(),
+        loopDetected: false,
+      };
+      const calls: FunctionCall[] = [
+        core.ToolNames.CRON_CREATE,
+        core.ToolNames.CRON_LIST,
+        core.ToolNames.CRON_DELETE,
+      ].map((name, index) => ({
+        id: `missing_proxy_${index}`,
+        name: core.ToolNames.DEFERRED_TOOL_CALL,
+        args: { name, arguments: {} },
+      }));
+
+      const result = await (
+        session as unknown as {
+          runToolCalls(
+            signal: AbortSignal,
+            promptId: string,
+            functionCalls: FunctionCall[],
+            loopState: typeof toolLoopState,
+          ): Promise<{
+            parts: Part[];
+            loopDetected?: boolean;
+          }>;
+        }
+      ).runToolCalls(
+        new AbortController().signal,
+        'prompt-proxy-normalization-errors',
+        calls,
+        toolLoopState,
+      );
+
+      expect(result.loopDetected).not.toBe(true);
+      expect(result.parts.map((part) => part.functionResponse?.name)).toEqual([
+        core.ToolNames.DEFERRED_TOOL_CALL,
+        core.ToolNames.DEFERRED_TOOL_CALL,
+        core.ToolNames.DEFERRED_TOOL_CALL,
+      ]);
+      expect(toolLoopState.invalidToolParamErrors).toEqual(
+        new Map([
+          [core.ToolNames.CRON_CREATE, 1],
+          [core.ToolNames.CRON_LIST, 1],
+          [core.ToolNames.CRON_DELETE, 1],
+        ]),
+      );
+      const events = logToolCallSpy.mock.calls.map(
+        ([, event]) =>
+          event as {
+            function_name?: string;
+            'tool.provider_name'?: string;
+            error_type?: string;
+          },
+      );
+      expect(events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            function_name: core.ToolNames.CRON_CREATE,
+            'tool.provider_name': core.ToolNames.DEFERRED_TOOL_CALL,
+            error_type: core.ToolErrorType.TOOL_NOT_REGISTERED,
+          }),
+          expect.objectContaining({
+            function_name: core.ToolNames.CRON_LIST,
+            'tool.provider_name': core.ToolNames.DEFERRED_TOOL_CALL,
+            error_type: core.ToolErrorType.TOOL_NOT_REGISTERED,
+          }),
+          expect.objectContaining({
+            function_name: core.ToolNames.CRON_DELETE,
+            'tool.provider_name': core.ToolNames.DEFERRED_TOOL_CALL,
+            error_type: core.ToolErrorType.TOOL_NOT_REGISTERED,
+          }),
+        ]),
+      );
+      expect(
+        mockChatRecordingService.recordToolResult.mock.calls.map(
+          ([, metadata]) => metadata.errorType,
+        ),
+      ).toEqual([
+        core.ToolErrorType.TOOL_NOT_REGISTERED,
+        core.ToolErrorType.TOOL_NOT_REGISTERED,
+        core.ToolErrorType.TOOL_NOT_REGISTERED,
+      ]);
+    });
+
+    it('still detects repeated normalization failures for one target', async () => {
+      mockToolRegistry.ensureTool.mockResolvedValue(undefined);
+      const toolLoopState = {
+        totalToolCalls: 0,
+        invalidToolParamErrors: new Map<string, number>(),
+        loopDetected: false,
+      };
+      const calls: FunctionCall[] = Array.from({ length: 3 }, (_, index) => ({
+        id: `missing_proxy_${index}`,
+        name: core.ToolNames.DEFERRED_TOOL_CALL,
+        args: { name: core.ToolNames.CRON_CREATE, arguments: {} },
+      }));
+
+      const result = await (
+        session as unknown as {
+          runToolCalls(
+            signal: AbortSignal,
+            promptId: string,
+            functionCalls: FunctionCall[],
+            loopState: typeof toolLoopState,
+          ): Promise<{
+            parts: Part[];
+            loopDetected?: boolean;
+          }>;
+        }
+      ).runToolCalls(
+        new AbortController().signal,
+        'prompt-repeated-proxy-normalization-errors',
+        calls,
+        toolLoopState,
+      );
+
+      expect(result.loopDetected).toBe(true);
+      expect(toolLoopState.invalidToolParamErrors).toEqual(
+        new Map([[core.ToolNames.CRON_CREATE, 3]]),
       );
     });
 
