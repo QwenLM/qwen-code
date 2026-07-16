@@ -2016,6 +2016,14 @@ export async function loadCliConfig(
       bareMode || safeMode ? undefined : disabledSkillNamesProvider,
     zvecGrepEnabled:
       bareMode || safeMode ? false : settings.tools?.zvecGrep?.enabled === true,
+    onDisableZvecGrepForWorkspace: async () => {
+      const currentSettings = loadSettings(cwd);
+      currentSettings.setValue(
+        SettingScope.Workspace,
+        'tools.zvecGrep.enabled',
+        false,
+      );
+    },
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     visibleTools: visibleTools.length > 0 ? visibleTools : undefined,
     // New unified permissions (PermissionManager source of truth).

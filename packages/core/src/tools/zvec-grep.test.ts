@@ -13,20 +13,30 @@ import { spawn } from 'node:child_process';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { FileReadCache } from '../services/fileReadCache.js';
+import { runRipgrep } from '../utils/ripgrepUtils.js';
+import { ToolConfirmationOutcome } from './tools.js';
 import { _resetZvecGrepInstallForTest, ZvecGrepTool } from './zvec-grep.js';
 
 vi.mock('node:child_process', () => ({
   spawn: vi.fn(),
 }));
+vi.mock('../utils/ripgrepUtils.js', () => ({
+  runRipgrep: vi.fn(),
+}));
 
 const spawnMock = vi.mocked(spawn);
+const runRipgrepMock = vi.mocked(runRipgrep);
 
 const UNINDEXED_STATUS = [
   'root\t/tmp/workspace',
   'policy\tundecided',
   'indexed\tno',
+  'state\tundecided',
   'source\tunindexed',
 ].join('\n');
+const ENABLE_WORKSPACE_CHOICE = 'Enable for this workspace';
+const NOT_THIS_SESSION_CHOICE = 'Not this session';
+const DISABLE_WORKSPACE_CHOICE = 'Disable for this workspace';
 
 type QueuedSpawnResult = {
   stdout?: string;
@@ -84,6 +94,7 @@ function createTool(
   root: string,
   interactive = true,
   fileReadCache = new FileReadCache(),
+  disableForWorkspace: () => Promise<void> = async () => {},
 ): ZvecGrepTool {
   return new ZvecGrepTool({
     getTargetDir: () => root,
@@ -94,6 +105,9 @@ function createTool(
     }),
     getFileReadCache: () => fileReadCache,
     getFileReadCacheDisabled: () => false,
+    getUseBuiltinRipgrep: () => true,
+    canDisableZvecGrepForWorkspace: () => true,
+    disableZvecGrepForWorkspace: disableForWorkspace,
   } as unknown as Config);
 }
 
@@ -130,6 +144,37 @@ function queueSpawnResult(result: QueuedSpawnResult): void {
   }) as unknown as typeof spawn);
 }
 
+function queueSpawnChild(child: MockChild): void {
+  spawnMock.mockImplementationOnce((() => child) as unknown as typeof spawn);
+}
+
+function queueRipgrepResult(
+  stdout: string,
+  options: { truncated?: boolean; error?: Error } = {},
+): void {
+  runRipgrepMock.mockResolvedValueOnce({
+    stdout,
+    truncated: options.truncated ?? false,
+    error: options.error,
+  });
+}
+
+async function chooseSetup(
+  invocation: ReturnType<ZvecGrepTool['build']>,
+  choice: string,
+) {
+  const details = await invocation.getConfirmationDetails(
+    new AbortController().signal,
+  );
+  if (details.type !== 'ask_user_question') {
+    throw new Error('expected setup question');
+  }
+  await details.onConfirm(ToolConfirmationOutcome.ProceedOnce, {
+    answers: { 0: choice },
+  });
+  return details;
+}
+
 function setFakeRemoteEmbeddingKey(): void {
   process.env['DASHSCOPE_API_KEY'] = 'test-api-key';
 }
@@ -144,6 +189,7 @@ afterEach(() => {
   vi.useRealTimers();
   _resetZvecGrepInstallForTest();
   spawnMock.mockReset();
+  runRipgrepMock.mockReset();
   for (const name of API_ENV_NAMES) {
     const value = originalApiEnv[name];
     if (value === undefined) {
@@ -198,17 +244,13 @@ describe('ZvecGrepTool', () => {
   it('describes zvec-grep without hidden operations', () => {
     const tool = createTool(createTempRoot());
 
-    expect(tool.description).toContain(
-      'primary, higher-quality workspace search tool',
-    );
-    expect(tool.description).toContain(
-      'do not use grep_search when zvec_grep is available',
-    );
+    expect(tool.description).toContain('semantic discovery');
+    expect(tool.description).toContain('ripgrep-compatible matching');
     expect(tool.description).toContain('operation="semantic" with query');
     expect(tool.description).toContain('semantic or fuzzy discovery');
     expect(tool.description).toContain('operation="rg" with pattern');
     expect(tool.description).toContain('regular-expression searches');
-    expect(tool.description).toContain('Trust zvec_grep result quality');
+    expect(tool.description).toContain('candidates to inspect');
     expect(tool.description).toContain('line ranges');
     expect(tool.description).toContain('increase limit');
     expect(tool.description).not.toContain('operation="index"');
@@ -216,6 +258,7 @@ describe('ZvecGrepTool', () => {
     expect(tool.description).not.toContain('transparently falls back');
     expect(tool.description).not.toContain('installation/indexing');
     expect(tool.description).not.toContain('zvec_grep_semantic_fallback_rg');
+    expect(tool.description).not.toContain('do not use grep_search');
   });
 
   it('validates the public zvec-grep parameter contract', () => {
@@ -263,9 +306,10 @@ describe('ZvecGrepTool', () => {
     ).toBe('exclude must contain only non-empty strings');
   });
 
-  it('falls back to rg for semantic search in interactive unindexed workspaces', async () => {
+  it('asks before setup, then indexes in the background after approval', async () => {
     setFakeRemoteEmbeddingKey();
     const root = createTempRoot();
+    queueSpawnResult({ stdout: UNINDEXED_STATUS });
     queueSpawnResult({ stdout: UNINDEXED_STATUS });
     queueSpawnResult({});
     queueSpawnResult({
@@ -277,7 +321,22 @@ describe('ZvecGrepTool', () => {
       query: 'vector index metadata storage',
     });
 
-    await expect(invocation.getDefaultPermission()).resolves.toBe('allow');
+    await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+    const details = await chooseSetup(invocation, ENABLE_WORKSPACE_CHOICE);
+    expect(details.questions[0]?.allowCustomInput).toBe(false);
+    expect(details.questions[0]?.question).toContain(
+      'build a semantic index for this workspace',
+    );
+    expect(details.questions[0]?.question).toContain(
+      'workspace code fragments and semantic search queries are sent to the Qwen/DashScope embedding service',
+    );
+    expect(details.questions[0]?.options.map((option) => option.label)).toEqual(
+      [
+        ENABLE_WORKSPACE_CHOICE,
+        NOT_THIS_SESSION_CHOICE,
+        DISABLE_WORKSPACE_CHOICE,
+      ],
+    );
     const result = await invocation.execute(new AbortController().signal);
     const content = String(result.llmContent);
 
@@ -286,15 +345,24 @@ describe('ZvecGrepTool', () => {
     expect(content).not.toContain('fallback_reason');
     expect(content).not.toContain('semantic_search: unavailable');
     expect(content).not.toContain('zvec_grep_index_required');
-    expect(spawnMock).toHaveBeenCalledTimes(3);
-    expect(spawnMock.mock.calls[0]?.[1]).toEqual(['--status']);
-    expect(spawnMock.mock.calls[1]?.[1]).toEqual([
-      '--index',
+    expect(result.returnDisplay).toContain(
+      'Semantic indexing is running in the background',
+    );
+    expect(content).not.toContain(
+      'Semantic indexing is running in the background',
+    );
+    expect(spawnMock).toHaveBeenCalledTimes(4);
+    expect(spawnMock.mock.calls[0]?.[1]).toEqual(['status']);
+    expect(spawnMock.mock.calls[1]?.[1]).toEqual(['status']);
+    expect(spawnMock.mock.calls[2]?.[1]).toEqual([
+      'index',
       '--embedding',
       'qwen/text-embedding-v4',
     ]);
-    expect(spawnMock.mock.calls[2]?.[1]).toEqual([
+    expect(spawnMock.mock.calls[3]?.[1]).toEqual([
+      'query',
       '--rg',
+      '-e',
       '(?i)(vector|index|metadata|storage)',
       '--limit',
       '20',
@@ -315,7 +383,6 @@ describe('ZvecGrepTool', () => {
     );
 
     queueSpawnResult({ stdout: UNINDEXED_STATUS });
-    queueSpawnResult({});
     queueSpawnResult({
       stdout: 'docs/README.md:1\n  1  # index types supported\n',
     });
@@ -334,15 +401,12 @@ describe('ZvecGrepTool', () => {
     expect(content).not.toContain('semantic_search: unavailable');
     expect(content).not.toContain('zvec_grep_index_required');
     expect(content).not.toContain('grep_search');
-    expect(spawnMock).toHaveBeenCalledTimes(3);
-    expect(spawnMock.mock.calls[0]?.[1]).toEqual(['--status']);
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+    expect(spawnMock.mock.calls[0]?.[1]).toEqual(['status']);
     expect(spawnMock.mock.calls[1]?.[1]).toEqual([
-      '--index',
-      '--embedding',
-      'qwen/text-embedding-v4',
-    ]);
-    expect(spawnMock.mock.calls[2]?.[1]).toEqual([
+      'query',
       '--rg',
+      '-e',
       '(?i)(index|types)',
       '--limit',
       '20',
@@ -352,7 +416,9 @@ describe('ZvecGrepTool', () => {
   it('does not build an index for semantic search without an embedding api key', async () => {
     clearEmbeddingEnv();
     const root = createTempRoot();
-    queueSpawnResult({ stdout: UNINDEXED_STATUS });
+    const staleLocalStatus = `${UNINDEXED_STATUS}\nembedding\tlocal/old-model`;
+    queueSpawnResult({ stdout: staleLocalStatus });
+    queueSpawnResult({ stdout: staleLocalStatus });
     queueSpawnResult({
       stdout: 'src/index.ts:1\n  1  // vector index metadata storage\n',
     });
@@ -362,13 +428,17 @@ describe('ZvecGrepTool', () => {
       query: 'vector index metadata storage',
     });
 
+    await expect(invocation.getDefaultPermission()).resolves.toBe('allow');
     const result = await invocation.execute(new AbortController().signal);
 
     expect(String(result.llmContent)).toContain('src/index.ts:1');
-    expect(spawnMock).toHaveBeenCalledTimes(2);
-    expect(spawnMock.mock.calls[0]?.[1]).toEqual(['--status']);
-    expect(spawnMock.mock.calls[1]?.[1]).toEqual([
+    expect(spawnMock).toHaveBeenCalledTimes(3);
+    expect(spawnMock.mock.calls[0]?.[1]).toEqual(['status']);
+    expect(spawnMock.mock.calls[1]?.[1]).toEqual(['status']);
+    expect(spawnMock.mock.calls[2]?.[1]).toEqual([
+      'query',
       '--rg',
+      '-e',
       '(?i)(vector|index|metadata|storage)',
       '--limit',
       '20',
@@ -398,9 +468,11 @@ describe('ZvecGrepTool', () => {
 
     expect(String(result.llmContent)).toContain('src/auth.ts:1');
     expect(spawnMock).toHaveBeenCalledTimes(2);
-    expect(spawnMock.mock.calls[0]?.[1]).toEqual(['--status']);
+    expect(spawnMock.mock.calls[0]?.[1]).toEqual(['status']);
     expect(spawnMock.mock.calls[1]?.[1]).toEqual([
+      'query',
       '--rg',
+      '-e',
       '(?i)(authentication|flow)',
       '--limit',
       '20',
@@ -431,13 +503,251 @@ describe('ZvecGrepTool', () => {
 
     expect(String(result.llmContent)).toContain('src/auth.ts:1');
     expect(spawnMock).toHaveBeenCalledTimes(2);
-    expect(spawnMock.mock.calls[0]?.[1]).toEqual(['--status']);
+    expect(spawnMock.mock.calls[0]?.[1]).toEqual(['status']);
     expect(spawnMock.mock.calls[1]?.[1]).toEqual([
-      'authentication flow',
+      'query',
       '--limit',
       '5',
+      '--',
+      'authentication flow',
     ]);
   });
+
+  it('silently falls back to rg when a semantic query fails', async () => {
+    setFakeRemoteEmbeddingKey();
+    const root = createTempRoot();
+    queueSpawnResult({
+      stdout: [
+        'root\t/tmp/workspace',
+        'policy\tindexed',
+        'indexed\tyes',
+        'state\tready',
+        'embedding\tqwen/text-embedding-v4',
+      ].join('\n'),
+    });
+    queueSpawnResult({ code: 1, stderr: 'embedding service unavailable\n' });
+    queueSpawnResult({
+      stdout: 'src/auth.ts:1\n  1  authentication flow\n',
+    });
+
+    const result = await createTool(root)
+      .build({ operation: 'semantic', query: 'authentication flow' })
+      .execute(new AbortController().signal);
+
+    expect(String(result.llmContent)).toContain('src/auth.ts:1');
+    expect(String(result.llmContent)).not.toContain(
+      'embedding service unavailable',
+    );
+    expect(spawnMock.mock.calls[1]?.[1]).toEqual([
+      'query',
+      '--limit',
+      '20',
+      '--',
+      'authentication flow',
+    ]);
+    expect(spawnMock.mock.calls[2]?.[1]).toEqual([
+      'query',
+      '--rg',
+      '-e',
+      '(?i)(authentication|flow)',
+      '--limit',
+      '20',
+    ]);
+  });
+
+  it('does not prompt or index when the workspace policy is disabled', async () => {
+    setFakeRemoteEmbeddingKey();
+    const root = createTempRoot();
+    const disabledStatus = [
+      'root\t/tmp/workspace',
+      'policy\tdisabled',
+      'indexed\tno',
+      'state\tundecided',
+      'source\tunindexed',
+    ].join('\n');
+    queueSpawnResult({ stdout: disabledStatus });
+    queueSpawnResult({ stdout: disabledStatus });
+    queueSpawnResult({
+      stdout: 'src/auth.ts:1\n  1  authentication flow\n',
+    });
+
+    const invocation = createTool(root).build({
+      operation: 'semantic',
+      query: 'authentication flow',
+    });
+
+    await expect(invocation.getDefaultPermission()).resolves.toBe('allow');
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(String(result.llmContent)).toContain('src/auth.ts:1');
+    expect(spawnMock).toHaveBeenCalledTimes(3);
+    expect(spawnMock.mock.calls.some((call) => call[1]?.[0] === 'index')).toBe(
+      false,
+    );
+  });
+
+  it('passes option-like queries as data instead of zg flags', async () => {
+    setFakeRemoteEmbeddingKey();
+    const root = createTempRoot();
+    queueSpawnResult({
+      stdout: [
+        'root\t/tmp/workspace',
+        'policy\tindexed',
+        'indexed\tyes',
+        'embedding\tqwen/text-embedding-v4',
+      ].join('\n'),
+    });
+    queueSpawnResult({});
+    queueSpawnResult({});
+    const tool = createTool(root);
+
+    await tool
+      .build({ operation: 'semantic', query: '--status' })
+      .execute(new AbortController().signal);
+    await tool
+      .build({ operation: 'rg', pattern: '--index', path: '--status' })
+      .execute(new AbortController().signal);
+
+    expect(spawnMock.mock.calls[1]?.[1]).toEqual([
+      'query',
+      '--limit',
+      '20',
+      '--',
+      '--status',
+    ]);
+    expect(spawnMock.mock.calls[2]?.[1]).toEqual([
+      'query',
+      '--rg',
+      '-e',
+      '--index',
+      '--',
+      '--status',
+    ]);
+  });
+
+  it('intersects semantic path scopes with the requested glob', async () => {
+    setFakeRemoteEmbeddingKey();
+    const root = createTempRoot();
+    queueSpawnResult({
+      stdout: [
+        'root\t/tmp/workspace',
+        'policy\tindexed',
+        'indexed\tyes',
+        'embedding\tqwen/text-embedding-v4',
+      ].join('\n'),
+    });
+    queueSpawnResult({});
+
+    await createTool(root)
+      .build({
+        operation: 'semantic',
+        query: 'authentication flow',
+        paths: ['src', 'packages'],
+        glob: '**/*.{ts,tsx}',
+        exclude: ['dist/**', 'vendor/**'],
+      })
+      .execute(new AbortController().signal);
+
+    expect(spawnMock.mock.calls[1]?.[1]).toEqual([
+      'query',
+      '--limit',
+      '20',
+      '--glob',
+      'src/**/*.ts',
+      '--glob',
+      'src/**/*.tsx',
+      '--glob',
+      'packages/**/*.ts',
+      '--glob',
+      'packages/**/*.tsx',
+      '--glob',
+      '!dist/**',
+      '--glob',
+      '!vendor/**',
+      '--',
+      'authentication flow',
+    ]);
+  });
+
+  it.each([
+    ['src/auth.ts', '**/*.ts', ['src/auth.ts', 'src/auth.ts/**/*.ts']],
+    ['src/auth.js', '**/*.ts', ['src/auth.js/**/*.ts']],
+    ['.github', '**/*.yml', ['.github/**/*.yml']],
+    ['LICENSE', '*', ['LICENSE', 'LICENSE/**/*']],
+  ])(
+    'intersects semantic scope %s with glob %s',
+    async (scope, glob, expectedGlobs) => {
+      setFakeRemoteEmbeddingKey();
+      const root = createTempRoot();
+      queueSpawnResult({
+        stdout: [
+          'root\t/tmp/workspace',
+          'policy\tindexed',
+          'indexed\tyes',
+          'state\tready',
+          'embedding\tqwen/text-embedding-v4',
+        ].join('\n'),
+      });
+      queueSpawnResult({});
+
+      await createTool(root)
+        .build({
+          operation: 'semantic',
+          query: 'authentication flow',
+          path: scope,
+          glob,
+        })
+        .execute(new AbortController().signal);
+
+      expect(spawnMock.mock.calls[1]?.[1]).toEqual([
+        'query',
+        '--limit',
+        '20',
+        ...expectedGlobs.flatMap((expectedGlob) => ['--glob', expectedGlob]),
+        '--',
+        'authentication flow',
+      ]);
+    },
+  );
+
+  it.each([
+    ['.github', ['.github', '.github/**']],
+    ['LICENSE', ['LICENSE', 'LICENSE/**']],
+    ['packages/*/src', ['packages/*/src']],
+  ])(
+    'preserves exact and descendant matches for semantic scope %s',
+    async (scope, expectedGlobs) => {
+      setFakeRemoteEmbeddingKey();
+      const root = createTempRoot();
+      queueSpawnResult({
+        stdout: [
+          'root\t/tmp/workspace',
+          'policy\tindexed',
+          'indexed\tyes',
+          'state\tready',
+          'embedding\tqwen/text-embedding-v4',
+        ].join('\n'),
+      });
+      queueSpawnResult({});
+
+      await createTool(root)
+        .build({
+          operation: 'semantic',
+          query: 'authentication flow',
+          path: scope,
+        })
+        .execute(new AbortController().signal);
+
+      expect(spawnMock.mock.calls[1]?.[1]).toEqual([
+        'query',
+        '--limit',
+        '20',
+        ...expectedGlobs.flatMap((expectedGlob) => ['--glob', expectedGlob]),
+        '--',
+        'authentication flow',
+      ]);
+    },
+  );
 
   it('uses the default semantic limit when none is provided', async () => {
     setFakeRemoteEmbeddingKey();
@@ -463,9 +773,11 @@ describe('ZvecGrepTool', () => {
     expect(String(result.llmContent)).toContain('src/auth.ts:1');
     expect(spawnMock).toHaveBeenCalledTimes(2);
     expect(spawnMock.mock.calls[1]?.[1]).toEqual([
-      'authentication flow',
+      'query',
       '--limit',
       '20',
+      '--',
+      'authentication flow',
     ]);
   });
 
@@ -473,6 +785,7 @@ describe('ZvecGrepTool', () => {
     clearEmbeddingEnv();
     process.env['ZVEC_GREP_EMBEDDING'] = 'local/embeddinggemma-300m';
     const root = createTempRoot();
+    queueSpawnResult({ stdout: UNINDEXED_STATUS });
     queueSpawnResult({ stdout: UNINDEXED_STATUS });
     queueSpawnResult({});
     queueSpawnResult({
@@ -483,21 +796,53 @@ describe('ZvecGrepTool', () => {
       operation: 'semantic',
       query: 'vector index metadata storage',
     });
+    await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+    const details = await chooseSetup(invocation, ENABLE_WORKSPACE_CHOICE);
+    expect(details.questions[0]?.question).toContain(
+      'workspace files stay local',
+    );
     const result = await invocation.execute(new AbortController().signal);
 
     expect(String(result.llmContent)).toContain('src/index.ts:1');
-    expect(spawnMock).toHaveBeenCalledTimes(3);
-    expect(spawnMock.mock.calls[1]?.[1]).toEqual([
-      '--index',
+    expect(spawnMock).toHaveBeenCalledTimes(4);
+    expect(spawnMock.mock.calls[2]?.[1]).toEqual([
+      'index',
       '--embedding',
       'local/embeddinggemma-300m',
     ]);
-    expect(spawnMock.mock.calls[2]?.[1]).toEqual([
+    expect(spawnMock.mock.calls[3]?.[1]).toEqual([
+      'query',
       '--rg',
+      '-e',
       '(?i)(vector|index|metadata|storage)',
       '--limit',
       '20',
     ]);
+  });
+
+  it('identifies a configured remote embedding in the setup question', async () => {
+    setFakeRemoteEmbeddingKey();
+    process.env['ZVEC_GREP_EMBEDDING'] = 'qwen/custom-embedding';
+    const root = createTempRoot();
+    queueSpawnResult({
+      stdout: `${UNINDEXED_STATUS}\nembedding\tlocal/old-model`,
+    });
+
+    const invocation = createTool(root).build({
+      operation: 'semantic',
+      query: 'authentication flow',
+    });
+    await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+    const details = await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    );
+
+    expect(details.type).toBe('ask_user_question');
+    if (details.type === 'ask_user_question') {
+      expect(details.questions[0]?.question).toContain(
+        'configured qwen/custom-embedding remote embedding model',
+      );
+    }
   });
 
   it('prefers code-like terms for semantic rg fallback', async () => {
@@ -517,7 +862,9 @@ describe('ZvecGrepTool', () => {
     expect(String(result.llmContent)).toContain('fts_query_ast.h:1');
     expect(spawnMock).toHaveBeenCalledTimes(2);
     expect(spawnMock.mock.calls[1]?.[1]).toEqual([
+      'query',
       '--rg',
+      '-e',
       '(?i)FTS',
       '--limit',
       '20',
@@ -541,7 +888,9 @@ describe('ZvecGrepTool', () => {
     expect(String(result.llmContent)).toContain('zvec-grep.ts:1');
     expect(spawnMock).toHaveBeenCalledTimes(2);
     expect(spawnMock.mock.calls[1]?.[1]).toEqual([
+      'query',
       '--rg',
+      '-e',
       '(?i)(auto|install)',
       '--limit',
       '20',
@@ -552,7 +901,6 @@ describe('ZvecGrepTool', () => {
     setFakeRemoteEmbeddingKey();
     const root = createTempRoot();
     queueSpawnResult({ stdout: UNINDEXED_STATUS });
-    queueSpawnResult({});
     queueSpawnResult({
       stdout: 'src/streamer/stream_service.cc:1\n  1  write request flow\n',
     });
@@ -566,18 +914,106 @@ describe('ZvecGrepTool', () => {
 
     expect(String(result.llmContent)).toContain('stream_service.cc:1');
     expect(String(result.llmContent)).not.toContain('fallback_reason');
-    expect(spawnMock).toHaveBeenCalledTimes(3);
+    expect(spawnMock).toHaveBeenCalledTimes(2);
     expect(spawnMock.mock.calls[1]?.[1]).toEqual([
-      '--index',
-      '--embedding',
-      'qwen/text-embedding-v4',
-    ]);
-    expect(spawnMock.mock.calls[2]?.[1]).toEqual([
+      'query',
       '--rg',
+      '-e',
       '(?i)(streamer|write|flow)',
       '--limit',
       '20',
     ]);
+  });
+
+  it.each([
+    ['a(', '(?i)a\\('],
+    ['C++', '(?i)C\\+\\+'],
+  ])(
+    'escapes regex-only semantic fallback query %s',
+    async (query, pattern) => {
+      clearEmbeddingEnv();
+      const root = createTempRoot();
+      queueSpawnResult({ stdout: UNINDEXED_STATUS });
+      queueSpawnResult({});
+
+      await createTool(root)
+        .build({ operation: 'semantic', query })
+        .execute(new AbortController().signal);
+
+      expect(spawnMock.mock.calls[1]?.[1]).toEqual([
+        'query',
+        '--rg',
+        '-e',
+        pattern,
+        '--limit',
+        '20',
+      ]);
+    },
+  );
+
+  it('uses native rg for the rest of the session after Not this session', async () => {
+    setFakeRemoteEmbeddingKey();
+    const root = createTempRoot();
+    queueSpawnResult({ stdout: UNINDEXED_STATUS });
+    queueRipgrepResult(`${path.join(root, 'src/a.ts')}:1:authentication\n`);
+    queueRipgrepResult(`${path.join(root, 'src/b.ts')}:2:authorization\n`);
+    const tool = createTool(root);
+    const firstInvocation = tool.build({
+      operation: 'semantic',
+      query: 'authentication flow',
+    });
+
+    await expect(firstInvocation.getDefaultPermission()).resolves.toBe('ask');
+    await chooseSetup(firstInvocation, NOT_THIS_SESSION_CHOICE);
+    const firstResult = await firstInvocation.execute(
+      new AbortController().signal,
+    );
+
+    const secondInvocation = tool.build({
+      operation: 'semantic',
+      query: 'authorization flow',
+    });
+    await expect(secondInvocation.getDefaultPermission()).resolves.toBe(
+      'allow',
+    );
+    const secondResult = await secondInvocation.execute(
+      new AbortController().signal,
+    );
+
+    expect(String(firstResult.llmContent)).toContain('src/a.ts:1');
+    expect(String(secondResult.llmContent)).toContain('src/b.ts:2');
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(runRipgrepMock).toHaveBeenCalledTimes(2);
+    expect(runRipgrepMock.mock.calls[0]?.[0]).toContain('-e');
+    expect(runRipgrepMock.mock.calls[0]?.[0]).toContain(
+      '(?i)(authentication|flow)',
+    );
+  });
+
+  it('persists Disable for this workspace and uses native rg immediately', async () => {
+    setFakeRemoteEmbeddingKey();
+    const root = createTempRoot();
+    const disableForWorkspace = vi.fn(async () => {});
+    queueSpawnResult({ stdout: UNINDEXED_STATUS });
+    queueRipgrepResult(`${path.join(root, 'src/a.ts')}:1:authentication\n`);
+    const invocation = createTool(
+      root,
+      true,
+      new FileReadCache(),
+      disableForWorkspace,
+    ).build({
+      operation: 'semantic',
+      query: 'authentication flow',
+    });
+
+    await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+    await chooseSetup(invocation, DISABLE_WORKSPACE_CHOICE);
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(disableForWorkspace).toHaveBeenCalledOnce();
+    expect(String(result.llmContent)).toContain('src/a.ts:1');
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(runRipgrepMock).toHaveBeenCalledOnce();
   });
 
   it('asks before searching paths outside the workspace', async () => {
@@ -604,7 +1040,7 @@ describe('ZvecGrepTool', () => {
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
-  it('runs exact grep through zg --rg without checking index status', async () => {
+  it('runs exact grep through zg query --rg without checking index status', async () => {
     const root = createTempRoot();
     queueSpawnResult({
       stdout:
@@ -626,19 +1062,143 @@ describe('ZvecGrepTool', () => {
     expect(result.returnDisplay).toBe('Found 2 matches');
     expect(spawnMock).toHaveBeenCalledTimes(1);
     expect(spawnMock.mock.calls[0]?.[1]).toEqual([
+      'query',
       '--rg',
+      '-e',
       'validate',
       '--limit',
       '5',
       '--glob',
       '**/*.ts',
+      '--',
       'src',
     ]);
   });
 
+  it('uses native rg when the installed zg command is incompatible', async () => {
+    const root = createTempRoot();
+    queueSpawnResult({
+      code: 1,
+      stderr: 'Unknown command: query\n',
+    });
+    queueRipgrepResult(`${path.join(root, 'src/index.ts')}:1:validate\n`);
+
+    const result = await createTool(root)
+      .build({ operation: 'rg', query: 'validate' })
+      .execute(new AbortController().signal);
+
+    expect(String(result.llmContent)).toContain('src/index.ts:1');
+    expect(spawnMock.mock.calls[0]?.[1]).toEqual([
+      'query',
+      '--rg',
+      '-e',
+      'validate',
+    ]);
+    expect(runRipgrepMock).toHaveBeenCalledOnce();
+  });
+
+  it('uses the npm prefix itself as the global binary directory on Windows', async () => {
+    const root = createTempRoot();
+    const originalPrefix = process.env['npm_config_prefix'];
+    const originalPath = process.env['PATH'];
+    const platform = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue('win32');
+    process.env['npm_config_prefix'] = 'C:\\npm-prefix';
+    process.env['PATH'] = 'C:\\Windows\\System32';
+    queueSpawnResult({});
+
+    try {
+      await createTool(root)
+        .build({ operation: 'rg', query: 'validate' })
+        .execute(new AbortController().signal);
+
+      const childPath = spawnMock.mock.calls[0]?.[2]?.env?.['PATH'];
+      expect(childPath?.split(';')[0]).toBe('C:\\npm-prefix');
+      expect(childPath).not.toContain('C:\\npm-prefix\\bin');
+    } finally {
+      platform.mockRestore();
+      if (originalPrefix === undefined) {
+        delete process.env['npm_config_prefix'];
+      } else {
+        process.env['npm_config_prefix'] = originalPrefix;
+      }
+      if (originalPath === undefined) {
+        delete process.env['PATH'];
+      } else {
+        process.env['PATH'] = originalPath;
+      }
+    }
+  });
+
+  it('uses native rg without installing when exact search cannot find zg', async () => {
+    const root = createTempRoot();
+    const error = Object.assign(new Error('spawn zg ENOENT'), {
+      code: 'ENOENT',
+    }) as NodeJS.ErrnoException;
+    queueSpawnResult({ error });
+    queueRipgrepResult(
+      [
+        `${path.join(root, 'src/index.ts')}:1:validate`,
+        `${path.join(root, 'src/other.tsx')}:2:validate`,
+        '',
+      ].join('\n'),
+    );
+
+    const invocation = createTool(root).build({
+      operation: 'rg',
+      query: 'validate',
+      paths: ['src'],
+      glob: '*.{ts,tsx}',
+      exclude: ['dist/**'],
+      limit: 1,
+    });
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(String(result.llmContent)).toContain('src/index.ts:1');
+    expect(String(result.llmContent)).not.toContain('src/other.tsx:2');
+    expect(String(result.llmContent)).toContain('Output was truncated');
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(spawnMock.mock.calls[0]?.[0]).toBe('zg');
+    expect(runRipgrepMock).toHaveBeenCalledOnce();
+    expect(runRipgrepMock.mock.calls[0]?.[0]).toEqual([
+      '--line-number',
+      '--with-filename',
+      '--no-heading',
+      '--color',
+      'never',
+      '--glob',
+      '*.ts',
+      '--glob',
+      '*.tsx',
+      '--glob',
+      '!dist/**',
+      '-e',
+      'validate',
+      '--',
+      path.join(root, 'src'),
+    ]);
+  });
+
+  it('returns a regular search error when native rg cannot start', async () => {
+    const root = createTempRoot();
+    const error = Object.assign(new Error('spawn zg ENOENT'), {
+      code: 'ENOENT',
+    }) as NodeJS.ErrnoException;
+    queueSpawnResult({ error });
+    runRipgrepMock.mockRejectedValueOnce(new Error('ripgrep not found'));
+
+    const result = await createTool(root)
+      .build({ operation: 'rg', query: 'validate' })
+      .execute(new AbortController().signal);
+
+    expect(result.llmContent).toContain('Regular search failed.');
+    expect(result.llmContent).toContain('ripgrep not found');
+  });
+
   it('returns a grep_search-style display for no matches', async () => {
     const root = createTempRoot();
-    queueSpawnResult({});
+    queueSpawnResult({ stderr: 'diagnostic warning\n' });
 
     const invocation = createTool(root).build({
       operation: 'rg',
@@ -647,6 +1207,7 @@ describe('ZvecGrepTool', () => {
     const result = await invocation.execute(new AbortController().signal);
 
     expect(String(result.llmContent)).toContain('No matches found');
+    expect(String(result.llmContent)).not.toContain('diagnostic warning');
     expect(result.returnDisplay).toBe('No matches found');
   });
 
@@ -658,6 +1219,7 @@ describe('ZvecGrepTool', () => {
 
     const invocation = createTool(root).build({
       operation: 'rg',
+      query: 'wrong-query',
       pattern: 'validate',
       glob: '**/*.ts',
       path: 'src',
@@ -667,10 +1229,13 @@ describe('ZvecGrepTool', () => {
     expect(String(result.llmContent)).toContain('src/index.ts:1');
     expect(spawnMock).toHaveBeenCalledTimes(1);
     expect(spawnMock.mock.calls[0]?.[1]).toEqual([
+      'query',
       '--rg',
+      '-e',
       'validate',
       '--glob',
       '**/*.ts',
+      '--',
       'src',
     ]);
   });
@@ -702,6 +1267,34 @@ describe('ZvecGrepTool', () => {
     expect(readState.entry.lastReadWasFull).toBe(false);
   });
 
+  it('checks each duplicate result path only once', async () => {
+    const root = createTempRoot();
+    const filePath = path.join(root, 'src', 'index.ts');
+    fs.mkdirSync(path.dirname(filePath));
+    fs.writeFileSync(filePath, 'export const validate = true;\n');
+    queueSpawnResult({
+      stdout: [
+        'src/index.ts:1:export const validate = true;',
+        'src/index.ts:2:validate();',
+        '',
+      ].join('\n'),
+    });
+    const existsSync = vi.spyOn(fs, 'existsSync');
+
+    try {
+      const result = await createTool(root)
+        .build({ operation: 'rg', query: 'validate' })
+        .execute(new AbortController().signal);
+
+      expect(result.resultFilePaths).toEqual([filePath]);
+      expect(
+        existsSync.mock.calls.filter(([candidate]) => candidate === filePath),
+      ).toHaveLength(1);
+    } finally {
+      existsSync.mockRestore();
+    }
+  });
+
   it('counts Windows absolute path result lines', async () => {
     const root = createTempRoot();
     queueSpawnResult({
@@ -722,6 +1315,7 @@ describe('ZvecGrepTool', () => {
     const root = createTempRoot();
     removeWorkspaceJobFiles(root);
     queueSpawnResult({ stdout: UNINDEXED_STATUS });
+    queueSpawnResult({ stdout: UNINDEXED_STATUS });
     queueSpawnResult({ stdout: 'indexing complete\n' });
     queueSpawnResult({
       stdout: 'src/index.ts:1\n  1  vector index metadata storage\n',
@@ -731,9 +1325,92 @@ describe('ZvecGrepTool', () => {
       operation: 'semantic',
       query: 'vector index metadata storage',
     });
+    await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+    await chooseSetup(invocation, ENABLE_WORKSPACE_CHOICE);
     await invocation.execute(new AbortController().signal);
 
     expect(listWorkspaceJobFiles(root)).toEqual([]);
+  });
+
+  it('cleans the background log when the index spawn throws', async () => {
+    setFakeRemoteEmbeddingKey();
+    const root = createTempRoot();
+    queueSpawnResult({ stdout: UNINDEXED_STATUS });
+    queueSpawnResult({ stdout: UNINDEXED_STATUS });
+    spawnMock.mockImplementationOnce((() => {
+      throw new Error('spawn failed');
+    }) as unknown as typeof spawn);
+    queueSpawnResult({
+      stdout: 'src/index.ts:1\n  1  vector index metadata storage\n',
+    });
+
+    const invocation = createTool(root).build({
+      operation: 'semantic',
+      query: 'vector index metadata storage',
+    });
+    await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+    await chooseSetup(invocation, ENABLE_WORKSPACE_CHOICE);
+    await invocation.execute(new AbortController().signal);
+
+    expect(listWorkspaceJobFiles(root)).toEqual([]);
+  });
+
+  it('cleans the background log when the index child has no pid', async () => {
+    setFakeRemoteEmbeddingKey();
+    const root = createTempRoot();
+    queueSpawnResult({ stdout: UNINDEXED_STATUS });
+    queueSpawnResult({ stdout: UNINDEXED_STATUS });
+    const child = createMockChild();
+    child.pid = 0;
+    queueSpawnChild(child);
+    queueSpawnResult({
+      stdout: 'src/index.ts:1\n  1  vector index metadata storage\n',
+    });
+
+    const invocation = createTool(root).build({
+      operation: 'semantic',
+      query: 'vector index metadata storage',
+    });
+    await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+    await chooseSetup(invocation, ENABLE_WORKSPACE_CHOICE);
+    await invocation.execute(new AbortController().signal);
+
+    expect(listWorkspaceJobFiles(root)).toEqual([]);
+  });
+
+  it('does not start a second background index job for the workspace', async () => {
+    setFakeRemoteEmbeddingKey();
+    const root = createTempRoot();
+    const isRunning = vi.spyOn(process, 'kill').mockReturnValue(true);
+    queueSpawnResult({ stdout: UNINDEXED_STATUS });
+    queueSpawnResult({ stdout: UNINDEXED_STATUS });
+    const indexChild = createMockChild();
+    queueSpawnChild(indexChild);
+    queueSpawnResult({
+      stdout: 'src/index.ts:1\n  1  vector index metadata storage\n',
+    });
+    queueSpawnResult({ stdout: UNINDEXED_STATUS });
+    queueSpawnResult({
+      stdout: 'src/index.ts:1\n  1  vector index metadata storage\n',
+    });
+
+    try {
+      const invocation = createTool(root).build({
+        operation: 'semantic',
+        query: 'vector index metadata storage',
+      });
+      await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+      await chooseSetup(invocation, ENABLE_WORKSPACE_CHOICE);
+      await invocation.execute(new AbortController().signal);
+      await invocation.execute(new AbortController().signal);
+
+      expect(
+        spawnMock.mock.calls.filter((call) => call[1]?.[0] === 'index'),
+      ).toHaveLength(1);
+    } finally {
+      indexChild.emit('exit', 0);
+      isRunning.mockRestore();
+    }
   });
 
   it('returns an error without spawning when the abort signal is already aborted', async () => {
@@ -752,6 +1429,7 @@ describe('ZvecGrepTool', () => {
   });
 
   it('kills a running zvec-grep search when aborted', async () => {
+    vi.useFakeTimers();
     const root = createTempRoot();
     const child = createMockChild();
     spawnMock.mockImplementationOnce((() => child) as unknown as typeof spawn);
@@ -767,6 +1445,8 @@ describe('ZvecGrepTool', () => {
 
     expect(child.kill).toHaveBeenCalledWith('SIGTERM');
     expect(String(result.llmContent)).toContain('aborted');
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
   });
 
   it('kills timed-out searches and reports the timeout', async () => {
@@ -783,6 +1463,8 @@ describe('ZvecGrepTool', () => {
 
     await vi.advanceTimersByTimeAsync(10_000);
     expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
     child.emit('close', null);
     const result = await promise;
 
@@ -807,14 +1489,14 @@ describe('ZvecGrepTool', () => {
     expect(String(result.llmContent)).toContain('Output was truncated');
   });
 
-  it('expands simple brace globs before passing them to zg --rg', async () => {
+  it('recursively expands brace globs before passing them to zg query --rg', async () => {
     const root = createTempRoot();
     queueSpawnResult({ stdout: 'src/a.cc:1\n  1  validate();\n' });
 
     const invocation = createTool(root).build({
       operation: 'rg',
       query: 'validate',
-      glob: '*.{h,cc,cpp}',
+      glob: '*.{h,cc}.test.{ts,tsx}',
       paths: ['src'],
     });
 
@@ -822,24 +1504,30 @@ describe('ZvecGrepTool', () => {
 
     expect(spawnMock).toHaveBeenCalledTimes(1);
     expect(spawnMock.mock.calls[0]?.[1]).toEqual([
+      'query',
       '--rg',
+      '-e',
       'validate',
       '--glob',
-      '*.h',
+      '*.h.test.ts',
       '--glob',
-      '*.cc',
+      '*.h.test.tsx',
       '--glob',
-      '*.cpp',
+      '*.cc.test.ts',
+      '--glob',
+      '*.cc.test.tsx',
+      '--',
       'src',
     ]);
   });
 
-  it('auto-installs zvec-grep and retries when zg is missing', async () => {
+  it('installs zvec-grep only after setup approval', async () => {
     setFakeRemoteEmbeddingKey();
     const root = createTempRoot();
     const error = Object.assign(new Error('spawn zg ENOENT'), {
       code: 'ENOENT',
     }) as NodeJS.ErrnoException;
+    queueSpawnResult({ error });
     queueSpawnResult({ error });
     queueSpawnResult({ stdout: 'added 1 package\n' });
     queueSpawnResult({ stdout: UNINDEXED_STATUS });
@@ -852,57 +1540,186 @@ describe('ZvecGrepTool', () => {
       operation: 'semantic',
       query: 'authentication flow',
     });
+    await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+    const details = await chooseSetup(invocation, ENABLE_WORKSPACE_CHOICE);
+    expect(details.questions[0]?.question).toContain(
+      'install @zvec/zvec-grep@0.1.5 globally with npm',
+    );
     const result = await invocation.execute(new AbortController().signal);
     const content = String(result.llmContent);
 
     expect(content).toContain('src/auth.ts:1');
-    expect(spawnMock).toHaveBeenCalledTimes(5);
+    expect(spawnMock).toHaveBeenCalledTimes(6);
     expect(spawnMock.mock.calls[0]?.[0]).toBe('zg');
-    expect(spawnMock.mock.calls[0]?.[1]).toEqual(['--status']);
-    expect(spawnMock.mock.calls[1]?.[0]).toBe('npm');
-    expect(spawnMock.mock.calls[1]?.[1]).toEqual([
+    expect(spawnMock.mock.calls[0]?.[1]).toEqual(['status']);
+    expect(spawnMock.mock.calls[1]?.[0]).toBe('zg');
+    expect(spawnMock.mock.calls[1]?.[1]).toEqual(['status']);
+    expect(spawnMock.mock.calls[2]?.[0]).toBe('npm');
+    expect(spawnMock.mock.calls[2]?.[1]).toEqual([
       'install',
       '-g',
-      '@zvec/zvec-grep@0.1.4',
+      '@zvec/zvec-grep@0.1.5',
     ]);
-    expect(spawnMock.mock.calls[2]?.[0]).toBe('zg');
-    expect(spawnMock.mock.calls[2]?.[1]).toEqual(['--status']);
+    expect(spawnMock.mock.calls[2]?.[2]?.env).not.toHaveProperty(
+      'DASHSCOPE_API_KEY',
+    );
+    expect(spawnMock.mock.calls[2]?.[2]?.env).toHaveProperty('PATH');
     expect(spawnMock.mock.calls[3]?.[0]).toBe('zg');
-    expect(spawnMock.mock.calls[3]?.[1]).toEqual([
-      '--index',
+    expect(spawnMock.mock.calls[3]?.[1]).toEqual(['status']);
+    expect(spawnMock.mock.calls[4]?.[0]).toBe('zg');
+    expect(spawnMock.mock.calls[4]?.[1]).toEqual([
+      'index',
       '--embedding',
       'qwen/text-embedding-v4',
     ]);
-    expect(spawnMock.mock.calls[4]?.[0]).toBe('zg');
-    expect(spawnMock.mock.calls[4]?.[1]).toEqual([
+    expect(spawnMock.mock.calls[5]?.[0]).toBe('zg');
+    expect(spawnMock.mock.calls[5]?.[1]).toEqual([
+      'query',
       '--rg',
+      '-e',
       '(?i)(authentication|flow)',
       '--limit',
       '20',
     ]);
   });
 
-  it('returns not_installed when automatic install fails', async () => {
+  it('terminates an approved install when the invocation is aborted', async () => {
+    setFakeRemoteEmbeddingKey();
+    const root = createTempRoot();
+    const unavailable = Object.assign(new Error('spawn zg ENOENT'), {
+      code: 'ENOENT',
+    }) as NodeJS.ErrnoException;
+    queueSpawnResult({ error: unavailable });
+    const invocation = createTool(root).build({
+      operation: 'semantic',
+      query: 'authentication flow',
+    });
+    await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+    await chooseSetup(invocation, ENABLE_WORKSPACE_CHOICE);
+
+    queueSpawnResult({ error: unavailable });
+    const installChild = createMockChild();
+    queueSpawnChild(installChild);
+    queueRipgrepResult(
+      `${path.join(root, 'src/auth.ts')}:1:authentication flow\n`,
+    );
+    const controller = new AbortController();
+    const promise = invocation.execute(controller.signal);
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(3));
+    vi.useFakeTimers();
+
+    controller.abort();
+    const result = await promise;
+
+    expect(installChild.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(String(result.llmContent)).toContain('src/auth.ts:1');
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(installChild.kill).toHaveBeenCalledWith('SIGKILL');
+  });
+
+  it('force-kills an approved install after its timeout', async () => {
+    vi.useFakeTimers();
+    setFakeRemoteEmbeddingKey();
+    const root = createTempRoot();
+    const unavailable = Object.assign(new Error('spawn zg ENOENT'), {
+      code: 'ENOENT',
+    }) as NodeJS.ErrnoException;
+    queueSpawnResult({ error: unavailable });
+    const invocation = createTool(root).build({
+      operation: 'semantic',
+      query: 'authentication flow',
+    });
+    const permission = invocation.getDefaultPermission();
+    await vi.runAllTicks();
+    await expect(permission).resolves.toBe('ask');
+    await chooseSetup(invocation, ENABLE_WORKSPACE_CHOICE);
+
+    queueSpawnResult({ error: unavailable });
+    const installChild = createMockChild();
+    queueSpawnChild(installChild);
+    queueRipgrepResult(
+      `${path.join(root, 'src/auth.ts')}:1:authentication flow\n`,
+    );
+    const promise = invocation.execute(new AbortController().signal);
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(3));
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(installChild.kill).toHaveBeenCalledWith('SIGTERM');
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(installChild.kill).toHaveBeenCalledWith('SIGKILL');
+    installChild.emit('close', null);
+    const result = await promise;
+
+    expect(String(result.llmContent)).toContain('src/auth.ts:1');
+  });
+
+  it('offers the pinned install when zg status is incompatible', async () => {
+    setFakeRemoteEmbeddingKey();
+    const root = createTempRoot();
+    queueSpawnResult({
+      code: 1,
+      stderr: 'Unknown command: status\n',
+    });
+    const invocation = createTool(root).build({
+      operation: 'semantic',
+      query: 'authentication flow',
+    });
+
+    await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+    const details = await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    );
+
+    expect(details.type).toBe('ask_user_question');
+    if (details.type === 'ask_user_question') {
+      expect(details.questions[0]?.question).toContain(
+        'install @zvec/zvec-grep@0.1.5 globally with npm',
+      );
+    }
+    expect(spawnMock.mock.calls[0]?.[1]).toEqual(['status']);
+  });
+
+  it('uses native rg and reports setup failure when approved install fails', async () => {
+    setFakeRemoteEmbeddingKey();
     const root = createTempRoot();
     const error = Object.assign(new Error('spawn zg ENOENT'), {
       code: 'ENOENT',
     }) as NodeJS.ErrnoException;
     queueSpawnResult({ error });
+    queueSpawnResult({ error });
     queueSpawnResult({
       code: 1,
       stderr: 'npm registry unavailable\n',
     });
+    queueRipgrepResult(
+      `${path.join(root, 'src/auth.ts')}:1:authentication flow\n`,
+    );
 
     const invocation = createTool(root).build({
       operation: 'semantic',
       query: 'authentication flow',
     });
+    await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+    await chooseSetup(invocation, ENABLE_WORKSPACE_CHOICE);
     const result = await invocation.execute(new AbortController().signal);
     const content = String(result.llmContent);
 
-    expect(content).toContain('zvec-grep is not installed');
-    expect(content).toContain('auto-install command failed');
-    expect(content).toContain('npm registry unavailable');
-    expect(spawnMock).toHaveBeenCalledTimes(2);
+    expect(content).toContain('src/auth.ts:1');
+    expect(content).not.toContain('npm registry unavailable');
+    expect(String(result.returnDisplay)).toContain(
+      'Enhanced search setup failed; regular search was used.',
+    );
+    expect(spawnMock).toHaveBeenCalledTimes(3);
+    expect(runRipgrepMock).toHaveBeenCalledTimes(1);
+
+    queueSpawnResult({ error });
+    queueSpawnResult({ code: 1, stderr: 'still unavailable\n' });
+    queueRipgrepResult(
+      `${path.join(root, 'src/auth.ts')}:1:authentication flow\n`,
+    );
+    await invocation.execute(new AbortController().signal);
+
+    expect(spawnMock).toHaveBeenCalledTimes(5);
+    expect(spawnMock.mock.calls[4]?.[0]).toBe('npm');
+    expect(runRipgrepMock).toHaveBeenCalledTimes(2);
   });
 });

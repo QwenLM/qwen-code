@@ -120,6 +120,22 @@ describe('<AskUserQuestionDialog />', () => {
       expect(lastFrame()).toContain('Type something...');
     });
 
+    it('hides custom input when the question only supports fixed choices', () => {
+      const details = createConfirmationDetails({
+        questions: [createSingleQuestion({ allowCustomInput: false })],
+      });
+      const onConfirm = vi.fn();
+
+      const { lastFrame } = renderWithProviders(
+        <AskUserQuestionDialog
+          confirmationDetails={details}
+          onConfirm={onConfirm}
+        />,
+      );
+
+      expect(lastFrame()).not.toContain('Type something...');
+    });
+
     it('renders help text for single select', () => {
       const details = createConfirmationDetails();
       const onConfirm = vi.fn();

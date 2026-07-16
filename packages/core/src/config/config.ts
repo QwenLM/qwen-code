@@ -892,6 +892,8 @@ export interface ConfigParameters {
    */
   disabledSkillNamesProvider?: () => ReadonlySet<string>;
   zvecGrepEnabled?: boolean;
+  /** Persists a workspace-scoped opt-out selected from zvec-grep setup. */
+  onDisableZvecGrepForWorkspace?: () => Promise<void>;
   /**
    * Tool names hidden from the registry at construction time. Unlike
    * `permissions.deny` (which keeps the tool registered and rejects
@@ -1810,6 +1812,7 @@ export class Config {
     ruleType: 'allow' | 'ask' | 'deny',
     rule: string,
   ) => Promise<void>;
+  private readonly onDisableZvecGrepForWorkspaceCallback?: () => Promise<void>;
   private initialized: boolean = false;
   storage: Storage;
   private runtimeStatusWrite: Promise<void> = Promise.resolve();
@@ -2060,6 +2063,8 @@ export class Config {
     this.addLegacyPlanLocationWarning();
     this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
     this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
+    this.onDisableZvecGrepForWorkspaceCallback =
+      params.onDisableZvecGrepForWorkspace;
 
     // (web search removed)
     this.useRipgrep = params.useRipgrep ?? true;
@@ -4263,6 +4268,14 @@ export class Config {
 
   isZvecGrepEnabled(): boolean {
     return this.zvecGrepEnabled;
+  }
+
+  canDisableZvecGrepForWorkspace(): boolean {
+    return this.onDisableZvecGrepForWorkspaceCallback !== undefined;
+  }
+
+  async disableZvecGrepForWorkspace(): Promise<void> {
+    await this.onDisableZvecGrepForWorkspaceCallback?.();
   }
 
   /**

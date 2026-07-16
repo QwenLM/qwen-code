@@ -173,6 +173,7 @@ export default {
   'toolDisplayName.WriteFile': '写入文件',
   'toolDisplayName.ReadFile': '读取文件',
   'toolDisplayName.Grep': 'Grep',
+  'toolDisplayName.ZvecGrep': '语义搜索',
   'toolDisplayName.Glob': 'Glob',
   'toolDisplayName.Shell': '运行命令',
   'toolDisplayName.Shell Command': 'Shell 命令',

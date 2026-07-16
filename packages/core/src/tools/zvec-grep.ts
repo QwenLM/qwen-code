@@ -8,24 +8,34 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
+import picomatch from 'picomatch';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import type {
+  ToolAskUserQuestionConfirmationDetails,
   ToolCallConfirmationDetails,
+  ToolConfirmationPayload,
   ToolInvocation,
   ToolResult,
   ToolResultDisplay,
 } from './tools.js';
-import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
+import {
+  BaseDeclarativeTool,
+  BaseToolInvocation,
+  Kind,
+  ToolConfirmationOutcome,
+} from './tools.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { getMemoryBaseDir } from '../memory/paths.js';
 import { isSubpath, resolvePath } from '../utils/paths.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { runRipgrep, type RipgrepRunResult } from '../utils/ripgrepUtils.js';
+import { getErrorMessage } from '../utils/errors.js';
 import { recordGrepResultFileReads } from './grepReadTracking.js';
 
 const DEFAULT_EMBEDDING_MODEL = 'qwen/text-embedding-v4';
-const ZVEC_GREP_NPM_PACKAGE = '@zvec/zvec-grep@0.1.4';
+const ZVEC_GREP_NPM_PACKAGE = '@zvec/zvec-grep@0.1.5';
 const REMOTE_EMBEDDING_API_KEY_ENV_NAMES = [
   'ZVEC_GREP_API_KEY',
   'DASHSCOPE_API_KEY',
@@ -37,9 +47,13 @@ const ZG_RUN_TIMEOUT_MS = 10_000;
 const ZG_WSL_TIMEOUT_MS = 60_000;
 const ZG_INSTALL_OUTPUT_LIMIT = 200_000;
 const ZG_INSTALL_TIMEOUT_MS = 120_000;
+const ZG_KILL_GRACE_MS = 5_000;
 const DEFAULT_SEMANTIC_LIMIT = 20;
 const SEMANTIC_FALLBACK_TOKEN_LIMIT = 12;
 const ZG_RESULT_LINE_RE = /^((?:[A-Za-z]:)?[^:\s][^:]*):\d+(?:-\d+)?(?::|\s|$)/;
+const ENABLE_WORKSPACE_CHOICE = 'Enable for this workspace';
+const NOT_THIS_SESSION_CHOICE = 'Not this session';
+const DISABLE_WORKSPACE_CHOICE = 'Disable for this workspace';
 const debugLogger = createDebugLogger('ZVEC_GREP');
 
 const SEMANTIC_FALLBACK_STOP_WORDS = new Set([
@@ -195,12 +209,20 @@ interface BackgroundIndexJob {
   startedAt: string;
 }
 
+interface ZvecGrepSessionState {
+  useNativeGrep: boolean;
+}
+
+interface SetupPromptState {
+  required: boolean;
+  needsInstall: boolean;
+  parsedStatus?: ParsedStatus;
+}
+
 let zvecGrepInstallPromise: Promise<ZgCommandResult> | undefined;
-let zvecGrepInstalledInProcess = false;
 
 export function _resetZvecGrepInstallForTest(): void {
   zvecGrepInstallPromise = undefined;
-  zvecGrepInstalledInProcess = false;
 }
 
 function shellQuoteForDisplay(arg: string): string {
@@ -226,7 +248,10 @@ function normalizeStringArray(value: string[] | undefined): string[] {
 }
 
 function getSearchQuery(params: ZvecGrepParams): string | undefined {
-  const query = params.query?.trim() || params.pattern?.trim();
+  const query =
+    params.operation === 'rg'
+      ? params.pattern?.trim() || params.query?.trim()
+      : params.query?.trim() || params.pattern?.trim();
   return query || undefined;
 }
 
@@ -240,18 +265,22 @@ function pathLooksLikeGlob(value: string): boolean {
   return /[*?[\]{}]/.test(value);
 }
 
-function pathToScopeGlob(value: string): string {
-  const trimmed = value.trim().replace(/\/+$/, '');
-  if (!trimmed || pathLooksLikeGlob(trimmed)) return trimmed;
-  const base = path.basename(trimmed);
-  if (base.includes('.') && !trimmed.endsWith('/')) {
-    return trimmed;
+function normalizeScopePath(value: string): string {
+  let normalized = value.trim().replaceAll('\\', '/');
+  while (normalized.endsWith('/')) {
+    normalized = normalized.slice(0, -1);
   }
-  return `${trimmed}/**`;
+  return normalized;
+}
+
+function pathToScopeGlobs(value: string): string[] {
+  const trimmed = normalizeScopePath(value);
+  if (!trimmed || pathLooksLikeGlob(trimmed)) return [trimmed];
+  return [trimmed, `${trimmed}/**`];
 }
 
 function expandBraceAlternates(value: string): string[] {
-  const match = value.match(/^(.*)\{([^{}]+)\}(.*)$/);
+  const match = value.match(/^(.*?)\{([^{}]+)\}(.*)$/);
   if (!match) return [value];
 
   const [, before, inner, after] = match;
@@ -260,40 +289,84 @@ function expandBraceAlternates(value: string): string[] {
     .map((item) => item.trim())
     .filter(Boolean);
   if (parts.length === 0) return [value];
-  return parts.map((item) => `${before}${item}${after}`);
+  return parts.flatMap((item) =>
+    expandBraceAlternates(`${before}${item}${after}`),
+  );
 }
 
 function expandGlobs(values: string[]): string[] {
   return values.flatMap(expandBraceAlternates);
 }
 
+function intersectScopeAndGlob(scope: string, glob: string): string[] {
+  const normalizedScope = normalizeScopePath(scope);
+  let normalizedGlob = glob.trim().replaceAll('\\', '/');
+  while (normalizedGlob.startsWith('./')) {
+    normalizedGlob = normalizedGlob.slice(2);
+  }
+  while (normalizedGlob.startsWith('/')) {
+    normalizedGlob = normalizedGlob.slice(1);
+  }
+  if (!normalizedScope) return [normalizedGlob];
+
+  const descendantGlob = normalizedGlob.includes('/')
+    ? normalizedGlob
+    : `**/${normalizedGlob}`;
+  const patterns = [`${normalizedScope}/${descendantGlob}`];
+  if (
+    !pathLooksLikeGlob(normalizedScope) &&
+    picomatch.isMatch(normalizedScope, normalizedGlob, {
+      basename: !normalizedGlob.includes('/'),
+    })
+  ) {
+    patterns.unshift(normalizedScope);
+  }
+  return patterns;
+}
+
 function addScopeArgs(args: string[], params: ZvecGrepParams): void {
-  const paths = normalizeSearchPaths(params).map(pathToScopeGlob);
+  const paths = normalizeSearchPaths(params);
   const glob = normalizeOptionalString(params.glob);
-  const include = expandGlobs(glob ? [...paths, glob] : paths);
+  const expandedGlobs = expandGlobs(glob ? [glob] : []);
+  const include =
+    paths.length === 0
+      ? expandedGlobs
+      : expandedGlobs.length === 0
+        ? expandGlobs(paths.flatMap(pathToScopeGlobs))
+        : expandGlobs(
+            paths.flatMap((scope) =>
+              expandedGlobs.flatMap((pattern) =>
+                intersectScopeAndGlob(scope, pattern),
+              ),
+            ),
+          );
   const exclude = expandGlobs(normalizeStringArray(params.exclude));
 
-  if (include.length > 0) {
-    args.push('--include', include.join(','));
+  for (const pattern of include) {
+    args.push('--glob', pattern);
   }
-  if (exclude.length > 0) {
-    args.push('--exclude', exclude.join(','));
+  for (const pattern of exclude) {
+    args.push('--glob', pattern.startsWith('!') ? pattern : `!${pattern}`);
   }
 }
 
 function buildSearchArgs(params: ZvecGrepParams): string[] {
   const searchQuery = getSearchQuery(params);
-  const args = searchQuery ? [searchQuery] : [];
-  args.push('--limit', String(params.limit ?? DEFAULT_SEMANTIC_LIMIT));
+  const args = [
+    'query',
+    '--limit',
+    String(params.limit ?? DEFAULT_SEMANTIC_LIMIT),
+  ];
   addScopeArgs(args, params);
+  if (searchQuery) args.push('--', searchQuery);
   return args;
 }
 
 function buildGrepArgs(params: ZvecGrepParams): string[] {
   const searchQuery = getSearchQuery(params);
-  const args = ['--rg'];
+  const args = ['query', '--rg'];
   if (searchQuery) {
-    args.push(searchQuery);
+    args.push('-e', searchQuery);
   }
   if (params.limit !== undefined) {
     args.push('--limit', String(params.limit));
@@ -308,7 +381,8 @@ function buildGrepArgs(params: ZvecGrepParams): string[] {
   for (const item of expandGlobs(normalizeStringArray(params.exclude))) {
     args.push('--glob', item.startsWith('!') ? item : `!${item}`);
   }
-  args.push(...normalizeSearchPaths(params));
+  const searchPaths = normalizeSearchPaths(params);
+  if (searchPaths.length > 0) args.push('--', ...searchPaths);
   return args;
 }
 
@@ -342,7 +416,7 @@ function buildSemanticFallbackQuery(query: string): string {
 
   const selected = codeLikeTokens.length > 0 ? codeLikeTokens : allTokens;
   const tokens = [...new Set(selected)].map(escapeRgRegex);
-  if (tokens.length === 0) return query;
+  if (tokens.length === 0) return `(?i)${escapeRgRegex(query)}`;
   if (tokens.length === 1) return `(?i)${tokens[0]}`;
   return `(?i)(${tokens.join('|')})`;
 }
@@ -397,10 +471,8 @@ function getIndexEmbeddingModel(): string {
   return getConfiguredEmbeddingModel() ?? DEFAULT_EMBEDDING_MODEL;
 }
 
-function buildIndexArgs(params: ZvecGrepParams): string[] {
-  const args = ['--index', '--embedding', getIndexEmbeddingModel()];
-  addScopeArgs(args, params);
-  return args;
+function buildIndexArgs(): string[] {
+  return ['index', '--embedding', getIndexEmbeddingModel()];
 }
 
 function parseStatus(output: string): ParsedStatus {
@@ -409,16 +481,18 @@ function parseStatus(output: string): ParsedStatus {
   return {
     ready:
       /\bindexed\s+yes\b/.test(lowered) ||
+      /\bstate\s+ready\b/.test(lowered) ||
+      /\bstate:\s*ready\b/.test(lowered) ||
       /\bstatus\s+ready\b/.test(lowered) ||
       /\bstatus:\s*ready\b/.test(lowered),
     disabled:
       /\bpolicy\s+disabled\b/.test(lowered) ||
       /\bpolicy:\s*disabled\b/.test(lowered),
     indexing:
-      /\bstatus\s+(indexing|building|running|in[_ -]?progress)\b/.test(
+      /\b(state|status)\s+(indexing|building|running|in[_ -]?progress)\b/.test(
         lowered,
       ) ||
-      /\bstatus:\s*(indexing|building|running|in[_ -]?progress)\b/.test(
+      /\b(state|status):\s*(indexing|building|running|in[_ -]?progress)\b/.test(
         lowered,
       ) ||
       /\bindexing\s+yes\b/.test(lowered) ||
@@ -458,6 +532,10 @@ function removeBackgroundJobFiles(jobPath: string, logPath?: string): void {
   } catch {
     // Best effort cleanup only.
   }
+  removeBackgroundLogFile(logPath);
+}
+
+function removeBackgroundLogFile(logPath?: string): void {
   if (
     logPath &&
     path.dirname(path.resolve(logPath)) === path.resolve(BACKGROUND_JOB_DIR)
@@ -535,11 +613,15 @@ function startBackgroundIndexJob(
       windowsHide: true,
       stdio: ['ignore', logFd, logFd],
     });
+  } catch (error) {
+    removeBackgroundLogFile(logPath);
+    throw error;
   } finally {
     fs.closeSync(logFd);
   }
 
   if (!child.pid) {
+    removeBackgroundLogFile(logPath);
     throw new Error('failed to start zvec-grep index process');
   }
 
@@ -561,21 +643,21 @@ function startBackgroundIndexJob(
   return job;
 }
 
-function startAutoBackgroundIndex(
+function startApprovedBackgroundIndex(
   cwd: string,
-  params: ZvecGrepParams,
   parsed: ParsedStatus,
-): void {
-  if (!parsed.unindexed || parsed.ready || parsed.disabled || parsed.indexing) {
-    return;
-  }
-  if (readBackgroundIndexJob(cwd)) return;
-  if (!canUseSemanticEmbedding(parsed)) return;
+): boolean {
+  if (parsed.ready || parsed.disabled) return false;
+  if (parsed.indexing) return true;
+  if (!parsed.unindexed) return false;
+  if (readBackgroundIndexJob(cwd)) return true;
+  if (!canUseSemanticEmbedding()) return false;
   try {
-    startBackgroundIndexJob(cwd, buildIndexArgs(params));
+    startBackgroundIndexJob(cwd, buildIndexArgs());
+    return true;
   } catch (error) {
     debugLogger.debug('Failed to start zvec-grep background index', error);
-    // Searching must stay transparent even when background indexing cannot start.
+    return false;
   }
 }
 
@@ -583,13 +665,17 @@ function pathListSeparator(): string {
   return process.platform === 'win32' ? ';' : ':';
 }
 
+function npmGlobalBinDir(prefix: string): string {
+  return process.platform === 'win32' ? prefix : path.join(prefix, 'bin');
+}
+
 function zvecGrepPathDirs(): string[] {
   const dirs = [
     process.env['npm_config_prefix']
-      ? path.join(process.env['npm_config_prefix'], 'bin')
+      ? npmGlobalBinDir(process.env['npm_config_prefix'])
       : undefined,
     path.dirname(process.execPath),
-    path.join(os.homedir(), '.npm-global', 'bin'),
+    npmGlobalBinDir(path.join(os.homedir(), '.npm-global')),
   ];
   return [...new Set(dirs.filter((dir): dir is string => Boolean(dir)))];
 }
@@ -605,6 +691,67 @@ function zvecGrepChildEnv(): NodeJS.ProcessEnv {
       .filter(Boolean)
       .filter((value, index, values) => values.indexOf(value) === index)
       .join(separator),
+  };
+}
+
+function zvecGrepInstallEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    PATH: zvecGrepChildEnv()['PATH'],
+  };
+  for (const name of [
+    'HOME',
+    'USERPROFILE',
+    'APPDATA',
+    'LOCALAPPDATA',
+    'SystemRoot',
+    'ComSpec',
+    'PATHEXT',
+    'TMPDIR',
+    'TMP',
+    'TEMP',
+    'LANG',
+    'LC_ALL',
+    'HTTP_PROXY',
+    'HTTPS_PROXY',
+    'NO_PROXY',
+    'http_proxy',
+    'https_proxy',
+    'no_proxy',
+    'NODE_EXTRA_CA_CERTS',
+    'SSL_CERT_FILE',
+    'SSL_CERT_DIR',
+    'npm_config_prefix',
+    'npm_config_registry',
+    'npm_config_cache',
+    'npm_config_userconfig',
+    'NPM_CONFIG_PREFIX',
+    'NPM_CONFIG_REGISTRY',
+    'NPM_CONFIG_CACHE',
+    'NPM_CONFIG_USERCONFIG',
+  ]) {
+    if (process.env[name] !== undefined) env[name] = process.env[name];
+  }
+  return env;
+}
+
+function createChildTerminator(child: Pick<ChildProcess, 'kill'>): {
+  terminate: () => void;
+  clear: () => void;
+} {
+  let forceKillTimer: NodeJS.Timeout | undefined;
+  return {
+    terminate: () => {
+      if (forceKillTimer) return;
+      child.kill('SIGTERM');
+      forceKillTimer = setTimeout(() => {
+        child.kill('SIGKILL');
+      }, ZG_KILL_GRACE_MS);
+      forceKillTimer.unref();
+    },
+    clear: () => {
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      forceKillTimer = undefined;
+    },
   };
 }
 
@@ -627,10 +774,11 @@ function runInstallZvecGrep(signal: AbortSignal): Promise<ZgCommandResult> {
     let timedOut = false;
 
     const child = spawn('npm', ['install', '-g', ZVEC_GREP_NPM_PACKAGE], {
-      env: zvecGrepChildEnv(),
+      env: zvecGrepInstallEnv(),
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    const terminator = createChildTerminator(child);
 
     const finish = (result: ZgCommandResult) => {
       if (settled) return;
@@ -643,7 +791,7 @@ function runInstallZvecGrep(signal: AbortSignal): Promise<ZgCommandResult> {
     const killForLimit = () => {
       if (truncated) return;
       truncated = true;
-      child.kill('SIGTERM');
+      terminator.terminate();
     };
 
     const timer = setTimeout(() => {
@@ -652,7 +800,7 @@ function runInstallZvecGrep(signal: AbortSignal): Promise<ZgCommandResult> {
     }, ZG_INSTALL_TIMEOUT_MS);
 
     const onAbort = () => {
-      child.kill('SIGTERM');
+      terminator.terminate();
       finish({
         ok: false,
         code: null,
@@ -693,6 +841,7 @@ function runInstallZvecGrep(signal: AbortSignal): Promise<ZgCommandResult> {
     });
 
     child.on('error', (error: NodeJS.ErrnoException) => {
+      terminator.clear();
       finish({
         ok: false,
         code: null,
@@ -705,6 +854,7 @@ function runInstallZvecGrep(signal: AbortSignal): Promise<ZgCommandResult> {
     });
 
     child.on('close', (code) => {
+      terminator.clear();
       finish({
         ok: code === 0,
         code,
@@ -724,10 +874,7 @@ function runInstallZvecGrep(signal: AbortSignal): Promise<ZgCommandResult> {
 function installZvecGrep(signal: AbortSignal): Promise<ZgCommandResult> {
   if (!zvecGrepInstallPromise) {
     zvecGrepInstallPromise = runInstallZvecGrep(signal).then((result) => {
-      if (result.ok) {
-        zvecGrepInstalledInProcess = true;
-      }
-      if (result.error === 'aborted') {
+      if (!result.ok) {
         zvecGrepInstallPromise = undefined;
       }
       return result;
@@ -736,44 +883,12 @@ function installZvecGrep(signal: AbortSignal): Promise<ZgCommandResult> {
   return zvecGrepInstallPromise;
 }
 
-function withInstallFailure(
-  result: ZgCommandResult,
-  installResult: ZgCommandResult,
-): ZgCommandResult {
-  const details = [
-    result.error,
-    `auto-install command failed: npm install -g ${ZVEC_GREP_NPM_PACKAGE}`,
-    `exit_code: ${installResult.code ?? 'unknown'}`,
-    installResult.stdout.trim()
-      ? `install_stdout:\n${installResult.stdout.trim()}`
-      : '',
-    installResult.stderr.trim()
-      ? `install_stderr:\n${installResult.stderr.trim()}`
-      : '',
-    installResult.error ? `install_error: ${installResult.error}` : '',
-  ]
-    .filter(Boolean)
-    .join('\n');
-
-  return { ...result, error: details };
-}
-
 async function runZg(
   args: readonly string[],
   cwd: string,
   signal: AbortSignal,
   options: { allowPartialOutput?: boolean } = {},
 ): Promise<ZgCommandResult> {
-  const result = await runZgOnce(args, cwd, signal, options);
-  if (!result.unavailable) return result;
-
-  if (zvecGrepInstalledInProcess) return result;
-
-  const installResult = await installZvecGrep(signal);
-  if (!installResult.ok) {
-    return withInstallFailure(result, installResult);
-  }
-
   return runZgOnce(args, cwd, signal, options);
 }
 
@@ -814,11 +929,12 @@ function runZgOnce(
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    const terminator = createChildTerminator(child);
 
     const killForLimit = () => {
       if (truncated) return;
       truncated = true;
-      child.kill('SIGTERM');
+      terminator.terminate();
     };
 
     const timer = setTimeout(() => {
@@ -827,7 +943,7 @@ function runZgOnce(
     }, zvecRunTimeoutMs());
 
     const onAbort = () => {
-      child.kill('SIGTERM');
+      terminator.terminate();
       finish({
         ok: false,
         code: null,
@@ -868,6 +984,7 @@ function runZgOnce(
     });
 
     child.on('error', (error: NodeJS.ErrnoException) => {
+      terminator.clear();
       finish({
         ok: false,
         code: null,
@@ -880,6 +997,7 @@ function runZgOnce(
     });
 
     child.on('close', (code) => {
+      terminator.clear();
       const partialOutputOk =
         options.allowPartialOutput === true &&
         truncated &&
@@ -908,7 +1026,7 @@ function extractResultFilePaths(cwd: string, output: string): string[] {
     const candidate = path.isAbsolute(match[1]!)
       ? match[1]!
       : path.resolve(cwd, match[1]!);
-    if (fs.existsSync(candidate)) {
+    if (!paths.has(candidate) && fs.existsSync(candidate)) {
       paths.add(candidate);
     }
   }
@@ -949,7 +1067,7 @@ async function makeSearchSuccessResult(
   cwd: string,
   result: ZgCommandResult,
 ): Promise<ToolResult> {
-  const rawOutput = result.stdout.trim() || result.stderr.trim();
+  const rawOutput = result.stdout.trim();
   const content = appendTruncationNotice(
     rawOutput || 'No matches found',
     result,
@@ -982,20 +1100,105 @@ function makeErrorResult(
   return { llmContent: content, returnDisplay: content };
 }
 
+function buildNativeGrepArgs(cwd: string, params: ZvecGrepParams): string[] {
+  const query = getSearchQuery(params) ?? '';
+  const pattern =
+    params.operation === 'semantic' ? buildSemanticFallbackQuery(query) : query;
+  const args = [
+    '--line-number',
+    '--with-filename',
+    '--no-heading',
+    '--color',
+    'never',
+  ];
+
+  const searchPaths: string[] = [];
+  for (const scopePath of normalizeSearchPaths(params)) {
+    if (pathLooksLikeGlob(scopePath)) {
+      for (const expandedGlob of expandBraceAlternates(scopePath)) {
+        args.push('--glob', expandedGlob);
+      }
+    } else {
+      searchPaths.push(resolvePath(cwd, scopePath));
+    }
+  }
+  const glob = normalizeOptionalString(params.glob);
+  if (glob) {
+    for (const expandedGlob of expandBraceAlternates(glob)) {
+      args.push('--glob', expandedGlob);
+    }
+  }
+  for (const item of expandGlobs(normalizeStringArray(params.exclude))) {
+    args.push('--glob', item.startsWith('!') ? item : `!${item}`);
+  }
+
+  args.push(
+    '-e',
+    pattern,
+    '--',
+    ...(searchPaths.length > 0 ? searchPaths : [cwd]),
+  );
+  return args;
+}
+
+async function runNativeGrepSearch(
+  config: Config,
+  cwd: string,
+  params: ZvecGrepParams,
+  signal: AbortSignal,
+): Promise<ToolResult> {
+  const args = buildNativeGrepArgs(cwd, params);
+  let result: RipgrepRunResult;
+  try {
+    result = await runRipgrep(args, signal, config.getUseBuiltinRipgrep());
+  } catch (error) {
+    const content = `Regular search failed.\n\nerror: ${getErrorMessage(error)}`;
+    return { llmContent: content, returnDisplay: content };
+  }
+  if (result.error && !result.stdout.trim()) {
+    const content = [
+      'Regular search failed.',
+      '',
+      `command: ${['rg', ...args].map(shellQuoteForDisplay).join(' ')}`,
+      `error: ${result.error.message}`,
+    ].join('\n');
+    return { llmContent: content, returnDisplay: content };
+  }
+
+  const lines = result.stdout.split(/\r?\n/).filter(Boolean);
+  const limit =
+    params.operation === 'semantic'
+      ? (params.limit ?? DEFAULT_SEMANTIC_LIMIT)
+      : params.limit;
+  const limitedLines = limit === undefined ? lines : lines.slice(0, limit);
+  const truncated = result.truncated || limitedLines.length < lines.length;
+  return makeSearchSuccessResult(config, cwd, {
+    ok: true,
+    code: 0,
+    stdout: limitedLines.join('\n'),
+    stderr: '',
+    truncated,
+  });
+}
+
 async function runGrepSearch(
   config: Config,
   cwd: string,
   args: readonly string[],
+  params: ZvecGrepParams,
   signal: AbortSignal,
 ): Promise<ToolResult> {
   const result = await runZg(args, cwd, signal, {
     allowPartialOutput: true,
   });
-  if (result.unavailable) {
-    return makeErrorResult('zvec-grep is not installed.', args, result);
-  }
   if (!result.ok) {
-    return makeErrorResult('zvec-grep search failed.', args, result);
+    if (
+      result.error === 'aborted' ||
+      result.error?.startsWith('timed out after ')
+    ) {
+      return makeErrorResult('zvec-grep search failed.', args, result);
+    }
+    return runNativeGrepSearch(config, cwd, params, signal);
   }
   return makeSearchSuccessResult(config, cwd, result);
 }
@@ -1004,8 +1207,13 @@ class ZvecGrepInvocation extends BaseToolInvocation<
   ZvecGrepParams,
   ToolResult
 > {
+  private setupPromptPromise?: Promise<SetupPromptState>;
+  private setupApproved = false;
+  private setupNotice?: string;
+
   constructor(
     private readonly config: Config,
+    private readonly sessionState: ZvecGrepSessionState,
     params: ZvecGrepParams,
   ) {
     super(params);
@@ -1033,14 +1241,179 @@ class ZvecGrepInvocation extends BaseToolInvocation<
       : 'Semantic zvec-grep search';
   }
 
+  private getSetupPromptState(): Promise<SetupPromptState> {
+    if (
+      this.params.operation !== 'semantic' ||
+      this.sessionState.useNativeGrep ||
+      !this.config.isInteractive()
+    ) {
+      return Promise.resolve({ required: false, needsInstall: false });
+    }
+
+    if (!this.setupPromptPromise) {
+      const cwd = this.config.getTargetDir();
+      this.setupPromptPromise = runZg(
+        ['status'],
+        cwd,
+        new AbortController().signal,
+      ).then((status) => {
+        if (!status.ok) {
+          return {
+            required: canUseSemanticEmbedding(),
+            needsInstall: true,
+          };
+        }
+        const parsedStatus = parseStatus(`${status.stdout}\n${status.stderr}`);
+        const backgroundIndexRunning =
+          readBackgroundIndexJob(cwd) !== undefined;
+        return {
+          required:
+            parsedStatus.unindexed &&
+            !parsedStatus.ready &&
+            !parsedStatus.disabled &&
+            !parsedStatus.indexing &&
+            !backgroundIndexRunning &&
+            canUseSemanticEmbedding(),
+          needsInstall: false,
+          parsedStatus,
+        };
+      });
+    }
+    return this.setupPromptPromise;
+  }
+
+  private buildSetupQuestion(
+    setup: SetupPromptState,
+    externalScopes: readonly string[],
+  ): string {
+    const setupText = setup.needsInstall
+      ? `Qwen Code will install ${ZVEC_GREP_NPM_PACKAGE} globally with npm and build a semantic index for this workspace.`
+      : 'Qwen Code can build a semantic index for this workspace.';
+    const embeddingModel = getIndexEmbeddingModel();
+    const embeddingText = isLocalEmbeddingModel(embeddingModel)
+      ? 'Indexing uses a local embedding model, so workspace files stay local.'
+      : embeddingModel === DEFAULT_EMBEDDING_MODEL
+        ? `With the default ${DEFAULT_EMBEDDING_MODEL} model, workspace code fragments and semantic search queries are sent to the Qwen/DashScope embedding service.`
+        : `Indexing uses the configured ${embeddingModel} remote embedding model, which sends workspace code fragments and semantic search queries to its embedding service.`;
+    const externalText =
+      externalScopes.length > 0
+        ? [
+            'This search also includes paths outside the current workspace:',
+            ...externalScopes.map((scopePath) => `  - ${scopePath}`),
+          ].join('\n')
+        : undefined;
+
+    return [
+      setupText,
+      'Indexing runs in the background. Regular search remains available while the index is being built.',
+      embeddingText,
+      externalText,
+    ]
+      .filter((part): part is string => part !== undefined)
+      .join('\n\n');
+  }
+
+  private buildSetupConfirmation(
+    setup: SetupPromptState,
+    externalScopes: readonly string[],
+  ): ToolAskUserQuestionConfirmationDetails {
+    const options = [
+      {
+        label: ENABLE_WORKSPACE_CHOICE,
+        description:
+          'Install zg if needed and build the index in the background.',
+      },
+      {
+        label: NOT_THIS_SESSION_CHOICE,
+        description:
+          'Use regular search for this session and ask again in a future session.',
+      },
+    ];
+    if (this.config.canDisableZvecGrepForWorkspace()) {
+      options.push({
+        label: DISABLE_WORKSPACE_CHOICE,
+        description:
+          'Do not install or index here. Always use regular search in this workspace.',
+      });
+    }
+
+    return {
+      type: 'ask_user_question',
+      title: 'Enable semantic search for this workspace?',
+      questions: [
+        {
+          header: 'Semantic search',
+          question: this.buildSetupQuestion(setup, externalScopes),
+          options,
+          allowCustomInput: false,
+        },
+      ],
+      onConfirm: async (
+        outcome: ToolConfirmationOutcome,
+        payload?: ToolConfirmationPayload,
+      ) => {
+        if (outcome === ToolConfirmationOutcome.Cancel) return;
+        const choice = payload?.answers?.['0'];
+        if (choice === ENABLE_WORKSPACE_CHOICE) {
+          this.setupApproved = true;
+          return;
+        }
+
+        this.sessionState.useNativeGrep = true;
+        if (choice === DISABLE_WORKSPACE_CHOICE) {
+          try {
+            await this.config.disableZvecGrepForWorkspace();
+          } catch (error) {
+            debugLogger.warn(
+              'Failed to persist zvec-grep workspace disable',
+              error,
+            );
+            this.setupNotice =
+              'Could not save the workspace setting; enhanced search is disabled for this session only.';
+          }
+        }
+      },
+    };
+  }
+
+  private withSetupNotice(result: ToolResult): ToolResult {
+    if (!this.setupNotice) return result;
+    const display =
+      typeof result.returnDisplay === 'string'
+        ? result.returnDisplay
+        : 'Regular search completed';
+    return {
+      ...result,
+      returnDisplay: `${this.setupNotice}\n${display}`,
+    };
+  }
+
+  private async runNativeGrep(
+    cwd: string,
+    signal: AbortSignal,
+  ): Promise<ToolResult> {
+    return this.withSetupNotice(
+      await runNativeGrepSearch(this.config, cwd, this.params, signal),
+    );
+  }
+
   override async getDefaultPermission(): Promise<PermissionDecision> {
-    return this.getExternalPathScopes().length > 0 ? 'ask' : 'allow';
+    if (this.getExternalPathScopes().length > 0) return 'ask';
+    const setup = await this.getSetupPromptState();
+    return setup.required ? 'ask' : 'allow';
   }
 
   override async getConfirmationDetails(
-    _abortSignal: AbortSignal,
+    abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
     const externalScopes = this.getExternalPathScopes();
+    const setup = await this.getSetupPromptState();
+    if (setup.required) {
+      return this.buildSetupConfirmation(setup, externalScopes);
+    }
+    if (externalScopes.length === 0) {
+      return super.getConfirmationDetails(abortSignal);
+    }
     return {
       type: 'info',
       title: 'Confirm zvec-grep external path search',
@@ -1060,21 +1433,42 @@ class ZvecGrepInvocation extends BaseToolInvocation<
   ): Promise<ToolResult> {
     const cwd = this.config.getTargetDir();
 
+    if (this.sessionState.useNativeGrep) {
+      updateOutput?.('Searching workspace');
+      return this.runNativeGrep(cwd, signal);
+    }
+
     if (this.params.operation === 'rg') {
       const grepArgs = buildGrepArgs(this.params);
       updateOutput?.(
         `Searching with zvec-grep rg: ${formatZgCommand(grepArgs)}`,
       );
-      return runGrepSearch(this.config, cwd, grepArgs, signal);
+      return runGrepSearch(this.config, cwd, grepArgs, this.params, signal);
     }
 
-    const status = await runZg(['--status'], cwd, signal);
-    if (status.unavailable) {
-      return makeErrorResult(
-        'zvec-grep is not installed.',
-        ['--status'],
-        status,
-      );
+    let status = await runZg(['status'], cwd, signal);
+    if (!status.ok && this.setupApproved && status.error !== 'aborted') {
+      updateOutput?.('Installing enhanced search support');
+      const installResult = await installZvecGrep(signal);
+      if (!installResult.ok) {
+        debugLogger.warn(
+          'Failed to install zvec-grep after user approval',
+          installResult.error ||
+            installResult.stderr.trim() ||
+            installResult.stdout.trim(),
+        );
+        this.setupNotice =
+          'Enhanced search setup failed; regular search was used.';
+        return this.runNativeGrep(cwd, signal);
+      }
+      status = await runZg(['status'], cwd, signal);
+    }
+    if (!status.ok) {
+      if (this.setupApproved) {
+        this.setupNotice =
+          'Enhanced search setup did not become available; regular search was used.';
+      }
+      return this.runNativeGrep(cwd, signal);
     }
 
     const parsed = parseStatus(`${status.stdout}\n${status.stderr}`);
@@ -1096,13 +1490,17 @@ class ZvecGrepInvocation extends BaseToolInvocation<
           searchResult.stderr.trim() ||
           searchResult.stdout.trim(),
       );
-    } else {
-      startAutoBackgroundIndex(cwd, this.params, parsed);
+    } else if (this.setupApproved) {
+      this.setupNotice = startApprovedBackgroundIndex(cwd, parsed)
+        ? 'Semantic indexing is running in the background; regular search was used for this request.'
+        : 'Semantic indexing could not be started; regular search was used.';
     }
 
     const grepArgs = buildSemanticFallbackGrepArgs(this.params);
     updateOutput?.('Searching with zvec-grep');
-    return runGrepSearch(this.config, cwd, grepArgs, signal);
+    return this.withSetupNotice(
+      await runGrepSearch(this.config, cwd, grepArgs, this.params, signal),
+    );
   }
 }
 
@@ -1111,6 +1509,9 @@ export class ZvecGrepTool extends BaseDeclarativeTool<
   ToolResult
 > {
   static readonly Name = ToolNames.ZVEC_GREP;
+  private readonly sessionState: ZvecGrepSessionState = {
+    useNativeGrep: false,
+  };
 
   override get maxOutputChars(): number {
     return 20_000;
@@ -1121,13 +1522,13 @@ export class ZvecGrepTool extends BaseDeclarativeTool<
       ZvecGrepTool.Name,
       ToolDisplayNames.ZVEC_GREP,
       [
-        'zvec_grep is the primary, higher-quality workspace search tool. Use zvec_grep for workspace search by default; do not use grep_search when zvec_grep is available.',
+        'Search workspace content with semantic discovery or exact ripgrep-compatible matching.',
         '',
         'Use operation="semantic" with query for semantic or fuzzy discovery: concepts, behavior, architecture, relationships, topics, relevant files, or cases where exact keywords are unknown.',
         '',
         'Use operation="rg" with pattern for exact text or regular-expression searches: names, paths, messages, literals, config keys, documentation phrases, and other known text patterns.',
         '',
-        'Trust zvec_grep result quality: treat returned files, symbols, and line ranges as high-signal candidates for the primary investigation path instead of repeating broad searches. Read only the relevant returned ranges when possible. If results look too narrow, increase limit and search again.',
+        'Treat returned files, symbols, and line ranges as candidates to inspect. Read the relevant ranges, and increase limit or refine the query when results are too narrow.',
       ].join('\n'),
       Kind.Search,
       {
@@ -1236,6 +1637,6 @@ export class ZvecGrepTool extends BaseDeclarativeTool<
   protected createInvocation(
     params: ZvecGrepParams,
   ): ToolInvocation<ZvecGrepParams, ToolResult> {
-    return new ZvecGrepInvocation(this.config, params);
+    return new ZvecGrepInvocation(this.config, this.sessionState, params);
   }
 }

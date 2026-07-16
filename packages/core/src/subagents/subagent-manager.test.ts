@@ -1911,6 +1911,19 @@ bad`);
         ]);
       });
 
+      it('should omit zvec_grep when the optional tool is not registered', async () => {
+        const configWithOptionalSearch: SubagentConfig = {
+          ...validConfig,
+          tools: ['read_file', 'zvec_grep'],
+        };
+
+        const runtimeConfig = await manager.convertToRuntimeConfig(
+          configWithOptionalSearch,
+        );
+
+        expect(runtimeConfig.toolConfig?.tools).toEqual(['read_file']);
+      });
+
       it('should set modelConfig.model from model selector and merge run configurations', async () => {
         const configWithCustom: SubagentConfig = {
           ...validConfig,
