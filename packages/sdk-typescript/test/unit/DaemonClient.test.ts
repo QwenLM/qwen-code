@@ -683,6 +683,21 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('reloads primary and workspace-qualified MCP settings over REST', async () => {
+      const result = { accepted: true };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(202, result));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.reloadWorkspaceMcp()).resolves.toEqual(result);
+      await expect(
+        client.workspaceById('workspace/id').reloadWorkspaceMcp(),
+      ).resolves.toEqual(result);
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['POST', 'http://daemon/workspace/mcp/reload'],
+        ['POST', 'http://daemon/workspaces/workspace%2Fid/mcp/reload'],
+      ]);
+    });
+
     it('reads primary and workspace-qualified Git status over REST', async () => {
       const primary = {
         v: 1 as const,
