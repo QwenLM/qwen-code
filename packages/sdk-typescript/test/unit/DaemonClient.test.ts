@@ -3138,6 +3138,90 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('generateSessionContent', () => {
+    it('POSTs the prompt and yields generation SSE events', async () => {
+      const frames = [
+        'event: started\ndata: {"v":1,"type":"started","requestId":"r-1","model":"fast","modelSource":"fast"}\n\n',
+        'event: thinking\ndata: {"v":1,"type":"thinking","requestId":"r-1"}\n\n',
+        'event: delta\ndata: {"v":1,"type":"delta","requestId":"r-1","seq":0,"text":"translated"}\n\n',
+        'event: done\ndata: {"v":1,"type":"done","requestId":"r-1","model":"fast","modelSource":"fast","inputTokens":8,"outputTokens":2}\n\n',
+      ].join('');
+      const { fetch, calls } = recordingFetch(() => sseResponse(frames));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const events = [];
+      for await (const event of client.generateSessionContent(
+        's/1',
+        'Translate this',
+        { clientId: 'client-1' },
+      )) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        {
+          v: 1,
+          type: 'started',
+          requestId: 'r-1',
+          model: 'fast',
+          modelSource: 'fast',
+        },
+        {
+          v: 1,
+          type: 'thinking',
+          requestId: 'r-1',
+        },
+        {
+          v: 1,
+          type: 'delta',
+          requestId: 'r-1',
+          seq: 0,
+          text: 'translated',
+        },
+        {
+          v: 1,
+          type: 'done',
+          requestId: 'r-1',
+          model: 'fast',
+          modelSource: 'fast',
+          inputTokens: 8,
+          outputTokens: 2,
+        },
+      ]);
+      expect(calls[0]?.url).toBe('http://daemon/session/s%2F1/generate');
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.headers.accept).toBe('text/event-stream');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(JSON.parse(calls[0]?.body as string)).toEqual({
+        prompt: 'Translate this',
+      });
+    });
+
+    it('does not expose malformed generation events through the typed API', async () => {
+      const frames = [
+        'event: delta\ndata: {"v":1,"type":"delta","requestId":"r-1","seq":"0","text":"invalid"}\n\n',
+        'event: done\ndata: {"v":1,"type":"done","requestId":"r-1","modelSource":"fast"}\n\n',
+        'event: error\ndata: {"v":1,"type":"error","code":"failed","message":"Generation failed"}\n\n',
+      ].join('');
+      const { fetch } = recordingFetch(() => sseResponse(frames));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const events = [];
+      for await (const event of client.generateSessionContent('s-1', 'test')) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        {
+          v: 1,
+          type: 'error',
+          code: 'failed',
+          message: 'Generation failed',
+        },
+      ]);
+    });
+  });
+
   describe('enqueueMidTurnMessage (web-shell mid-turn drain)', () => {
     it('POSTs the message and returns accepted:true', async () => {
       const { fetch, calls } = recordingFetch(() =>
@@ -3748,6 +3832,39 @@ describe('DaemonClient', () => {
         'content-type': 'application/json',
         'x-qwen-client-id': 'client-8',
       });
+    });
+
+    it('preserves structured startup failure bodies on 502 responses', async () => {
+      const body = {
+        error: 'Channel worker exited before ready.',
+        code: 'channel_worker_start_failed',
+        rolledBack: true,
+        state: {
+          enabled: false,
+          selection: null,
+          transition: 'idle',
+          workers: [],
+        },
+        startupFailures: [
+          {
+            workspaceCwd: '/work',
+            channel: 'telegram',
+            phase: 'connect',
+            code: 'ECONNREFUSED',
+            message: 'connection refused',
+          },
+        ],
+      };
+      const { fetch } = recordingFetch(() => jsonResponse(502, body));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const error = await client
+        .setChannelWorkerSelection({ mode: 'all' })
+        .catch((value: unknown) => value);
+
+      expect(error).toBeInstanceOf(DaemonHttpError);
+      expect((error as DaemonHttpError).status).toBe(502);
+      expect((error as DaemonHttpError).body).toEqual(body);
     });
 
     it('DELETEs idempotently and maps HTTP failures', async () => {

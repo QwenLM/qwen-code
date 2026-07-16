@@ -561,6 +561,39 @@ export interface BridgeExtensionsChangedData {
   error?: string;
 }
 
+export type BridgeGenerationModelSource = 'fast' | 'main';
+
+export type BridgeGenerationStreamEvent =
+  | {
+      type: 'started';
+      requestId: string;
+      model: string;
+      modelSource: BridgeGenerationModelSource;
+    }
+  | {
+      type: 'thinking';
+      requestId: string;
+    }
+  | {
+      type: 'delta';
+      requestId: string;
+      seq: number;
+      text: string;
+    }
+  | {
+      type: 'done';
+      requestId: string;
+      model: string;
+      modelSource: BridgeGenerationModelSource;
+      inputTokens?: number;
+      outputTokens?: number;
+    };
+
+export type BridgeGenerationNotificationEvent = Exclude<
+  BridgeGenerationStreamEvent,
+  { type: 'done' }
+>;
+
 export interface AcpSessionBridge {
   /** Read-only daemon diagnostics for status endpoints. */
   getDaemonStatusSnapshot(): BridgeDaemonStatusSnapshot;
@@ -1028,6 +1061,18 @@ export interface AcpSessionBridge {
     sessionId: string,
     context?: BridgeClientRequestContext,
   ): Promise<{ sessionId: string; recap: string | null }>;
+
+  /**
+   * Run a stateless, tool-free text generation request in the ACP child and
+   * stream model deltas back only to this caller. The child prefers the
+   * configured fast model and falls back to the session's main model.
+   */
+  generateSessionContent?(
+    sessionId: string,
+    prompt: string,
+    signal: AbortSignal,
+    context?: BridgeClientRequestContext,
+  ): AsyncIterable<BridgeGenerationStreamEvent>;
 
   /**
    * Run a side question (/btw) against the session's conversation context.

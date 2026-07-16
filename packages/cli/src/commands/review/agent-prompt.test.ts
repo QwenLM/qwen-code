@@ -599,6 +599,60 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain('--out /abs/tmp/qwen-review-pr-6766-efficacy.json');
   });
 
+  it('hands Agent 7 the build-test command with absolute --plan/--worktree/--out', () => {
+    const p = buildRoleBrief(PR_PLAN, '7', { planPath: '/abs/tmp/plan.json' });
+    expect(p).toContain('qwen review build-test');
+    expect(p).toContain('--plan /abs/tmp/plan.json');
+    expect(p).toMatch(/--worktree \/[^\s]*review-pr-6766/);
+    expect(p).not.toMatch(/--plan \.qwen/);
+    expect(p).toContain('--out /abs/tmp/qwen-review-pr-6766-build-test.json');
+  });
+
+  it('never emits a literal "undefined" in the build-test --out filename', () => {
+    // `prNumber` is typed `unknown` and can be absent. Without the guard, the
+    // filename resolves to `qwen-review-pr-undefined-build-test.json` — a report the
+    // agent writes and downstream never finds. With a worktree but no PR number the
+    // block still emits (a re-review can lack the number), just with the stable local
+    // name — never an interpolated `undefined`.
+    const noPr = { ...PR_PLAN };
+    delete (noPr as { prNumber?: unknown }).prNumber;
+    const p = buildRoleBrief(noPr, '7', { planPath: '/abs/tmp/plan.json' });
+    expect(p).not.toContain('undefined');
+    expect(p).toContain('--out /abs/tmp/qwen-review-build-test.json');
+  });
+
+  it('emits a build-test block for a LOCAL review (no worktree, no PR number)', () => {
+    // Local reviews launch Agents 1a–7 with no worktree and no PR number. The brief
+    // opens with "run build-test, below" and forbids `npm run build` by hand, so the
+    // block must still be there — scoped to the project root the agent stands in.
+    const local = { ...PLAN }; // PLAN has no prNumber / worktreePath
+    const p = buildRoleBrief(local, '7', {
+      planPath: '/abs/tmp/local-plan.json',
+    });
+    expect(p).toContain('qwen review build-test');
+    expect(p).toContain('--plan /abs/tmp/local-plan.json');
+    expect(p).toContain('--worktree /'); // absolute (the resolved cwd), not `.`
+    expect(p).not.toContain('undefined');
+  });
+
+  it('emits NO build-test block in PR mode when the worktree is missing', () => {
+    // A PR-mode report (prNumber set) that unexpectedly lacks worktreePath must not
+    // fall back to the cwd — that is the user's own checkout, and building it would
+    // attribute a build of the wrong tree to the PR. Better no block than the wrong tree.
+    const prNoWt = { ...PLAN, prNumber: '42', ownerRepo: 'o/r' }; // no worktreePath
+    const p = buildRoleBrief(prNoWt, '7', { planPath: '/abs/tmp/plan.json' });
+    expect(p).not.toMatch(/--plan \/abs\/tmp\/plan\.json/);
+    expect(p).not.toMatch(/qwen review build-test \\/);
+  });
+
+  it('welds a long tool timeout into the build-test invocation', () => {
+    // The command runs install + builds + tests in one process; the agent's default
+    // 120s shell timeout would kill it — the very failure this command prevents, one
+    // level up. So the block tells the agent to pass the tool's max, 600000ms.
+    const p = buildRoleBrief(PR_PLAN, '7', { planPath: '/abs/tmp/plan.json' });
+    expect(p).toContain('timeout: 600000');
+  });
+
   it('welds the PR into Agent 0 — a bare `gh pr view` judges the wrong issue', () => {
     const p = buildRoleBrief(PR_PLAN, '0', {
       planPath: '/x/qwen-review-pr-6766-fetch.json',

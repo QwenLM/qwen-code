@@ -119,6 +119,8 @@ Each selected channel's `cwd` must resolve to a registered workspace, and channe
 
 Replacing a selection preflights configuration, ownership, and trust before stopping anything. It keeps workspace workers whose ordered selection is unchanged. If a changed worker cannot start, the daemon stops new workers and restores the old selection. If the daemon cannot confirm that an old child exited even after SIGKILL, it keeps the PID lease and refuses to create a duplicate worker. A worker is still considered ready when at least one requested adapter connects; PUT then returns `partial: true`, and `/daemon/status` reports `channel_worker_partial_connect` for the missing adapters.
 
+When an adapter rejects `connect()`, current worker snapshots may include `startupFailures` entries with the channel, `phase: "connect"`, an optional adapter code, and a credential-redacted message. `qwen channel set`, `qwen channel reload`, and remote `qwen channel status --daemon-url …` print these reasons. If every adapter fails during a dynamic set or reload, the command receives `502 channel_worker_start_failed`; the response reasons describe that attempt and its `state` describes the result after rollback. The failed attempt is not retained by later status requests. At most 64 reasons are retained per worker startup, and adapter codes should be treated as diagnostic rather than stable categories. Initial `qwen serve --channel …` startup still exits when no adapter connects.
+
 The daemon also exposes read-only runtime snapshots for client UIs and
 operators: `GET /daemon/status`, `GET /workspace/mcp`,
 `GET /workspace/skills`, `GET /workspace/providers`, `GET /workspace/env`,
