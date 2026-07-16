@@ -27,10 +27,17 @@ vi.mock('../telemetry/trace-context.js', () => ({
 
 describe('getShellContextEnvVars', () => {
   let originalSessionId: string | undefined;
+  // Isolated for the same reason as the session id, and it matters more now: the
+  // CLI exports QWEN_CODE_CLI to every shell it spawns, so a `npm test` run started
+  // from inside a qwen session inherits it — and the exact-equality assertion below
+  // would fail on a variable the test never set.
+  let originalCli: string | undefined;
 
   beforeEach(() => {
     originalSessionId = process.env['QWEN_CODE_SESSION_ID'];
     delete process.env['QWEN_CODE_SESSION_ID'];
+    originalCli = process.env['QWEN_CODE_CLI'];
+    delete process.env['QWEN_CODE_CLI'];
   });
 
   afterEach(() => {
@@ -39,6 +46,28 @@ describe('getShellContextEnvVars', () => {
     } else {
       delete process.env['QWEN_CODE_SESSION_ID'];
     }
+    if (originalCli !== undefined) {
+      process.env['QWEN_CODE_CLI'] = originalCli;
+    } else {
+      delete process.env['QWEN_CODE_CLI'];
+    }
+  });
+
+  it('passes the running CLI down, so a subprocess does not resolve `qwen` off PATH', () => {
+    // A skill that shells out to `qwen …` would otherwise reach whatever the machine
+    // has installed. Dogfooded: a dev-daemon session ran `qwen review agent-prompt
+    // --role 0`, PATH found a v0.19.10 whose agent-prompt predates --role, and the
+    // review died on "Missing required argument: chunk".
+    process.env['QWEN_CODE_CLI'] = '/repo/scripts/cli-entry.js';
+    expect(getShellContextEnvVars()['QWEN_CODE_CLI']).toBe(
+      '/repo/scripts/cli-entry.js',
+    );
+  });
+
+  it('omits QWEN_CODE_CLI when the host does not export one', () => {
+    // The skill falls back to a bare `qwen`, which is the pre-existing behaviour —
+    // an empty string here would shadow it with a command that is not one.
+    expect('QWEN_CODE_CLI' in getShellContextEnvVars()).toBe(false);
   });
 
   it('returns empty strings for agent/prompt when no context is available', () => {

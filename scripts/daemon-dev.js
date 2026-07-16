@@ -281,6 +281,15 @@ const serveEnv = {
   QWEN_SERVER_TOKEN: token,
   QWEN_CODE_NO_RELAUNCH: 'true',
   NODE_OPTIONS: nodeOptions,
+  // This daemon runs the checkout, but a skill that shells out to `qwen …` would
+  // get whatever `qwen` PATH resolves to — an older global install, on the machines
+  // most likely to be running a dev daemon. That is not a hypothetical: a /review
+  // launched from the web shell issued `qwen review agent-prompt --role 0`, PATH
+  // found a v0.19.10 whose `agent-prompt` predates `--role`, and the run died on
+  // "Missing required argument: chunk". The daemon is started as `node
+  // scripts/dev.js`, never through the bin wrapper, so nothing else sets this.
+  QWEN_CODE_CLI:
+    process.env['QWEN_CODE_CLI'] ?? join(__dirname, 'cli-entry.js'),
 };
 
 const webEnv = {

@@ -59,6 +59,25 @@ export function getShellContextEnvVars(): Record<string, string> {
     env['QWEN_CODE_PROJECT_DIR'] = projectDir;
   }
 
+  // The CLI a subprocess should call to reach *this* build.
+  //
+  // A skill that shells out to `qwen …` gets whatever `qwen` PATH resolves to,
+  // which is not necessarily the code that launched it: run `npm run dev:daemon`
+  // on a machine with an older global install and every `qwen review …` the
+  // /review skill issues lands in the old binary. Measured: a current-source
+  // daemon told its shell to run `qwen review agent-prompt --role 0`, PATH
+  // resolved to a v0.19.10 global whose `agent-prompt` predates `--role`, and the
+  // run died on `Missing required argument: chunk` — the skill and the CLI running
+  // it were different programs.
+  //
+  // So the entry is passed down instead of rediscovered. The bin wrapper sets it
+  // (it is the executable entry, and knows its own path); a subprocess prefers it
+  // and falls back to `qwen` when it is absent, which is exactly the old behaviour.
+  const cliEntry = process.env['QWEN_CODE_CLI'];
+  if (cliEntry) {
+    env['QWEN_CODE_CLI'] = cliEntry;
+  }
+
   // For agent/prompt IDs: explicitly set empty string when no ALS context
   // exists, so that stale values inherited from a parent qwen-code process
   // (via process.env spread) are overwritten rather than leaked.
