@@ -4234,6 +4234,7 @@ export async function runQwenServe(
       fsFactory: routeFsFactory,
       primaryWorkspaceTrusted: trustedWorkspace,
       primaryRuntimeEnv,
+      daemonEnv: daemonRuntimeBaseEnv,
       daemonLog,
       getChannelWorkerSnapshot,
       getChannelWorkerSnapshots,
