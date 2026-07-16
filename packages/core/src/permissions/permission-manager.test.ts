@@ -1486,19 +1486,15 @@ describe('PermissionManager', () => {
       ).toBe('allow');
     });
 
-    it('exact Monitor(...) allow rule matches wrapped fallback commands', async () => {
-      const pm2 = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Monitor(FOO="bar baz" tail -f /var/log/app.log)'],
-        }),
-      );
+    it('asks by default for wrapped commands with environment prefixes', async () => {
+      const pm2 = new PermissionManager(makeConfig({}));
       pm2.initialize();
       expect(
         await pm2.evaluate({
           toolName: 'monitor',
           command: String.raw`FOO="bar baz" /bin/bash --noprofile -c 'tail -f /var/log/app.log &'`,
         }),
-      ).toBe('allow');
+      ).toBe('ask');
     });
 
     it('Monitor(...) deny rule sees shell wrapper suffix commands', async () => {

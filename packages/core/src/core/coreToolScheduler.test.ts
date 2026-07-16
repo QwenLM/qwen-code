@@ -12020,8 +12020,8 @@ describe('Fire hook functions integration', () => {
         onToolCallsUpdate,
       );
 
-      // "git log" and "ls" are read-only → concurrent
-      // "npm install" is not read-only → sequential, breaks the batch
+      // "git log" and "ls" are read-only → concurrent.
+      // Wrappers, output-writing sort, and npm install are sequential.
       const requests = [
         {
           callId: '1',
@@ -12039,6 +12039,20 @@ describe('Fire hook functions integration', () => {
         },
         {
           callId: '3',
+          name: 'run_shell_command',
+          args: { command: "bash -c 'git status'" },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+        {
+          callId: '4',
+          name: 'run_shell_command',
+          args: { command: 'sort -o output input' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+        {
+          callId: '5',
           name: 'run_shell_command',
           args: { command: 'npm install' },
           isClientInitiated: false,
@@ -12063,14 +12077,32 @@ describe('Fire hook functions integration', () => {
       expect(gitStart).toBeLessThan(firstReadOnlyEnd);
       expect(lsStart).toBeLessThan(firstReadOnlyEnd);
 
-      // "npm install" should start after both read-only commands complete
+      // The unknown wrapper should start after both reads complete.
       const lastReadOnlyEnd = Math.max(
         executionLog.indexOf('shell:end:git log'),
         executionLog.indexOf('shell:end:ls'),
       );
+      const wrapperStart = executionLog.indexOf(
+        "shell:start:bash -c 'git status'",
+      );
+      expect(wrapperStart).not.toBe(-1);
+      expect(wrapperStart).toBeGreaterThan(lastReadOnlyEnd);
+
+      // The output-writing sort should not overlap the wrapper batch.
+      const wrapperEnd = executionLog.indexOf("shell:end:bash -c 'git status'");
+      const sortStart = executionLog.indexOf(
+        'shell:start:sort -o output input',
+      );
+      expect(wrapperEnd).not.toBe(-1);
+      expect(sortStart).not.toBe(-1);
+      expect(sortStart).toBeGreaterThan(wrapperEnd);
+
+      // npm install should not overlap the sequential sort batch.
+      const sortEnd = executionLog.indexOf('shell:end:sort -o output input');
       const npmStart = executionLog.indexOf('shell:start:npm install');
+      expect(sortEnd).not.toBe(-1);
       expect(npmStart).not.toBe(-1);
-      expect(npmStart).toBeGreaterThan(lastReadOnlyEnd);
+      expect(npmStart).toBeGreaterThan(sortEnd);
     });
   });
 });
