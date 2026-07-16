@@ -15,12 +15,12 @@ Last updated: 2026-07-16
 
 本方案将当前 Auto Memory 从“后台 Agent 直接写正式记忆”演进为“候选生成、校验、审批、应用、检索、整理”的完整生命周期，同时保留 Markdown 作为最终持久化格式。
 
-整体分为三个阶段、十个可独立合并的 PR：
+整体分为三个阶段、十二个可独立合并的 PR：
 
 | 阶段    | 目标                 | PR 数 | 交付结果                                            |
 | ------- | -------------------- | ----: | --------------------------------------------------- |
 | Phase 1 | 可靠性、安全、可观测 |     4 | 首轮可靠召回、CJK fallback、秘密扫描、安全 Forget   |
-| Phase 2 | 可信写入和人工治理   |     3 | Schema v2、来源证据、候选箱、延迟提取               |
+| Phase 2 | 可信写入和人工治理   |     5 | Schema v2、候选基础设施、接入、Inbox、延迟提取      |
 | Phase 3 | 检索质量和生命周期   |     3 | BM25 + 模型重排、多作用域整理、冲突、过期和预算控制 |
 
 目标数据流：
@@ -88,6 +88,8 @@ type RecallDiscardReason =
   | 'error';
 ```
 
+`loop_detected` 只表示现有 `LoopDetector` 判定并终止当前逻辑轮次；普通重复输出、用户取消和超时必须使用各自原因，不能归入该枚举。
+
 只记录 phase、delivery point、discard reason、strategy、文档数量和耗时。禁止记录 Query、Memory 正文、文件路径、模型 reasoning 和 Session ID。
 
 #### 涉及文件
@@ -123,15 +125,16 @@ fix(memory): guarantee fast recall on the initial turn
 
 #### 设计
 
-Recall 拆成两个阶段：
+Recall 拆成两个可灰度的阶段，但不直接把默认路径从 Model-primary 切换为 Heuristic-primary：
 
 1. 项目和用户 Memory 只扫描一次。
-2. 本地 Fast Recall 确定性选择最多 2 个文档。
-3. 首轮主模型请求前注入 Fast 结果。
-4. 模型 Refined Recall 异步运行。
+2. 本地 Fast Recall 和现有 Model Recall 并发运行。
+3. Model 在首轮预算内返回时优先使用其结果；否则只注入达到高置信阈值的 Fast 结果，最多 2 个，不为凑满配额注入弱相关文档。
+4. Model Recall 继续异步运行，作为 Refined 结果。
 5. 第一次 ToolResult 最多补充 3 个文档。
 6. 没有 ToolResult 时丢弃 Refined，并记录 Telemetry。
 7. 新 Query 到达时取消旧 Query 的 Refined 结果。
+8. `fast 2 + refined 3` 是容量上限而非固定配额；总量始终不超过 5。
 
 新增：
 
@@ -152,6 +155,8 @@ const CJK_RUN =
 
 单个 CJK 字符不参与宽泛 fallback。必须按 Unicode code point 切分。
 
+二元组是 Phase 1 的低成本 fallback，而不是最终 CJK 分词方案。Phase 3 必须在多语言标注集上比较 bigram、`Intl.Segmenter` 和语言专用 Tokenizer 的 Recall、MRR、延迟、索引及 Bundle 成本；只有收益显著时才引入新依赖。
+
 同时修正当前“非空正文无条件加分”的问题：没有 lexical match 时得分必须为 0，type/scope 只能在已有匹配上加权。
 
 #### 涉及文件
@@ -169,12 +174,13 @@ const CJK_RUN =
 
 #### 验证
 
-- Model Recall 永不结束时，中文 Memory 仍进入首轮 Prompt。
+- Model Recall 永不结束时，达到高置信阈值的中文 Memory 仍进入首轮 Prompt。
 - 无工具调用时 Fast 生效，Refined 被正确丢弃。
-- Fast 最多 2 条，合计最多 5 条。
+- Fast 最多 2 条且允许为 0，合计最多 5 条。
 - 同一路径不重复注入。
 - 中文、日文、韩文、英文和混合 Query 均有确定性行为。
 - Fast Recall P95 小于 100ms，首轮附加 P95 小于 150ms。
+- 先以内部 Rollout Flag 保持 Model-primary 并对比两套结果；只有离线 Recall@5/MRR、无关结果率及线上投递指标不退化时才启用 Hybrid。公开的 `retrievalMode` 配置在 Phase 3 引入。
 
 ### PR 1.3：所有 Managed Memory 的秘密扫描
 
@@ -191,6 +197,8 @@ fix(memory): block secrets in all managed memory scopes
 新增 realpath-aware 的 `getManagedMemoryScope()`，必须处理新文件、父目录符号链接、`..` 路径逃逸和路径前缀碰撞。
 
 `write_file` 和 `edit` 的 validation/execute 都必须调用统一 Guard；`edit` 扫描最终完整文件，而不是只扫描 `new_string`。
+
+新写入的单个 Memory 文档上限为 64 KiB，超限时在扫描前拒绝；已有超限文档仍可读取，但必须缩小后才能再次写入。增加 64 KiB 和 1 MiB 输入基准，确保秘密扫描保持线性且不会拖慢普通编辑。
 
 #### 涉及文件
 
@@ -231,6 +239,8 @@ fix(memory): confirm and undo forget operations
 
 提供进程内 `/forget --undo [operation-id]`：最多保留 10 条记录、TTL 30 分钟，不把已删除正文持久化到磁盘。Undo 前检查当前文件 hash；任一文件冲突时整体拒绝恢复。
 
+确认界面和删除结果必须明确提示 Undo 仅在当前进程有效。默认不提供持久化 JSON 或 `.trash`，因为它们会保留用户明确要求遗忘的秘密或私人内容。跨重启 Undo 若未来确有需求，必须作为默认关闭、短 TTL、权限受限且支持永久删除的独立隐私设计。
+
 #### 涉及文件
 
 | 文件                                                       | 变化                            |
@@ -264,23 +274,23 @@ feat(memory): add provenance-aware memory schema v2
 
 ```yaml
 version: 2
-id: mem_01J...
+id: mem_550e8400-e29b-41d4-a716-446655440000
 type: project
 scope: project
+name: Release merge freeze
+description: Non-critical merges are frozen during the mobile release.
 confidence: asserted
 status: active
 created_at: 2026-07-16T10:00:00.000Z
 updated_at: 2026-07-16T10:00:00.000Z
 last_verified_at: 2026-07-16T10:00:00.000Z
-expires_at:
 source_kind: user_message
-source_session_id: session-id
-source_message_ids: []
-external_context: false
-supersedes: []
+context_origin: local
 ```
 
-`confidence` 为 `explicit | asserted | inferred`；`status` 为 `active | superseded | expired`。Team Memory 接受时清除私人 session/message ID，改为 `source_kind: team_review`。
+Memory ID 使用 `mem_${crypto.randomUUID()}`，Candidate ID 同理使用 `cand_${crypto.randomUUID()}`，避免为 ULID 引入新依赖。`confidence` 为 `explicit | asserted | inferred`；`status` 为 `active | superseded | expired`。
+
+`expires_at`、`supersedes`、`last_verified_at` 等可选字段只在有值时写入，不输出空字段。`source_kind` 表示谁或什么产生了断言；正交的 `context_origin: local | external | mixed` 表示证据是否依赖外部上下文。详细的 `source_session_id` 和 `source_message_ids` 存入按 Memory ID 索引的私人 Sidecar，不写入正式 Frontmatter。工具来源使用 `source_kind: tool_output`，不再使用与 `context_origin` 重叠的 `external_context`。Team Memory 接受时清除私人来源 ID，改为 `source_kind: team_review`。
 
 兼容策略：无 `version` 视为 v1；读取 v1 不写回；v1 被更新时才写成 v2；不做启动时批量迁移。
 
@@ -291,6 +301,8 @@ supersedes: []
 ```text
 packages/core/src/memory/memory-document.ts
 packages/core/src/memory/memory-document.test.ts
+packages/core/src/memory/memory-provenance-store.ts
+packages/core/src/memory/memory-provenance-store.test.ts
 ```
 
 修改：
@@ -315,27 +327,28 @@ packages/core/src/memory/memory-document.test.ts
 - v1 更新后成为合法 v2。
 - 单个坏文档不会导致全量扫描失败。
 - Team 序列化会清除私人来源。
-- CRLF、Unicode、YAML 引号、数组和空字段均可 round-trip。
+- 空的可选字段不会被序列化。
+- CRLF、Unicode、YAML 引号和数组均可 round-trip。
 
-### PR 2.2：Candidate Pipeline 和 Memory Inbox
+### PR 2.2a：Candidate Staging 基础设施
 
 建议提交：
 
 ```text
-feat(memory): stage auto-memory candidates for review
+feat(memory): add auto-memory candidate staging
 ```
 
 #### 设计
 
-Extraction 和 Consolidation Agent 不再直接编辑正式 Memory：
+先增加不接入现有 Extraction 的纯 Core 基础设施：
 
 1. 框架快照用户/项目 Memory。
 2. 将快照复制到任务 staging 目录。
-3. Agent 只能修改 staging 副本。
-4. 框架比较 original/proposed，生成 Create/Update/Delete Candidate。
-5. 校验路径、Schema、来源和秘密。
-6. 根据策略自动应用私人 Candidate 或进入 Inbox。
-7. 只有 Apply 后才重建正式索引。
+3. 比较 original/proposed，生成 Create/Update/Delete Candidate。
+4. 校验路径、Schema、来源和秘密。
+5. 提供 Candidate Store、状态迁移、容量限制和 GC。
+
+本 PR 不改变现有写入路径，不新增 UI；基础设施以未接入或测试夹具方式存在，从而可以独立评审。
 
 Staging 位于：
 
@@ -346,17 +359,18 @@ Staging 位于：
   proposed/
 ```
 
-Candidate 保存 `action`、`scope`、目标相对路径、`baseDigest`、建议内容、来源、状态和校验错误。Apply 时当前目标 digest 必须等于 `baseDigest`，否则标记 conflicted，不能覆盖。
+Candidate 保存 `action`、`scope`、目标相对路径、`baseDigest`、建议内容、来源、状态和校验错误。Apply 时当前目标 digest 必须等于 `baseDigest`，否则标记 conflicted，不能覆盖。Candidate ID 使用 `cand_${crypto.randomUUID()}`。
 
-写入策略只有：
+#### Staging 生命周期和 GC
 
-```ts
-type MemoryWritePolicy = 'off' | 'review' | 'auto-private';
-```
+- accepted/rejected 后立即删除 `original/` 和 `proposed/` 正文，只保留脱敏审计 Manifest 7 天。
+- `running` 且超过 24 小时的孤儿任务自动清理。
+- 损坏 Manifest 移入 quarantine、告警一次，最多保留 7 天。
+- Pending Candidate 默认保留 30 天，之后标记 expired 并清理。
+- 每项目最多 100 个 Pending Candidate 或 50 MiB；达到任一上限后停止新的自动 Candidate 生成并告警，不能静默丢弃。
+- GC 在 Session 启动和 Candidate 处理完成后执行，必须 best-effort，失败不能阻塞主请求。
 
-Team Candidate 永远进入 Inbox，不提供未评审 Team 自动写入。
-
-#### Core 文件
+#### 文件
 
 新增：
 
@@ -367,34 +381,83 @@ packages/core/src/memory/candidate-store.ts
 packages/core/src/memory/candidate-store.test.ts
 packages/core/src/memory/memory-snapshot.ts
 packages/core/src/memory/memory-snapshot.test.ts
+packages/core/src/memory/candidate-gc.ts
+packages/core/src/memory/candidate-gc.test.ts
 ```
 
-修改 `paths.ts`、`memory-scoped-agent-config.ts`、`extractionAgentPlanner.ts`、`extract.ts`、`manager.ts`、`indexer.ts`、`prompt.ts`、`config.ts` 和 Core 导出入口。
-
-#### CLI 文件
-
-新增：
-
-```text
-packages/cli/src/ui/components/MemoryInboxDialog.tsx
-packages/cli/src/ui/components/MemoryInboxDialog.test.tsx
-```
-
-修改 `MemoryDialog.tsx`、`DialogManager.tsx`、`AppContainer.tsx`、`UIStateContext.tsx`、`UIActionsContext.tsx`、`memoryCommand.ts` 和 `settingsSchema.ts`。
-
-Inbox 展示作用域、类型、来源、置信度、时间和 Before/After Diff，支持 Accept、Reject、Edit、Accept All Private 和 Conflict 展示。
+修改 `paths.ts` 和 Core 导出入口，只暴露尚未接入行为的 Candidate API。
 
 #### 验证
 
-- Agent 运行期间正式 Memory 字节不变。
+- Create/Update/Delete Diff 产生确定 Candidate。
+- Agent/Staging 路径不能逃逸项目 Candidate 根目录。
+- Pending 可跨重启读取，一个损坏 Manifest 不隐藏其他 Candidate。
+- 已处理正文立即删除，审计 Manifest、孤儿、quarantine 和 pending TTL 正确执行。
+- 100 条/50 MiB 上限停止新任务但不删除 Pending。
+- GC 失败不影响 Session 启动。
+
+### PR 2.2b：Extraction 接入 Staging
+
+建议提交：
+
+```text
+feat(memory): route extraction through candidate staging
+```
+
+#### 设计
+
+Extraction 和 Consolidation Agent 不再直接编辑正式 Memory：Agent 只能修改 staging 副本，框架将 Diff 转为 Candidate；只有 Apply 后才修改正式文件并重建索引。
+
+写入策略：
+
+```ts
+type MemoryWritePolicy = 'off' | 'review' | 'auto-private';
+```
+
+Team Candidate 永远进入 Inbox，不提供未评审 Team 自动写入。
+
+修改 `memory-scoped-agent-config.ts`、`extractionAgentPlanner.ts`、`extract.ts`、`manager.ts`、`indexer.ts`、`prompt.ts`、`config.ts` 和 Core 导出入口。先支持 `shadow`：Staging 路径生成和校验 Candidate，但不修改正式目录；Legacy 路径仍是唯一正式写入者，用于比较结果。确认稳定后再启用 `review/auto-private`。
+
+#### 验证
+
+- Staging 路径自身不修改正式 Memory；Shadow 期间只有 Legacy 路径可以写正式目录。
 - Agent 无法写出 staging。
-- Create/Update/Delete 都能正确生成 Candidate。
 - 并发修改导致 conflict，不会覆盖。
 - Reject 不修改正式目录。
 - Apply 后才更新正式文件和索引。
 - Team 永远需要确认。
 - staging finalization 和 apply 都做秘密扫描。
-- 重启后 Pending Candidate 仍然存在。
+- Shadow 模式不改变用户可见行为，并能比较旧写入和 Candidate 结果。
+
+### PR 2.2c：Memory Inbox UI
+
+建议提交：
+
+```text
+feat(cli): add auto-memory inbox review
+```
+
+#### 交互策略
+
+- Extraction 后不自动弹出阻塞式 Dialog。
+- `review` 模式显示非阻塞 Badge，每个 Session 最多提醒一次；用户通过 `/memory inbox` 或 Memory 面板主动打开。
+- `auto-private` 下成功应用的私人 Candidate 不提醒；Team、Conflict 和 Invalid Candidate 进入 Inbox。
+- 按 Extraction Task/Session 分组，默认每页 20 条；Conflict、Team 和高风险项优先，其余按时间倒序。
+- Private Candidate 支持批量 Accept/Reject；Team Candidate 必须逐条确认。
+- Inbox 展示作用域、类型、来源、置信度、时间和 Before/After Diff，支持 Accept、Reject、Edit 和 Conflict 处理。
+- 达到 100 条/50 MiB 上限时显示持久告警和清理入口，不通过折叠掩盖积压。
+
+#### 文件
+
+新增 `MemoryInboxDialog.tsx` 和对应测试。修改 `MemoryDialog.tsx`、`DialogManager.tsx`、`AppContainer.tsx`、`UIStateContext.tsx`、`UIActionsContext.tsx`、`memoryCommand.ts` 和 `settingsSchema.ts`。
+
+#### 验证
+
+- Extraction 完成不会中断当前输入或自动打开 Dialog。
+- Badge 每 Session 最多提醒一次，重启后 Pending 数量正确。
+- 分页、分组、优先级和批量私人操作正确。
+- Team 不能批量 Accept，Conflict 不能绕过 Digest 检查。
+- 达到积压上限时告警清晰，拒绝或接受后容量实时释放。
 
 ### PR 2.3：延迟提取和任务级控制
 
@@ -407,6 +470,8 @@ feat(memory): gate auto extraction by session eligibility
 #### 设计
 
 自动提取资格：至少 3 条非空用户消息、空闲至少 5 分钟或会话正常结束、不是 Subagent/Side Query、不在 safe/bare/incognito、外部上下文策略允许、没有处理过同一消息边界。
+
+开启 Incognito 时取消当前 Session 未完成的 Extraction；期间消息不计入三条消息门槛，也不持久化由这些消息产生的 Cursor 或 Extraction State。关闭后不回溯处理 Incognito 消息。它只影响后续 Recall/Contribution，已经注入当前模型历史的 Memory 无法移除；严格隔离需要新建 Session。
 
 `/remember` 继续立即执行。退出时不强制启动 Agent；下一次启动扫描符合条件但未处理的会话。
 
@@ -453,9 +518,11 @@ feat(memory): add hybrid lexical and model retrieval
 
 #### 设计
 
-构建全量 Catalog，使用 Phase 1 Unicode Tokenizer 和字段加权 BM25，过滤 expired/superseded，应用 confidence/scope/轻量 freshness 加权。本地注入 Top 2，再将 BM25 Top 20 交给模型重排，最终总计不超过 5 条。
+构建全量 Catalog，使用 Phase 1 Unicode Tokenizer 和字段加权 BM25，过滤 expired/superseded，应用 confidence/scope/轻量 freshness加权。BM25 与 Model Recall 并发；Model 在首轮预算内返回时优先使用其结果，否则只注入高置信 BM25 结果，最多 2 条。BM25 Top 20 可交给模型重排补充，最终总计不超过 5 条，不为填满配额注入弱相关文档。
 
 建议权重：Title 4.0、Description 3.0、Summary 2.0、Why/How 1.0、Type/Scope 0.5。
+
+上述权重只是评估起点。建立 50–100 组、目标不少于 100 组的多语言 `query → relevant memory` 标注集，保留独立验证集，使用 Recall@5、MRR@5、nDCG@5、irrelevant@5 和延迟比较 Legacy、bigram、BM25、BM25 + Rerank。权重先作为代码常量，只有数据证明收益后调整，避免在小样本上过拟合。
 
 Topic 扫描上限从“Recall 前截断 200”改为“Catalog 最多 5000”；`MEMORY.md` 仍保持 200 行、25KB。超过 Catalog 上限必须告警，不能静默遗漏。
 
@@ -472,11 +539,15 @@ packages/core/src/memory/retrieval-index.ts
 packages/core/src/memory/retrieval-index.test.ts
 packages/core/src/memory/memory-usage-store.ts
 packages/core/src/memory/memory-usage-store.test.ts
+packages/core/src/memory/retrieval-eval.test.ts
+packages/core/src/memory/testdata/retrieval-eval.json
 ```
 
 修改 `scan.ts`、`indexer.ts`、`recall.ts`、`relevanceSelector.ts`、`manager.ts`、`candidates.ts`、`remember.ts`、`forget.ts` 和 `dream.ts`。
 
 支持 `legacy | shadow | hybrid` 三种 Retrieval Mode。Shadow 运行新算法但注入旧结果，只记录数量、Top-K overlap 和耗时，不记录文档身份。
+
+默认保持 `legacy`。只有标注集 Recall@5/MRR 不退化、无关结果率达标、首轮延迟满足预算，且线上投递/纠正指标无回归时才切换 `hybrid`；`fast 2 + refined 3` 始终只是上限。
 
 #### 验证
 
@@ -501,9 +572,9 @@ Project 默认 24 小时/5 个新会话；User 默认 7 天/20 个新会话；Te
 
 Dream 使用与 Extraction 相同的 snapshot → isolated clone → diff → candidate 流程，不再直接删除或覆盖正式 Memory。
 
-`expires_at < now` 时标记 expired，普通 Recall 不再选中，但不立即删除。冲突优先级为：当前观测 > QWEN/AGENTS > Project explicit/asserted > User explicit/asserted > Project inferred > User inferred > expired/superseded。
+`expires_at < now` 时标记 expired，普通 Recall 不再选中，但不立即删除。冲突推荐优先级为：经工具或文件验证的当前观测 > QWEN/AGENTS > Project explicit/asserted > User explicit/asserted > Project inferred > User inferred > expired/superseded。模型对用户意图的解释不属于“当前观测”。
 
-发现矛盾时生成带 `supersedes` 的 Candidate，旧 Memory 保留并标记 superseded，不静默覆盖。
+该优先级只决定推荐处理方式，不授予静默覆盖权限。`last_verified_at` 仅作为同级证据的 Tie-breaker；新 inferred 永远不能自动 supersede explicit/asserted，而是生成 Conflict Candidate。新的已验证 explicit 事实可以在评审或明确证据下 supersede 旧事实。旧 Memory 保留并标记 superseded。
 
 #### 涉及文件
 
@@ -593,11 +664,13 @@ npm run preflight
 
 1. 先发布 Phase 1，不涉及格式迁移。
 2. 先发布 Schema v2 Reader，再启用 v2 Writer。
-3. Candidate 先 Shadow 生成，再默认展示 Inbox。
-4. 现有开启 Auto Memory 的安装保持 `auto-private` 兼容行为。
-5. Hybrid Retrieval 先 Shadow 对比，再切正式注入。
-6. Project 和 User Consolidation 分别开启。
-7. Team Consolidation 始终只生成 Candidate。
+3. 先发布不改变行为的 Candidate Staging 基础设施。
+4. Extraction 接入 Staging 后先以 Shadow 比较，Staging 不写正式目录。
+5. 发布非阻塞 Inbox 后再开放 `review` 策略。
+6. 现有开启 Auto Memory 的安装保持 `auto-private` 兼容行为。
+7. Hybrid Retrieval 先 Shadow 并达到质量门槛，再切正式注入。
+8. Project 和 User Consolidation 分别开启。
+9. Team Consolidation 始终只生成 Candidate。
 
 ### 回滚
 
@@ -635,12 +708,13 @@ memory system. The roadmap keeps Markdown as the durable storage format while
 improving recall reliability, write safety, provenance, reviewability,
 retrieval quality, and lifecycle management.
 
-The work is intentionally split into small, independently reviewable changes:
+The work is intentionally split into twelve small, independently reviewable
+changes:
 
 | Phase   | Goal                                    | PRs | Result                                                                 |
 | ------- | --------------------------------------- | --: | ---------------------------------------------------------------------- |
 | Phase 1 | Reliability, safety, and observability  |   4 | Reliable first-turn recall, CJK fallback, secret scanning, safe forget |
-| Phase 2 | Trustworthy writes and human governance |   3 | Schema v2, provenance, candidates, inbox, deferred extraction          |
+| Phase 2 | Trustworthy writes and human governance |   5 | Schema v2, candidate staging, integration, inbox, deferred extraction  |
 | Phase 3 | Retrieval quality and lifecycle         |   3 | BM25 and reranking, scoped consolidation, conflicts, expiry, budgets   |
 
 The target pipeline is:
@@ -752,6 +826,10 @@ interface MemoryRecallDeliveryEvent {
 }
 ```
 
+`loop_detected` is emitted only when the existing `LoopDetector` terminates the
+current logical turn. Repeated output that does not trigger that safeguard,
+user cancellation, and timeouts use their own reasons.
+
 Do not record query text, memory content, file paths, model reasoning, or session
 identifiers.
 
@@ -808,7 +886,7 @@ Suggested commit:
 fix(memory): guarantee fast recall on the initial turn
 ```
 
-### 5.1 Two-phase recall
+### 5.1 Two-phase recall with a guarded rollout
 
 Introduce:
 
@@ -819,15 +897,21 @@ interface AutoMemoryRecallPlan {
 }
 ```
 
-The lifecycle becomes:
+This change must not immediately replace the current model-primary path with a
+heuristic-primary default. The lifecycle becomes:
 
 1. Scan project and user memory once.
-2. Run deterministic local fast recall.
-3. Inject at most two fast documents before the initial main-model request.
-4. Run model refinement asynchronously over the remaining documents.
-5. Inject at most three additional documents on the first tool-result turn.
-6. If no tool continuation occurs, discard refinement with telemetry.
-7. Never carry a refinement result into a different user query.
+2. Start deterministic local recall and the existing model recall concurrently.
+3. Prefer the model result if it settles within the initial-turn budget.
+4. Otherwise inject only high-confidence local matches, at most two; do not
+   inject weak matches merely to fill the allocation.
+5. Continue the model recall asynchronously as refinement.
+6. Inject at most three additional documents on the first tool-result turn.
+7. If no tool continuation occurs, discard refinement with telemetry.
+8. Never carry a refinement result into a different user query.
+
+The `fast 2 + refined 3` split is a capacity limit, not a fixed quota. Fast
+recall may return zero, and the total never exceeds five.
 
 ### 5.2 Tokenization
 
@@ -843,6 +927,11 @@ const CJK_RUN =
 
 Single CJK characters do not participate in broad fallback recall. Iterate by
 Unicode code point rather than UTF-16 index.
+
+Two-character grams are a low-cost Phase 1 fallback, not the final CJK
+tokenization strategy. Phase 3 compares bigrams, `Intl.Segmenter`, and
+language-specific tokenizers on multilingual relevance, latency, index size,
+and bundle cost. Add a dependency only when the measured gain justifies it.
 
 ### 5.3 Scoring correction
 
@@ -873,22 +962,26 @@ return lexicalScore + typeBoost;
 - User scan failure preserves project recall.
 - Fast failure does not prevent model refinement.
 - Model failure does not affect already-injected fast memory.
-- A model-selected empty set is valid; the fast stage already provided the
-  heuristic fallback.
+- A model-selected empty set is valid; a high-confidence fast result may have
+  provided an initial fallback.
 
 ### 5.6 Verification
 
 Required cases:
 
-- Model recall never settles, but relevant Chinese memory reaches the initial
-  prompt.
+- Model recall never settles, but a high-confidence relevant Chinese memory
+  reaches the initial prompt.
 - A no-tool response uses fast memory and discards refined memory.
-- Fast selects at most two and refined fills the total to at most five.
+- Fast selects zero to two and refined fills the total to at most five.
 - The same path is not injected twice.
 - Chinese, Japanese, Korean, English, and mixed queries behave deterministically.
 - Single-character CJK queries do not recall broad unrelated sets.
 - A new query cancels the old refined result.
 - Disabling managed memory prevents both phases.
+- An internal rollout flag keeps model-primary behavior while comparing the two
+  result sets. Hybrid is enabled only after Recall@5, MRR, irrelevant-result
+  rate, delivery telemetry, and online correction signals show no regression.
+  The public `retrievalMode` setting is introduced in Phase 3.
 
 Performance gates:
 
@@ -954,6 +1047,11 @@ Existing stored secrets are not automatically removed. Historical auditing is
 a separate operation because deletion may be destructive and may not remediate
 the original source or Git history.
 
+New managed-memory documents are limited to 64 KiB and rejected before a scan
+when larger. Existing oversized documents remain readable but must be reduced
+before another write. Benchmark 64 KiB and 1 MiB inputs to verify that the
+curated, bounded scanner remains linear and does not slow ordinary edits.
+
 ### 6.4 Verification
 
 - Project, user, and team writes containing credentials are rejected.
@@ -991,6 +1089,13 @@ Maintain a bounded pending-selection map keyed by project root and raw command:
 
 Keep at most ten undo records for 30 minutes in `MemoryManager`. Do not write
 deleted content to a persistent trash directory.
+
+The confirmation and completion messages state that undo is available only in
+the current process. Persistent JSON or `.trash` storage is intentionally not a
+default because it retains content the user explicitly asked to forget,
+including possible secrets and personal data. Crash-safe undo requires a
+separate, default-off privacy design with a short TTL, restricted permissions,
+and an explicit permanent-delete path.
 
 ```ts
 interface AutoMemoryForgetUndoRecord {
@@ -1043,7 +1148,7 @@ Continue storing one durable memory per Markdown file:
 ```yaml
 ---
 version: 2
-id: mem_01J...
+id: mem_550e8400-e29b-41d4-a716-446655440000
 type: project
 scope: project
 name: Release merge freeze
@@ -1053,13 +1158,8 @@ status: active
 created_at: 2026-07-16T10:00:00.000Z
 updated_at: 2026-07-16T10:00:00.000Z
 last_verified_at: 2026-07-16T10:00:00.000Z
-expires_at:
 source_kind: user_message
-source_session_id: session-id
-source_message_ids:
-  - message-id
-external_context: false
-supersedes: []
+context_origin: local
 ---
 
 Non-critical merges are frozen after 2026-07-18.
@@ -1078,13 +1178,28 @@ type MemorySourceKind =
   | 'explicit_remember'
   | 'user_message'
   | 'assistant_inference'
-  | 'external_context'
+  | 'tool_output'
   | 'migration'
   | 'team_review';
+
+type MemoryContextOrigin = 'local' | 'external' | 'mixed';
 ```
 
-Team documents remove private session and message identifiers when accepted.
-They use `source_kind: team_review` and may later record Git attribution.
+Generate IDs as `mem_${crypto.randomUUID()}` and candidate IDs as
+`cand_${crypto.randomUUID()}`. This avoids a new ULID dependency; chronological
+sorting uses explicit timestamps.
+
+Omit optional fields such as `expires_at`, `supersedes`, and
+`last_verified_at` when they have no value. `source_kind` identifies who or
+what asserted the fact, while the orthogonal `context_origin` identifies
+whether evidence depended on external context. Store verbose private
+`source_session_id` and `source_message_ids` in a private sidecar keyed by
+memory ID rather than durable frontmatter. Team documents remove those private
+identifiers when accepted, use `source_kind: team_review`, and may later record
+Git attribution.
+
+Tool-derived evidence uses `source_kind: tool_output`; the removed
+`external_context` source kind no longer overlaps with `context_origin`.
 
 ### 8.2 Compatibility
 
@@ -1102,6 +1217,8 @@ Add:
 ```text
 packages/core/src/memory/memory-document.ts
 packages/core/src/memory/memory-document.test.ts
+packages/core/src/memory/memory-provenance-store.ts
+packages/core/src/memory/memory-provenance-store.test.ts
 ```
 
 Modify:
@@ -1126,28 +1243,31 @@ Modify:
 - Updating v1 creates valid v2.
 - Invalid enum values isolate one document rather than fail the full scan.
 - Team serialization strips private provenance.
-- CRLF, Unicode, YAML quoting, arrays, and empty optional values round-trip.
+- Empty optional values are not serialized.
+- CRLF, Unicode, YAML quoting, and arrays round-trip.
 
-## 9. PR 2.2: Candidate pipeline and Memory Inbox
+## 9. PR 2.2a: Candidate staging infrastructure
 
 Suggested commit:
 
 ```text
-feat(memory): stage auto-memory candidates for review
+feat(memory): add auto-memory candidate staging
 ```
 
-### 9.1 Isolated extraction
+### 9.1 Scope
 
-Extraction and consolidation agents no longer edit live memory:
+Add pure Core infrastructure without connecting it to the current extraction
+path or adding UI:
 
 1. Snapshot user and project memory.
 2. Copy the snapshot into a task staging directory.
-3. Restrict the agent to the staging copy.
-4. Diff the proposed tree against the snapshot.
-5. Convert each file change into a candidate.
-6. Validate path, schema, provenance, and secrets.
-7. Auto-apply safe private candidates or leave them in the inbox.
-8. Rebuild live indexes only after application.
+3. Diff the proposed tree against the snapshot.
+4. Convert each file change into a candidate.
+5. Validate path, schema, provenance, and secrets.
+6. Persist bounded candidate state and support garbage collection.
+
+This PR has no user-visible behavior. The APIs remain unused outside tests so
+the domain model, filesystem safety, and lifecycle can be reviewed separately.
 
 Staging layout:
 
@@ -1159,7 +1279,7 @@ Staging layout:
     proposed/
 ```
 
-### 9.2 Candidate model
+### 9.2 Candidate model and conflict invariant
 
 ```ts
 interface MemoryCandidate {
@@ -1178,9 +1298,69 @@ interface MemoryCandidate {
 ```
 
 Application requires the current target digest to match `baseDigest`. A mismatch
-marks the candidate conflicted and never overwrites the live file.
+marks the candidate conflicted and never overwrites the live file. Generate IDs
+as `cand_${crypto.randomUUID()}`.
 
-### 9.3 Write policy
+### 9.3 Staging lifecycle and garbage collection
+
+- Immediately delete `original/` and `proposed/` content after acceptance or
+  rejection; retain only a sanitized audit manifest for seven days.
+- Remove orphaned `running` task directories after 24 hours.
+- Quarantine a corrupt manifest, warn once, and retain it for at most seven
+  days.
+- Expire and remove pending candidates after 30 days.
+- Allow at most 100 pending candidates or 50 MiB per project. At either limit,
+  stop new automatic candidate generation and warn; never silently drop a
+  pending candidate.
+- Run best-effort GC on session startup and after candidate resolution. GC
+  failure never blocks the main session.
+
+### 9.4 File changes
+
+Add:
+
+```text
+packages/core/src/memory/candidates.ts
+packages/core/src/memory/candidates.test.ts
+packages/core/src/memory/candidate-store.ts
+packages/core/src/memory/candidate-store.test.ts
+packages/core/src/memory/memory-snapshot.ts
+packages/core/src/memory/memory-snapshot.test.ts
+packages/core/src/memory/candidate-gc.ts
+packages/core/src/memory/candidate-gc.test.ts
+```
+
+Modify `packages/core/src/memory/paths.ts` and the Core export entry point to
+expose candidate APIs without activating them.
+
+### 9.5 Verification
+
+- Create, update, and delete diffs produce deterministic candidates.
+- Staging paths cannot escape the project candidate root.
+- Pending state survives restart; one corrupt manifest does not hide others.
+- Resolved content, audit manifests, orphans, quarantine, and pending TTLs
+  follow the lifecycle rules.
+- The 100-candidate/50-MiB cap stops new tasks without deleting pending work.
+- GC failure does not prevent session startup.
+
+## 10. PR 2.2b: Route extraction through staging
+
+Suggested commit:
+
+```text
+feat(memory): route extraction through candidate staging
+```
+
+### 10.1 Isolated extraction and application
+
+Extraction and consolidation agents no longer edit live memory. Restrict an
+agent to its staged copy, convert its diff to candidates, and update live files
+and indexes only through framework application.
+
+Application requires a successful schema, provenance, path, and secret check,
+plus a matching `baseDigest`. A mismatch becomes a conflict.
+
+### 10.2 Write policy
 
 ```ts
 type MemoryWritePolicy = 'off' | 'review' | 'auto-private';
@@ -1196,20 +1376,7 @@ Do not provide an unreviewed team-write mode. Existing
 `enableManagedAutoMemory=false` maps to `off`; existing `true` with no new
 setting maps to `auto-private`.
 
-### 9.4 Core file changes
-
-Add:
-
-```text
-packages/core/src/memory/candidates.ts
-packages/core/src/memory/candidates.test.ts
-packages/core/src/memory/candidate-store.ts
-packages/core/src/memory/candidate-store.test.ts
-packages/core/src/memory/memory-snapshot.ts
-packages/core/src/memory/memory-snapshot.test.ts
-```
-
-Modify:
+### 10.3 File changes
 
 | File                                                     | Change                                        |
 | -------------------------------------------------------- | --------------------------------------------- |
@@ -1223,20 +1390,47 @@ Modify:
 | `packages/core/src/config/config.ts`                     | Resolve write policy.                         |
 | `packages/core/src/index.ts`                             | Export candidate APIs.                        |
 
-### 9.5 CLI file changes
+### 10.4 Rollout and verification
 
-Add:
+- Start in `shadow`: the staging path generates and validates candidates but
+  does not mutate live memory. The legacy path remains the only live writer so
+  its result can be compared.
+- The staging path itself never changes live memory.
+- The scoped agent cannot write outside staging.
+- Concurrent live edits create conflicts instead of overwrites.
+- Rejection never changes live memory.
+- Acceptance atomically updates one file and then its index.
+- Team candidates always require review.
+- Secrets are checked at staging finalization and application.
+
+## 11. PR 2.2c: Memory Inbox UI
+
+Suggested commit:
 
 ```text
-packages/cli/src/ui/components/MemoryInboxDialog.tsx
-packages/cli/src/ui/components/MemoryInboxDialog.test.tsx
+feat(cli): add auto-memory inbox review
 ```
 
-The dialog shows scope, type, source, confidence, age, and before/after diff. It
-supports accept, reject, edit, accept-all-private, and conflict display. Team
-candidates require individual confirmation.
+### 11.1 Interaction policy
 
-Modify:
+- Extraction completion never opens a blocking dialog automatically.
+- In `review` mode, show a non-blocking badge and at most one notification per
+  session. Users open the inbox with `/memory inbox` or the Memory panel.
+- In `auto-private`, do not notify for successfully applied private candidates;
+  team, conflicted, and invalid candidates enter the inbox.
+- Group by extraction task/session, show 20 items per page, prioritize
+  conflicted, team, and high-risk items, then sort newest first.
+- Allow batch accept/reject for private candidates. Team candidates require
+  individual confirmation.
+- Show scope, type, source, confidence, age, and a before/after diff. Support
+  accept, reject, edit, and conflict handling.
+- At the 100-candidate/50-MiB limit, show a persistent warning and cleanup
+  entry point rather than hiding the backlog through visual folding.
+
+### 11.2 File changes
+
+Add `packages/cli/src/ui/components/MemoryInboxDialog.tsx` and its collocated
+test. Modify:
 
 | File                                                | Change                             |
 | --------------------------------------------------- | ---------------------------------- |
@@ -1248,20 +1442,16 @@ Modify:
 | `packages/cli/src/ui/commands/memoryCommand.ts`     | Add `/memory inbox`.               |
 | `packages/cli/src/config/settingsSchema.ts`         | Add `memory.writePolicy`.          |
 
-### 9.6 Verification
+### 11.3 Verification
 
-- Live memory is byte-identical while the agent runs.
-- The scoped agent cannot write outside staging.
-- Create, update, and delete diffs produce valid candidates.
-- Concurrent live edits create conflicts instead of overwrites.
-- Reject does not change live memory.
-- Accept atomically updates one file and rebuilds the correct index.
-- Team candidates always require review.
-- Secrets are checked at staging finalization and application.
-- Pending candidates survive restart.
-- One damaged manifest does not hide other candidates.
+- Extraction completion does not interrupt input or open a dialog.
+- The badge notifies at most once per session and reflects persisted counts.
+- Pagination, grouping, priority, and private batch operations work.
+- Team candidates cannot be batch accepted; conflicts cannot bypass digest
+  checks.
+- Capacity warnings clear as accepted or rejected items release space.
 
-## 10. PR 2.3: Deferred extraction and task-level controls
+## 12. PR 2.3: Deferred extraction and task-level controls
 
 Suggested commit:
 
@@ -1269,7 +1459,7 @@ Suggested commit:
 feat(memory): gate auto extraction by session eligibility
 ```
 
-### 10.1 Eligibility
+### 12.1 Eligibility
 
 Automatic extraction requires:
 
@@ -1283,7 +1473,7 @@ Automatic extraction requires:
 Explicit `/remember` remains immediate and writes explicit confidence. Shutdown
 does not force a new agent; the next startup scans eligible unprocessed sessions.
 
-### 10.2 External context policy
+### 12.2 External context policy
 
 ```ts
 type ExternalContextContributionPolicy = 'never' | 'review' | 'allow';
@@ -1294,7 +1484,7 @@ document connectors do not contribute automatically unless configured. Under
 `review`, all resulting candidates go to the inbox. Tool output can never be
 marked as explicit or user-asserted evidence.
 
-### 10.3 Session controls
+### 12.3 Session controls
 
 ```text
 /memory session use on|off
@@ -1305,7 +1495,14 @@ marked as explicit or user-asserted evidence.
 Incognito disables both recall and contribution for the current session without
 changing persistent settings.
 
-### 10.4 File changes
+Enabling incognito cancels unfinished extraction for the current session.
+Messages sent while incognito do not count toward the three-message threshold
+and do not update an extraction cursor or state. Disabling it later does not
+retroactively ingest those messages. Incognito affects future recall and
+contribution only: memory already injected into the model conversation cannot
+be removed, so strict isolation requires a new session.
+
+### 12.4 File changes
 
 Add:
 
@@ -1333,7 +1530,7 @@ Modify:
 | `docs/users/features/memory.md`                                | Document new behavior.                                   |
 | `docs/users/configuration/settings.md`                         | Document settings.                                       |
 
-### 10.5 Verification
+### 12.5 Verification
 
 - Short and active sessions do not extract.
 - Eligible idle sessions produce candidates once.
@@ -1347,7 +1544,7 @@ Modify:
 
 # Phase 3: Retrieval quality and lifecycle
 
-## 11. PR 3.1: Full catalog, BM25, and model reranking
+## 13. PR 3.1: Full catalog, BM25, and model reranking
 
 Suggested commit:
 
@@ -1355,16 +1552,18 @@ Suggested commit:
 feat(memory): add hybrid lexical and model retrieval
 ```
 
-### 11.1 Retrieval pipeline
+### 13.1 Retrieval pipeline
 
 1. Build a full catalog of active memory documents.
 2. Tokenize with the Phase 1 Unicode tokenizer.
-3. Rank locally with weighted BM25.
+3. Start weighted BM25 and model recall concurrently.
 4. Remove expired and superseded entries.
 5. Apply confidence, scope, and small freshness tie-breakers.
-6. Inject local fast top two.
-7. Send BM25 top 20 to model reranking.
-8. Fill the total result set to at most five.
+6. Prefer model results that settle within the initial-turn budget; otherwise
+   inject only high-confidence local matches, at most two.
+7. Send BM25 top 20 to model reranking for refinement.
+8. Fill the total result set to at most five without injecting weak matches to
+   satisfy a quota.
 
 Suggested field weights:
 
@@ -1376,21 +1575,28 @@ Suggested field weights:
 | Why/how to apply |    1.0 |
 | Type/scope       |    0.5 |
 
+These weights are starting hypotheses, not accepted constants. Build 50–100
+annotated `query -> relevant memory` cases, targeting at least 100 as the corpus
+matures, with multilingual queries and multiple valid documents. Keep a held-
+out set and compare legacy, bigram, BM25, and BM25 plus reranking with Recall@5,
+MRR@5, nDCG@5, irrelevant@5, and latency. Keep weights as code constants rather
+than user settings until evaluation demonstrates a stable benefit.
+
 Project scope wins a tie over user scope. Explicit and asserted confidence win
 over inference. Freshness cannot override a clearly stronger lexical match.
 
-### 11.2 Catalog size
+### 13.2 Catalog size
 
 Change topic scanning so recall can see up to 5,000 documents. `MEMORY.md`
 remains capped at 200 lines and 25 KB. Emit a warning and telemetry beyond the
 catalog safety limit rather than silently selecting only the newest 200.
 
-### 11.3 Usage state
+### 13.3 Usage state
 
 Store recall counts and timestamps outside Markdown to avoid mtime changes and
 team Git churn. Writes are debounced and atomic.
 
-### 11.4 File changes
+### 13.4 File changes
 
 Add:
 
@@ -1401,6 +1607,8 @@ packages/core/src/memory/retrieval-index.ts
 packages/core/src/memory/retrieval-index.test.ts
 packages/core/src/memory/memory-usage-store.ts
 packages/core/src/memory/memory-usage-store.test.ts
+packages/core/src/memory/retrieval-eval.test.ts
+packages/core/src/memory/testdata/retrieval-eval.json
 ```
 
 Modify:
@@ -1417,7 +1625,7 @@ Modify:
 | `packages/core/src/memory/forget.ts`            | Invalidate after delete or undo.                   |
 | `packages/core/src/memory/dream.ts`             | Invalidate after consolidation application.        |
 
-### 11.5 Shadow rollout
+### 13.5 Shadow rollout
 
 ```ts
 type MemoryRetrievalMode = 'legacy' | 'shadow' | 'hybrid';
@@ -1426,7 +1634,12 @@ type MemoryRetrievalMode = 'legacy' | 'shadow' | 'hybrid';
 Shadow mode runs the new local ranker but injects legacy results. Record result
 count, top-k overlap, and latency without recording document identity.
 
-### 11.6 Verification
+Keep `legacy` as the default. Enable `hybrid` only when the annotated set shows
+no Recall@5 or MRR regression, irrelevant results and initial latency meet their
+gates, and online delivery/correction signals show no regression. The
+`fast 2 + refined 3` allocation remains a maximum rather than a quota.
+
+### 13.6 Verification
 
 Create retrieval fixtures covering multilingual preferences, deadlines,
 conflicting project facts, expired entries, same-name cross-scope entries,
@@ -1441,7 +1654,7 @@ ticket IDs, URLs, and 200/1,000/5,000 document corpora.
 | Catalog build P95              | `< 500 ms` |
 | Initial-turn added P95         | `< 200 ms` |
 
-## 12. PR 3.2: Scoped consolidation, expiry, and conflicts
+## 14. PR 3.2: Scoped consolidation, expiry, and conflicts
 
 Suggested commit:
 
@@ -1449,7 +1662,7 @@ Suggested commit:
 feat(memory): consolidate user project and team scopes
 ```
 
-### 12.1 Scope policy
+### 14.1 Scope policy
 
 | Scope   |   Default interval | New sessions | Application           |
 | ------- | -----------------: | -----------: | --------------------- |
@@ -1460,7 +1673,7 @@ feat(memory): consolidate user project and team scopes
 Dream uses the same snapshot, isolated-clone, diff, and candidate pipeline as
 extraction. It no longer deletes or overwrites live memory directly.
 
-### 12.2 Expiry
+### 14.2 Expiry
 
 - `expires_at < now` marks a document expired.
 - Expired documents do not participate in ordinary recall.
@@ -1471,10 +1684,10 @@ extraction. It no longer deletes or overwrites live memory directly.
 Do not assign a mandatory TTL based only on memory type. Time-bound project
 facts may receive suggested expiry during extraction or review.
 
-### 12.3 Conflict precedence
+### 14.3 Conflict precedence
 
 ```text
-Current observed source
+Current source verified by tool or file evidence
 > QWEN.md or AGENTS.md instruction
 > project explicit/asserted
 > user explicit/asserted
@@ -1486,7 +1699,14 @@ Current observed source
 Contradictions create a candidate with `supersedes`; they do not silently
 replace an active record. The old record remains stored with superseded status.
 
-### 12.4 File changes
+Model interpretation of user intent is not a current observation. Precedence
+recommends conflict handling; it never grants silent-overwrite permission.
+Use `last_verified_at` only as a tie-breaker between evidence at the same level.
+An inferred candidate never automatically supersedes explicit or asserted
+memory and instead requires conflict review. A newly verified explicit fact may
+supersede an older explicit fact with review or authoritative evidence.
+
+### 14.4 File changes
 
 Add:
 
@@ -1500,7 +1720,7 @@ packages/core/src/memory/memory-conflicts.test.ts
 Modify:
 
 | File                                                   | Change                                         |
-| ------------------------------------------------------ | ---------------------------------------------- | ---- | ---- | ----- |
+| ------------------------------------------------------ | ---------------------------------------------- |
 | `packages/core/src/memory/dream.ts`                    | Produce candidates rather than live mutations. |
 | `packages/core/src/memory/dreamAgentPlanner.ts`        | Accept scope and staging paths.                |
 | `packages/core/src/memory/manager.ts`                  | Per-scope scheduling and locks.                |
@@ -1509,10 +1729,10 @@ Modify:
 | `packages/core/src/memory/candidates.ts`               | Consolidation candidate types.                 |
 | `packages/core/src/memory/recall.ts`                   | Filter expired and superseded entries.         |
 | `packages/core/src/memory/indexer.ts`                  | Index active entries only.                     |
-| `packages/cli/src/ui/commands/dreamCommand.ts`         | Add `--scope project                           | user | team | all`. |
+| `packages/cli/src/ui/commands/dreamCommand.ts`         | Add a project/user/team/all scope selector.    |
 | `packages/cli/src/ui/components/MemoryInboxDialog.tsx` | Render merge, supersede, and expiry actions.   |
 
-### 12.5 Verification
+### 14.5 Verification
 
 - Each consolidation scope reads and proposes changes only for that scope.
 - Team consolidation never applies directly.
@@ -1522,7 +1742,7 @@ Modify:
 - Per-scope locks work across processes.
 - Cancellation removes incomplete staging without touching live memory.
 
-## 13. PR 3.3: Routing, budgets, models, and project identity
+## 15. PR 3.3: Routing, budgets, models, and project identity
 
 Suggested commit:
 
@@ -1530,7 +1750,7 @@ Suggested commit:
 feat(memory): add routing budgets and project identity controls
 ```
 
-### 13.1 Model and cost controls
+### 15.1 Model and cost controls
 
 ```json
 {
@@ -1539,7 +1759,7 @@ feat(memory): add routing budgets and project identity controls
     "recallModel": "fast-model-id",
     "consolidationModel": "main-model-id",
     "dailySideQueryTokenBudget": 100000,
-    "retrievalMode": "hybrid"
+    "retrievalMode": "legacy"
   }
 }
 ```
@@ -1551,7 +1771,7 @@ After the daily budget is exhausted:
 - Automatic consolidation is skipped.
 - Explicit remember remains available and reports budget state.
 
-### 13.2 Durable knowledge routing
+### 15.2 Durable knowledge routing
 
 ```ts
 type DurableKnowledgeTarget = 'instruction' | 'memory' | 'skill' | 'ignore';
@@ -1577,7 +1797,7 @@ packages/core/src/memory/memory-routing.test.ts
 Modify `extractionAgentPlanner.ts`, `prompt.ts`, `skillReviewAgentPlanner.ts`,
 `pending-skills.ts`, `MemoryInboxDialog.tsx`, and `SkillReviewDialog.tsx`.
 
-### 13.3 Project identity
+### 15.3 Project identity
 
 ```ts
 type MemoryProjectIdentity = 'worktree' | 'repository';
@@ -1590,7 +1810,7 @@ in the active worktree so changes remain visible in its Git diff.
 Switching identity never automatically moves or deletes memory. The Memory
 dialog shows the active location and offers migration preview separately.
 
-### 13.4 File changes
+### 15.4 File changes
 
 | File                                                           | Change                                                     |
 | -------------------------------------------------------------- | ---------------------------------------------------------- |
@@ -1601,7 +1821,7 @@ dialog shows the active location and offers migration preview separately.
 | `packages/vscode-ide-companion/schemas/settings.schema.json`   | Regenerate schema.                                         |
 | `packages/desktop/packages/shared/src/config/qwen-settings.ts` | Update desktop types.                                      |
 
-### 13.5 Verification
+### 15.5 Verification
 
 - Side queries use their configured models without changing the main session
   model.
@@ -1614,9 +1834,9 @@ dialog shows the active location and offers migration preview separately.
 
 ---
 
-# 14. Complete file impact
+# 16. Complete file impact
 
-## 14.1 Primary existing core files
+## 16.1 Primary existing core files
 
 ```text
 packages/core/src/core/client.ts
@@ -1649,14 +1869,16 @@ packages/core/src/telemetry/metrics.ts
 packages/core/src/telemetry/index.ts
 ```
 
-## 14.2 Proposed core files
+## 16.2 Proposed core files
 
 ```text
 packages/core/src/memory/managed-memory-secret-guard.ts
 packages/core/src/memory/memory-document.ts
+packages/core/src/memory/memory-provenance-store.ts
 packages/core/src/memory/memory-snapshot.ts
 packages/core/src/memory/candidates.ts
 packages/core/src/memory/candidate-store.ts
+packages/core/src/memory/candidate-gc.ts
 packages/core/src/memory/extraction-eligibility.ts
 packages/core/src/memory/extraction-state.ts
 packages/core/src/memory/bm25.ts
@@ -1669,7 +1891,7 @@ packages/core/src/memory/memory-routing.ts
 
 Each new production file must have a collocated Vitest file.
 
-## 14.3 CLI and configuration files
+## 16.3 CLI and configuration files
 
 ```text
 packages/cli/src/config/settingsSchema.ts
@@ -1690,9 +1912,9 @@ docs/users/features/memory.md
 docs/users/configuration/settings.md
 ```
 
-# 15. Verification strategy
+# 17. Verification strategy
 
-## 15.1 Focused unit tests
+## 17.1 Focused unit tests
 
 Run tests from their package directories:
 
@@ -1701,14 +1923,17 @@ cd packages/core
 npx vitest run src/memory/recall.test.ts
 npx vitest run src/memory/relevanceSelector.test.ts
 npx vitest run src/memory/memory-document.test.ts
+npx vitest run src/memory/memory-provenance-store.test.ts
 npx vitest run src/memory/candidates.test.ts
 npx vitest run src/memory/candidate-store.test.ts
+npx vitest run src/memory/candidate-gc.test.ts
 npx vitest run src/memory/memory-snapshot.test.ts
 npx vitest run src/memory/extraction-eligibility.test.ts
 npx vitest run src/memory/extraction-state.test.ts
 npx vitest run src/memory/bm25.test.ts
 npx vitest run src/memory/retrieval-index.test.ts
 npx vitest run src/memory/memory-usage-store.test.ts
+npx vitest run src/memory/retrieval-eval.test.ts
 npx vitest run src/memory/consolidation-policy.test.ts
 npx vitest run src/memory/memory-conflicts.test.ts
 npx vitest run src/memory/memory-routing.test.ts
@@ -1730,7 +1955,7 @@ npx vitest run src/ui/hooks/slashCommandProcessor.test.ts
 npx vitest run src/acp-integration/session/Session.test.ts
 ```
 
-## 15.2 Integration and fault injection
+## 17.2 Integration and fault injection
 
 Exercise the full chain:
 
@@ -1750,7 +1975,7 @@ Inject failures for agent timeout, no tool calls, corrupt manifests, concurrent
 target edits, ENOSPC, EACCES, symlinked team roots, diverged Git branches,
 unsettled recall models, shutdown, and hard/critical memory pressure.
 
-## 15.3 E2E plans
+## 17.3 E2E plans
 
 Create ignored working plans:
 
@@ -1776,7 +2001,7 @@ Minimum scenarios:
 12. Consolidation remains scope-isolated.
 13. Worktree and repository identity modes behave as documented.
 
-## 15.4 Performance benchmark
+## 17.4 Performance benchmark
 
 Create an ignored benchmark helper:
 
@@ -1788,7 +2013,7 @@ Measure cold and warm catalog build, BM25 query time, fast recall, initial-turn
 latency, prompt characters, and heap growth at 10, 100, 1,000, and 5,000
 documents across English, Chinese, Japanese, and mixed queries.
 
-## 15.5 Final checks
+## 17.5 Final checks
 
 Every PR runs focused tests plus:
 
@@ -1804,19 +2029,21 @@ Each completed phase runs:
 npm run preflight
 ```
 
-# 16. Rollout and rollback
+# 18. Rollout and rollback
 
-## 16.1 Rollout
+## 18.1 Rollout
 
 1. Release Phase 1 without format migration.
 2. Release the v2 reader before enabling v2 writers.
-3. Run candidate creation in shadow mode before showing the inbox by default.
-4. Preserve `auto-private` semantics for existing enabled installations.
-5. Run hybrid retrieval in shadow mode and compare overlap before injection.
-6. Enable project and user consolidation separately.
-7. Keep team consolidation review-only.
+3. Release candidate staging infrastructure without behavior changes.
+4. Route extraction through staging in shadow mode before enabling application.
+5. Release the non-blocking inbox before making `review` selectable.
+6. Preserve `auto-private` semantics for existing enabled installations.
+7. Run hybrid retrieval in shadow mode and meet quality gates before injection.
+8. Enable project and user consolidation separately.
+9. Keep team consolidation review-only.
 
-## 16.2 Rollback
+## 18.2 Rollback
 
 | Change             | Rollback                                                 |
 | ------------------ | -------------------------------------------------------- |
@@ -1832,7 +2059,7 @@ npm run preflight
 No phase automatically deletes old memory directories or rewrites every stored
 document.
 
-# 17. Completion metrics
+# 19. Completion metrics
 
 | Metric                                    |     Target |
 | ----------------------------------------- | ---------: |
@@ -1850,7 +2077,7 @@ document.
 | v1 compatibility                          |     `100%` |
 | Observable automatic operations           |     `100%` |
 
-# 18. Suggested reviewers
+# 20. Suggested reviewers
 
 | Area                            | Suggested reviewers based on recent ownership   |
 | ------------------------------- | ----------------------------------------------- |
