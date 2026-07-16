@@ -145,13 +145,19 @@ for (const theme of THEMES) {
       // Gate on the page heading — a stable structural role, unlike card text a
       // refactor could reshape or that could also match a toast/sidebar — to
       // prove the manager PAGE (not a transcript/dialog) is reachable, then
-      // confirm a seeded card rendered via its button role.
+      // confirm seeded cards rendered via their button role — both an enabled
+      // marketplace one and the disabled, local-source one, so a regression
+      // that hides `isActive: false` or local rows fails an assertion rather
+      // than only differing in the (visually reviewed) screenshot.
       await submitLocalCommand(page, '/extensions');
       await expect(
         page.getByRole('heading', { name: 'Manage Extensions' }),
       ).toBeVisible();
       await expect(
         page.getByRole('button', { name: 'Context7' }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole('button', { name: 'Local Notes' }),
       ).toBeVisible();
       await captureScreenshot(page, `extensions-manager-${theme}`);
     });
