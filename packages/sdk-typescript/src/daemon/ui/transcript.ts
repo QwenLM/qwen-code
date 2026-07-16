@@ -122,9 +122,14 @@ export function appendLocalUserTranscriptMessage(
 // mutate a COW-shared blocks array in place (see reduceDaemonTranscriptEvents).
 // This is a dev/CI safety net; in production it is pure O(blocks) overhead on
 // every dispatch and the reducer's own mutation discipline (takeBlocksOwnership)
-// does not depend on it, so skip it there. Bundlers statically replace
-// `process.env.NODE_ENV`, so this folds to `false` in production builds.
-const FREEZE_TRANSCRIPT_BLOCKS = process.env.NODE_ENV !== 'production';
+// does not depend on it, so skip it there. App bundlers statically replace
+// `process.env.NODE_ENV`, folding the check to `false`. The `typeof process`
+// guard keeps an unbundled browser consumer from throwing a ReferenceError —
+// this module sits on the browser-hostile `daemon/ui` surface and Vite lib
+// builds preserve `process.env.NODE_ENV` in their output — matching the
+// existing SDK idiom (see ProcessTransport, cliPath).
+const FREEZE_TRANSCRIPT_BLOCKS =
+  typeof process !== 'undefined' && process.env.NODE_ENV !== 'production';
 
 export function reduceDaemonTranscriptEvents(
   state: DaemonTranscriptState,

@@ -73,10 +73,13 @@ on a macrotask boundary, instead of one dispatch per event.
 Why macrotask, not microtask: the loop is `for await` over an async generator,
 so a burst of already-buffered events drains back-to-back via microtasks. A
 `queueMicrotask` flush would run between every event (no coalescing). A
-macrotask flush (`requestAnimationFrame` where available, `setTimeout(0)`
-fallback for Node/tests) only runs once the generator blocks on a genuinely new
-network event — so a whole burst collapses into one dispatch, while steady
-streaming stays at roughly one dispatch per frame.
+macrotask flush (`setTimeout(0)`) only runs once the generator blocks on a
+genuinely new network event — so a whole burst collapses into one dispatch,
+while steady streaming stays at roughly one dispatch per network chunk.
+`requestAnimationFrame` was rejected: it never fires in a hidden tab (the exact
+resume scenario), so rAF-scheduled flushes would stall while backgrounded;
+background `setTimeout` throttling only makes each batch larger, which is
+harmless.
 
 Batcher API (local to the `run()` scope):
 
@@ -145,13 +148,16 @@ regression still throws during development and CI.
 
 ## Verification Plan
 
-- Unit-test the batcher: a burst of many events yields one (or few)
-  `store.dispatch` calls and a correct, fully-ordered transcript; control
-  events (`turn_complete`, `replay_complete`, `prompt.cancelled`,
-  `state_resync_required`) stay correctly ordered relative to buffered content;
-  unmount flushes the buffer.
-- Unit-test that `reduceDaemonTranscriptEvents` does not freeze `blocks` in
-  production mode and still freezes in dev.
+- Unit-test the batcher: a burst of many events yields **exactly one**
+  `store.dispatch` call (a dispatch-count spy pins the coalescing property, so a
+  regression to per-event dispatch fails) and a correct, fully-ordered
+  transcript; control events (`turn_complete`, `replay_complete`,
+  `prompt.cancelled`, `state_resync_required`) stay correctly ordered relative
+  to buffered content; unmount flushes the buffer instead of dropping it.
+- The dev-only freeze is gated by `typeof process !== 'undefined' &&
+process.env.NODE_ENV !== 'production'`: on in dev/CI (where the reducer
+  mutation-discipline tests run), off in production by construction. A dedicated
+  NODE_ENV-switch unit test was judged more brittle than the guarantee it pins.
 - Regression: existing `DaemonSessionProvider` and transcript reducer tests stay
   green.
 - Final: `npm run build`, `npm run typecheck`, `npm run lint`, and targeted

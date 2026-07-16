@@ -1597,10 +1597,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       const session = sessionRef.current;
       disposed = true;
       abort.abort();
-      // Drop any buffered transcript events and cancel the scheduled flush —
-      // the loop is being torn down (session switch or unmount) and the daemon
-      // remains the source of truth, so a re-run re-fetches from it.
-      clearPendingTranscriptEvents();
+      // Apply buffered transcript events before tearing down (do NOT drop them).
+      // The SSE client advances lastSeenEventId as each event is *yielded* —
+      // before our batched dispatch runs — so dropping here would make a
+      // same-session incremental resume (the keepSessionForNextEffect path)
+      // skip them permanently. Flushing is free and safe: the store notifies
+      // via queueMicrotask, so there is no synchronous setState; on unmount it
+      // is an orphaned dispatch and on a session switch the next run resets the
+      // store anyway.
+      flushTranscriptSync();
       hasCurrentSessionActivePromptRef.current = () => false;
       setPromptStatus('idle');
       clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);

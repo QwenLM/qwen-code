@@ -13,6 +13,7 @@ import type {
   DaemonEvent,
   NonBlockingPromptAccepted,
   DaemonTranscriptBlock,
+  DaemonTranscriptStore,
   DaemonUiSessionActions,
   PromptResult,
 } from '@qwen-code/sdk/daemon';
@@ -26,6 +27,7 @@ import {
   useDaemonStreamingState,
   useDaemonTranscriptBlocks,
   useDaemonTranscriptState,
+  useDaemonTranscriptStore,
   useDaemonWorkspaceEventSignals,
   type DaemonSessionProviderProps,
   type DaemonConnectionState,
@@ -2568,6 +2570,24 @@ describe('DaemonSessionProvider', () => {
     // events.
     const CHUNK_COUNT = 100;
     const burstDrained = createDeferred<void>();
+    // Spy on the store factory to record how many events each dispatch
+    // receives. Batched dispatch must hand the whole burst to a single reducer
+    // pass; a regression to per-event dispatch would surface as many
+    // single-event dispatches and fail the batch-size assertion below.
+    const sdk = await import('@qwen-code/sdk/daemon');
+    const realCreateStore = sdk.createDaemonTranscriptStore;
+    const dispatchBatchSizes: number[] = [];
+    const createStoreSpy = vi
+      .spyOn(sdk, 'createDaemonTranscriptStore')
+      .mockImplementation((seed) => {
+        const store = realCreateStore(seed);
+        const realDispatch = store.dispatch.bind(store);
+        store.dispatch = (event) => {
+          dispatchBatchSizes.push(Array.isArray(event) ? event.length : 1);
+          return realDispatch(event);
+        };
+        return store;
+      });
     const session = createMockSession({
       events: async function* burstEvents(opts: { signal?: AbortSignal } = {}) {
         for (let i = 0; i < CHUNK_COUNT; i += 1) {
@@ -2620,6 +2640,80 @@ describe('DaemonSessionProvider', () => {
       expect(idx).toBeGreaterThan(lastIndex);
       lastIndex = idx;
     }
+    // The whole burst reached the store in a single dispatch — the coalescing
+    // property this fix exists to provide. Order/completeness alone would still
+    // pass under a per-event dispatch regression.
+    expect(dispatchBatchSizes).toContain(CHUNK_COUNT);
+    createStoreSpy.mockRestore();
+  });
+
+  it('flushes buffered transcript events on unmount instead of dropping them', async () => {
+    // The SSE client advances lastSeenEventId as each event is yielded, before
+    // the batched dispatch runs. If teardown dropped the pending buffer, a
+    // same-session incremental resume would skip those events. The cleanup must
+    // flush, not drop — assert a still-buffered event lands in the store on
+    // unmount (the macrotask flush never runs here).
+    const eventBuffered = createDeferred<void>();
+    const session = createMockSession({
+      events: async function* oneChunkThenIdle(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        yield {
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'buffered-chunk' },
+            },
+          },
+        };
+        eventBuffered.resolve();
+        // Stay alive so the event sits in the pending buffer (no loop-end
+        // flush) until the test unmounts the provider.
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let store: DaemonTranscriptStore | undefined;
+    function Harness() {
+      store = useDaemonTranscriptStore();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await eventBuffered.promise;
+      await flushPromises();
+    });
+
+    expect(store).toBeDefined();
+    // The macrotask flush has not run, so the event is still buffered.
+    expect(
+      store?.getSnapshot().blocks.some((block) => block.kind === 'assistant'),
+    ).toBe(false);
+
+    await act(async () => {
+      root?.unmount();
+      root = null;
+    });
+
+    // Unmount flushed the buffered event into the store rather than dropping it.
+    const assistant = store
+      ?.getSnapshot()
+      .blocks.find((block) => block.kind === 'assistant') as
+      | { text?: string }
+      | undefined;
+    expect(assistant?.text ?? '').toContain('buffered-chunk');
   });
 
   it('does not insert abort errors from shell commands into the transcript', async () => {
