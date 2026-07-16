@@ -229,12 +229,12 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('"${N_FAILED_CHECKS}" -eq 0');
     expect(reviewScanJob).toContain('${N_FAILED_CHECKS} failed check(s) new');
     expect(reviewScanJob).toContain('.completedAt // .updatedAt // ""');
-    expect(reviewScanJob.indexOf('EFF_WM="${PUSH_WM}"')).toBeLessThan(
+    expect(reviewScanJob.indexOf('EFF_WM="${EVAL_WM}"')).toBeLessThan(
       reviewScanJob.indexOf('N_FAILED_CHECKS='),
     );
     expect(reviewScanJob).toContain('echo "targets=[]" >> "${GITHUB_OUTPUT}"');
     expect(reviewScanJob).toContain(
-      'PR has pending checks; skipping until the current verification finishes',
+      'recent pending checks; skipping until verification finishes',
     );
   });
 
@@ -1070,12 +1070,16 @@ describe('qwen-autofix workflow', () => {
       "NEWEST: '${{ steps.prepare.outputs.newest }}'",
     );
     expect(reviewAddressReportStep).toContain('"${DRY_RUN}" != "true"');
-    expect(reviewAddressReportStep).toContain('-s "${WORKDIR}/handoff.md"');
+    // Handoff no longer requires the agent to have written handoff.md: an infra
+    // or agent crash before the verify gate (OUTCOME unset, JOB_STATUS failure)
+    // must still post a handoff + marker so the loop never goes silent.
+    expect(reviewAddressReportStep).toContain('POST_HANDOFF=true');
+    expect(reviewAddressReportStep).toContain('"${JOB_STATUS:-}" == "failure"');
     expect(reviewAddressReportStep).toContain(
-      '<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} -->',
+      '<!-- autofix-eval ts=${MARK_TS} acted=false round=${NEXT_ROUND} -->',
     );
     expect(reviewAddressReportStep).toContain(
-      'Could not address the latest review feedback automatically',
+      'Could not address the latest feedback automatically',
     );
     expect(reviewAddressReportStep).toContain('gh pr comment "${PR}"');
     expect(reviewAddressReportStep).toContain(

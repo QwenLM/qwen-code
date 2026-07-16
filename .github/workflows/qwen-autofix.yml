@@ -25,13 +25,6 @@ on:
   pull_request_review:
     types:
       - 'submitted'
-  # A maintainer @-mentioning the bot on its PR (e.g. "@qwen-code-dev-bot the
-  # build failed") should re-trigger the review loop promptly instead of waiting
-  # for the next scheduled tick. The route job gates this to trusted senders on
-  # bot-authored PRs; review-scan re-validates PR ownership.
-  issue_comment:
-    types:
-      - 'created'
   schedule:
     - cron: '*/10 * * * *' # Review first; issue fallback only when no PR needs work
   workflow_dispatch:
@@ -132,10 +125,6 @@ jobs:
           PR_NUMBER_EVENT: '${{ github.event.pull_request.number }}'
           PR_HEAD_REPO: '${{ github.event.pull_request.head.repo.full_name }}'
           PR_BASE_REF: '${{ github.event.pull_request.base.ref }}'
-          # issue_comment events. The body is kept in an env var (never
-          # interpolated into the shell) as a prompt-injection-safe boundary.
-          COMMENT_BODY: '${{ github.event.comment.body }}'
-          ISSUE_IS_PR: '${{ github.event.issue.pull_request.url }}'
         run: |-
           DO_ISSUE=false
           DO_REVIEW=false
@@ -240,44 +229,6 @@ jobs:
                       echo "::notice::Issue #${ISSUE_NUMBER:-n/a} needs both ${READY_FOR_AGENT_LABEL} and ${AUTOFIX_APPROVED_LABEL} before autofix can run."
                     fi
                     echo "🧭 issue event ignored: state_open=$([[ "${ISSUE_STATE}" == 'open' ]] && echo true || echo false) bug=${issue_is_bug} ready=${issue_is_ready} approved=${issue_is_approved} trigger_label=${label_is_trigger} sender_permission='${sender_permission:-none}' sender_trusted=${sender_is_trusted} label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
-                  fi
-                fi
-              fi
-              # A trusted maintainer @-mentioning the bot on its own PR forces a
-              # prompt review pass. review-scan re-validates that the PR is an
-              # open, in-repo, main-targeting, bot-authored PR, so here we only
-              # gate on the mention and the sender's trust.
-              if [[ "${EVENT_NAME}" == 'issue_comment' ]]; then
-                DO_ISSUE=false
-                DO_REVIEW=false
-                if [[ -z "${ISSUE_IS_PR}" ]]; then
-                  echo "🧭 issue_comment ignored: not a pull request comment"
-                elif [[ "${COMMENT_BODY}" != *"@${AUTOFIX_BOT}"* ]]; then
-                  echo "🧭 issue_comment ignored: does not @-mention ${AUTOFIX_BOT}"
-                else
-                  sender_permission=''
-                  sender_is_trusted=false
-                  if [[ "${SENDER_LOGIN}" == "${REVIEW_BOT}" ]]; then
-                    sender_is_trusted=true
-                  elif [[ -n "${SENDER_LOGIN}" ]]; then
-                    api_error_file="$(mktemp)"
-                    if sender_permission="$(gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission" --jq '.permission // ""' 2>"${api_error_file}")"; then
-                      case "${sender_permission}" in
-                        admin|maintain|write) sender_is_trusted=true ;;
-                      esac
-                    else
-                      api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
-                      echo "::warning::Permission API call failed for ${SENDER_LOGIN}: ${api_error:-unknown error}"
-                      sender_permission=''
-                    fi
-                    rm -f "${api_error_file}"
-                  fi
-                  if [[ "${sender_is_trusted}" == "true" ]]; then
-                    DO_REVIEW=true
-                    ROUTE_PR="$(sanitize_number "${ISSUE_NUMBER}")"
-                    echo "🧭 issue_comment on bot PR #${ISSUE_NUMBER} by ${SENDER_LOGIN} (${sender_permission:-review-bot}) → review phase"
-                  else
-                    echo "🧭 issue_comment ignored: sender '${SENDER_LOGIN}' permission='${sender_permission:-none}' is not trusted"
                   fi
                 fi
               fi
@@ -1405,46 +1356,6 @@ jobs:
               | select((.completedAt // .updatedAt // "") > $wm)
               | "- \(((.name // .workflowName) // "external check") | gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]): \(.conclusion // .state // "?")"' \
               "${WORKDIR}/checks.json"
-            echo
-            echo "## Failing step logs (excerpt)"
-            echo "The failing STEP name and its log for each failed CI check below."
-            echo "Read these FIRST: the real failure — and often the exact fix, e.g. a"
-            echo "command to run — is stated here. A check named \"Test\" can fail on a"
-            echo "non-test step (schema/format/lint guard); do NOT assume it is a unit"
-            echo "test and do NOT declare it \"pre-existing\" without reading the step."
-            # For each failed non-autofix check, pull the failing job's failed-step
-            # log (job id parsed from detailsUrl), then surface high-signal lines
-            # plus a tail for context. Capped in count and size to keep feedback
-            # small. gh uses this step's CI_DEV_BOT_PAT, which can read Actions logs.
-            FAILED_JOB_IDS="$(jq -r --arg wm "${WATERMARK}" '
-              .[]
-              | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
-              | select((.workflowName // "") != "Qwen Autofix")
-              | select((.completedAt // .updatedAt // "") > $wm)
-              | ((.detailsUrl // .targetUrl // "") | [ scan("/job/([0-9]+)") ] | .[0][0] // empty)' \
-              "${WORKDIR}/checks.json" 2> /dev/null | awk 'NF' | head -3)"
-            if [[ -z "${FAILED_JOB_IDS}" ]]; then
-              echo "(no per-step logs available)"
-            else
-              for job_id in ${FAILED_JOB_IDS}; do
-                job_log="${WORKDIR}/joblog-${job_id}.txt"
-                gh run view --repo "${REPO}" --job "${job_id}" --log-failed 2> /dev/null \
-                  | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' \
-                  | awk -F'\t' 'NF >= 3 { print "[" $2 "] " $3 }' > "${job_log}" || true
-                echo
-                echo "### Failing job ${job_id}"
-                echo '```text'
-                if [[ -s "${job_log}" ]]; then
-                  grep -iE 'error|please run|out of date|not up to date|npm run |[✕✗]|fail(ed|ure)?|expected|received|assert' "${job_log}" | head -20 || true
-                  echo '… (log tail) …'
-                  tail -c 1000 "${job_log}" || true
-                else
-                  echo '(log unavailable)'
-                fi
-                echo
-                echo '```'
-              done
-            fi
           } > "${WORKDIR}/feedback.md"
           echo '--- feedback.md ---'
           cat "${WORKDIR}/feedback.md"
