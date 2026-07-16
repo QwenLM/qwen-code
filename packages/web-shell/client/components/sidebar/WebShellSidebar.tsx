@@ -3440,11 +3440,6 @@ export function WebShellSidebar({
                             }
                             client={workspace.client}
                             reloadToken={workspaceSessionsReloadToken}
-                            primaryLabel={
-                              displayedWorkspaces.length > 1
-                                ? t('sidebar.workspacePrimary')
-                                : ''
-                            }
                             untrustedLabel={t('sidebar.workspaceUntrusted')}
                             readOnlyLabel={t('sidebar.workspaceReadOnly')}
                             trustToOpenLabel={t('sidebar.workspaceTrustToOpen')}

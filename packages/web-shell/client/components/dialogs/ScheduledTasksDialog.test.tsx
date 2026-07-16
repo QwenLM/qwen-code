@@ -947,11 +947,12 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     expect(actions.listScheduledTasks).toHaveBeenCalledWith('id-other');
     expect(actions.listScheduledTasks).not.toHaveBeenCalledWith('id-locked');
 
-    // Each card carries a workspace badge (title = cwd), the primary marked.
+    // Each card carries a workspace badge (title = cwd), labeled by basename.
     const primaryBadge = document.querySelector('[title="/repo/main"]');
     const secondaryBadge = document.querySelector('[title="/repo/other"]');
     expect(primaryBadge?.textContent).toContain('main');
-    expect(primaryBadge?.textContent).toContain('(primary)');
+    // The primary is no longer singled out with a "(primary)" tag.
+    expect(primaryBadge?.textContent).not.toContain('(primary)');
     expect(secondaryBadge?.textContent).toContain('other');
   });
 
