@@ -1082,6 +1082,29 @@ describe('StreamingToolCallParser', () => {
       expect(call3?.args).toEqual({ c: 3 });
     });
 
+    it('routes an id-less continuation to the newest of three colliding openers', () => {
+      // Three tool calls reuse provider index 0 in sequence, each opener remapping
+      // to a fresh slot. An id-less continuation after the third opener must land on
+      // the third call's slot. Guarding the remap overwrite to keep the *first*
+      // mapping would pin the remap at call_2's slot and misroute this chunk.
+      parser.addChunk(0, '{"a":1}', 'call_1', 'function1'); // slot 0
+      parser.addChunk(0, '', 'call_2', 'function2'); // opener -> slot 1
+      parser.addChunk(0, '{"b":2}'); // call_2 args -> slot 1
+      const opener3 = parser.addChunk(0, '', 'call_3', 'function3'); // opener -> slot 2
+      expect(opener3.actualIndex).toBe(2);
+
+      const continuation = parser.addChunk(0, '{"c":3}'); // id-less -> must be call_3's slot
+      expect(continuation.actualIndex).toBe(2);
+
+      const completed = parser.getCompletedToolCalls();
+      expect(completed.find((tc) => tc.id === 'call_3')?.args).toEqual({
+        c: 3,
+      });
+      expect(completed.find((tc) => tc.id === 'call_2')?.args).toEqual({
+        b: 2,
+      });
+    });
+
     it('should handle rapid tool call switching at same index', () => {
       // Rapid switching between different tool calls at index 0
       parser.addChunk(0, '{"step1":', 'call_1', 'function1');
