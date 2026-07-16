@@ -34,12 +34,16 @@ export interface VisionModelCandidate {
   baseUrl?: string;
   modalities?: InputModalities;
   isVision?: boolean;
+  capabilities?: { agent?: boolean };
+  fastOnly?: boolean;
+  voiceOnly?: boolean;
 }
 
 /** The model/endpoint selected for a vision bridge call. */
 export interface VisionBridgeModelSelection {
   id: string;
   baseUrl?: string;
+  agentCapable?: true;
 }
 
 /**
@@ -55,8 +59,44 @@ export function isImageCapable(model: VisionModelCandidate): boolean {
   );
 }
 
+export function isFullTurnVisionCapable(model: VisionModelCandidate): boolean {
+  return (
+    !model.fastOnly &&
+    !model.voiceOnly &&
+    model.capabilities?.agent === true &&
+    isImageCapable(model)
+  );
+}
+
+export function getFullTurnVisionModelId(
+  model: Pick<VisionModelCandidate, 'id' | 'authType'>,
+): string {
+  return model.authType && !model.id.startsWith(`${model.authType}:`)
+    ? `${model.authType}:${model.id}`
+    : model.id;
+}
+
 function toSelection(model: VisionModelCandidate): VisionBridgeModelSelection {
-  return { id: model.id, ...(model.baseUrl && { baseUrl: model.baseUrl }) };
+  const agentCapable = isFullTurnVisionCapable(model);
+  return {
+    id: agentCapable ? getFullTurnVisionModelId(model) : model.id,
+    ...(model.baseUrl && { baseUrl: model.baseUrl }),
+    ...(agentCapable && { agentCapable: true }),
+  };
+}
+
+export function getVisionModelSelector(
+  selection: VisionBridgeModelSelection,
+): string {
+  return selection.baseUrl
+    ? `${selection.id}\0${selection.baseUrl}`
+    : selection.id;
+}
+
+export function getFullTurnVisionModelSelector(
+  selection: VisionBridgeModelSelection,
+): string {
+  return `${getVisionModelSelector(selection)}\0`;
 }
 
 /**
@@ -303,6 +343,14 @@ function hostOf(baseUrl?: string): string | undefined {
   }
 }
 
+export function formatFullTurnVisionNotice(
+  selection: VisionBridgeModelSelection,
+): string {
+  const endpoint = hostOf(selection.baseUrl);
+  const target = endpoint ? `${selection.id} (${endpoint})` : selection.id;
+  return `Routing this image turn to ${target}; retries and tool continuations will stay on that model until the turn ends.`;
+}
+
 /**
  * Build the focus-hint text part appended after the images. The user's intent
  * guides which details to transcribe thoroughly; it is explicitly not a question
@@ -430,7 +478,7 @@ export async function runVisionBridge(params: {
   const selection = config.getDefaultVisionBridgeModel?.();
   const modelId = selection?.id;
   const baseUrl = selection?.baseUrl;
-  const modelForApi = baseUrl && modelId ? `${modelId}\0${baseUrl}` : modelId;
+  const modelForApi = selection ? getVisionModelSelector(selection) : undefined;
   if (!modelForApi || !modelId) {
     return failure(
       'no image-capable model is available for the vision bridge',

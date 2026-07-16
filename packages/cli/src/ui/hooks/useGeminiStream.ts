@@ -53,6 +53,8 @@ import {
   runVisionBridge,
   shouldRunVisionBridge,
   formatVisionBridgeNotice,
+  formatFullTurnVisionNotice,
+  getFullTurnVisionModelSelector,
   hasImageParts,
   splitImageParts,
   generateToolUseSummary,
@@ -899,15 +901,41 @@ export const useGeminiStream = (
       timestamp: number,
       signal: AbortSignal,
     ): Promise<{ parts: PartListUnion | null; shouldProceed: boolean }> => {
-      if (
-        parts === null ||
-        !hasImageParts(parts) ||
-        !shouldRunVisionBridge(config)
-      ) {
+      if (parts === null || !hasImageParts(parts)) {
         return { parts, shouldProceed: true };
+      }
+      if (modelOverrideRef.current?.endsWith('\0')) {
+        return { parts, shouldProceed: true };
+      }
+      if (inlineModelOverrideActiveRef.current) {
+        return { parts, shouldProceed: true };
+      }
+      if (!shouldRunVisionBridge(config)) {
+        return { parts, shouldProceed: true };
+      }
+      if (signal.aborted) {
+        return { parts: null, shouldProceed: false };
       }
 
       debugLogger.debug('vision bridge: gate matched, running conversion');
+      const fullTurnModel = config.getDefaultVisionBridgeModel();
+      if (fullTurnModel?.agentCapable) {
+        applyModelOverride(
+          modelOverrideRef,
+          inlineModelOverrideActiveRef,
+          getFullTurnVisionModelSelector(fullTurnModel),
+          false,
+        );
+        addItem(
+          {
+            type: MessageType.VISION_NOTICE,
+            text: formatFullTurnVisionNotice(fullTurnModel),
+          },
+          timestamp,
+        );
+        return { parts, shouldProceed: true };
+      }
+
       const bridgeResult = await runVisionBridge({ config, parts, signal });
       debugLogger.debug(
         `vision bridge: status=${bridgeResult.status} applied=${bridgeResult.applied} model=${bridgeResult.modelId ?? '(none)'}`,
@@ -1051,6 +1079,16 @@ export const useGeminiStream = (
                   );
                 }
               }
+
+              const bridgeResult = await applyVisionBridgeIfNeeded(
+                localQueryToSendToGemini,
+                userMessageTimestamp,
+                abortSignal,
+              );
+              if (!bridgeResult.shouldProceed) {
+                return { queryToSend: null, shouldProceed: false };
+              }
+              localQueryToSendToGemini = bridgeResult.parts;
 
               return {
                 queryToSend: localQueryToSendToGemini,
@@ -3008,11 +3046,14 @@ export const useGeminiStream = (
       // while it is active.
       for (const toolCall of geminiTools) {
         if ('modelOverride' in toolCall.response) {
-          if (inlineModelOverrideActiveRef.current) {
+          if (
+            inlineModelOverrideActiveRef.current ||
+            modelOverrideRef.current?.endsWith('\0')
+          ) {
             debugLogger.debug(
               `skill-tool model override (${String(
                 toolCall.response.modelOverride,
-              )}) blocked: inline override active`,
+              )}) blocked: turn model override active`,
             );
           } else {
             applyModelOverride(

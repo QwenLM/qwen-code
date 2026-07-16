@@ -5380,6 +5380,166 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('uses one exact image route across provider retries', async () => {
+      const capacityError = Object.assign(
+        new Error('temporarily unavailable'),
+        {
+          status: 503,
+        },
+      );
+      const routeGenerateContentStream = vi
+        .fn()
+        .mockRejectedValueOnce(capacityError)
+        .mockResolvedValueOnce(
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: { parts: [{ text: 'seen' }] },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })(),
+        );
+      const routeGenerator = {
+        ...mockContentGenerator,
+        generateContentStream: routeGenerateContentStream,
+      } as ContentGenerator;
+      const routeSelector =
+        'openai:vision-agent\0https://vision.example.com/v1';
+      const selector = `${routeSelector}\0`;
+      const resolveForModel = vi.fn().mockResolvedValue({
+        contentGenerator: routeGenerator,
+        contentGeneratorConfig: {
+          model: 'vision-agent',
+          authType: AuthType.USE_OPENAI,
+          maxRetries: 1,
+          modalities: { image: true },
+        },
+        retryAuthType: AuthType.USE_OPENAI,
+        model: 'vision-agent',
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel,
+      } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+      chat = new GeminiChat(
+        mockConfig,
+        config,
+        [
+          { role: 'user', parts: [{ text: 'prior question' }] },
+          { role: 'model', parts: [{ text: 'prior answer' }] },
+        ],
+        undefined,
+        uiTelemetryService,
+      );
+      const tryCompress = vi.spyOn(chat, 'tryCompress');
+      mockRetryWithBackoff.mockImplementation(async (apiCall, options) => {
+        try {
+          return await apiCall();
+        } catch (error) {
+          expect(options?.shouldRetryOnError?.(error)).toBe(true);
+          return apiCall();
+        }
+      });
+
+      const stream = await chat.sendMessageStream(
+        selector,
+        {
+          message: [
+            { text: 'inspect' },
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'private-image',
+              },
+            },
+          ],
+        },
+        'prompt-exact-route-retry',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(resolveForModel).toHaveBeenCalledOnce();
+      expect(resolveForModel).toHaveBeenCalledWith(routeSelector, {
+        failClosed: true,
+      });
+      expect(tryCompress).not.toHaveBeenCalled();
+      expect(routeGenerateContentStream).toHaveBeenCalledTimes(2);
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+      expect(routeGenerateContentStream).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          model: 'vision-agent',
+          contents: expect.arrayContaining([
+            { role: 'user', parts: [{ text: 'prior question' }] },
+            { role: 'model', parts: [{ text: 'prior answer' }] },
+            expect.objectContaining({
+              parts: expect.arrayContaining([
+                expect.objectContaining({
+                  inlineData: expect.objectContaining({
+                    data: 'private-image',
+                  }),
+                }),
+              ]),
+            }),
+          ]),
+        }),
+        'prompt-exact-route-retry',
+      );
+    });
+
+    it('fails an exact image route without entering the fallback chain', async () => {
+      const capacityError = Object.assign(new Error('vision unavailable'), {
+        status: 503,
+      });
+      const routeGenerator = {
+        ...mockContentGenerator,
+        generateContentStream: vi.fn().mockRejectedValue(capacityError),
+      } as ContentGenerator;
+      const selector = 'openai:vision-agent\0https://vision.example.com/v1\0';
+      const resolveForModel = vi.fn().mockResolvedValue({
+        contentGenerator: routeGenerator,
+        contentGeneratorConfig: {
+          model: 'vision-agent',
+          authType: AuthType.USE_OPENAI,
+          maxRetries: 0,
+          modalities: { image: true },
+        },
+        retryAuthType: AuthType.USE_OPENAI,
+        model: 'vision-agent',
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel,
+      } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+      vi.mocked(mockConfig.getModelFallbacks).mockReturnValue([
+        'ordinary-fallback',
+      ]);
+
+      const stream = await chat.sendMessageStream(
+        selector,
+        {
+          message: [
+            {
+              inlineData: { mimeType: 'image/png', data: 'private-image' },
+            },
+          ],
+        },
+        'prompt-exact-route-failure',
+      );
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            /* consume */
+          }
+        })(),
+      ).rejects.toBe(capacityError);
+
+      expect(resolveForModel).toHaveBeenCalledOnce();
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+    });
+
     it('tries the next fallback when a fallback emits only preparation metadata', async () => {
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         authType: AuthType.USE_GEMINI,

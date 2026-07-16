@@ -856,11 +856,17 @@ describe('BaseLlmClient', () => {
         return undefined;
       });
 
+      const targetConfig = {
+        model: fastModel,
+        authType: AuthType.USE_ANTHROPIC,
+      };
+      mockBuildAgentContentGeneratorConfig.mockReturnValue(targetConfig);
       const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
 
       const resolved = await c.resolveForModel(fastModel);
 
       expect(resolved.contentGenerator).toBe(fastContentGenerator);
+      expect(resolved.contentGeneratorConfig).toBe(targetConfig);
       expect(resolved.retryAuthType).toBe(AuthType.USE_ANTHROPIC);
       expect(mockBuildAgentContentGeneratorConfig).toHaveBeenCalledWith(
         crossProviderConfig,
@@ -871,6 +877,56 @@ describe('BaseLlmClient', () => {
         }),
       );
       expect(mockCreateContentGenerator).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not confuse a qualified cross-provider namesake with the primary', async () => {
+      vi.mocked(crossProviderConfig.getModel).mockReturnValue('shared-model');
+      getResolvedModel.mockImplementation((authType: string, model: string) =>
+        authType === AuthType.USE_ANTHROPIC && model === 'shared-model'
+          ? {
+              id: 'shared-model',
+              authType: AuthType.USE_ANTHROPIC,
+              baseUrl: '',
+            }
+          : undefined,
+      );
+
+      const resolved = await new BaseLlmClient(
+        mockContentGenerator,
+        crossProviderConfig,
+      ).resolveForModel('anthropic:shared-model', { failClosed: true });
+
+      expect(resolved.contentGenerator).toBe(fastContentGenerator);
+      expect(mockCreateContentGenerator).toHaveBeenCalledOnce();
+    });
+
+    it('keeps explicit vision capability on the resolved generator config', async () => {
+      getResolvedModel.mockImplementation((authType: string, model: string) =>
+        authType === AuthType.USE_ANTHROPIC && model === fastModel
+          ? {
+              id: fastModel,
+              authType: AuthType.USE_ANTHROPIC,
+              baseUrl: 'https://api.anthropic.com',
+              capabilities: { vision: true },
+            }
+          : undefined,
+      );
+      mockBuildAgentContentGeneratorConfig.mockReturnValue({
+        model: fastModel,
+        authType: AuthType.USE_ANTHROPIC,
+        modalities: {},
+      });
+
+      const resolved = await new BaseLlmClient(
+        mockContentGenerator,
+        crossProviderConfig,
+      ).resolveForModel(fastModel, { failClosed: true });
+
+      expect(resolved.contentGeneratorConfig.modalities?.image).toBe(true);
+      expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+        expect.objectContaining({ modalities: { image: true } }),
+        crossProviderConfig,
+      );
     });
 
     it('resolves same-id model selectors by baseUrl when provided', async () => {

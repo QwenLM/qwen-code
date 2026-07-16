@@ -9,6 +9,8 @@ import type { Part } from '@google/genai';
 import {
   formatVisionBridgeNoticeDisplay,
   formatVisionBridgeNotice,
+  formatFullTurnVisionNotice,
+  getFullTurnVisionModelSelector,
   isVisionBridgeNoticeDisplay,
   runVisionBridge,
   selectVisionBridgeModel,
@@ -947,6 +949,50 @@ describe('selectVisionBridgeModel (same-provider only)', () => {
       { baseUrl: dashscope },
     );
     expect(picked?.id).toBe('custom-text-name');
+  });
+
+  it('marks only explicit agent-capable image models for full-turn routing', () => {
+    const picked = selectVisionBridgeModel(
+      'primary',
+      [
+        { id: 'primary', authType: 'openai', baseUrl: dashscope },
+        {
+          id: 'vision-agent',
+          authType: 'openai',
+          baseUrl: dashscope,
+          modalities: { image: true },
+          capabilities: { agent: true },
+        },
+      ],
+      { baseUrl: dashscope },
+    );
+
+    expect(picked).toEqual({
+      id: 'openai:vision-agent',
+      baseUrl: dashscope,
+      agentCapable: true,
+    });
+    expect(getFullTurnVisionModelSelector(picked!)).toBe(
+      `openai:vision-agent\0${dashscope}\0`,
+    );
+    expect(formatFullTurnVisionNotice(picked!)).toMatch(
+      /retries and tool continuations/i,
+    );
+
+    expect(
+      selectVisionBridgeModel(
+        'primary',
+        [
+          { id: 'primary', baseUrl: dashscope },
+          {
+            id: 'vision-only',
+            baseUrl: dashscope,
+            modalities: { image: true },
+          },
+        ],
+        { baseUrl: dashscope },
+      )?.agentCapable,
+    ).toBeUndefined();
   });
 });
 

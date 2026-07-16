@@ -237,7 +237,8 @@ export class ModelRegistry {
 
   /**
    * Get model configuration by authType and modelId.
-   * When baseUrl is provided, looks up by the exact composite key (id+baseUrl).
+   * When baseUrl is provided, looks up the exact composite key, then a plain
+   * entry whose resolved default baseUrl matches.
    * When baseUrl is omitted, tries the plain id first (backward compatible),
    * then scans all entries for the first match by model id.
    */
@@ -250,7 +251,10 @@ export class ModelRegistry {
     if (!models) return undefined;
 
     if (baseUrl) {
-      return models.get(modelRegistryKey(modelId, baseUrl));
+      const exact = models.get(modelRegistryKey(modelId, baseUrl));
+      if (exact) return exact;
+      const plain = models.get(modelId);
+      return plain?.baseUrl === baseUrl ? plain : undefined;
     }
 
     // Try plain id key first (models registered without explicit baseUrl)
@@ -266,7 +270,7 @@ export class ModelRegistry {
 
   /**
    * Check if model exists for given authType.
-   * When baseUrl is provided, checks the exact composite key.
+   * When baseUrl is provided, checks the exact endpoint or matching default.
    * When baseUrl is omitted, checks plain id and scans by model id.
    */
   hasModel(authType: AuthType, modelId: string, baseUrl?: string): boolean {

@@ -1883,6 +1883,16 @@ export class GeminiChat {
     params: SendMessageParameters,
     prompt_id: string,
   ): Promise<AsyncGenerator<StreamEvent>> {
+    const fullTurnRoute = model.endsWith('\0');
+    const exactRoute = fullTurnRoute
+      ? await this.config
+          .getBaseLlmClient()
+          .resolveForModel(model.slice(0, -1), { failClosed: true })
+      : undefined;
+    if (exactRoute) {
+      model = exactRoute.model;
+    }
+
     await this.sendPromise;
 
     let streamDoneResolver: () => void;
@@ -1917,7 +1927,9 @@ export class GeminiChat {
     // or QWEN_CODE_MAX_OUTPUT_TOKENS from user config), else
     // defaultOutputCeiling(model) (the model's output limit clipped to
     // OUTPUT_TOKEN_CEILING).
-    const cgConfigForThresholds = this.config.getContentGeneratorConfig();
+    const cgConfigForThresholds =
+      exactRoute?.contentGeneratorConfig ??
+      this.config.getContentGeneratorConfig();
     const parsedEnvMaxTokensForClamp = parsePositiveIntegerEnvValue(
       process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
     );
@@ -1993,7 +2005,9 @@ export class GeminiChat {
       );
       const isHardTier = effectiveTokens >= hard;
       const shouldForceFromHard =
-        isHardTier && this.hardRescueFailureCount < MAX_CONSECUTIVE_FAILURES;
+        !exactRoute &&
+        isHardTier &&
+        this.hardRescueFailureCount < MAX_CONSECUTIVE_FAILURES;
       const historyBeforeHardRescue = shouldForceFromHard
         ? this.getHistoryShallow()
         : undefined;
@@ -2004,13 +2018,13 @@ export class GeminiChat {
         debugLogger.warn(
           `[compaction] hard-tier rescue triggered: prompt_id=${prompt_id}, effectiveTokens=${effectiveTokens}, hard=${hard}, hardRescueAttempt=${this.hardRescueFailureCount + 1}, consecutiveFailures=${this.consecutiveFailures}.`,
         );
-      } else if (isHardTier) {
+      } else if (isHardTier && !exactRoute) {
         debugLogger.warn(
           `[compaction] hard-tier rescue skipped after ${this.hardRescueFailureCount} failed attempts; relying on reactive overflow recovery. prompt_id=${prompt_id}, effectiveTokens=${effectiveTokens}, hard=${hard}.`,
         );
       }
 
-      if (isHardTier && !shouldForceFromHard) {
+      if (exactRoute || (isHardTier && !shouldForceFromHard)) {
         compressionInfo = {
           originalTokenCount: effectiveTokens,
           newTokenCount: effectiveTokens,
@@ -2224,7 +2238,16 @@ export class GeminiChat {
         let streamYieldedAnyChunk = false;
 
         // Read per-config overrides; fall back to built-in defaults.
-        const cgConfig = self.config.getContentGeneratorConfig();
+        const cgConfig =
+          exactRoute?.contentGeneratorConfig ??
+          self.config.getContentGeneratorConfig();
+        const requestOverrides = exactRoute
+          ? {
+              contentGenerator: exactRoute.contentGenerator,
+              retryAuthType: exactRoute.retryAuthType,
+              retryErrorCodes: exactRoute.retryErrorCodes,
+            }
+          : undefined;
         const maxRateLimitRetries =
           cgConfig?.maxRetries ?? RATE_LIMIT_RETRY_OPTIONS.maxRetries;
         const extraRetryErrorCodes = cgConfig?.retryErrorCodes;
@@ -2260,6 +2283,7 @@ export class GeminiChat {
               requestContents,
               params,
               prompt_id,
+              requestOverrides,
             );
 
             lastFinishReason = undefined;
@@ -2400,12 +2424,12 @@ export class GeminiChat {
 
             const contextOverflow = getContextLengthExceededInfo(error);
             if (contextOverflow.isExceeded) {
-              if (!reactiveCompressionAttempted) {
+              if (!exactRoute && !reactiveCompressionAttempted) {
                 reactiveCompressionAttempted = true;
                 const reactiveOriginalTokenCount =
                   contextOverflow.actualTokens ??
                   contextOverflow.limitTokens ??
-                  self.config.getContentGeneratorConfig()?.contextWindowSize ??
+                  cgConfig?.contextWindowSize ??
                   DEFAULT_TOKEN_LIMIT;
                 debugLogger.warn(
                   'Context length exceeded; attempting reactive compression.',
@@ -2608,6 +2632,7 @@ export class GeminiChat {
                 attemptState.requestContents,
                 attemptState.params,
                 prompt_id,
+                requestOverrides,
               );
               for await (const chunk of stream) {
                 yield { type: StreamEventType.CHUNK, value: chunk };
@@ -2917,7 +2942,9 @@ export class GeminiChat {
           // - Maximum 3 fallback transitions (capped by config normalization).
           // - Fallback is only for capacity/availability errors (429/503/529),
           //   not for auth/billing/client errors.
-          const fallbackModels = self.config.getModelFallbacks();
+          const fallbackModels = exactRoute
+            ? []
+            : self.config.getModelFallbacks();
 
           if (
             fallbackModels.length > 0 &&

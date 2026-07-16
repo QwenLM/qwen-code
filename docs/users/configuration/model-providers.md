@@ -237,6 +237,17 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
 }
 ```
 
+For a vision model that can also follow the normal Qwen Code agent policy and use tools, opt in to full-turn image routing with both capabilities:
+
+```json
+"capabilities": {
+  "vision": true,
+  "agent": true
+}
+```
+
+When a text-only primary uses that model as its configured vision fallback, the complete image-bearing turn stays on the vision model. Omit `agent` (or set it to `false`) to keep the safer Vision Bridge transcription flow.
+
 ### Local Self-Hosted Models (via OpenAI-compatible API)
 
 Most local inference servers (vLLM, Ollama, LM Studio, etc.) provide an OpenAI-compatible API endpoint. Configure them using the `openai` auth type with a local `baseUrl`:

@@ -3164,6 +3164,59 @@ describe('Session', () => {
       expect(sent.some((part) => 'inlineData' in part)).toBe(false);
     });
 
+    it('routes an agent-capable image prompt for that ACP prompt only', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'vision-agent',
+        baseUrl: 'https://vision.example.com/v1',
+        agentCapable: true,
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+      });
+
+      expect(runVisionBridgeSpy).not.toHaveBeenCalled();
+      expect(firstSentMessage().some((part) => 'inlineData' in part)).toBe(
+        true,
+      );
+      expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
+        1,
+        'vision-agent\0https://vision.example.com/v1\0',
+        expect.any(Object),
+        expect.any(String),
+      );
+      expect(
+        agentMessageChunks().some((chunk) =>
+          chunk.includes('Routing this image turn'),
+        ),
+      ).toBe(true);
+      expect(mockGeminiClient.tryCompressChat).not.toHaveBeenCalled();
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'next text turn' }],
+      });
+      expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
+        2,
+        'qwen3-code-plus',
+        expect.any(Object),
+        expect.any(String),
+      );
+      expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledOnce();
+    });
+
     it('strips image parts when the vision bridge is cancelled before applying', async () => {
       mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
       mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({

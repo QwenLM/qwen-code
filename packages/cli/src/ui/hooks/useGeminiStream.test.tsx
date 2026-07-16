@@ -489,6 +489,81 @@ describe('useGeminiStream', () => {
       );
     });
 
+    it('keeps an agent-capable image route through tools and retry, then clears it', async () => {
+      enableBridge();
+      mockHandleSlashCommand.mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'describe' }, imagePart],
+      });
+      mockConfig.getDefaultVisionBridgeModel = vi.fn(() => ({
+        id: 'vision-agent',
+        baseUrl: 'https://vision.example.com/v1',
+        agentCapable: true,
+      }));
+      const selector = 'vision-agent\0https://vision.example.com/v1\0';
+      const { result, mockSendMessageStream } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('/inspect-image');
+      });
+      expect(mockRunVisionBridge).not.toHaveBeenCalled();
+      expect(mockSendMessageStream.mock.calls[0]?.[0]).toEqual([
+        { text: 'describe' },
+        imagePart,
+      ]);
+      expect(mockSendMessageStream.mock.calls[0]?.[3]).toMatchObject({
+        modelOverride: selector,
+      });
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.VISION_NOTICE,
+          text: expect.stringContaining('Routing this image turn'),
+        }),
+        expect.any(Number),
+      );
+
+      await act(async () => {
+        await result.current.submitQuery(
+          [
+            {
+              functionResponse: {
+                id: 'tool-call',
+                name: 'read_file',
+                response: { output: 'tool result' },
+              },
+            },
+          ],
+          SendMessageType.ToolResult,
+        );
+      });
+      expect(mockSendMessageStream.mock.calls[1]?.[3]).toMatchObject({
+        modelOverride: selector,
+      });
+
+      await act(async () => {
+        await result.current.submitQuery(
+          [{ text: 'retry' }, imagePart],
+          SendMessageType.Retry,
+        );
+      });
+      expect(mockSendMessageStream.mock.calls[2]?.[3]).toMatchObject({
+        modelOverride: selector,
+      });
+
+      handleAtCommandSpy.mockResolvedValue({
+        processedQuery: [{ text: 'next text turn' }],
+        shouldProceed: true,
+      } as unknown as Awaited<
+        ReturnType<typeof atCommandProcessor.handleAtCommand>
+      >);
+      await act(async () => {
+        await result.current.submitQuery('next text turn');
+      });
+      expect(
+        mockSendMessageStream.mock.calls[3]?.[3].modelOverride,
+      ).toBeUndefined();
+    });
+
     it('does not query bridge config for text-only messages', async () => {
       Object.assign(mockConfig, {
         getEffectiveInputModalities: vi.fn(() => ({})),
@@ -5710,9 +5785,17 @@ describe('useGeminiStream', () => {
 
       it('does not let a skill tool with modelOverride: undefined clobber an active inline override', async () => {
         allowInlineModel();
+        mockConfig.getEffectiveInputModalities = vi.fn(() => ({}));
+        mockConfig.getDefaultVisionBridgeModel = vi.fn(() => ({
+          id: 'vision-agent',
+          agentCapable: true,
+        }));
         mockHandleSlashCommand.mockResolvedValue({
           type: 'submit_prompt',
-          content: 'do the thing',
+          content: [
+            { text: 'do the thing' },
+            { inlineData: { mimeType: 'image/png', data: 'abc123' } },
+          ],
           modelOverride: 'inline-model',
         });
 
@@ -5761,6 +5844,7 @@ describe('useGeminiStream', () => {
         expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
           modelOverride: 'inline-model',
         });
+        expect(mockRunVisionBridge).not.toHaveBeenCalled();
 
         mockSendMessageStream.mockClear();
 

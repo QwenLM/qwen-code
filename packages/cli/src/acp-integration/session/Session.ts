@@ -133,6 +133,8 @@ import {
   runVisionBridge,
   shouldRunVisionBridge,
   formatVisionBridgeNotice,
+  formatFullTurnVisionNotice,
+  getFullTurnVisionModelSelector,
   splitImageParts,
   approxBase64Bytes,
 } from '@qwen-code/qwen-code-core';
@@ -1816,6 +1818,10 @@ export class Session implements SessionContext {
             const inputText = firstTextBlock?.text || '';
 
             let parts: Part[] | null;
+            let fullTurnModelOverride: string | undefined;
+            const onFullTurnModel = (model: string) => {
+              fullTurnModelOverride = model;
+            };
 
             if (isContinue) {
               // Non-null here: the `none` case returned early above, and both
@@ -1833,6 +1839,8 @@ export class Session implements SessionContext {
               parts = await this.#processSlashCommandResult(
                 slashCommandResult,
                 params.prompt,
+                pendingSend.signal,
+                onFullTurnModel,
               );
 
               // If parts is null, the command was fully handled (e.g., /summary completed)
@@ -1847,7 +1855,7 @@ export class Session implements SessionContext {
               parts = await this.#resolvePrompt(
                 params.prompt,
                 pendingSend.signal,
-                { promptLast: true },
+                { promptLast: true, onFullTurnModel },
               );
             }
 
@@ -2001,6 +2009,7 @@ export class Session implements SessionContext {
                       promptId,
                       nextMessage?.parts ?? [],
                       pendingSend.signal,
+                      { modelOverride: fullTurnModelOverride },
                     );
                   if (!sendResult.responseStream) {
                     // Preserve the full message (not just functionResponse
@@ -2207,6 +2216,7 @@ export class Session implements SessionContext {
                 promptId,
                 hooksEnabled,
                 messageBus,
+                fullTurnModelOverride,
               );
             } finally {
               logConversationFinishedEvent(
@@ -2242,6 +2252,7 @@ export class Session implements SessionContext {
     promptId: string,
     hooksEnabled: boolean,
     messageBus: MessageBus | undefined,
+    modelOverride?: string,
   ): Promise<{ stopReason: PromptResponse['stopReason'] }> {
     const stopHookBlockingCap = this.config.getStopHookBlockingCap();
     let stopHookIterationCount = 0;
@@ -2365,7 +2376,10 @@ export class Session implements SessionContext {
                 promptId + '_stop_hook_' + stopHookIterationCount,
                 nextMessage?.parts ?? [],
                 pendingSend.signal,
-                { skipCompression: stopHookIterationCount > 1 },
+                {
+                  skipCompression: stopHookIterationCount > 1,
+                  modelOverride,
+                },
               );
             if (!continueSendResult.responseStream) {
               this.#preserveUnsentMessageHistory(
@@ -2576,12 +2590,12 @@ export class Session implements SessionContext {
     promptId: string,
     message: Part[],
     abortSignal: AbortSignal,
-    options: { skipCompression?: boolean } = {},
+    options: { skipCompression?: boolean; modelOverride?: string } = {},
   ): Promise<AutoCompressionSendResult> {
     const geminiClient = this.config.getGeminiClient()!;
     let compressionDiagnostic: string | null = null;
     let compressionInfo: ChatCompressionInfo | null = null;
-    if (!options.skipCompression) {
+    if (!options.skipCompression && !options.modelOverride) {
       try {
         const compressed = await geminiClient.tryCompressChat(
           promptId,
@@ -2659,7 +2673,7 @@ export class Session implements SessionContext {
     }
 
     const responseStream = await this.#getCurrentChat().sendMessageStream(
-      this.config.getModel(),
+      options.modelOverride ?? this.config.getModel(),
       {
         message,
         config: {
@@ -5809,6 +5823,8 @@ export class Session implements SessionContext {
   async #processSlashCommandResult(
     result: NonInteractiveSlashCommandResult,
     originalPrompt: ContentBlock[],
+    abortSignal: AbortSignal,
+    onFullTurnModel: (model: string) => void,
   ): Promise<Part[] | null> {
     this.#emitGoalStatusItems(result);
 
@@ -5816,7 +5832,11 @@ export class Session implements SessionContext {
       case 'submit_prompt':
         // Command wants to submit a prompt to the model
         // Convert PartListUnion to Part[]
-        return normalizePartList(result.content);
+        return this.#applyBridgeConversionsIfNeeded(
+          normalizePartList(result.content),
+          abortSignal,
+          onFullTurnModel,
+        );
 
       case 'message': {
         if (result.messageType === 'error') {
@@ -5888,11 +5908,10 @@ export class Session implements SessionContext {
         // No command was found or executed, resolve the original prompt
         // through the standard path that handles all block types. promptLast
         // keeps the user's instruction prominent (matches the normal path).
-        return this.#resolvePrompt(
-          originalPrompt,
-          new AbortController().signal,
-          { promptLast: true },
-        );
+        return this.#resolvePrompt(originalPrompt, abortSignal, {
+          promptLast: true,
+          onFullTurnModel,
+        });
 
       default: {
         // Exhaustiveness check
@@ -5911,7 +5930,10 @@ export class Session implements SessionContext {
     // (see the assembly comment below). Only genuine user prompts pass this;
     // the mid-turn drain path leaves it false so its synthetic `@uri` marker
     // stays first and keeps carrying the "[User message received...]" prefix.
-    options: { promptLast?: boolean } = {},
+    options: {
+      promptLast?: boolean;
+      onFullTurnModel?: (model: string) => void;
+    } = {},
   ): Promise<Part[]> {
     const FILE_URI_SCHEME = 'file://';
 
@@ -5988,13 +6010,18 @@ export class Session implements SessionContext {
       extensionParts.length === 0 &&
       mcpServerParts.length === 0
     ) {
-      return this.#applyBridgeConversionsIfNeeded(parts, abortSignal);
+      return this.#applyBridgeConversionsIfNeeded(
+        parts,
+        abortSignal,
+        options.onFullTurnModel,
+      );
     }
 
     if (atPathCommandParts.length === 0 && embeddedContext.length === 0) {
       return this.#applyBridgeConversionsIfNeeded(
         [...parts, ...extensionParts, ...mcpServerParts],
         abortSignal,
+        options.onFullTurnModel,
       );
     }
 
@@ -6103,18 +6130,29 @@ export class Session implements SessionContext {
     return this.#applyBridgeConversionsIfNeeded(
       processedQueryParts,
       abortSignal,
+      options.onFullTurnModel,
     );
   }
 
   async #applyBridgeConversionsIfNeeded(
     originalParts: Part[],
     abortSignal: AbortSignal,
+    onFullTurnModel?: (model: string) => void,
   ): Promise<Part[]> {
     const parts = await this.#applyVoiceBridgeIfNeeded(
       originalParts,
       abortSignal,
     );
     if (!hasImageParts(parts) || !shouldRunVisionBridge(this.config)) {
+      return parts;
+    }
+
+    const fullTurnModel = this.config.getDefaultVisionBridgeModel();
+    if (onFullTurnModel && fullTurnModel?.agentCapable) {
+      onFullTurnModel(getFullTurnVisionModelSelector(fullTurnModel));
+      await this.messageEmitter.emitAgentMessage(
+        formatFullTurnVisionNotice(fullTurnModel),
+      );
       return parts;
     }
 

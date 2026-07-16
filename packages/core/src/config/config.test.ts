@@ -1017,19 +1017,24 @@ describe('Server Config (config.ts)', () => {
       );
     };
 
-    it('honors an explicit visionModel even across providers', () => {
-      const config = new Config({ ...baseParams, visionModel: 'vl-anthropic' });
+    it('keeps a bare cross-provider namesake on its exact agent route', () => {
+      const config = new Config({ ...baseParams, visionModel: 'text-primary' });
       stubProvider(config, [
         {
-          id: 'vl-anthropic',
+          id: 'text-primary',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+        },
+        {
+          id: 'text-primary',
           authType: AuthType.USE_ANTHROPIC,
-          baseUrl: 'https://api.anthropic.com',
           isVision: true,
+          capabilities: { vision: true, agent: true },
         },
       ]);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-anthropic',
-        baseUrl: 'https://api.anthropic.com',
+        id: 'anthropic:text-primary',
+        agentCapable: true,
       });
     });
 
