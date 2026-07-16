@@ -192,6 +192,15 @@ export function startSessionCleanup(state: BridgeState): () => void {
 
 export async function disposeBindings(state: BridgeState): Promise<void> {
   state.disposed = true;
+  // Let already-tracked handlers start so any collector they create is visible.
+  await Promise.resolve();
+  for (const binding of state.bindings.values()) {
+    const collector = binding.stream.activeCollector;
+    if (collector) {
+      collector.interrupted = true;
+      collector.resolve();
+    }
+  }
   while (state.pendingLifecycles.size > 0) {
     await Promise.all([...state.pendingLifecycles]);
   }

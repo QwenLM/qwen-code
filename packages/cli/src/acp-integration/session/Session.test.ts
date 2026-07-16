@@ -2092,6 +2092,7 @@ describe('Session', () => {
       });
 
       expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(session.getTurnCount()).toBe(0);
     });
 
     it('rejects an invalid trusted invocation ingress', async () => {
@@ -2107,6 +2108,7 @@ describe('Session', () => {
       });
 
       expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(session.getTurnCount()).toBe(0);
     });
 
     it('records the latest file history snapshot after makeSnapshot', async () => {

@@ -1114,6 +1114,48 @@ describe('serve-bridge', () => {
       );
     });
 
+    it('should interrupt collector waits before draining prompt disposal', async () => {
+      const { state, calls } = makeMockState({
+        defaultSessionId: 'test-session',
+        fetchReply: (req) =>
+          req.url.endsWith('/prompt')
+            ? jsonResponse(200, { stopReason: 'end_turn' })
+            : new Response(null, { status: 204 }),
+      });
+      const binding = bindSession(state, 'test-session', 'client-test');
+      const { agentTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/agent.js'
+      );
+      const promptTool = agentTools(state).find(
+        (t: { name: string }) => t.name === 'prompt',
+      );
+
+      const prompting = promptTool.handler({ prompt: 'test' }, {});
+      let disposalSettled = false;
+      const disposing = disposeBindings(state).finally(() => {
+        disposalSettled = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const settledBeforeCollectorTimeout = disposalSettled;
+      if (!settledBeforeCollectorTimeout) {
+        const collector = binding.stream.activeCollector;
+        if (collector) {
+          collector.interrupted = true;
+          collector.resolve();
+        }
+      }
+      const [result] = await Promise.all([prompting, disposing]);
+
+      expect(settledBeforeCollectorTimeout).toBe(true);
+      expect(JSON.parse(result.content[0].text).stop_reason).toBe(
+        'interrupted',
+      );
+      expect(calls.some((call) => call.url.endsWith('/cancel'))).toBe(false);
+      expect(calls.filter((call) => call.url.endsWith('/detach'))).toHaveLength(
+        1,
+      );
+    });
+
     it('should invalidate the current binding when abort cancellation is rejected', async () => {
       const controller = new AbortController();
       const { state, calls } = makeMockState({

@@ -289,6 +289,26 @@ describe('AcpBridge', () => {
     );
   });
 
+  it('forwards invocation ingress metadata to the ACP prompt', async () => {
+    const prompt = vi.fn().mockResolvedValue(undefined);
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod: vi.fn(), prompt };
+
+    await bridge.prompt('s-1', 'question', {
+      invocationIngress: 'channel',
+    });
+
+    expect(prompt).toHaveBeenCalledWith({
+      sessionId: 's-1',
+      prompt: [{ type: 'text', text: 'question' }],
+      _meta: { 'qwen-code/invocation-ingress': 'channel' },
+    });
+  });
+
   it('excludes nested subagent text from the final response', async () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',

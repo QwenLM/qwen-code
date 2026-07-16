@@ -1688,9 +1688,7 @@ export class Session implements SessionContext {
     params: PromptRequest,
     pendingSend: AbortController,
   ): Promise<PromptResponse> {
-    this.turn += 1;
     const sessionId = this.config.getSessionId();
-    const promptId = sessionId + '########' + this.turn;
     const promptMeta =
       params._meta && typeof params._meta === 'object'
         ? { ...params._meta }
@@ -1728,6 +1726,8 @@ export class Session implements SessionContext {
         'Invalid trusted ACP invocation ingress',
       );
     }
+    this.turn += 1;
+    const promptId = sessionId + '########' + this.turn;
     const invocationContext = trustedContext ?? {
       version: 1 as const,
       ingress: trustedIngress ?? ('acp' as const),
