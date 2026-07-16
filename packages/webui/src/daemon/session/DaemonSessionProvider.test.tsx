@@ -2641,9 +2641,10 @@ describe('DaemonSessionProvider', () => {
       lastIndex = idx;
     }
     // The whole burst reached the store in a single dispatch — the coalescing
-    // property this fix exists to provide. Order/completeness alone would still
-    // pass under a per-event dispatch regression.
-    expect(dispatchBatchSizes).toContain(CHUNK_COUNT);
+    // property this fix exists to provide. `toContain` alone would still pass
+    // if a regression also emitted redundant per-event dispatches; pin that the
+    // burst is the only dispatch (one reducer pass, nothing duplicated).
+    expect(dispatchBatchSizes).toEqual([CHUNK_COUNT]);
     createStoreSpy.mockRestore();
   });
 

@@ -1194,7 +1194,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     ? ((event.data as DaemonTurnCompleteData | undefined)
                         ?.stopReason ?? 'end_turn')
                     : 'error';
-                store.dispatch(assistantDoneFromTurnEvent(event, stopReason));
+                dispatchTranscriptNow(
+                  assistantDoneFromTurnEvent(event, stopReason),
+                );
                 if (!hasSessionActivePrompt()) {
                   setPromptStatus('idle');
                 }
@@ -1252,7 +1254,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     clearPassiveAssistantDoneTimer(
                       passiveAssistantDoneTimerRef,
                     );
-                    store.dispatch({
+                    dispatchTranscriptNow({
                       type: 'assistant.done',
                       reason: 'replay_complete',
                     });
@@ -1454,6 +1456,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           }
         } catch (error) {
           if (disposed || abort.signal.aborted) return;
+          // The loop threw, so the in-try post-loop flush was skipped. Apply
+          // buffered transcript events now: leaving them with a scheduled timer
+          // would let it fire after a reconnect reset and dispatch stale events.
+          // Flush (not clear) because the retriable path below resumes via
+          // Last-Event-ID without resetting the store — clearing would drop
+          // events the SSE client already yielded (lastSeenEventId has advanced
+          // past them).
+          flushTranscriptSync();
           const message =
             error instanceof Error ? error.message : String(error);
           const errorStatus = extractHttpStatus(error);

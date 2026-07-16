@@ -160,6 +160,22 @@ by flushing before the guard (scoped to observer-mode debug events) and pinned
 by a focused burst regression test. Lesson: every `getSnapshot()` read in the
 live loop must either flush first or be proven independent of pending events.
 
+Round 7 (post-review, ci-bot): The `catch` block that runs when the `for await`
+loop throws skipped the in-try post-loop flush, so buffered transcript events
+sat on a scheduled timer. The retriable path below resumes via Last-Event-ID
+delta and does NOT reset the store, and `iterateEvents` has already advanced
+`lastSeenEventId` past those events — so clearing the buffer would drop them on
+the incremental resume. The fix is `flushTranscriptSync()` at the top of the
+catch (after the disposed/aborted early return), not `clearPending()`. The two
+remaining bare `store.dispatch` control sites (restored-prompt settle,
+`replay_complete`) were routed through `dispatchTranscriptNow` so each control
+dispatch is self-contained (flush + dispatch) rather than relying on an earlier
+flush by timing; the `replay_complete` branch keeps its own earlier flush, which
+the `awaitingResync` read requires. The burst regression test was tightened from
+`toContain(CHUNK_COUNT)` to `toEqual([CHUNK_COUNT])` so a regression that also
+emitted redundant per-event dispatches would fail, not just a pure per-event
+revert.
+
 ## Verification Plan
 
 - Unit-test the batcher: a burst of many events yields **exactly one**
