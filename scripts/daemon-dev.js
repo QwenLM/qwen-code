@@ -288,8 +288,13 @@ const serveEnv = {
   // found a v0.19.10 whose `agent-prompt` predates `--role`, and the run died on
   // "Missing required argument: chunk". The daemon is started as `node
   // scripts/dev.js`, never through the bin wrapper, so nothing else sets this.
-  QWEN_CODE_CLI:
-    process.env['QWEN_CODE_CLI'] ?? join(__dirname, 'cli-entry.js'),
+  //
+  // `dev.js`, not `cli-entry.js`: this daemon runs the TypeScript **source** through
+  // tsx, and `cli-entry.js` runs `dist/cli.js`. Pointing there would trade a
+  // one-major-version skew for a rebuild-shaped one — measured on this box, dist was
+  // 105 source files behind — which is the same bug wearing a smaller hat. `dev.js`
+  // is the entry that runs what the daemon itself is running.
+  QWEN_CODE_CLI: process.env['QWEN_CODE_CLI'] ?? join(__dirname, 'dev.js'),
 };
 
 const webEnv = {
