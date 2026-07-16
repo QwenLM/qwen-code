@@ -285,7 +285,12 @@ export const splitFencedMarkdown = (
   const baseInfo = fence.infoString
     .replace(START_LINE_DIRECTIVE_RE, '')
     .replace(/\s+$/, '');
-  const reopeningFence = `${fence.delimiter}${baseInfo} qwen-code:start-line=${tailStart}`;
+  const directive = `qwen-code:start-line=${tailStart}`;
+  // A language-less fence has no base info, so omit the separating space to
+  // avoid a stray leading space in the re-opened fence's info string.
+  const reopeningFence = `${fence.delimiter}${
+    baseInfo ? `${baseInfo} ${directive}` : directive
+  }`;
   const beforeWithClose = before.endsWith('\n')
     ? `${before}${closingFence}\n`
     : `${before}\n${closingFence}\n`;

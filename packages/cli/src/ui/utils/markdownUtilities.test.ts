@@ -150,6 +150,22 @@ describe('markdownUtilities', () => {
       expect(after.match(/qwen-code:start-line=/g)).toHaveLength(1);
     });
 
+    it('handles a language-less fence without a stray leading space', () => {
+      const content = '```\nline1\nline2\nline3\n';
+      const splitPoint = content.indexOf('line3');
+      const { before, after } = splitFencedMarkdown(content, splitPoint);
+      // Head closes with a bare fence; tail re-opens with the directive only,
+      // no language and no leading space.
+      expect(before).toBe('```\nline1\nline2\n```\n');
+      expect(after).toBe('```qwen-code:start-line=3\nline3\n');
+      expect(after).toMatch(/^```qwen-code:start-line=\d+\n/);
+      // The directive still parses back to no language and the right start line.
+      expect(parseCodeFenceInfo('qwen-code:start-line=3')).toEqual({
+        lang: null,
+        startLine: 3,
+      });
+    });
+
     it('does not touch a split that closes exactly at the fence boundary', () => {
       // Point sits right after a fully closed block → not inside a fence.
       const content = '```ts\ncode\n```\n\nprose after';
