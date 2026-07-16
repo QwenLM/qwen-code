@@ -143,10 +143,11 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         `not substitute: the agent runs and may even find something, but the ` +
         `severity bar, the finding format and this project's rules live in the ` +
         `brief it was never given, and a dimension reviewed without them cannot ` +
-        `be certified clean. Build each prompt with \`qwen review agent-prompt ` +
-        `--role <n>\` — the role number is in each label above, and a per-file ` +
-        `role takes \`--file <path>\` — then launch an agent with what it prints, ` +
-        `verbatim.\n` +
+        `be certified clean. Build every required prompt in one call — ` +
+        `\`qwen review agent-prompt --plan <plan> --roster\` — and launch one ` +
+        `agent per block it prints, verbatim; \`--role <n>\` rebuilds a single ` +
+        `one (the role number is in each label above; a per-file role takes ` +
+        `\`--file <path>\`).\n` +
         // Where it looked, because "the builder never ran" and "the builder ran
         // against a different --plan" are indistinguishable from a missing file and
         // are fixed differently. The record dir hangs off the plan path as given, so

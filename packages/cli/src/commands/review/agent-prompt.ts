@@ -45,7 +45,12 @@ import { READ_FILE_CHAR_CAP, type DiffChunk } from './lib/diff-plan.js';
 import { recordPrompt, writeBrief } from './lib/prompt-record.js';
 import { BRIEFS, type RoleId } from './lib/agent-briefs.js';
 import { pathRulesFor } from './lib/path-rules.js';
-import { reviewMode, type RosterPlan } from './lib/roster.js';
+import {
+  requiredAgents,
+  reviewMode,
+  type RequiredAgent,
+  type RosterPlan,
+} from './lib/roster.js';
 
 interface AgentPromptArgs {
   plan: string;
@@ -57,6 +62,8 @@ interface AgentPromptArgs {
   file?: string;
   /** Build only the diff-reading block (Agent 8, whose brief lives nowhere else). */
   wholeDiff?: boolean;
+  /** Build every prompt the plan's roster requires, in one call. */
+  roster?: boolean;
   rules?: string;
   /**
    * A file of findings to fold into a verify/reverse-audit prompt, so the caller
@@ -1026,6 +1033,113 @@ export function findingsSection(role: RoleId, content: string): string {
   );
 }
 
+/**
+ * Build one agent's brief and launch prompt, write the brief beside the plan, and
+ * return the key and the prompt for the caller to record and print.
+ *
+ * One body for both callers on purpose: the single-agent path and `--roster` must
+ * emit byte-identical prompts for the same agent, because the delivery check
+ * compares agents against records — a drift between the two paths would read as a
+ * rewritten launch on a run that did everything right.
+ */
+function buildLaunch(
+  report: PlanReport,
+  planPath: string,
+  spec: { role?: RoleId; chunk?: number; file?: string },
+  rules?: string,
+): { key: string; prompt: string } {
+  if (spec.role) {
+    const key = spec.file
+      ? `${spec.role}--${spec.file}`
+      : typeof spec.chunk === 'number'
+        ? `${spec.role}--chunk-${spec.chunk}`
+        : spec.role;
+    const briefFile = writeBrief(
+      planPath,
+      key,
+      buildRoleBrief(report, spec.role, {
+        rules,
+        file: spec.file,
+        planPath,
+        chunk: spec.chunk,
+      }),
+    );
+    return {
+      key,
+      prompt: buildRoleLaunchPrompt(report, spec.role, briefFile, {
+        file: spec.file,
+        chunk: spec.chunk,
+      }),
+    };
+  }
+  const id = spec.chunk as number;
+  const key = `chunk-${id}`;
+  const briefFile = writeBrief(
+    planPath,
+    key,
+    buildChunkAgentPrompt(report, id, rules),
+  );
+  return { key, prompt: buildChunkLaunchPrompt(report, id, briefFile) };
+}
+
+/** The line above each roster block: who this launch is, in the reader's terms. */
+function rosterLabel(req: RequiredAgent): string {
+  if (req.role === 'chunk') return `chunk ${req.chunk}`;
+  // The brief's label already reads `Agent 1a: Line-by-line correctness`; the
+  // rebuild hint downstream names roles, so keep the id visible when the label
+  // does not carry it.
+  const label = BRIEFS[req.role]?.label ?? `role ${req.role}`;
+  return req.file ? `${label} — ${req.file}` : label;
+}
+
+/**
+ * Every prompt the plan requires, in one call.
+ *
+ * The per-agent form asks the orchestrator for ~30 build-then-launch round trips
+ * on a large review, and compliance decays with repetition: dogfooded on one PR,
+ * the same environment went from a clean run to "no prompt was built for any of
+ * twelve roles" over three reviews in a day — the builder simply stopped being
+ * called. One call per review is a compliance cost that does not accumulate, and
+ * the list it builds is the same one `check-coverage` will hold the run to,
+ * because both come from `requiredAgents(plan)`.
+ */
+function runRoster(report: PlanReport, planPath: string, rules?: string): void {
+  const roster = requiredAgents(report as RosterPlan);
+  const blocks = roster.map((req, i) => {
+    const { key, prompt } = buildLaunch(
+      report,
+      planPath,
+      req.role === 'chunk'
+        ? { chunk: req.chunk }
+        : { role: req.role, file: req.file },
+      rules,
+    );
+    // The roster is what coverage checks; the key is what this command records
+    // under. They are derived in two files, and if they ever disagree, every
+    // delivery check downstream reads "brief never reached an agent" on a run
+    // that did everything right. Refuse to hand out prompts that cannot match.
+    if (key !== req.key) {
+      throw new Error(
+        `agent-prompt: --roster built "${key}" where the roster requires ` +
+          `"${req.key}" — the record could never be matched to the requirement. ` +
+          'This is a bug in the CLI, not in the call.',
+      );
+    }
+    recordPrompt(planPath, key, prompt);
+    return `───── agent ${i + 1} of ${roster.length} — ${rosterLabel(req)} ─────\n\n${prompt}`;
+  });
+  writeStdoutLine(
+    [
+      `${roster.length} agents required. Launch one agent per block below, ` +
+        `passing its block VERBATIM — copy, do not retype. The ───── lines are ` +
+        `separators, not part of any prompt. This is the same roster ` +
+        `\`check-coverage\` reads out of the plan: a block you skip or reword is ` +
+        `a dimension nobody reviewed.`,
+      ...blocks,
+    ].join('\n\n'),
+  );
+}
+
 function runAgentPrompt(args: AgentPromptArgs): void {
   // Exactly one primary mode: a territory chunk, a named role, or the bare
   // whole-diff block. A call that named none used to fall through to the chunk
@@ -1040,7 +1154,18 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   const bad = (msg: string): never => {
     throw new Error(`agent-prompt: ${msg}`);
   };
-  if (hasWhole) {
+  if (args.roster) {
+    // The roster IS the selection — the plan decides who runs, which is the point.
+    // A --roster call that also names one agent is asking for two contradictory
+    // scopes, and honouring either would silently drop the other.
+    if (hasChunk || hasRole || hasFile || hasFindings || hasWhole) {
+      bad(
+        '--roster builds every prompt the plan requires; it takes no --chunk, ' +
+          '--role, --file, --findings or --whole-diff. (Step 4/5 verify and ' +
+          'reverse-audit prompts are built per round, with --role and --findings.)',
+      );
+    }
+  } else if (hasWhole) {
     if (hasChunk || hasRole || hasFile || hasFindings) {
       bad(
         '--whole-diff builds the diff-reading block alone; it takes no --chunk, --role, --file or --findings.',
@@ -1116,8 +1241,9 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     );
   } else if (!hasChunk) {
     bad(
-      'pass exactly one of --chunk <id> (a Step 3B territory agent), --role ' +
-        '<role> (a named agent), or --whole-diff (the diff-reading block on its own).',
+      'pass exactly one of --roster (every prompt the plan requires, in one ' +
+        'call), --chunk <id> (a Step 3B territory agent), --role <role> (a named ' +
+        'agent), or --whole-diff (the diff-reading block on its own).',
     );
   }
 
@@ -1157,48 +1283,32 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   // reciting a stock sentence, and replacing the project's review rules with a
   // summary of its own — and every check downstream passed, because a paraphrase
   // keeps the diff path.
+  if (args.roster) {
+    runRoster(report, args.plan, rules);
+    return;
+  }
+
   let prompt: string;
   let key: string;
   if (args.wholeDiff) {
     prompt = buildWholeDiffBlock(report, rules);
     key = 'whole-diff';
-  } else if (args.role) {
-    const role = args.role as RoleId;
+  } else {
     // The record key must be unique per launch. An invariant agent is keyed by its
     // file; a Step 3B reverse-audit agent by its chunk (its brief is identical
     // across chunks, but its launch prompt reads a different range, and the delivery
     // check compares launch prompts). Everything else is one per review.
-    key = args.file
-      ? `${role}--${args.file}`
-      : typeof args.chunk === 'number'
-        ? `${role}--chunk-${args.chunk}`
-        : role;
-    // Two artifacts, both written here. The brief is what the agent reads; the
-    // launch prompt is the short thing the orchestrator carries, and the only thing
-    // it has to get right.
-    const briefFile = writeBrief(
+    // Two artifacts, both written in `buildLaunch`. The brief is what the agent
+    // reads; the launch prompt is the short thing the orchestrator carries, and the
+    // only thing it has to get right.
+    ({ key, prompt } = buildLaunch(
+      report,
       args.plan,
-      key,
-      buildRoleBrief(report, role, {
-        rules,
-        file: args.file,
-        planPath: args.plan,
-        chunk: args.chunk,
-      }),
-    );
-    prompt = buildRoleLaunchPrompt(report, role, briefFile, {
-      file: args.file,
-      chunk: args.chunk,
-    });
-  } else {
-    const id = args.chunk as number;
-    key = `chunk-${id}`;
-    const briefFile = writeBrief(
-      args.plan,
-      key,
-      buildChunkAgentPrompt(report, id, rules),
-    );
-    prompt = buildChunkLaunchPrompt(report, id, briefFile);
+      args.role
+        ? { role: args.role as RoleId, chunk: args.chunk, file: args.file }
+        : { chunk: args.chunk },
+      rules,
+    ));
   }
 
   // Record the findings-FREE launch prompt, and print the one the caller pastes.
@@ -1259,6 +1369,13 @@ export const agentPromptCommand: CommandModule = {
           'The heavily-rewritten file an invariant agent owns (--role ' +
           'invariant-a|invariant-b|invariant-c)',
       })
+      .option('roster', {
+        type: 'boolean',
+        describe:
+          'Build EVERY prompt the plan requires — chunk, dimension and ' +
+          'invariant agents alike — in one call, each labelled and separated. ' +
+          'The list is the same one check-coverage reads out of the plan.',
+      })
       .option('whole-diff', {
         type: 'boolean',
         describe:
@@ -1287,6 +1404,7 @@ export const agentPromptCommand: CommandModule = {
       chunk: argv['chunk'] as number | undefined,
       file: argv['file'] as string | undefined,
       wholeDiff: argv['whole-diff'] === true,
+      roster: argv['roster'] === true,
       rules: argv['rules'] as string | undefined,
       findings: argv['findings'] as string | undefined,
     });

@@ -247,14 +247,14 @@ Use **Step 3A** or **Step 3B** as the topology gate in Step 1 decided. The dimen
 
 Launch **12 agents** for same-repo **PR** reviews (Agent 1 has three procedural variants 1a/1b/1c and Agent 6 has three persona variants 6a/6b/6c — each variant counts as a separate parallel agent), plus up to 2 optional diff-specialized finders (Agent 8) when the diff's domain calls for them. For cross-repo lightweight **PR** mode launch **10 agents** — skip Agent 7 (Build & Test) and Agent 1c (Cross-file tracer), since there is no local codebase to build, test, or grep. (Agent 8 finders need only the diff, so the up-to-2 option applies in every mode — lightweight and local included.) Lightweight mode also degrades Agents 1a and 1b, whose briefs assume a source tree: tell them they have the diff ONLY — 1a reviews hunks without enclosing-function reads, and 1b, when it cannot find a deleted invariant re-established because the evidence would live outside the diff, reports the candidate at `Confidence: low` and says the re-establishment could not be checked, instead of asserting it is missing. Step 4's verifiers operate under the same limit, so lightweight-mode findings that depend on unseen source must stay low-confidence (terminal-only) rather than becoming public blockers. **Agent 0 (Issue Fidelity) runs only when the review target is a PR** — a local-diff or file-path review has no PR and no linked issue, so skip Agent 0 and launch **11 agents** (Agents 1a–7). Each agent should focus exclusively on its dimension. (Agent counts are maxima: on a diff with no removed or replaced lines, Agent 1b has nothing to audit and is skipped — one fewer agent.)
 
-**Do not write these prompts. Ask for each one:**
+**Do not write these prompts, and do not ask for them one at a time. One call builds all of them:**
 
 ```bash
-"${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <the plan report from Step 1> --role <role> \
+"${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <the plan report from Step 1> --roster \
   [--rules <the rules file from Step 2, if the project has any>]
 ```
 
-One call per agent, and **pass what it prints to that agent verbatim.** The roles are `0`, `1a`, `1b`, `1c`, `2`, `3`, `4`, `5`, `6a`, `6b`, `6c`, `7`.
+It prints one labelled block per required agent — which roles this review owes is read out of the plan, so the paragraph above is the _why_ and the roster is the _list_ — and **each block goes to its agent verbatim**, all launched in one response. To rebuild a single agent's prompt (a relaunch after Step 3D): `--role <role>` in place of `--roster`; the roles are `0`, `1a`, `1b`, `1c`, `2`, `3`, `4`, `5`, `6a`, `6b`, `6c`, `7`.
 
 **What it prints is short — a few hundred characters — and it is short on purpose.** It names the agent's role, points at the **brief file** the command just wrote, and lists the `read_file` calls for the diff. The brief itself — the dimension, the finding format, the severity definitions, the project rules — is on disk, and the agent reads it, exactly as it reads the diff. That is not an optimisation. Asked to paste a 4 652-character prompt to each of twelve agents, a real run delivered **2 893** characters of one: it kept the head, added a preamble of its own, and cut nineteen hundred characters out of the middle. Then it read the coverage check's refusal, concluded that "the agents clearly did their job", skipped `compose-review`, and filed an **Approve it had written itself**. What you are asked to carry is now small enough that you will carry it. Copy it; do not retype it. (Agent 8, when you launch one, is the exception — its brief is the one you write, so give it `--whole-diff` and append your domain brief.)
 
@@ -266,16 +266,14 @@ Why: **the roles this command does not build are the roles that go missing.** Me
 
 Eleven agents all reading the same diff (every 3A agent except Build & Test walks the whole chunk plan) multiplies redundant reading of the early hunks; it does not add coverage. Once there is enough production code to divide, fan out along **territory** as well: one agent per chunk, with the review dimensions folded into that agent's brief, plus a small set of whole-diff agents for the concerns that only exist at diff scale.
 
-**Chunk agents — one per entry in `chunks[]`.** Each is a `general-purpose` subagent. **Do not write its prompt. Ask for it:**
+**Chunk agents — one per entry in `chunks[]`.** Each is a `general-purpose` subagent. **Do not write their prompts, and do not ask for them one at a time — one call builds the whole 3B fan-out, chunk agents, whole-diff agents and invariant agents alike:**
 
 ```bash
-"${QWEN_CODE_CLI:-qwen}" review agent-prompt \
-  --plan <the plan report from Step 1> \
-  --chunk <id> \
+"${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <the plan report from Step 1> --roster \
   [--rules <the rules file from Step 2, if the project has any>]
 ```
 
-Pass what it prints to the agent **verbatim**. **Pass `--rules` whenever Step 2 found any** — this command builds the whole prompt, so there is no later step in which you would staple them on, and a review that silently enforces no project rule is one of the things this skill exists to prevent.
+One labelled block per agent; each goes to its agent **verbatim**. (To rebuild a single chunk agent's prompt for a relaunch: `--chunk <id>` in place of `--roster`.) **Pass `--rules` whenever Step 2 found any** — this command builds the whole prompt, so there is no later step in which you would staple them on, and a review that silently enforces no project rule is one of the things this skill exists to prevent.
 
 **What it prints is short — a few hundred characters.** It names the chunk, points at the **brief file** the command just wrote, and gives the one `read_file` that defines the territory. The brief — the territory's files, the paging rule, the uncoverable rule, what to review, the finding format, the severity definitions, the project rules and the receipt — is on disk, and the agent reads it, exactly as it reads the diff. A chunk agent's brief runs to about five kilobytes with the project rules in it, and a Step 3B review of a real pull request has **seventeen** of them: eighty-seven kilobytes, in one response, pasted without an edit. That is not a thing that happens. At a twelfth of that load, a real run cut nineteen hundred characters out of a single prompt and then talked its way past the check that caught it.
 
@@ -297,14 +295,7 @@ Everything below still governs what the agent is asked to do; the command builds
 
 **Whole-diff agents — launched alongside the chunk agents, in the same response.**
 
-**Their prompts are built in code too. Ask for each one:**
-
-```bash
-"${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <the plan report from Step 1> --role <role> \
-  [--rules <the rules file from Step 2, if the project has any>]
-```
-
-Roles here: `0` (PR reviews), `1b` (when the diff removes anything), `1c`, `test-matrix`, `7` (same-repo). For a **heavy** file, three more, one per checklist slice: `--role invariant-a|invariant-b|invariant-c --file <path>`. Pass each **verbatim**. `check-coverage` derives the same list from the plan and will name any role that did not run.
+**Their blocks are already in the `--roster` output above — you have them.** Roles there: `0` (PR reviews), `1b` (when the diff removes anything), `1c`, `test-matrix`, `7` (same-repo), and for a **heavy** file three more, one per checklist slice (their blocks are labelled `Invariant agent A|B|C: … — <path>`). Pass each **verbatim**. To rebuild one for a relaunch: `--role <role>` (an invariant agent adds `--file <path>`). `check-coverage` derives the same list from the plan and will name any role that did not run.
 
 Why: **the chunk agents got the diff and these did not.** Measured against the harness's record of one real 3B run, all three whole-diff agents — cross-file tracer, test-coverage matrix, build & test — were launched with a prompt that named **no diff file at all**. The test-coverage matrix was told, in prose, to "Read the diff chunks and the test files", and given no path to read them from. It went and read the post-change source instead, and on a diff with deletions that shows an agent precisely nothing: the removed line is not in that file, and nothing marks where it was. These are the agents that own the classes a chunk agent is structurally blind to — the cross-file trace, the cross-chunk removed-behaviour pairing, the test matrix. The review's only coverage of all three was done by agents that never opened the diff, and the coverage check could not see it, because it only ever asked that question of agents whose prompt said `chunk N of M`.
 
@@ -322,7 +313,7 @@ The sections below say what each agent is _for_. They are no longer what it is _
 
 When a file is largely rewritten, reviewing it as a diff is the wrong frame. The bugs are not inside any one hunk; they are **between** the new lines, which can sit two thousand lines apart — a timer armed near the top of the file and a teardown path near the bottom. No chunk agent, and no reader of a diff with three lines of context, can see that pair.
 
-Three agents per `heavy` file, one checklist slice each:
+Three agents per `heavy` file, one checklist slice each — their blocks are in the `--roster` output; to rebuild one for a relaunch:
 
 ```bash
 "${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <the plan report from Step 1> \
@@ -386,7 +377,7 @@ A check you perform silently is a check you skip, and this one has been skipped:
 
 **For same-repo PR reviews (worktree mode), every `agent` call MUST also set `working_dir: "<worktreePath>"`** — the `worktreePath` from the Step 1 fetch report (a repo-relative path like `.qwen/tmp/review-pr-<n>`; pass it through as-is). This sets each agent's working directory to the PR worktree, so its `git diff`, `grep_search`, file reads, and Agent 7's build/test **resolve against the PR's code, not the user's main checkout**. It is a deterministic, harness-level cwd pin — it does NOT depend on the agent remembering to `cd`, and it is what makes reviewing multiple PRs concurrently safe. (It pins the working directory; it is not a hard filesystem sandbox — an absolute path could still reach elsewhere — but normal review operations stay inside the worktree.) This rule applies to **every** agent the review workflow launches — not just the Step 3 dimension agents, but also the Step 4 verification agent and the Step 5 reverse-audit agents (both restated below). Do NOT set `working_dir` for **local-diff, file-path, or cross-repo lightweight** reviews — those have no worktree, so the agents run in the main project directory.
 
-**You no longer compose these prompts. `qwen review agent-prompt` does** — one call per agent, and what it prints goes to that agent unedited. It already contains everything the list below used to ask you to remember: `diffPathAbsolute` and the exact `read_file` ranges for that role (its own `offset`/`limit` for a chunk agent; every chunk for a whole-diff or 3A agent; the post-change file plus `addedRanges[]` and its own `diffRange` for an invariant agent), the agent's focus areas, the severity definitions verbatim, the finding format, and the project rules. **Never give an agent a `git diff` command** — see "Diff capture and the review topology" in Step 1 for why. In worktree-mode PR reviews the agent's `working_dir` is the PR worktree, so `grep_search` and source-file reads resolve against the PR's code automatically — the agent must NOT `cd` into the worktree or prefix absolute paths for those.
+**You no longer compose these prompts. `qwen review agent-prompt` does** — one `--roster` call builds every one of them, and each block it prints goes to its agent unedited. It already contains everything the list below used to ask you to remember: `diffPathAbsolute` and the exact `read_file` ranges for that role (its own `offset`/`limit` for a chunk agent; every chunk for a whole-diff or 3A agent; the post-change file plus `addedRanges[]` and its own `diffRange` for an invariant agent), the agent's focus areas, the severity definitions verbatim, the finding format, and the project rules. **Never give an agent a `git diff` command** — see "Diff capture and the review topology" in Step 1 for why. In worktree-mode PR reviews the agent's `working_dir` is the PR worktree, so `grep_search` and source-file reads resolve against the PR's code automatically — the agent must NOT `cd` into the worktree or prefix absolute paths for those.
 
 The one thing you still add per agent is **a one-sentence summary of what the change is about**, ahead of the block. Add it before, never inside: the delivered prompt must _contain_ what the command printed, and Step 3D checks that it does.
 

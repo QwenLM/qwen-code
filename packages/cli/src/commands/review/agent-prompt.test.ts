@@ -416,6 +416,204 @@ describe('agent-prompt (command boundary)', () => {
   });
 });
 
+// One call per review, not one per agent. The per-agent form asks for ~30
+// build-then-launch round trips on a large review, and compliance decays with
+// repetition: dogfooded, the same environment went from a clean run to "no prompt
+// was built for any of twelve roles" in a day — the builder simply stopped being
+// called. The roster call and check-coverage read the same list out of the same
+// plan, so what gets built is exactly what gets checked.
+describe('--roster — every prompt the plan requires, in one call', () => {
+  beforeEach(() => {
+    (writeStdoutLine as unknown as Mock).mockClear();
+  });
+
+  /** The blocks as an orchestrator would copy them: split on separator lines. */
+  function printedBlocks(): string[] {
+    const printed = (writeStdoutLine as unknown as Mock).mock
+      .calls[0][0] as string;
+    return printed
+      .split(/^(?=───── agent )/m)
+      .slice(1) // drop the header
+      .map((b) => b.trimEnd());
+  }
+
+  it('builds and records the whole 3A roster', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-roster-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        roster: true,
+      });
+
+      // PLAN has no srcDiffLines and no worktree: a diff-only 3A review, and its
+      // `files[]` is absent, so the removed-behaviour audit is owed (an unknown
+      // deletion count is not "no deletions"). Pinned literally: this list IS the
+      // contract, and a drift here is a drift in who reviews.
+      const recorded = readRecordedPrompts(plan);
+      expect([...recorded.keys()].sort()).toEqual([
+        '1a',
+        '1b',
+        '2',
+        '3',
+        '4',
+        '5',
+        '6a',
+        '6b',
+        '6c',
+      ]);
+
+      const printed = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      expect(printed).toContain('9 agents required');
+      // Every recorded prompt appears in the output byte-for-byte: what the
+      // orchestrator copies is what the delivery check will look for.
+      for (const [, prompt] of recorded) {
+        expect(printed).toContain(prompt);
+      }
+      // Labelled for the reader, so a Task launch can be named after its block.
+      expect(printed).toMatch(
+        /───── agent \d+ of 9 — Agent 1a: Line-by-line correctness ─────/,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a whole block copied lazily — separator line included — still delivers', () => {
+    // The point of one call is that the compliant move is mechanical. An
+    // orchestrator that copies from one ───── line to the next has copied an
+    // insertion above the prompt, and the delivery check is add-only: it must
+    // pass. If this fails, sloppy-but-honest copying reads as a rewrite, and the
+    // gate starts punishing exactly the behaviour the roster call exists to buy.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-roster2-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        roster: true,
+      });
+      const recorded = readRecordedPrompts(plan);
+      const blocks = printedBlocks();
+      expect(blocks).toHaveLength(recorded.size);
+      for (const block of blocks) {
+        const match = [...recorded.values()].filter((p) =>
+          wasDeliveredVerbatim(block, p),
+        );
+        expect(match).toHaveLength(1); // its own prompt, and nobody else's
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('builds the 3B roster: chunks, whole-diff roles and per-file invariants', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-roster3b-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(
+        plan,
+        JSON.stringify({
+          ...PLAN,
+          srcDiffLines: 5000,
+          diffLines: 5000,
+          worktreePath: dir,
+          prNumber: '6771',
+          ownerRepo: 'QwenLM/qwen-code',
+          files: [
+            {
+              path: 'src/big.ts',
+              kind: 'source',
+              heavy: true,
+              removedLines: 40,
+              addedRanges: [{ start: 10, end: 400 }],
+              diffRange: { startLine: 3808, endLine: 4024 },
+            },
+          ],
+        }),
+      );
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        roster: true,
+      });
+
+      const recorded = readRecordedPrompts(plan);
+      expect([...recorded.keys()].sort()).toEqual(
+        [
+          '0',
+          'chunk-13',
+          'chunk-14',
+          'chunk-15',
+          'test-matrix',
+          '1b',
+          '1c',
+          '7',
+          'invariant-a--src/big.ts',
+          'invariant-b--src/big.ts',
+          'invariant-c--src/big.ts',
+        ].sort(),
+      );
+      // The invariant briefs are file-scoped, exactly as the --file form builds
+      // them — the roster path must not hand an invariant agent the whole diff.
+      const inv = readFileSync(
+        briefPath(plan, 'invariant-a--src/big.ts'),
+        'utf8',
+      );
+      expect(inv).toContain('`src/big.ts`');
+      expect(inv).toContain('10-400');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('threads --rules into every brief it writes', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-roster-rules-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      const rules = join(dir, 'rules.md');
+      writeFileSync(rules, 'No `any` in new code.\n');
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        roster: true,
+        rules,
+      });
+      for (const key of ['1a', '1b', '6c']) {
+        expect(readFileSync(briefPath(plan, key), 'utf8')).toContain(
+          'No `any` in new code.',
+        );
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses company: the roster IS the selection', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-roster-x-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      for (const extra of [
+        { role: '1a' },
+        { chunk: 13 },
+        { 'whole-diff': true },
+      ]) {
+        expect(() =>
+          (agentPromptCommand.handler as (a: unknown) => void)({
+            plan,
+            roster: true,
+            ...extra,
+          }),
+        ).toThrow(/--roster builds every prompt/);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 // Dogfooded on a real 3A review: the orchestrator delivered Step 3 prompts verbatim
 // but PARAPHRASED the Step 4/5 ones — added "(round 2)", inserted its own summary,
 // truncated the "nothing replaces the brief" line — because it hand-prepended the
