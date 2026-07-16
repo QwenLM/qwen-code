@@ -182,6 +182,10 @@ describe('EnhancedErrorHandler', () => {
       expect(() => {
         errorHandler.handle(stringError, mockContext, mockRequest);
       }).toThrow(stringError);
+      expect(debugLoggerSpy.error).toHaveBeenCalledWith(
+        'OpenAI API Error:',
+        stringError,
+      );
     });
 
     it('should redact proxy credentials before throwing request-time errors', () => {
@@ -327,6 +331,25 @@ describe('EnhancedErrorHandler', () => {
       expect(() => {
         errorHandler.handle(originalError, mockContext, mockRequest);
       }).toThrow('Original error message');
+      expect(debugLoggerSpy.error).toHaveBeenCalledWith(
+        'OpenAI API Error:',
+        'Original error message',
+      );
+    });
+
+    it('should include the underlying cause for non-timeout errors', () => {
+      const cause = Object.assign(new Error('fetch failed'), {
+        code: 'ECONNREFUSED',
+      });
+      const connectionError = new Error('Connection error.', { cause });
+
+      expect(() => {
+        errorHandler.handle(connectionError, mockContext, mockRequest);
+      }).toThrow(connectionError);
+      expect(debugLoggerSpy.error).toHaveBeenCalledWith(
+        'OpenAI API Error:',
+        'Connection error. (cause: ECONNREFUSED: fetch failed)',
+      );
     });
 
     it('should handle non-Error objects', () => {
