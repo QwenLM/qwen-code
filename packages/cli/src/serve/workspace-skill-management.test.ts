@@ -325,6 +325,85 @@ describe('workspace Skill management', () => {
     ).rejects.toMatchObject({ code: 'invalid_skill_source' });
   });
 
+  it('rejects unsafe GitHub refs before making a request', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'invalid-ref',
+        scope: 'workspace',
+        source: {
+          type: 'github',
+          url: 'https://github.com/owner/repo/blob/--upload-pack/SKILL.md',
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_skill_source' });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('stops reading an oversized GitHub Skill file', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const oversizedBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(2 * 1024 * 1024));
+        controller.enqueue(new Uint8Array(1));
+        controller.close();
+      },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify([
+              {
+                name: 'SKILL.md',
+                path: 'SKILL.md',
+                type: 'file',
+                download_url:
+                  'https://raw.githubusercontent.com/owner/repo/main/SKILL.md',
+              },
+            ]),
+            { status: 200 },
+          ),
+        )
+        .mockResolvedValueOnce(new Response(oversizedBody, { status: 200 })),
+    );
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'large-github-skill',
+        scope: 'workspace',
+        source: {
+          type: 'github',
+          url: 'https://github.com/owner/repo/blob/main/SKILL.md',
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'skill_package_too_large',
+      statusCode: 413,
+    });
+  });
+
+  it('rejects a symbolic link as the source folder', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const source = await temporaryDirectory('qwen-skill-source-');
+    const sourceLink = path.join(workspace, 'source-link');
+    await fs.writeFile(path.join(source, 'SKILL.md'), skillMarkdown('linked'));
+    await fs.symlink(source, sourceLink);
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'linked',
+        scope: 'workspace',
+        source: { type: 'folder', path: sourceLink },
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_skill_folder' });
+  });
+
   it('reports an expanded ZIP entry over the limit as too large', async () => {
     const workspace = await temporaryDirectory('qwen-skill-workspace-');
 
@@ -337,6 +416,31 @@ describe('workspace Skill management', () => {
           contentBase64: await zip({
             'large-skill/SKILL.md': skillMarkdown('large-skill'),
             'large-skill/asset.txt': 'x'.repeat(2 * 1024 * 1024 + 1),
+          }),
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'skill_package_too_large',
+      statusCode: 413,
+    });
+  });
+
+  it('reports a ZIP whose total expanded content is over the limit', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const largeFile = 'x'.repeat(1_600_000);
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'large-total-skill',
+        scope: 'workspace',
+        source: {
+          type: 'zip',
+          contentBase64: await zip({
+            'large-total-skill/SKILL.md': skillMarkdown('large-total-skill'),
+            'large-total-skill/one.txt': largeFile,
+            'large-total-skill/two.txt': largeFile,
+            'large-total-skill/three.txt': largeFile,
+            'large-total-skill/four.txt': largeFile,
           }),
         },
       }),
@@ -374,5 +478,92 @@ describe('workspace Skill management', () => {
     await expect(
       fs.readFile(installed.installedPath!, 'utf8'),
     ).resolves.toContain('name: stable-skill');
+  });
+
+  it('keeps a committed replacement when backup cleanup fails', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const source = await temporaryDirectory('qwen-skill-source-');
+    const replacement = await temporaryDirectory('qwen-skill-source-');
+    await fs.writeFile(
+      path.join(source, 'SKILL.md'),
+      skillMarkdown('stable-skill'),
+    );
+    await fs.writeFile(
+      path.join(replacement, 'SKILL.md'),
+      `${skillMarkdown('stable-skill')}Replacement instructions.`,
+    );
+    const request = {
+      name: 'stable-skill',
+      scope: 'workspace' as const,
+      source: { type: 'folder' as const, path: source },
+    };
+    await installWorkspaceSkill(workspace, request);
+    vi.spyOn(fs, 'rm').mockRejectedValueOnce(new Error('cleanup failed'));
+
+    const result = await installWorkspaceSkill(workspace, {
+      ...request,
+      source: { type: 'folder', path: replacement },
+    });
+
+    await expect(fs.readFile(result.installedPath!, 'utf8')).resolves.toContain(
+      'Replacement instructions.',
+    );
+  });
+
+  it('preserves the install error when staging cleanup fails', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const source = await temporaryDirectory('qwen-skill-source-');
+    await fs.writeFile(
+      path.join(source, 'SKILL.md'),
+      skillMarkdown('different-name'),
+    );
+    vi.spyOn(fs, 'rm').mockRejectedValueOnce(new Error('cleanup failed'));
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'expected-name',
+        scope: 'workspace',
+        source: { type: 'folder', path: source },
+      }),
+    ).rejects.toThrow('does not match requested name');
+  });
+
+  it('restores the existing Skill when committing a replacement fails', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const source = await temporaryDirectory('qwen-skill-source-');
+    const replacement = await temporaryDirectory('qwen-skill-source-');
+    await fs.writeFile(
+      path.join(source, 'SKILL.md'),
+      skillMarkdown('stable-skill'),
+    );
+    await fs.writeFile(
+      path.join(replacement, 'SKILL.md'),
+      `${skillMarkdown('stable-skill')}Replacement instructions.`,
+    );
+    const request = {
+      name: 'stable-skill',
+      scope: 'workspace' as const,
+      source: { type: 'folder' as const, path: source },
+    };
+    const installed = await installWorkspaceSkill(workspace, request);
+    const rename = fs.rename.bind(fs);
+    vi.spyOn(fs, 'rename').mockImplementation(
+      async (sourcePath, targetPath) => {
+        if (String(sourcePath).includes('.installing-')) {
+          throw new Error('commit failed');
+        }
+        await rename(sourcePath, targetPath);
+      },
+    );
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        ...request,
+        source: { type: 'folder', path: replacement },
+      }),
+    ).rejects.toThrow('commit failed');
+    await expect(
+      fs.readFile(installed.installedPath!, 'utf8'),
+    ).resolves.not.toContain('Replacement instructions.');
   });
 });

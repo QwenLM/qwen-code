@@ -40,13 +40,7 @@ import {
   CardHeader,
   CardTitle,
 } from '../ui/card';
-import {
-  Empty,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from '../ui/empty';
+import { Empty, EmptyHeader, EmptyMedia, EmptyTitle } from '../ui/empty';
 import { Input } from '../ui/input';
 import {
   DropdownMenu,
@@ -286,10 +280,10 @@ export function SkillsManagerPage({
   ): Promise<void> {
     setInstallNotice(null);
     await install(request);
-    await reload();
     setInstallNotice(
       t('skills.install.succeeded', { name: request.name.trim() }),
     );
+    await reload().catch(() => undefined);
   }
 
   async function deleteSkill(): Promise<void> {
@@ -752,9 +746,6 @@ export function SkillsManagerPage({
                   ? t('skills.noMatches')
                   : t('skills.empty')}
               </EmptyTitle>
-              {!query && levelFilter === 'all' && statusFilter === 'all' ? (
-                <EmptyDescription>{t('skills.empty')}</EmptyDescription>
-              ) : null}
             </EmptyHeader>
           </Empty>
         )}

@@ -216,10 +216,25 @@ async function fetchBytes(url: string, githubToken?: string): Promise<Buffer> {
   if (Number.isFinite(declared) && declared > MAX_FILE_BYTES) {
     skillError('skill_package_too_large', 'Skill file is too large', 413);
   }
-  const content = Buffer.from(await response.arrayBuffer());
-  if (content.length > MAX_FILE_BYTES)
-    skillError('skill_package_too_large', 'Skill file is too large', 413);
-  return content;
+  if (!response.body) return Buffer.alloc(0);
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_FILE_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        skillError('skill_package_too_large', 'Skill file is too large', 413);
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, size);
 }
 
 async function downloadGitHubDirectory(
@@ -408,6 +423,7 @@ async function downloadGitHubSkill(
     !owner ||
     !repo ||
     !ref ||
+    ref.startsWith('-') ||
     !/^[A-Za-z0-9._-]+$/.test(owner) ||
     !/^[A-Za-z0-9._-]+$/.test(repo)
   ) {
@@ -520,8 +536,7 @@ async function filesFromZip(content: Buffer): Promise<SkillPackageFile[]> {
         );
         return;
       }
-      totalBytes += entry.uncompressedSize;
-      if (totalBytes > MAX_TOTAL_BYTES) {
+      if (totalBytes + entry.uncompressedSize > MAX_TOTAL_BYTES) {
         finish(
           new WorkspaceSkillManagementError(
             'skill_package_too_large',
@@ -532,6 +547,17 @@ async function filesFromZip(content: Buffer): Promise<SkillPackageFile[]> {
         return;
       }
       void readZipEntry(zipFile, entry).then((entryContent) => {
+        totalBytes += entryContent.length;
+        if (totalBytes > MAX_TOTAL_BYTES) {
+          finish(
+            new WorkspaceSkillManagementError(
+              'skill_package_too_large',
+              'Skill ZIP expands beyond the allowed size',
+              413,
+            ),
+          );
+          return;
+        }
         files.push({ relativePath: entry.fileName, content: entryContent });
         if (!settled) zipFile.readEntry();
       }, finish);
@@ -575,6 +601,12 @@ async function filesFromFolder(
 ): Promise<SkillPackageFile[]> {
   if (!path.isAbsolute(folderPath)) {
     skillError('invalid_skill_folder', 'Skill folder path must be absolute');
+  }
+  if ((await fs.lstat(folderPath)).isSymbolicLink()) {
+    skillError(
+      'invalid_skill_folder',
+      'Skill folder path must not be a symbolic link',
+    );
   }
   const root = await fs.realpath(folderPath);
   if (!(await fs.stat(root)).isDirectory()) {
@@ -721,22 +753,25 @@ export async function installWorkspaceSkill(
       movedExisting = true;
     }
     await fs.rename(staging, destination);
-    if (movedExisting) {
-      await fs.rm(backup, { recursive: true, force: true });
-    }
-    return {
-      skillName,
-      scope: request.scope,
-      installedPath: path.join(destination, 'SKILL.md'),
-    };
   } catch (error) {
-    await fs.rm(staging, { recursive: true, force: true });
+    await fs
+      .rm(staging, { recursive: true, force: true })
+      .catch(() => undefined);
     if (movedExisting) {
-      await fs.rm(destination, { recursive: true, force: true });
-      await fs.rename(backup, destination);
+      await fs.rename(backup, destination).catch(() => undefined);
     }
     throw error;
   }
+  if (movedExisting) {
+    await fs
+      .rm(backup, { recursive: true, force: true })
+      .catch(() => undefined);
+  }
+  return {
+    skillName,
+    scope: request.scope,
+    installedPath: path.join(destination, 'SKILL.md'),
+  };
 }
 
 export async function deleteWorkspaceSkill(

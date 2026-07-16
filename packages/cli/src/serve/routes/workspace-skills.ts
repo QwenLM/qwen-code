@@ -21,6 +21,7 @@ import type {
 import {
   MAX_WORKSPACE_SKILL_NAME_LENGTH,
   WorkspaceSkillManagementError,
+  validateWorkspaceSkillName,
   type WorkspaceSkillInstallRequest,
   type WorkspaceSkillScope,
 } from '../workspace-skill-management.js';
@@ -192,9 +193,16 @@ export function registerWorkspaceSkillsRoutes(
     deps.mutate({ strict: true }),
     async (req, res) => {
       if (!requireTrustedWorkspaceRuntime(deps.workspaceRuntime, res)) return;
-      const skillName = req.params['name'];
+      const rawSkillName = req.params['name'];
       const scope = parseDeleteScope(req, res);
-      if (!skillName || !scope) return;
+      if (!rawSkillName || !scope) return;
+      let skillName: string;
+      try {
+        skillName = validateWorkspaceSkillName(rawSkillName);
+      } catch (error) {
+        sendSkillManagementError(res, error);
+        return;
+      }
       const clientId = deps.parseAndValidateClientId(req, res);
       if (clientId === null) return;
       const deleteRoute = 'DELETE /workspace/skills/:name';

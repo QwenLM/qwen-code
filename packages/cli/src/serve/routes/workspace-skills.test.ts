@@ -123,4 +123,15 @@ describe('workspace Skill management routes', () => {
     expect(response.body.code).toBe('invalid_skill_name');
     expect(harness.installWorkspaceSkill).not.toHaveBeenCalled();
   });
+
+  it('rejects an invalid delete name before calling the service', async () => {
+    const harness = createHarness();
+    const response = await request(harness.app).delete(
+      '/workspace/skills/invalid%20name?scope=workspace',
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('invalid_skill_name');
+    expect(harness.deleteWorkspaceSkill).not.toHaveBeenCalled();
+  });
 });
