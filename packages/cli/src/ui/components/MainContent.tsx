@@ -14,7 +14,6 @@ import { Notifications } from './Notifications.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useAppContext } from '../contexts/AppContext.js';
-import { useStreamingContext } from '../contexts/StreamingContext.js';
 import { AppHeader } from './AppHeader.js';
 import { DebugModeNotification } from './DebugModeNotification.js';
 import {
@@ -108,7 +107,7 @@ const virtualIsStaticItem = (item: VpItem) =>
 export const MainContent = () => {
   const { version } = useAppContext();
   const uiState = useUIState();
-  const streamingState = useStreamingContext();
+  const streamingState = uiState.streamingState;
   const showScrollbar = uiState.showScrollbar ?? true;
   const {
     pendingHistoryItems,
@@ -495,7 +494,7 @@ export const MainContent = () => {
             maxHeight={
               uiState.constrainHeight ||
               streamingState === StreamingState.Responding
-                ? availableTerminalHeight
+                ? availableTerminalHeight || undefined
                 : undefined
             }
             overflow="hidden"
