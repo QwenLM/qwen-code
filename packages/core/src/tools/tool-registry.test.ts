@@ -15,6 +15,7 @@ import {
   getFunctionSchemaFingerprint,
 } from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
+import { EnterPlanModeTool } from './enterPlanMode.js';
 import { ExitPlanModeTool } from './exitPlanMode.js';
 import { DeferredToolCallTool } from './deferred-tool-call.js';
 import type { FunctionDeclaration, CallableTool } from '@google/genai';
@@ -550,6 +551,31 @@ describe('ToolRegistry', () => {
 
       expect(declared).toContain('exit_plan_mode');
       expect(deferred).not.toContain('exit_plan_mode');
+      expect(
+        toolRegistry.isDeferredToolRevealed(ToolNames.EXIT_PLAN_MODE),
+      ).toBe(false);
+    });
+
+    it('keeps declarations byte-stable when entering plan mode', async () => {
+      const enterPlanMode = new EnterPlanModeTool(config);
+      toolRegistry.registerTool(enterPlanMode);
+      toolRegistry.registerTool(new ExitPlanModeTool(config));
+      vi.spyOn(config, 'isInteractive').mockReturnValue(true);
+      const declarationsBefore = JSON.stringify(
+        toolRegistry.getFunctionDeclarations(),
+      );
+
+      const result = await enterPlanMode
+        .build({})
+        .execute(new AbortController().signal);
+
+      expect(result.llmContent).toContain('Plan mode is now active');
+      expect(JSON.stringify(toolRegistry.getFunctionDeclarations())).toBe(
+        declarationsBefore,
+      );
+      expect(
+        toolRegistry.getFunctionDeclarations().map((tool) => tool.name),
+      ).toContain(ToolNames.EXIT_PLAN_MODE);
     });
 
     it('includes revealed deferred tools in getFunctionDeclarations', () => {

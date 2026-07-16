@@ -105,6 +105,18 @@ describe('EnterPlanModeTool', () => {
       expect(result.llmContent).toContain('Plan mode is now active');
     });
 
+    it('does not resync tool declarations when entering plan mode', async () => {
+      const getToolRegistry = vi.fn();
+      const getGeminiClient = vi.fn();
+      Object.assign(mockConfig, { getToolRegistry, getGeminiClient });
+
+      const result = await tool.build({}).execute(new AbortController().signal);
+
+      expect(result.llmContent).toContain('Plan mode is now active');
+      expect(getToolRegistry).not.toHaveBeenCalled();
+      expect(getGeminiClient).not.toHaveBeenCalled();
+    });
+
     it('should switch from AUTO_EDIT to PLAN', async () => {
       approvalMode = ApprovalMode.AUTO_EDIT;
       const invocation = tool.build({});
