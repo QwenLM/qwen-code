@@ -438,6 +438,33 @@ describe('languageUtils', () => {
       expect(i18n.detectSystemLanguage).not.toHaveBeenCalled();
     });
 
+    it('should migrate generated fixed-language files after harmless template wording changes', () => {
+      writeOutputLanguageFile('Chinese');
+      const generatedFixedLanguageContent = vi.mocked(fs.writeFileSync).mock
+        .calls[0][1] as string;
+      const generatedWithExtraTemplateLine =
+        generatedFixedLanguageContent.replace(
+          '## Exception',
+          '- Keep the selected language stable across turns.\n\n## Exception',
+        );
+      vi.mocked(fs.writeFileSync).mockClear();
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(
+        generatedWithExtraTemplateLine,
+      );
+
+      initializeLlmOutputLanguage('auto');
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining(
+          "Respond in the same language as the user's input.",
+        ),
+        'utf-8',
+      );
+    });
+
     it('should preserve a manually customized fixed-language file even when setting is auto', () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(

@@ -11268,7 +11268,7 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(updateOutputLanguageFile).mockClear();
     vi.mocked(writeOutputLanguageAndRegisterPath).mockClear();
 
-    await agent.extMethod('qwen/control/session/language', {
+    const result = await agent.extMethod('qwen/control/session/language', {
       sessionId: 's-a',
       language: 'auto',
       syncOutputLanguage: true,
@@ -11283,6 +11283,7 @@ describe('sessionLanguage multi-session propagation', () => {
       '/proj-b/.qwen/output-language.md',
     );
     expect(resolveOutputLanguageOrPreserveAuto).toHaveBeenCalledWith('auto');
+    expect(result).toMatchObject({ outputLanguage: 'auto' });
 
     mockConnectionState.resolve();
     await agentPromise;

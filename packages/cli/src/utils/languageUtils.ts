@@ -199,12 +199,25 @@ function readOutputLanguageFileContent(): string | null {
   }
 }
 
-function isGeneratedOutputLanguageFileContent(
+function isGeneratedFixedOutputLanguageFileContent(
   content: string,
   language: string,
 ): boolean {
+  const normalizedContent = content.replace(/\r\n/g, '\n');
+  const headings = normalizedContent.match(/^#{1,2}\s+.+$/gm) ?? [];
+
   return (
-    content.trimEnd() === generateOutputLanguageFileContent(language).trimEnd()
+    normalizedContent.includes(
+      `<!-- ${LLM_OUTPUT_LANGUAGE_MARKER_PREFIX} ${sanitizeForMarker(language)} -->`,
+    ) &&
+    headings.length === 5 &&
+    headings[0] === `# Output language preference: ${language}` &&
+    headings.includes('## Rule') &&
+    headings.includes('## Exception') &&
+    headings.includes('## Keep technical artifacts unchanged') &&
+    headings.includes('## Tool / system outputs') &&
+    normalizedContent.includes(`**${language}**`) &&
+    normalizedContent.includes('You MUST always respond')
   );
 }
 
@@ -286,7 +299,7 @@ export function initializeLlmOutputLanguage(outputLanguage?: string): void {
     currentFileLanguage !== null &&
     !isAutoLanguage(currentFileLanguage) &&
     currentFileContent !== null &&
-    isGeneratedOutputLanguageFileContent(
+    isGeneratedFixedOutputLanguageFileContent(
       currentFileContent,
       currentFileLanguage,
     );
