@@ -601,7 +601,7 @@ async function handleDaemonRoute(
     return;
   }
   if (method === 'GET' && path === '/workspace/extensions') {
-    await json(route, workspaceExtensions(scenario));
+    await json(route, scenario.extensions);
     return;
   }
   if (method === 'GET' && path === '/workspace/extensions/operations') {
@@ -928,12 +928,6 @@ function workspaceTools(
     tools: [],
     errors: [],
   };
-}
-
-function workspaceExtensions(
-  scenario: WebShellDaemonScenario,
-): DaemonWorkspaceExtensionsStatus {
-  return scenario.extensions;
 }
 
 function workspaceVoice(
