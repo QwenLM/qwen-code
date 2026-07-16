@@ -329,6 +329,7 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
       );
     }
 
+    this.savePlanBestEffort(plan);
     try {
       this.config.setApprovalMode(decision.targetMode);
     } catch (error) {
@@ -338,7 +339,6 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
       );
     }
 
-    this.savePlanBestEffort(plan);
     const feedback = decision.message
       ? ` Leader note: ${decision.message}`
       : '';

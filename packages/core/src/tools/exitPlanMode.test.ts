@@ -44,6 +44,10 @@ describe('ExitPlanModeTool', () => {
     expect(tool.kind).toBe('think');
     expect(tool.shouldDefer).toBe(true);
     expect(tool.alwaysLoad).toBe(true);
+    expect(tool.displayName).toBe('ExitPlanMode');
+    const invocation = tool.build({ plan: 'x' });
+    expect(invocation.getDescription()).toBe('Plan:');
+    expect(invocation.toolLocations()).toEqual([]);
     expect(tool.schema.parametersJsonSchema).toMatchObject({
       properties: {
         plan: { type: 'string' },
@@ -58,11 +62,14 @@ describe('ExitPlanModeTool', () => {
     ).not.toHaveProperty('resolutionSummary');
   });
 
-  it.each([undefined, '', '  \n'])('rejects an empty plan (%j)', (plan) => {
-    expect(
-      tool.validateToolParams({ plan } as unknown as ExitPlanModeParams),
-    ).toBe('Parameter "plan" must be a non-empty string.');
-  });
+  it.each([undefined, '', '  \n', 123])(
+    'rejects an invalid plan (%j)',
+    (plan) => {
+      expect(
+        tool.validateToolParams({ plan } as unknown as ExitPlanModeParams),
+      ).toBe('Parameter "plan" must be a non-empty string.');
+    },
+  );
 
   it('always requires explicit interaction in the main session', async () => {
     const invocation = tool.build({ plan: 'Plan' });
@@ -362,6 +369,32 @@ describe('ExitPlanModeTool', () => {
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('cancelled');
     expect(config.setApprovalMode).not.toHaveBeenCalled();
+  });
+
+  it('saves a leader-approved plan when the teammate transition fails', async () => {
+    transitionError = new Error('mode locked');
+    vi.mocked(config.getTeamManager).mockReturnValue({
+      requestPlanApproval: vi.fn(async () => ({
+        action: 'approve',
+        targetMode: ApprovalMode.DEFAULT,
+      })),
+    } as never);
+    const invocation = tool.build({ plan: 'Teammate plan' });
+
+    const result = await runWithTeammateIdentity(
+      {
+        agentId: 'planner@test',
+        agentName: 'planner',
+        teamName: 'test',
+        isTeamLead: false,
+        planModeRequired: true,
+      },
+      () => invocation.execute(new AbortController().signal),
+    );
+
+    expect(result.error?.message).toContain('mode locked');
+    expect(approvalMode).toBe(ApprovalMode.PLAN);
+    expect(config.savePlan).toHaveBeenCalledWith('Teammate plan');
   });
 
   it('keeps plan mode and returns leader feedback after rejection', async () => {
