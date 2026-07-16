@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.19.10",
+  "version": "0.19.11",
   "engines": {
     "node": ">=22.0.0"
   },
@@ -22,7 +22,7 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.19.10"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.19.11"
   },
   "scripts": {
     "start": "node scripts/start.js",
@@ -31,7 +31,6 @@
     "debug": "cross-env DEBUG=1 node --inspect-brk scripts/start.js",
     "generate": "node scripts/generate-git-commit-info.js",
     "generate:settings-schema": "node --import tsx/esm scripts/generate-settings-schema.ts",
-    "verify:pr": "node scripts/verify-pr.js",
     "build": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" node scripts/build.js",
     "build-and-start": "npm run build && npm run start",
     "build:vscode": "node scripts/build_vscode_companion.js",
