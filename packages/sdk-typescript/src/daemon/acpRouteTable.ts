@@ -761,6 +761,8 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
           ...strParam(query, 'view'),
           ...strParam(query, 'group'),
           ...strParam(query, 'parentSessionId'),
+          ...strParam(query, 'sourceType'),
+          ...strParam(query, 'sourceId'),
           ...(size == null || size === ''
             ? {}
             : { _meta: { size: Number(size) } }),

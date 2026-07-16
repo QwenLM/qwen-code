@@ -2,6 +2,7 @@ import { basename, join } from 'node:path';
 import type {
   ChannelConfig,
   ChannelMemoryCallbacks,
+  ChannelMemoryEntry,
   ChannelMemoryIntentClassifier,
   ChannelMemoryTarget,
   ChannelRuntimeIdentity,
@@ -77,7 +78,7 @@ const CHANNEL_MEMORY_PAGE_SIZE = 20;
 const CHANNEL_MEMORY_PREVIEW_CODE_POINT_LIMIT = 160;
 const CHANNEL_MEMORY_CLASSIFIER_MIN_CONFIDENCE = 0.7;
 const CHANNEL_MEMORY_CLASSIFIER_TRIGGER_RE =
-  /(记住|记得|记一下|记忆|忘掉|忘记|清空|清除|删除|保存|remember|memory|forget)/iu;
+  /(?:记住|记得|记一下|记忆|忘掉|忘记|清空|清除|删除|删掉|改成|更新|刚才那条|保存|(?:只|仅)(?:看|列出)[\p{Script=Han}\s]{0,12}(?:偏好|习惯)|\b(?:remember|memory|forget|delete|remove|update|change)\b)/iu;
 /** Sentinel message for the loop-prompt timeout rejection; matched by identity below. */
 const LOOP_TIMED_OUT_MESSAGE = 'loop timed out';
 const DEBUG_PAYLOAD_ENV = 'QWEN_CHANNEL_DEBUG_PAYLOAD';
@@ -108,6 +109,14 @@ const SENSITIVE_PAYLOAD_KEY_PATTERN = new RegExp(
   ].join('|'),
   'i',
 );
+
+type ResolvedChannelMemoryIntent =
+  | ChannelMemoryIntent
+  | { kind: 'list_matches'; ids: string[] }
+  | { kind: 'no_match' }
+  | { kind: 'ambiguous'; ids: string[] }
+  | { kind: 'natural_update'; id: string; text: string; expectedText: string }
+  | { kind: 'natural_remove'; id: string; expectedText: string };
 
 export interface ChannelBaseOptions {
   router?: SessionRouter;
@@ -2719,10 +2728,104 @@ export abstract class ChannelBase {
     return this.channelMemory;
   }
 
+  private entriesForChannelMemoryIds(
+    entries: readonly ChannelMemoryEntry[],
+    ids: readonly string[],
+  ): ChannelMemoryEntry[] {
+    const selected = new Set(ids);
+    return entries.filter((entry) => selected.has(entry.id));
+  }
+
+  private renderChannelMemoryCandidate(entry: ChannelMemoryEntry): string {
+    const preview = truncateCodePoints(
+      sanitizePromptText(entry.text)
+        .replace(/[\r\n]+/gu, ' ')
+        .trim(),
+      CHANNEL_MEMORY_PREVIEW_CODE_POINT_LIMIT,
+    );
+    return `${entry.id}  ${preview}`;
+  }
+
+  private renderChannelMemoryCandidates(
+    entries: readonly ChannelMemoryEntry[],
+  ): string[] {
+    return entries.map((entry) => this.renderChannelMemoryCandidate(entry));
+  }
+
   private async handleChannelMemoryIntent(
     envelope: Envelope,
-    intent: ChannelMemoryIntent,
+    intent: ResolvedChannelMemoryIntent,
   ): Promise<void> {
+    if (intent.kind === 'no_match') {
+      await this.sendMessage(
+        envelope.chatId,
+        'No matching channel memory entry.',
+      );
+      return;
+    }
+
+    if (intent.kind === 'ambiguous') {
+      const channelMemory = await this.getChannelMemory(envelope);
+      if (!channelMemory) return;
+      let entries: ChannelMemoryEntry[];
+      try {
+        entries = await channelMemory.listChannelMemoryEntries(
+          this.channelMemoryTarget(envelope),
+        );
+      } catch (error) {
+        this.logChannelMemoryError(
+          'read',
+          envelope,
+          this.channelMemoryErrorMessage(error),
+        );
+        await this.sendMessage(
+          envelope.chatId,
+          `Failed to read channel memory: ${this.channelMemoryUserErrorMessage()}`,
+        );
+        return;
+      }
+      const selected = this.entriesForChannelMemoryIds(entries, intent.ids);
+      await this.sendMessage(
+        envelope.chatId,
+        [
+          'Multiple channel memory entries match:',
+          ...this.renderChannelMemoryCandidates(selected),
+        ].join('\n'),
+      );
+      return;
+    }
+
+    if (intent.kind === 'list_matches') {
+      const channelMemory = await this.getChannelMemory(envelope);
+      if (!channelMemory) return;
+      let entries: ChannelMemoryEntry[];
+      try {
+        entries = await channelMemory.listChannelMemoryEntries(
+          this.channelMemoryTarget(envelope),
+        );
+      } catch (error) {
+        this.logChannelMemoryError(
+          'read',
+          envelope,
+          this.channelMemoryErrorMessage(error),
+        );
+        await this.sendMessage(
+          envelope.chatId,
+          `Failed to read channel memory: ${this.channelMemoryUserErrorMessage()}`,
+        );
+        return;
+      }
+      const selected = this.entriesForChannelMemoryIds(entries, intent.ids);
+      await this.sendMessage(
+        envelope.chatId,
+        [
+          'Channel memory (page 1/1):',
+          ...this.renderChannelMemoryCandidates(selected),
+        ].join('\n'),
+      );
+      return;
+    }
+
     if (intent.kind === 'clear_request') {
       this.setPendingClear(this.clearPendingKey(envelope));
       await this.sendMessage(
@@ -2823,15 +2926,7 @@ export abstract class ChannelBase {
       const pageStart = (intent.page - 1) * CHANNEL_MEMORY_PAGE_SIZE;
       const lines = entries
         .slice(pageStart, pageStart + CHANNEL_MEMORY_PAGE_SIZE)
-        .map((entry) => {
-          const preview = truncateCodePoints(
-            sanitizePromptText(entry.text)
-              .replace(/[\r\n]+/gu, ' ')
-              .trim(),
-            CHANNEL_MEMORY_PREVIEW_CODE_POINT_LIMIT,
-          );
-          return `${entry.id}  ${preview}`;
-        });
+        .map((entry) => this.renderChannelMemoryCandidate(entry));
       await this.sendMessage(
         envelope.chatId,
         [`Channel memory (page ${intent.page}/${totalPages}):`, ...lines].join(
@@ -2841,44 +2936,63 @@ export abstract class ChannelBase {
       return;
     }
 
-    if (intent.kind === 'update' || intent.kind === 'remove') {
+    if (
+      intent.kind === 'update' ||
+      intent.kind === 'remove' ||
+      intent.kind === 'natural_update' ||
+      intent.kind === 'natural_remove'
+    ) {
       let changed: boolean;
+      const isUpdate =
+        intent.kind === 'update' || intent.kind === 'natural_update';
+      const id = intent.id;
       try {
-        if (intent.kind === 'update') {
+        if (isUpdate) {
           ({ changed } = await channelMemory.updateChannelMemoryEntry(
             this.channelMemoryTarget(envelope),
-            { id: intent.id, text: intent.text },
+            intent.kind === 'natural_update'
+              ? {
+                  id: intent.id,
+                  text: intent.text,
+                  expectedText: intent.expectedText,
+                }
+              : { id: intent.id, text: intent.text },
           ));
         } else {
           ({ changed } = await channelMemory.removeChannelMemoryEntries(
             this.channelMemoryTarget(envelope),
-            { ids: [intent.id] },
+            intent.kind === 'natural_remove'
+              ? {
+                  ids: [intent.id],
+                  expectedTextById: { [intent.id]: intent.expectedText },
+                }
+              : { ids: [intent.id] },
           ));
         }
       } catch (error) {
         const message = this.channelMemoryErrorMessage(error);
         this.logChannelMemoryError(
-          intent.kind === 'update' ? 'update' : 'remove',
+          isUpdate ? 'update' : 'remove',
           envelope,
           message,
         );
         await this.sendMessage(
           envelope.chatId,
-          `Failed to ${intent.kind === 'update' ? 'update' : 'remove'} channel memory: ${this.channelMemoryUserErrorMessage()}`,
+          `Failed to ${isUpdate ? 'update' : 'remove'} channel memory: ${this.channelMemoryUserErrorMessage()}`,
         );
         return;
       }
       if (!changed) {
         await this.sendMessage(
           envelope.chatId,
-          `No channel memory entry ${intent.id}.`,
+          `No channel memory entry ${id}.`,
         );
         return;
       }
       this.invalidateSessionContext(envelope);
       await this.sendMessage(
         envelope.chatId,
-        `Channel memory ${intent.id} ${intent.kind === 'update' ? 'updated' : 'removed'}.`,
+        `Channel memory ${id} ${isUpdate ? 'updated' : 'removed'}.`,
       );
       return;
     }
@@ -2952,16 +3066,33 @@ export abstract class ChannelBase {
   }
 
   private async classifyChannelMemoryIntent(
-    text: string,
-  ): Promise<ChannelMemoryIntent | null> {
-    if (!this.memoryIntentClassifier) {
+    envelope: Envelope,
+  ): Promise<ResolvedChannelMemoryIntent | null> {
+    if (!this.memoryIntentClassifier || !this.channelMemory) {
       return null;
     }
 
-    let classified;
+    let entries: ChannelMemoryEntry[];
+    try {
+      entries = await this.channelMemory.listChannelMemoryEntries(
+        this.channelMemoryTarget(envelope),
+      );
+    } catch (error) {
+      this.logChannelMemoryError(
+        'read',
+        envelope,
+        this.channelMemoryErrorMessage(error),
+      );
+      return null;
+    }
+
+    let classified: unknown;
     try {
       classified =
-        await this.memoryIntentClassifier.classifyChannelMemoryIntent(text);
+        await this.memoryIntentClassifier.classifyChannelMemoryIntent(
+          envelope.text,
+          entries,
+        );
     } catch (error) {
       process.stderr.write(
         `[${this.name}] channel memory intent classifier failed: ${sanitizeLogText(
@@ -2972,19 +3103,90 @@ export abstract class ChannelBase {
       return null;
     }
 
-    if (classified.confidence < CHANNEL_MEMORY_CLASSIFIER_MIN_CONFIDENCE) {
+    const confidence =
+      classified && typeof classified === 'object'
+        ? (classified as { confidence?: unknown }).confidence
+        : undefined;
+    if (
+      typeof confidence !== 'number' ||
+      !Number.isFinite(confidence) ||
+      confidence < 0 ||
+      confidence > 1 ||
+      confidence < CHANNEL_MEMORY_CLASSIFIER_MIN_CONFIDENCE
+    ) {
       return null;
     }
 
-    if (classified.intent === 'remember') {
-      const memory = classified.memory?.trim();
+    const result = classified as {
+      intent?: unknown;
+      memory?: unknown;
+      targetIds?: unknown;
+    };
+    const targetIds = result.targetIds;
+    const entryById = new Map(entries.map((entry) => [entry.id, entry]));
+    const resolvedEntries =
+      targetIds === undefined
+        ? undefined
+        : Array.isArray(targetIds) &&
+            targetIds.every(
+              (id): id is string => typeof id === 'string' && entryById.has(id),
+            ) &&
+            new Set(targetIds).size === targetIds.length
+          ? this.entriesForChannelMemoryIds(entries, targetIds)
+          : null;
+
+    if (result.intent === 'remember') {
+      const memory =
+        typeof result.memory === 'string' ? result.memory.trim() : '';
       return memory ? { kind: 'remember', text: memory } : null;
     }
-    if (classified.intent === 'list') {
-      return { kind: 'list', page: 1 };
+    if (result.intent === 'list') {
+      if (resolvedEntries === undefined) return { kind: 'list', page: 1 };
+      if (resolvedEntries === null) return null;
+      return resolvedEntries.length === 0
+        ? { kind: 'no_match' }
+        : {
+            kind: 'list_matches',
+            ids: resolvedEntries.map((entry) => entry.id),
+          };
     }
-    if (classified.intent === 'clear_all') {
+    if (result.intent === 'clear_all') {
       return { kind: 'clear_request' };
+    }
+
+    if (
+      result.intent !== 'inspect' &&
+      result.intent !== 'update' &&
+      result.intent !== 'remove'
+    ) {
+      return null;
+    }
+    if (resolvedEntries === null || resolvedEntries === undefined) return null;
+    if (resolvedEntries.length === 0) return { kind: 'no_match' };
+    if (resolvedEntries.length > 1) {
+      return {
+        kind: 'ambiguous',
+        ids: resolvedEntries.map((entry) => entry.id),
+      };
+    }
+
+    const entry = resolvedEntries[0]!;
+    if (result.intent === 'inspect') return { kind: 'inspect', id: entry.id };
+    if (result.intent === 'remove') {
+      return {
+        kind: 'natural_remove',
+        id: entry.id,
+        expectedText: entry.text,
+      };
+    }
+    const text = typeof result.memory === 'string' ? result.memory.trim() : '';
+    if (text) {
+      return {
+        kind: 'natural_update',
+        id: entry.id,
+        text,
+        expectedText: entry.text,
+      };
     }
     return null;
   }
@@ -3449,12 +3651,13 @@ export abstract class ChannelBase {
       );
     }
 
-    let memoryIntent = parseChannelMemoryIntent(envelope.text);
+    let memoryIntent: ResolvedChannelMemoryIntent | null =
+      parseChannelMemoryIntent(envelope.text);
     if (
       !memoryIntent &&
       this.shouldClassifyChannelMemoryIntent(envelope.text)
     ) {
-      memoryIntent = await this.classifyChannelMemoryIntent(envelope.text);
+      memoryIntent = await this.classifyChannelMemoryIntent(envelope);
     }
     if (memoryIntent) {
       await this.handleChannelMemoryIntent(envelope, memoryIntent);

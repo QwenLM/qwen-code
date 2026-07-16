@@ -23,11 +23,21 @@ on:
       - 'packages/web-shell/package.json'
       - 'packages/web-shell/vite.config.ts'
       - 'packages/web-shell/playwright.visuals.config.ts'
-      # The visuals dev server aliases these runtime sources (see the `resolve.
-      # alias` block in packages/web-shell/vite.config.ts), so UI-affecting
-      # changes there must also refresh the preview.
+      # The visuals dev server aliases the shared web UI library into the
+      # rendered bundle (see the `resolve.alias` block in
+      # packages/web-shell/vite.config.ts), so a change to its components/hooks
+      # must also refresh the preview.
       - 'packages/webui/src/**'
-      - 'packages/sdk-typescript/src/**'
+      # NOTE: packages/sdk-typescript/src/** is deliberately NOT a trigger.
+      # It is aliased in too, but the visuals render against a *mock* daemon, so
+      # the SDK's transport/client layer is stubbed at the network boundary and
+      # its changes don't alter the canned scenarios — e.g. #6911 only added a
+      # DaemonClient data-layer method yet still re-posted identical screenshots
+      # on a pure-backend PR. The web-shell client imports no runtime code from
+      # the SDK root and only type-imports DaemonClient, so leaving the SDK out
+      # avoids spamming backend PRs. If an SDK-only, render-shaping change ever
+      # needs a preview, add the specific file (e.g. daemon/events.ts) here
+      # rather than the whole tree.
       # The capture pipeline itself, so a workflow-only change is exercised.
       - '.github/workflows/web-shell-visuals.yml'
 

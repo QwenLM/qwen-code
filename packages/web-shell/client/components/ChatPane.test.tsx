@@ -534,6 +534,36 @@ describe('ChatPane', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('renders no maximize toggle without onToggleMaximize', () => {
+    render({ onClose: () => {} });
+    expect(container!.querySelector('[aria-label="Maximize pane"]')).toBeNull();
+    expect(container!.querySelector('[aria-label="Restore pane"]')).toBeNull();
+  });
+
+  it('invokes onToggleMaximize from the header maximize button', () => {
+    const onToggleMaximize = vi.fn();
+    render({ onToggleMaximize });
+    const maximizeBtn = container!.querySelector(
+      '[aria-label="Maximize pane"]',
+    );
+    expect(maximizeBtn).not.toBeNull();
+    // A toggle button always exposes its pressed state; not maximized here.
+    expect(maximizeBtn!.getAttribute('aria-pressed')).toBe('false');
+    act(() =>
+      maximizeBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    expect(onToggleMaximize).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the restore affordance while maximized', () => {
+    render({ onToggleMaximize: () => {}, isMaximized: true });
+    const restoreBtn = container!.querySelector('[aria-label="Restore pane"]');
+    expect(restoreBtn).not.toBeNull();
+    expect(restoreBtn!.getAttribute('aria-pressed')).toBe('true');
+    // The label flips to "restore" — no stale "maximize" affordance remains.
+    expect(container!.querySelector('[aria-label="Maximize pane"]')).toBeNull();
+  });
+
   it('cancels the active turn via the composer cancel action', () => {
     render();
     act(() =>

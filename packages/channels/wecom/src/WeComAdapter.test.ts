@@ -1484,7 +1484,7 @@ describe('WeComChannel', () => {
       'bot',
       makeConfig({
         groupPolicy: 'open',
-        groups: { '*': { requireMention: false } },
+        groups: { '*': {} },
       }),
       makeBridge(),
     );
@@ -1544,6 +1544,7 @@ describe('WeComChannel', () => {
     const mixed = channel.envelopes[0]!;
     expect(mixed.chatId).toBe('group-1');
     expect(mixed.isGroup).toBe(true);
+    expect(mixed.isMentioned).toBe(true);
     expect(mixed.text).toBe('@bot inspect this\nvoice transcript');
     expect(mixed.referencedText).toBe('previous voice text');
     expect(mixed.attachments?.[0]).toMatchObject({
@@ -1600,7 +1601,7 @@ describe('WeComChannel', () => {
     ).toBe(2);
   });
 
-  it('allows group replies to the bot without an explicit mention', async () => {
+  it('normalizes replies to the bot in group callbacks', async () => {
     const channel = new TestWeComChannel(
       'bot',
       makeConfig({
@@ -1617,7 +1618,6 @@ describe('WeComChannel', () => {
       chattype: 'group',
       chatid: 'group-1',
       from: { userid: 'alice' },
-      mentions: [],
       text: { content: 'follow up' },
       quote: {
         msgtype: 'text',
@@ -1629,7 +1629,7 @@ describe('WeComChannel', () => {
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
     expect(channel.envelopes[0]).toMatchObject({
       isGroup: true,
-      isMentioned: false,
+      isMentioned: true,
       isReplyToBot: true,
       referencedText: 'bot response',
     });
@@ -1653,78 +1653,6 @@ describe('WeComChannel', () => {
 
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
     expect(channel.envelopes[0]?.attachments?.[0]?.fileName).toBe('secret.png');
-  });
-
-  it('honors explicit group mention metadata when present', async () => {
-    const channel = new TestWeComChannel(
-      'bot',
-      makeConfig({
-        groupPolicy: 'open',
-        groups: { '*': { requireMention: false } },
-      }),
-      makeBridge(),
-    );
-    await channel.connect();
-    const client = lastClient();
-
-    client.emit('message.text', {
-      msgid: 'msg-unmentioned',
-      msgtype: 'text',
-      chattype: 'group',
-      chatid: 'group-1',
-      from: { userid: 'bob' },
-      text: { content: 'background' },
-      mentions: [{ userid: 'other-bot' }],
-    });
-    client.emit('message.text', {
-      msgid: 'msg-mentioned',
-      msgtype: 'text',
-      chattype: 'group',
-      chatid: 'group-1',
-      from: { userid: 'bob' },
-      text: { content: '@bot inspect' },
-      mentions: [{ userid: 'bot-id' }],
-    });
-    client.emit('message.text', {
-      msgid: 'msg-other-mentioned',
-      msgtype: 'text',
-      chattype: 'group',
-      chatid: 'group-1',
-      from: { userid: 'bob' },
-      text: { content: '@someone else' },
-      isMentioned: true,
-      isInAtList: false,
-    });
-
-    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(3));
-    expect(channel.envelopes.map((envelope) => envelope.isMentioned)).toEqual([
-      false,
-      true,
-      false,
-    ]);
-  });
-
-  it('treats empty mention metadata as explicitly unmentioned', async () => {
-    const channel = new TestWeComChannel(
-      'bot',
-      makeConfig({ groupPolicy: 'open', groups: { '*': {} } }),
-      makeBridge(),
-    );
-    await channel.connect();
-    const client = lastClient();
-
-    client.emit('message.text', {
-      msgid: 'msg-empty-mentions',
-      msgtype: 'text',
-      chattype: 'group',
-      chatid: 'group-1',
-      from: { userid: 'bob' },
-      text: { content: 'background' },
-      mentions: [],
-    });
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(channel.envelopes).toHaveLength(0);
   });
 
   it('logs sanitized payloads only when debug payload logging is enabled', async () => {
@@ -1774,7 +1702,7 @@ describe('WeComChannel', () => {
     expect(logged).not.toContain('media-key');
   });
 
-  it('treats missing group mention metadata as unmentioned', async () => {
+  it('accepts delivered group messages without mention metadata', async () => {
     const channel = new TestWeComChannel(
       'bot',
       makeConfig({ groupPolicy: 'open', groups: { '*': {} } }),
@@ -1784,22 +1712,30 @@ describe('WeComChannel', () => {
     const client = lastClient();
 
     client.emit('message.text', {
-      msgid: 'msg-missing-mention-metadata',
-      msgtype: 'text',
-      chattype: 'group',
-      chatid: 'group-1',
-      from: { userid: 'bob' },
-      text: { content: 'background' },
+      cmd: 'aibot_msg_callback',
+      headers: { req_id: 'req-group-mention' },
+      body: {
+        msgid: 'msg-missing-mention-metadata',
+        aibotid: 'bot-id',
+        msgtype: 'text',
+        chattype: 'group',
+        chatid: 'group-1',
+        from: { userid: 'bob' },
+        text: { content: 'inspect this' },
+      },
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(channel.envelopes).toHaveLength(0);
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]).toMatchObject({
+      isGroup: true,
+      isMentioned: true,
+    });
   });
 
-  it('does not download attachments for messages rejected by mention gate', async () => {
+  it('does not download attachments for messages rejected by group policy', async () => {
     const channel = new TestWeComChannel(
       'bot',
-      makeConfig({ groupPolicy: 'open', groups: { '*': {} } }),
+      makeConfig({ groupPolicy: 'disabled' }),
       makeBridge(),
     );
     await channel.connect();
@@ -1811,7 +1747,6 @@ describe('WeComChannel', () => {
       chattype: 'group',
       chatid: 'group-1',
       from: { userid: 'bob' },
-      mentions: [],
       image: { url: 'https://example.invalid/private-image', aeskey: 'k1' },
     });
 
@@ -1839,7 +1774,6 @@ describe('WeComChannel', () => {
       chattype: 'group',
       from: { userid: 'bob' },
       text: { content: '@bot inspect' },
-      mentions: [{ userid: 'bot-id' }],
     });
 
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1894,7 +1828,6 @@ describe('WeComChannel', () => {
       chatid: 'group-1',
       from: { userid: 'alice' },
       text: { content: '!pwd' },
-      mentions: [{ userid: 'bot-id' }],
     });
 
     await vi.waitFor(() => expect(client.sendMessage).toHaveBeenCalled());

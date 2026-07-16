@@ -397,6 +397,9 @@ const EN: Messages = {
   'mermaid.rendering': 'Rendering diagram...',
   'mermaid.viewCode': '</>',
   'mermaid.viewDiagram': '⊞',
+  'mermaid.zoomIn': '+',
+  'mermaid.zoomOut': '−',
+  'mermaid.zoomReset': '↺',
   'contextUsage.active': 'active',
   'contextUsage.autocompactBuffer': 'Autocompact buffer',
   'contextUsage.bodyLoaded': 'body loaded',
@@ -920,6 +923,8 @@ const EN: Messages = {
     `Delete "${v?.name ?? ''}"? This cannot be undone.`,
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,
   'sidebar.running': 'Running',
+  'sidebar.waitingForApproval': 'Waiting for approval',
+  'sidebar.userInputNeeded': 'User input needed',
   'sidebar.completedUnread': 'Finished',
   'sidebar.pin': 'Pin',
   'sidebar.unpin': 'Unpin',
@@ -1832,7 +1837,9 @@ const EN: Messages = {
     `Searched ${v?.count ?? 0} time${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.updatedTodos': (v) =>
     `Updated task list${v?.count === 1 ? '' : ` ${v?.count ?? 0} times`}`,
-  'toolGroup.summary.askedUser': 'Asked user',
+  'toolGroup.summary.provideInformation': 'Provide information',
+  'toolGroup.summary.askedQuestions': (v) =>
+    `Asked ${v?.count ?? 0} question${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.otherTools': (v) =>
     `Called ${v?.count ?? 0} other tool${v?.count === 1 ? '' : 's'}`,
   'toolGroup.running': (v) =>
@@ -1873,6 +1880,8 @@ const EN: Messages = {
   'splitView.count': (v) => `${v?.count ?? 0} panes`,
   'splitView.addPane': 'Add session',
   'splitView.closePane': 'Close pane',
+  'splitView.maximizePane': 'Maximize pane',
+  'splitView.restorePane': 'Restore pane',
   'splitView.paneError': 'This session pane hit an error',
   'splitView.paneConnectionError': 'Connection lost',
   'splitView.outerApprovalPending':
@@ -2348,6 +2357,9 @@ const ZH: Messages = {
   'mermaid.rendering': '正在渲染图表...',
   'mermaid.viewCode': '</>',
   'mermaid.viewDiagram': '⊞',
+  'mermaid.zoomIn': '+',
+  'mermaid.zoomOut': '−',
+  'mermaid.zoomReset': '↺',
   'contextUsage.active': '已激活',
   'contextUsage.autocompactBuffer': '自动压缩缓冲区',
   'contextUsage.bodyLoaded': '已加载正文',
@@ -2848,6 +2860,8 @@ const ZH: Messages = {
     `确定删除“${v?.name ?? ''}”吗？删除后不可恢复。`,
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,
   'sidebar.running': '运行中',
+  'sidebar.waitingForApproval': '等待批准',
+  'sidebar.userInputNeeded': '需要用户输入',
   'sidebar.completedUnread': '刚完成',
   'sidebar.pin': '置顶',
   'sidebar.unpin': '取消置顶',
@@ -3701,7 +3715,8 @@ const ZH: Messages = {
     Number(v?.count ?? 0) > 1
       ? `已更新任务清单 ${v?.count ?? 0} 次`
       : '已更新任务清单',
-  'toolGroup.summary.askedUser': '已询问用户',
+  'toolGroup.summary.provideInformation': '补充信息',
+  'toolGroup.summary.askedQuestions': (v) => `已询问 ${v?.count ?? 0} 个问题`,
   'toolGroup.summary.otherTools': (v) => `调用了 ${v?.count ?? 0} 个工具`,
   'toolGroup.running': (v) =>
     `正在执行 ${v?.name ?? '工具'}${v?.duration ? ` ${v.duration}` : ''}${
@@ -3740,6 +3755,8 @@ const ZH: Messages = {
   'splitView.count': (v) => `${v?.count ?? 0} 个窗格`,
   'splitView.addPane': '添加会话',
   'splitView.closePane': '关闭窗格',
+  'splitView.maximizePane': '最大化窗格',
+  'splitView.restorePane': '还原窗格',
   'splitView.paneError': '此会话窗格出错',
   'splitView.paneConnectionError': '连接已断开',
   'splitView.outerApprovalPending': '主会话正在等待审批。',

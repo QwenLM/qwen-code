@@ -85,6 +85,7 @@ import {
   InvalidRewindTargetError,
 } from './bridgeErrors.js';
 import { canonicalizeWorkspace } from './workspacePaths.js';
+import { parseSessionSource } from './session-source.js';
 import {
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_META_KEY,
@@ -401,6 +402,9 @@ interface SessionEntry {
    * Immutable — written once at creation, never on attach. Absent for a
    * top-level session. */
   parentSessionId?: string;
+  /** Immutable creator attribution, persisted in the transcript when present. */
+  sourceType?: string;
+  sourceId?: string;
   channel: AcpChannel;
   connection: ClientSideConnection;
   /** Per-session event bus drives `GET /session/:id/events`. */
@@ -1548,6 +1552,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ...(entry.parentSessionId
         ? { parentSessionId: entry.parentSessionId }
         : {}),
+      ...(entry.sourceType ? { sourceType: entry.sourceType } : {}),
+      ...(entry.sourceId !== undefined ? { sourceId: entry.sourceId } : {}),
       clientCount: entry.clientIds.size,
       hasActivePrompt: entry.promptActive,
       isWaitingForPermission,
@@ -2067,6 +2073,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     requestedClientId?: string,
     onSessionRegistered?: () => void,
     parentSessionId?: string,
+    sourceType?: string,
+    sourceId?: string,
   ): Promise<BridgeSession> {
     // Get-or-create the daemon's single channel, then call
     // `connection.newSession()` on it. Sessions share the child's
@@ -2146,7 +2154,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         newSessionResp.sessionId,
         boundWorkspace,
         undefined,
-        { parentSessionId },
+        { parentSessionId, sourceType, sourceId },
       );
       initializedSessionId = entry.sessionId;
       sessionRegistered = true;
@@ -2239,6 +2247,39 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
       }
 
+      let sourcePersisted: boolean | undefined;
+      if (entry.sourceType) {
+        try {
+          const sourceResult = await Promise.race([
+            withTimeout(
+              entry.connection.extMethod(
+                SERVE_CONTROL_EXT_METHODS.sessionSource,
+                {
+                  sessionId: entry.sessionId,
+                  sourceType: entry.sourceType,
+                  ...(entry.sourceId !== undefined
+                    ? { sourceId: entry.sourceId }
+                    : {}),
+                },
+              ),
+              initTimeoutMs,
+              'sessionSource',
+            ),
+            getTransportClosedReject(entry),
+          ]);
+          sourcePersisted =
+            (sourceResult as { persisted?: boolean } | undefined)?.persisted ===
+            true;
+        } catch (err) {
+          sourcePersisted = false;
+          writeStderrLine(
+            `qwen serve: source metadata for ${entry.sessionId} was not persisted ` +
+              `(${err instanceof Error ? err.message : String(err)}) — the source is live-only ` +
+              `until restart (reported to the caller via sourcePersisted=false)`,
+          );
+        }
+      }
+
       // ACP `newSession` doesn't take a model id; honor the caller's
       // `modelServiceId` via `unstable_setSessionModel`. See
       // `applyModelServiceId` for rationale (race against
@@ -2296,6 +2337,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         attached: false,
         clientId,
         createdAt: entry.createdAt,
+        ...(entry.sourceType ? { sourceType: entry.sourceType } : {}),
+        ...(entry.sourceId !== undefined ? { sourceId: entry.sourceId } : {}),
+        ...(entry.sourceType
+          ? { sourcePersisted: sourcePersisted === true }
+          : {}),
         ...(entry.parentSessionId
           ? { parentSessionPersisted: parentSessionPersisted === true }
           : {}),
@@ -3065,6 +3111,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       drainEarlyEvents?: boolean;
       lifecycleReason?: string;
       parentSessionId?: string;
+      sourceType?: string;
+      sourceId?: string;
     } = {},
   ): SessionEntry => {
     const entry: SessionEntry = {
@@ -3074,6 +3122,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ...(options.parentSessionId
         ? { parentSessionId: options.parentSessionId }
         : {}),
+      ...(options.sourceType ? { sourceType: options.sourceType } : {}),
+      ...(options.sourceId !== undefined ? { sourceId: options.sourceId } : {}),
       channel: ci.channel,
       connection: ci.connection,
       events,
@@ -3412,6 +3462,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         attached: true,
         clientId,
         createdAt: existing.createdAt,
+        ...(existing.sourceType ? { sourceType: existing.sourceType } : {}),
+        ...(existing.sourceId !== undefined
+          ? { sourceId: existing.sourceId }
+          : {}),
         // Late attachers get the same ACP state the original restore
         // caller saw; spawn-only sessions don't carry a state payload.
         state: existing.restoreState ?? {},
@@ -3647,6 +3701,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           attached: true,
           clientId,
           createdAt: racedEntry.createdAt,
+          ...(racedEntry.sourceType
+            ? { sourceType: racedEntry.sourceType }
+            : {}),
+          ...(racedEntry.sourceId !== undefined
+            ? { sourceId: racedEntry.sourceId }
+            : {}),
           state: racedEntry.restoreState ?? {},
           hasActivePrompt: racedEntry.promptActive,
           ...replayFieldsFor(racedEntry, action),
@@ -3666,6 +3726,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ...(req.parentSessionId
             ? { parentSessionId: req.parentSessionId }
             : {}),
+          ...(req.sourceType ? { sourceType: req.sourceType } : {}),
+          ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
         },
       );
       releaseAdmissionOnce();
@@ -3724,6 +3786,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         attached: false,
         clientId,
         createdAt: entry.createdAt,
+        ...(entry.sourceType ? { sourceType: entry.sourceType } : {}),
+        ...(entry.sourceId !== undefined ? { sourceId: entry.sourceId } : {}),
         state: publicState,
         ...(artifactRestoreWarnings.length > 0
           ? { artifactWarnings: artifactRestoreWarnings }
@@ -4042,6 +4106,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         throw new InvalidSessionScopeError(req.sessionScope);
       }
       const effectiveScope = req.sessionScope ?? defaultSessionScope;
+      const source = parseSessionSource(req.sourceType, req.sourceId);
+      if ('error' in source) {
+        throw new InvalidSessionMetadataError('sourceType', source.error);
+      }
       if (
         req.approvalMode !== undefined &&
         !KNOWN_APPROVAL_MODES.has(req.approvalMode)
@@ -4109,6 +4177,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             attached: true,
             clientId,
             createdAt: existing.createdAt,
+            ...(existing.sourceType ? { sourceType: existing.sourceType } : {}),
+            ...(existing.sourceId !== undefined
+              ? { sourceId: existing.sourceId }
+              : {}),
             hasActivePrompt: existing.promptActive,
           };
         }
@@ -4202,6 +4274,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         req.clientId,
         releaseAdmissionOnce,
         req.parentSessionId,
+        source.sourceType,
+        source.sourceId,
       );
       // Track in-flight spawns regardless of scope. Under `single`
       // this also serves the coalescing path above (a parallel
@@ -6758,7 +6832,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
     async killSession(sessionId, opts) {
       const entry = byId.get(sessionId);
-      if (!entry) return;
+      if (!entry) return false;
       // BQ9tV race guard: skip the reap if any other client already
       // attached to this entry. The disconnect-reaper in server.ts
       // sets `requireZeroAttaches: true` because it only wants to
@@ -6774,7 +6848,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // detach does nothing structural).
       if (opts?.requireZeroAttaches && entry.attachCount > 0) {
         entry.spawnOwnerWantedKill = true;
-        return;
+        return false;
       }
       // Mediator-driven cancel cascade. Must run BEFORE byId.delete so
       // the mediator's emit callback can still reach entry.events via
@@ -6856,6 +6930,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           await startIdleTimer(ci, `killSession "${sessionId}"`);
         }
       }
+      return true;
     },
 
     async detachClient(sessionId, clientId) {

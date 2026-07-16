@@ -140,6 +140,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionContinue: 'qwen/control/session/continue',
   sessionTitle: 'qwen/control/session/title',
   sessionParent: 'qwen/control/session/parent',
+  sessionSource: 'qwen/control/session/source',
   sessionArtifactsPersist: 'qwen/control/session/artifacts/persist',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',

@@ -41,6 +41,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // the underlying ACP method from unstable_resumeSession to resumeSession.
   unstable_session_resume: { since: 'v1' },
   session_list: { since: 'v1' },
+  session_source_metadata: { since: 'v1' },
   session_prompt: { since: 'v1' },
   session_cancel: { since: 'v1' },
   session_events: { since: 'v1' },
@@ -306,6 +307,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // This is separate from `session_export` so clients do not infer the plural
   // route from the legacy primary-workspace export capability.
   workspace_session_export: { since: 'v1' },
+  // Workspace-qualified full session export from archived persisted storage.
+  // This remains independent from active export so older daemons cannot ignore
+  // archive intent and return an active transcript with the same session id.
+  workspace_archived_session_export: { since: 'v1' },
   // Workspace-qualified ACP transport (issue #6378 Phase 4):
   // `/workspaces/:workspace/acp` mounts a per-runtime ACP dispatcher (HTTP +
   // WebSocket) for each registered workspace, with per-runtime device-flow and

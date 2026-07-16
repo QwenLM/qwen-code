@@ -306,6 +306,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_resume',
       'unstable_session_resume',
       'session_list',
+      'session_source_metadata',
       'session_prompt',
       'session_cancel',
       'session_events',
@@ -381,6 +382,7 @@ describe('qwen serve — capabilities envelope', () => {
       'extension_management_v2',
       'workspace_persisted_transcript',
       'workspace_session_export',
+      'workspace_archived_session_export',
       'voice_transcribe',
     ]);
   });
