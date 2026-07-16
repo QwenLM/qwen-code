@@ -553,9 +553,11 @@ function runtimeEffectiveEnv(
   runtime: WorkspaceRuntime,
   daemonEnv: Readonly<NodeJS.ProcessEnv>,
 ): Readonly<NodeJS.ProcessEnv> {
-  return runtime.env.mode === 'runtime-overlay'
-    ? (runtime.env.effectiveEnv ?? {})
-    : (runtime.env.effectiveEnv ?? daemonEnv);
+  if (runtime.env.mode === 'runtime-overlay') {
+    // An empty overlay must stay isolated instead of inheriting daemon values.
+    return runtime.env.effectiveEnv ?? {};
+  }
+  return runtime.env.effectiveEnv ?? daemonEnv;
 }
 
 /**

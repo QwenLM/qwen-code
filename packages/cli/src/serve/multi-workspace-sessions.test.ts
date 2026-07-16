@@ -1585,7 +1585,10 @@ describe('multi-workspace session dispatch', () => {
   ])(
     'rejects $route for a non-primary live-session owner',
     async ({ suffix, route, body }) => {
-      const { app, primaryBridge, secondaryBridge } = makeHarness();
+      const daemonLog = makeDaemonLog();
+      const { app, primaryBridge, secondaryBridge } = makeHarness({
+        daemonLog,
+      });
 
       const res = await request(app)
         .post(`/session/secondary-session/${suffix}`)
@@ -1603,6 +1606,13 @@ describe('multi-workspace session dispatch', () => {
       });
       expect(primaryBridge.primaryOnlyMutationCalls).toEqual([]);
       expect(secondaryBridge.primaryOnlyMutationCalls).toEqual([]);
+      expect(daemonLog.warn).toHaveBeenCalledWith('session routing failed', {
+        route,
+        resolutionKind: 'non_primary_session_route_not_supported',
+        sessionId: 'secondary-session',
+        workspaceId: 'secondary-id',
+        workspaceCwd: SECONDARY_CWD,
+      });
     },
   );
 

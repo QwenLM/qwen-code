@@ -7942,6 +7942,7 @@ describe('ACP WebSocket transport security', () => {
       allowedOrigins?: { allowAny: boolean; origins: Set<string> };
       checkRate?: (key: string, tier: string) => boolean;
       cdpTunnelOverWs?: boolean;
+      daemonEnv?: Readonly<NodeJS.ProcessEnv>;
     } = {},
   ) {
     return new Promise<void>((resolve) => {
@@ -7952,6 +7953,7 @@ describe('ACP WebSocket transport security', () => {
         boundWorkspace: '/ws',
         workspace: fakeWorkspace,
         enabled: true,
+        daemonEnv: opts.daemonEnv,
         token: opts.token,
         allowedOrigins: opts.allowedOrigins,
         workspaceRememberLane: new WorkspaceRememberTaskLane(
@@ -8148,8 +8150,11 @@ describe('ACP WebSocket transport security', () => {
   });
 
   it('passes a custom CDP MCP command through to the runtime config', async () => {
-    process.env['QWEN_CDP_MCP_COMMAND'] = '/opt/custom/cdp-adapter';
-    await startServer({ cdpTunnelOverWs: true });
+    process.env['QWEN_CDP_MCP_COMMAND'] = '/opt/process/cdp-adapter';
+    await startServer({
+      cdpTunnelOverWs: true,
+      daemonEnv: { QWEN_CDP_MCP_COMMAND: '/opt/custom/cdp-adapter' },
+    });
     const ws = await wsConnect();
     await initializeCdpBridge(ws);
 

@@ -1090,6 +1090,15 @@ export function registerSessionRoutes(
       const runtime = resolveLiveSessionRuntime(sessionId, res, route);
       if (!runtime) return;
       if (!runtime.primary) {
+        logSessionRoutingFailure(
+          route,
+          'non_primary_session_route_not_supported',
+          {
+            sessionId,
+            workspaceId: runtime.workspaceId,
+            workspaceCwd: runtime.workspaceCwd,
+          },
+        );
         sendNonPrimarySessionRouteUnsupported(res, route, sessionId, runtime);
         return;
       }

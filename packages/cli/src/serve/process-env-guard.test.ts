@@ -206,12 +206,17 @@ function findProcessEnvAccesses(
     accesses.set(access, (accesses.get(access) ?? 0) + 1);
   };
   const visit = (node: ts.Node): void => {
-    if (
-      ts.isPropertyAccessExpression(node) &&
-      ts.isIdentifier(node.expression) &&
-      node.expression.text === 'process' &&
-      node.name.text === 'env'
-    ) {
+    const isProcessEnv =
+      (ts.isPropertyAccessExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === 'process' &&
+        node.name.text === 'env') ||
+      (ts.isElementAccessExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === 'process' &&
+        ts.isStringLiteralLike(node.argumentExpression) &&
+        node.argumentExpression.text === 'env');
+    if (isProcessEnv) {
       const parent = node.parent;
       if (ts.isElementAccessExpression(parent) && parent.expression === node) {
         const argument = parent.argumentExpression;
@@ -238,6 +243,25 @@ function findProcessEnvAccesses(
 }
 
 describe('serve process.env guard', () => {
+  it('detects dot and element process.env access expressions', () => {
+    expect(
+      findProcessEnvAccesses(
+        'example.ts',
+        `
+          process.env.DOT;
+          process['env']['ELEMENT'];
+          process['env'].MIXED;
+          const whole = process['env'];
+        `,
+      ),
+    ).toEqual({
+      'key:DOT': 1,
+      'key:ELEMENT': 1,
+      'key:MIXED': 1,
+      whole: 1,
+    });
+  });
+
   it('allows only documented process-scoped process.env expressions', () => {
     const actual = new Map<string, Readonly<Record<string, number>>>();
     for (const root of scannedRoots) {
@@ -277,6 +301,9 @@ describe('serve process.env guard', () => {
             ];
       });
 
-    expect(mismatches).toEqual([]);
+    expect(
+      mismatches,
+      'process.env access mismatches — update allowedProcessEnvAccesses with a reason and the new access pattern',
+    ).toEqual([]);
   });
 });

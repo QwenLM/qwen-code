@@ -183,11 +183,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
         primary: true,
         trusted: true,
         bridge: primaryBridge,
-        env: {
-          mode: 'runtime-overlay',
-          overlayKeys: ['HTTPS_PROXY'],
-          effectiveEnv: { HTTPS_PROXY: 'http://primary-proxy.example:8080' },
-        },
+        env: PARENT_ENV,
       }),
       secondaryRuntime,
       makeRuntime({
@@ -221,6 +217,10 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       workspace: {} as unknown as DaemonWorkspaceService,
       fsFactory: workspaceRegistry.primary.routeFileSystemFactory,
       enabled: true,
+      daemonEnv: {
+        ...process.env,
+        HTTPS_PROXY: 'http://primary-proxy.example:8080',
+      },
       workspaceRegistry,
       deviceFlowRegistry,
       cdpTunnelOverWs: true,
@@ -386,7 +386,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     );
   });
 
-  it('keeps setup-github proxy fallback scoped to the owning runtime', async () => {
+  it('uses daemon env for parent-process setup-github without leaking into overlays', async () => {
     const secondary = await sendWsRequest('/workspaces/secondary-id/acp', {
       jsonrpc: '2.0',
       id: 2,
