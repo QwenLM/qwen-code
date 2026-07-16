@@ -22,6 +22,8 @@ const observed = vi.hoisted(() => ({
 
 vi.mock('../App', () => ({
   CompactModeContext: createContext(false),
+  TodoDetailContext: createContext(new Map()),
+  TodoTimelineContext: createContext(new Map()),
 }));
 
 vi.mock('./MessageList', async () => {

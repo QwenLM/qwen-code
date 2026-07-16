@@ -951,14 +951,19 @@ function normalizePlanUpdate(
 ): DaemonUiEvent {
   const entries = Array.isArray(update['entries']) ? update['entries'] : [];
   const contentText = capDetails(formatPlanEntries(entries));
+  const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const transcript =
+    meta && isRecord(meta['qwenTranscript'])
+      ? meta['qwenTranscript']
+      : undefined;
   const planCallId =
-    base.eventId !== undefined
+    getString(transcript, 'planToolCallId') ??
+    (base.eventId !== undefined
       ? `${DAEMON_PLAN_TOOL_CALL_ID}-${base.eventId}`
-      : DAEMON_PLAN_TOOL_CALL_ID;
+      : DAEMON_PLAN_TOOL_CALL_ID);
   // Carry the cumulative-usage snapshot the agent stamps on each plan update
   // (PlanEmitter) through to rawOutput, so the web-shell can diff consecutive
   // todo snapshots into per-task token/time detail.
-  const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
   const stats = meta && isRecord(meta['stats']) ? meta['stats'] : undefined;
   return {
     ...base,

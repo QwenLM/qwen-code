@@ -947,14 +947,20 @@ describe('HistoryReplayer', () => {
           { content: 'Task 1', priority: 'medium', status: 'pending' },
           { content: 'Task 2', priority: 'medium', status: 'completed' },
         ],
-        _meta: replayMeta(record, {
-          stats: {
-            promptTokens: 0,
-            cachedTokens: 0,
-            candidateTokens: 0,
-            apiTimeMs: 0,
+        _meta: {
+          ...replayMeta(record, {
+            stats: {
+              promptTokens: 0,
+              cachedTokens: 0,
+              candidateTokens: 0,
+              apiTimeMs: 0,
+            },
+          }),
+          qwenTranscript: {
+            sourceRecordIds: [record.uuid],
+            planToolCallId: 'call-123',
           },
-        }),
+        },
       });
     });
 

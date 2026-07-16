@@ -158,6 +158,65 @@ describe('projectChatRecordsToDaemonTranscript', () => {
     });
   });
 
+  it('keeps Vision Bridge disclosure in rendered tool content', () => {
+    const projection = projectChatRecordsToDaemonTranscript([
+      record('tool-start', null, {
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'read-1',
+                name: 'read_file',
+                args: { path: '/tmp/a.pdf' },
+              },
+            },
+          ],
+        },
+      }),
+      record('tool-result', 'tool-start', {
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'read-1',
+                name: 'read_file',
+                response: { output: 'contents' },
+              },
+            },
+          ],
+        },
+        toolCallResult: {
+          callId: 'read-1',
+          resultDisplay: {
+            type: 'vision_bridge_notice',
+            summary: 'Transcribed PDF pages 1-2',
+            notice: 'Converted 2 images via qwen3-vl-plus.',
+          },
+        },
+      }),
+    ]);
+
+    expect(projection.blocks.find((block) => block.kind === 'tool')).toEqual(
+      expect.objectContaining({
+        content: expect.arrayContaining([
+          {
+            type: 'content',
+            content: {
+              type: 'text',
+              text:
+                'Transcribed PDF pages 1-2\n' +
+                'Converted 2 images via qwen3-vl-plus.',
+            },
+          },
+        ]),
+      }),
+    );
+  });
+
   it('treats persisted identifiers as data, including prototype names', () => {
     const identifiers = [
       '__proto__',
@@ -234,6 +293,153 @@ describe('projectChatRecordsToDaemonTranscript', () => {
       status: 'failed',
       toolCallId: 'qwen-replay-tool:tool-start:0',
     });
+  });
+
+  it('preserves assistant usage when the record ends with a tool call', () => {
+    const projection = projectChatRecordsToDaemonTranscript([
+      record('assistant', null, {
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            { text: 'I will read it' },
+            {
+              functionCall: {
+                id: 'read-1',
+                name: 'read_file',
+                args: { path: '/tmp/a' },
+              },
+            },
+          ],
+        },
+        usageMetadata: {
+          promptTokenCount: 11,
+          candidatesTokenCount: 7,
+        },
+      }),
+    ]);
+
+    expect(
+      projection.blocks.find((block) => block.kind === 'assistant'),
+    ).toMatchObject({
+      kind: 'assistant',
+      text: 'I will read it',
+      usage: { inputTokens: 11, outputTokens: 7, cachedTokens: 0 },
+    });
+  });
+
+  it('preserves each todo plan snapshot as a separate block', () => {
+    const projection = projectChatRecordsToDaemonTranscript([
+      record('plan-1', null, {
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [{ functionResponse: { name: 'todo_write', response: {} } }],
+        },
+        toolCallResult: {
+          callId: 'todo-1',
+          resultDisplay: {
+            type: 'todo_list',
+            todos: [{ content: 'A', status: 'in_progress' }],
+          },
+        },
+      }),
+      record('plan-2', 'plan-1', {
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [{ functionResponse: { name: 'todo_write', response: {} } }],
+        },
+        toolCallResult: {
+          callId: 'todo-2',
+          resultDisplay: {
+            type: 'todo_list',
+            todos: [
+              { content: 'A', status: 'completed' },
+              { content: 'B', status: 'pending' },
+            ],
+          },
+        },
+      }),
+    ]);
+
+    const plans = projection.blocks.filter(
+      (block) => block.kind === 'tool' && block.toolName === 'todo_write',
+    );
+    expect(plans).toHaveLength(2);
+    expect(plans.map((block) => block.sourceRecordIds)).toEqual([
+      ['plan-1'],
+      ['plan-2'],
+    ]);
+    expect(new Set(plans.map((block) => block.toolCallId)).size).toBe(2);
+  });
+
+  it('does not merge a todo plan into a persisted daemon-plan tool id', () => {
+    const projection = projectChatRecordsToDaemonTranscript([
+      record('tool-start', null, {
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'daemon-plan',
+                name: 'read_file',
+                args: { path: '/tmp/a' },
+              },
+            },
+          ],
+        },
+      }),
+      record('tool-result', 'tool-start', {
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'daemon-plan',
+                name: 'read_file',
+                response: { output: 'contents' },
+              },
+            },
+          ],
+        },
+        toolCallResult: { callId: 'daemon-plan', resultDisplay: 'contents' },
+      }),
+      record('plan', 'tool-result', {
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [{ functionResponse: { name: 'todo_write', response: {} } }],
+        },
+        toolCallResult: {
+          callId: 'todo-1',
+          resultDisplay: {
+            type: 'todo_list',
+            todos: [{ content: 'A', status: 'completed' }],
+          },
+        },
+      }),
+    ]);
+
+    const tools = projection.blocks.filter((block) => block.kind === 'tool');
+    expect(tools).toHaveLength(2);
+    expect(tools).toContainEqual(
+      expect.objectContaining({
+        toolCallId: 'daemon-plan',
+        toolName: 'read_file',
+        rawInput: { path: '/tmp/a' },
+        rawOutput: 'contents',
+      }),
+    );
+    expect(tools).toContainEqual(
+      expect.objectContaining({
+        toolCallId: 'todo-1',
+        toolName: 'todo_write',
+        sourceRecordIds: ['plan'],
+      }),
+    );
   });
 
   it('returns diagnostics for gaps and partial input', () => {

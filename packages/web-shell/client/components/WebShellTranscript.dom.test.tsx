@@ -119,6 +119,137 @@ describe('WebShellTranscript DOM integration', () => {
     expect(container.textContent).toContain('You cancelled this request');
   });
 
+  it('derives task detail from todo_write transcript snapshots', () => {
+    const todoSnapshot = (
+      id: string,
+      status: 'in_progress' | 'completed',
+      timestamp: number,
+      stats: {
+        promptTokens: number;
+        cachedTokens: number;
+        candidateTokens: number;
+        apiTimeMs: number;
+      },
+    ) =>
+      block(
+        {
+          id,
+          kind: 'tool',
+          toolCallId: `${id}-call`,
+          title: 'Updated Plan',
+          toolName: 'todo_write',
+          toolKind: 'updated_plan',
+          status: 'completed',
+          preview: { kind: 'generic' },
+          rawOutput: {
+            entries: [
+              {
+                id: 'task-1',
+                content: 'Prepare release',
+                status,
+              },
+            ],
+            stats,
+          },
+        },
+        timestamp,
+      );
+    const { container } = render(
+      <WebShellTranscript
+        blocks={[
+          todoSnapshot('todo-start', 'in_progress', 1000, {
+            promptTokens: 100,
+            cachedTokens: 10,
+            candidateTokens: 20,
+            apiTimeMs: 500,
+          }),
+          todoSnapshot('todo-done', 'completed', 5000, {
+            promptTokens: 300,
+            cachedTokens: 40,
+            candidateTokens: 80,
+            apiTimeMs: 1500,
+          }),
+        ]}
+        collapseCompletedTurns={false}
+        language="en"
+      />,
+    );
+
+    const summaries = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).filter((button) => button.textContent?.includes('Updated task list'));
+    expect(summaries).toHaveLength(2);
+    act(() => {
+      summaries[1].click();
+    });
+    const completedSnapshot = summaries[1].parentElement;
+    const detailButton = completedSnapshot?.querySelector<HTMLButtonElement>(
+      'button[title="Show task detail"]',
+    );
+    expect(detailButton).not.toBeNull();
+
+    act(() => {
+      detailButton?.click();
+    });
+    const detailText = completedSnapshot?.textContent ?? '';
+    expect(detailText).toContain('Tokens');
+    expect(detailText).toContain('200');
+    expect(detailText).toContain('60');
+    expect(detailText).toContain('30');
+    expect(detailText).toContain('Time spent');
+    expect(detailText).toContain('1.0s');
+    expect(detailText).toContain('4.0s');
+  });
+
+  it('derives the transition introduced by each plan snapshot', () => {
+    const planSnapshot = (
+      id: string,
+      firstStatus: 'in_progress' | 'completed',
+      secondStatus: 'pending' | 'in_progress',
+      timestamp: number,
+    ) =>
+      block(
+        {
+          id,
+          kind: 'status',
+          text: `plan: ${JSON.stringify({
+            sessionUpdate: 'plan',
+            entries: [
+              {
+                id: 'task-1',
+                content: 'Prepare release',
+                status: firstStatus,
+              },
+              {
+                id: 'task-2',
+                content: 'Run verification',
+                status: secondStatus,
+              },
+            ],
+          })}`,
+        },
+        timestamp,
+      );
+    const { container } = render(
+      <WebShellTranscript
+        blocks={[
+          planSnapshot('plan-start', 'in_progress', 'pending', 1000),
+          planSnapshot('plan-next', 'completed', 'in_progress', 5000),
+        ]}
+        collapseCompletedTurns={false}
+        language="en"
+      />,
+    );
+
+    const planHeaders = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).filter((button) => button.textContent?.includes('Plan'));
+    expect(planHeaders).toHaveLength(2);
+    const secondSnapshotText = planHeaders[1].parentElement?.textContent ?? '';
+    expect(secondSnapshotText).toContain('Prepare release');
+    expect(secondSnapshotText).toContain('Run verification');
+  });
+
   it('omits pending permissions and AskUserQuestion controls', () => {
     const blocks: DaemonTranscriptBlock[] = [
       block({ id: 'u1', kind: 'user', text: 'Before permission' }),

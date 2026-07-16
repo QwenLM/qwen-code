@@ -135,6 +135,26 @@ describe('prepareTranscriptRecords', () => {
     );
   });
 
+  it('accepts session source metadata as a known record subtype', () => {
+    const prepared = prepareTranscriptRecords([
+      record('source', null, {
+        type: 'system',
+        subtype: 'session_source',
+        message: undefined,
+        systemPayload: { sourceType: 'web', sourceId: 'demo' },
+      }),
+      record('root', 'source'),
+    ]);
+
+    expect(prepared.diagnostics).not.toContainEqual(
+      expect.objectContaining({
+        code: 'unknown_record_or_part',
+        recordId: 'source',
+        path: 'subtype',
+      }),
+    );
+  });
+
   it('rejects mixed sessions and an explicit artifact leaf', () => {
     expect(() =>
       prepareTranscriptRecords([

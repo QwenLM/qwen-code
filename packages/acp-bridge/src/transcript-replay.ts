@@ -80,6 +80,7 @@ export interface TranscriptReplayMachine {
 interface UpdateMetaOptions {
   readonly timestamp?: string | number;
   readonly sourceRecordIds?: readonly string[];
+  readonly planToolCallId?: string;
   readonly extra?: Readonly<Record<string, unknown>>;
 }
 
@@ -147,12 +148,16 @@ function buildUpdateMeta(
 ): Record<string, unknown> | undefined {
   const timestamp = toTranscriptEpochMs(options.timestamp);
   const sourceRecordIds = dedupeStrings(options.sourceRecordIds ?? []);
+  const qwenTranscript = {
+    ...(sourceRecordIds.length > 0 ? { sourceRecordIds } : {}),
+    ...(options.planToolCallId
+      ? { planToolCallId: options.planToolCallId }
+      : {}),
+  };
   const meta: Record<string, unknown> = {
     ...(options.extra ?? {}),
     ...(timestamp !== undefined ? { timestamp } : {}),
-    ...(sourceRecordIds.length > 0
-      ? { qwenTranscript: { sourceRecordIds } }
-      : {}),
+    ...(Object.keys(qwenTranscript).length > 0 ? { qwenTranscript } : {}),
   };
   return Object.keys(meta).length > 0 ? meta : undefined;
 }
@@ -468,11 +473,25 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
   ): Iterable<TranscriptReplayEmission> {
-    yield* this.projectMessageParts(record, 'assistant', emit, meta);
-    if (isObjectRecord(record.usageMetadata)) {
-      this.addUsage(record.usageMetadata);
-      yield emit(createTranscriptUsageUpdate(record.usageMetadata, meta));
-    }
+    const usageMetadata = isObjectRecord(record.usageMetadata)
+      ? record.usageMetadata
+      : undefined;
+    let usageEmitted = false;
+    const takeUsageUpdate = (): SessionUpdate | undefined => {
+      if (!usageMetadata || usageEmitted) return undefined;
+      usageEmitted = true;
+      this.addUsage(usageMetadata);
+      return createTranscriptUsageUpdate(usageMetadata, meta);
+    };
+    yield* this.projectMessageParts(
+      record,
+      'assistant',
+      emit,
+      meta,
+      takeUsageUpdate,
+    );
+    const trailingUsage = takeUsageUpdate();
+    if (trailingUsage) yield emit(trailingUsage);
   }
 
   private *projectMessageParts(
@@ -480,6 +499,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     role: 'user' | 'assistant',
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
+    beforeToolCall?: () => SessionUpdate | undefined,
   ): Iterable<TranscriptReplayEmission> {
     const parts = record.message?.parts;
     if (!parts) return;
@@ -548,6 +568,8 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           );
           continue;
         }
+        const preToolUpdate = beforeToolCall?.();
+        if (preToolUpdate) yield emit(preToolUpdate);
         if (toolName === 'todo_write') continue;
         const explicitId =
           typeof functionCall['id'] === 'string' &&
@@ -613,7 +635,12 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     if (toolName === 'todo_write') {
       const todos = extractTranscriptTodos(resultDisplay);
       if (todos) {
-        yield emit(createTranscriptPlanUpdate(todos, this.usage, meta));
+        yield emit(
+          createTranscriptPlanUpdate(todos, this.usage, {
+            ...meta,
+            planToolCallId: callId,
+          }),
+        );
       }
       return;
     }
@@ -762,17 +789,17 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       return (
         this.options.presentation?.buildToolResultContentPrefix?.(
           resultDisplay,
-        ) ?? []
+        ) ?? defaultToolResultContentPrefix(resultDisplay)
       );
     } catch {
       this.report(
         'presentation_fallback',
-        'Tool result content presentation fell back to no prefix.',
+        'Tool result content presentation fell back to deterministic defaults.',
         recordId,
         undefined,
         false,
       );
-      return [];
+      return defaultToolResultContentPrefix(resultDisplay);
     }
   }
 
@@ -792,6 +819,28 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       ...(path ? { path } : {}),
     });
   }
+}
+
+function defaultToolResultContentPrefix(
+  resultDisplay: unknown,
+): readonly ToolCallContent[] {
+  if (
+    !isObjectRecord(resultDisplay) ||
+    resultDisplay['type'] !== 'vision_bridge_notice' ||
+    typeof resultDisplay['summary'] !== 'string' ||
+    typeof resultDisplay['notice'] !== 'string'
+  ) {
+    return [];
+  }
+  return [
+    {
+      type: 'content',
+      content: {
+        type: 'text',
+        text: `${resultDisplay['summary']}\n${resultDisplay['notice']}`,
+      },
+    },
+  ];
 }
 
 function parseInitialState(
