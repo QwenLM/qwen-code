@@ -26,7 +26,7 @@ import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 import type { VisionBridgeModelSelection } from '../services/visionBridge/vision-bridge-service.js';
 import {
-  getFullTurnVisionModelId,
+  getQualifiedVisionModelId,
   isFullTurnVisionCapable,
   selectVisionBridgeModel,
 } from '../services/visionBridge/vision-bridge-service.js';
@@ -3548,9 +3548,9 @@ export class Config {
 
   /**
    * Resolve the user's explicit `visionModel` (set via `/model --vision`) into a
-   * bridge selection. The id is passed through verbatim so `runSideQuery` can
-   * resolve an `authType:modelId` selector; the endpoint is looked up for the
-   * egress notice. Returns `undefined` (so the caller falls back to
+   * bridge selection. The selected id is auth-qualified so `runSideQuery`
+   * resolves the exact provider route; the endpoint is looked up for the egress
+   * notice. Returns `undefined` (so the caller falls back to
    * same-provider auto-select) when no explicit model is set, the selector can't
    * be parsed, the pinned model isn't actually configured, or it points at the
    * text-only primary itself — those guards keep a stale/typo'd pin from firing
@@ -3589,22 +3589,20 @@ export class Config {
     // the primary entry itself (the text-only model the bridge works around) —
     // via the provider-aware identity check so a cross-provider namesake stays
     // eligible.
-    const matches = this.getAllConfiguredModels().filter(
+    const routeMatches = this.getAllConfiguredModels().filter(
       (m) =>
         m.id === selector.modelId &&
         (!selector.authType || m.authType === selector.authType) &&
         (!parsedSetting.baseUrl || m.baseUrl === parsedSetting.baseUrl) &&
-        !m.fastOnly &&
-        !m.voiceOnly &&
         !this.isCurrentPrimaryModel(m),
     );
-    if (!parsedSetting.baseUrl && matches.length > 1) {
+    if (routeMatches.length > 1) {
       this.debugLogger.warn(
-        `vision model pin '${visionModelForLog}' matched multiple configured endpoints; falling back to auto-select`,
+        `vision model pin '${visionModelForLog}' matched multiple configured routes; falling back to auto-select`,
       );
       return undefined;
     }
-    const match = matches[0];
+    const match = routeMatches.find((m) => !m.fastOnly && !m.voiceOnly);
     if (!match) {
       this.debugLogger.warn(
         `vision model pin '${visionModelForLog}' did not match a usable configured model ` +
@@ -3614,9 +3612,7 @@ export class Config {
     }
     const agentCapable = isFullTurnVisionCapable(match);
     return {
-      id: agentCapable
-        ? getFullTurnVisionModelId(match)
-        : parsedSetting.selector,
+      id: getQualifiedVisionModelId(match),
       ...((parsedSetting.baseUrl ?? match.baseUrl) && {
         baseUrl: parsedSetting.baseUrl ?? match.baseUrl,
       }),

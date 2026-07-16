@@ -37,7 +37,7 @@ import {
   isFallbackEligible,
 } from '../utils/retryErrorClassification.js';
 import type { Config } from '../config/config.js';
-import type { ContentGenerator } from './contentGenerator.js';
+import type { ContentGenerator, InputModalities } from './contentGenerator.js';
 import {
   clampOutputTokensToWindow,
   defaultOutputCeiling,
@@ -69,6 +69,7 @@ import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
 import {
   resolveCompactionTuning,
   resolveSlimmingConfig,
+  slimCompactionInput,
 } from '../services/compactionInputSlimming.js';
 import {
   InMemoryImagePayloadStore,
@@ -1640,6 +1641,16 @@ export class GeminiChat {
     return curatedHistory.map(copyContentContainer);
   }
 
+  private getRequestHistoryForRoute(
+    currentUserContent: Content | undefined,
+    supportedModalities: InputModalities,
+  ): Content[] {
+    return slimCompactionInput(
+      this.getRequestHistory(currentUserContent),
+      supportedModalities,
+    ).slimmedHistory;
+  }
+
   /**
    * Seed the last-prompt-token-count for chats created with inherited
    * history (forks, subagents, speculation). Without this, the auto-compress
@@ -1892,6 +1903,9 @@ export class GeminiChat {
     if (exactRoute) {
       model = exactRoute.model;
     }
+    const requestModalities =
+      exactRoute?.contentGeneratorConfig.modalities ??
+      this.config.getEffectiveInputModalities();
 
     await this.sendPromise;
 
@@ -2149,7 +2163,10 @@ export class GeminiChat {
               .join(', '),
         );
       }
-      requestContents = this.getRequestHistory(currentUserContent);
+      requestContents = this.getRequestHistoryForRoute(
+        currentUserContent,
+        requestModalities,
+      );
 
       // Window-clamp the output request AFTER compression has settled the
       // history: max_tokens = min(ceiling, window − prompt − margin), floored
@@ -2456,8 +2473,10 @@ export class GeminiChat {
                     // tryCompress stops resetting it.
                     self.popPendingPartialAssistantTurn();
 
-                    requestContents =
-                      self.getRequestHistory(currentUserContent);
+                    requestContents = self.getRequestHistoryForRoute(
+                      currentUserContent,
+                      requestModalities,
+                    );
                     debugLogger.info(
                       `Reactive compression succeeded: ` +
                         `${reactiveInfo.originalTokenCount} -> ` +
@@ -2830,7 +2849,10 @@ export class GeminiChat {
                   )
                 : 0;
             self.history.push(recoveryUserContent);
-            const recoveryContents = self.getRequestHistory(currentUserContent);
+            const recoveryContents = self.getRequestHistoryForRoute(
+              currentUserContent,
+              requestModalities,
+            );
             self.history.pop();
             const walkRecoveryEstimate =
               estimateContentTokens(
@@ -2863,7 +2885,10 @@ export class GeminiChat {
                 () => {
                   self.history.push(recoveryUserContent);
                   return {
-                    requestContents: self.getRequestHistory(currentUserContent),
+                    requestContents: self.getRequestHistoryForRoute(
+                      currentUserContent,
+                      requestModalities,
+                    ),
                     params: iterationParams,
                     rollback: rollbackRecoveryAttempt,
                   };
@@ -2981,6 +3006,7 @@ export class GeminiChat {
                 let fallbackRetryAuthType: string | undefined;
                 let fallbackRetryErrorCodes: readonly number[] | undefined;
                 let resolvedFallbackModel: string;
+                let fallbackModalities: InputModalities | undefined;
                 try {
                   const resolved = await self.config
                     .getBaseLlmClient()
@@ -2989,6 +3015,8 @@ export class GeminiChat {
                   fallbackRetryAuthType = resolved.retryAuthType;
                   fallbackRetryErrorCodes = resolved.retryErrorCodes;
                   resolvedFallbackModel = resolved.model;
+                  fallbackModalities =
+                    resolved.contentGeneratorConfig?.modalities;
                 } catch (resolveError) {
                   if (isAbortError(resolveError)) throw resolveError;
                   const resolveErrorMessage =
@@ -3040,9 +3068,14 @@ export class GeminiChat {
                 // Run the fallback model through the existing API-call wiring.
                 let currentFallbackYieldedAnyChunk = false;
                 try {
+                  const fallbackRequestContents =
+                    self.getRequestHistoryForRoute(
+                      currentUserContent,
+                      fallbackModalities ?? {},
+                    );
                   for await (const event of self.makeFallbackStream(
                     resolvedFallbackModel,
-                    requestContents,
+                    fallbackRequestContents,
                     params,
                     prompt_id,
                     fallbackGenerator,

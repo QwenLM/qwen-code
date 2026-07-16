@@ -184,6 +184,7 @@ describe('GeminiChat', async () => {
         getTool: vi.fn(),
       }),
       getContentGenerator: vi.fn().mockReturnValue(mockContentGenerator),
+      getEffectiveInputModalities: vi.fn().mockReturnValue({ image: true }),
       getBaseLlmClient: vi.fn().mockReturnValue(undefined),
       getModelFallbacks: vi.fn().mockReturnValue([]),
       getChatCompression: vi.fn().mockReturnValue(undefined),
@@ -5380,7 +5381,7 @@ describe('GeminiChat', async () => {
       }
     });
 
-    it('uses one exact image route across provider retries', async () => {
+    it('uses one exact image route across retries and filters history for the next target', async () => {
       const capacityError = Object.assign(
         new Error('temporarily unavailable'),
         {
@@ -5423,11 +5424,25 @@ describe('GeminiChat', async () => {
       vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
         resolveForModel,
       } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+      vi.mocked(mockConfig.getEffectiveInputModalities).mockReturnValue({
+        pdf: true,
+      });
       chat = new GeminiChat(
         mockConfig,
         config,
         [
-          { role: 'user', parts: [{ text: 'prior question' }] },
+          {
+            role: 'user',
+            parts: [
+              { text: 'prior question' },
+              {
+                inlineData: {
+                  mimeType: 'application/pdf',
+                  data: 'prior-pdf',
+                },
+              },
+            ],
+          },
           { role: 'model', parts: [{ text: 'prior answer' }] },
         ],
         undefined,
@@ -5469,25 +5484,59 @@ describe('GeminiChat', async () => {
       expect(tryCompress).not.toHaveBeenCalled();
       expect(routeGenerateContentStream).toHaveBeenCalledTimes(2);
       expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
-      expect(routeGenerateContentStream).toHaveBeenLastCalledWith(
-        expect.objectContaining({
-          model: 'vision-agent',
-          contents: expect.arrayContaining([
-            { role: 'user', parts: [{ text: 'prior question' }] },
-            { role: 'model', parts: [{ text: 'prior answer' }] },
-            expect.objectContaining({
-              parts: expect.arrayContaining([
-                expect.objectContaining({
-                  inlineData: expect.objectContaining({
-                    data: 'private-image',
-                  }),
-                }),
-              ]),
-            }),
-          ]),
-        }),
-        'prompt-exact-route-retry',
+      const routeRequest = JSON.stringify(
+        routeGenerateContentStream.mock.calls.at(-1)?.[0],
       );
+      expect(routeRequest).toContain('"model":"vision-agent"');
+      expect(routeRequest).toContain('private-image');
+      expect(routeRequest).toContain('[document: application/pdf]');
+      expect(routeRequest).not.toContain('prior-pdf');
+
+      vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mockResolvedValueOnce(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { parts: [{ text: 'primary follow-up' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+      const primaryStream = await chat.sendMessageStream(
+        'test-model',
+        {
+          message: [
+            { text: 'continue on primary' },
+            {
+              inlineData: {
+                mimeType: 'application/pdf',
+                data: 'current-pdf',
+              },
+            },
+          ],
+        },
+        'prompt-after-exact-route',
+      );
+      for await (const _ of primaryStream) {
+        /* consume */
+      }
+
+      const primaryRequest = JSON.stringify(
+        vi.mocked(mockContentGenerator.generateContentStream).mock
+          .calls[0]?.[0],
+      );
+      expect(primaryRequest).toContain('[image: image/png]');
+      expect(primaryRequest).not.toContain('private-image');
+      expect(primaryRequest).toContain('prior-pdf');
+      expect(primaryRequest).toContain('current-pdf');
+      const history = JSON.stringify(chat.getHistory());
+      expect(history).toContain('private-image');
+      expect(history).toContain('prior-pdf');
+      expect(history).toContain('current-pdf');
     });
 
     it('fails an exact image route without entering the fallback chain', async () => {
@@ -5546,6 +5595,9 @@ describe('GeminiChat', async () => {
         model: 'test-model',
         maxRetries: 0,
       });
+      vi.mocked(mockConfig.getEffectiveInputModalities).mockReturnValue({
+        image: true,
+      });
       vi.mocked(mockConfig.getModelFallbacks).mockReturnValue([
         'fallback-a',
         'fallback-b',
@@ -5568,6 +5620,7 @@ describe('GeminiChat', async () => {
           contentGenerator: makeFallbackGenerator(
             fallbackAGenerateContentStream,
           ),
+          contentGeneratorConfig: { modalities: {} },
           retryAuthType: AuthType.USE_GEMINI,
           retryErrorCodes: undefined,
           model: 'fallback-a',
@@ -5576,6 +5629,7 @@ describe('GeminiChat', async () => {
           contentGenerator: makeFallbackGenerator(
             fallbackBGenerateContentStream,
           ),
+          contentGeneratorConfig: { modalities: { image: true } },
           retryAuthType: AuthType.USE_GEMINI,
           retryErrorCodes: undefined,
           model: 'fallback-b',
@@ -5620,7 +5674,17 @@ describe('GeminiChat', async () => {
 
       const stream = await chat.sendMessageStream(
         'test-model',
-        { message: 'test' },
+        {
+          message: [
+            { text: 'test' },
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'fallback-image',
+              },
+            },
+          ],
+        },
         'prompt-two-fallbacks',
       );
       const events: StreamEvent[] = [];
@@ -5656,6 +5720,12 @@ describe('GeminiChat', async () => {
       expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
         1,
       );
+      expect(
+        JSON.stringify(fallbackAGenerateContentStream.mock.calls[0]?.[0]),
+      ).not.toContain('fallback-image');
+      expect(
+        JSON.stringify(fallbackBGenerateContentStream.mock.calls[0]?.[0]),
+      ).toContain('fallback-image');
       expect(fallbackAGenerateContentStream).toHaveBeenCalledTimes(1);
       expect(fallbackBGenerateContentStream).toHaveBeenCalledTimes(1);
       expect(

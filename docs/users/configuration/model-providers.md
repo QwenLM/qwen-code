@@ -246,7 +246,7 @@ For a vision model that can also follow the normal Qwen Code agent policy and us
 }
 ```
 
-When a text-only primary uses that model as its configured vision fallback, the complete image-bearing turn stays on the vision model. Omit `agent` (or set it to `false`) to keep the safer Vision Bridge transcription flow.
+When a text-only primary uses that model as its configured vision fallback, the complete image-bearing turn stays on that exact provider, model, and endpoint across tool calls and retries. The next independent turn returns to the primary, and each model request receives only media modalities supported by its target. Omit `agent` (or set it to `false`) to keep the safer Vision Bridge transcription flow.
 
 ### Local Self-Hosted Models (via OpenAI-compatible API)
 

@@ -64,7 +64,11 @@ import { WriteFileTool } from '../tools/write-file.js';
 import { ShellTool, ShellToolInvocation } from '../tools/shell.js';
 import type { ShellToolParams } from '../tools/shell.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
-import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import {
+  getRuntimeContentGenerator,
+  runWithAgentContext,
+  type RuntimeContentGeneratorView,
+} from '../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
 
 type ToolSpanRecord = {
@@ -4440,7 +4444,10 @@ class MockEditToolInvocation extends BaseToolInvocation<
   Record<string, unknown>,
   ToolResult
 > {
-  constructor(params: Record<string, unknown>) {
+  constructor(
+    params: Record<string, unknown>,
+    private readonly executeFn?: () => Promise<ToolResult>,
+  ) {
     super(params);
   }
 
@@ -4469,10 +4476,12 @@ class MockEditToolInvocation extends BaseToolInvocation<
   }
 
   async execute(_abortSignal: AbortSignal): Promise<ToolResult> {
-    return {
-      llmContent: 'Edited successfully',
-      returnDisplay: 'Edited successfully',
-    };
+    return (
+      this.executeFn?.() ?? {
+        llmContent: 'Edited successfully',
+        returnDisplay: 'Edited successfully',
+      }
+    );
   }
 }
 
@@ -4480,14 +4489,14 @@ class MockEditTool extends BaseDeclarativeTool<
   Record<string, unknown>,
   ToolResult
 > {
-  constructor() {
+  constructor(private readonly executeFn?: () => Promise<ToolResult>) {
     super('mockEditTool', 'mockEditTool', 'A mock edit tool', Kind.Edit, {});
   }
 
   protected createInvocation(
     params: Record<string, unknown>,
   ): ToolInvocation<Record<string, unknown>, ToolResult> {
-    return new MockEditToolInvocation(params);
+    return new MockEditToolInvocation(params, this.executeFn);
   }
 }
 
@@ -5266,7 +5275,16 @@ describe('CoreToolScheduler request queueing', () => {
       resolveFirstCall = resolve;
     });
 
-    const executeFn = vi.fn().mockImplementation(() => firstCallPromise);
+    const runtimeView = {
+      contentGenerator: {},
+      contentGeneratorConfig: { model: 'vision-agent' },
+    } as RuntimeContentGeneratorView;
+    const executeFn = vi.fn().mockImplementation((args) => {
+      if ('b' in args) {
+        expect(getRuntimeContentGenerator()).toBe(runtimeView);
+      }
+      return firstCallPromise;
+    });
     const mockTool = new MockTool({ name: 'mockTool', execute: executeFn });
     const declarativeTool = mockTool;
 
@@ -5350,6 +5368,7 @@ describe('CoreToolScheduler request queueing', () => {
     const schedulePromise2 = scheduler.schedule(
       [request2],
       abortController.signal,
+      runtimeView,
     );
 
     // Ensure the second tool call hasn't been executed yet.
@@ -9543,20 +9562,22 @@ describe('CoreToolScheduler telemetry spans', () => {
    * Build a scheduler around a single MockEditTool that requires
    * approval. Used by the awaiting_approval-flow tests below.
    */
-  function buildApprovalScheduler(overrides: { getIdeMode?: () => boolean }): {
+  function buildApprovalScheduler(
+    overrides: { getIdeMode?: () => boolean },
+    tool: AnyDeclarativeTool = new MockEditTool(),
+  ): {
     scheduler: CoreToolScheduler;
     onToolCallsUpdate: ReturnType<typeof vi.fn>;
   } {
-    const mockEditTool = new MockEditTool();
     const mockToolRegistry = {
-      getTool: () => mockEditTool,
-      ensureTool: async () => mockEditTool,
+      getTool: () => tool,
+      ensureTool: async () => tool,
       getFunctionDeclarations: () => [],
       tools: new Map(),
       discovery: {},
       registerTool: () => {},
-      getToolByName: () => mockEditTool,
-      getToolByDisplayName: () => mockEditTool,
+      getToolByName: () => tool,
+      getToolByDisplayName: () => tool,
       getTools: () => [],
       discoverTools: async () => {},
       getAllTools: () => [],
@@ -9597,6 +9618,47 @@ describe('CoreToolScheduler telemetry spans', () => {
     });
     return { scheduler, onToolCallsUpdate };
   }
+
+  it('keeps the exact runtime through manual approval', async () => {
+    let runtimeDuringExecute: RuntimeContentGeneratorView | undefined;
+    const tool = new MockEditTool(async () => {
+      runtimeDuringExecute = getRuntimeContentGenerator();
+      return {
+        llmContent: 'Edited successfully',
+        returnDisplay: 'Edited successfully',
+      };
+    });
+    const { scheduler, onToolCallsUpdate } = buildApprovalScheduler({}, tool);
+    const runtimeView = {
+      contentGenerator: {},
+      contentGeneratorConfig: { model: 'vision-agent' },
+    } as RuntimeContentGeneratorView;
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'runtime-approval-1',
+          name: 'mockEditTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-runtime-approval',
+        },
+      ],
+      new AbortController().signal,
+      runtimeView,
+    );
+
+    const awaitingCall = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    expect(getRuntimeContentGenerator()).toBeUndefined();
+    await awaitingCall.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    expect(runtimeDuringExecute).toBe(runtimeView);
+  });
 
   it('blocked_on_user span ends with decision=error when getConfirmationDetails throws (#4321)', async () => {
     // Trigger _schedule's outer catch (line ~1711) by making

@@ -2293,7 +2293,11 @@ export const useGeminiStream = (
         }
 
         if (executableToolCallRequests.length > 0) {
-          scheduleToolCalls(executableToolCallRequests, signal);
+          scheduleToolCalls(
+            executableToolCallRequests,
+            signal,
+            modelOverrideRef.current,
+          );
         }
       }
       return StreamProcessingStatus.Completed;

@@ -68,7 +68,7 @@ export function isFullTurnVisionCapable(model: VisionModelCandidate): boolean {
   );
 }
 
-export function getFullTurnVisionModelId(
+export function getQualifiedVisionModelId(
   model: Pick<VisionModelCandidate, 'id' | 'authType'>,
 ): string {
   return model.authType && !model.id.startsWith(`${model.authType}:`)
@@ -79,10 +79,24 @@ export function getFullTurnVisionModelId(
 function toSelection(model: VisionModelCandidate): VisionBridgeModelSelection {
   const agentCapable = isFullTurnVisionCapable(model);
   return {
-    id: agentCapable ? getFullTurnVisionModelId(model) : model.id,
+    id: getQualifiedVisionModelId(model),
     ...(model.baseUrl && { baseUrl: model.baseUrl }),
     ...(agentCapable && { agentCapable: true }),
   };
+}
+
+function hasAmbiguousRoute(
+  candidates: VisionModelCandidate[],
+  selected: VisionModelCandidate,
+): boolean {
+  return (
+    candidates.filter(
+      (candidate) =>
+        candidate.id === selected.id &&
+        candidate.authType === selected.authType &&
+        candidate.baseUrl === selected.baseUrl,
+    ).length > 1
+  );
 }
 
 export function getVisionModelSelector(
@@ -125,14 +139,20 @@ export function selectVisionBridgeModel(
   // Match the primary's endpoint when it has one; otherwise fall back to the
   // primary's auth type. Never pick a model from a different endpoint.
   if (primaryProvider.baseUrl) {
-    const sameEndpoint = candidates.find(
+    const sameEndpointCandidates = candidates.filter(
       (m) => m.baseUrl === primaryProvider.baseUrl,
+    );
+    const sameEndpoint = sameEndpointCandidates.find(
+      (candidate) => !hasAmbiguousRoute(models, candidate),
     );
     return sameEndpoint ? toSelection(sameEndpoint) : undefined;
   }
   if (primaryProvider.authType) {
-    const sameAuth = candidates.find(
+    const sameAuthCandidates = candidates.filter(
       (m) => m.authType === primaryProvider.authType,
+    );
+    const sameAuth = sameAuthCandidates.find(
+      (candidate) => !hasAmbiguousRoute(models, candidate),
     );
     return sameAuth ? toSelection(sameAuth) : undefined;
   }

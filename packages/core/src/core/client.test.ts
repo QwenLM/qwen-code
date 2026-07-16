@@ -99,6 +99,10 @@ import {
 } from '../goals/activeGoalStore.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import {
+  clearCacheSafeParams,
+  getCacheSafeParams,
+} from '../utils/forkedAgent.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -565,6 +569,7 @@ describe('Gemini Client (client.ts)', () => {
           .mockReturnValue('/test/project/root/.gemini/projects/test-project'),
       },
       getContentGenerator: vi.fn().mockReturnValue(mockContentGenerator),
+      getEffectiveInputModalities: vi.fn().mockReturnValue({}),
       getBaseLlmClient: vi.fn(),
       getSkipLoopDetection: vi.fn().mockReturnValue(false),
       // Mimics the resolved Config getter: always a number (Infinity keeps
@@ -4065,6 +4070,44 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   describe('sendMessageStream', () => {
+    it('filters unsupported media from the shared history snapshot', async () => {
+      clearCacheSafeParams();
+      vi.mocked(mockConfig.getEffectiveInputModalities).mockReturnValue({
+        pdf: true,
+      });
+      client.getChat().setHistory([
+        {
+          role: 'user',
+          parts: [
+            { inlineData: { mimeType: 'image/png', data: 'image-bytes' } },
+            {
+              inlineData: {
+                mimeType: 'application/pdf',
+                data: 'pdf-bytes',
+              },
+            },
+          ],
+        },
+      ]);
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'response' };
+        })(),
+      );
+
+      for await (const _ of client.sendMessageStream(
+        [{ text: 'next turn' }],
+        new AbortController().signal,
+        'prompt-cache-media',
+      )) {
+        /* drain */
+      }
+
+      const history = JSON.stringify(getCacheSafeParams()?.history);
+      expect(history).not.toContain('image-bytes');
+      expect(history).toContain('pdf-bytes');
+    });
+
     it('should merge editor context into the user request when ideMode is enabled', async () => {
       // Arrange
       vi.mocked(ideContextStore.get).mockReturnValue({
@@ -8372,6 +8415,40 @@ Other open files:
   });
 
   describe('generateContent', () => {
+    it('filters unsupported media for the resolved target model', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'test-model',
+        modalities: { pdf: true },
+      } as ContentGeneratorConfig);
+      const contents: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            { inlineData: { mimeType: 'image/png', data: 'image-bytes' } },
+            {
+              inlineData: {
+                mimeType: 'application/pdf',
+                data: 'pdf-bytes',
+              },
+            },
+          ],
+        },
+      ];
+
+      await client.generateContent(
+        contents,
+        {},
+        new AbortController().signal,
+        'test-model',
+      );
+
+      const request = vi.mocked(mockContentGenerator.generateContent).mock
+        .calls[0]?.[0];
+      expect(JSON.stringify(request?.contents)).not.toContain('image-bytes');
+      expect(JSON.stringify(request?.contents)).toContain('pdf-bytes');
+    });
+
     it('should call generateContent with the correct parameters', async () => {
       const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
       const generationConfig = { temperature: 0.5 };

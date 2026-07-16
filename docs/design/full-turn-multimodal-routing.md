@@ -27,15 +27,15 @@ Missing or false `agent` capability keeps the existing Vision Bridge transcripti
 - If the primary accepts images, use the existing primary-model path.
 - If the selected vision model is not agent-capable, transcribe through Vision Bridge and answer on the primary.
 - If the selected vision model is agent-capable, keep the original image parts and set a turn-local exact model selector.
-- The selector is reused for provider retries, tool-result continuations, and blocking ACP Stop Hook continuations.
+- The exact provider, model, and endpoint are reused for provider retries, tool execution, tool-result continuations, and blocking ACP Stop Hook continuations.
 - Configured fallback models are disabled for that turn. Failure to resolve the exact route fails closed instead of sending raw image data to the primary.
-- The next independent user turn clears the selector and returns to the primary.
+- The next independent user turn clears the selector and returns to the primary. Every model request, including side queries, receives only media modalities supported by its exact target.
 
 The full-turn selector adds a trailing NUL marker to the existing `model\0baseUrl` representation. The chat layer removes that marker before model resolution. This keeps ordinary endpoint-qualified model selections on their existing behavior.
 
 ## Context limits
 
-LLM-based automatic chat compression remains on the primary-model path. A full-turn route skips that compression because running primary-model compression while an image turn is owned by another provider would violate the exact-route guarantee. Existing local history microcompaction and image-payload slimming still apply. An oversized full-turn request therefore fails on the selected model.
+LLM-based automatic chat compression remains on the primary-model path. A full-turn route skips that compression because running primary-model compression while an image turn is owned by another provider would violate the exact-route guarantee. Existing local history microcompaction and image-payload slimming still apply, and request/cache copies retain only media modalities supported by their target model. An oversized full-turn request therefore fails on the selected model.
 
 ## Entry points
 

@@ -1051,7 +1051,7 @@ describe('Server Config (config.ts)', () => {
       // 'ghost-model' isn't configured, so the explicit pin is ignored and the
       // same-provider candidate is auto-picked instead.
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -1067,7 +1067,7 @@ describe('Server Config (config.ts)', () => {
         },
       ]);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -1124,6 +1124,35 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
+    it.each([false, true])(
+      'rejects an exact visionModel route that matches multiple entries (reversed=%s)',
+      (reversed) => {
+        const baseUrl = 'https://vision.example.com/v1';
+        const routeEntries = [
+          {
+            id: 'vision-agent',
+            authType: AuthType.USE_OPENAI,
+            baseUrl,
+            isVision: true,
+            capabilities: { vision: true, agent: true },
+          },
+          {
+            id: 'vision-agent',
+            authType: AuthType.USE_OPENAI,
+            baseUrl,
+            fastOnly: true,
+          },
+        ];
+        const config = new Config({
+          ...baseParams,
+          visionModel: `openai:vision-agent\0${baseUrl}`,
+        });
+        stubProvider(config, reversed ? routeEntries.reverse() : routeEntries);
+
+        expect(config.getDefaultVisionBridgeModel()).toBeUndefined();
+      },
+    );
+
     it('falls back to auto-select when a legacy visionModel matches multiple endpoints', () => {
       const config = new Config({
         ...baseParams,
@@ -1150,7 +1179,7 @@ describe('Server Config (config.ts)', () => {
         },
       ]);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -1169,7 +1198,7 @@ describe('Server Config (config.ts)', () => {
       ]);
       expect(() => config.getDefaultVisionBridgeModel()).not.toThrow();
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -1190,7 +1219,7 @@ describe('Server Config (config.ts)', () => {
       ]);
 
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
       expect(warn).toHaveBeenCalledWith(
@@ -1220,7 +1249,7 @@ describe('Server Config (config.ts)', () => {
         },
       ]);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -1243,20 +1272,20 @@ describe('Server Config (config.ts)', () => {
       ]);
       // Pinned first.
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-anthropic',
+        id: 'anthropic:vl-anthropic',
         baseUrl: 'https://api.anthropic.com',
       });
       // Cleared with '' — JSDoc promises a fall back to auto-select.
       config.setVisionModel('');
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
       // undefined clears too.
       config.setVisionModel('vl-anthropic');
       config.setVisionModel(undefined);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
     });

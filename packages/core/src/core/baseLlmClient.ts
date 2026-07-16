@@ -37,6 +37,7 @@ import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
+import { slimCompactionInput } from '../services/compactionInputSlimming.js';
 
 const DEFAULT_MAX_ATTEMPTS = 7;
 
@@ -251,10 +252,15 @@ export class BaseLlmClient {
 
     const {
       contentGenerator,
+      contentGeneratorConfig,
       retryAuthType,
       retryErrorCodes,
       model: requestModel,
     } = await this.resolveForModel(model);
+    const requestContents = slimCompactionInput(
+      contents,
+      contentGeneratorConfig.modalities,
+    ).slimmedHistory;
 
     try {
       const apiCall = () =>
@@ -265,7 +271,7 @@ export class BaseLlmClient {
               ...requestConfig,
               tools,
             },
-            contents,
+            contents: requestContents,
           },
           promptId ?? '',
         );
@@ -369,16 +375,21 @@ export class BaseLlmClient {
 
     const {
       contentGenerator,
+      contentGeneratorConfig,
       retryAuthType,
       retryErrorCodes,
       model: requestModel,
     } = await this.resolveForModel(model, { failClosed: options.failClosed });
+    const requestContents = slimCompactionInput(
+      contents,
+      contentGeneratorConfig.modalities,
+    ).slimmedHistory;
 
     try {
       const request = {
         model: requestModel,
         config: requestConfig,
-        contents,
+        contents: requestContents,
       };
 
       // Both branches resolve to the same `{ text, usage }` shape so a single

@@ -482,6 +482,47 @@ describe('BaseLlmClient', () => {
     });
   });
 
+  it('filters unsupported media from text and JSON side queries', async () => {
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      model: 'test-model',
+      authType: AuthType.USE_GEMINI,
+      modalities: { pdf: true },
+    });
+    const contents = [
+      {
+        role: 'user',
+        parts: [
+          { inlineData: { mimeType: 'image/png', data: 'image-bytes' } },
+          { inlineData: { mimeType: 'application/pdf', data: 'pdf-bytes' } },
+        ],
+      },
+    ];
+    mockGenerateContent
+      .mockResolvedValueOnce(createMockTextResponse('ok'))
+      .mockResolvedValueOnce(createMockResponseWithFunctionCall({ ok: true }));
+    vi.mocked(getFunctionCalls).mockReturnValue([
+      { name: 'respond_in_schema', args: { ok: true } },
+    ]);
+
+    await client.generateText({
+      contents,
+      model: 'test-model',
+      abortSignal: abortController.signal,
+    });
+    await client.generateJson({
+      contents,
+      schema: { type: 'object' },
+      model: 'test-model',
+      abortSignal: abortController.signal,
+    });
+
+    for (const [request] of mockGenerateContent.mock.calls) {
+      const sent = JSON.stringify(request.contents);
+      expect(sent).not.toContain('image-bytes');
+      expect(sent).toContain('pdf-bytes');
+    }
+  });
+
   describe('generateEmbedding', () => {
     const texts = ['hello world', 'goodbye world'];
     const testEmbeddingModel = 'test-embedding-model';

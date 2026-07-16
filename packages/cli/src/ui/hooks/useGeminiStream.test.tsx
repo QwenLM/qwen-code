@@ -502,6 +502,19 @@ describe('useGeminiStream', () => {
       }));
       const selector = 'vision-agent\0https://vision.example.com/v1\0';
       const { result, mockSendMessageStream } = renderTestHook();
+      const toolRequest = {
+        callId: 'full-turn-tool',
+        name: 'read_file',
+        args: { file_path: 'image.png' },
+      };
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: toolRequest,
+          };
+        })(),
+      );
 
       await act(async () => {
         await result.current.submitQuery('/inspect-image');
@@ -514,6 +527,11 @@ describe('useGeminiStream', () => {
       expect(mockSendMessageStream.mock.calls[0]?.[3]).toMatchObject({
         modelOverride: selector,
       });
+      expect(mockScheduleToolCalls).toHaveBeenCalledWith(
+        [toolRequest],
+        expect.any(AbortSignal),
+        selector,
+      );
       expect(mockAddItem).toHaveBeenCalledWith(
         expect.objectContaining({
           type: MessageType.VISION_NOTICE,

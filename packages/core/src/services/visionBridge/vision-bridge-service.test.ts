@@ -894,7 +894,7 @@ describe('selectVisionBridgeModel (same-provider only)', () => {
     // dashscope endpoint and must win.
     expect(
       selectVisionBridgeModel('qwen-text-max', models, { baseUrl: dashscope }),
-    ).toEqual({ id: 'qwen3.7-plus', baseUrl: dashscope });
+    ).toEqual({ id: 'openai:qwen3.7-plus', baseUrl: dashscope });
   });
 
   it('never reaches across providers: undefined when the only vision model is on a different endpoint', () => {
@@ -927,7 +927,7 @@ describe('selectVisionBridgeModel (same-provider only)', () => {
       ],
       { authType: 'openai' },
     );
-    expect(picked?.id).toBe('vision-same');
+    expect(picked?.id).toBe('openai:vision-same');
   });
 
   it('returns undefined when the provider identity is unknown', () => {
@@ -994,6 +994,72 @@ describe('selectVisionBridgeModel (same-provider only)', () => {
       )?.agentCapable,
     ).toBeUndefined();
   });
+
+  it.each([false, true])(
+    'rejects an agent route whose exact identity collides with a non-vision entry (reversed=%s)',
+    (reversed) => {
+      const routeEntries: VisionModelCandidate[] = [
+        {
+          id: 'vision-agent',
+          authType: 'openai',
+          baseUrl: dashscope,
+          modalities: { image: true },
+          capabilities: { agent: true },
+        },
+        {
+          id: 'vision-agent',
+          authType: 'openai',
+          baseUrl: dashscope,
+          modalities: { image: false },
+        },
+      ];
+
+      expect(
+        selectVisionBridgeModel(
+          'primary',
+          [
+            { id: 'primary', authType: 'openai', baseUrl: dashscope },
+            ...(reversed ? routeEntries.reverse() : routeEntries),
+          ],
+          { authType: 'openai', baseUrl: dashscope },
+        ),
+      ).toBeUndefined();
+    },
+  );
+
+  it.each([
+    [false, 'openai:shared-vision'],
+    [true, 'anthropic:shared-vision'],
+  ])(
+    'auth-qualifies a cross-auth same-endpoint route (reversed=%s)',
+    (reversed, expectedId) => {
+      const routeEntries: VisionModelCandidate[] = [
+        {
+          id: 'shared-vision',
+          authType: 'openai',
+          baseUrl: dashscope,
+          isVision: true,
+        },
+        {
+          id: 'shared-vision',
+          authType: 'anthropic',
+          baseUrl: dashscope,
+          isVision: true,
+        },
+      ];
+
+      const picked = selectVisionBridgeModel(
+        'primary',
+        [
+          { id: 'primary', authType: 'openai', baseUrl: dashscope },
+          ...(reversed ? routeEntries.reverse() : routeEntries),
+        ],
+        { authType: 'openai', baseUrl: dashscope },
+      );
+
+      expect(picked).toEqual({ id: expectedId, baseUrl: dashscope });
+    },
+  );
 });
 
 describe('isImageCapable', () => {

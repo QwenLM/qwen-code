@@ -142,6 +142,11 @@ import {
 } from '../telemetry/index.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
+import {
+  getRuntimeContentGenerator,
+  runWithRuntimeContentGenerator,
+  type RuntimeContentGeneratorView,
+} from '../agents/runtime/agent-context.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 
@@ -1311,9 +1316,14 @@ export class CoreToolScheduler {
   // PostToolUse — reusing this id keeps the Pre/Post pair correlated instead
   // of orphaning two events. Cleared on terminal state via finalizeToolSpan.
   private readonly bouncedToolUseId = new Map<string, string>();
+  private readonly runtimeContentGeneratorViews = new Map<
+    string,
+    RuntimeContentGeneratorView
+  >();
   private requestQueue: Array<{
     request: ToolCallRequestInfo | ToolCallRequestInfo[];
     signal: AbortSignal;
+    runtimeView?: RuntimeContentGeneratorView;
     resolve: () => void;
     reject: (reason?: Error) => void;
   }> = [];
@@ -1606,6 +1616,7 @@ export class CoreToolScheduler {
     // defensive no-span path.
     this.bouncedAwaitingApproval.delete(callId);
     this.bouncedToolUseId.delete(callId);
+    this.runtimeContentGeneratorViews.delete(callId);
     const span = this.toolSpans.get(callId);
     if (!span) return;
     this.toolSpans.delete(callId);
@@ -1966,6 +1977,7 @@ export class CoreToolScheduler {
   schedule(
     request: ToolCallRequestInfo | ToolCallRequestInfo[],
     signal: AbortSignal,
+    runtimeView?: RuntimeContentGeneratorView,
   ): Promise<void> {
     if (this.isRunning() || this.isScheduling) {
       return new Promise((resolve, reject) => {
@@ -1985,6 +1997,7 @@ export class CoreToolScheduler {
         this.requestQueue.push({
           request,
           signal,
+          runtimeView,
           resolve: () => {
             signal.removeEventListener('abort', abortHandler);
             resolve();
@@ -1996,7 +2009,7 @@ export class CoreToolScheduler {
         });
       });
     }
-    return this._schedule(request, signal);
+    return this._schedule(request, signal, runtimeView);
   }
 
   /**
@@ -2038,7 +2051,24 @@ export class CoreToolScheduler {
   private async _schedule(
     request: ToolCallRequestInfo | ToolCallRequestInfo[],
     signal: AbortSignal,
+    runtimeView?: RuntimeContentGeneratorView,
   ): Promise<void> {
+    if (runtimeView) {
+      const items = Array.isArray(request) ? request : [request];
+      for (const item of items) {
+        this.runtimeContentGeneratorViews.set(item.callId, runtimeView);
+      }
+      try {
+        return await runWithRuntimeContentGenerator(runtimeView, () =>
+          this._schedule(request, signal),
+        );
+      } catch (error) {
+        for (const item of items) {
+          this.runtimeContentGeneratorViews.delete(item.callId);
+        }
+        throw error;
+      }
+    }
     this.isScheduling = true;
     try {
       if (this.isRunning()) {
@@ -2880,6 +2910,18 @@ export class CoreToolScheduler {
     signal: AbortSignal,
     payload?: ToolConfirmationPayload,
   ): Promise<void> {
+    const runtimeView = this.runtimeContentGeneratorViews.get(callId);
+    if (runtimeView && getRuntimeContentGenerator() !== runtimeView) {
+      return runWithRuntimeContentGenerator(runtimeView, () =>
+        this.handleConfirmationResponse(
+          callId,
+          originalOnConfirm,
+          outcome,
+          signal,
+          payload,
+        ),
+      );
+    }
     const toolCall = this.toolCalls.find(
       (c) => c.request.callId === callId && c.status === 'awaiting_approval',
     );
@@ -3355,6 +3397,12 @@ export class CoreToolScheduler {
 
     const scheduledCall = toolCall;
     const { callId, name: toolName } = scheduledCall.request;
+    const runtimeView = this.runtimeContentGeneratorViews.get(callId);
+    if (runtimeView && getRuntimeContentGenerator() !== runtimeView) {
+      return runWithRuntimeContentGenerator(runtimeView, () =>
+        this.executeSingleToolCall(toolCall, signal),
+      );
+    }
 
     // The tool span is opened in `_schedule` so it covers validating →
     // awaiting_approval → executing in one span. Reuse it here. If it's
@@ -4655,6 +4703,7 @@ export class CoreToolScheduler {
         completedCalls = await this.applyBatchOutputBudget(completedCalls);
 
         for (const call of completedCalls) {
+          this.runtimeContentGeneratorViews.delete(call.request.callId);
           logToolCall(this.config, new ToolCallEvent(call));
         }
 
@@ -4672,7 +4721,7 @@ export class CoreToolScheduler {
           // Always drain the queue, even if completion callbacks throw.
           if (this.requestQueue.length > 0) {
             const next = this.requestQueue.shift()!;
-            this._schedule(next.request, next.signal)
+            this._schedule(next.request, next.signal, next.runtimeView)
               .then(next.resolve)
               .catch(next.reject);
           }

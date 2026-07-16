@@ -137,6 +137,7 @@ import {
   getFullTurnVisionModelSelector,
   splitImageParts,
   approxBase64Bytes,
+  runWithRuntimeContentGenerator,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
@@ -1820,7 +1821,11 @@ export class Session implements SessionContext {
             let parts: Part[] | null;
             let fullTurnModelOverride: string | undefined;
             const onFullTurnModel = (model: string) => {
+              if (fullTurnModelOverride) {
+                return false;
+              }
               fullTurnModelOverride = model;
+              return true;
             };
 
             if (isContinue) {
@@ -2177,11 +2182,15 @@ export class Session implements SessionContext {
                 }
 
                 if (functionCalls.length > 0) {
-                  const toolRun = await this.runToolCalls(
-                    pendingSend.signal,
-                    promptId,
-                    functionCalls,
-                    toolLoopState,
+                  const toolRun = await this.#runWithFullTurnModel(
+                    fullTurnModelOverride,
+                    () =>
+                      this.runToolCalls(
+                        pendingSend.signal,
+                        promptId,
+                        functionCalls,
+                        toolLoopState,
+                      ),
                   );
                   if (toolRun.stopAfterPermissionCancel) {
                     await this.#preserveStoppedToolRun(
@@ -2193,6 +2202,7 @@ export class Session implements SessionContext {
                   nextMessage = await this.#buildNextMessageAfterToolRun(
                     toolRun,
                     pendingSend.signal,
+                    onFullTurnModel,
                   );
                   if (toolRun.loopDetected) {
                     await this.#preserveStoppedToolRun(
@@ -2257,6 +2267,13 @@ export class Session implements SessionContext {
     const stopHookBlockingCap = this.config.getStopHookBlockingCap();
     let stopHookIterationCount = 0;
     let stopHookReasons: string[] = [];
+    const onFullTurnModel = (model: string) => {
+      if (modelOverride) {
+        return false;
+      }
+      modelOverride = model;
+      return true;
+    };
 
     while (stopHookIterationCount < stopHookBlockingCap) {
       if (
@@ -2504,11 +2521,15 @@ export class Session implements SessionContext {
 
           // Process tool calls from the follow-up message
           if (functionCalls.length > 0) {
-            const toolRun = await this.runToolCalls(
-              pendingSend.signal,
-              promptId,
-              functionCalls,
-              toolLoopState,
+            const toolRun = await this.#runWithFullTurnModel(
+              modelOverride,
+              () =>
+                this.runToolCalls(
+                  pendingSend.signal,
+                  promptId,
+                  functionCalls,
+                  toolLoopState,
+                ),
             );
             if (toolRun.stopAfterPermissionCancel) {
               await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
@@ -2517,6 +2538,7 @@ export class Session implements SessionContext {
             nextMessage = await this.#buildNextMessageAfterToolRun(
               toolRun,
               pendingSend.signal,
+              onFullTurnModel,
             );
             if (toolRun.loopDetected) {
               await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
@@ -2547,6 +2569,19 @@ export class Session implements SessionContext {
 
   #getCurrentChat(): GeminiChat {
     return this.config.getGeminiClient()!.getChat();
+  }
+
+  async #runWithFullTurnModel<T>(
+    modelOverride: string | undefined,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    if (!modelOverride?.endsWith('\0')) {
+      return fn();
+    }
+    const runtimeView = await this.config
+      .getBaseLlmClient()
+      .resolveForModel(modelOverride.slice(0, -1), { failClosed: true });
+    return runWithRuntimeContentGenerator(runtimeView, fn);
   }
 
   /**
@@ -2738,6 +2773,7 @@ export class Session implements SessionContext {
   async #buildNextMessageAfterToolRun(
     toolRun: RunToolResult,
     abortSignal: AbortSignal,
+    onFullTurnModel?: (model: string) => boolean,
   ): Promise<Content | null> {
     if (toolRun.loopDetected) {
       debugLogger.debug('Stopping ACP turn after daemon loop detection.');
@@ -2751,7 +2787,7 @@ export class Session implements SessionContext {
     }
     const parts = [
       ...toolRun.parts,
-      ...(await this.#drainMidTurnUserMessages(abortSignal)),
+      ...(await this.#drainMidTurnUserMessages(abortSignal, onFullTurnModel)),
     ];
     return { role: 'user', parts };
   }
@@ -2862,7 +2898,10 @@ export class Session implements SessionContext {
     });
   }
 
-  async #drainMidTurnUserMessages(abortSignal: AbortSignal): Promise<Part[]> {
+  async #drainMidTurnUserMessages(
+    abortSignal: AbortSignal,
+    onFullTurnModel?: (model: string) => boolean,
+  ): Promise<Part[]> {
     // Flush anything recovered from a PRIOR timed-out drain first: the daemon
     // splices + SSE-publishes synchronously, so on a timeout the browser has
     // already deduped those messages — discarding the late response would lose
@@ -2871,7 +2910,7 @@ export class Session implements SessionContext {
     const recovered = this.#takeRecoveredMidTurnMessages();
 
     if (this.midTurnDrainUnavailable) {
-      return this.#buildMidTurnParts(recovered, abortSignal);
+      return this.#buildMidTurnParts(recovered, abortSignal, onFullTurnModel);
     }
 
     let drainPromise: ReturnType<AgentSideConnection['extMethod']> | undefined;
@@ -2896,6 +2935,7 @@ export class Session implements SessionContext {
       return this.#buildMidTurnParts(
         [...recovered, ...parseMidTurnDrainResponse(response)],
         abortSignal,
+        onFullTurnModel,
       );
     } catch (error) {
       // The ACP SDK rejects with the raw JSON-RPC error object
@@ -2946,7 +2986,7 @@ export class Session implements SessionContext {
       );
       // Even on a failed/timed-out drain, still inject anything recovered from
       // an EARLIER timeout so a transient stall never strands those messages.
-      return this.#buildMidTurnParts(recovered, abortSignal);
+      return this.#buildMidTurnParts(recovered, abortSignal, onFullTurnModel);
     }
   }
 
@@ -3012,6 +3052,7 @@ export class Session implements SessionContext {
   async #buildMidTurnParts(
     messages: DrainedMidTurnMessage[],
     abortSignal: AbortSignal,
+    onFullTurnModel?: (model: string) => boolean,
   ): Promise<Part[]> {
     const parts: Part[] = [];
     for (const message of messages) {
@@ -3025,7 +3066,10 @@ export class Session implements SessionContext {
             : await withTimeoutSignal(
                 abortSignal,
                 MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
-                (signal) => this.#resolvePrompt(message.content, signal),
+                (signal) =>
+                  this.#resolvePrompt(message.content, signal, {
+                    onFullTurnModel,
+                  }),
               );
       } catch (messageError) {
         if (abortSignal.aborted) return parts;
@@ -3183,7 +3227,6 @@ export class Session implements SessionContext {
         this.cronAbortController = ac;
         const promptId =
           this.config.getSessionId() + '########cron' + Date.now();
-
         let cronHadError = false;
         await withInteractionSpan(
           this.config,
@@ -3675,7 +3718,6 @@ export class Session implements SessionContext {
         this.notificationAbortController = ac;
         const promptId =
           this.config.getSessionId() + '########notification' + Date.now();
-
         try {
           await this.#emitBackgroundNotificationDisplay(item);
 
@@ -5824,7 +5866,7 @@ export class Session implements SessionContext {
     result: NonInteractiveSlashCommandResult,
     originalPrompt: ContentBlock[],
     abortSignal: AbortSignal,
-    onFullTurnModel: (model: string) => void,
+    onFullTurnModel: (model: string) => boolean,
   ): Promise<Part[] | null> {
     this.#emitGoalStatusItems(result);
 
@@ -5932,7 +5974,7 @@ export class Session implements SessionContext {
     // stays first and keeps carrying the "[User message received...]" prefix.
     options: {
       promptLast?: boolean;
-      onFullTurnModel?: (model: string) => void;
+      onFullTurnModel?: (model: string) => boolean;
     } = {},
   ): Promise<Part[]> {
     const FILE_URI_SCHEME = 'file://';
@@ -6137,7 +6179,7 @@ export class Session implements SessionContext {
   async #applyBridgeConversionsIfNeeded(
     originalParts: Part[],
     abortSignal: AbortSignal,
-    onFullTurnModel?: (model: string) => void,
+    onFullTurnModel?: (model: string) => boolean,
   ): Promise<Part[]> {
     const parts = await this.#applyVoiceBridgeIfNeeded(
       originalParts,
@@ -6149,11 +6191,27 @@ export class Session implements SessionContext {
 
     const fullTurnModel = this.config.getDefaultVisionBridgeModel();
     if (onFullTurnModel && fullTurnModel?.agentCapable) {
-      onFullTurnModel(getFullTurnVisionModelSelector(fullTurnModel));
-      await this.messageEmitter.emitAgentMessage(
-        formatFullTurnVisionNotice(fullTurnModel),
+      const fullTurnParts = parts.map((part) => clampInlineMediaPart(part));
+      if (!hasImageParts(fullTurnParts)) {
+        return fullTurnParts;
+      }
+      const selected = onFullTurnModel(
+        getFullTurnVisionModelSelector(fullTurnModel),
       );
-      return parts;
+      if (selected) {
+        try {
+          await this.messageEmitter.emitAgentMessage(
+            formatFullTurnVisionNotice(fullTurnModel),
+          );
+        } catch (error) {
+          debugLogger.debug(
+            `full-turn vision: failed to emit notice; continuing error=${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
+      return fullTurnParts;
     }
 
     let bridgeResult: VisionBridgeResult;
