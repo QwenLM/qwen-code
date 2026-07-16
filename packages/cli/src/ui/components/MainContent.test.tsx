@@ -927,5 +927,21 @@ describe('<MainContent />', () => {
         (p: { maxHeight?: number }) => p.maxHeight === undefined,
       ),
     ).toBe(true);
+
+    // Constrained mode (#6421): constrainHeight alone must engage the
+    // backstop even when not streaming, so streaming tables don't yank
+    // the viewport to the top.
+    boxPropsSpy.mockClear();
+    renderMainContent(
+      createUIState({
+        pendingHistoryItems: [{ type: 'gemini_content', text: 'x' }],
+        availableTerminalHeight: 5,
+        constrainHeight: true,
+        streamingState: StreamingState.Idle,
+      }),
+    );
+    expect(
+      wrapperProps().some((p: { maxHeight?: number }) => p.maxHeight === 5),
+    ).toBe(true);
   });
 });
