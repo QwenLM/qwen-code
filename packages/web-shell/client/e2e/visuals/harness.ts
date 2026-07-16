@@ -158,8 +158,14 @@ export async function captureScreenshot(
  * a deterministic frame (verified: sidebar-attention drops from ~0.12% of pixels
  * differing between identical renders to 0); a two-frame wait lets the compositor
  * commit that frame before the capture reads it.
+ *
+ * Scope: this covers WAAPI and CSS `@keyframes` animations — everything
+ * `document.getAnimations()` reports. A spinner hand-rolled on a
+ * `requestAnimationFrame` loop instead would NOT be caught, and the flake would
+ * silently return; if a spinner reimplementation ever reintroduces it, this is
+ * the function to extend. `harness.spec.ts` pins the pause/rewind contract.
  */
-async function freezeLoopingAnimations(page: Page): Promise<void> {
+export async function freezeLoopingAnimations(page: Page): Promise<void> {
   await page.evaluate(
     /* global document, requestAnimationFrame */
     async () => {

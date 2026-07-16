@@ -347,12 +347,22 @@ for (const theme of THEMES) {
       // Every other scenario here is single-workspace, where that tag never
       // renders (it is gated on more than one displayed workspace), so this is
       // the only scenario that can surface a change to the workspace labels.
+      //
+      // Pin the primary workspace cwd and its loaded session name explicitly,
+      // rather than leaning on createWebShellDaemonScenario's defaults: the
+      // basename ("qwen-web-shell-e2e") and the settle-wait below both depend on
+      // them, so a rename of those defaults in mockDaemon.ts would otherwise
+      // turn this into a cryptic "not visible" failure.
+      const primaryCwd = '/tmp/qwen-web-shell-e2e';
+      const primarySessionName = 'Run auth migration';
       const scenario = createWebShellDaemonScenario({
+        workspaceCwd: primaryCwd,
+        displayName: primarySessionName,
         capabilities: {
           workspaces: [
             {
               id: 'ws-primary',
-              cwd: '/tmp/qwen-web-shell-e2e',
+              cwd: primaryCwd,
               primary: true,
               trusted: true,
             },
@@ -384,11 +394,10 @@ for (const theme of THEMES) {
       ).toBeVisible();
       await expect(sidebar.getByText('Primary', { exact: true })).toBeVisible();
       // The primary workspace auto-expands and streams its session rows in via a
-      // per-workspace fetch. Wait for a row before capturing so the async load
-      // has settled — otherwise the row list races the screenshot and the
-      // capture is byte-nondeterministic between runs (the flake this scenario
-      // was added to replace).
-      await expect(sidebar.getByText('E2E Harness Session')).toBeVisible();
+      // per-workspace fetch. Wait for the loaded session's row before capturing
+      // so the async load has settled — otherwise the row list races the
+      // screenshot and the capture differs between runs.
+      await expect(sidebar.getByText(primarySessionName)).toBeVisible();
       await captureScreenshot(page, `workspace-sidebar-${theme}`);
     });
 
