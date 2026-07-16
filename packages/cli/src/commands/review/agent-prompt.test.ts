@@ -32,6 +32,7 @@ import {
   buildWholeDiffBlock,
   buildRoleBrief,
   buildRoleLaunchPrompt,
+  findingsSection,
   agentPromptCommand,
 } from './agent-prompt.js';
 import {
@@ -500,6 +501,16 @@ describe('--findings — fold the list in, print one block, record the block alo
     expect(recorded).not.toContain('foo.ts:10');
     expect(recorded).toContain('offset=4024, limit=176');
     expect(wasDeliveredVerbatim(printed, recorded)).toBe(true);
+  });
+
+  it('throws for a role it has no framing for, rather than falling through', () => {
+    // A future role that sets acceptsFindings but has no branch in findingsSection
+    // must fail loudly, not inherit the reverse auditor's "do not re-report" prose.
+    // Called directly with a role the function does not frame — the guards never let
+    // a non-findings role reach it in a real run.
+    expect(() => findingsSection('2', 'some findings')).toThrow(
+      /--findings has no framing for role "2"/,
+    );
   });
 
   it('an empty findings file tells the reverse auditor nothing is confirmed yet', () => {

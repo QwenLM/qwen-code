@@ -934,8 +934,14 @@ export function buildRoleLaunchPrompt(
  * free launch block, so the shared per-shard/round key still matches by the add-only
  * delivery rule). Its closing line restates that the brief is authoritative — the
  * exact sentence the orchestrator truncated when it used to build this by hand.
+ *
+ * Each `acceptsFindings` role has its own framing, and the branches are explicit: a
+ * future role that opts into `--findings` but has no framing here throws, rather than
+ * silently inheriting the reverse auditor's "do not re-report" prose — which is wrong
+ * for any role not hunting gaps. (Same reasoning as the no-role guard message, which
+ * also derives from `acceptsFindings` so a new role cannot leave it stale.)
  */
-function findingsSection(role: RoleId, content: string): string {
+export function findingsSection(role: RoleId, content: string): string {
   const body = content.trim();
   if (role === 'verify') {
     return [
@@ -947,24 +953,31 @@ function findingsSection(role: RoleId, content: string): string {
       body || '(no findings were provided — there is nothing to verify)',
     ].join('\n');
   }
-  // A reverse auditor: the list is what NOT to re-report. Empty is meaningful — an
-  // early round on a clean review has nothing confirmed yet, and must be told so
-  // rather than handed a bare heading.
-  return body
-    ? [
-        '## Already confirmed — do not re-report these',
-        '',
-        'These are already on the review; a gap that repeats one is not a gap. Your ' +
-          'job is what they missed. This list does not replace the brief; read it first.',
-        '',
-        body,
-      ].join('\n')
-    : [
-        '## Nothing is confirmed yet',
-        '',
-        'No prior finding to avoid — hunt every gap. This note does not replace the ' +
-          'brief; read it first.',
-      ].join('\n');
+  if (role === 'reverse-audit') {
+    // The list is what NOT to re-report. Empty is meaningful — an early round on a
+    // clean review has nothing confirmed yet, and must be told so rather than handed
+    // a bare heading.
+    return body
+      ? [
+          '## Already confirmed — do not re-report these',
+          '',
+          'These are already on the review; a gap that repeats one is not a gap. Your ' +
+            'job is what they missed. This list does not replace the brief; read it first.',
+          '',
+          body,
+        ].join('\n')
+      : [
+          '## Nothing is confirmed yet',
+          '',
+          'No prior finding to avoid — hunt every gap. This note does not replace the ' +
+            'brief; read it first.',
+        ].join('\n');
+  }
+  throw new Error(
+    `agent-prompt: --findings has no framing for role "${role}". A role that sets ` +
+      '`acceptsFindings` needs a branch in findingsSection; do not let it inherit ' +
+      "another role's framing by falling through.",
+  );
 }
 
 function runAgentPrompt(args: AgentPromptArgs): void {
