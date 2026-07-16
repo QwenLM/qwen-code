@@ -42,9 +42,12 @@ import {
   readFileSync,
   rmSync,
   lstatSync,
+  existsSync,
 } from 'node:fs';
 import { dirname, join, isAbsolute, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { probeWorktreePath } from './lib/paths.js';
+import { isWorkspaceMember } from './lib/workspaces.js';
 
 export type ProbeVerdict = 'gated' | 'inert' | 'inconclusive';
 
@@ -53,45 +56,11 @@ export interface FileEntry {
   kind: string;
 }
 
-/**
- * Does `npm test --workspaces` reach this file?
- *
- * A test outside every workspace glob is collected by nothing. This is the
- * whole of the #6486 unreachability finding, and it needs no execution at all —
- * just the root `package.json`.
- *
- * Globs here are npm workspace globs, not full minimatch: a trailing `/*` means
- * "one path segment", a leading `!` excludes. Anything fancier is treated as a
- * literal prefix, which errs toward calling a file REACHABLE — the safe
- * direction, since a false "unreachable" finding would be posted to a PR.
- */
-export function isWorkspaceMember(
-  filePath: string,
-  workspaceGlobs: string[],
-): boolean {
-  const norm = filePath.replace(/^\.\//, '');
-  const matches = (glob: string): boolean => {
-    const g = glob.replace(/^!/, '').replace(/\/$/, '');
-    if (g.endsWith('/*')) {
-      const base = g.slice(0, -2);
-      if (!norm.startsWith(`${base}/`)) return false;
-      // `packages/*` owns `packages/cli/**`, not `packages/channels/base/**`
-      // — but the latter is listed explicitly, and negation is handled below.
-      return true;
-    }
-    return norm === g || norm.startsWith(`${g}/`);
-  };
-  // npm evaluates the globs IN ORDER — a positive glob listed after a negation
-  // re-includes what the negation excluded. So walk them in order and let the
-  // last match win; a two-pass filter (all negations, then all positives) would
-  // let a negation win wherever it sat and file a false `unreachable`.
-  let member = false;
-  for (const g of workspaceGlobs) {
-    if (!matches(g)) continue;
-    member = !g.startsWith('!');
-  }
-  return member;
-}
+// `isWorkspaceMember` now lives in `lib/workspaces.ts`, where `build-test` needs
+// the same npm-workspace-glob walk to decide which packages a diff touches.
+// Imported (this module still calls it) and re-exported (its tests and callers
+// still import it from here).
+export { isWorkspaceMember };
 
 export interface EfficacyPlan {
   /** Test files the diff adds or changes that the test command never collects. */
@@ -337,11 +306,90 @@ export function safeRmWithin(worktree: string, relPath: string): void {
   rmSync(cur, { force: true });
 }
 
+type SweepResult = ReturnType<typeof spawnSync>;
+
+/**
+ * Free the probe worktree's path: unregister it, then remove whatever is left.
+ *
+ * `git worktree remove --force` only clears a tree git still tracks. A directory
+ * left at the path after metadata loss or a partial cleanup is reported "not a
+ * working tree" and left in place — and a *non-empty* one then makes
+ * `git worktree add` fail `already exists`, wedging every probe as
+ * `inconclusive` until someone clears it by hand. So the unregister is followed
+ * by a plain remove of whatever dir remains. `rmSync` unlinks a symlink rather
+ * than following it, so a tampered leftover cannot redirect the delete outside
+ * `tree`.
+ *
+ * This is `releaseWorktree`'s two-step, and deliberately NOT a call to it:
+ * `releaseWorktree` runs git from the process cwd, which need not be this
+ * worktree's repo, and it discards the sweep's stderr — which is usually the
+ * only thing that explains a subsequent `add` failure. Both callers here need
+ * `cwd: worktree` and that stderr, so the step lives here and is shared between
+ * them.
+ *
+ * Best-effort by design: a clean path is the normal case, so the unregister does
+ * not go through the throwing `git()` wrapper. `rmSync` can still throw (`force`
+ * suppresses ENOENT but not EPERM/EBUSY) — callers decide what that means.
+ */
+function discardWorktree(cwd: string, tree: string): SweepResult {
+  const sweep = spawnSync('git', ['worktree', 'remove', '--force', tree], {
+    cwd,
+    encoding: 'utf8',
+  });
+  rmSync(tree, { recursive: true, force: true });
+  return sweep;
+}
+
 const existsAtBase = (cwd: string, base: string, path: string) =>
   existsAtRev(cwd, base, path);
-/** A file the PR DELETED does not exist at HEAD — restoring it means removing it. */
-const existsAtHead = (cwd: string, path: string) =>
-  existsAtRev(cwd, 'HEAD', path);
+
+/**
+ * The `inconclusive` detail for a probe worktree that could not be created.
+ *
+ * Pure, and extracted for that reason: the branch it lives on fires only when
+ * `git worktree add` fails, and there is no portable way to force that in a
+ * real-git test — the one lever (making `.git/worktrees` unwritable) is bypassed
+ * by root and behaves differently under CI's unprivileged user, so a test built
+ * on it would assert one thing locally and another in CI. The composition is the
+ * part with logic in it, so it is testable here on its own.
+ *
+ * The stale-sweep's stderr is folded in because it is usually the explanation:
+ * when `add` fails on a leftover the sweep could not clear, the sweep is what
+ * says why.
+ */
+export function probeCreateFailureDetail(
+  err: unknown,
+  sweepStderr: string,
+): string {
+  const sweepErr = sweepStderr.trim();
+  return (
+    `probe worktree could not be created: ${err instanceof Error ? err.message : String(err)}` +
+    (sweepErr ? ` (stale-tree sweep also reported: ${sweepErr})` : '')
+  );
+}
+
+/**
+ * The warning for a probe worktree that survived its discard.
+ *
+ * Pure, and for the same reason as its sibling above: the branch it lives on
+ * fires only when the path outlives both `worktree remove` and `rmSync`, which
+ * no portable test can force. The reason is what makes it useful — whoever has
+ * to delete the tree by hand needs to know WHY it would not go, and a bare
+ * "could not remove <path>" tells them nothing. Prefer the exception (`rmSync`
+ * hit EPERM/EBUSY); fall back to what git said when it refused to unregister.
+ */
+export function probeCleanupFailureDetail(
+  probeTree: string,
+  removeError: unknown,
+  sweepStderr: string,
+): string {
+  const why = removeError
+    ? removeError instanceof Error
+      ? removeError.message
+      : String(removeError)
+    : sweepStderr.trim();
+  return `could not remove probe worktree ${probeTree}${why ? `: ${why}` : ''}`;
+}
 
 async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   const { report, worktree, base, out } = args;
@@ -379,134 +427,131 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     verdict: ProbeVerdict;
     detail: string;
   }> = [];
-  let restoreFailure: string | undefined;
+  let cleanupFailure: string | undefined;
 
   if (probes.length > 0 && revert.length > 0) {
-    // The probe checks out base over the revert set and deletes added files,
-    // then restores HEAD. That is safe on the ephemeral worktree the /review
-    // pipeline builds, but this is a public command that accepts any
-    // `--worktree`: on a tree with uncommitted edits to a revert-set file, the
-    // checkout would discard them with no undo. Refuse a dirty revert set
-    // rather than eat someone's work.
-    // `gitOut` throws on spawn failure (via the `git()` guard), so a `git`
-    // that could not run fails the probe rather than silently reading as a
-    // clean tree — the fail-OPEN outcome would defeat the whole guard, which
-    // exists to prevent data loss.
-    // `--ignored` too: a revert-set path can be gitignored at HEAD (a generated
-    // or locally-recreated file), and a plain `status --porcelain` says nothing
-    // about it — the base checkout would then overwrite a file the user has and
-    // git will not restore.
-    const dirty = revert.filter(
-      (p) =>
-        gitOut(worktree, 'status', '--porcelain', '--ignored', '--', p).length >
-        0,
-    );
-    if (dirty.length > 0) {
-      throw new Error(
-        `refusing to run: the worktree has uncommitted changes to files this probe would revert (${dirty.join(', ')}). ` +
-          `Commit or stash them first — the probe checks out base over these files and could not restore your edits.`,
-      );
-    }
-  }
-
-  if (probes.length > 0 && revert.length > 0) {
-    // "Revert to base" is two operations, not one. A file the PR MODIFIED is
-    // checked out from base; a file the PR ADDED did not exist at base, and
-    // `git checkout <base> -- <newfile>` does not quietly skip it — it fails
-    // with `pathspec ... did not match any file(s) known to git`. That throw
-    // used to escape past `writeFileSync` and discard the whole report,
-    // `unreachable` findings included, on every PR that adds a source file.
-    // Which is most of them.
-    const modified: string[] = [];
-    const added: string[] = [];
-    for (const p of revert) {
-      (existsAtBase(worktree, base, p) ? modified : added).push(p);
-    }
+    // The probe reverts the PR's source to base and runs the tests against it —
+    // in its OWN disposable worktree, checked out at the PR head and discarded
+    // wholesale when the probe finishes. The shared worktree the other review
+    // agents read is never mutated (so a concurrent reader can never observe a
+    // half-reverted tree), and there is no in-place restore to get wrong (so the
+    // restore delete that once followed a PR-controlled symlink out of the tree
+    // is gone with it). See #6832.
+    //
+    // Isolation is also why there is no dirty-worktree guard anymore: the probe
+    // tree is a fresh checkout of the committed head, so nothing the caller has
+    // uncommitted in the shared tree is ever touched or discarded.
+    //
+    // `node_modules` resolves without a per-tree install because the probe tree
+    // is nested under the repo (`.qwen/tmp/…-probe`), so Node walks up to the
+    // repo-root `node_modules` — exactly how the shared review worktree already
+    // runs vitest.
+    const headSha = gitOut(worktree, 'rev-parse', 'HEAD');
+    const probeTree = probeWorktreePath(worktree);
+    let created = false;
+    let sweep: SweepResult | undefined;
     try {
-      if (modified.length > 0) {
-        git(worktree, 'checkout', base, '--', ...modified);
-      }
-      // An added file's base state is "absent". Removing it is the honest
-      // revert; the probe usually then fails to compile, which is
-      // `inconclusive` — not a verdict, but an honest one.
-      for (const p of added) safeRmWithin(worktree, p);
-
-      const r = spawnSync(
-        'npx',
-        ['vitest', 'run', '--reporter=json', ...probes],
-        {
-          cwd: worktree,
-          encoding: 'utf8',
-          timeout: 300_000,
-          // Vitest's JSON reporter on a large suite easily exceeds spawnSync's
-          // 1 MiB default stdout buffer, which returns ENOBUFS and turns every
-          // probe `inconclusive`. Match the 64 MiB ceiling the gh wrapper uses.
-          maxBuffer: 64 * 1024 * 1024,
-        },
-      );
-      // `r.error` is set — and `r.status` is null — when the process never ran
-      // (npx missing) or was killed (the timeout above fires SIGTERM). Ignoring
-      // it reports those as "the runner produced no parseable JSON", which
-      // blames the runner's output for a run that produced none.
-      if (r.error) throw r.error;
-      if (r.signal) {
-        throw new Error(
-          `runner killed by ${r.signal}${r.signal === 'SIGTERM' ? ' (probe timed out after 300s)' : ''}`,
-        );
-      }
-      results.push(
-        ...classifyProbeRun(
-          r.status ?? 1,
-          `${r.stdout ?? ''}`,
-          probes,
-          `${r.stderr ?? ''}`,
-        ),
-      );
+      // Clear a stale probe tree left by a crashed run — it would fail `add`.
+      // Its stderr is kept to explain a subsequent `add` failure.
+      sweep = discardWorktree(worktree, probeTree);
+      git(worktree, 'worktree', 'add', '--detach', probeTree, headSha);
+      created = true;
     } catch (e) {
-      // The probe could not be set up or run. That is not evidence about any
-      // test — record it and keep going, so the report (and the unreachable
-      // findings, which needed no probe at all) still reaches the caller.
-      const detail = `probe could not run: ${e instanceof Error ? e.message : String(e)}`;
-      results.push(
-        ...probes.map((file) => ({
-          file,
-          verdict: 'inconclusive' as const,
-          detail,
-        })),
-      );
-    } finally {
-      // Always put the worktree back — the review's later steps read this tree
-      // and must see the PR's code, not the base's. This restores deleted files
-      // too. A restore failure must not mask the probe's own outcome (hence the
-      // catch), but it must not be swallowed either: the tree is now sitting on
-      // BASE code, and every agent that reads it afterwards reviews the wrong
-      // source. That is the loudest thing this command can have to say.
-      //
-      // Restore is also two operations, for the mirror-image reason the revert
-      // was. A file the PR DELETED does not exist at HEAD either, and
-      // `git checkout HEAD -- <deleted> <other>` fails on the bad pathspec and
-      // restores NOTHING — so one deleted source file used to leave the whole
-      // revert set sitting on base code, plus a resurrected copy of the file the
-      // PR removed. Delete what HEAD does not have; check out what it does.
-      const atHead: string[] = [];
-      const notAtHead: string[] = [];
-      for (const p of revert) {
-        (existsAtHead(worktree, p) ? atHead : notAtHead).push(p);
+      // Could not isolate — probe nothing rather than fall back to mutating the
+      // shared tree. Probes are inconclusive; the unreachable findings, which
+      // need no probe, still ship.
+      const detail = probeCreateFailureDetail(e, String(sweep?.stderr ?? ''));
+      for (const file of probes) {
+        results.push({ file, verdict: 'inconclusive' as const, detail });
       }
+    }
+
+    if (created) {
       try {
-        if (atHead.length > 0) {
-          git(worktree, 'checkout', 'HEAD', '--', ...atHead);
+        // "Revert to base" is two operations, confined to the throwaway tree. A
+        // file the PR MODIFIED is checked out from base; a file the PR ADDED did
+        // not exist at base, so it is removed — through `safeRmWithin`, which
+        // still refuses to delete through a PR-controlled symlink even here.
+        // Removing an added file usually makes the probe fail to compile, which
+        // is `inconclusive` — a non-verdict, but an honest one.
+        const modified: string[] = [];
+        const added: string[] = [];
+        for (const p of revert) {
+          (existsAtBase(probeTree, base, p) ? modified : added).push(p);
         }
-        if (notAtHead.length > 0) {
-          // `git checkout <base> -- <path>` writes the INDEX as well as the
-          // working tree, so removing the file leaves a staged phantom add
-          // behind (`AD` in `git status`). Reset those index entries to HEAD —
-          // where the path does not exist, which is exactly the state we want.
-          for (const p of notAtHead) safeRmWithin(worktree, p);
-          git(worktree, 'reset', '-q', 'HEAD', '--', ...notAtHead);
+        if (modified.length > 0) {
+          git(probeTree, 'checkout', base, '--', ...modified);
         }
+        for (const p of added) safeRmWithin(probeTree, p);
+
+        const r = spawnSync(
+          'npx',
+          ['vitest', 'run', '--reporter=json', ...probes],
+          {
+            cwd: probeTree,
+            encoding: 'utf8',
+            timeout: 300_000,
+            // Vitest's JSON reporter on a large suite easily exceeds spawnSync's
+            // 1 MiB default stdout buffer, which returns ENOBUFS and turns every
+            // probe `inconclusive`. Match the 64 MiB ceiling the gh wrapper uses.
+            maxBuffer: 64 * 1024 * 1024,
+          },
+        );
+        // `r.error` is set — and `r.status` is null — when the process never ran
+        // (npx missing) or was killed (the timeout above fires SIGTERM). Ignoring
+        // it reports those as "the runner produced no parseable JSON", which
+        // blames the runner's output for a run that produced none.
+        if (r.error) throw r.error;
+        if (r.signal) {
+          throw new Error(
+            `runner killed by ${r.signal}${r.signal === 'SIGTERM' ? ' (probe timed out after 300s)' : ''}`,
+          );
+        }
+        results.push(
+          ...classifyProbeRun(
+            r.status ?? 1,
+            `${r.stdout ?? ''}`,
+            probes,
+            `${r.stderr ?? ''}`,
+          ),
+        );
       } catch (e) {
-        restoreFailure = `WORKTREE NOT RESTORED — it is still on base code for: ${revert.join(', ')}. Every later step of this review reads the wrong source. Run \`git checkout HEAD -- ${atHead.join(' ')}\` in ${worktree} before continuing. (${e instanceof Error ? e.message : String(e)})`;
+        // The probe could not be set up or run. That is not evidence about any
+        // test — record it and keep going, so the report (and the unreachable
+        // findings, which needed no probe at all) still reaches the caller.
+        const detail = `probe could not run: ${e instanceof Error ? e.message : String(e)}`;
+        results.push(
+          ...probes.map((file) => ({
+            file,
+            verdict: 'inconclusive' as const,
+            detail,
+          })),
+        );
+      } finally {
+        // Discard the whole probe tree. There is no in-place restore to fail —
+        // the shared worktree was never mutated — and a path that survives the
+        // discard corrupts nothing: the next run's pre-sweep and cleanup.ts both
+        // sweep it. So this is a warning, not the "every later step reads the
+        // wrong source" alarm the old in-place restore had to raise.
+        //
+        // Whether the path is still THERE is the signal, not whether a call
+        // threw: `worktree remove` can fail while `rmSync` still frees the path.
+        // But keep the reason — a bare "could not remove <path>" tells whoever
+        // has to clean it up by hand nothing about why they must.
+        let removeError: unknown;
+        let discard: SweepResult | undefined;
+        try {
+          discard = discardWorktree(worktree, probeTree);
+        } catch (e) {
+          removeError = e;
+        }
+        if (existsSync(probeTree)) {
+          cleanupFailure = probeCleanupFailureDetail(
+            probeTree,
+            removeError,
+            String(discard?.stderr ?? ''),
+          );
+        }
       }
     }
   }
@@ -531,7 +576,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     probed: results,
     inconclusive: results.filter((r) => r.verdict === 'inconclusive'),
     findings,
-    restoreFailure,
+    cleanupFailure,
   };
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(out, JSON.stringify(result, null, 2), 'utf8');
@@ -541,15 +586,11 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   for (const f of findings) {
     writeStdoutLine(`  [test] ${f.kind}: ${f.file}`);
   }
-  if (restoreFailure) {
-    // Loud, on stderr, AND a non-zero exit. The worktree is now on base code,
-    // so every later review step reads the wrong source; a line in a JSON
-    // field the workflow does not consume would let it proceed anyway (the
-    // fail-open the whole guard exists to prevent). The report is already
-    // written, so the caller still has the findings — it just cannot mistake
-    // this for a clean run.
-    writeStderrLine(`ERROR: ${restoreFailure}`);
-    process.exitCode = 1;
+  if (cleanupFailure) {
+    // A leftover probe worktree does not corrupt the shared tree — it is swept
+    // at the start of the next run and by cleanup.ts — so this is a warning, not
+    // the non-zero-exit alarm the old in-place restore failure had to raise.
+    writeStderrLine(`WARNING: ${cleanupFailure}`);
   }
 }
 

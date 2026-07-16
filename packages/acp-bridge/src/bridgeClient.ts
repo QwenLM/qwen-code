@@ -26,6 +26,7 @@ import type { BridgeEvent, EventBus } from './eventBus.js';
 import { MID_TURN_MESSAGE_INJECTED_EVENT } from './daemonEventTypes.js';
 import { MID_TURN_QUEUE_DRAIN_METHOD } from './bridgeTypes.js';
 import type {
+  BridgeGenerationNotificationEvent,
   BridgePendingInteraction,
   MidTurnQueueEntry,
 } from './bridgeTypes.js';
@@ -593,11 +594,16 @@ export class BridgeClient implements Client {
      * `agent_message_chunk._meta.usage` at {@link sessionUpdate} (the single
      * session/update fan-in). Wired only by the daemon host for the Daemon
      * Status token-burn chart; omitted by tests / Mode A in-process consumers.
+     * `apiErrors` / `apiRetries` are the per-round model-API-error and
+     * automatic-retry increments riding the same `_meta` frame (0 when the
+     * round had none), for the daemon's model-API-health charts.
      */
     private readonly onTokenUsage?: (
       inputTokens: number,
       outputTokens: number,
       durationMs?: number,
+      apiErrors?: number,
+      apiRetries?: number,
     ) => void,
     /**
      * Daemon-host seam for the `create_sub_session` tool. Invoked from the
@@ -608,6 +614,12 @@ export class BridgeClient implements Client {
      * `methodNotFound` and the tool surfaces itself as daemon-only.
      */
     private readonly onCreateSubSession?: CreateSubSessionHandler,
+    /** Request-scoped generation events are routed to a private bridge queue,
+     * never to the session EventBus. */
+    private readonly onGenerationEvent?: (
+      sessionId: string,
+      event: BridgeGenerationNotificationEvent,
+    ) => void,
   ) {}
 
   async requestPermission(
@@ -877,12 +889,17 @@ export class BridgeClient implements Client {
     if (typeof inputTokens !== 'number' && typeof outputTokens !== 'number') {
       return;
     }
-    // `_meta.durationMs` (the LLM API round-trip) rides the same frame.
+    // `_meta.durationMs` (the LLM API round-trip) rides the same frame, as do
+    // the per-round model-API-error / auto-retry increments (absent → 0).
     const durationMs = updateMeta?.['durationMs'];
+    const apiErrors = updateMeta?.['apiErrors'];
+    const apiRetries = updateMeta?.['apiRetries'];
     this.onTokenUsage(
       typeof inputTokens === 'number' ? inputTokens : 0,
       typeof outputTokens === 'number' ? outputTokens : 0,
       typeof durationMs === 'number' ? durationMs : undefined,
+      typeof apiErrors === 'number' ? apiErrors : 0,
+      typeof apiRetries === 'number' ? apiRetries : 0,
     );
   }
 
@@ -1174,6 +1191,67 @@ export class BridgeClient implements Client {
     method: string,
     params: Record<string, unknown>,
   ): Promise<void> {
+    if (method === 'qwen/notify/session/generation/event') {
+      const sessionId = params['sessionId'];
+      const requestId = params['requestId'];
+      const event = params['event'];
+      if (
+        params['v'] !== 1 ||
+        typeof sessionId !== 'string' ||
+        typeof requestId !== 'string' ||
+        !event ||
+        typeof event !== 'object' ||
+        Array.isArray(event)
+      ) {
+        return;
+      }
+      const record = event as Record<string, unknown>;
+      if (record['type'] === 'started') {
+        const model = record['model'];
+        const modelSource = record['modelSource'];
+        if (
+          typeof model !== 'string' ||
+          (modelSource !== 'fast' && modelSource !== 'main')
+        ) {
+          return;
+        }
+        this.onGenerationEvent?.(sessionId, {
+          type: 'started',
+          requestId,
+          model,
+          modelSource,
+        });
+        return;
+      }
+      if (record['type'] === 'thinking') {
+        this.onGenerationEvent?.(sessionId, {
+          type: 'thinking',
+          requestId,
+        });
+        return;
+      }
+      if (record['type'] === 'delta') {
+        const seq = record['seq'];
+        const text = record['text'];
+        if (
+          typeof seq !== 'number' ||
+          !Number.isSafeInteger(seq) ||
+          seq < 0 ||
+          typeof text !== 'string' ||
+          text.length === 0
+        ) {
+          return;
+        }
+        this.onGenerationEvent?.(sessionId, {
+          type: 'delta',
+          requestId,
+          seq,
+          text,
+        });
+        return;
+      }
+      return;
+    }
     if (method === 'qwen/notify/session/model-update') {
       this.handleInSessionModelUpdate(params);
       return;

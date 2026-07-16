@@ -49,6 +49,7 @@ import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { GeminiClient } from '../core/client.js';
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
+import { getSessionProjectDir } from '../utils/sessionIdContext.js';
 import { logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
@@ -508,6 +509,18 @@ describe('Server Config (config.ts)', () => {
         sources: {},
       }),
     );
+  });
+
+  describe('project-dir registry lifecycle', () => {
+    it('drops its session entry on shutdown — no daemon leak', async () => {
+      const sessionId = 'cfg-shutdown-test-session';
+      const config = new Config({ ...baseParams, sessionId });
+      // Registered in the constructor, resolvable while alive.
+      expect(getSessionProjectDir(sessionId)).toBeDefined();
+      await config.shutdown();
+      // In daemon mode this is what stops the map growing per session.
+      expect(getSessionProjectDir(sessionId)).toBeUndefined();
+    });
   });
 
   describe('shell execution config', () => {
@@ -5390,6 +5403,31 @@ describe('Server Config (config.ts)', () => {
           maxToolCallsPerTurn: capValue,
         });
         expect(config.getMaxToolCallsPerTurn()).toBe(Number.POSITIVE_INFINITY);
+      },
+    );
+
+    it.each([0.5, Number.NaN, Number.POSITIVE_INFINITY])(
+      'should reject an invalid maxToolCallsPerTurn value: %s',
+      (capValue) => {
+        expect(
+          () => new Config({ ...baseParams, maxToolCallsPerTurn: capValue }),
+        ).toThrow(/maxToolCallsPerTurn: must be an integer/);
+      },
+    );
+  });
+
+  describe('getMaxSessionTurns', () => {
+    it.each([-42, -1, 0, 42])('should accept %d', (maxSessionTurns) => {
+      const config = new Config({ ...baseParams, maxSessionTurns });
+      expect(config.getMaxSessionTurns()).toBe(maxSessionTurns);
+    });
+
+    it.each([0.5, Number.NaN, Number.POSITIVE_INFINITY])(
+      'should reject an invalid value: %s',
+      (maxSessionTurns) => {
+        expect(() => new Config({ ...baseParams, maxSessionTurns })).toThrow(
+          /maxSessionTurns: must be an integer/,
+        );
       },
     );
   });

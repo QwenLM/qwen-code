@@ -8,6 +8,7 @@ import { AlertDialogContent, AlertDialogOverlay } from './alert-dialog';
 import { Button } from './button';
 import { DialogContent, DialogOverlay } from './dialog';
 import { Input } from './input';
+import { PopoverAnchor, PopoverContent, PopoverTrigger } from './popover';
 import { SelectTrigger } from './select';
 
 const FORWARD_REF_TYPE = Symbol.for('react.forward_ref');
@@ -22,6 +23,9 @@ describe('React 18 ref compatibility', () => {
     ['DialogContent', DialogContent],
     ['DialogOverlay', DialogOverlay],
     ['Input', Input],
+    ['PopoverAnchor', PopoverAnchor],
+    ['PopoverContent', PopoverContent],
+    ['PopoverTrigger', PopoverTrigger],
     ['SelectTrigger', SelectTrigger],
   ])('%s forwards refs', (_name, Component) => {
     expect(Component).toHaveProperty('$$typeof', FORWARD_REF_TYPE);

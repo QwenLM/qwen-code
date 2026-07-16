@@ -36,6 +36,10 @@ export interface ListWorkspaceSessionsOptions {
    * (not the numeric storage cursor). Absent = no parent filter.
    */
   parentSessionId?: string;
+  /** Restrict results to sessions created by this source type. */
+  sourceType?: string;
+  /** Further restrict `sourceType` matches to this source identifier. */
+  sourceId?: string;
 }
 
 export interface ListWorkspaceSessionsResult {
@@ -53,7 +57,7 @@ export interface ListWorkspaceSessionsReadOptions {
 export class InvalidCursorError extends Error {
   constructor(
     cursor: string,
-    kind: 'numeric' | 'organized' | 'live' | 'parent' = 'numeric',
+    kind: 'numeric' | 'organized' | 'live' | 'parent' | 'metadata' = 'numeric',
   ) {
     super(`Invalid cursor: "${cursor}" is not a valid ${kind} cursor`);
     this.name = 'InvalidCursorError';
@@ -164,18 +168,16 @@ function encodeLiveSessionCursor(last: LiveSessionCursorKey): string {
   return Buffer.from(JSON.stringify(last), 'utf8').toString('base64url');
 }
 
-/**
- * Decodes a `?parentSessionId=` page cursor, binding it to the query that
- * produced it. The cursor carries the `parentSessionId` and `archiveState` it
- * was minted for, and decode REJECTS a cursor whose scope differs from the
- * current request — otherwise a cursor from parent A (or from the active set)
- * replayed against parent B (or the archived set) would be accepted and
- * silently skip every session newer than that unrelated key. Same
- * bind-and-validate contract as {@link parseOrganizedCursor}.
- */
-function parseParentSessionCursor(
+/** Binds an opaque cursor to the metadata filter that produced it. */
+interface SessionMetadataFilter {
+  parentSessionId?: string;
+  sourceType?: string;
+  sourceId?: string;
+}
+
+function parseMetadataSessionCursor(
   cursor: string,
-  expected: { parentSessionId: string; archiveState: SessionArchiveState },
+  expected: SessionMetadataFilter & { archiveState: SessionArchiveState },
 ): LiveSessionCursorKey | undefined {
   if (cursor === '') return undefined;
   try {
@@ -196,24 +198,29 @@ function parseParentSessionCursor(
       last.sessionId.length === 0 ||
       (parsed as { parentSessionId?: unknown }).parentSessionId !==
         expected.parentSessionId ||
+      (parsed as { sourceType?: unknown }).sourceType !== expected.sourceType ||
+      (parsed as { sourceId?: unknown }).sourceId !== expected.sourceId ||
       (parsed as { archiveState?: unknown }).archiveState !==
         expected.archiveState
     ) {
-      throw new Error('invalid parent cursor');
+      throw new Error('invalid metadata cursor');
     }
     return { activityTime: last.activityTime, sessionId: last.sessionId };
   } catch {
-    throw new InvalidCursorError(cursor, 'parent');
+    throw new InvalidCursorError(
+      cursor,
+      expected.sourceType === undefined ? 'parent' : 'metadata',
+    );
   }
 }
 
-function encodeParentSessionCursor(
+function encodeMetadataSessionCursor(
   last: LiveSessionCursorKey,
-  parentSessionId: string,
+  filter: SessionMetadataFilter,
   archiveState: SessionArchiveState,
 ): string {
   return Buffer.from(
-    JSON.stringify({ parentSessionId, archiveState, last }),
+    JSON.stringify({ ...filter, archiveState, last }),
     'utf8',
   ).toString('base64url');
 }
@@ -226,6 +233,8 @@ function toSummary(item: {
   prompt: string;
   customTitle?: string;
   parentSessionId?: string;
+  sourceType?: string;
+  sourceId?: string;
   isArchived?: boolean;
 }): BridgeSessionSummary {
   return {
@@ -235,6 +244,8 @@ function toSummary(item: {
     updatedAt: new Date(item.mtime).toISOString(),
     displayName: item.customTitle || item.prompt,
     ...(item.parentSessionId ? { parentSessionId: item.parentSessionId } : {}),
+    ...(item.sourceType ? { sourceType: item.sourceType } : {}),
+    ...(item.sourceId !== undefined ? { sourceId: item.sourceId } : {}),
     clientCount: 0,
     hasActivePrompt: false,
     isArchived: item.isArchived === true,
@@ -246,7 +257,7 @@ function toSummary(item: {
  * that exists in both. The persisted record owns identity/immutable facts
  * (`createdAt`, `parentSessionId` lineage) while the live entry owns volatile
  * state (`clientCount`, `hasActivePrompt`, a fresher `displayName`/`updatedAt`).
- * Shared by all three list paths (default, organized, by-parent) so the merge
+ * Shared by all three list paths (default, organized, metadata-filtered) so the merge
  * rule lives in one place.
  */
 function mergeLiveSessionSummary(
@@ -261,6 +272,9 @@ function mergeLiveSessionSummary(
     // Immutable lineage; the persisted transcript is authoritative, and a live
     // entry only carries it when spawned this run.
     parentSessionId: existing.parentSessionId ?? live.parentSessionId,
+    sourceType: existing.sourceType ?? live.sourceType,
+    sourceId:
+      existing.sourceType !== undefined ? existing.sourceId : live.sourceId,
     updatedAt: live.updatedAt ?? existing.updatedAt,
     clientCount: live.clientCount,
     hasActivePrompt: live.hasActivePrompt,
@@ -515,19 +529,15 @@ async function listOrganizedWorkspaceSessionsForResponse(
 }
 
 /**
- * Lists only the sessions spawned by `parentSessionId`. Unlike the default
- * storage-paginated path, this gathers the whole workspace (capped, like the
- * organized view) and filters before paginating, so a page is never short of
- * matches and the client can page to completion without wading through empty
- * pages. Sorted newest-activity-first and paginated with the same opaque
- * activity cursor as the live-only path.
+ * Applies persisted metadata filters before pagination so pages are not
+ * silently short of matches.
  */
-async function listWorkspaceSessionsByParentForResponse(
+async function listWorkspaceSessionsByMetadataForResponse(
   bridge: AcpSessionBridge,
   workspaceCwd: string,
   options: ListWorkspaceSessionsOptions,
   pageSize: number,
-  parentSessionId: string,
+  filter: SessionMetadataFilter,
   readOptions: ListWorkspaceSessionsReadOptions,
 ): Promise<ListWorkspaceSessionsResult> {
   const archiveState = options.archiveState ?? 'active';
@@ -564,7 +574,7 @@ async function listWorkspaceSessionsByParentForResponse(
     } catch (error) {
       liveMergeFailed = true;
       writeStderrLine(
-        `qwen serve: session-by-parent live merge failed; using persisted sessions only: ${
+        `qwen serve: session metadata filter live merge failed; using persisted sessions only: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
@@ -572,7 +582,14 @@ async function listWorkspaceSessionsByParentForResponse(
   }
 
   const matches = [...bySessionId.values()]
-    .filter((session) => session.parentSessionId === parentSessionId)
+    .filter(
+      (session) =>
+        (filter.parentSessionId === undefined ||
+          session.parentSessionId === filter.parentSessionId) &&
+        (filter.sourceType === undefined ||
+          session.sourceType === filter.sourceType) &&
+        (filter.sourceId === undefined || session.sourceId === filter.sourceId),
+    )
     .sort((a, b) =>
       compareLiveSessionCursorKeys(
         getLiveSessionCursorKey(a),
@@ -581,8 +598,8 @@ async function listWorkspaceSessionsByParentForResponse(
     );
   const cursorKey =
     options.cursor !== undefined && options.cursor !== ''
-      ? parseParentSessionCursor(options.cursor, {
-          parentSessionId,
+      ? parseMetadataSessionCursor(options.cursor, {
+          ...filter,
           archiveState,
         })
       : undefined;
@@ -599,9 +616,9 @@ async function listWorkspaceSessionsByParentForResponse(
   const page = afterCursor.slice(0, pageSize);
   const nextCursor =
     page.length < afterCursor.length
-      ? encodeParentSessionCursor(
+      ? encodeMetadataSessionCursor(
           getLiveSessionCursorKey(page[page.length - 1]!),
-          parentSessionId,
+          filter,
           archiveState,
         )
       : undefined;
@@ -636,13 +653,26 @@ export async function listWorkspaceSessionsForResponse(
     );
   }
 
-  if (options?.parentSessionId !== undefined) {
-    return listWorkspaceSessionsByParentForResponse(
+  if (
+    options?.parentSessionId !== undefined ||
+    options?.sourceType !== undefined
+  ) {
+    return listWorkspaceSessionsByMetadataForResponse(
       bridge,
       workspaceCwd,
       options,
       pageSize,
-      options.parentSessionId,
+      {
+        ...(options.parentSessionId !== undefined
+          ? { parentSessionId: options.parentSessionId }
+          : {}),
+        ...(options.sourceType !== undefined
+          ? { sourceType: options.sourceType }
+          : {}),
+        ...(options.sourceId !== undefined
+          ? { sourceId: options.sourceId }
+          : {}),
+      },
       readOptions,
     );
   }

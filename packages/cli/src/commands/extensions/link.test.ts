@@ -96,4 +96,27 @@ describe('handleLink', () => {
 
     processExitSpy.mockRestore();
   });
+
+  it('does not fail after a link was committed with reload warnings', async () => {
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+    mockInstallExtension.mockRejectedValueOnce(
+      Object.assign(new Error('Link committed but could not be reloaded.'), {
+        code: 'extension_committed_with_warnings',
+        committed: true,
+        identity: { id: 'linked-extension', name: 'linked-extension' },
+        warnings: [],
+      }),
+    );
+
+    await handleLink({ path: '/some/local/path' });
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      'Warning: Link committed but could not be reloaded.',
+    );
+    expect(processExitSpy).not.toHaveBeenCalled();
+
+    processExitSpy.mockRestore();
+  });
 });

@@ -31,16 +31,20 @@ function GitBranchIcon() {
 export function GitBranchIndicator({
   branch,
   ariaLabel,
+  compact = false,
 }: {
   branch: string;
   ariaLabel: string;
+  compact?: boolean;
 }) {
   return (
     <TooltipProvider delayDuration={300}>
       <Tooltip>
         <TooltipTrigger asChild>
           <output
-            className={styles.gitBranchChip}
+            className={`${styles.gitBranchChip} ${
+              compact ? styles.gitBranchChipCompact : ''
+            }`}
             aria-label={ariaLabel}
             data-web-shell-git-branch
           >

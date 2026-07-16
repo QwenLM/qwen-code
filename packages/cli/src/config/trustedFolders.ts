@@ -323,10 +323,6 @@ function loadTrustedFoldersWithOverrides(
 ): LoadedTrustedFolders {
   const folders = loadTrustedFolders();
 
-  if (trustConfig) {
-    folders.user.config = trustConfig;
-  }
-
   if (folders.errors.length > 0) {
     const errorMessages = folders.errors.map(
       (error) => `Error in ${error.path}: ${error.message}`,
@@ -335,6 +331,20 @@ function loadTrustedFoldersWithOverrides(
       `${errorMessages.join('\n')}\nPlease fix the configuration file and try again.`,
     );
   }
+
+  if (trustConfig) {
+    // Return a fresh instance instead of mutating the cached singleton. Callers
+    // pass an override to *preview* trust status for a tentative config (e.g.
+    // useTrustModify's updateTrustLevel, which builds the config "to check the
+    // new trust status without writing"). Mutating the cached singleton here
+    // would leak that unconfirmed config into every later loadTrustedFolders()
+    // read and persist it on the next setValue().
+    return new LoadedTrustedFolders(
+      { ...folders.user, config: trustConfig },
+      folders.errors,
+    );
+  }
+
   return folders;
 }
 

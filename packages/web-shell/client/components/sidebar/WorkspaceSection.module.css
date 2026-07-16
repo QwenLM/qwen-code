@@ -31,11 +31,6 @@
   background: var(--sidebar-accent);
 }
 
-.headerActive {
-  background: var(--sidebar-accent);
-  font-weight: 600;
-}
-
 .headerDisabled {
   opacity: 0.5;
 }

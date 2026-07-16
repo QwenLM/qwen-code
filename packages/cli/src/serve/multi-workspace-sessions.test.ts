@@ -10,6 +10,8 @@ import * as os from 'node:os';
 import { describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import {
+  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+  SessionService,
   Storage,
   createDebugLogger,
   resetDebugLoggingState,
@@ -119,6 +121,25 @@ interface FakeBridge extends AcpSessionBridge {
     taskKind: 'agent' | 'shell' | 'monitor';
   }>;
   readonly goalClearCalls: string[];
+  readonly continueCalls: Array<{
+    sessionId: string;
+    context?: BridgeClientRequestContext;
+  }>;
+  readonly languageCalls: Array<{
+    sessionId: string;
+    params: Parameters<AcpSessionBridge['setSessionLanguage']>[1];
+    context?: BridgeClientRequestContext;
+  }>;
+  readonly addArtifactCalls: Array<{
+    sessionId: string;
+    artifact: Parameters<AcpSessionBridge['addSessionArtifact']>[1];
+    context?: BridgeClientRequestContext;
+  }>;
+  readonly removeArtifactCalls: Array<{
+    sessionId: string;
+    artifactId: string;
+    context?: BridgeClientRequestContext;
+  }>;
   readonly rewindSnapshotCalls: string[];
   readonly rewindCalls: Array<{
     sessionId: string;
@@ -256,6 +277,10 @@ function makeBridge(
   const midTurnMessageCalls: FakeBridge['midTurnMessageCalls'] = [];
   const taskCancelCalls: FakeBridge['taskCancelCalls'] = [];
   const goalClearCalls: string[] = [];
+  const continueCalls: FakeBridge['continueCalls'] = [];
+  const languageCalls: FakeBridge['languageCalls'] = [];
+  const addArtifactCalls: FakeBridge['addArtifactCalls'] = [];
+  const removeArtifactCalls: FakeBridge['removeArtifactCalls'] = [];
   const rewindSnapshotCalls: string[] = [];
   const rewindCalls: FakeBridge['rewindCalls'] = [];
   const shellCalls: FakeBridge['shellCalls'] = [];
@@ -282,6 +307,10 @@ function makeBridge(
     midTurnMessageCalls,
     taskCancelCalls,
     goalClearCalls,
+    continueCalls,
+    languageCalls,
+    addArtifactCalls,
+    removeArtifactCalls,
     rewindSnapshotCalls,
     rewindCalls,
     shellCalls,
@@ -468,6 +497,61 @@ function makeBridge(
         cleared: workspaceCwd === SECONDARY_CWD,
         condition: workspaceCwd,
       };
+    },
+    async continueSession(
+      sessionId: string,
+      context?: BridgeClientRequestContext,
+    ) {
+      continueCalls.push({
+        sessionId,
+        ...(context ? { context } : {}),
+      });
+      return {
+        accepted: true,
+        interruption: 'interrupted_turn' as const,
+        promptId: context?.promptId,
+        lastEventId: 42,
+      };
+    },
+    async setSessionLanguage(
+      sessionId: string,
+      params: Parameters<AcpSessionBridge['setSessionLanguage']>[1],
+      context?: BridgeClientRequestContext,
+    ) {
+      languageCalls.push({
+        sessionId,
+        params,
+        ...(context ? { context } : {}),
+      });
+      return {
+        language: params.language,
+        outputLanguage: params.syncOutputLanguage ? params.language : null,
+        refreshed: params.syncOutputLanguage,
+      };
+    },
+    async addSessionArtifact(
+      sessionId: string,
+      artifact: Parameters<AcpSessionBridge['addSessionArtifact']>[1],
+      context?: BridgeClientRequestContext,
+    ) {
+      addArtifactCalls.push({
+        sessionId,
+        artifact,
+        ...(context ? { context } : {}),
+      });
+      return { v: 1 as const, sessionId, changes: [] };
+    },
+    async removeSessionArtifact(
+      sessionId: string,
+      artifactId: string,
+      context?: BridgeClientRequestContext,
+    ) {
+      removeArtifactCalls.push({
+        sessionId,
+        artifactId,
+        ...(context ? { context } : {}),
+      });
+      return { v: 1 as const, sessionId, changes: [] };
     },
     async getRewindSnapshots(sessionId: string) {
       rewindSnapshotCalls.push(sessionId);
@@ -694,6 +778,8 @@ describe('multi-workspace session dispatch', () => {
     expect(res.body.features).toContain('multi_workspace_session_rewind');
     expect(res.body.features).not.toContain('multi_workspace_session_shell');
     expect(res.body.features).toContain('workspace_persisted_transcript');
+    expect(res.body.features).toContain('workspace_session_export');
+    expect(res.body.features).toContain('workspace_archived_session_export');
     expect(res.body.workspaces).toEqual([
       { id: 'primary-id', cwd: PRIMARY_CWD, primary: true, trusted: true },
       {
@@ -1663,6 +1749,310 @@ describe('multi-workspace session dispatch', () => {
     ]) {
       expect(calls).toEqual([]);
     }
+  });
+
+  it('routes continue, language, and artifact mutations to the owning non-primary bridge', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      token: TEST_TOKEN,
+    });
+    const auth = (test: request.Test) =>
+      test.set('Host', host()).set('Authorization', TEST_AUTHORIZATION);
+
+    const firstContinue = await auth(
+      request(app).post('/session/secondary-session/continue'),
+    )
+      .set('X-Qwen-Client-Id', 'secondary-client')
+      .send({});
+    const secondContinue = await auth(
+      request(app).post('/session/secondary-session/continue'),
+    )
+      .set('X-Qwen-Client-Id', 'secondary-client')
+      .send({});
+    expect(firstContinue.status).toBe(200);
+    expect(secondContinue.status).toBe(200);
+    expect(firstContinue.body.promptId).toEqual(expect.any(String));
+    expect(secondContinue.body.promptId).toEqual(expect.any(String));
+    expect(firstContinue.body.promptId).not.toBe('');
+    expect(secondContinue.body.promptId).not.toBe('');
+    expect(secondContinue.body.promptId).not.toBe(firstContinue.body.promptId);
+
+    const language = await auth(
+      request(app).post('/session/secondary-session/language'),
+    )
+      .set('X-Qwen-Client-Id', 'secondary-client')
+      .send({ language: 'zh', syncOutputLanguage: true });
+    expect(language.status).toBe(200);
+    expect(language.body).toEqual({
+      language: 'zh',
+      outputLanguage: 'zh',
+      refreshed: true,
+    });
+
+    const addArtifact = await auth(
+      request(app).post('/session/secondary-session/artifacts'),
+    )
+      .set('X-Qwen-Client-Id', 'secondary-client')
+      .send({
+        title: 'Secondary artifact',
+        url: 'https://example.com/secondary',
+        retention: 'ephemeral',
+      });
+    expect(addArtifact.status).toBe(200);
+    expect(addArtifact.body).toMatchObject({
+      v: 1,
+      sessionId: 'secondary-session',
+    });
+
+    const removeArtifact = await auth(
+      request(app).delete(
+        '/session/secondary-session/artifacts/artifact-secondary',
+      ),
+    ).set('X-Qwen-Client-Id', 'secondary-client');
+    expect(removeArtifact.status).toBe(200);
+    expect(removeArtifact.body).toMatchObject({
+      v: 1,
+      sessionId: 'secondary-session',
+    });
+
+    expect(secondaryBridge.continueCalls).toHaveLength(2);
+    for (const call of secondaryBridge.continueCalls) {
+      expect(call).toMatchObject({
+        sessionId: 'secondary-session',
+        context: {
+          clientId: 'secondary-client',
+          promptId: expect.any(String),
+        },
+      });
+    }
+    expect(secondaryBridge.languageCalls).toEqual([
+      {
+        sessionId: 'secondary-session',
+        params: { language: 'zh', syncOutputLanguage: true },
+        context: { clientId: 'secondary-client' },
+      },
+    ]);
+    expect(secondaryBridge.addArtifactCalls).toEqual([
+      expect.objectContaining({
+        sessionId: 'secondary-session',
+        artifact: expect.objectContaining({
+          title: 'Secondary artifact',
+          url: 'https://example.com/secondary',
+          retention: 'ephemeral',
+        }),
+        context: { clientId: 'secondary-client' },
+      }),
+    ]);
+    expect(secondaryBridge.removeArtifactCalls).toEqual([
+      {
+        sessionId: 'secondary-session',
+        artifactId: 'artifact-secondary',
+        context: { clientId: 'secondary-client' },
+      },
+    ]);
+    expect(primaryBridge.continueCalls).toEqual([]);
+    expect(primaryBridge.languageCalls).toEqual([]);
+    expect(primaryBridge.addArtifactCalls).toEqual([]);
+    expect(primaryBridge.removeArtifactCalls).toEqual([]);
+  });
+
+  it('preserves mutation auth while leaving language on its existing non-strict gate', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness();
+
+    const responses = await Promise.all([
+      request(app)
+        .post('/session/secondary-session/continue')
+        .set('Host', host())
+        .send({}),
+      request(app)
+        .post('/session/secondary-session/artifacts')
+        .set('Host', host())
+        .set('X-Qwen-Client-Id', 'secondary-client')
+        .send({ title: 'blocked', url: 'https://example.com/blocked' }),
+      request(app)
+        .delete('/session/secondary-session/artifacts/artifact-secondary')
+        .set('Host', host())
+        .set('X-Qwen-Client-Id', 'secondary-client'),
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([
+      401, 401, 401,
+    ]);
+
+    const language = await request(app)
+      .post('/session/secondary-session/language')
+      .set('Host', host())
+      .send({ language: 'zh' });
+    expect(language.status).toBe(200);
+    expect(secondaryBridge.languageCalls).toEqual([
+      {
+        sessionId: 'secondary-session',
+        params: { language: 'zh', syncOutputLanguage: false },
+      },
+    ]);
+    for (const bridge of [primaryBridge, secondaryBridge]) {
+      expect(bridge.continueCalls).toEqual([]);
+      expect(bridge.addArtifactCalls).toEqual([]);
+      expect(bridge.removeArtifactCalls).toEqual([]);
+    }
+  });
+
+  it('rejects remaining mutations for an untrusted non-primary owner', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      secondaryTrusted: false,
+      token: TEST_TOKEN,
+    });
+    const auth = (test: request.Test) =>
+      test.set('Host', host()).set('Authorization', TEST_AUTHORIZATION);
+
+    const responses = await Promise.all([
+      auth(request(app).post('/session/secondary-session/continue')).send({}),
+      auth(request(app).post('/session/secondary-session/language')).send({
+        language: 'zh',
+      }),
+      auth(request(app).post('/session/secondary-session/artifacts'))
+        .set('X-Qwen-Client-Id', 'secondary-client')
+        .send({ title: 'blocked', url: 'https://example.com/blocked' }),
+      auth(
+        request(app).delete(
+          '/session/secondary-session/artifacts/artifact-secondary',
+        ),
+      ).set('X-Qwen-Client-Id', 'secondary-client'),
+    ]);
+
+    expect(responses.map((response) => response.status)).toEqual([
+      403, 403, 403, 403,
+    ]);
+    for (const response of responses) {
+      expect(response.body.code).toBe('untrusted_workspace');
+    }
+    for (const bridge of [primaryBridge, secondaryBridge]) {
+      expect(bridge.continueCalls).toEqual([]);
+      expect(bridge.languageCalls).toEqual([]);
+      expect(bridge.addArtifactCalls).toEqual([]);
+      expect(bridge.removeArtifactCalls).toEqual([]);
+    }
+  });
+
+  it('fails closed for missing and ambiguous remaining mutation owners', async () => {
+    const missing = makeHarness({ token: TEST_TOKEN });
+    const auth = (test: request.Test) =>
+      test.set('Host', host()).set('Authorization', TEST_AUTHORIZATION);
+    const missingResponses = await Promise.all([
+      auth(request(missing.app).post('/session/missing/continue')).send({}),
+      auth(request(missing.app).post('/session/missing/language')).send({
+        language: 'zh',
+      }),
+      auth(request(missing.app).post('/session/missing/artifacts'))
+        .set('X-Qwen-Client-Id', 'secondary-client')
+        .send({ title: 'missing', url: 'https://example.com/missing' }),
+      auth(
+        request(missing.app).delete('/session/missing/artifacts/artifact-1'),
+      ).set('X-Qwen-Client-Id', 'secondary-client'),
+    ]);
+    expect(missingResponses.map((response) => response.status)).toEqual([
+      404, 404, 404, 404,
+    ]);
+    for (const response of missingResponses) {
+      expect(response.body.code).toBe('session_not_found');
+    }
+    for (const bridge of [missing.primaryBridge, missing.secondaryBridge]) {
+      expect(bridge.continueCalls).toEqual([]);
+      expect(bridge.languageCalls).toEqual([]);
+      expect(bridge.addArtifactCalls).toEqual([]);
+      expect(bridge.removeArtifactCalls).toEqual([]);
+    }
+
+    const duplicate = makeSummary('duplicate-session', PRIMARY_CWD);
+    const ambiguous = makeHarness({
+      token: TEST_TOKEN,
+      primarySummaries: [duplicate],
+      secondarySummaries: [makeSummary('duplicate-session', SECONDARY_CWD)],
+    });
+    const ambiguousResponses = await Promise.all([
+      auth(
+        request(ambiguous.app).post('/session/duplicate-session/language'),
+      ).send({ language: 'zh' }),
+      auth(
+        request(ambiguous.app).post('/session/duplicate-session/continue'),
+      ).send({}),
+    ]);
+    expect(ambiguousResponses.map((response) => response.status)).toEqual([
+      500, 500,
+    ]);
+    for (const response of ambiguousResponses) {
+      expect(response.body.code).toBe('ambiguous_session_owner');
+    }
+    expect(ambiguous.primaryBridge.languageCalls).toEqual([]);
+    expect(ambiguous.secondaryBridge.languageCalls).toEqual([]);
+    expect(ambiguous.primaryBridge.continueCalls).toEqual([]);
+    expect(ambiguous.secondaryBridge.continueCalls).toEqual([]);
+  });
+
+  it('preserves primary routing for remaining mutations', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      token: TEST_TOKEN,
+    });
+    const auth = (test: request.Test) =>
+      test.set('Host', host()).set('Authorization', TEST_AUTHORIZATION);
+
+    const responses = await Promise.all([
+      auth(request(app).post('/session/primary-session/continue'))
+        .set('X-Qwen-Client-Id', 'primary-client')
+        .send({}),
+      auth(request(app).post('/session/primary-session/language'))
+        .set('X-Qwen-Client-Id', 'primary-client')
+        .send({ language: 'en', syncOutputLanguage: true }),
+      auth(request(app).post('/session/primary-session/artifacts'))
+        .set('X-Qwen-Client-Id', 'primary-client')
+        .send({
+          title: 'Primary artifact',
+          url: 'https://example.com/primary',
+        }),
+      auth(
+        request(app).delete(
+          '/session/primary-session/artifacts/artifact-primary',
+        ),
+      ).set('X-Qwen-Client-Id', 'primary-client'),
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([
+      200, 200, 200, 200,
+    ]);
+    expect(primaryBridge.continueCalls).toEqual([
+      {
+        sessionId: 'primary-session',
+        context: {
+          clientId: 'primary-client',
+          promptId: expect.any(String),
+        },
+      },
+    ]);
+    expect(primaryBridge.languageCalls).toEqual([
+      {
+        sessionId: 'primary-session',
+        params: { language: 'en', syncOutputLanguage: true },
+        context: { clientId: 'primary-client' },
+      },
+    ]);
+    expect(primaryBridge.addArtifactCalls).toEqual([
+      expect.objectContaining({
+        sessionId: 'primary-session',
+        artifact: expect.objectContaining({
+          title: 'Primary artifact',
+          url: 'https://example.com/primary',
+        }),
+        context: { clientId: 'primary-client' },
+      }),
+    ]);
+    expect(primaryBridge.removeArtifactCalls).toEqual([
+      {
+        sessionId: 'primary-session',
+        artifactId: 'artifact-primary',
+        context: { clientId: 'primary-client' },
+      },
+    ]);
+    expect(secondaryBridge.continueCalls).toEqual([]);
+    expect(secondaryBridge.languageCalls).toEqual([]);
+    expect(secondaryBridge.addArtifactCalls).toEqual([]);
+    expect(secondaryBridge.removeArtifactCalls).toEqual([]);
   });
 
   it('preserves primary routing for owner-local actions', async () => {
@@ -2957,6 +3347,577 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
+  it('exports the selected trusted workspace without falling back or starting ACP', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440280';
+      await writeStoredSession({
+        sessionId,
+        cwd: PRIMARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'primary export marker',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:01:00.000Z',
+        prompt: 'secondary export marker',
+        mtime: new Date('2026-07-08T00:01:00.000Z'),
+      });
+      const { app, primaryBridge, secondaryBridge } = makeHarness();
+
+      const secondary = await request(app)
+        .get(`/workspaces/secondary-id/session/${sessionId}/export`)
+        .set('Host', host())
+        .expect(200);
+      expect(secondary.headers['content-type']).toContain('text/html');
+      expect(secondary.headers['cache-control']).toBe('no-store');
+      expect(secondary.headers['x-content-type-options']).toBe('nosniff');
+      expect(secondary.headers['content-disposition']).toMatch(
+        /^attachment; filename="qwen-code-export-.+\.html"$/,
+      );
+      expect(secondary.text).toContain('secondary export marker');
+      expect(secondary.text).not.toContain('primary export marker');
+
+      const primary = await request(app)
+        .get(`/session/${sessionId}/export?format=md`)
+        .set('Host', host())
+        .expect(200);
+      expect(primary.text).toContain('primary export marker');
+      expect(primary.text).not.toContain('secondary export marker');
+
+      expect(primaryBridge.spawnCalls).toEqual([]);
+      expect(primaryBridge.restoreCalls).toEqual([]);
+      expect(primaryBridge.summaryCalls).toEqual([]);
+      expect(secondaryBridge.spawnCalls).toEqual([]);
+      expect(secondaryBridge.restoreCalls).toEqual([]);
+      expect(secondaryBridge.summaryCalls).toEqual([]);
+    });
+  });
+
+  it.each([
+    ['md', 'text/markdown', 'secondary md export'],
+    ['json', 'application/json', 'secondary json export'],
+    ['jsonl', 'application/jsonl', 'secondary jsonl export'],
+  ])(
+    'exports secondary sessions as %s through an encoded cwd selector',
+    async (format, mimeType, marker) => {
+      await withRuntimeDir(async () => {
+        const sessionId = `550e8400-e29b-41d4-a716-${format.padEnd(12, '0')}`;
+        await writeStoredSession({
+          sessionId,
+          cwd: SECONDARY_CWD,
+          timestamp: '2026-07-08T00:00:00.000Z',
+          prompt: marker,
+          mtime: new Date('2026-07-08T00:00:00.000Z'),
+        });
+        const { app } = makeHarness();
+
+        const response = await request(app)
+          .get(
+            `/workspaces/${encodeURIComponent(SECONDARY_CWD)}/session/${sessionId}/export?format=${format}`,
+          )
+          .set('Host', host())
+          .expect(200);
+
+        expect(response.headers['content-type']).toContain(mimeType);
+        expect(response.headers['content-disposition']).toContain(
+          `.${format}"`,
+        );
+        const content =
+          format === 'json' ? JSON.stringify(response.body) : response.text;
+        expect(content).toContain(marker);
+      });
+    },
+  );
+
+  it('enforces workspace, trust, format, and active-session export boundaries', async () => {
+    await withRuntimeDir(async () => {
+      const primaryOnlyId = '550e8400-e29b-41d4-a716-446655440281';
+      const archivedId = '550e8400-e29b-41d4-a716-446655440282';
+      const conflictId = '550e8400-e29b-41d4-a716-446655440284';
+      await writeStoredSession({
+        sessionId: primaryOnlyId,
+        cwd: PRIMARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'primary only',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: archivedId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:01:00.000Z',
+        prompt: 'archived secondary',
+        mtime: new Date('2026-07-08T00:01:00.000Z'),
+      });
+      await archiveStoredSession(SECONDARY_CWD, archivedId);
+      await writeStoredSession({
+        sessionId: conflictId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:02:00.000Z',
+        prompt: 'conflicting secondary',
+        mtime: new Date('2026-07-08T00:02:00.000Z'),
+      });
+      const secondaryChatsDir = path.join(
+        new Storage(SECONDARY_CWD).getProjectDir(),
+        'chats',
+      );
+      await fsp.mkdir(path.join(secondaryChatsDir, 'archive'), {
+        recursive: true,
+      });
+      await fsp.copyFile(
+        path.join(secondaryChatsDir, `${conflictId}.jsonl`),
+        path.join(secondaryChatsDir, 'archive', `${conflictId}.jsonl`),
+      );
+      const trusted = makeHarness();
+
+      const missing = await request(trusted.app)
+        .get(`/workspaces/secondary-id/session/${primaryOnlyId}/export`)
+        .set('Host', host());
+      expect(missing.status).toBe(404);
+      expect(missing.body.code).toBe('session_not_found');
+
+      const archived = await request(trusted.app)
+        .get(`/workspaces/secondary-id/session/${archivedId}/export`)
+        .set('Host', host());
+      expect(archived.status).toBe(409);
+      expect(archived.body.code).toBe('session_archived');
+
+      const conflict = await request(trusted.app)
+        .get(`/workspaces/secondary-id/session/${conflictId}/export`)
+        .set('Host', host());
+      expect(conflict.status).toBe(409);
+      expect(conflict.body).toMatchObject({
+        code: 'session_conflict',
+        sessionId: conflictId,
+      });
+
+      const invalidFormat = await request(trusted.app)
+        .get(
+          `/workspaces/secondary-id/session/${primaryOnlyId}/export?format=pdf`,
+        )
+        .set('Host', host());
+      expect(invalidFormat.status).toBe(400);
+      expect(invalidFormat.body).toMatchObject({
+        code: 'invalid_export_format',
+        format: 'pdf',
+        allowedFormats: ['html', 'md', 'json', 'jsonl'],
+      });
+
+      const unknown = await request(trusted.app)
+        .get(
+          `/workspaces/missing-id/session/${primaryOnlyId}/export?format=pdf`,
+        )
+        .set('Host', host());
+      expect(unknown.status).toBe(400);
+      expect(unknown.body.code).toBe('workspace_mismatch');
+
+      const untrustedSecondary = makeHarness({ secondaryTrusted: false });
+      const forbiddenSecondary = await request(untrustedSecondary.app)
+        .get(
+          `/workspaces/secondary-id/session/${primaryOnlyId}/export?format=pdf`,
+        )
+        .set('Host', host());
+      expect(forbiddenSecondary.status).toBe(403);
+      expect(forbiddenSecondary.body.code).toBe('untrusted_workspace');
+
+      const untrustedPrimary = makeHarness({ primaryTrusted: false });
+      const forbiddenPrimary = await request(untrustedPrimary.app)
+        .get(
+          `/workspaces/primary-id/session/${primaryOnlyId}/export?format=pdf`,
+        )
+        .set('Host', host());
+      expect(forbiddenPrimary.status).toBe(403);
+      expect(forbiddenPrimary.body.code).toBe('untrusted_workspace');
+    });
+  });
+
+  it('keeps archive and delete blocked while a workspace export is in flight', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440283';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'secondary export lock marker',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      let loadStarted!: () => void;
+      let releaseLoad!: () => void;
+      const loadStartedPromise = new Promise<void>((resolve) => {
+        loadStarted = resolve;
+      });
+      const loadReleasedPromise = new Promise<void>((resolve) => {
+        releaseLoad = resolve;
+      });
+      const originalLoadSession = SessionService.prototype.loadSession;
+      const loadSpy = vi
+        .spyOn(SessionService.prototype, 'loadSession')
+        .mockImplementation(async function (this: SessionService, id) {
+          const result = await originalLoadSession.call(this, id);
+          if (id === sessionId) {
+            loadStarted();
+            await loadReleasedPromise;
+          }
+          return result;
+        });
+      const { app } = makeHarness({ secondarySummaries: [] });
+      const exportPromise = request(app)
+        .get(`/workspaces/secondary-id/session/${sessionId}/export`)
+        .set('Host', host())
+        .then((response) => response);
+
+      try {
+        await loadStartedPromise;
+        const archive = await request(app)
+          .post('/workspaces/secondary-id/sessions/archive')
+          .set('Host', host())
+          .send({ sessionIds: [sessionId] });
+        expect(archive.status).toBe(409);
+        expect(archive.body).toMatchObject({
+          code: 'session_archiving',
+          sessionId,
+        });
+
+        const remove = await request(app)
+          .post('/workspaces/secondary-id/sessions/delete')
+          .set('Host', host())
+          .send({ sessionIds: [sessionId] });
+        expect(remove.status).toBe(200);
+        expect(remove.body.removed).toEqual([]);
+        expect(remove.body.errors).toEqual([
+          {
+            sessionId,
+            error: expect.stringContaining('is being archived or unarchived'),
+          },
+        ]);
+
+        releaseLoad();
+        const exported = await exportPromise;
+        expect(exported.status).toBe(200);
+        expect(exported.text).toContain('secondary export lock marker');
+      } finally {
+        releaseLoad();
+        loadSpy.mockRestore();
+        await Promise.allSettled([exportPromise]);
+      }
+    });
+  });
+
+  it('exports only the selected workspace archived transcript in every format', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440285';
+      await writeStoredSession({
+        sessionId,
+        cwd: PRIMARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'primary active collision marker',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const archivedMarker = `secondary archived collision marker ${'x'.repeat(
+        128 * 1024,
+      )}`;
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:01:00.000Z',
+        prompt: archivedMarker,
+        mtime: new Date('2026-07-08T00:01:00.000Z'),
+      });
+      await archiveStoredSession(SECONDARY_CWD, sessionId);
+      const { app, primaryBridge, secondaryBridge } = makeHarness();
+
+      for (const [format, mimeType] of [
+        ['html', 'text/html'],
+        ['md', 'text/markdown'],
+        ['json', 'application/json'],
+        ['jsonl', 'application/jsonl'],
+      ] as const) {
+        const response = await request(app)
+          .get(
+            `/workspaces/${encodeURIComponent(SECONDARY_CWD)}/session/${sessionId}/archive/export?format=${format}`,
+          )
+          .set('Host', host())
+          .expect(200);
+
+        expect(response.headers['content-type']).toContain(mimeType);
+        expect(response.headers['cache-control']).toBe('no-store');
+        expect(response.headers['x-content-type-options']).toBe('nosniff');
+        expect(response.headers['content-disposition']).toContain(
+          `.${format}"`,
+        );
+        expect(response.text).toContain('secondary archived collision marker');
+        expect(response.text).not.toContain('primary active collision marker');
+      }
+
+      expect(primaryBridge.spawnCalls).toEqual([]);
+      expect(primaryBridge.restoreCalls).toEqual([]);
+      expect(primaryBridge.summaryCalls).toEqual([]);
+      expect(secondaryBridge.spawnCalls).toEqual([]);
+      expect(secondaryBridge.restoreCalls).toEqual([]);
+      expect(secondaryBridge.summaryCalls).toEqual([]);
+      expect(secondaryBridge.closeCalls).toEqual([]);
+    });
+  });
+
+  it('enforces archived export state, selector, trust, and format boundaries', async () => {
+    await withRuntimeDir(async () => {
+      const activeId = '550e8400-e29b-41d4-a716-446655440286';
+      const missingId = '550e8400-e29b-41d4-a716-446655440287';
+      const conflictId = '550e8400-e29b-41d4-a716-446655440288';
+      await writeStoredSession({
+        sessionId: activeId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'active secondary',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: missingId,
+        cwd: PRIMARY_CWD,
+        timestamp: '2026-07-08T00:01:00.000Z',
+        prompt: 'other workspace only',
+        mtime: new Date('2026-07-08T00:01:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: conflictId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:02:00.000Z',
+        prompt: 'conflicting secondary',
+        mtime: new Date('2026-07-08T00:02:00.000Z'),
+      });
+      const chatsDir = path.join(
+        new Storage(SECONDARY_CWD).getProjectDir(),
+        'chats',
+      );
+      await fsp.mkdir(path.join(chatsDir, 'archive'), { recursive: true });
+      await fsp.copyFile(
+        path.join(chatsDir, `${conflictId}.jsonl`),
+        path.join(chatsDir, 'archive', `${conflictId}.jsonl`),
+      );
+      const trusted = makeHarness();
+
+      const active = await request(trusted.app)
+        .get(`/workspaces/secondary-id/session/${activeId}/archive/export`)
+        .set('Host', host());
+      expect(active.status).toBe(409);
+      expect(active.body).toMatchObject({
+        code: 'session_not_archived',
+        sessionId: activeId,
+      });
+
+      const missing = await request(trusted.app)
+        .get(`/workspaces/secondary-id/session/${missingId}/archive/export`)
+        .set('Host', host());
+      expect(missing.status).toBe(404);
+      expect(missing.body).toMatchObject({
+        code: 'session_not_found',
+        sessionId: missingId,
+      });
+
+      const conflict = await request(trusted.app)
+        .get(`/workspaces/secondary-id/session/${conflictId}/archive/export`)
+        .set('Host', host());
+      expect(conflict.status).toBe(409);
+      expect(conflict.body).toMatchObject({
+        code: 'session_conflict',
+        sessionId: conflictId,
+      });
+
+      const invalidFormat = await request(trusted.app)
+        .get(
+          `/workspaces/secondary-id/session/${conflictId}/archive/export?format=pdf`,
+        )
+        .set('Host', host());
+      expect(invalidFormat.status).toBe(400);
+      expect(invalidFormat.body.code).toBe('invalid_export_format');
+
+      const unknown = await request(trusted.app)
+        .get(
+          `/workspaces/missing-id/session/${missingId}/archive/export?format=pdf`,
+        )
+        .set('Host', host());
+      expect(unknown.status).toBe(400);
+      expect(unknown.body.code).toBe('workspace_mismatch');
+
+      const untrusted = makeHarness({ secondaryTrusted: false });
+      const forbidden = await request(untrusted.app)
+        .get(
+          `/workspaces/secondary-id/session/${missingId}/archive/export?format=pdf`,
+        )
+        .set('Host', host());
+      expect(forbidden.status).toBe(403);
+      expect(forbidden.body.code).toBe('untrusted_workspace');
+    });
+  });
+
+  it('rejects archived exports above the persisted source size limit', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440291';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'oversized archived export',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      await archiveStoredSession(SECONDARY_CWD, sessionId);
+      const archivedPath = path.join(
+        new Storage(SECONDARY_CWD).getProjectDir(),
+        'chats',
+        'archive',
+        `${sessionId}.jsonl`,
+      );
+      await fsp.truncate(archivedPath, SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1);
+      const { app } = makeHarness({ secondarySummaries: [] });
+
+      const response = await request(app)
+        .get(`/workspaces/secondary-id/session/${sessionId}/archive/export`)
+        .set('Host', host());
+
+      expect(response.status).toBe(413);
+      expect(response.body).toMatchObject({
+        code: 'transcript_too_large',
+        sessionId,
+        snapshotSize: SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1,
+        maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+      });
+    });
+  });
+
+  it('keeps unarchive and delete blocked while archived export is in flight', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440289';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'archived export lock marker',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      await archiveStoredSession(SECONDARY_CWD, sessionId);
+      let loadStarted!: () => void;
+      let releaseLoad!: () => void;
+      const loadStartedPromise = new Promise<void>((resolve) => {
+        loadStarted = resolve;
+      });
+      const loadReleasedPromise = new Promise<void>((resolve) => {
+        releaseLoad = resolve;
+      });
+      const originalLoad = SessionService.prototype.loadArchivedSession;
+      const loadSpy = vi
+        .spyOn(SessionService.prototype, 'loadArchivedSession')
+        .mockImplementation(async function (this: SessionService, id, opts) {
+          const result = await originalLoad.call(this, id, opts);
+          if (id === sessionId) {
+            loadStarted();
+            await loadReleasedPromise;
+          }
+          return result;
+        });
+      const { app } = makeHarness({ secondarySummaries: [] });
+      const exportPromise = request(app)
+        .get(`/workspaces/secondary-id/session/${sessionId}/archive/export`)
+        .set('Host', host())
+        .then((response) => response);
+
+      try {
+        await loadStartedPromise;
+        const unarchive = await request(app)
+          .post('/workspaces/secondary-id/sessions/unarchive')
+          .set('Host', host())
+          .send({ sessionIds: [sessionId] });
+        expect(unarchive.status).toBe(409);
+        expect(unarchive.body.code).toBe('session_archiving');
+
+        const remove = await request(app)
+          .post('/workspaces/secondary-id/sessions/delete')
+          .set('Host', host())
+          .send({ sessionIds: [sessionId] });
+        expect(remove.status).toBe(200);
+        expect(remove.body.removed).toEqual([]);
+        expect(remove.body.errors).toEqual([
+          {
+            sessionId,
+            error: expect.stringContaining('is being archived or unarchived'),
+          },
+        ]);
+        await expect(
+          new SessionService(SECONDARY_CWD).getSessionLocation(sessionId),
+        ).resolves.toBe('archived');
+
+        releaseLoad();
+        const exported = await exportPromise;
+        expect(exported.status).toBe(200);
+        expect(exported.text).toContain('archived export lock marker');
+      } finally {
+        releaseLoad();
+        loadSpy.mockRestore();
+        await Promise.allSettled([exportPromise]);
+      }
+    });
+  });
+
+  it('returns session_archiving while unarchive holds the exclusive lease', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440290';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'exclusive transition marker',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      await archiveStoredSession(SECONDARY_CWD, sessionId);
+      let unarchiveStarted!: () => void;
+      let releaseUnarchive!: () => void;
+      const unarchiveStartedPromise = new Promise<void>((resolve) => {
+        unarchiveStarted = resolve;
+      });
+      const unarchiveReleasedPromise = new Promise<void>((resolve) => {
+        releaseUnarchive = resolve;
+      });
+      const originalUnarchive = SessionService.prototype.unarchiveSessions;
+      const unarchiveSpy = vi
+        .spyOn(SessionService.prototype, 'unarchiveSessions')
+        .mockImplementation(async function (this: SessionService, ids, opts) {
+          if (ids.includes(sessionId)) {
+            unarchiveStarted();
+            await unarchiveReleasedPromise;
+          }
+          return originalUnarchive.call(this, ids, opts);
+        });
+      const { app } = makeHarness({ secondarySummaries: [] });
+      const unarchivePromise = request(app)
+        .post('/workspaces/secondary-id/sessions/unarchive')
+        .set('Host', host())
+        .send({ sessionIds: [sessionId] })
+        .then((response) => response);
+
+      try {
+        await unarchiveStartedPromise;
+        const exported = await request(app)
+          .get(`/workspaces/secondary-id/session/${sessionId}/archive/export`)
+          .set('Host', host());
+        expect(exported.status).toBe(409);
+        expect(exported.headers['retry-after']).toBe('5');
+        expect(exported.body).toMatchObject({
+          code: 'session_archiving',
+          sessionId,
+        });
+
+        releaseUnarchive();
+        const unarchived = await unarchivePromise;
+        expect(unarchived.status).toBe(200);
+        expect(unarchived.body.unarchived).toEqual([sessionId]);
+      } finally {
+        releaseUnarchive();
+        unarchiveSpy.mockRestore();
+        await Promise.allSettled([unarchivePromise]);
+      }
+    });
+  });
+
   it('lists session groups for an untrusted secondary while mutations stay blocked', async () => {
     await withRuntimeDir(async () => {
       const service = createSessionOrganizationService(SECONDARY_CWD);
@@ -3439,6 +4400,108 @@ describe('multi-workspace session dispatch', () => {
       });
       expect(primaryBridge.closeCalls).toEqual([]);
       expect(secondaryBridge.closeCalls).toEqual([archiveId, deleteId]);
+    });
+  });
+
+  it('archives and unarchives only the selected workspace when session ids collide', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440122';
+      await writeStoredSession({
+        sessionId,
+        cwd: PRIMARY_CWD,
+        timestamp: '2026-07-08T00:12:00.000Z',
+        prompt: 'primary collision target',
+        mtime: new Date('2026-07-08T00:12:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:13:00.000Z',
+        prompt: 'secondary collision target',
+        mtime: new Date('2026-07-08T00:13:00.000Z'),
+      });
+      const primaryChatsDir = path.join(
+        new Storage(PRIMARY_CWD).getProjectDir(),
+        'chats',
+      );
+      const secondaryChatsDir = path.join(
+        new Storage(SECONDARY_CWD).getProjectDir(),
+        'chats',
+      );
+      const primaryActivePath = path.join(
+        primaryChatsDir,
+        `${sessionId}.jsonl`,
+      );
+      const primaryArchivedPath = path.join(
+        primaryChatsDir,
+        'archive',
+        `${sessionId}.jsonl`,
+      );
+      const secondaryActivePath = path.join(
+        secondaryChatsDir,
+        `${sessionId}.jsonl`,
+      );
+      const secondaryArchivedPath = path.join(
+        secondaryChatsDir,
+        'archive',
+        `${sessionId}.jsonl`,
+      );
+      const { app, primaryBridge, secondaryBridge } = makeHarness({
+        primarySummaries: [],
+        secondarySummaries: [],
+      });
+
+      const archived = await request(app)
+        .post('/workspaces/secondary-id/sessions/archive')
+        .set('Host', host())
+        .send({ sessionIds: [sessionId] })
+        .expect(200);
+      expect(archived.body).toMatchObject({
+        archived: [sessionId],
+        alreadyArchived: [],
+        notFound: [],
+        errors: [],
+      });
+      await expect(fsp.readFile(primaryActivePath, 'utf8')).resolves.toContain(
+        'primary collision target',
+      );
+      await expect(fsp.stat(primaryArchivedPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await expect(
+        fsp.readFile(secondaryArchivedPath, 'utf8'),
+      ).resolves.toContain('secondary collision target');
+      await expect(fsp.stat(secondaryActivePath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      expect(primaryBridge.closeCalls).toEqual([]);
+      expect(secondaryBridge.closeCalls).toEqual([sessionId]);
+
+      const unarchived = await request(app)
+        .post('/workspaces/secondary-id/sessions/unarchive')
+        .set('Host', host())
+        .send({ sessionIds: [sessionId] })
+        .expect(200);
+      expect(unarchived.body).toMatchObject({
+        unarchived: [sessionId],
+        alreadyActive: [],
+        notFound: [],
+        errors: [],
+      });
+      await expect(fsp.readFile(primaryActivePath, 'utf8')).resolves.toContain(
+        'primary collision target',
+      );
+      await expect(fsp.stat(primaryArchivedPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await expect(
+        fsp.readFile(secondaryActivePath, 'utf8'),
+      ).resolves.toContain('secondary collision target');
+      await expect(fsp.stat(secondaryArchivedPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      expect(primaryBridge.closeCalls).toEqual([]);
+      expect(secondaryBridge.closeCalls).toEqual([sessionId]);
     });
   });
 

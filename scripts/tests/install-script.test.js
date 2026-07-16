@@ -1749,14 +1749,13 @@ describe('standalone release packaging', () => {
       const shim = readScript(
         path.join(extractDir, 'qwen-code', 'bin', 'qwen.cmd'),
       );
-      expect(shim).toContain('if "%~1"=="serve" goto serve');
       expect(shim).toContain(
-        '"%ROOT%\\node\\node.exe" --expose-gc "%ROOT%\\lib\\cli.js" %*',
+        'set "QWEN_CODE_LAUNCHER_PATH=%ROOT%\\bin\\qwen.cmd"',
       );
       expect(shim).toContain(
         '"%ROOT%\\node\\node.exe" "%ROOT%\\lib\\cli-entry.js" %*',
       );
-      expect((shim.match(/exit \/b %ERRORLEVEL%/g) || []).length).toBe(2);
+      expect((shim.match(/exit \/b %ERRORLEVEL%/g) || []).length).toBe(1);
       expect(readScript(path.join(outDir, 'SHA256SUMS'))).toContain(
         'qwen-code-win-x64.zip',
       );
@@ -1904,7 +1903,7 @@ describe('standalone release packaging', () => {
   });
 
   itOnUnix(
-    'packages a Unix standalone archive with a serve fast path shim',
+    'packages a Unix standalone archive through the CLI entry wrapper',
     () => {
       const createdDist = ensureMinimalDist();
       const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
@@ -1923,12 +1922,8 @@ describe('standalone release packaging', () => {
         const shim = readScript(
           path.join(extractDir, 'qwen-code', 'bin', 'qwen'),
         );
-        expect(shim).toContain('if [ "${1:-}" = "serve" ]; then');
         expect(shim).toContain(
-          'exec "$ROOT/node/bin/node" "$ROOT/lib/cli-entry.js" "$@"',
-        );
-        expect(shim).toContain(
-          'exec "$ROOT/node/bin/node" --expose-gc "$ROOT/lib/cli.js" "$@"',
+          'QWEN_CODE_LAUNCHER_PATH="$ROOT/bin/qwen" exec "$ROOT/node/bin/node" "$ROOT/lib/cli-entry.js" "$@"',
         );
       } finally {
         restoreMinimalDist(createdDist);

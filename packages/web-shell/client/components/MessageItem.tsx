@@ -10,7 +10,11 @@ import { useI18n } from '../i18n';
 import { ErrorBoundary } from './ErrorBoundary';
 import { MessageTimestamp } from './MessageTimestamp';
 import { UserMessage } from './messages/UserMessage';
-import { AssistantMessage, ThinkingMessage } from './messages/AssistantMessage';
+import {
+  AssistantMessage,
+  ThinkingMessage,
+  type SessionContentGenerator,
+} from './messages/AssistantMessage';
 import { SystemMessage } from './messages/SystemMessage';
 import { ToolGroup } from './messages/ToolGroup';
 import { PlanMessage } from './messages/PlanMessage';
@@ -33,6 +37,7 @@ interface MessageItemProps {
   showAssistantBranch?: boolean;
   isLocateFlashing?: boolean;
   assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
+  generateContent?: SessionContentGenerator;
 }
 
 export const MessageItem = memo(function MessageItem({
@@ -48,6 +53,7 @@ export const MessageItem = memo(function MessageItem({
   showAssistantBranch = false,
   isLocateFlashing = false,
   assistantTurnFooterInfo,
+  generateContent,
 }: MessageItemProps) {
   const { t } = useI18n();
   const body = ((): ReactElement | null => {
@@ -77,10 +83,12 @@ export const MessageItem = memo(function MessageItem({
       case 'thinking':
         return (
           <ThinkingMessage
+            messageId={message.id}
             content={message.content}
             isStreaming={message.isStreaming}
             timestamp={message.timestamp}
             isLocateFlashing={isLocateFlashing}
+            generateContent={generateContent}
           />
         );
       case 'tool_group':
@@ -258,6 +266,7 @@ function areMessageItemPropsEqual(
   if (prev.showAssistantActions !== next.showAssistantActions) return false;
   if (prev.showAssistantBranch !== next.showAssistantBranch) return false;
   if (prev.isLocateFlashing !== next.isLocateFlashing) return false;
+  if (prev.generateContent !== next.generateContent) return false;
   if (
     !areAssistantTurnFooterInfosEqual(
       prev.assistantTurnFooterInfo,

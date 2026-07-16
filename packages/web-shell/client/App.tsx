@@ -34,6 +34,7 @@ import type {
   DaemonTranscriptBlock,
   DaemonSessionTaskStatus,
   DaemonSessionArtifact,
+  DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList, type MessageListHandle } from './components/MessageList';
@@ -93,7 +94,8 @@ import {
 import { useIsLargeScreen } from './hooks/useIsLargeScreen';
 import { MAX_SPLIT_PANES, parseSplitSessionIds } from './utils/splitUrl';
 import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
-import { ExtensionsDialog } from './components/dialogs/ExtensionsDialog';
+import { ExtensionsManagerPage } from './components/extensions/ExtensionsManagerPage';
+import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { isAskUserPermission } from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
@@ -107,6 +109,7 @@ import {
   WebShellSidebar,
   type WebShellSidebarBranding,
   type WebShellSidebarFooterOptions,
+  type WebShellSidebarLockedWorkspace,
 } from './components/sidebar/WebShellSidebar';
 import {
   getLocalCommands,
@@ -161,7 +164,7 @@ import {
   type StatusInfo,
 } from './components/messages/StatusMessage';
 import type { SerializedMcpStatusMessage } from './components/messages/McpStatusMessage';
-import { McpDialog } from './components/dialogs/McpDialog';
+import { McpManagerPage } from './components/mcp/McpManagerPage';
 import {
   GOAL_STATUS_ACTIVE_EVENT,
   parseGoalStatusMessage,
@@ -419,6 +422,8 @@ export interface WebShellSidebarOptions {
   branding?: false | WebShellSidebarBranding;
   /** Hide the footer completely or select the built-in entries it exposes. */
   footer?: false | WebShellSidebarFooterOptions;
+  /** Customize the workspace row shown when lockWorkspaceCwd is active. */
+  lockedWorkspace?: WebShellSidebarLockedWorkspace;
 }
 
 export type SessionChangeEvent =
@@ -431,6 +436,10 @@ export interface WebShellApi {
   openSplitView: () => void;
   /** Open the Session Overview panel, matching the built-in sidebar button. */
   openSessionOverview: () => void;
+  /** Open the compact session drawer, matching the hamburger control. */
+  openSessionDrawer: () => void;
+  /** Start a new session using the same lifecycle as the built-in New Chat action. */
+  createNewSession: () => Promise<boolean>;
 }
 
 export type WebShellComposerPlaceholderState = ComposerPlaceholderState;
@@ -440,10 +449,11 @@ export type WebShellComposerPlaceholders = Readonly<
 >;
 
 export interface WebShellProps {
-  /** Called whenever the attached daemon session id changes. */
+  /** Called whenever the attached daemon session or workspace changes. */
   onSessionIdChange?: (
     sessionId: string | undefined,
     workspaceId?: string,
+    workspaceCwd?: string,
   ) => void;
   /** Called after a new session is created. Session setup waits up to 30 seconds. */
   onSessionCreated?: (sessionId: string) => Promise<void> | void;
@@ -585,6 +595,11 @@ export interface WebShellProps {
   }) => Promise<void>;
 }
 
+interface AppProps extends WebShellProps {
+  lockedWorkspaceCwd?: string;
+  lockedWorkspaceCapability?: DaemonWorkspaceCapability;
+}
+
 type SessionActionsWithCreate = {
   createSession: (options?: {
     workspaceCwd?: string;
@@ -620,6 +635,7 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
   showCompactToggle: boolean;
   branding?: false | WebShellSidebarBranding;
   footer?: false | WebShellSidebarFooterOptions;
+  lockedWorkspace?: WebShellSidebarLockedWorkspace;
 } {
   if (sidebar === true) {
     return { enabled: true, defaultCollapsed: false, showCompactToggle: true };
@@ -633,6 +649,7 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
     showCompactToggle: sidebar.showCompactToggle ?? true,
     branding: sidebar.branding,
     footer: sidebar.footer,
+    lockedWorkspace: sidebar.lockedWorkspace,
   };
 }
 
@@ -1017,7 +1034,9 @@ export function App({
   composerInputVersion,
   onSessionChange,
   onSubmitBefore,
-}: WebShellProps = {}) {
+  lockedWorkspaceCwd,
+  lockedWorkspaceCapability,
+}: AppProps = {}) {
   const [chatWidthMode, setChatWidthMode] =
     useState<ChatWidthMode>(readChatWidthMode);
   const [selectedLanguage, setSelectedLanguage] = useState<WebShellLanguage>(
@@ -1038,8 +1057,10 @@ export function App({
     string | null
   >(null);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
+  const [forceMobileDrawer, setForceMobileDrawer] = useState(false);
   const closeMobileDrawer = useCallback(() => {
     setMobileDrawerOpen(false);
+    setForceMobileDrawer(false);
   }, []);
   // The Session Overview panel (mission control for managing many sessions at
   // once) is only offered on large screens; below that there is no room for it
@@ -1052,13 +1073,17 @@ export function App({
   const splitSidebarHasRoom = useIsLargeScreen('(min-width: 1200px)');
 
   useEffect(() => {
+    if (!sidebarOptions.enabled) closeMobileDrawer();
+  }, [closeMobileDrawer, sidebarOptions.enabled]);
+
+  useEffect(() => {
     const mql = window.matchMedia('(max-width: 760px)');
     const handler = (e: MediaQueryListEvent) => {
-      if (!e.matches) setMobileDrawerOpen(false);
+      if (!e.matches) closeMobileDrawer();
     };
     mql.addEventListener('change', handler);
     return () => mql.removeEventListener('change', handler);
-  }, []);
+  }, [closeMobileDrawer]);
 
   useEffect(() => {
     if (!mobileDrawerOpen) return;
@@ -1161,9 +1186,24 @@ export function App({
   const blocks = useTranscriptBlocks();
   const connection = useConnection();
   const workspace = useWorkspace();
-  const workspaces = useMemo(
-    () => workspace.capabilities?.workspaces ?? [],
-    [workspace.capabilities?.workspaces],
+  const workspaces = useMemo(() => {
+    const capabilityWorkspaces = workspace.capabilities?.workspaces ?? [];
+    if (
+      lockedWorkspaceCapability &&
+      !capabilityWorkspaces.some(
+        (entry) => entry.cwd === lockedWorkspaceCapability.cwd,
+      )
+    ) {
+      return [...capabilityWorkspaces, lockedWorkspaceCapability];
+    }
+    return capabilityWorkspaces;
+  }, [lockedWorkspaceCapability, workspace.capabilities?.workspaces]);
+  const visibleWorkspaces = useMemo(
+    () =>
+      lockedWorkspaceCwd
+        ? workspaces.filter((entry) => entry.cwd === lockedWorkspaceCwd)
+        : workspaces,
+    [lockedWorkspaceCwd, workspaces],
   );
   const sessionActions = useActions();
   const { notices, dismissNotice } = useSessionNotices();
@@ -1185,7 +1225,8 @@ export function App({
       return;
     }
     const primaryWorkspaceCwd = workspaces.find((entry) => entry.primary)?.cwd;
-    const workspaceCwd = selectedWorkspaceCwd ?? primaryWorkspaceCwd;
+    const workspaceCwd =
+      lockedWorkspaceCwd ?? selectedWorkspaceCwd ?? primaryWorkspaceCwd;
     if (!workspaceCwd) {
       setSelectedWorkspaceGitBranch(undefined);
       return;
@@ -1208,6 +1249,7 @@ export function App({
     };
   }, [
     connection.sessionId,
+    lockedWorkspaceCwd,
     selectedWorkspaceCwd,
     workspaces,
     workspace.client,
@@ -1251,6 +1293,7 @@ export function App({
   const currentSessionIdRef = useRef(connection.sessionId);
   const lastNotifiedSessionIdRef = useRef<string | undefined>(undefined);
   const lastNotifiedWorkspaceIdRef = useRef<string | undefined>(undefined);
+  const lastNotifiedWorkspaceCwdRef = useRef<string | undefined>(undefined);
   const lastGoalSessionIdRef = useRef(connection.sessionId);
   const displayMessages = useMemo(() => {
     const localMessages = [recapMessage].filter(
@@ -1802,6 +1845,10 @@ export function App({
   // dialogOpen prop.
   const approvalOverlayActive =
     pendingToolApproval !== null || pendingAskUserApproval !== null;
+  const approvalOverlayActiveRef = useRef(approvalOverlayActive);
+  approvalOverlayActiveRef.current =
+    approvalOverlayActive ||
+    (canActOnPendingApproval && extractPendingPermission(blocks) !== null);
   const floatingTodosState = useMemo(
     () => getFloatingTodos(messages),
     [messages],
@@ -2054,14 +2101,13 @@ export function App({
   // dependency (it changes on every pane add/remove).
   const splitSessionIdsRef = useRef<string[]>(splitSessionIds);
   splitSessionIdsRef.current = splitSessionIds;
-  const [showExtensionsDialog, setShowExtensionsDialog] = useState(false);
   const [mcpDialogMessage, setMcpDialogMessage] =
     useState<SerializedMcpStatusMessage | null>(null);
   // Settings and Daemon Status are shown as an in-place panel that replaces the
   // chat view (message list + composer), not as a modal overlay. Only one may be
   // active at a time; null means the normal chat view is shown.
   const [activePanel, setActivePanel] = useState<
-    'settings' | 'status' | 'sessions' | null
+    'settings' | 'status' | 'sessions' | 'extensions' | 'mcp' | 'plugins' | null
   >(null);
   const closePanel = useCallback(() => setActivePanel(null), []);
   // The Settings/Status panel (activePanel) and the Scheduled Tasks page
@@ -2070,14 +2116,43 @@ export function App({
   // one closes the other. Without this, opening Scheduled Tasks then Daemon
   // Status left the panel rendered behind the Scheduled Tasks overlay, looking
   // like the button did nothing.
-  const openPanel = useCallback((panel: 'settings' | 'status' | 'sessions') => {
-    setMainView('chat');
-    setActivePanel(panel);
-  }, []);
+  const openPanel = useCallback(
+    (
+      panel:
+        | 'settings'
+        | 'status'
+        | 'sessions'
+        | 'extensions'
+        | 'mcp'
+        | 'plugins',
+    ) => {
+      setMainView('chat');
+      setActivePanel(panel);
+    },
+    [],
+  );
+  const loadMcpManagerMessage = useCallback(async () => {
+    const status = await workspaceActions.loadMcpStatus();
+    setMcpDialogMessage({
+      status,
+      toolsByServer: {},
+      resourcesByServer: {},
+      showDescriptions: false,
+      showSchema: false,
+      showTips: false,
+    });
+  }, [workspaceActions]);
   const openScheduledTasks = useCallback(() => {
     setActivePanel(null);
     setMainView('scheduledTasks');
   }, []);
+  const openSessionDrawer = useCallback(() => {
+    if (!sidebarOptions.enabled) return;
+    setActivePanel(null);
+    setMainView('chat');
+    setForceMobileDrawer(true);
+    setMobileDrawerOpen(true);
+  }, [sidebarOptions.enabled]);
   // Open the in-window split view showing 2+ sessions side by side. `splitSessionIds`
   // is the live pane set — SplitView mirrors add/remove back into it via
   // onPanesChange — so it must be preserved across entries, not blindly reset.
@@ -2128,22 +2203,6 @@ export function App({
     openSplitView,
     splitSessionIds,
   ]);
-  const shellApi = useMemo<WebShellApi>(
-    () => ({
-      openSplitView: () => requestOpenSplitView(),
-      openSessionOverview: () => openPanel('sessions'),
-    }),
-    [openPanel, requestOpenSplitView],
-  );
-  useEffect(() => {
-    assignShellRef(shellRef, shellApi);
-  }, [shellApi, shellRef]);
-  useEffect(
-    () => () => {
-      assignShellRef(shellRef, null);
-    },
-    [shellRef],
-  );
   useEffect(() => {
     if (!externalSplitControlled) return;
     const requested = externalSplitSignature
@@ -2242,18 +2301,19 @@ export function App({
   ]);
   // Land focus on the composer after a shrink-driven split close so keyboard
   // users aren't dropped onto <body> — but not when the chat now shows an
-  // approval overlay (it owns the keyboard) or a panel (its Back self-focuses).
+  // approval overlay (it owns the keyboard) or a panel (it manages focus).
   useEffect(() => {
     if (mainView !== 'chat' || !focusComposerAfterSplitCloseRef.current) return;
     focusComposerAfterSplitCloseRef.current = false;
     if (!activePanel && !approvalOverlayActive) editorRef.current?.focus();
   }, [mainView, activePanel, approvalOverlayActive]);
   // The Settings / Daemon Status panel is a view, not a modal, so it lacks
-  // DialogShell's focus trap/restore. Move focus to the Back button when a panel
-  // opens (or when switching directly between panels) and back to the composer
-  // when it closes, so keyboard users aren't stranded on an element that is
-  // about to be hidden.
+  // DialogShell's focus trap/restore. Move focus into a panel when it opens (or
+  // when switching directly between panels) and back to the composer when it
+  // closes, so keyboard users aren't stranded on an element that is hidden.
   const panelBackRef = useRef<HTMLButtonElement | null>(null);
+  const panelHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const pluginTabRef = useRef<HTMLButtonElement | null>(null);
   const prevActivePanelRef = useRef(activePanel);
   const prevApprovalOverlayRef = useRef(approvalOverlayActive);
   useEffect(() => {
@@ -2262,6 +2322,14 @@ export function App({
     prevActivePanelRef.current = activePanel;
     prevApprovalOverlayRef.current = approvalOverlayActive;
     if (activePanel) {
+      if (activePanel === 'extensions') {
+        panelHeadingRef.current?.focus();
+        return;
+      }
+      if (activePanel === 'plugins') {
+        pluginTabRef.current?.focus();
+        return;
+      }
       // Covers null→panel and panel→panel: the Back button lives outside the
       // keyed panel body so it survives a switch, but refocus explicitly rather
       // than depending on that DOM coincidence.
@@ -2491,7 +2559,10 @@ export function App({
           SessionActionsWithCreate,
         modelId,
         modeId,
-        workspaceCwd: selectedWorkspaceCwdRef.current ?? primaryWorkspaceCwd,
+        workspaceCwd:
+          lockedWorkspaceCwd ??
+          selectedWorkspaceCwdRef.current ??
+          primaryWorkspaceCwd,
         onSessionCreated: onSessionCreatedRef.current,
         onSessionAllocated: (sessionId) => {
           preparingSessionIdRef.current = sessionId;
@@ -2512,7 +2583,7 @@ export function App({
     };
     void promise.then(clearPreparation, clearPreparation);
     return promise;
-  }, [sessionActions, workspaces]);
+  }, [lockedWorkspaceCwd, sessionActions, workspaces]);
   const onSubmitBeforeRef = useRef(onSubmitBefore);
   onSubmitBeforeRef.current = onSubmitBefore;
   const [sessionListReloadToken, setSessionListReloadToken] = useState(0);
@@ -2659,7 +2730,6 @@ export function App({
     showHelpDialog ||
     showThemeDialog ||
     showToolsDialog ||
-    showExtensionsDialog ||
     modelDialogMode !== null ||
     showApprovalModeDialog ||
     tasksDialogMessage !== null ||
@@ -3330,6 +3400,7 @@ export function App({
       // new chat; clearing it here would immediately hide the recovery state.
       lastNotifiedSessionIdRef.current = connection.sessionId;
       lastNotifiedWorkspaceIdRef.current = undefined;
+      lastNotifiedWorkspaceCwdRef.current = undefined;
       return;
     }
     const activeWorkspace = workspaces.find(
@@ -3342,13 +3413,19 @@ export function App({
         : undefined;
     if (
       lastNotifiedSessionIdRef.current === connection.sessionId &&
-      lastNotifiedWorkspaceIdRef.current === workspaceId
+      lastNotifiedWorkspaceIdRef.current === workspaceId &&
+      lastNotifiedWorkspaceCwdRef.current === connection.workspaceCwd
     ) {
       return;
     }
     lastNotifiedSessionIdRef.current = connection.sessionId;
     lastNotifiedWorkspaceIdRef.current = workspaceId;
-    onSessionIdChange?.(connection.sessionId, workspaceId);
+    lastNotifiedWorkspaceCwdRef.current = connection.workspaceCwd;
+    onSessionIdChange?.(
+      connection.sessionId,
+      workspaceId,
+      connection.workspaceCwd,
+    );
   }, [
     connection.missingSession,
     connection.sessionId,
@@ -3543,33 +3620,93 @@ export function App({
     branchCurrentSession();
   }, [branchCurrentSession]);
 
+  const composerFocusRequestRef = useRef(0);
+  const scheduleComposerFocus = useCallback((sessionId?: string) => {
+    const request = ++composerFocusRequestRef.current;
+    window.setTimeout(() => {
+      if (
+        request !== composerFocusRequestRef.current ||
+        approvalOverlayActiveRef.current ||
+        (sessionId !== undefined &&
+          connectionRef.current.sessionId !== sessionId)
+      ) {
+        return;
+      }
+      editorRef.current?.focus();
+    }, 0);
+    return request;
+  }, []);
   const createNewSession = useCallback(
     async (workspaceCwd?: string) => {
-      selectedWorkspaceCwdRef.current = workspaceCwd;
-      setSelectedWorkspaceCwd(workspaceCwd);
+      const targetWorkspaceCwd = lockedWorkspaceCwd ?? workspaceCwd;
+      selectedWorkspaceCwdRef.current = targetWorkspaceCwd;
+      setSelectedWorkspaceCwd(targetWorkspaceCwd);
       // Close the drawer before awaiting so a failed createSession() doesn't leave
       // it stuck open with the page scroll still locked, matching loadSidebarSession.
       closeMobileDrawer();
       // Starting a new chat means the user wants to see it — leave any open
       // Settings/Status panel so the fresh chat is visible (no-op when closed).
       closePanel();
+      setMainView('chat');
+      let focusRequest: number | undefined;
       try {
-        await (
+        const clearPromise = (
           sessionActions as typeof sessionActions & SessionActionsWithCreate
         ).clearSession();
+        focusRequest = scheduleComposerFocus();
+        await clearPromise;
         return true;
       } catch (error) {
+        if (composerFocusRequestRef.current === focusRequest) {
+          composerFocusRequestRef.current += 1;
+        }
         reportError(error, 'Failed to start a new chat');
         return false;
       }
     },
-    [closeMobileDrawer, closePanel, reportError, sessionActions],
+    [
+      closeMobileDrawer,
+      closePanel,
+      lockedWorkspaceCwd,
+      reportError,
+      scheduleComposerFocus,
+      sessionActions,
+    ],
+  );
+  const shellApi = useMemo<WebShellApi>(
+    () => ({
+      openSplitView: () => {
+        closeMobileDrawer();
+        requestOpenSplitView();
+      },
+      openSessionOverview: () => {
+        closeMobileDrawer();
+        openPanel('sessions');
+      },
+      openSessionDrawer,
+      createNewSession: () => createNewSession(),
+    }),
+    [
+      closeMobileDrawer,
+      createNewSession,
+      openPanel,
+      openSessionDrawer,
+      requestOpenSplitView,
+    ],
+  );
+  useEffect(() => {
+    assignShellRef(shellRef, shellApi);
+  }, [shellApi, shellRef]);
+  useEffect(
+    () => () => {
+      assignShellRef(shellRef, null);
+    },
+    [shellRef],
   );
   const handleMissingSessionNewSession = useCallback(async () => {
     if (creatingMissingSessionRef.current) return;
     creatingMissingSessionRef.current = true;
     setIsCreatingMissingSession(true);
-    setMainView('chat');
     try {
       const success = await createNewSession();
       if (success) {
@@ -3583,6 +3720,7 @@ export function App({
 
   const loadSidebarSession = useCallback(
     async (sessionId: string, workspaceCwd?: string) => {
+      composerFocusRequestRef.current += 1;
       setSidebarSwitchingSessionId(sessionId);
       // Close the drawer before awaiting the load; the transcript clears
       // immediately and shows its loading skeleton for the selected session.
@@ -3636,11 +3774,13 @@ export function App({
       !connection.catchingUp
     ) {
       setSidebarSwitchingSessionId(null);
+      scheduleComposerFocus(sidebarSwitchingSessionId);
     }
   }, [
     connection.catchingUp,
     connection.loadingTranscript,
     connection.sessionId,
+    scheduleComposerFocus,
     sidebarSwitchingSessionId,
   ]);
 
@@ -4294,53 +4434,16 @@ export function App({
             const mcpArg = text.slice(match[0].length).trim().toLowerCase();
             workspaceActions
               .loadMcpStatus()
-              .then(async (status) => {
-                const toolsByServer: Record<
-                  string,
-                  Awaited<ReturnType<typeof workspaceActions.loadMcpTools>>
-                > = {};
-                const resourcesByServer: Record<
-                  string,
-                  Awaited<ReturnType<typeof workspaceActions.loadMcpResources>>
-                > = {};
-                await Promise.all(
-                  (status?.servers ?? []).map(async (server) => {
-                    // Tools and resources load in parallel; a failure in one
-                    // must not hide the other, and per-server failures still
-                    // let sibling servers render.
-                    await Promise.all([
-                      (async () => {
-                        try {
-                          toolsByServer[server.name] =
-                            await workspaceActions.loadMcpTools(server.name);
-                        } catch {
-                          // Allow partial failure — other servers still render
-                        }
-                      })(),
-                      (async () => {
-                        // Skip the round-trip for servers that advertise no
-                        // resources (or older daemons that omit the count).
-                        if (!server.resourceCount) return;
-                        try {
-                          resourcesByServer[server.name] =
-                            await workspaceActions.loadMcpResources(
-                              server.name,
-                            );
-                        } catch {
-                          // Allow partial failure — other servers still render
-                        }
-                      })(),
-                    ]);
-                  }),
-                );
+              .then((status) => {
                 setMcpDialogMessage({
                   status,
-                  toolsByServer,
-                  resourcesByServer,
+                  toolsByServer: {},
+                  resourcesByServer: {},
                   showDescriptions: mcpArg === 'desc',
                   showSchema: mcpArg === 'schema',
                   showTips: !mcpArg,
                 });
+                openPanel('mcp');
               })
               .catch((error: unknown) => {
                 reportError(error, 'Failed to load MCP status');
@@ -4487,7 +4590,7 @@ export function App({
             const args = text.slice(match[0].length).trim();
             const subCommand = args.split(/\s+/)[0]?.toLowerCase();
             if (!subCommand || subCommand === 'manage') {
-              setShowExtensionsDialog(true);
+              openPanel('extensions');
               return true;
             }
             if (subCommand === 'install') {
@@ -5570,6 +5673,7 @@ export function App({
               onClose={() => setShowResumeDialog(false)}
             >
               <ResumeDialog
+                workspaceCwd={lockedWorkspaceCwd}
                 onSelect={(sessionId) => {
                   closeMobileDrawer();
                   closePanel();
@@ -5632,27 +5736,6 @@ export function App({
               onClose={() => setShowToolsDialog(false)}
             >
               <ToolsDialog />
-            </DialogShell>
-          )}
-          {showExtensionsDialog && (
-            <DialogShell
-              title={t('extensions.manage.title')}
-              size="lg"
-              onClose={() => setShowExtensionsDialog(false)}
-            >
-              <ExtensionsDialog />
-            </DialogShell>
-          )}
-          {mcpDialogMessage && (
-            <DialogShell
-              title={t('mcp.manageServers')}
-              size="lg"
-              onClose={() => setMcpDialogMessage(null)}
-            >
-              <McpDialog
-                message={mcpDialogMessage}
-                onClose={() => setMcpDialogMessage(null)}
-              />
             </DialogShell>
           )}
           {tasksDialogMessage && (
@@ -5767,6 +5850,7 @@ export function App({
               onClose={() => setShowDeleteDialog(false)}
             >
               <DeleteSessionDialog
+                workspaceCwd={lockedWorkspaceCwd}
                 onDeleted={(sessionIds) => {
                   store.dispatch([
                     {
@@ -5797,6 +5881,7 @@ export function App({
               onClose={() => setShowReleaseDialog(false)}
             >
               <ReleaseSessionDialog
+                workspaceCwd={lockedWorkspaceCwd}
                 onReleased={(sessionId) => {
                   store.dispatch([
                     {
@@ -5843,6 +5928,7 @@ export function App({
                 className={[
                   styles.mobileDrawer,
                   mobileDrawerOpen ? styles.mobileDrawerOpen : undefined,
+                  forceMobileDrawer ? styles.mobileDrawerForced : undefined,
                 ]
                   .filter(Boolean)
                   .join(' ')}
@@ -5862,6 +5948,10 @@ export function App({
                   onOpenSettings={() => {
                     closeMobileDrawer();
                     openPanel('settings');
+                  }}
+                  onOpenPlugins={() => {
+                    closeMobileDrawer();
+                    openPanel('plugins');
                   }}
                   onOpenDaemonStatus={() => {
                     closeMobileDrawer();
@@ -5891,18 +5981,25 @@ export function App({
                     );
                   }}
                   onNewSession={(workspaceCwd) => {
-                    setMainView('chat');
                     return createNewSession(workspaceCwd);
                   }}
                   onLoadSession={(sessionId, workspaceCwd) => {
                     setMainView('chat');
                     return loadSidebarSession(sessionId, workspaceCwd);
                   }}
+                  onSelectCurrentSession={() => {
+                    closeMobileDrawer();
+                    setMainView('chat');
+                    closePanel();
+                  }}
                   onError={reportError}
                   mobileOpen={mobileDrawerOpen}
                   sessionListReloadToken={sessionListReloadToken}
                   selectedWorkspaceCwd={selectedWorkspaceCwd}
                   onSelectWorkspace={setSelectedWorkspaceCwd}
+                  workspaces={workspaces}
+                  lockedWorkspaceCwd={lockedWorkspaceCwd}
+                  lockedWorkspace={sidebarOptions.lockedWorkspace}
                   branding={sidebarOptions.branding}
                   footer={sidebarOptions.footer}
                 />
@@ -5935,6 +6032,7 @@ export function App({
                       .filter(Boolean)
                       .join(' ')}
                     onClick={() => {
+                      setForceMobileDrawer(false);
                       setMobileDrawerOpen((open) => !open);
                     }}
                     aria-label={t('sidebar.toggleMenu')}
@@ -5965,10 +6063,19 @@ export function App({
                       ? t('settings.title')
                       : activePanel === 'status'
                         ? t('daemon.title')
-                        : t('sessionsOverview.title')
+                        : activePanel === 'extensions'
+                          ? t('extensions.manage.title')
+                          : activePanel === 'mcp'
+                            ? t('mcp.title')
+                            : activePanel === 'plugins'
+                              ? t('plugins.title')
+                              : t('sessionsOverview.title')
                   }
                 >
-                  <div className={styles.panelHeader}>
+                  {activePanel !== 'extensions' &&
+                    activePanel !== 'mcp' &&
+                    activePanel !== 'plugins' && (
+                    <div className={styles.panelHeader}>
                     <button
                       ref={panelBackRef}
                       type="button"
@@ -5996,7 +6103,8 @@ export function App({
                           ? t('daemon.title')
                           : t('sessionsOverview.title')}
                     </div>
-                  </div>
+                    </div>
+                  )}
                   <div className={styles.panelBody} key={activePanel}>
                     {activePanel === 'settings' ? (
                       <SettingsMessage
@@ -6067,10 +6175,39 @@ export function App({
                       />
                     ) : activePanel === 'status' ? (
                       <DaemonStatusDialog />
+                    ) : activePanel === 'extensions' ? (
+                      <ExtensionsManagerPage
+                        onClose={closePanel}
+                        initialFocusRef={panelHeadingRef}
+                      />
+                    ) : activePanel === 'mcp' && mcpDialogMessage ? (
+                      <McpManagerPage
+                        message={mcpDialogMessage}
+                        onClose={() => {
+                          setMcpDialogMessage(null);
+                          closePanel();
+                        }}
+                      />
+                    ) : activePanel === 'plugins' ? (
+                      <PluginManagerPage
+                        mcpMessage={mcpDialogMessage}
+                        loadMcpMessage={async () => {
+                          try {
+                            await loadMcpManagerMessage();
+                          } catch (error) {
+                            reportError(error, 'Failed to load MCP status');
+                            throw error;
+                          }
+                        }}
+                        onClose={closePanel}
+                        initialFocusRef={pluginTabRef}
+                      />
                     ) : (
                       <SessionOverviewPanel
                         onOpenSession={handleOpenSessionFromOverview}
                         onOpenSplit={openSplitView}
+                        includeOtherWorkspaces={!lockedWorkspaceCwd}
+                        workspaceCwd={lockedWorkspaceCwd}
                       />
                     )}
                   </div>
@@ -6113,7 +6250,12 @@ export function App({
                       // Registered workspaces (multi-workspace daemons only) so
                       // the page aggregates every project's schedule and the New
                       // form can target one; absent/single → primary-only view.
-                      workspaces={connection.capabilities?.workspaces}
+                      workspaces={
+                        lockedWorkspaceCwd
+                          ? visibleWorkspaces
+                          : workspaces
+                      }
+                      lockedWorkspace={lockedWorkspaceCapability}
                       onCreateViaChat={() => {
                         // Start a FRESH session and jump to it so the task-
                         // creation chat doesn't pile onto the current
@@ -6121,7 +6263,6 @@ export function App({
                         // describe the task in natural language; the agent
                         // creates it via its cron_create tool. Focus is deferred
                         // so the new session's composer is mounted/visible first.
-                        setMainView('chat');
                         void createNewSession().then((created) => {
                           // If the new session couldn't be started,
                           // createNewSession already surfaced the error — do NOT
@@ -6187,6 +6328,8 @@ export function App({
                         // Refresh the "add pane" picker when the session list
                         // changes elsewhere, matching the sidebar.
                         sessionListReloadToken={sessionListReloadToken}
+                        includeOtherWorkspaces={!lockedWorkspaceCwd}
+                        workspaceCwd={lockedWorkspaceCwd}
                         // Back returns to the Session Overview (the hub the split
                         // is launched from), not the single-session chat.
                         onExit={handleSplitExit}
@@ -6267,67 +6410,74 @@ export function App({
                               .join(' ');
 
                             const messageList = (
-                            <MessageList
-                              ref={messageListRef}
-                              messages={displayMessages}
-                              pendingApproval={pendingToolApproval}
-                              onShowContextDetail={handleShowContextDetail}
-                              loadingTranscript={connection.loadingTranscript}
-                              catchingUp={connection.catchingUp}
-                              isResponding={streamingState !== 'idle'}
-                              activeTurnStartedAt={activeTurnStartedAt}
-                              workspaceCwd={connection.workspaceCwd || ''}
-                              hideSessionTimeline={
-                                effectiveChatWidthMode === 'wide'
-                              }
-                              showRetryHint={showRetryHint}
-                              onRetryClick={handleRetry}
-                              onBranchSession={handleBranchCurrentSession}
-                              bottomOverlayInset={bottomPanelInset}
-                              welcomeHeader={
-                                isChatEmptyState ? welcomeHeader : undefined
-                              }
-                              centerWelcomeHeader={
-                                showMobileWelcomeFooterMiddle || undefined
-                              }
-                              tailContent={undefined}
-                              tailKey={undefined}
-                              onCanScrollToBottomChange={
-                                handleCanScrollToBottomChange
-                              }
-                              virtualScrollThreshold={virtualScrollThreshold}
-                              turnFileChanges={
-                                visibleTurnOutputKinds.has('file')
-                                  ? fileChangesByTurn
-                                  : undefined
-                              }
-                              turnArtifacts={
-                                visibleTurnOutputKinds.has('artifact')
-                                  ? artifactsByTurn
-                                  : undefined
-                              }
-                              turnScheduledTasks={
-                                visibleTurnOutputKinds.has('scheduled_task')
-                                  ? scheduledTasksByTurn
-                                  : undefined
-                              }
-                              onTurnOutputOpen={handleTurnOutputOpen}
-                              onReviewChanges={openReviewPanel}
-                              onOpenArtifact={openArtifactPanel}
-                              onOpenScheduledTask={openScheduledTaskPanel}
-                            />
+                              <MessageList
+                                ref={messageListRef}
+                                messages={displayMessages}
+                                pendingApproval={pendingToolApproval}
+                                onShowContextDetail={handleShowContextDetail}
+                                loadingTranscript={connection.loadingTranscript}
+                                catchingUp={connection.catchingUp}
+                                isResponding={streamingState !== 'idle'}
+                                activeTurnStartedAt={activeTurnStartedAt}
+                                workspaceCwd={connection.workspaceCwd || ''}
+                                hideSessionTimeline={
+                                  effectiveChatWidthMode === 'wide'
+                                }
+                                showRetryHint={showRetryHint}
+                                onRetryClick={handleRetry}
+                                onBranchSession={handleBranchCurrentSession}
+                                bottomOverlayInset={bottomPanelInset}
+                                welcomeHeader={
+                                  isChatEmptyState ? welcomeHeader : undefined
+                                }
+                                centerWelcomeHeader={
+                                  showMobileWelcomeFooterMiddle || undefined
+                                }
+                                tailContent={undefined}
+                                tailKey={undefined}
+                                onCanScrollToBottomChange={
+                                  handleCanScrollToBottomChange
+                                }
+                                virtualScrollThreshold={virtualScrollThreshold}
+                                turnFileChanges={
+                                  visibleTurnOutputKinds.has('file')
+                                    ? fileChangesByTurn
+                                    : undefined
+                                }
+                                turnArtifacts={
+                                  visibleTurnOutputKinds.has('artifact')
+                                    ? artifactsByTurn
+                                    : undefined
+                                }
+                                turnScheduledTasks={
+                                  visibleTurnOutputKinds.has('scheduled_task')
+                                    ? scheduledTasksByTurn
+                                    : undefined
+                                }
+                                onTurnOutputOpen={handleTurnOutputOpen}
+                                onReviewChanges={openReviewPanel}
+                                onOpenArtifact={openArtifactPanel}
+                                onOpenScheduledTask={openScheduledTaskPanel}
+                                generateContent={
+                                  connection.capabilities?.features.includes(
+                                    'session_generation',
+                                  )
+                                    ? sessionActions.generateSessionContent
+                                    : undefined
+                                }
+                              />
                             );
 
                             const btwPanel =
                               !showMobileWelcomeFooterMiddle &&
                               btwMessage?.role === 'btw' ? (
-                              <div className={styles.btwPanel}>
-                                <BtwMessage
-                                  question={btwMessage.question}
-                                  answer={btwMessage.answer}
-                                  isPending={btwMessage.isPending}
-                                />
-                              </div>
+                                <div className={styles.btwPanel}>
+                                  <BtwMessage
+                                    question={btwMessage.question}
+                                    answer={btwMessage.answer}
+                                    isPending={btwMessage.isPending}
+                                  />
+                                </div>
                               ) : null;
 
                             if (showMobileWelcomeFooterMiddle) {
@@ -6505,7 +6655,7 @@ export function App({
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
                           workspaces={
-                            workspaces.length > 1
+                            !lockedWorkspaceCwd && workspaces.length > 1
                               ? workspaces.map((entry) => ({
                                     id: entry.id,
                                     cwd: entry.cwd,
@@ -6532,10 +6682,11 @@ export function App({
                             connection.sessionId,
                           )}
                           atWorkspaceCwd={
-                            connection.sessionId
+                            lockedWorkspaceCwd ??
+                            (connection.sessionId
                               ? connection.workspaceCwd
                               : (selectedWorkspaceCwd ??
-                                workspaces.find((entry) => entry.primary)?.cwd)
+                                workspaces.find((entry) => entry.primary)?.cwd))
                           }
                           onSelectWorkspace={(cwd) => {
                             selectedWorkspaceCwdRef.current = cwd;

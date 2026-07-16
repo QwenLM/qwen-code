@@ -23,9 +23,9 @@ pub fn workspace_root() -> PathBuf {
 /// copy-pasted across the test files.
 pub fn driver_binary() -> PathBuf {
     let name = if cfg!(target_os = "windows") {
-        "cua-driver.exe"
+        "qwen-cua-driver.exe"
     } else {
-        "cua-driver"
+        "qwen-cua-driver"
     };
     let root = workspace_root();
     let release = root.join("target/release").join(name);

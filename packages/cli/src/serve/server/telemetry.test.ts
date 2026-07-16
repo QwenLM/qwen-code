@@ -140,6 +140,53 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     );
   });
 
+  it('attributes workspace exports to the target workspace and session', () => {
+    const mw = daemonTelemetryMiddleware(() => '/workspace/secondary');
+    const res = mockRes(200);
+
+    mw(
+      mockReq('GET', '/workspaces/ws-secondary/session/session%2F1/export'),
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+    res.emit('finish');
+
+    expect(coreMocks.withDaemonRequestSpan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'GET',
+        route: 'GET /workspaces/:workspace/session/:id/export',
+        sessionId: 'session/1',
+        workspaceHash: 'hash:/workspace/secondary',
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('attributes archived workspace exports to the target workspace and session', () => {
+    const mw = daemonTelemetryMiddleware(() => '/workspace/secondary');
+    const res = mockRes(200);
+
+    mw(
+      mockReq(
+        'GET',
+        '/workspaces/ws-secondary/session/session%2F1/archive/export',
+      ),
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+    res.emit('finish');
+
+    expect(coreMocks.withDaemonRequestSpan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'GET',
+        route: 'GET /workspaces/:workspace/session/:id/archive/export',
+        sessionId: 'session/1',
+        workspaceHash: 'hash:/workspace/secondary',
+      }),
+      expect.any(Function),
+    );
+  });
+
   it('attributes singular rewind and shell routes to the live session owner', () => {
     const resolveSessionWorkspaceCwd = vi.fn(() => '/workspace/secondary');
     const mw = daemonTelemetryMiddleware(
@@ -253,6 +300,32 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
       res.emit('finish');
       expect(coreMocks.withDaemonRequestSpan).toHaveBeenLastCalledWith(
         expect.objectContaining({ method, route }),
+        expect.any(Function),
+      );
+    }
+  });
+
+  it('attributes plural workspace voice requests to the selected workspace', () => {
+    const mw = daemonTelemetryMiddleware(() => '/workspace/secondary');
+    for (const [method, path, route] of [
+      ['GET', '/workspaces/ws-secondary/voice', 'GET /workspace/voice'],
+      ['POST', '/workspaces/ws-secondary/voice', 'POST /workspace/voice'],
+      [
+        'POST',
+        '/workspaces/ws-secondary/voice/transcribe',
+        'POST /workspace/voice/transcribe',
+      ],
+    ] as const) {
+      const res = mockRes(200);
+      mw(mockReq(method, path), res, vi.fn() as unknown as NextFunction);
+      res.emit('finish');
+
+      expect(coreMocks.withDaemonRequestSpan).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          method,
+          route,
+          workspaceHash: 'hash:/workspace/secondary',
+        }),
         expect.any(Function),
       );
     }

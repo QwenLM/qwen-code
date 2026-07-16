@@ -37,6 +37,7 @@ import {
   SessionBusyError,
   SessionConflictError,
   SessionLimitExceededError,
+  SessionNotArchivedError,
   SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
@@ -49,6 +50,10 @@ import {
   TotalSessionLimitExceededError,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
+import {
+  WorkspaceSkillNotFoundError,
+  WorkspaceSkillNotToggleableError,
+} from '../workspace-service/types.js';
 
 export type BridgeErrorContext = {
   route?: string;
@@ -153,6 +158,24 @@ export function sendBridgeError(
   ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
+  if (err instanceof WorkspaceSkillNotFoundError) {
+    res.status(404).json({
+      error: err.message,
+      code: 'skill_not_found',
+      skillName: err.skillName,
+    });
+    return;
+  }
+  if (err instanceof WorkspaceSkillNotToggleableError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'skill_not_toggleable',
+      skillName: err.skillName,
+      reason: err.reason,
+      ...(err.lockedScope ? { lockedScope: err.lockedScope } : {}),
+    });
+    return;
+  }
   if (err instanceof InvalidSessionTranscriptCursorError) {
     res.status(400).json({
       error: err.message,
@@ -300,6 +323,14 @@ export function sendBridgeError(
     res.status(409).json({
       error: err.message,
       code: 'session_archived',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof SessionNotArchivedError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'session_not_archived',
       sessionId: err.sessionId,
     });
     return;

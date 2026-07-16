@@ -25,6 +25,7 @@ import {
   type SessionArchiveState,
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
+import { parseSessionSource } from '@qwen-code/acp-bridge';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
@@ -60,6 +61,7 @@ import {
 } from '../server/session-list.js';
 import {
   archiveDaemonSessions,
+  assertSessionArchived,
   assertSessionLoadable,
   deleteDaemonSessions,
   logSessionArchiveWarning,
@@ -73,6 +75,7 @@ import {
 } from '../server/session-export.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
+import { GENERATION_MAX_PROMPT_BYTES } from '../../acp-integration/generation.js';
 import { requireSessionRuntime } from './session-runtime.js';
 import {
   resolveWorkspaceRuntimeFromParam,
@@ -101,6 +104,51 @@ const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
 const WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES = 64 * 1024;
 const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
   'Transcript pagination state exceeds the safe limit';
+const GENERATION_HEARTBEAT_MS = 15_000;
+
+function formatGenerationSse(
+  event: string,
+  data: Record<string, unknown>,
+): string {
+  return `event: ${event}\ndata: ${JSON.stringify({ v: 1, ...data })}\n\n`;
+}
+
+function writeGenerationSseChunk(res: Response, chunk: string): Promise<void> {
+  if (res.destroyed) {
+    return Promise.reject(new Error('Generation SSE connection destroyed'));
+  }
+  const writable = res.write(chunk);
+  const flush = (res as Response & { flush?: () => void }).flush;
+  flush?.call(res);
+  if (writable) {
+    return res.destroyed
+      ? Promise.reject(new Error('Generation SSE connection destroyed'))
+      : Promise.resolve();
+  }
+  return new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      res.off('drain', onDrain);
+      res.off('close', onClose);
+      res.off('error', onError);
+    };
+    const onDrain = () => {
+      cleanup();
+      resolve();
+    };
+    const onClose = () => {
+      cleanup();
+      reject(new Error('Generation SSE connection closed'));
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    res.once('drain', onDrain);
+    res.once('close', onClose);
+    res.once('error', onError);
+    if (res.destroyed) onClose();
+  });
+}
 
 function isReadOnlyWorkspaceInspection(runtime: WorkspaceRuntime): boolean {
   return !runtime.primary && !runtime.trusted;
@@ -511,6 +559,74 @@ export function registerSessionRoutes(
       return null;
     }
     return runtime;
+  };
+
+  const handleSessionExport = async (
+    req: Request,
+    res: Response,
+    target: {
+      route: string;
+      workspaceCwd: string;
+      workspaceQualified?: boolean;
+      archiveState?: SessionArchiveState;
+    },
+  ): Promise<void> => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const rawFormat = req.query['format'];
+    const format = parseSessionExportFormat(rawFormat);
+    if (!format) {
+      res.status(400).json({
+        error: 'Invalid export format',
+        code: 'invalid_export_format',
+        format: typeof rawFormat === 'string' ? rawFormat : String(rawFormat),
+        allowedFormats: sessionExportFormatValues(),
+      });
+      return;
+    }
+    try {
+      const result = await archiveCoordinator.runSharedMany(
+        [sessionId],
+        async () => {
+          if (target.archiveState === 'archived') {
+            await assertSessionArchived(target.workspaceCwd, sessionId);
+          } else {
+            await assertSessionLoadable(target.workspaceCwd, sessionId);
+          }
+          return exportSessionTranscript({
+            workspaceCwd: target.workspaceCwd,
+            sessionId,
+            format,
+            archiveState: target.archiveState,
+            config: { getChannel: () => 'daemon' },
+          });
+        },
+      );
+      const filename = result.filename.replace(/["\\\r\n]/g, '_');
+      res
+        .status(200)
+        .set('Cache-Control', 'no-store')
+        .set('X-Content-Type-Options', 'nosniff')
+        .set('Content-Type', result.mimeType)
+        .set('Content-Disposition', `attachment; filename="${filename}"`)
+        .send(result.content);
+    } catch (err) {
+      if (target.workspaceQualified && err instanceof SessionNotFoundError) {
+        res.status(404).json({
+          error: err.message,
+          code: 'session_not_found',
+          sessionId: err.sessionId,
+        });
+        return;
+      }
+      sendBridgeError(res, err, {
+        route: target.route,
+        sessionId,
+        ...(target.workspaceQualified
+          ? { workspaceCwd: target.workspaceCwd }
+          : {}),
+      });
+    }
   };
 
   const sendAmbiguousSessionOwner = (
@@ -994,6 +1110,14 @@ export function registerSessionRoutes(
     }
     const approvalMode = parseOptionalApprovalMode(body, res);
     if (approvalMode === null) return;
+    const source = parseSessionSource(body['sourceType'], body['sourceId']);
+    if ('error' in source) {
+      res.status(400).json({
+        error: source.error,
+        code: 'invalid_session_source',
+      });
+      return;
+    }
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     try {
@@ -1003,6 +1127,10 @@ export function registerSessionRoutes(
         ...(clientId !== undefined ? { clientId } : {}),
         ...(sessionScope !== undefined ? { sessionScope } : {}),
         ...(approvalMode !== undefined ? { approvalMode } : {}),
+        ...(source.sourceType !== undefined
+          ? { sourceType: source.sourceType }
+          : {}),
+        ...(source.sourceId !== undefined ? { sourceId: source.sourceId } : {}),
       });
       // Client may have disconnected during the 1–3s spawn window. If
       // so, the response can't be delivered. The session is otherwise
@@ -1049,11 +1177,18 @@ export function registerSessionRoutes(
           // dispatching, the bridge will see `attachCount > 0` and
           // skip the kill. Without the flag, that second client's
           // session would die mid-prompt.
-          runtime.bridge
-            .killSession(session.sessionId, { requireZeroAttaches: true })
-            .catch(() => {
-              // Best-effort cleanup; channel.exited will eventually reap.
+          try {
+            const killed = await runtime.bridge.killSession(session.sessionId, {
+              requireZeroAttaches: true,
             });
+            if (killed) {
+              await new SessionService(runtime.workspaceCwd).removeSession(
+                session.sessionId,
+              );
+            }
+          } catch {
+            // Best-effort cleanup; channel.exited will eventually reap.
+          }
         } else {
           // When an attaching client disconnects
           // before its 200 response can be written, the
@@ -1125,9 +1260,9 @@ export function registerSessionRoutes(
             // Recover the persisted parent lineage so the restored live entry
             // reports it (the bridge otherwise creates the entry without it, and
             // status calls would show a restored sub-session as top-level).
-            const parentSessionId = await new SessionService(
+            const metadata = await new SessionService(
               workspaceCwd,
-            ).readParentSessionId(sessionId);
+            ).readCreationMetadata(sessionId);
             return action === 'load'
               ? await runtime.bridge.loadSession({
                   sessionId,
@@ -1135,14 +1270,14 @@ export function registerSessionRoutes(
                   historyReplay: 'response',
                   ...(clientId !== undefined ? { clientId } : {}),
                   ...(approvalMode !== undefined ? { approvalMode } : {}),
-                  ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+                  ...metadata,
                 })
               : await runtime.bridge.resumeSession({
                   sessionId,
                   workspaceCwd,
                   ...(clientId !== undefined ? { clientId } : {}),
                   ...(approvalMode !== undefined ? { approvalMode } : {}),
-                  ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+                  ...metadata,
                 });
           },
         );
@@ -1307,47 +1442,37 @@ export function registerSessionRoutes(
   });
 
   app.get('/session/:id/export', async (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    const rawFormat = req.query['format'];
-    const format = parseSessionExportFormat(rawFormat);
-    if (!format) {
-      res.status(400).json({
-        error: 'Invalid export format',
-        code: 'invalid_export_format',
-        format: typeof rawFormat === 'string' ? rawFormat : String(rawFormat),
-        allowedFormats: sessionExportFormatValues(),
-      });
-      return;
-    }
-    try {
-      const result = await archiveCoordinator.runSharedMany(
-        [sessionId],
-        async () => {
-          await assertSessionLoadable(boundWorkspace, sessionId);
-          return exportSessionTranscript({
-            workspaceCwd: boundWorkspace,
-            sessionId,
-            format,
-            config: { getChannel: () => 'daemon' },
-          });
-        },
-      );
-      const filename = result.filename.replace(/["\\\r\n]/g, '_');
-      res
-        .status(200)
-        .set('Cache-Control', 'no-store')
-        .set('X-Content-Type-Options', 'nosniff')
-        .set('Content-Type', result.mimeType)
-        .set('Content-Disposition', `attachment; filename="${filename}"`)
-        .send(result.content);
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'GET /session/:id/export',
-        sessionId,
-      });
-    }
+    await handleSessionExport(req, res, {
+      route: 'GET /session/:id/export',
+      workspaceCwd: boundWorkspace,
+    });
   });
+
+  app.get('/workspaces/:workspace/session/:id/export', async (req, res) => {
+    const route = 'GET /workspaces/:workspace/session/:id/export';
+    const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+    if (!runtime) return;
+    await handleSessionExport(req, res, {
+      route,
+      workspaceCwd: runtime.workspaceCwd,
+      workspaceQualified: true,
+    });
+  });
+
+  app.get(
+    '/workspaces/:workspace/session/:id/archive/export',
+    async (req, res) => {
+      const route = 'GET /workspaces/:workspace/session/:id/archive/export';
+      const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+      if (!runtime) return;
+      await handleSessionExport(req, res, {
+        route,
+        workspaceCwd: runtime.workspaceCwd,
+        workspaceQualified: true,
+        archiveState: 'archived',
+      });
+    },
+  );
 
   app.get('/session/:id/transcript', async (req, res) => {
     const route = 'GET /session/:id/transcript';
@@ -1613,9 +1738,9 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/artifacts',
     mutate({ strict: true }),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/artifacts',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         if (!requireSessionArtifactClientId(clientId, res)) return;
@@ -1641,9 +1766,11 @@ export function registerSessionRoutes(
               'clientRetained'
             ] as SessionArtifactInput['clientRetained'],
           };
-          const result = await bridge.addSessionArtifact(sessionId, artifact, {
-            clientId,
-          });
+          const result = await runtime.bridge.addSessionArtifact(
+            sessionId,
+            artifact,
+            { clientId },
+          );
           res.status(200).json(result);
         } catch (err) {
           if (sendArtifactValidationError(res, err)) return;
@@ -1659,9 +1786,9 @@ export function registerSessionRoutes(
   app.delete(
     '/session/:id/artifacts/:artifactId',
     mutate({ strict: true }),
-    withMutableSession(
+    withOwnerMutableSession(
       'DELETE /session/:id/artifacts/:artifactId',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const artifactId = req.params['artifactId'];
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
@@ -1678,7 +1805,7 @@ export function registerSessionRoutes(
           return;
         }
         try {
-          const result = await bridge.removeSessionArtifact(
+          const result = await runtime.bridge.removeSessionArtifact(
             sessionId,
             artifactId,
             { clientId },
@@ -1739,9 +1866,9 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/continue',
     mutate({ strict: true }),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/continue',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         // Forward the originator and a generated promptId so the bridge can
         // attribute and correlate the continuation turn (it now runs through the
         // prompt-admission path, same as POST /session/:id/prompt). The accepted
@@ -1750,7 +1877,7 @@ export function registerSessionRoutes(
         if (clientId === null) return;
         const promptId = crypto.randomUUID();
         res.status(200).json(
-          await bridge.continueSession(sessionId, {
+          await runtime.bridge.continueSession(sessionId, {
             ...(clientId !== undefined ? { clientId } : {}),
             promptId,
           }),
@@ -1911,6 +2038,98 @@ export function registerSessionRoutes(
           daemonLog.info('prompt enqueued', { sessionId, promptId, clientId });
         }
         res.status(202).json({ promptId, lastEventId });
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/generate',
+    mutate(),
+    withOwnerReadSession(
+      'POST /session/:id/generate',
+      async (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        const prompt = body['prompt'];
+        if (
+          typeof prompt !== 'string' ||
+          prompt.trim().length === 0 ||
+          Buffer.byteLength(prompt, 'utf8') > GENERATION_MAX_PROMPT_BYTES
+        ) {
+          res.status(400).json({
+            error: `\`prompt\` must be a non-empty string no larger than ${GENERATION_MAX_PROMPT_BYTES} UTF-8 bytes`,
+            code: 'invalid_prompt',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        if (!runtime.bridge.generateSessionContent) {
+          res.status(501).json({
+            error: 'Stateless generation is not supported by this bridge',
+            code: 'generation_not_supported',
+          });
+          return;
+        }
+
+        const abort = new AbortController();
+        let completed = false;
+        const onClose = () => {
+          if (!completed) abort.abort();
+        };
+        res.once('close', onClose);
+
+        const stream = runtime.bridge.generateSessionContent(
+          sessionId,
+          prompt,
+          abort.signal,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+
+        res.status(200);
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders();
+
+        let writeChain = Promise.resolve();
+        const write = (chunk: string): Promise<void> => {
+          writeChain = writeChain.then(() =>
+            writeGenerationSseChunk(res, chunk),
+          );
+          return writeChain;
+        };
+        await write(': connected\n\n');
+        const heartbeat = setInterval(() => {
+          void write(': heartbeat\n\n').catch(() => abort.abort());
+        }, GENERATION_HEARTBEAT_MS);
+        heartbeat.unref();
+
+        try {
+          for await (const event of stream) {
+            await write(formatGenerationSse(event.type, event));
+          }
+        } catch (err) {
+          if (!abort.signal.aborted && !res.destroyed) {
+            daemonLog?.error(
+              'session generation failed',
+              err instanceof Error ? err : new Error(String(err)),
+              { sessionId, clientId },
+            );
+            await write(
+              formatGenerationSse('error', {
+                type: 'error',
+                code: 'generation_failed',
+                message: 'Generation failed',
+              }),
+            ).catch(() => undefined);
+          }
+        } finally {
+          completed = true;
+          clearInterval(heartbeat);
+          res.off('close', onClose);
+          if (!res.destroyed) res.end();
+        }
       },
     ),
   );
@@ -2579,6 +2798,24 @@ export function registerSessionRoutes(
           }
           parentSessionId = rawParentSessionId;
         }
+        const parsedSource = parseSessionSource(
+          req.query['sourceType'],
+          req.query['sourceId'],
+        );
+        if ('error' in parsedSource) {
+          res.status(400).json({
+            error: parsedSource.error,
+            code: 'invalid_session_source',
+          });
+          return;
+        }
+        if (parsedSource.sourceType !== undefined && view === 'organized') {
+          res.status(400).json({
+            error: '`sourceType` is not supported with `view=organized`',
+            code: 'invalid_session_source_filter',
+          });
+          return;
+        }
         const options = {
           ...(cursor !== undefined ? { cursor } : {}),
           ...(size !== undefined ? { size } : {}),
@@ -2586,11 +2823,12 @@ export function registerSessionRoutes(
           ...(view !== undefined ? { view } : {}),
           ...(group !== undefined ? { group } : {}),
           ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+          ...parsedSource,
         };
         // Organized/archived views always need the persisted store: organized
         // cursors are opaque (non-numeric) and archived-only workspaces have no
         // active persisted sessions, so the live-only fallback would drop them.
-        // A parentSessionId filter joins them: it gathers the whole workspace
+        // Metadata filters gather the whole workspace
         // (persisted + live) to filter completely and paginates with an opaque
         // activity cursor, so the numeric-cursor live fallback can't serve it.
         const usePersisted =
@@ -2599,6 +2837,7 @@ export function registerSessionRoutes(
           view === 'organized' ||
           archiveState === 'archived' ||
           parentSessionId !== undefined ||
+          parsedSource.sourceType !== undefined ||
           (cursor !== undefined && cursor !== ''
             ? isNumericSessionCursor(cursor)
             : await hasActivePersistedSessions(key));
@@ -2608,7 +2847,10 @@ export function registerSessionRoutes(
         // a future option added to validation but not to that gate fails loudly.
         if (
           !usePersisted &&
-          (view !== undefined || archiveState === 'archived')
+          (view !== undefined ||
+            archiveState === 'archived' ||
+            parentSessionId !== undefined ||
+            parsedSource.sourceType !== undefined)
         ) {
           throw new Error(
             'session list live path received persisted-only options',
@@ -3068,9 +3310,9 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/language',
     mutate(),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/language',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         const language = body['language'];
         const syncOutputLanguage = body['syncOutputLanguage'];
@@ -3103,7 +3345,7 @@ export function registerSessionRoutes(
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
 
-        const response = await bridge.setSessionLanguage(
+        const response = await runtime.bridge.setSessionLanguage(
           sessionId,
           {
             language,

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { DaemonClient } from '@qwen-code/sdk/daemon';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createDaemonWorkspaceActions } from './actions.js';
 
@@ -108,5 +109,76 @@ describe('workspace actions', () => {
       actions.removeWorkspace('secondary', { timeoutMs: 0 }),
     ).resolves.toEqual(removal);
     expect(remove).toHaveBeenCalledWith({ timeoutMs: 0 });
+  });
+
+  it('loads active extension operations from the daemon client', async () => {
+    const activeExtensionOperations = vi
+      .fn()
+      .mockResolvedValue({ v: 1, operations: [] });
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({ activeExtensionOperations }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/workspace',
+      baseUrl: 'http://daemon',
+    });
+
+    await expect(actions.activeExtensionOperations()).resolves.toEqual({
+      v: 1,
+      operations: [],
+    });
+    expect(activeExtensionOperations).toHaveBeenCalledOnce();
+  });
+
+  it('reloads MCP settings through the daemon client', async () => {
+    const reloadWorkspaceMcp = vi.fn().mockResolvedValue({ accepted: true });
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ reloadWorkspaceMcp }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/workspace',
+      baseUrl: 'http://daemon',
+    });
+
+    await expect(actions.reloadMcp()).resolves.toEqual({ accepted: true });
+    expect(reloadWorkspaceMcp).toHaveBeenCalledOnce();
+  });
+
+  it('forwards an extension interaction response to the daemon client', async () => {
+    const respondToExtensionInteraction = vi
+      .fn()
+      .mockResolvedValue({ accepted: true });
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({ respondToExtensionInteraction }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/workspace',
+      baseUrl: 'http://daemon',
+    });
+
+    await expect(
+      actions.respondToExtensionInteraction(
+        'op-1',
+        'interaction-1',
+        { value: 'answer' },
+        'client-1',
+      ),
+    ).resolves.toEqual({ accepted: true });
+    expect(respondToExtensionInteraction).toHaveBeenCalledWith(
+      'op-1',
+      'interaction-1',
+      { value: 'answer' },
+      'client-1',
+    );
+  });
+
+  it('rejects when no daemon client is connected', async () => {
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => undefined,
+      getWorkspaceCwd: () => '/workspace',
+      baseUrl: 'http://daemon',
+    });
+
+    await expect(
+      actions.respondToExtensionInteraction('op-1', 'interaction-1', {
+        cancelled: true,
+      }),
+    ).rejects.toThrow('Respond to extension interaction failed');
   });
 });

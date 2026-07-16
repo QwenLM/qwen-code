@@ -162,6 +162,151 @@ describe('ToolCallEmitter', () => {
     });
   });
 
+  describe('tool preparation lifecycle', () => {
+    it('emits a preparing tool call without partial input', async () => {
+      await emitter.emitStart({
+        callId: 'call-1',
+        toolName: 'read_file',
+        args: {},
+        status: 'pending',
+        phase: 'preparing',
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call',
+          toolCallId: 'call-1',
+          status: 'pending',
+          rawInput: {},
+          _meta: expect.objectContaining({
+            toolName: 'read_file',
+            phase: 'preparing',
+          }),
+        }),
+      );
+    });
+
+    it('suppresses duplicate preparing frames for the same call ID', async () => {
+      const params = {
+        callId: 'call-1',
+        toolName: 'read_file',
+        args: {},
+        status: 'pending' as const,
+        phase: 'preparing' as const,
+      };
+
+      const first = await emitter.emitStart(params);
+      const duplicate = await emitter.emitStart(params);
+
+      expect(first).toBe(true);
+      expect(duplicate).toBe(false);
+      expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('updates the prepared tool call when execution starts', async () => {
+      await emitter.emitStart({
+        callId: 'call-1',
+        toolName: 'read_file',
+        args: {},
+        status: 'pending',
+        phase: 'preparing',
+      });
+      await emitter.emitStart({
+        callId: 'call-1',
+        toolName: 'read_file',
+        args: { file_path: 'README.md' },
+        status: 'in_progress',
+      });
+
+      expect(sendUpdateSpy.mock.calls.map(([update]) => update)).toEqual([
+        expect.objectContaining({
+          sessionUpdate: 'tool_call',
+          toolCallId: 'call-1',
+          _meta: expect.objectContaining({ phase: 'preparing' }),
+        }),
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-1',
+          status: 'in_progress',
+          rawInput: { file_path: 'README.md' },
+        }),
+      ]);
+    });
+
+    it('emits a protocol-valid discarded preparation terminal update', async () => {
+      await emitter.emitPreparationDiscarded(
+        'call-1',
+        'mcp__filesystem__read_file',
+      );
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-1',
+        status: 'failed',
+        content: [],
+        _meta: {
+          toolName: 'mcp__filesystem__read_file',
+          phase: 'preparing',
+          preparationDiscarded: true,
+          provenance: 'mcp',
+          serverId: 'filesystem',
+        },
+      });
+    });
+
+    it.each(['result', 'error'] as const)(
+      'clears prepared state after terminal %s',
+      async (terminal) => {
+        const preparation = {
+          callId: 'call-1',
+          toolName: 'read_file',
+          args: {},
+          status: 'pending' as const,
+          phase: 'preparing' as const,
+        };
+        await emitter.emitStart(preparation);
+
+        if (terminal === 'result') {
+          await emitter.emitResult({
+            callId: 'call-1',
+            toolName: 'read_file',
+            success: true,
+            message: [],
+          });
+        } else {
+          await emitter.emitError('call-1', 'read_file', new Error('failed'));
+        }
+        sendUpdateSpy.mockClear();
+
+        const emitted = await emitter.emitStart(preparation);
+
+        expect(emitted).toBe(true);
+        expect(sendUpdateSpy).toHaveBeenCalledOnce();
+        expect(sendUpdateSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sessionUpdate: 'tool_call',
+            toolCallId: 'call-1',
+            _meta: expect.objectContaining({ phase: 'preparing' }),
+          }),
+        );
+      },
+    );
+
+    it('suppresses preparation lifecycle frames for TodoWrite', async () => {
+      const emitted = await emitter.emitStart({
+        callId: 'call-todo',
+        toolName: ToolNames.TODO_WRITE,
+        args: {},
+        status: 'pending',
+        phase: 'preparing',
+      });
+      await emitter.emitPreparationDiscarded('call-todo', ToolNames.TODO_WRITE);
+
+      expect(emitted).toBe(false);
+      expect(sendUpdateSpy).not.toHaveBeenCalled();
+    });
+  });
+
   describe('emitResult', () => {
     it('should emit tool_call_update with completed status on success', async () => {
       await emitter.emitResult({
@@ -179,6 +324,112 @@ describe('ToolCallEmitter', () => {
           status: 'completed',
           rawOutput: 'Tool completed successfully',
           _meta: { toolName: 'test_tool', provenance: 'builtin' },
+        }),
+      );
+    });
+
+    it('places the vision bridge disclosure in ACP content on success', async () => {
+      const resultDisplay = {
+        type: 'vision_bridge_notice' as const,
+        summary: 'Transcribed PDF pages 20-23; remaining pages 24-25',
+        notice:
+          'Converted 4 images via qwen3-vl-plus (dashscope.aliyuncs.com).',
+      };
+
+      await emitter.emitResult({
+        toolName: 'read_file',
+        callId: 'call-pdf-success',
+        success: true,
+        message: createMockMessage('Page 20: transcribed content'),
+        resultDisplay,
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: 'completed',
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: `${resultDisplay.summary}\n${resultDisplay.notice}`,
+              },
+            },
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: 'Page 20: transcribed content',
+              },
+            },
+          ],
+          rawOutput: resultDisplay,
+        }),
+      );
+    });
+
+    it('sanitizes terminal controls in the ACP vision bridge disclosure', async () => {
+      const resultDisplay = {
+        type: 'vision_bridge_notice' as const,
+        summary: 'Transcribed evil\x1b]52;c;ZXZpbA==\x07\u202E.pdf pages 20-23',
+        notice: 'Converted via qwen3-vl-plus.',
+      };
+
+      await emitter.emitResult({
+        toolName: 'read_file',
+        callId: 'call-pdf-unsafe-name',
+        success: true,
+        message: createMockMessage('Page 20: transcribed content'),
+        resultDisplay,
+      });
+
+      const update = sendUpdateSpy.mock.calls[0][0] as {
+        content: Array<{ content?: { text?: string } }>;
+      };
+      const disclosure = update.content[0].content?.text;
+      expect(disclosure).toContain('evil');
+      expect(disclosure).not.toContain('\x1b');
+      expect(disclosure).not.toContain('\x07');
+      expect(disclosure).not.toContain('\u202e');
+    });
+
+    it('keeps the vision bridge disclosure in ACP content on failure', async () => {
+      const resultDisplay = {
+        type: 'vision_bridge_notice' as const,
+        summary: 'Failed to read PDF after rendering pages 20-23',
+        notice:
+          'Vision bridge (qwen3-vl-plus) failed after sending images to dashscope.aliyuncs.com.',
+      };
+
+      await emitter.emitResult({
+        toolName: 'read_file',
+        callId: 'call-pdf-failure',
+        success: false,
+        message: createMockMessage('Cannot extract text from PDF'),
+        resultDisplay,
+        error: new Error('No extractable text layer.'),
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: 'failed',
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: `${resultDisplay.summary}\n${resultDisplay.notice}`,
+              },
+            },
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: 'No extractable text layer.',
+              },
+            },
+          ],
+          rawOutput: resultDisplay,
         }),
       );
     });

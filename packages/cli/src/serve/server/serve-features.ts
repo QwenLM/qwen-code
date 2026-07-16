@@ -43,6 +43,7 @@ interface CreateServeFeaturesDeps {
   boundWorkspace: string;
   persistSettingAvailable: boolean;
   sessionArtifactsPersistenceAvailable: boolean;
+  sessionGenerationAvailable: () => boolean;
   reloadAvailable: boolean;
   channelReloadAvailable: () => boolean;
   channelControlAvailable: boolean;
@@ -67,6 +68,7 @@ export function createServeFeatures(
     boundWorkspace,
     persistSettingAvailable,
     sessionArtifactsPersistenceAvailable,
+    sessionGenerationAvailable,
     reloadAvailable,
     channelReloadAvailable,
     channelControlAvailable,
@@ -82,7 +84,11 @@ export function createServeFeatures(
   };
   const getCachedVoiceTranscriptionAvailable = () => {
     cachedVoiceTranscriptionAvailable ??=
-      isWorkspaceVoiceTranscriptionAvailable(boundWorkspace);
+      isWorkspaceVoiceTranscriptionAvailable(
+        boundWorkspace,
+        env,
+        deps.env !== undefined,
+      );
     return cachedVoiceTranscriptionAvailable;
   };
 
@@ -104,6 +110,7 @@ export function createServeFeatures(
         persistSettingAvailable,
         sessionShellCommandEnabled,
         sessionArtifactsPersistenceAvailable,
+        sessionGenerationAvailable: sessionGenerationAvailable(),
         rateLimit: opts.rateLimit === true,
         reloadAvailable,
         channelReloadAvailable: channelReloadAvailable(),
@@ -130,10 +137,13 @@ export function createServeFeatures(
 
 function isWorkspaceVoiceTranscriptionAvailable(
   boundWorkspace: string,
+  env: Readonly<Record<string, string | undefined>>,
+  skipLoadEnvironment: boolean,
 ): boolean {
   try {
     return hasConfiguredBatchVoiceTranscriptionModel(
-      loadSettings(boundWorkspace),
+      loadSettings(boundWorkspace, { skipLoadEnvironment }),
+      { env },
     );
   } catch (err) {
     writeStderrLine(
