@@ -307,6 +307,138 @@ export async function fetchGitDiffHunks(
 }
 
 /**
+ * Fetch structured hunks for a single file (working tree vs HEAD). Cheaper than
+ * `fetchGitDiffHunks`, which diffs the whole tree — this is for on-demand
+ * rendering of one file in the diff viewer.
+ *
+ * `filePath` may be a repo-root-relative path or an absolute path inside the
+ * repo (the daemon passes the workspace-sandboxed absolute path). Relative
+ * inputs reject absolute prefixes, drive letters, and `..` traversal; absolute
+ * inputs are rejected when they fall outside the git root. Both forms are
+ * normalized to a git-root-relative path before any git call, so the path can
+ * never escape the repository.
+ *
+ * Untracked files (which `git diff HEAD` omits) are synthesized as a single
+ * all-added hunk by reading the file, so the viewer can show new files like any
+ * other addition. Returns `null` for non-repos, transient states, paths outside
+ * the repo, binary or unreadable untracked files, and tracked files with no
+ * changes.
+ */
+export async function fetchGitDiffHunksForFile(
+  cwd: string,
+  filePath: string,
+): Promise<Hunk[] | null> {
+  const gitRoot = findGitRoot(cwd);
+  if (!gitRoot) return null;
+  const relPath = toRepoRelativePath(gitRoot, filePath);
+  if (relPath === null) return null;
+  if (await isInTransientGitState(gitRoot)) return null;
+
+  const diffOut = await runGit(
+    [
+      '--no-optional-locks',
+      'diff',
+      '--no-ext-diff',
+      '--no-textconv',
+      'HEAD',
+      '--',
+      relPath,
+    ],
+    gitRoot,
+  );
+  if (diffOut == null) return null;
+  const parsed = parseGitDiff(diffOut);
+  // A single-file diff yields at most one entry; return its hunks regardless of
+  // the exact header key (which may carry rename / C-style-quote formatting).
+  if (parsed.size > 0) return parsed.values().next().value ?? [];
+
+  // No tracked diff: synthesize an all-added hunk only for a genuinely
+  // untracked (and not ignored) file, matching the `--exclude-standard` listing
+  // that drives the diff file list. A tracked-but-unchanged or ignored file
+  // yields nothing here and returns null.
+  const untrackedOut = await runGit(
+    ['ls-files', '--others', '--exclude-standard', '--', relPath],
+    gitRoot,
+  );
+  if (untrackedOut && untrackedOut.trim().length > 0) {
+    return synthesizeUntrackedHunk(gitRoot, relPath);
+  }
+  return null;
+}
+
+/**
+ * Normalize a caller-supplied path (relative or absolute) to a git-root-relative
+ * path, or `null` when it escapes the repo. Relative inputs reject absolute
+ * prefixes, drive letters, and `..` segments; absolute inputs are mapped through
+ * `path.relative` and rejected when the result climbs out of the root.
+ */
+function toRepoRelativePath(gitRoot: string, filePath: string): string | null {
+  if (!path.isAbsolute(filePath)) {
+    if (filePath.length === 0) return null;
+    if (filePath.startsWith('/') || filePath.startsWith('\\')) return null;
+    if (/^[A-Za-z]:/.test(filePath)) return null;
+    if (filePath.split(/[\\/]/).some((segment) => segment === '..'))
+      return null;
+    return filePath;
+  }
+  const rel = path.relative(gitRoot, filePath);
+  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  return rel;
+}
+
+/**
+ * Build a single all-added hunk from an untracked file's content, capped by
+ * `MAX_DIFF_SIZE_BYTES` / `MAX_LINES_PER_FILE`. Binary or unreadable files
+ * return `null` so the caller surfaces them without an inline diff.
+ */
+async function synthesizeUntrackedHunk(
+  gitRoot: string,
+  filePath: string,
+): Promise<Hunk[] | null> {
+  let fh;
+  try {
+    fh = await open(path.join(gitRoot, filePath), getUntrackedOpenFlags());
+  } catch {
+    return null;
+  }
+  try {
+    const st = await fh.stat();
+    if (!st.isFile()) return null;
+    const cap = Math.min(st.size, MAX_DIFF_SIZE_BYTES);
+    const buf = Buffer.allocUnsafe(cap);
+    let offset = 0;
+    while (offset < cap) {
+      const { bytesRead } = await fh.read(buf, offset, cap - offset, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    // Binary sniff on the same window git uses (a NUL in the first 8 KB).
+    const sniffEnd = Math.min(offset, BINARY_SNIFF_BYTES);
+    for (let i = 0; i < sniffEnd; i++) {
+      if (buf[i] === 0) return null;
+    }
+    const lines = buf.toString('utf8', 0, offset).split('\n');
+    // Drop the trailing empty element produced by a final newline.
+    if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+    const capped = lines.slice(0, MAX_LINES_PER_FILE);
+    if (capped.length === 0) return [];
+    return [
+      {
+        oldStart: 0,
+        oldLines: 0,
+        newStart: 1,
+        newLines: capped.length,
+        lines: capped.map((line) => '+' + line),
+      },
+    ];
+  } catch {
+    return null;
+  } finally {
+    await fh.close().catch(() => {});
+  }
+}
+
+/**
  * Parse `git diff --numstat -z` output.
  *
  * Wire format (stable per `git-diff(1)`):
@@ -926,5 +1058,239 @@ async function runGit(args: string[], cwd: string): Promise<string | null> {
     return stdout;
   } catch {
     return null;
+  }
+}
+
+/** An in-progress git operation that the status indicator should surface. */
+export type GitOperation =
+  | 'merge'
+  | 'rebase'
+  | 'cherry-pick'
+  | 'revert'
+  | 'bisect';
+
+/**
+ * Working-tree summary for the status line / Web Shell git chip: branch,
+ * detached-HEAD flag, upstream ahead/behind, staged / unstaged / untracked /
+ * conflicted file counts, stash count, and any in-progress operation. A single
+ * `git status --porcelain=v1 --branch -z` call drives everything except stash
+ * and the operation (read directly from the git dir to avoid extra
+ * subprocesses).
+ *
+ * Unlike `fetchGitDiff`, this does NOT bail on a transient state — a
+ * merge / rebase / cherry-pick / revert in progress is exactly what the
+ * indicator should show (reported via `operation`). `git status` still
+ * produces valid output during these states.
+ *
+ * Returns `null` only when not inside a git repo or when git itself fails.
+ */
+export interface GitWorkingTreeStatus {
+  /** Branch name, or `null` when detached / unborn / unreadable. */
+  branch: string | null;
+  /** `true` for a detached HEAD (branch holds no name). */
+  detached: boolean;
+  /** `true` when the branch tracks an upstream. */
+  hasUpstream: boolean;
+  /** Commits ahead of upstream (0 without an upstream). */
+  ahead: number;
+  /** Commits behind upstream (0 without an upstream). */
+  behind: number;
+  /** Files with a staged change (porcelain X column). */
+  staged: number;
+  /** Files with an unstaged change (porcelain Y column). */
+  unstaged: number;
+  /** Untracked files (`??`). */
+  untracked: number;
+  /** Unmerged (conflicted) entries. */
+  conflicted: number;
+  /** Stash entries (lines in `logs/refs/stash`). */
+  stashCount: number;
+  /** In-progress operation, if any. */
+  operation?: GitOperation;
+}
+
+export async function getGitWorkingTreeStatus(
+  cwd: string,
+): Promise<GitWorkingTreeStatus | null> {
+  const gitRoot = findGitRoot(cwd);
+  if (!gitRoot) return null;
+
+  const stdout = await runGit(
+    ['--no-optional-locks', 'status', '--porcelain=v1', '--branch', '-z'],
+    gitRoot,
+  );
+  if (stdout == null) return null;
+
+  // `-z` NUL-terminates each entry; the `--branch` header is always first.
+  const tokens = stdout.split('\0');
+  if (tokens.length > 0 && tokens[tokens.length - 1] === '') tokens.pop();
+  const head = tokens.shift() ?? '';
+  const branch = parseStatusBranchLine(head);
+  const counts = parseStatusEntries(tokens);
+  const [stashCount, operation] = await Promise.all([
+    countStashEntries(gitRoot),
+    detectGitOperation(gitRoot),
+  ]);
+
+  return {
+    ...branch,
+    ...counts,
+    stashCount,
+    ...(operation ? { operation } : {}),
+  };
+}
+
+interface StatusBranchLine {
+  branch: string | null;
+  detached: boolean;
+  hasUpstream: boolean;
+  ahead: number;
+  behind: number;
+}
+
+const NO_BRANCH: StatusBranchLine = {
+  branch: null,
+  detached: false,
+  hasUpstream: false,
+  ahead: 0,
+  behind: 0,
+};
+
+/**
+ * Parse the `## ...` header from `git status --branch`. Forms handled:
+ * `## branch...upstream [ahead N, behind M]`, `## branch`, `## HEAD (no
+ * branch)` (detached), and `## No commits yet on branch` / `## Initial commit
+ * on branch` (unborn).
+ */
+export function parseStatusBranchLine(line: string): StatusBranchLine {
+  if (!line.startsWith('## ')) return { ...NO_BRANCH };
+  let desc = line.slice(3);
+
+  if (desc.startsWith('HEAD (no branch)')) {
+    return { ...NO_BRANCH, detached: true };
+  }
+  const unborn = desc.match(/^(?:No commits yet|Initial commit) on (.+)$/);
+  if (unborn) {
+    return { ...NO_BRANCH, branch: unborn[1] ?? null };
+  }
+
+  let ahead = 0;
+  let behind = 0;
+  const bracket = desc.match(/ \[([^\]]*)\]$/);
+  if (bracket) {
+    const inner = bracket[1] ?? '';
+    const aheadMatch = inner.match(/ahead (\d+)/);
+    const behindMatch = inner.match(/behind (\d+)/);
+    ahead = aheadMatch ? Number(aheadMatch[1]) : 0;
+    behind = behindMatch ? Number(behindMatch[1]) : 0;
+    desc = desc.slice(0, bracket.index).trimEnd();
+  }
+
+  const hasUpstream = desc.includes('...');
+  const branch = desc.split('...')[0];
+  return {
+    branch: branch || null,
+    detached: false,
+    hasUpstream,
+    ahead,
+    behind,
+  };
+}
+
+interface StatusCounts {
+  staged: number;
+  unstaged: number;
+  untracked: number;
+  conflicted: number;
+}
+
+/**
+ * git's unmerged determination: any `U` in either column, or both-deleted /
+ * both-added. These are counted separately (a conflict is neither a plain
+ * staged nor unstaged change) and not double-counted into staged/unstaged.
+ */
+function isUnmergedEntry(x: string, y: string): boolean {
+  if (x === 'U' || y === 'U') return true;
+  if (x === 'D' && y === 'D') return true;
+  if (x === 'A' && y === 'A') return true;
+  return false;
+}
+
+/**
+ * Count staged / unstaged / untracked / conflicted entries from `git status
+ * --porcelain=v1 -z` tokens (the branch header is already removed). Each entry
+ * is `XY <path>`; a rename/copy carries a second NUL-separated path that is
+ * skipped.
+ */
+export function parseStatusEntries(tokens: string[]): StatusCounts {
+  let staged = 0;
+  let unstaged = 0;
+  let untracked = 0;
+  let conflicted = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i] ?? '';
+    // A real entry has two status chars then a space; anything else (a rename's
+    // second path, a stray token) is not an entry header.
+    if (tok.length < 3 || tok[2] !== ' ') continue;
+    const x = tok[0];
+    const y = tok[1];
+    if (x === '?' && y === '?') {
+      untracked++;
+      continue;
+    }
+    if (x === '!' && y === '!') continue; // ignored; not emitted without --ignored
+    if (isUnmergedEntry(x, y)) {
+      conflicted++;
+      continue;
+    }
+    if (x !== ' ' && x !== '?') staged++;
+    if (y !== ' ' && y !== '?') unstaged++;
+    // Rename/copy entries carry a second NUL-separated path; skip it.
+    if (x === 'R' || x === 'C' || y === 'R' || y === 'C') i++;
+  }
+  return { staged, unstaged, untracked, conflicted };
+}
+
+/**
+ * Detect an in-progress operation by probing the git dir for the marker files
+ * git writes during merge / rebase / cherry-pick / revert / bisect. Order
+ * matters: rebase markers are checked first so a rebase isn't misreported.
+ */
+async function detectGitOperation(
+  gitRoot: string,
+): Promise<GitOperation | undefined> {
+  const gitDir = await resolveGitDirFromRoot(gitRoot);
+  if (!gitDir) return undefined;
+  const checks: Array<[string, GitOperation]> = [
+    ['rebase-merge', 'rebase'],
+    ['rebase-apply', 'rebase'],
+    ['MERGE_HEAD', 'merge'],
+    ['CHERRY_PICK_HEAD', 'cherry-pick'],
+    ['REVERT_HEAD', 'revert'],
+    ['BISECT_LOG', 'bisect'],
+  ];
+  for (const [name, op] of checks) {
+    try {
+      await access(path.join(gitDir, name));
+      return op;
+    } catch {
+      // Marker absent; try the next.
+    }
+  }
+  return undefined;
+}
+
+/** Stash count = lines in `<gitDir>/logs/refs/stash` (0 when absent). */
+async function countStashEntries(gitRoot: string): Promise<number> {
+  const gitDir = await resolveGitDirFromRoot(gitRoot);
+  if (!gitDir) return 0;
+  try {
+    const content = await readFile(
+      path.join(gitDir, 'logs', 'refs', 'stash'),
+      'utf8',
+    );
+    return content.split('\n').filter((line) => line.trim().length > 0).length;
+  } catch {
+    return 0;
   }
 }

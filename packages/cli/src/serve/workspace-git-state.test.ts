@@ -5,21 +5,30 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { resolveBranchName, watchRepoBranch } from '@qwen-code/qwen-code-core';
+import {
+  getGitWorkingTreeStatus,
+  resolveBranchName,
+  watchRepoBranch,
+} from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
 import { WorkspaceGitState } from './workspace-git-state.js';
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
+  getGitWorkingTreeStatus: vi.fn(),
   resolveBranchName: vi.fn(),
   watchRepoBranch: vi.fn(),
 }));
 
+const getGitWorkingTreeStatusMock = vi.mocked(getGitWorkingTreeStatus);
 const resolveBranchNameMock = vi.mocked(resolveBranchName);
 const watchRepoBranchMock = vi.mocked(watchRepoBranch);
 
 describe('WorkspaceGitState', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Default: no working-tree summary, so getStatus returns the branch-only
+    // v2 shape. Tests that exercise enriched fields override this.
+    getGitWorkingTreeStatusMock.mockResolvedValue(null);
   });
 
   it('returns the current branch and publishes only real changes', async () => {
@@ -41,7 +50,7 @@ describe('WorkspaceGitState', () => {
         publishWorkspaceEvent,
       } as unknown as AcpSessionBridge),
     ).resolves.toEqual({
-      v: 1,
+      v: 2,
       workspaceCwd: '/workspace',
       branch: 'main',
     });
@@ -97,12 +106,104 @@ describe('WorkspaceGitState', () => {
       'git unavailable',
     );
     await expect(state.getStatus('/retry', bridge)).resolves.toEqual({
-      v: 1,
+      v: 2,
       workspaceCwd: '/retry',
       branch: 'main',
     });
     expect(resolveBranchNameMock).toHaveBeenCalledTimes(2);
     expect(watchRepoBranchMock).toHaveBeenCalledOnce();
+  });
+
+  it('merges the working-tree summary into the v2 status', async () => {
+    resolveBranchNameMock.mockResolvedValue('main');
+    watchRepoBranchMock.mockResolvedValue(() => {});
+    getGitWorkingTreeStatusMock.mockResolvedValue({
+      branch: 'main',
+      detached: false,
+      hasUpstream: true,
+      ahead: 2,
+      behind: 1,
+      staged: 3,
+      unstaged: 4,
+      untracked: 5,
+      conflicted: 7,
+      stashCount: 6,
+      operation: 'rebase',
+    });
+    const state = new WorkspaceGitState();
+    const bridge = {
+      publishWorkspaceEvent: vi.fn(),
+    } as unknown as AcpSessionBridge;
+
+    const status = await state.getStatus('/workspace', bridge);
+    expect(status).toMatchObject({
+      v: 2,
+      workspaceCwd: '/workspace',
+      branch: 'main',
+      detached: false,
+      hasUpstream: true,
+      ahead: 2,
+      behind: 1,
+      staged: 3,
+      unstaged: 4,
+      untracked: 5,
+      conflicted: 7,
+      stashCount: 6,
+      operation: 'rebase',
+    });
+    expect(typeof status.computedAt).toBe('number');
+  });
+
+  it('omits operation when no operation is in progress', async () => {
+    resolveBranchNameMock.mockResolvedValue('main');
+    watchRepoBranchMock.mockResolvedValue(() => {});
+    getGitWorkingTreeStatusMock.mockResolvedValue({
+      branch: 'main',
+      detached: false,
+      hasUpstream: false,
+      ahead: 0,
+      behind: 0,
+      staged: 0,
+      unstaged: 0,
+      untracked: 0,
+      conflicted: 0,
+      stashCount: 0,
+    });
+    const state = new WorkspaceGitState();
+    const bridge = {
+      publishWorkspaceEvent: vi.fn(),
+    } as unknown as AcpSessionBridge;
+
+    const status = await state.getStatus('/workspace', bridge);
+    expect(status).not.toHaveProperty('operation');
+  });
+
+  it('prefers the watcher branch over the summary branch when detached', async () => {
+    // resolveBranchName yields the short SHA for a detached HEAD; the summary
+    // reports branch=null + detached. The chip should still show the SHA.
+    resolveBranchNameMock.mockResolvedValue('a1b2c3d');
+    watchRepoBranchMock.mockResolvedValue(() => {});
+    getGitWorkingTreeStatusMock.mockResolvedValue({
+      branch: null,
+      detached: true,
+      hasUpstream: false,
+      ahead: 0,
+      behind: 0,
+      staged: 0,
+      unstaged: 0,
+      untracked: 0,
+      conflicted: 0,
+      stashCount: 0,
+    });
+    const state = new WorkspaceGitState();
+    const bridge = {
+      publishWorkspaceEvent: vi.fn(),
+    } as unknown as AcpSessionBridge;
+
+    await expect(state.getStatus('/workspace', bridge)).resolves.toMatchObject({
+      branch: 'a1b2c3d',
+      detached: true,
+    });
   });
 
   it('disposes only the removed workspace watcher', async () => {

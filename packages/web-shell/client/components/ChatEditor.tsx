@@ -14,7 +14,10 @@ import { Tooltip as TooltipPrimitive } from 'radix-ui';
 import { DAEMON_APPROVAL_MODES } from '@qwen-code/webui/daemon-react-sdk';
 import type { CommandInfo } from '../adapters/types';
 import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/webui/daemon-react-sdk';
-import type { DaemonSessionGroupPresetColor } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionGroupPresetColor,
+  DaemonWorkspaceGitStatus,
+} from '@qwen-code/sdk/daemon';
 import type { CommandDisplayCategoryOrder } from '../utils/commandDisplay';
 import type { SkillInfo } from '../completions/slashCompletion';
 import { useI18n } from '../i18n';
@@ -124,6 +127,10 @@ interface ChatEditorProps {
   currentMode?: string;
   currentModel?: string;
   gitBranch?: string;
+  /** Enriched working-tree summary (dirty / ahead-behind / stash / operation). */
+  gitStatus?: DaemonWorkspaceGitStatus;
+  /** Opens the working-tree Changes dialog; makes the git chip clickable. */
+  onOpenGitDiff?: () => void;
   /** Workspace name shown in the pane composer's `workspace` toolbar chip. */
   workspaceName?: string;
   /** Full workspace cwd, used as the chip's tooltip. */
@@ -1133,6 +1140,8 @@ export const ChatEditor = memo(
       currentMode = 'default',
       currentModel = '',
       gitBranch,
+      gitStatus,
+      onOpenGitDiff,
       workspaceName,
       workspaceTitle,
       workspaceColor,
@@ -2107,8 +2116,9 @@ export const ChatEditor = memo(
                   {gitBranchVisible && gitBranch && (
                     <GitBranchIndicator
                       branch={gitBranch}
+                      status={gitStatus}
                       compact={!showGitBranchLabel}
-                      ariaLabel={t('git.currentBranch', { branch: gitBranch })}
+                      onOpenDiff={onOpenGitDiff}
                     />
                   )}
                   {showModeAction && (

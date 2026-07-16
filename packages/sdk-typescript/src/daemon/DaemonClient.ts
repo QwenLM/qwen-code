@@ -69,6 +69,8 @@ import type {
   DaemonWorkspaceAgentsStatus,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceGitStatus,
+  DaemonWorkspaceGitDiff,
+  DaemonWorkspaceGitDiffHunks,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceMcpInitializeResult,
   DaemonWorkspaceMcpToolsStatus,
@@ -995,6 +997,24 @@ export class DaemonClient {
     return await this.jsonRequest<DaemonWorkspaceGitStatus>(
       '/workspace/git',
       'GET /workspace/git',
+      { mode: 'rest' },
+    );
+  }
+
+  async workspaceGitDiff(): Promise<DaemonWorkspaceGitDiff> {
+    return await this.jsonRequest<DaemonWorkspaceGitDiff>(
+      '/workspace/git/diff',
+      'GET /workspace/git/diff',
+      { mode: 'rest' },
+    );
+  }
+
+  async workspaceGitDiffFile(
+    path: string,
+  ): Promise<DaemonWorkspaceGitDiffHunks> {
+    return await this.jsonRequest<DaemonWorkspaceGitDiffHunks>(
+      `/workspace/git/diff/file?path=${urlEncode(path)}`,
+      'GET /workspace/git/diff/file',
       { mode: 'rest' },
     );
   }
@@ -4123,6 +4143,24 @@ export class WorkspaceDaemonClient {
       this.workspaceSelector,
       '/git',
       'GET /workspaces/:workspace/git',
+      { mode: 'rest' },
+    );
+  }
+
+  workspaceGitDiff(): Promise<DaemonWorkspaceGitDiff> {
+    return this.client.workspaceJsonRequest<DaemonWorkspaceGitDiff>(
+      this.workspaceSelector,
+      '/git/diff',
+      'GET /workspaces/:workspace/git/diff',
+      { mode: 'rest' },
+    );
+  }
+
+  workspaceGitDiffFile(path: string): Promise<DaemonWorkspaceGitDiffHunks> {
+    return this.client.workspaceJsonRequest<DaemonWorkspaceGitDiffHunks>(
+      this.workspaceSelector,
+      `/git/diff/file?path=${urlEncode(path)}`,
+      'GET /workspaces/:workspace/git/diff/file',
       { mode: 'rest' },
     );
   }

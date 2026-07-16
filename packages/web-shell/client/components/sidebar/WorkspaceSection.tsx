@@ -10,8 +10,10 @@ import type {
   DaemonSessionGroup,
   DaemonSessionSummary,
   DaemonWorkspaceCapability,
+  DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
 import { FolderClosedIcon, FolderOpenIcon } from 'lucide-react';
+import { GitBranchIndicator } from '../GitBranchIndicator';
 import { SESSION_LIST_PAGE_SIZE } from '../../constants/sessions';
 import {
   readWorkspaceCollapsedGroupIds,
@@ -79,6 +81,12 @@ interface WorkspaceSectionProps {
   deleteGroupLabel?: string;
   groupActionsDisabled?: boolean;
   excludePinned?: boolean;
+  /**
+   * Open the working-tree Changes dialog for this workspace. When provided, the
+   * folder header shows a live git chip (branch + dirty/ahead-behind state) that
+   * fires this on click. Omitted for untrusted workspaces (no git surface).
+   */
+  onOpenGitDiff?: (workspaceCwd: string) => void;
 }
 
 export function WorkspaceSection({
@@ -108,6 +116,7 @@ export function WorkspaceSection({
   deleteGroupLabel,
   groupActionsDisabled,
   excludePinned = false,
+  onOpenGitDiff,
 }: WorkspaceSectionProps) {
   const [sessions, setSessions] = useState<DaemonSessionSummary[]>([]);
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
@@ -117,6 +126,7 @@ export function WorkspaceSection({
     readWorkspaceCollapsedGroupIds(workspace.id),
   );
   const [actionsVisible, setActionsVisible] = useState(false);
+  const [gitStatus, setGitStatus] = useState<DaemonWorkspaceGitStatus>();
   const expanded = controlledExpanded ?? internalExpanded;
   const readOnly = !workspace.primary && !workspace.trusted;
   const disabled = workspace.primary && !workspace.trusted;
@@ -203,6 +213,39 @@ export function WorkspaceSection({
     searchQuery,
   ]);
 
+  const loadGitStatus = useCallback(async () => {
+    if (!onOpenGitDiff || !workspace.trusted) return;
+    try {
+      const status = await client.workspaceByCwd(workspace.cwd).workspaceGit();
+      setGitStatus(status);
+    } catch (err) {
+      console.warn('[WorkspaceSection] git status poll failed:', err);
+      setGitStatus(undefined);
+    }
+  }, [client, onOpenGitDiff, workspace.cwd, workspace.trusted]);
+
+  // The git chip lives in the always-visible folder header, so it polls
+  // independently of session expansion: on mount/trust, on window focus, and on
+  // a visibility-gated 60s tick (the daemon recomputes the working-tree summary
+  // per call, so the cadence stays gentle). Skipped entirely when no diff
+  // handler is wired, since the chip — its only consumer — would not render.
+  useEffect(() => {
+    if (!onOpenGitDiff || !workspace.trusted) {
+      setGitStatus(undefined);
+      return;
+    }
+    void loadGitStatus();
+    const onFocus = () => void loadGitStatus();
+    window.addEventListener('focus', onFocus);
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void loadGitStatus();
+    }, 60_000);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      window.clearInterval(timer);
+    };
+  }, [loadGitStatus, onOpenGitDiff, reloadToken, workspace.trusted]);
+
   const visibleSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     return sessions.filter((session) => {
@@ -283,6 +326,16 @@ export function WorkspaceSection({
             </>
           )}
         </button>
+        {onOpenGitDiff && workspace.trusted && gitStatus?.branch && (
+          <span className={styles.gitPill}>
+            <GitBranchIndicator
+              branch={gitStatus.branch}
+              status={gitStatus}
+              compact
+              onOpenDiff={() => onOpenGitDiff(workspace.cwd)}
+            />
+          </span>
+        )}
         {headerActions?.(actionsVisible)}
       </div>
       {renderSessions &&

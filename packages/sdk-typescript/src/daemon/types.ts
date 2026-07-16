@@ -54,12 +54,98 @@ export interface DaemonWorkspaceRemovalResult {
   activity: DaemonWorkspaceRemovalActivity;
 }
 
-/** Current Git branch metadata returned from a workspace Git status route. */
+/** In-progress Git operation detected from the repo's transient state. */
+export type DaemonGitOperation =
+  | 'merge'
+  | 'rebase'
+  | 'cherry-pick'
+  | 'revert'
+  | 'bisect';
+
+/**
+ * Current Git metadata returned from a workspace Git status route.
+ *
+ * `v: 1` daemons return only `branch`. `v: 2` daemons additionally return the
+ * enriched working-tree summary; every enriched field is optional so older
+ * clients (and non-repo / git-unavailable workspaces) degrade gracefully.
+ */
 export interface DaemonWorkspaceGitStatus {
-  v: 1;
+  v: 1 | 2;
   workspaceCwd: string;
   /** Branch name, short detached-HEAD hash, or null outside a Git repository. */
   branch: string | null;
+  /** v2: HEAD is detached (branch holds the short SHA). */
+  detached?: boolean;
+  /** v2: number of staged entries. */
+  staged?: number;
+  /** v2: number of unstaged (modified) entries. */
+  unstaged?: number;
+  /** v2: number of untracked entries. */
+  untracked?: number;
+  /** v2: number of conflicted (unmerged) entries. */
+  conflicted?: number;
+  /** v2: branch has a configured upstream. */
+  hasUpstream?: boolean;
+  /** v2: commits ahead of upstream. */
+  ahead?: number;
+  /** v2: commits behind upstream. */
+  behind?: number;
+  /** v2: number of stash entries. */
+  stashCount?: number;
+  /** v2: in-progress operation (merge/rebase/cherry-pick/revert/bisect). */
+  operation?: DaemonGitOperation;
+  /** v2: epoch ms when the enriched fields were computed. */
+  computedAt?: number;
+}
+
+/** One changed file in the working-tree-vs-HEAD diff file list. */
+export interface DaemonWorkspaceGitDiffFile {
+  /** Repo-root-relative path (render after sanitizing — git allows odd bytes). */
+  path: string;
+  /** Lines added; `undefined` for binary files. */
+  added?: number;
+  /** Lines removed; `undefined` for binary files. */
+  removed?: number;
+  isBinary: boolean;
+  isUntracked: boolean;
+  isDeleted: boolean;
+  /** Untracked text file exceeded the read cap, so `added` is a lower bound. */
+  truncated: boolean;
+}
+
+/** File list + summary returned from `GET /workspace/git/diff`. */
+export interface DaemonWorkspaceGitDiff {
+  v: 1;
+  workspaceCwd: string;
+  /** `false` for a non-repo / missing-HEAD / transient-state workspace. */
+  available: boolean;
+  filesCount: number;
+  linesAdded: number;
+  linesRemoved: number;
+  files: DaemonWorkspaceGitDiffFile[];
+  /** `filesCount - files.length`: files dropped by the per-file cap. */
+  hiddenCount: number;
+}
+
+/** A unified-diff hunk, mirroring the `diff` library's `Hunk` over the wire. */
+export interface DaemonDiffHunk {
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  /** Diff lines, each prefixed with `' '`, `'+'`, or `'-'`. */
+  lines: string[];
+}
+
+/** Single-file hunks returned from `GET /workspace/git/diff/file?path=`. */
+export interface DaemonWorkspaceGitDiffHunks {
+  v: 1;
+  workspaceCwd: string;
+  /** The requested repo-root-relative path, echoed back. */
+  path: string;
+  /** `false` when the file has no diff (unchanged / binary / untracked-empty). */
+  available: boolean;
+  hunks: DaemonDiffHunk[];
 }
 
 /** Capabilities envelope returned from `GET /capabilities`. */

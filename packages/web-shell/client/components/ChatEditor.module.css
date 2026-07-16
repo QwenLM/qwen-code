@@ -951,6 +951,19 @@
   line-height: 1;
 }
 
+/* When the chip opens the Changes dialog it renders as a <button>; reset the
+   UA button chrome so it looks identical to the read-only <output> chip. */
+.gitBranchChipButton {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.gitBranchChipButton:hover {
+  background: var(--subtle-bg);
+}
+
 .gitBranchIcon {
   display: inline-flex;
   width: 16px;
@@ -968,6 +981,106 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.gitBranchChip[data-detached='true'] .gitBranchText {
+  color: var(--warning-color);
+}
+
+.gitBranchIconWrap {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 16px;
+}
+
+/* Compact (icon-only) chip: a single severity dot on the branch icon so the
+   working-tree state is still glanceable without the text + inline indicators. */
+.gitBranchBadgeDot {
+  position: absolute;
+  top: -2px;
+  right: -3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--chat-editor-accent-color);
+  box-shadow: 0 0 0 1.5px var(--chat-editor-bg-primary, transparent);
+}
+
+.gitBranchBadgeDot[data-tone='warning'] {
+  background: var(--warning-color);
+}
+
+.gitBranchBadgeDot[data-tone='error'] {
+  background: var(--error-color);
+}
+
+.gitBranchIndicators {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+}
+
+.gitBranchDirtyDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--chat-editor-accent-color);
+  display: inline-block;
+}
+
+.gitBranchAheadBehind {
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.gitBranchStash {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.gitBranchStash svg {
+  width: 13px;
+  height: 13px;
+}
+
+.gitBranchConflicted {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--error-color);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.gitBranchConflicted svg {
+  width: 13px;
+  height: 13px;
+}
+
+.gitBranchOperation {
+  color: var(--warning-color);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.gitBranchTooltip {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gitBranchTooltipTitle {
+  font-weight: 600;
+}
+
+.gitBranchTooltipRow {
+  opacity: 0.85;
 }
 
 /* Which workspace a split-view pane's session lives in — parallel to the git
