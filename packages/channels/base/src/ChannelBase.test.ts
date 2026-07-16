@@ -2407,6 +2407,64 @@ describe('ChannelBase', () => {
       });
     });
 
+    it('does not confirm a natural update before proposal delivery completes', async () => {
+      const channelMemory = createChannelMemory([
+        { id: 'm-a31f0d82c7e4', text: 'Use staging.' },
+      ]);
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        {
+          channelMemory,
+          memoryIntentClassifier: {
+            classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+              intent: 'update',
+              targetIds: ['m-a31f0d82c7e4'],
+              memory: 'Use production.',
+              confidence: 0.92,
+            }),
+          },
+        },
+      );
+      let resolveDelivery!: () => void;
+      const delivery = new Promise<void>((resolve) => {
+        resolveDelivery = resolve;
+      });
+      let markDeliveryStarted!: () => void;
+      const deliveryStarted = new Promise<void>((resolve) => {
+        markDeliveryStarted = resolve;
+      });
+      vi.spyOn(ch, 'sendMessage').mockImplementation(async (chatId, text) => {
+        if (text.startsWith('Update channel memory')) {
+          markDeliveryStarted();
+          await delivery;
+          return;
+        }
+        ch.sent.push({ chatId, text });
+      });
+
+      const proposal = ch.handleInbound(
+        envelope({
+          text: '把刚才那条记忆改成 Use production.',
+          senderId: 'alice',
+        }),
+      );
+      await deliveryStarted;
+      await ch.handleInbound(
+        envelope({ text: '确认更新记忆', senderId: 'alice' }),
+      );
+      const callsBeforeDelivery =
+        channelMemory.updateChannelMemoryEntry.mock.calls.length;
+
+      resolveDelivery();
+      await proposal;
+
+      expect(callsBeforeDelivery).toBe(0);
+      await ch.handleInbound(
+        envelope({ text: '确认更新记忆', senderId: 'alice' }),
+      );
+      expect(channelMemory.updateChannelMemoryEntry).toHaveBeenCalledTimes(1);
+    });
+
     it('does not retain an undelivered natural update proposal', async () => {
       const channelMemory = createChannelMemory([
         { id: 'm-a31f0d82c7e4', text: 'Use staging.' },
@@ -2510,7 +2568,90 @@ describe('ChannelBase', () => {
       expect(channelMemory.updateChannelMemoryEntry).not.toHaveBeenCalled();
     });
 
-    it('accepts a natural update confirmation at 60 seconds and expires it after the boundary', async () => {
+    it('does not let an older delivery overwrite a newer delivered proposal', async () => {
+      const channelMemory = createChannelMemory([
+        { id: 'm-a31f0d82c7e4', text: 'Use staging.' },
+      ]);
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        {
+          channelMemory,
+          memoryIntentClassifier: {
+            classifyChannelMemoryIntent: vi
+              .fn()
+              .mockResolvedValueOnce({
+                intent: 'update',
+                targetIds: ['m-a31f0d82c7e4'],
+                memory: 'Use production.',
+                confidence: 0.92,
+              })
+              .mockResolvedValueOnce({
+                intent: 'remove',
+                targetIds: ['m-a31f0d82c7e4'],
+                confidence: 0.92,
+              }),
+          },
+        },
+      );
+      let resolveOlderDelivery!: () => void;
+      const olderDelivery = new Promise<void>((resolve) => {
+        resolveOlderDelivery = resolve;
+      });
+      let resolveNewerDelivery!: () => void;
+      const newerDelivery = new Promise<void>((resolve) => {
+        resolveNewerDelivery = resolve;
+      });
+      let markOlderStarted!: () => void;
+      const olderStarted = new Promise<void>((resolve) => {
+        markOlderStarted = resolve;
+      });
+      let markNewerStarted!: () => void;
+      const newerStarted = new Promise<void>((resolve) => {
+        markNewerStarted = resolve;
+      });
+      vi.spyOn(ch, 'sendMessage').mockImplementation(async (chatId, text) => {
+        if (text.startsWith('Update channel memory')) {
+          markOlderStarted();
+          await olderDelivery;
+          return;
+        }
+        if (text.startsWith('Remove channel memory')) {
+          markNewerStarted();
+          await newerDelivery;
+          return;
+        }
+        ch.sent.push({ chatId, text });
+      });
+
+      const olderProposal = ch.handleInbound(
+        envelope({
+          text: '把刚才那条记忆改成 Use production.',
+          senderId: 'alice',
+        }),
+      );
+      await olderStarted;
+      const newerProposal = ch.handleInbound(
+        envelope({ text: '删掉刚才那条记忆', senderId: 'alice' }),
+      );
+      await newerStarted;
+
+      resolveNewerDelivery();
+      await newerProposal;
+      resolveOlderDelivery();
+      await olderProposal;
+
+      await ch.handleInbound(
+        envelope({ text: '确认更新记忆', senderId: 'alice' }),
+      );
+      await ch.handleInbound(
+        envelope({ text: '确认删除记忆', senderId: 'alice' }),
+      );
+
+      expect(channelMemory.updateChannelMemoryEntry).not.toHaveBeenCalled();
+      expect(channelMemory.removeChannelMemoryEntries).toHaveBeenCalledTimes(1);
+    });
+
+    it('starts the inclusive 60-second confirmation window after proposal delivery', async () => {
       vi.useFakeTimers();
       try {
         const channelMemory = createChannelMemory([
@@ -2528,13 +2669,33 @@ describe('ChannelBase', () => {
           { allowedUsers: ['alice'] },
           { channelMemory, memoryIntentClassifier },
         );
+        let resolveDelivery!: () => void;
+        const delivery = new Promise<void>((resolve) => {
+          resolveDelivery = resolve;
+        });
+        let markDeliveryStarted!: () => void;
+        const deliveryStarted = new Promise<void>((resolve) => {
+          markDeliveryStarted = resolve;
+        });
+        vi.spyOn(ch, 'sendMessage').mockImplementation(async (chatId, text) => {
+          if (text.startsWith('Update channel memory')) {
+            markDeliveryStarted();
+            await delivery;
+            return;
+          }
+          ch.sent.push({ chatId, text });
+        });
 
-        await ch.handleInbound(
+        const firstProposal = ch.handleInbound(
           envelope({
             text: '把刚才那条记忆改成 Use production.',
             senderId: 'alice',
           }),
         );
+        await deliveryStarted;
+        await vi.advanceTimersByTimeAsync(30_000);
+        resolveDelivery();
+        await firstProposal;
         await vi.advanceTimersByTimeAsync(60_000);
         await ch.handleInbound(
           envelope({ text: '确认更新记忆', senderId: 'alice' }),
@@ -2971,6 +3132,71 @@ describe('ChannelBase', () => {
         chatId: 'chat1',
         text: 'No pending channel memory update. Start a new update request first.',
       });
+    });
+
+    it('prevents an unresolved natural proposal from activating after an exact-ID mutation', async () => {
+      const channelMemory = createChannelMemory([
+        { id: 'm-a31f0d82c7e4', text: 'Use staging.' },
+      ]);
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        {
+          channelMemory,
+          memoryIntentClassifier: {
+            classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+              intent: 'update',
+              targetIds: ['m-a31f0d82c7e4'],
+              memory: 'Use production.',
+              confidence: 0.92,
+            }),
+          },
+        },
+      );
+      let resolveDelivery!: () => void;
+      const delivery = new Promise<void>((resolve) => {
+        resolveDelivery = resolve;
+      });
+      let markDeliveryStarted!: () => void;
+      const deliveryStarted = new Promise<void>((resolve) => {
+        markDeliveryStarted = resolve;
+      });
+      vi.spyOn(ch, 'sendMessage').mockImplementation(async (chatId, text) => {
+        if (text.startsWith('Update channel memory')) {
+          markDeliveryStarted();
+          await delivery;
+          return;
+        }
+        ch.sent.push({ chatId, text });
+      });
+
+      const proposal = ch.handleInbound(
+        envelope({
+          text: '把刚才那条记忆改成 Use production.',
+          senderId: 'alice',
+        }),
+      );
+      await deliveryStarted;
+      await ch.handleInbound(
+        envelope({
+          text: '把 m-a31f0d82c7e4 改成Use latest.',
+          senderId: 'alice',
+        }),
+      );
+      resolveDelivery();
+      await proposal;
+      await ch.handleInbound(
+        envelope({ text: '确认更新记忆', senderId: 'alice' }),
+      );
+
+      expect(channelMemory.updateChannelMemoryEntry).toHaveBeenCalledTimes(1);
+      expect(channelMemory.updateChannelMemoryEntry).toHaveBeenCalledWith(
+        {
+          channelName: 'test-chan',
+          chatId: 'chat1',
+          threadId: undefined,
+        },
+        { id: 'm-a31f0d82c7e4', text: 'Use latest.' },
+      );
     });
 
     it('keeps a pending update through natural reads, no matches, and ambiguity', async () => {
@@ -3865,6 +4091,69 @@ describe('ChannelBase', () => {
         { chatId: 'chat1', text: 'Channel memory cleared.' },
       ]);
       expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('does not confirm a clear before proposal delivery completes', async () => {
+      const channelMemory = createChannelMemory();
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+      let resolveDelivery!: () => void;
+      const delivery = new Promise<void>((resolve) => {
+        resolveDelivery = resolve;
+      });
+      let markDeliveryStarted!: () => void;
+      const deliveryStarted = new Promise<void>((resolve) => {
+        markDeliveryStarted = resolve;
+      });
+      vi.spyOn(ch, 'sendMessage').mockImplementation(async (chatId, text) => {
+        if (text.startsWith('This clears channel memory')) {
+          markDeliveryStarted();
+          await delivery;
+          return;
+        }
+        ch.sent.push({ chatId, text });
+      });
+
+      const proposal = ch.handleInbound(
+        envelope({ text: '清空记忆', senderId: 'alice' }),
+      );
+      await deliveryStarted;
+      await ch.handleInbound(
+        envelope({ text: '确认清空记忆', senderId: 'alice' }),
+      );
+      const callsBeforeDelivery =
+        channelMemory.clearChannelMemory.mock.calls.length;
+
+      resolveDelivery();
+      await proposal;
+
+      expect(callsBeforeDelivery).toBe(0);
+      await ch.handleInbound(
+        envelope({ text: '确认清空记忆', senderId: 'alice' }),
+      );
+      expect(channelMemory.clearChannelMemory).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not retain a clear proposal when delivery fails', async () => {
+      const channelMemory = createChannelMemory();
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+      vi.spyOn(ch, 'sendMessage').mockRejectedValueOnce(
+        new Error('delivery failed'),
+      );
+
+      await expect(
+        ch.handleInbound(envelope({ text: '清空记忆', senderId: 'alice' })),
+      ).rejects.toThrow('delivery failed');
+      await ch.handleInbound(
+        envelope({ text: '确认清空记忆', senderId: 'alice' }),
+      );
+
+      expect(channelMemory.clearChannelMemory).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: 'No pending clear request. Say "清空记忆" first.',
+        },
+      ]);
     });
 
     it('keeps a pending clear after an unmatched update confirmation', async () => {

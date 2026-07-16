@@ -294,6 +294,10 @@ export abstract class ChannelBase {
     string,
     PendingChannelMemoryMutation
   >();
+  private pendingChannelMemoryMutationDeliveries = new Map<
+    string,
+    PendingChannelMemoryMutationInput
+  >();
 
   /** Per-session active prompt tracking for dispatch modes. */
   private activePrompts: Map<string, ActivePrompt> = new Map();
@@ -2848,9 +2852,9 @@ export abstract class ChannelBase {
     }
 
     if (intent.kind === 'clear_request') {
-      this.setPendingChannelMemoryMutation(envelope, { kind: 'clear' });
-      await this.sendMessage(
-        envelope.chatId,
+      await this.deliverPendingChannelMemoryMutation(
+        envelope,
+        { kind: 'clear' },
         'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
       );
       return;
@@ -2925,48 +2929,38 @@ export abstract class ChannelBase {
     }
 
     if (intent.kind === 'natural_update') {
-      const pending = this.setPendingChannelMemoryMutation(envelope, {
-        kind: 'update',
-        id: intent.id,
-        expectedText: intent.expectedText,
-        proposedText: intent.text,
-      });
-      try {
-        await this.sendMessage(
-          envelope.chatId,
-          [
-            `Update channel memory ${intent.id}?`,
-            `Before: ${sanitizePromptText(intent.expectedText).trim()}`,
-            `After: ${sanitizePromptText(intent.text).trim()}`,
-            'Say "确认更新记忆" or "confirm memory update" within 60 seconds.',
-          ].join('\n'),
-        );
-      } catch (error) {
-        this.deletePendingChannelMemoryMutationIfMatches(envelope, pending);
-        throw error;
-      }
+      await this.deliverPendingChannelMemoryMutation(
+        envelope,
+        {
+          kind: 'update',
+          id: intent.id,
+          expectedText: intent.expectedText,
+          proposedText: intent.text,
+        },
+        [
+          `Update channel memory ${intent.id}?`,
+          `Before: ${sanitizePromptText(intent.expectedText).trim()}`,
+          `After: ${sanitizePromptText(intent.text).trim()}`,
+          'Say "确认更新记忆" or "confirm memory update" within 60 seconds.',
+        ].join('\n'),
+      );
       return;
     }
 
     if (intent.kind === 'natural_remove') {
-      const pending = this.setPendingChannelMemoryMutation(envelope, {
-        kind: 'remove',
-        id: intent.id,
-        expectedText: intent.expectedText,
-      });
-      try {
-        await this.sendMessage(
-          envelope.chatId,
-          [
-            `Remove channel memory ${intent.id}?`,
-            sanitizePromptText(intent.expectedText).trim(),
-            'Say "确认删除记忆" or "confirm memory removal" within 60 seconds.',
-          ].join('\n'),
-        );
-      } catch (error) {
-        this.deletePendingChannelMemoryMutationIfMatches(envelope, pending);
-        throw error;
-      }
+      await this.deliverPendingChannelMemoryMutation(
+        envelope,
+        {
+          kind: 'remove',
+          id: intent.id,
+          expectedText: intent.expectedText,
+        },
+        [
+          `Remove channel memory ${intent.id}?`,
+          sanitizePromptText(intent.expectedText).trim(),
+          'Say "确认删除记忆" or "confirm memory removal" within 60 seconds.',
+        ].join('\n'),
+      );
       return;
     }
 
@@ -3174,10 +3168,11 @@ export abstract class ChannelBase {
     ]);
   }
 
-  private setPendingChannelMemoryMutation(
+  private async deliverPendingChannelMemoryMutation(
     envelope: Envelope,
     mutation: PendingChannelMemoryMutationInput,
-  ): PendingChannelMemoryMutation {
+    message: string,
+  ): Promise<void> {
     const now = Date.now();
     for (const [pendingKey, pending] of this.pendingChannelMemoryMutations) {
       if (pending.expiresAt < now) {
@@ -3185,12 +3180,24 @@ export abstract class ChannelBase {
       }
     }
     this.deletePendingChannelMemoryMutation(envelope);
-    const pending = { ...mutation, expiresAt: now + 60_000 };
-    this.pendingChannelMemoryMutations.set(
-      this.channelMemoryPendingKey(envelope),
-      pending,
-    );
-    return pending;
+    const key = this.channelMemoryPendingKey(envelope);
+    this.pendingChannelMemoryMutationDeliveries.set(key, mutation);
+    try {
+      await this.sendMessage(envelope.chatId, message);
+    } catch (error) {
+      if (this.pendingChannelMemoryMutationDeliveries.get(key) === mutation) {
+        this.pendingChannelMemoryMutationDeliveries.delete(key);
+      }
+      throw error;
+    }
+    if (this.pendingChannelMemoryMutationDeliveries.get(key) !== mutation) {
+      return;
+    }
+    this.pendingChannelMemoryMutationDeliveries.delete(key);
+    this.pendingChannelMemoryMutations.set(key, {
+      ...mutation,
+      expiresAt: Date.now() + 60_000,
+    });
   }
 
   private takePendingChannelMemoryMutation<
@@ -3216,19 +3223,9 @@ export abstract class ChannelBase {
   }
 
   private deletePendingChannelMemoryMutation(envelope: Envelope): void {
-    this.pendingChannelMemoryMutations.delete(
-      this.channelMemoryPendingKey(envelope),
-    );
-  }
-
-  private deletePendingChannelMemoryMutationIfMatches(
-    envelope: Envelope,
-    pending: PendingChannelMemoryMutation,
-  ): void {
     const key = this.channelMemoryPendingKey(envelope);
-    if (this.pendingChannelMemoryMutations.get(key) === pending) {
-      this.pendingChannelMemoryMutations.delete(key);
-    }
+    this.pendingChannelMemoryMutations.delete(key);
+    this.pendingChannelMemoryMutationDeliveries.delete(key);
   }
 
   private async classifyChannelMemoryIntent(
