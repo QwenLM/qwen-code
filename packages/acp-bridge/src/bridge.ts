@@ -110,6 +110,7 @@ import type {
   BridgeWorkspaceMemoryRememberRequest,
   BridgeWorkspaceMemoryRememberResult,
   BridgeSessionTranscriptPage,
+  BridgeGenerationStreamEvent,
 } from './bridgeTypes.js';
 import type {
   BridgeFreshSessionAdmissionContext,
@@ -122,6 +123,7 @@ import { MCP_RESTART_SERVER_DEADLINE_MS } from './mcpTimeouts.js';
 import { defaultSpawnChannelFactory } from './spawnChannel.js';
 import { writeStderrLine } from './internal/stderrLine.js';
 import { BridgeClient, KNOWN_APPROVAL_MODES } from './bridgeClient.js';
+import { GenerationStreamQueue } from './generation-stream.js';
 import {
   CANCEL_VOTE_SENTINEL,
   createNoOpPermissionAuditPublisher,
@@ -1095,6 +1097,8 @@ const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
  * disconnect cancellation in v1 (see server.ts route comment).
  */
 const SESSION_RECAP_TIMEOUT_MS = 60_000;
+const SESSION_GENERATION_TIMEOUT_MS = 65_000;
+const GENERATION_STREAM_QUEUE_CAPACITY = 128;
 const SESSION_BTW_TIMEOUT_MS = 60_000;
 const SESSION_TRANSCRIPT_TIMEOUT_MS = 60_000;
 const SHELL_COMMAND_TIMEOUT_MS = 120_000;
@@ -1523,6 +1527,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // daemon. Cleared in the `finally` of the creator.
   let inFlightChannelSpawn: Promise<ChannelInfo> | undefined;
   const byId = new Map<string, SessionEntry>();
+  const generationRequests = new Map<
+    string,
+    {
+      sessionId: string;
+      connection: ClientSideConnection;
+      queue: GenerationStreamQueue<BridgeGenerationStreamEvent>;
+      settled: boolean;
+    }
+  >();
   const inFlightExtensionRefreshes = new Map<
     string,
     { connection: ClientSideConnection; promise: Promise<void> }
@@ -1840,6 +1853,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // tool can ask the daemon to spawn a sub-session and (for 'first-turn')
         // return its result. Omitted → the method reports daemon-only.
         opts.onCreateSubSession,
+        (sessionId, event) => {
+          const request = generationRequests.get(event.requestId);
+          if (!request || request.sessionId !== sessionId) return;
+          if (request.queue.push(event)) return;
+          request.settled = true;
+          generationRequests.delete(event.requestId);
+          request.queue.fail(new Error('Generation stream consumer too slow'));
+          void request.connection
+            .extMethod(SERVE_CONTROL_EXT_METHODS.sessionGenerationCancel, {
+              sessionId,
+              requestId: event.requestId,
+            })
+            .catch(() => undefined);
+        },
       );
       const connection = new ClientSideConnection(() => client, channel.stream);
 
@@ -6130,6 +6157,93 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         sessionId: entry.sessionId,
         recap: response.recap ?? null,
       };
+    },
+
+    generateSessionContent(sessionId, prompt, signal, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+
+      const requestId = randomUUID();
+      const queue = new GenerationStreamQueue<BridgeGenerationStreamEvent>(
+        GENERATION_STREAM_QUEUE_CAPACITY,
+      );
+      const request = {
+        sessionId,
+        connection: entry.connection,
+        queue,
+        settled: false,
+      };
+      generationRequests.set(requestId, request);
+
+      const cancel = () => {
+        if (request.settled) return;
+        request.settled = true;
+        generationRequests.delete(requestId);
+        queue.close();
+        void entry.connection
+          .extMethod(SERVE_CONTROL_EXT_METHODS.sessionGenerationCancel, {
+            sessionId,
+            requestId,
+          })
+          .catch(() => undefined);
+      };
+      signal.addEventListener('abort', cancel, { once: true });
+
+      if (signal.aborted) {
+        cancel();
+        return queue;
+      }
+
+      void Promise.race([
+        withTimeout(
+          entry.connection.extMethod(
+            SERVE_CONTROL_EXT_METHODS.sessionGenerationStart,
+            { sessionId, requestId, prompt },
+          ),
+          SESSION_GENERATION_TIMEOUT_MS,
+          SERVE_CONTROL_EXT_METHODS.sessionGenerationStart,
+        ),
+        getTransportClosedReject(entry),
+      ])
+        .then((raw) => {
+          if (request.settled) return;
+          const response = raw as Record<string, unknown>;
+          const model = response['model'];
+          const modelSource = response['modelSource'];
+          if (
+            typeof model !== 'string' ||
+            (modelSource !== 'fast' && modelSource !== 'main')
+          ) {
+            throw new Error('Malformed generation completion');
+          }
+          const accepted = queue.push({
+            type: 'done',
+            requestId,
+            model,
+            modelSource,
+            ...(typeof response['inputTokens'] === 'number'
+              ? { inputTokens: response['inputTokens'] }
+              : {}),
+            ...(typeof response['outputTokens'] === 'number'
+              ? { outputTokens: response['outputTokens'] }
+              : {}),
+          });
+          if (accepted) queue.close();
+          else queue.fail(new Error('Generation stream consumer too slow'));
+        })
+        .catch((error: unknown) => {
+          if (!request.settled) queue.fail(error);
+        })
+        .finally(() => {
+          request.settled = true;
+          signal.removeEventListener('abort', cancel);
+          generationRequests.delete(requestId);
+        });
+
+      return queue;
     },
 
     getPendingPrompts(sessionId, context) {

@@ -20,6 +20,7 @@ import { presubmitCommand } from './review/presubmit.js';
 import { resolveAnchorsCommand } from './review/resolve-anchors.js';
 import { checkCoverageCommand } from './review/check-coverage.js';
 import { agentPromptCommand } from './review/agent-prompt.js';
+import { buildTestCommand } from './review/build-test.js';
 import { submitCommand } from './review/submit.js';
 import { testEfficacyCommand } from './review/test-efficacy.js';
 import { cleanupCommand } from './review/cleanup.js';
@@ -37,6 +38,7 @@ export const reviewCommand: CommandModule = {
       .command(prContextCommand)
       .command(loadRulesCommand)
       .command(agentPromptCommand)
+      .command(buildTestCommand)
       .command(resolveAnchorsCommand)
       .command(checkCoverageCommand)
       .command(presubmitCommand)
@@ -46,7 +48,7 @@ export const reviewCommand: CommandModule = {
       .command(cleanupCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: parse-args, fetch-pr, capture-local, plan-diff, pr-context, load-rules, agent-prompt, resolve-anchors, check-coverage, presubmit, test-efficacy, compose-review, submit, or cleanup.',
+        'Specify a subcommand: parse-args, fetch-pr, capture-local, plan-diff, pr-context, load-rules, agent-prompt, build-test, resolve-anchors, check-coverage, presubmit, test-efficacy, compose-review, submit, or cleanup.',
       )
       .version(false),
   handler: () => {

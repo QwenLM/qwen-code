@@ -2425,6 +2425,13 @@ export function WebShellSidebar({
       const isCurrent = isCurrentSession(session);
       const isEditing = isCurrent && editingSessionId === session.sessionId;
       const exporting = exportingSessionIds.has(sessionIdentity);
+      const needsUserInput =
+        !session.isWaitingForPermission && session.isWaitingForUserQuestion;
+      const attentionLabel = session.isWaitingForPermission
+        ? t('sidebar.waitingForApproval')
+        : needsUserInput
+          ? t('sidebar.userInputNeeded')
+          : null;
       return (
         <div
           key={sessionIdentity}
@@ -2487,14 +2494,25 @@ export function WebShellSidebar({
                 <>
                   <span className={styles.sessionText}>{label}</span>
                   <div className={styles.sessionMetaSlot}>
+                    {attentionLabel && (
+                      <span
+                        className={cx(
+                          styles.sessionAttention,
+                          needsUserInput && styles.sessionAttentionUserInput,
+                        )}
+                        aria-label={attentionLabel}
+                      >
+                        {attentionLabel}
+                      </span>
+                    )}
                     {session.hasActivePrompt ? (
                       <span
                         className={styles.sessionLoading}
                         aria-label={t('sidebar.running')}
                       />
-                    ) : (
+                    ) : !attentionLabel ? (
                       <span className={styles.sessionTime}>{time}</span>
-                    )}
+                    ) : null}
                     {readOnly && canMutateSessionArchive(session) && (
                       <div
                         className={styles.sessionActions}

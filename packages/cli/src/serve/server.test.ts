@@ -361,6 +361,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_trust' &&
       f !== 'workspace_mcp_restart' &&
       f !== 'session_recap' &&
+      f !== 'session_generation' &&
       f !== 'session_btw' &&
       f !== 'auth_device_flow' &&
       f !== 'permission_mediation' &&
@@ -387,6 +388,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_github_setup',
   'workspace_mcp_restart',
   'session_recap',
+  'session_generation',
   'session_btw',
   'session_shell_command',
   'mcp_workspace_pool',
@@ -563,6 +565,9 @@ interface FakeBridgeOpts {
     sessionId: string,
     context?: BridgeClientRequestContext,
   ) => Promise<{ sessionId: string; recap: string | null }>;
+  generateSessionContentImpl?: NonNullable<
+    AcpSessionBridge['generateSessionContent']
+  >;
   generateSessionBtwImpl?: (
     sessionId: string,
     question: string,
@@ -798,6 +803,11 @@ interface FakeBridge extends AcpSessionBridge {
   }>;
   generateSessionRecapCalls: Array<{
     sessionId: string;
+    context?: BridgeClientRequestContext;
+  }>;
+  generateSessionContentCalls: Array<{
+    sessionId: string;
+    prompt: string;
     context?: BridgeClientRequestContext;
   }>;
   generateSessionBtwCalls: Array<{
@@ -1278,6 +1288,34 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionId,
       recap: 'Default fake recap.',
     }));
+  const generateSessionContentCalls: FakeBridge['generateSessionContentCalls'] =
+    [];
+  const generateSessionContentImpl =
+    opts.generateSessionContentImpl ??
+    async function* () {
+      yield {
+        type: 'started' as const,
+        requestId: 'fake-request',
+        model: 'fake-fast-model',
+        modelSource: 'fast' as const,
+      };
+      yield {
+        type: 'thinking' as const,
+        requestId: 'fake-request',
+      };
+      yield {
+        type: 'delta' as const,
+        requestId: 'fake-request',
+        seq: 0,
+        text: 'generated',
+      };
+      yield {
+        type: 'done' as const,
+        requestId: 'fake-request',
+        model: 'fake-fast-model',
+        modelSource: 'fast' as const,
+      };
+    };
   const generateSessionBtwCalls: FakeBridge['generateSessionBtwCalls'] = [];
   const generateSessionBtwImpl =
     opts.generateSessionBtwImpl ??
@@ -1426,6 +1464,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     setApprovalModeCalls,
     shellCalls,
     generateSessionRecapCalls,
+    generateSessionContentCalls,
     generateSessionBtwCalls,
     forkCalls,
     workspaceMemoryRememberCalls,
@@ -1703,6 +1742,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(context ? { context } : {}),
       });
       return generateSessionRecapImpl(sessionId, context);
+    },
+    generateSessionContent(sessionId, prompt, signal, context) {
+      generateSessionContentCalls.push({
+        sessionId,
+        prompt,
+        ...(context ? { context } : {}),
+      });
+      return generateSessionContentImpl(sessionId, prompt, signal, context);
     },
     async generateSessionBtw(sessionId, question, signal, context) {
       generateSessionBtwCalls.push({
@@ -2196,6 +2243,20 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, {
               sessionArtifactsPersistenceAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'session_generation') {
+          expect(predicate({ sessionGenerationAvailable: true })).toBe(true);
+          expect(predicate({ sessionGenerationAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              sessionGenerationAvailable: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
@@ -2787,6 +2848,24 @@ describe('createServeApp', () => {
   });
 
   describe('GET /capabilities', () => {
+    it('advertises session generation only when every bridge supports it', async () => {
+      const supported = await request(
+        createServeApp(baseOpts, undefined, { bridge: fakeBridge() }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(supported.body.features).toContain('session_generation');
+
+      const unsupportedBridge = fakeBridge();
+      delete unsupportedBridge.generateSessionContent;
+      const unsupported = await request(
+        createServeApp(baseOpts, undefined, { bridge: unsupportedBridge }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(unsupported.body.features).not.toContain('session_generation');
+    });
+
     it('returns the v1 envelope', async () => {
       const previousQwenHome = process.env['QWEN_HOME'];
       const tempHome = await fsp.mkdtemp(
@@ -2814,6 +2893,7 @@ describe('createServeApp', () => {
           getAdvertisedServeFeatures(undefined, {
             mcpPoolActive: true,
             sessionArtifactsPersistenceAvailable: true,
+            sessionGenerationAvailable: true,
           }),
         );
         expect(res.body.modelServices).toEqual([]);
@@ -11004,6 +11084,140 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send();
       expect(res.status).toBe(200);
+    });
+  });
+
+  describe('POST /session/:id/generate', () => {
+    it('streams request-scoped generation events as SSE', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/generate')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .set('Accept', 'text/event-stream')
+        .send({ prompt: 'Translate hello' });
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toContain('text/event-stream');
+      expect(res.text.startsWith(': connected\n\n')).toBe(true);
+      expect(res.text).toContain('event: started');
+      expect(res.text).toContain('event: thinking');
+      expect(res.text).toContain('event: delta');
+      expect(res.text).toContain('"text":"generated"');
+      expect(res.text).toContain('event: done');
+      expect(bridge.generateSessionContentCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          prompt: 'Translate hello',
+          context: { clientId: 'client-1' },
+        },
+      ]);
+    });
+
+    it('returns 501 when the bridge does not support generation', async () => {
+      const bridge = fakeBridge();
+      delete bridge.generateSessionContent;
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/generate')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ prompt: 'Translate hello' });
+
+      expect(res.status).toBe(501);
+      expect(res.body.code).toBe('generation_not_supported');
+    });
+
+    it('streams an error event when generation fails', async () => {
+      const bridge = fakeBridge({
+        async *generateSessionContentImpl() {
+          yield {
+            type: 'started',
+            requestId: 'failed-request',
+            model: 'fast-model',
+            modelSource: 'fast',
+          };
+          throw new Error('upstream failed');
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/generate')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ prompt: 'Translate hello' });
+
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('event: started');
+      expect(res.text).toContain('event: error');
+      expect(res.text).toContain('"type":"error"');
+      expect(res.text).toContain('"code":"generation_failed"');
+    });
+
+    it.each([
+      { prompt: '' },
+      { prompt: 42 },
+      { prompt: 'x'.repeat(32 * 1024 + 1) },
+    ])('rejects invalid prompts before opening SSE', async (body) => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/generate')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send(body);
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_prompt');
+      expect(bridge.generateSessionContentCalls).toHaveLength(0);
+    });
+
+    it('does not block closing the session while generation is streaming', async () => {
+      let markStarted: (() => void) | undefined;
+      let finishGeneration: (() => void) | undefined;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      const finish = new Promise<void>((resolve) => {
+        finishGeneration = resolve;
+      });
+      const bridge = fakeBridge({
+        async *generateSessionContentImpl() {
+          markStarted?.();
+          yield {
+            type: 'started',
+            requestId: 'streaming-request',
+            model: 'fast-model',
+            modelSource: 'fast',
+          };
+          await finish;
+          yield {
+            type: 'done',
+            requestId: 'streaming-request',
+            model: 'fast-model',
+            modelSource: 'fast',
+          };
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const generation = request(app)
+        .post('/session/session-A/generate')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ prompt: 'Translate hello' })
+        .then((res) => res);
+
+      await started;
+      const close = await request(app)
+        .delete('/session/session-A')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send();
+      finishGeneration?.();
+      await generation;
+
+      expect(close.status).toBe(204);
+      expect(bridge.closeCalls).toHaveLength(1);
     });
   });
 
