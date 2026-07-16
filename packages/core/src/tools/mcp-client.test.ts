@@ -786,6 +786,67 @@ describe('mcp-client', () => {
       expect(mcpServerRequiresOAuth.has(serverName)).toBe(false);
     });
 
+    it('preserves a captured OAuth challenge when the SDK error only reports 401', async () => {
+      const serverName = 'status-only-http-oauth-server';
+      const serverConfig = { httpUrl: 'https://example.com/mcp' };
+      const resourceMetadataUrl =
+        'https://example.com/.well-known/oauth-protected-resource';
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, {
+          status: 401,
+          headers: {
+            'www-authenticate': `Bearer resource_metadata="${resourceMetadataUrl}"`,
+          },
+        }),
+      );
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi.fn().mockImplementation(async (transport: unknown) => {
+          const transportFetch = (transport as { _fetch: typeof fetch })._fetch;
+          await transportFetch(serverConfig.httpUrl, { method: 'POST' });
+          throw new Error('Streamable HTTP error: HTTP 401 Unauthorized');
+        }),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getInstructions: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials: vi.fn().mockResolvedValue(null),
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      const authenticate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(MCPOAuthProvider).mockImplementation(
+        () => ({ authenticate }) as unknown as MCPOAuthProvider,
+      );
+      const discoverOAuthConfig = vi
+        .spyOn(OAuthUtils, 'discoverOAuthConfig')
+        .mockResolvedValue({
+          authorizationUrl: 'https://auth.example/authorize',
+          tokenUrl: 'https://auth.example/token',
+          scopes: [],
+        });
+      const client = new McpClient(
+        serverName,
+        serverConfig,
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {
+          getDirectories: vi.fn().mockReturnValue([]),
+        } as unknown as WorkspaceContext,
+        false,
+      );
+
+      await expect(client.connect()).rejects.toThrow('HTTP 401 Unauthorized');
+      await expect(
+        attemptAutomaticMcpOAuth(serverName, serverConfig, true),
+      ).resolves.toBe(true);
+
+      expect(discoverOAuthConfig).toHaveBeenCalledWith(resourceMetadataUrl);
+      expect(authenticate).toHaveBeenCalledOnce();
+      expect(fetchSpy).toHaveBeenCalledOnce();
+    });
+
     it('does not classify a non-401 HTTP failure as OAuth', async () => {
       vi.mocked(ClientLib.Client).mockReturnValue({
         connect: vi

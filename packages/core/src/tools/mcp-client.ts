@@ -767,7 +767,10 @@ function setMcpOAuthRequirement(
   const key = oauthRecoveryKey(mcpServerName, mcpServerConfig);
   mcpServerOAuthProbeCandidates.delete(key);
   mcpServerOAuthRequirements.add(key);
-  mcpServerOAuthChallenges.set(key, wwwAuthenticate);
+  mcpServerOAuthChallenges.set(
+    key,
+    wwwAuthenticate || mcpServerOAuthChallenges.get(key) || '',
+  );
   mcpServerRequiresOAuth.set(mcpServerName, true);
 }
 
