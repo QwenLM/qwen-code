@@ -128,15 +128,15 @@ cd integration-tests && \
 **Gotcha:** In interactive tests, always call `session.idle()` between sends —
 ANSI output streams asynchronously.
 
-### Linting, Formatting & Verification
+### Linting & Formatting
 
 ```bash
 npm run lint       # ESLint check
 npm run lint:fix   # Auto-fix lint issues
 npm run format     # Prettier formatting
 npm run typecheck  # TypeScript type checking
-npm run preflight  # Legacy broad check; writes formatting and omits some PR CI checks
-npm run verify:pr  # Optional clean PR verification after committing
+npm run preflight  # Full check: clean → install → format → lint → build
+                   # → typecheck → test
 ```
 
 ## Code Conventions
@@ -211,10 +211,6 @@ npm run verify:pr  # Optional clean PR verification after committing
    Here, `/review` means the Codex code-review workflow, not Qwen Review or
    the `qwen-review` plugin. Do not invoke Qwen Review unless the user
    explicitly requests it by name.
-6. **Optional PR verification** — after the final changes are committed and the
-   working tree is clean, ask whether to run `npm run verify:pr`. Run it only
-   when requested; it is not a required local step before pushing, and remote CI
-   remains authoritative.
 
 ### Feature development
 
