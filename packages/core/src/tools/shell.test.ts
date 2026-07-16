@@ -2636,7 +2636,8 @@ describe('ShellTool', () => {
       'diff before after',
       'test -f missing',
       '[ -f missing ]',
-      'find protected-directory',
+      '[[ -f missing ]]',
+      '"C:\\\\tools\\\\grep.exe" pattern file',
     ])('does not report exit 1 from %s as a tool error', async (command) => {
       const invocation = shellTool.build({
         command,
@@ -2655,9 +2656,44 @@ describe('ShellTool', () => {
       expect(result.llmContent).toContain('Exit Code: 1');
     });
 
-    it('does not exempt exit 1 from a compound command', async () => {
+    it('does not report exit 1 from a pipeline ending in grep as a tool error', async () => {
       const invocation = shellTool.build({
-        command: 'false && grep pattern file',
+        command: 'ps aux | grep missing-process',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: '',
+        exitCode: 1,
+        error: null,
+      });
+
+      const result = await promise;
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Exit Code: 1');
+    });
+
+    it('reports exit 1 from find as a tool error', async () => {
+      const invocation = shellTool.build({
+        command: 'find missing-directory',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: 'find: missing-directory: No such file or directory',
+        exitCode: 1,
+        error: null,
+      });
+
+      const result = await promise;
+
+      expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
+    });
+
+    it('does not exempt exit 1 from a mixed compound command', async () => {
+      const invocation = shellTool.build({
+        command: 'false && ps aux | grep pattern',
         is_background: false,
       });
       const promise = invocation.execute(mockAbortSignal);
