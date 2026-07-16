@@ -10,8 +10,8 @@
 > [`daemon-multi-workspace-session-file-ops.md`](./daemon-multi-workspace-session-file-ops.md).
 > The later primary-only classification of live-session continue, language,
 > and artifact mutations is also superseded: those singular REST routes now
-> dispatch to the owning trusted workspace runtime. The remaining Phase 2a
-> Other phase-scoped statements may also be superseded by later design records
+> dispatch to the owning trusted workspace runtime. Other phase-scoped
+> statements may also be superseded by later design records
 > and must not be treated as the current route inventory.
 
 ## Summary
