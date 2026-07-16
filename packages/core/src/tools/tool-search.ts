@@ -237,23 +237,24 @@ class ToolSearchInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Candidates for keyword search: only deferred tools that have NOT yet
-   * been revealed this session. Already-loaded (core) tools are in the
-   * model's tool-declaration list already, so surfacing them here would
-   * be noise. Already-revealed deferred tools were loaded via a prior
-   * `select:` or keyword search and ARE in the declaration list too —
-   * re-surfacing them in subsequent searches wastes tokens and risks
-   * the model retrying a tool it already has.
+   * Keyword candidates exclude schemas already presented in the active model
+   * context. Presentation state is fingerprint-bound, so a refreshed schema
+   * automatically becomes searchable again, while metadata that has not yet
+   * crossed the active-history boundary does not hide the tool prematurely.
    *
    * `select:<name>` mode is unrestricted — the model may legitimately
-   * want to re-inspect the schema of a loaded tool — and handles its
+   * want to re-inspect a presented schema — and handles its
    * own lookup via {@link loadAndReturnSchemas}.
    */
   private collectCandidates(): AnyDeclarativeTool[] {
     const registry = this.config.getToolRegistry();
     return registry
       .getAllTools()
-      .filter((t) => registry.isDeferredAndHidden(t.name));
+      .filter(
+        (tool) =>
+          registry.isDeferredAndHidden(tool.name) &&
+          !registry.hasPresentedProxySchema(tool.name),
+      );
   }
 
   private async loadAndReturnSchemas(

@@ -858,10 +858,7 @@ describe('ToolSearchTool', () => {
     expect(String(sq.llmContent)).toContain('"name":"cron_create"');
   });
 
-  it('keyword search keeps proxy-presented deferred tools searchable', async () => {
-    // Under the stable-schema proxy design, ToolSearch presentations do not
-    // mutate function declarations or revealed state. Re-running the same
-    // keyword search may re-surface the schema; it must not rely on setTools().
+  it('keeps an uncommitted keyword presentation searchable', async () => {
     registry.registerTool(
       new MockTool({
         name: 'slack_send_message',
@@ -882,11 +879,106 @@ describe('ToolSearchTool', () => {
     expect(presentationNames(first)).toEqual(['slack_send_message']);
     expect(registry.hasPresentedProxySchema('slack_send_message')).toBe(false);
 
-    // Second: same keyword search can still return the schema.
+    // Producing metadata is not enough: until the result enters active model
+    // history and the scheduler commits it, another search may return it.
     const second = await tool
       .build({ query: 'slack' })
       .execute(new AbortController().signal);
     expect(String(second.llmContent)).toContain('"name":"slack_send_message"');
+  });
+
+  it('uses keyword result slots for unpresented deferred tools', async () => {
+    registry.registerTool(
+      new MockTool({
+        name: 'slack',
+        description: 'primary slack operations',
+        shouldDefer: true,
+      }),
+    );
+    registry.registerTool(
+      new MockTool({
+        name: 'slack_archive',
+        description: 'archive slack messages',
+        shouldDefer: true,
+      }),
+    );
+    const tool = new ToolSearchTool(config);
+
+    const first = await tool
+      .build({ query: 'slack', max_results: 1 })
+      .execute(new AbortController().signal);
+    expect(presentationNames(first)).toEqual(['slack']);
+    const firstPresentation = first.deferredToolPresentations?.[0];
+    expect(firstPresentation).toBeDefined();
+    if (!firstPresentation) throw new Error('missing first presentation');
+    expect(registry.markProxySchemaPresented(firstPresentation)).toBe(true);
+
+    const second = await tool
+      .build({ query: 'slack', max_results: 1 })
+      .execute(new AbortController().signal);
+    expect(presentationNames(second)).toEqual(['slack_archive']);
+  });
+
+  it('allows exact selection of a presented deferred tool', async () => {
+    const deferred = new MockTool({ name: 'cron_create', shouldDefer: true });
+    registry.registerTool(deferred);
+    registry.markProxySchemaPresented({
+      name: deferred.name,
+      schemaFingerprint: getFunctionSchemaFingerprint(deferred.schema),
+    });
+
+    const result = await new ToolSearchTool(config)
+      .build({ query: `select:${deferred.name}` })
+      .execute(new AbortController().signal);
+
+    expect(String(result.llmContent)).toContain('"name":"cron_create"');
+    expect(presentationNames(result)).toEqual(['cron_create']);
+  });
+
+  it('makes a refreshed deferred schema keyword-searchable again', async () => {
+    const oldTool = new DiscoveredMCPTool(
+      {} as CallableTool,
+      'calendar',
+      'create_event',
+      'create a calendar event',
+      {
+        type: 'object',
+        properties: { title: { type: 'string' } },
+      },
+    );
+    registry.registerTool(oldTool);
+    const toolSearch = new ToolSearchTool(config);
+    const first = await toolSearch
+      .build({ query: 'calendar' })
+      .execute(new AbortController().signal);
+    const firstPresentation = first.deferredToolPresentations?.[0];
+    expect(firstPresentation).toBeDefined();
+    if (!firstPresentation) throw new Error('missing first presentation');
+    expect(registry.markProxySchemaPresented(firstPresentation)).toBe(true);
+
+    const hidden = await toolSearch
+      .build({ query: 'calendar' })
+      .execute(new AbortController().signal);
+    expect(presentationNames(hidden)).toEqual([]);
+
+    registry.removeMcpToolsByServer('calendar');
+    const refreshedTool = new DiscoveredMCPTool(
+      {} as CallableTool,
+      'calendar',
+      'create_event',
+      'create a calendar event',
+      {
+        type: 'object',
+        properties: { startTime: { type: 'string' } },
+      },
+    );
+    registry.registerTool(refreshedTool);
+
+    const refreshed = await toolSearch
+      .build({ query: 'calendar' })
+      .execute(new AbortController().signal);
+    expect(String(refreshed.llmContent)).toContain('"startTime"');
+    expect(presentationNames(refreshed)).toEqual([refreshedTool.name]);
   });
 
   it('rejects a presentation when MCP refresh replaces the displayed schema', async () => {
