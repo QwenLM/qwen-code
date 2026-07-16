@@ -215,6 +215,24 @@ describe('ChatEditor composer tag icons', () => {
       container.querySelectorAll('[style*="--composer-tag-icon-url"]'),
     ).toHaveLength(kinds.length);
   });
+
+  it('rejects unsafe custom icon URLs for top composer tags', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: [],
+      composerTags: [
+        {
+          id: 'custom:reference',
+          value: 'reference',
+          icon: 'javascript:alert(1)',
+        },
+      ],
+    });
+
+    expect(container.innerHTML).not.toContain('javascript:alert');
+    expect(
+      container.querySelector('[style*="--composer-tag-icon-url"]'),
+    ).toBeNull();
+  });
 });
 
 describe('ChatEditor git branch toolbar integration', () => {

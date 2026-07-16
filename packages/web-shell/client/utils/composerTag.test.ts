@@ -45,9 +45,9 @@ describe('composer tag icon URLs', () => {
 
   it('recognizes only exact built-in tag icon URLs', () => {
     for (const kind of ['extension', 'file', 'mcp', 'skill'] as const) {
-      expect(isBuiltinComposerTagIconUrl(getComposerTagIconUrl(kind))).toBe(
-        true,
-      );
+      const iconUrl = getComposerTagIconUrl(kind);
+      expect(iconUrl).toMatch(/^data:image\/svg\+xml/);
+      expect(isBuiltinComposerTagIconUrl(iconUrl)).toBe(true);
     }
     expect(
       isBuiltinComposerTagIconUrl(
