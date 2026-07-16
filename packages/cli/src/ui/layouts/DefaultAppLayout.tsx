@@ -17,7 +17,7 @@ import { AgentTabBar } from '../components/agent-view/AgentTabBar.js';
 import { AgentChatView } from '../components/agent-view/AgentChatView.js';
 import { AgentComposer } from '../components/agent-view/AgentComposer.js';
 import { LiveAgentPanel } from '../components/background-view/LiveAgentPanel.js';
-import { LIVE_AGENT_PANEL_VP_MAX_ROWS } from '../components/background-view/liveAgentPanelVisibility.js';
+import { getLiveAgentPanelVpMaxRows } from '../components/background-view/liveAgentPanelVisibility.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useAgentViewState } from '../contexts/AgentViewContext.js';
@@ -141,7 +141,7 @@ export const DefaultAppLayout: React.FC = () => {
                 width={uiState.terminalWidth}
                 maxRows={
                   uiState.useTerminalBuffer
-                    ? LIVE_AGENT_PANEL_VP_MAX_ROWS
+                    ? getLiveAgentPanelVpMaxRows(uiState.terminalHeight)
                     : undefined
                 }
               />
