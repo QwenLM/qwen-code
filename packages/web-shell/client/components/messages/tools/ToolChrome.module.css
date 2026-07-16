@@ -215,6 +215,7 @@
 
 .iconError {
   color: var(--error-color);
+  font-size: 13px;
 }
 
 .lineName {

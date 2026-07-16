@@ -474,14 +474,17 @@ Launch verification agents that between them receive **all** non-pre-confirmed f
 
 A single verifier for every finding was cheaper, but on a large review it becomes the most context-starved agent in the pipeline: it must re-read code for each of 30-60 findings inside one context window, and its quality collapses on the tail of the list. Sharding keeps each verifier's job small; the cost is still far below one-agent-per-finding.
 
-**Do not write the verifier's prompt. Ask for it:**
+**Do not write the verifier's prompt. Ask for it — and hand it the shard's findings so it prints the whole block:**
+
+Write this shard's findings to a file — each with its file, line, issue and failure scenario (the scenario is the claim under test); for any **Agent 0 (Issue Fidelity)** finding, include the **issue evidence it quoted** (issue body + comments), because a root-cause claim rests on linked-issue evidence the codebase does not contain and the verifier must check against it. Then:
 
 ```bash
 qwen review agent-prompt --plan <the plan report from Step 1> --role verify \
+  --findings <the file of this shard's findings> \
   [--rules <the rules file from Step 2, if the project has any>]
 ```
 
-Paste what it prints to each verifier **verbatim**, and add above it the one thing that changes per shard: **the findings this shard must rule on** — each with its file, line, issue and failure scenario (the scenario is the claim under test). For any **Agent 0 (Issue Fidelity)** finding in the shard, add the **issue evidence it quoted** (issue body + comments): a root-cause claim rests on linked-issue evidence the codebase does not contain, and the verifier must be handed it to check against. In worktree mode the verifier's `working_dir` is the PR worktree (same rule as Step 3), so its reads and re-checks resolve against the PR's code.
+**Paste what it prints verbatim — the whole block, findings and all. Do not prepend, append, reword, or add a shard number.** `--findings` folds the list in for you precisely so there is no hand-assembly step left to drift: dogfooded, the step that used to have you prepend the list by hand is where the prompt got paraphrased — a summary inserted, the "nothing replaces the brief" line truncated — and Step 6's check caught it and capped the verdict. The command records the findings-free launch block, so every shard's record still matches (the findings are an add-only prefix). In worktree mode the verifier's `working_dir` is the PR worktree (same rule as Step 3), so its reads and re-checks resolve against the PR's code.
 
 The brief holds the method the orchestrator used to spell out here and that a paraphrase kept dropping: trace the failure scenario through the real code rather than voting on the finding's prose; engage the diff's own documented intent before calling a documented change a regression (the rule a run skipped when it auto-posted a false "leaks tokens" Critical); and the one-way, quote-the-contradiction bar on **rejecting a Critical**. Read the brief to know what a verdict means; do not re-derive it here.
 
@@ -519,19 +522,23 @@ After aggregation, run reverse audit **iteratively**. Each round receives the cu
 - **Small diffs (Step 3A path):** one reverse audit agent per round, reading the whole diff.
 - **Large diffs (Step 3B path):** one reverse audit agent **per chunk** per round, launched together in a single response. A single agent asked to re-read a 5 800-line diff with a growing finding list appended is the most context-starved agent in the pipeline — precisely on the PRs where the reverse audit matters most. Each per-chunk auditor gets the same territory as its Step 3B counterpart, plus the cumulative finding list for the **whole** diff (so it knows what is already covered elsewhere).
 
-**Do not write the reverse auditor's prompt. Ask for it:**
+**Do not write the reverse auditor's prompt. Ask for it — and hand it the findings so far so it prints the whole block:**
+
+Write **the cumulative list of every confirmed finding so far** (Steps 3-4 plus all prior rounds) to a file, so the auditor hunts what is not already on it. An early round on a clean review may have nothing confirmed yet — pass the file anyway (empty is fine; the command tells the auditor so). Then:
 
 ```bash
 # Step 3A (small diff): one auditor per round, the whole diff.
 qwen review agent-prompt --plan <the plan report from Step 1> --role reverse-audit \
+  --findings <the cumulative findings file> \
   [--rules <the rules file from Step 2>]
 
 # Step 3B (large diff): one auditor PER CHUNK per round, launched together.
 qwen review agent-prompt --plan <the plan report from Step 1> --role reverse-audit --chunk <id> \
+  --findings <the cumulative findings file> \
   [--rules <the rules file from Step 2>]
 ```
 
-Paste what it prints **verbatim**, and add above it the one thing that changes per round: **the cumulative list of every confirmed finding so far** (Steps 3-4 plus all prior rounds), so the auditor hunts what is not already on it. The command gives each auditor its diff reads — the whole plan in 3A, one chunk's range in 3B (a Step 3B auditor handed the whole 5 800-line diff is the most context-starved agent in the pipeline, on exactly the PRs where the reverse audit matters most). In worktree mode its `working_dir` is the PR worktree.
+**Paste what it prints verbatim — the whole block. Do not prepend, append, reword, or add a round number** (track the round in your own notes, not in the prompt). `--findings` folds the cumulative list in so there is no hand-assembly step to drift — the same paraphrase Step 6's check caught and capped a real run on, even though the auditor had opened its brief. The command records the findings-free launch block, so every round's record still matches. It also gives each auditor its diff reads — the whole plan in 3A, one chunk's range in 3B (a Step 3B auditor handed the whole 5 800-line diff is the most context-starved agent in the pipeline, on exactly the PRs where the reverse audit matters most). In worktree mode its `working_dir` is the PR worktree.
 
 The brief holds what the auditor is for: hunt only the **gaps** no prior agent caught, report only Critical or Suggestion, apply the Exclusion Criteria, and end with a substantive receipt (`No issues found — <what it re-examined>`) — a bare "No issues found." fails the substantive-return check below and triggers the one relaunch.
 

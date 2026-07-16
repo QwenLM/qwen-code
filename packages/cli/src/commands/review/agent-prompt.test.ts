@@ -11,7 +11,15 @@
 // is in the prompt, the read call is in the prompt, and the agent is not handed a
 // sentence to recite when it finds nothing.
 
-import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  type Mock,
+} from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -24,9 +32,14 @@ import {
   buildWholeDiffBlock,
   buildRoleBrief,
   buildRoleLaunchPrompt,
+  findingsSection,
   agentPromptCommand,
 } from './agent-prompt.js';
-import { readRecordedPrompts, briefPath } from './lib/prompt-record.js';
+import {
+  readRecordedPrompts,
+  briefPath,
+  wasDeliveredVerbatim,
+} from './lib/prompt-record.js';
 
 const PLAN = {
   diffPathAbsolute: '/abs/.qwen/tmp/qwen-review-pr-6771-diff.txt',
@@ -394,6 +407,209 @@ describe('agent-prompt (command boundary)', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// Dogfooded on a real 3A review: the orchestrator delivered Step 3 prompts verbatim
+// but PARAPHRASED the Step 4/5 ones — added "(round 2)", inserted its own summary,
+// truncated the "nothing replaces the brief" line — because it hand-prepended the
+// findings list. `--findings` removes that assembly step: the command folds the list
+// in and prints one block. The record stays findings-free, so the shared key still
+// matches by the add-only delivery rule.
+describe('--findings — fold the list in, print one block, record the block alone', () => {
+  // Every temp dir this block makes, cleaned up after each test — the rest of the
+  // file uses try/finally; a helper-based block tracks and sweeps instead.
+  let dirs: string[] = [];
+  const tmp = (prefix: string): string => {
+    const d = mkdtempSync(join(tmpdir(), prefix));
+    dirs.push(d);
+    return d;
+  };
+  beforeEach(() => {
+    (writeStdoutLine as unknown as Mock).mockClear();
+    dirs = [];
+  });
+  afterEach(() => {
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+  });
+
+  function run(args: Record<string, unknown>): {
+    printed: string;
+    plan: string;
+  } {
+    const dir = tmp('ap-find-');
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    const findings = join(dir, 'findings.md');
+    writeFileSync(
+      findings,
+      '- **[Critical]** foo.ts:10 — the collision drops arguments\n' +
+        '- **[Suggestion]** bar.ts:5 — stale comment',
+    );
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      findings,
+      ...args,
+    });
+    const printed = (writeStdoutLine as unknown as Mock).mock
+      .calls[0][0] as string;
+    return { printed, plan };
+  }
+
+  it('a verifier gets the findings folded above, and the record is findings-free', () => {
+    const { printed, plan } = run({ role: 'verify' });
+    // Printed: the findings section AND the findings themselves — and NOT the
+    // reverse auditor's framing (a branch swap in findingsSection would pass both
+    // tests if each only asserted its own heading).
+    expect(printed).toContain('## The findings you are ruling on');
+    expect(printed).not.toContain('Already confirmed');
+    expect(printed).toContain('foo.ts:10 — the collision drops arguments');
+    // and the line the orchestrator used to truncate away.
+    expect(printed).toContain('does not replace the brief; read it first');
+    // Recorded: the launch block ALONE — no findings baked in.
+    const recorded = readRecordedPrompts(plan).get('verify')!;
+    expect(recorded).not.toContain('foo.ts:10');
+    expect(recorded.startsWith('You are review agent `verify`')).toBe(true);
+    // The whole point: the delivery check still passes on the folded prompt, because
+    // the recorded block appears in order within it (findings are an add-only prefix).
+    expect(wasDeliveredVerbatim(printed, recorded)).toBe(true);
+  });
+
+  it('a reverse auditor gets the do-not-re-report framing', () => {
+    const { printed, plan } = run({ role: 'reverse-audit' });
+    expect(printed).toContain('Already confirmed — do not re-report these');
+    // and NOT the verifier's framing — the mirror of the assertion above.
+    expect(printed).not.toContain('The findings you are ruling on');
+    expect(printed).toContain('foo.ts:10 — the collision drops arguments');
+    const recorded = readRecordedPrompts(plan).get('reverse-audit')!;
+    expect(recorded).not.toContain('foo.ts:10');
+    expect(wasDeliveredVerbatim(printed, recorded)).toBe(true);
+  });
+
+  it('a Step 3B per-chunk reverse auditor takes --chunk and --findings together', () => {
+    // The one valid triple: reverse-audit declares both acceptsChunk and
+    // acceptsFindings, and Step 5 3B launches `--role reverse-audit --chunk N
+    // --findings <cumulative>` per chunk per round. The findings fold above the
+    // chunk-scoped prompt; the record is that chunk's block, findings-free, keyed by
+    // the chunk. (PLAN's chunks are 13/14/15 — chunk 14 is offset 4024, limit 176.)
+    const { printed, plan } = run({ role: 'reverse-audit', chunk: 14 });
+    expect(printed).toContain('Already confirmed — do not re-report these');
+    expect(printed).toContain('foo.ts:10 — the collision drops arguments');
+    expect(printed).toContain('offset=4024, limit=176'); // this chunk's range only
+    expect(printed).not.toContain('offset=3807'); // not chunk 13's
+    const recorded = readRecordedPrompts(plan).get('reverse-audit--chunk-14')!;
+    expect(recorded).not.toContain('foo.ts:10');
+    expect(recorded).toContain('offset=4024, limit=176');
+    expect(wasDeliveredVerbatim(printed, recorded)).toBe(true);
+  });
+
+  it('throws for a role it has no framing for, rather than falling through', () => {
+    // A future role that sets acceptsFindings but has no branch in findingsSection
+    // must fail loudly, not inherit the reverse auditor's "do not re-report" prose.
+    // Called directly with a role the function does not frame — the guards never let
+    // a non-findings role reach it in a real run.
+    expect(() => findingsSection('2', 'some findings')).toThrow(
+      /--findings has no framing for role "2"/,
+    );
+  });
+
+  it('an empty findings file tells the reverse auditor nothing is confirmed yet', () => {
+    const dir = tmp('ap-find0-');
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    const findings = join(dir, 'f.md');
+    writeFileSync(findings, '   \n  ');
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+    });
+    const printed = (writeStdoutLine as unknown as Mock).mock
+      .calls[0][0] as string;
+    expect(printed).toContain('Nothing is confirmed yet');
+    expect(printed).not.toContain('do not re-report');
+  });
+
+  it('an empty findings file tells the verifier there is nothing to verify', () => {
+    // The verify branch of findingsSection handles empty differently from the
+    // reverse auditor's (which hunts every gap) — a verifier with no findings has
+    // nothing to rule on. Asymmetric handling is exactly what regresses unnoticed.
+    const dir = tmp('ap-vf0-');
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    const findings = join(dir, 'f.md');
+    writeFileSync(findings, '   \n  ');
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'verify',
+      findings,
+    });
+    const printed = (writeStdoutLine as unknown as Mock).mock
+      .calls[0][0] as string;
+    expect(printed).toContain('nothing to verify');
+    expect(printed).not.toContain('Nothing is confirmed yet');
+  });
+
+  it('the record is byte-identical whether or not --findings was passed', () => {
+    // Proves the shared per-shard/round key is unaffected: two verify shards with
+    // different findings record the SAME launch block, so both match it. Same plan
+    // both times (the record embeds the plan-derived brief path), differing only in
+    // whether findings were folded into what was PRINTED.
+    const dir = tmp('ap-nof-');
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    const findings = join(dir, 'f.md');
+    writeFileSync(findings, '- **[Critical]** foo.ts:10 — x');
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'verify',
+      findings,
+    });
+    const withFindings = readRecordedPrompts(plan).get('verify')!;
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'verify',
+    });
+    const withoutFindings = readRecordedPrompts(plan).get('verify')!;
+    expect(withFindings).toBe(withoutFindings);
+  });
+
+  it('cannot read the findings file — says so, does not review without them', () => {
+    const dir = tmp('ap-findbad-');
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    expect(() =>
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'verify',
+        findings: join(dir, 'no-such.md'),
+      }),
+    ).toThrow(/cannot read the findings/);
+  });
+
+  it.each([
+    [
+      'a dimension role',
+      { role: '2', findings: '/f' },
+      /--findings folds a findings list into the prompt, only for a role that takes one/,
+    ],
+    [
+      'no role',
+      { findings: '/f' },
+      /--findings folds a findings list into a --role verify \/ --role reverse-audit/,
+    ],
+    [
+      'whole-diff',
+      { 'whole-diff': true, findings: '/f' },
+      /--whole-diff builds the diff-reading block alone/,
+    ],
+  ])('rejects --findings with %s', (_, extra, pattern) => {
+    expect(() =>
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan: '/nonexistent/plan.json',
+        ...extra,
+      }),
+    ).toThrow(pattern as RegExp);
   });
 });
 
