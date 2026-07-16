@@ -1199,6 +1199,20 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   setPromptStatus('idle');
                 }
               }
+              // The debug guard below reads the committed store's active
+              // assistant block, but batching leaves earlier chunks from this
+              // same burst in the pending buffer until the macrotask flush. An
+              // observer burst that interleaves a debug event between assistant
+              // chunks would otherwise miss the still-pending assistant block
+              // and let the debug event split it. Commit the buffer first so the
+              // guard sees the effective state. Scoped to observer-mode debug
+              // events (rare) so steady streaming keeps batching.
+              if (
+                !hasSessionActivePrompt() &&
+                uiEvents.some((e) => e.type === 'debug')
+              ) {
+                flushTranscriptSync();
+              }
               const shouldGuardAssistant =
                 !hasSessionActivePrompt() &&
                 store.getSnapshot().activeAssistantBlockId != null;

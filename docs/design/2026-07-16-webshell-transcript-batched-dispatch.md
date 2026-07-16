@@ -102,10 +102,16 @@ Flush points:
 - `clearPending()` before `store.reset()` (resync / epoch reload).
 - `flushSync()` on loop exit and provider unmount so no buffered events are lost.
 
-Known minor semantic: `shouldGuardAssistant` reads `store.getSnapshot()`
-pre-dispatch and may lag the pending buffer by a few events within a burst. This
-only affects whether rare `debug` events are filtered while observing another
-client's turn; it does not affect ordering or correctness of rendered content.
+Observer debug-guard read: `shouldGuardAssistant` reads the committed store's
+`activeAssistantBlockId`, which batching leaves stale within a burst (earlier
+assistant chunks are still only in the pending buffer). Left unhandled, a `debug`
+event interleaved in an observer assistant burst is not filtered and splits the
+assistant block — a real correctness regression, not a cosmetic one. The guard
+therefore flushes the buffer first, scoped to observer-mode debug events (rare)
+so steady streaming keeps batching, restoring the pre-batching filtering
+behavior. This was the one store read site the original audit missed; every
+other `getSnapshot()` read in the live loop (`replay_complete` →
+`awaitingResync`) already flushes first.
 
 ### Fix B2 — Dev-only block freeze
 
@@ -145,6 +151,14 @@ core fix. Fix A is required.
 
 Round 5: The freeze is intentionally kept in dev so an in-place mutation
 regression still throws during development and CI.
+
+Round 6 (post-review, ytahdn): The original audit treated the
+`shouldGuardAssistant` snapshot lag as a cosmetic tradeoff. It is not — within a
+burst the committed store has no active assistant block yet, so an interleaved
+`debug` event escapes the observer filter and splits the assistant block. Fixed
+by flushing before the guard (scoped to observer-mode debug events) and pinned
+by a focused burst regression test. Lesson: every `getSnapshot()` read in the
+live loop must either flush first or be proven independent of pending events.
 
 ## Verification Plan
 
