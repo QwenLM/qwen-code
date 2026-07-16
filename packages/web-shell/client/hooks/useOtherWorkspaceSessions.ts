@@ -7,7 +7,10 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
-import { SESSION_LIST_PAGE_SIZE } from '../constants/sessions';
+import {
+  SESSION_LIST_PAGE_SIZE,
+  WEB_SHELL_SESSION_SOURCE_TYPE,
+} from '../constants/sessions';
 
 export interface OtherWorkspaceSessionsResult {
   /**
@@ -73,6 +76,7 @@ export function useOtherWorkspaceSessions(
         client.listWorkspaceSessions(cwd, {
           pageSize: SESSION_LIST_PAGE_SIZE,
           archiveState: 'active',
+          sourceType: WEB_SHELL_SESSION_SOURCE_TYPE,
         }),
       ),
     );
