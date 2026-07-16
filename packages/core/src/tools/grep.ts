@@ -14,6 +14,7 @@ import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   resolveAndValidatePath,
+  formatDisplayPath,
   resolvePath,
   isSubpath,
   unescapePath,
@@ -407,7 +408,11 @@ class GrepToolInvocation extends BaseToolInvocation<
    * @returns A string describing the grep
    */
   getDescription(): string {
-    let description = `'${this.params.pattern}' in path '${this.params.path || './'}'`;
+    const displayPath = formatDisplayPath(
+      this.params.path || '.',
+      this.config.getTargetDir(),
+    );
+    let description = `'${this.params.pattern}' in ${displayPath}`;
     if (this.params.glob) {
       description += ` (filter: '${this.params.glob}')`;
     }

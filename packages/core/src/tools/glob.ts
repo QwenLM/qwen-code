@@ -12,6 +12,7 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import {
   resolveAndValidatePath,
+  formatDisplayPath,
   resolvePath,
   isSubpath,
   unescapePath,
@@ -106,7 +107,11 @@ class GlobToolInvocation extends BaseToolInvocation<
   getDescription(): string {
     let description = `'${this.params.pattern}'`;
     if (this.params.path) {
-      description += ` in path '${this.params.path}'`;
+      const displayPath = formatDisplayPath(
+        this.params.path,
+        this.config.getTargetDir(),
+      );
+      description += ` in ${displayPath}`;
     }
 
     return description;
