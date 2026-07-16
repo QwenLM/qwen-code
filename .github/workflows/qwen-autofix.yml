@@ -792,6 +792,7 @@ jobs:
           if [[ -n "$(git status --porcelain "${SCHEMA_FILE}")" ]]; then
             echo "❌ ${SCHEMA_FILE} is out of date. Run: npm run generate:settings-schema"
             git --no-pager diff -- "${SCHEMA_FILE}" || true
+            echo "outcome=failed" >> "${GITHUB_OUTPUT}"
             exit 1
           fi
 

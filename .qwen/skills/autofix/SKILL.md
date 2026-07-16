@@ -44,11 +44,12 @@ owns the model-driven decisions, code changes, and pre-commit verification.
   or "unrelated" without reproducing it on the base branch. For a
   generated-artifact check, regenerate the artifact and compare (see the
   generated-artifact rule above) rather than assuming.
-- Do not invent environment or tooling excuses (e.g. "node_modules is
-  incomplete"). The runner does a clean `npm ci` and `npm run build` before you
-  start, so the toolchain works. If a command genuinely fails, quote the exact
-  command and its real output in `<workdir>/failure.md`; do not rationalize
-  skipping a check.
+- Do not skip a failing check by attributing it to the environment without
+  evidence. The runner does a clean `npm ci` and `npm run build` before you
+  start, so assume the toolchain works unless a command actually fails. A real
+  infra failure IS worth reporting: quote the exact command and its real output
+  in `<workdir>/failure.md` rather than skipping the check or guessing at the
+  cause (e.g. do not claim "node_modules is incomplete" unless you saw it fail).
 - Never ask the user a question in this headless workflow. If blocked, write
   `<workdir>/failure.md` with what you learned and stop.
 
