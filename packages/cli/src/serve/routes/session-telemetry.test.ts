@@ -267,6 +267,31 @@ describe('special session resolver telemetry publication', () => {
     );
   });
 
+  it('does not publish a workspace for ambiguous transcript storage matches', async () => {
+    archiveMocks.assertSessionLoadable.mockResolvedValue('active');
+    const primary = runtime({
+      workspaceId: 'primary',
+      workspaceCwd: primaryCwd,
+      primary: true,
+      bridge: bridgeWithSessions(),
+    });
+    const secondary = runtime({
+      workspaceId: 'secondary',
+      workspaceCwd: secondaryCwd,
+      primary: false,
+      bridge: bridgeWithSessions(),
+    });
+
+    const res = await request(makeApp([primary, secondary])).get(
+      '/session/shared-storage/transcript',
+    );
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('ambiguous_session_owner');
+    expect(archiveMocks.assertSessionLoadable).toHaveBeenCalledTimes(2);
+    expect(telemetryMocks.setDaemonTelemetryWorkspace).not.toHaveBeenCalled();
+  });
+
   it('does not publish a workspace for a creation workspace mismatch', async () => {
     const primary = runtime({
       workspaceId: 'primary',

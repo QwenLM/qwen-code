@@ -138,7 +138,7 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     const res = mockRes(200);
 
     mw(
-      mockReq('GET', '/workspaces/ws-secondary/session/session-1/transcript'),
+      mockReq('GET', '/workspaces/ws-secondary/session/session%2F1/transcript'),
       res,
       vi.fn() as unknown as NextFunction,
     );
@@ -148,7 +148,7 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
       expect.objectContaining({
         method: 'GET',
         route: 'GET /workspaces/:workspace/session/:id/transcript',
-        sessionId: 'session-1',
+        sessionId: 'session/1',
         workspaceHash: 'hash:/workspace/secondary',
       }),
       expect.any(Function),
