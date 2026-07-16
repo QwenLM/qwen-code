@@ -653,7 +653,7 @@ export default {
     "Incloeu el nom de l'extensió a desinstal·lar com a argument posicional.",
   'Enables an extension.': 'Activa una extensió.',
   'The name of the extension to enable.': "El nom de l'extensió a activar.",
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
     "L'àmbit en el qual activar l'extensió. Si no s'estableix, s'activarà en tots els àmbits.",
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     'L\'extensió "{{name}}" s\'ha activat correctament per a l\'àmbit "{{scope}}".',
@@ -663,7 +663,7 @@ export default {
     'Àmbit no vàlid: {{scope}}. Useu un dels següents: {{scopes}}.',
   'Disables an extension.': 'Desactiva una extensió.',
   'The name of the extension to disable.': "El nom de l'extensió a desactivar.",
-  'The scope to disable the extenison in.':
+  'The scope to disable the extension in.':
     "L'àmbit en el qual desactivar l'extensió.",
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     'L\'extensió "{{name}}" s\'ha desactivat correctament per a l\'àmbit "{{scope}}".',
