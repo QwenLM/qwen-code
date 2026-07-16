@@ -63,6 +63,7 @@ import {
   mountWebShellAssets,
   mountWebShellSpaFallback,
 } from './web-shell-static.js';
+import { installExtensionPairingRoutes } from './extension-pairing-routes.js';
 import {
   mountWorkspaceMemoryRoutes,
   mountWorkspaceQualifiedMemoryRoutes,
@@ -986,6 +987,9 @@ export function createServeApp(
     });
   }
 
+  if (opts.extensionPairingManager) {
+    installExtensionPairingRoutes(app, opts.extensionPairingManager);
+  }
   app.use(bearerAuth(opts.token));
 
   // Rate limiter: after auth (only count authenticated requests), except
@@ -1626,6 +1630,7 @@ export function createServeApp(
     workspaceRememberLane,
     checkRate: rateLimiter?.checkRate,
     clientMcpOverWs: opts.clientMcpOverWs === true,
+    allowUnpairedClientMcp: opts.allowUnpairedClientMcp === true,
     // Reverse tool channel (issue #5626, Phase 2). Per-connection provider:
     // on `mcp_register` it records the WS registrar's sender in the shared
     // registry and adds an SDK-type runtime MCP server in the ACP child
@@ -1644,6 +1649,7 @@ export function createServeApp(
     // Plan C CDP tunnel (issue #5626): the `/cdp` branch + `cdp_*` routing
     // activate only when the flag is on and a registry is supplied.
     cdpTunnelOverWs: opts.cdpTunnelOverWs === true,
+    verifyExtensionPairingCredential: opts.verifyExtensionPairingCredential,
     ...(cdpTunnelRegistry ? { cdpTunnelRegistry } : {}),
     // Browser captures audio and streams raw PCM here; the daemon transcribes
     // server-side via the reused CLI voice pipeline. Shares the ACP upgrade

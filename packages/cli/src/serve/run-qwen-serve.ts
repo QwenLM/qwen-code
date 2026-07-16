@@ -138,15 +138,34 @@ import type {
   ServiceInfoWorker,
 } from '../commands/channel/pidfile.js';
 import { sanitizeLogText } from '@qwen-code/channel-base';
-import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
+import {
+  isBrowserAutomationMcpAvailable,
+  resolveCdpMcpCommand,
+} from './cdp-mcp-command.js';
+import {
+  createExtensionPairingManager,
+  type ExtensionPairingManager,
+} from './extension-pairing.js';
+import {
+  EXTENSION_PAIRING_CONFIRM_PATH,
+  EXTENSION_PAIRING_PATH,
+  EXTENSION_PAIRING_VERIFY_PATH,
+  installExtensionPairingRoutes,
+} from './extension-pairing-routes.js';
 
-// Reverse MCP channel; enabled only by explicit option or env opt-in.
+// Reverse MCP channel; enabled by default for extension-hosted tools. Operators
+// can explicitly disable it with QWEN_SERVE_CLIENT_MCP_OVER_WS=0.
 const QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV = 'QWEN_SERVE_CLIENT_MCP_OVER_WS';
 // CDP tunnel; default-on for Chrome-extension origins or explicit env opt-in.
 const QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV = 'QWEN_SERVE_CDP_TUNNEL_OVER_WS';
 const QWEN_SERVE_PROMPT_DEADLINE_MS_ENV = 'QWEN_SERVE_PROMPT_DEADLINE_MS';
 const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
   'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
+// Derived from packages/chrome-extension/public/manifest.json's stable key.
+// Pinning one extension origin preserves the browser Origin/CSWSH boundary
+// without requiring every user to pass --allow-origin.
+export const OFFICIAL_QWEN_CHROME_EXTENSION_ORIGIN =
+  'chrome-extension://idkijaaipeeinemigojbjkmfmabokbdk';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
 
 function daemonPipeDirection(
@@ -198,6 +217,7 @@ const WORKSPACE_SETTING_SCOPE =
 type RunQwenServeOptions = Omit<ServeOptions, 'token' | 'workspace'> & {
   token?: string;
   workspace?: string | string[];
+  extensionPairingManager?: ExtensionPairingManager;
 };
 type WorkspaceSettingsWrite =
   import('./workspace-service/types.js').WorkspaceSettingsWrite;
@@ -1157,6 +1177,9 @@ const BOOTSTRAP_SERVE_PATHS = new Set([
   BOOTSTRAP_HEALTH_PATH,
   BOOTSTRAP_CAPABILITIES_PATH,
   BOOTSTRAP_DAEMON_STATUS_PATH,
+  EXTENSION_PAIRING_PATH,
+  EXTENSION_PAIRING_CONFIRM_PATH,
+  EXTENSION_PAIRING_VERIFY_PATH,
 ]);
 
 function createBootstrapServeApp(input: {
@@ -1175,6 +1198,7 @@ function createBootstrapServeApp(input: {
     ChannelWorkerSupervisor['snapshot']
   >;
   getChannelWorkerSnapshots: () => ChannelWorkerGroupSnapshot[];
+  extensionPairingManager: ExtensionPairingManager;
   onHealthServed?: () => void;
 }): Application {
   const {
@@ -1191,6 +1215,7 @@ function createBootstrapServeApp(input: {
     getRuntimeError,
     getChannelWorkerSnapshot,
     getChannelWorkerSnapshots,
+    extensionPairingManager,
     onHealthServed,
   } = input;
   const app = express();
@@ -1224,6 +1249,7 @@ function createBootstrapServeApp(input: {
     app.get(BOOTSTRAP_HEALTH_PATH, healthHandler);
   }
 
+  installExtensionPairingRoutes(app, extensionPairingManager);
   app.use(bearerAuth(opts.token));
 
   if (!exposeHealthPreAuth) {
@@ -1673,26 +1699,51 @@ export async function runQwenServe(
       process.env[QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV],
     );
   const clientMcpOverWsEnv = process.env[QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV];
+  const clientMcpExplicitlyEnabled =
+    optsIn.clientMcpOverWs === true ||
+    (clientMcpOverWsEnv !== undefined && !envFlagDisabled(clientMcpOverWsEnv));
   const cdpTunnelOverWsEnv = process.env[QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV];
+  const cdpMcpCommandConfigured =
+    resolveCdpMcpCommand(process.env) !== undefined;
   const chromeExtensionOriginAllowed = hasChromeExtensionOrigin(
     optsIn.allowOrigins,
   );
+  const allowOrigins = [
+    OFFICIAL_QWEN_CHROME_EXTENSION_ORIGIN,
+    ...(optsIn.allowOrigins ?? []),
+  ].filter((origin, index, origins) => origins.indexOf(origin) === index);
   const rawWorkspaces = resolveWorkspaceInputs(optsIn.workspace);
   const rawWorkspace = rawWorkspaces[0]!;
+  const extensionPairingManager =
+    optsIn.extensionPairingManager ??
+    createExtensionPairingManager({
+      onCodeRotated: (code) => {
+        writeStderrLine(
+          `qwen serve: Chrome extension pairing code rotated → ` +
+            `${code} (expires in 10 minutes)`,
+        );
+      },
+    });
   const opts: ServeOptions = {
     ...optsIn,
     token,
     promptDeadlineMs,
     writerIdleTimeoutMs,
     workspace: rawWorkspace,
+    allowOrigins,
     clientMcpOverWs:
-      optsIn.clientMcpOverWs ??
-      (!envFlagDisabled(clientMcpOverWsEnv) &&
-        clientMcpOverWsEnv !== undefined),
+      optsIn.clientMcpOverWs ?? !envFlagDisabled(clientMcpOverWsEnv),
+    allowUnpairedClientMcp:
+      optsIn.allowUnpairedClientMcp ?? clientMcpExplicitlyEnabled,
     cdpTunnelOverWs:
       optsIn.cdpTunnelOverWs ??
       (!envFlagDisabled(cdpTunnelOverWsEnv) &&
-        (cdpTunnelOverWsEnv !== undefined || chromeExtensionOriginAllowed)),
+        (cdpTunnelOverWsEnv !== undefined ||
+          chromeExtensionOriginAllowed ||
+          cdpMcpCommandConfigured)),
+    verifyExtensionPairingCredential: (credential) =>
+      extensionPairingManager.verifyCredential(credential),
+    extensionPairingManager,
   };
   let channelRuntime = opts.channelSelection
     ? await loadChannelWorkerRuntime()
@@ -2166,6 +2217,10 @@ export async function runQwenServe(
   });
   writeStderrLine(
     `qwen serve: daemon log → ${daemonLog.getLogPath() || '(disabled)'}`,
+  );
+  writeStderrLine(
+    `qwen serve: Chrome extension pairing code → ` +
+      `${extensionPairingManager.getDisplayCode()} (expires in 10 minutes)`,
   );
 
   // The MCP client guardrails enforce in the ACP child process (where
@@ -4131,6 +4186,7 @@ export async function runQwenServe(
     getRuntimeError: () => runtimeStartupError,
     getChannelWorkerSnapshot,
     getChannelWorkerSnapshots,
+    extensionPairingManager,
     onHealthServed: deferRuntimeUntilFirstHealth
       ? () => startRuntimeAfterHealth?.()
       : undefined,
@@ -4380,10 +4436,16 @@ export async function runQwenServe(
           `qwen serve: bearer auth disabled (loopback default). Set ${QWEN_SERVER_TOKEN_ENV} to enable.`,
         );
         if (opts.clientMcpOverWs === true) {
-          writeStderrLine(
-            `qwen serve: client-hosted MCP tools are accepted over the WebSocket without auth. ` +
-              `Set ${QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV}=0 to disable.`,
-          );
+          if (opts.allowUnpairedClientMcp === true) {
+            writeStderrLine(
+              'qwen serve: unpaired client-hosted MCP tools are explicitly enabled.',
+            );
+          } else {
+            writeStderrLine(
+              `qwen serve: client-hosted MCP tools require Chrome extension pairing. ` +
+                `Set ${QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV}=0 to disable.`,
+            );
+          }
         }
       } else if (opts.requireAuth) {
         // The boot check above guarantees `token` is set whenever

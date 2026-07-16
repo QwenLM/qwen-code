@@ -74,6 +74,7 @@ describe('createClientMcpServerProvider', () => {
     addResult: Awaited<ReturnType<ClientMcpBridge['addRuntimeMcpServer']>>,
   ) {
     return {
+      preheat: vi.fn(async () => {}),
       addRuntimeMcpServer: vi.fn(async () => addResult),
       removeRuntimeMcpServer: vi.fn(async () => ({})),
     } satisfies ClientMcpBridge;
@@ -114,6 +115,7 @@ describe('createClientMcpServerProvider', () => {
   it('rolls back the sender when bridge add throws', async () => {
     const registry = new ClientMcpSenderRegistry();
     const bridge = {
+      preheat: vi.fn(async () => {}),
       addRuntimeMcpServer: vi.fn(async () => {
         throw new Error('boom');
       }),
@@ -130,6 +132,29 @@ describe('createClientMcpServerProvider', () => {
 
     expect(registry.serverNames()).toEqual([]);
     expect(bridge.removeRuntimeMcpServer).not.toHaveBeenCalled();
+  });
+
+  it('preheats the ACP child before adding the runtime server', async () => {
+    const registry = new ClientMcpSenderRegistry();
+    const order: string[] = [];
+    const bridge = {
+      preheat: vi.fn(async () => {
+        order.push('preheat');
+      }),
+      addRuntimeMcpServer: vi.fn(async () => {
+        order.push('add');
+        return { toolCount: 1 };
+      }),
+      removeRuntimeMcpServer: vi.fn(async () => ({})),
+    } satisfies ClientMcpBridge;
+    const provider = createClientMcpServerProvider(registry, bridge, 'connA');
+
+    await provider.registerClientMcpServer(
+      'srv',
+      vi.fn(async () => msg(1)),
+    );
+
+    expect(order).toEqual(['preheat', 'add']);
   });
 
   it('does not unregister a server now owned by another connection', async () => {

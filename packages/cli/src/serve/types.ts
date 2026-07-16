@@ -14,6 +14,7 @@ import {
 // are compiler-flagged here.
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
 import type { AuthType, InputModalities } from '@qwen-code/qwen-code-core';
+import type { ExtensionPairingManager } from './extension-pairing.js';
 
 /**
  * Stage 1 daemon mode shape.
@@ -241,10 +242,12 @@ export interface ServeOptions {
    * Phase 2 "reverse tool channel"). When enabled, a connected WS client may
    * send `mcp_register` / `mcp_message` / `mcp_unregister` frames so the
    * daemon's agent can call tools that execute in the client (e.g. the Chrome
-   * extension's browser tools). `runQwenServe` only enables this when a caller
-   * or environment variable opts in.
+   * extension's browser tools). Enabled by default for paired extension
+   * clients; ordinary unpaired clients require an explicit opt-in.
    */
   clientMcpOverWs?: boolean;
+  /** Allow ordinary ACP clients to register reverse MCP without pairing. */
+  allowUnpairedClientMcp?: boolean;
   /**
    * Tunnel raw CDP to a real browser tab over the reverse `/acp` WS
    * (Plan C "CDP tunnel", issue #5626). When enabled, a loopback CDP client can
@@ -253,6 +256,15 @@ export interface ServeOptions {
    * Chrome extension origins or explicit env opt-in; callers may pass `false`.
    */
   cdpTunnelOverWs?: boolean;
+  /**
+   * Verify the Chrome extension's daemon pairing credential before accepting
+   * extension-hosted browser tools over `/acp`.
+   */
+  verifyExtensionPairingCredential?: (
+    credential: string | undefined,
+  ) => boolean;
+  /** Process-local manager for Chrome extension one-time pairing routes. */
+  extensionPairingManager?: ExtensionPairingManager;
   /** Forward the experimental LSP opt-in to spawned ACP children. */
   experimentalLsp?: boolean;
   /**

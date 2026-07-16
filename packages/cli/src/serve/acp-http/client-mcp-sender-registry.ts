@@ -135,6 +135,7 @@ export class ClientMcpSenderRegistry {
  * bridge surface (and easy to fake in tests).
  */
 export interface ClientMcpBridge {
+  preheat(): Promise<void>;
   addRuntimeMcpServer(
     name: string,
     config: Record<string, unknown>,
@@ -167,6 +168,10 @@ export function createClientMcpServerProvider(
 ): ClientMcpServerProvider {
   return {
     async registerClientMcpServer(serverName, sendSdkMcpMessage) {
+      // A browser extension can connect before the daemon's ACP child is warm.
+      // Runtime MCP mutation requires that live channel, so establish it here
+      // instead of relying on a Web Shell request to race ahead of registration.
+      await bridge.preheat();
       // Record the sender FIRST so the child's discovery handshake — which the
       // bridge add triggers synchronously — can route `client_mcp/message`
       // frames back to this WS. Owned by this connection's client id so a peer

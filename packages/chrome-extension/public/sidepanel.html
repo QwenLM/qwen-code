@@ -272,6 +272,53 @@
         display: inline;
       }
 
+      .pair {
+        display: grid;
+        gap: 9px;
+        animation: rise 0.55s 0.21s both;
+      }
+      .pair__row {
+        display: flex;
+        gap: 8px;
+      }
+      .pair__input {
+        min-width: 0;
+        flex: 1;
+        padding: 10px 11px;
+        color: var(--text);
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        font:
+          600 13px/1 ui-monospace,
+          SFMono-Regular,
+          monospace;
+        letter-spacing: 0;
+      }
+      .pair__input:focus {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+      }
+      .pair__button {
+        flex: none;
+        padding: 0 13px;
+        color: var(--bg);
+        background: var(--status);
+        border: 1px solid transparent;
+        border-radius: 8px;
+        font-weight: 650;
+        cursor: pointer;
+      }
+      .pair__button:disabled {
+        opacity: 0.6;
+        cursor: wait;
+      }
+      .pair__message {
+        min-height: 18px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
       /* ---- live status ---- */
       .status {
         display: flex;
@@ -365,8 +412,7 @@
           <h1 id="welcome-title">Start qwen serve</h1>
           <p id="welcome-desc">
             No local qwen&nbsp;serve daemon is reachable. Run this in a terminal
-            and leave it running — this panel connects on its own. Browser
-            automation tools require QWEN_CDP_MCP_COMMAND.
+            and leave it running — this panel connects on its own.
           </p>
         </section>
 
@@ -427,6 +473,25 @@
             <span id="copy-label">Copy command</span>
           </button>
         </figure>
+
+        <form id="pair-form" class="pair hidden">
+          <div class="pair__row">
+            <input
+              id="pair-code"
+              class="pair__input"
+              inputmode="text"
+              autocomplete="one-time-code"
+              placeholder="xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx"
+              maxlength="39"
+              pattern="(?:[0-9a-fA-F]{4}-?){8}"
+              aria-label="Pairing code"
+            />
+            <button id="pair-submit" class="pair__button" type="submit">
+              Pair
+            </button>
+          </div>
+          <div id="pair-message" class="pair__message" role="status"></div>
+        </form>
       </div>
 
       <footer class="status">

@@ -18,7 +18,10 @@ import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import { SdkControlClientTransport } from '@qwen-code/qwen-code-core';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { mountAcpHttp } from './index.js';
-import type { ClientMcpServerProvider } from './client-mcp-ws.js';
+import {
+  ClientMcpWsConnection,
+  type ClientMcpServerProvider,
+} from './client-mcp-ws.js';
 import { WorkspaceRememberTaskLane } from '../workspace-remember.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
@@ -168,10 +171,17 @@ describe('client_mcp_over_ws reverse channel (serve layer)', () => {
   let provider: AgentSideProvider;
 
   function startServer(
-    opts: { clientMcpOverWs?: boolean; withProvider?: boolean } = {},
+    opts: {
+      clientMcpOverWs?: boolean;
+      allowUnpairedClientMcp?: boolean;
+      withProvider?: boolean;
+      verifyExtensionPairingCredential?: (
+        credential: string | undefined,
+      ) => boolean;
+    } = {},
   ): Promise<void> {
     provider = new AgentSideProvider();
-    return new Promise<void>((resolve) => {
+    return new Promise<void>((resolve, reject) => {
       const app = express();
       app.use(express.json());
       const handle = mountAcpHttp(app, fakeBridge, {
@@ -180,13 +190,17 @@ describe('client_mcp_over_ws reverse channel (serve layer)', () => {
         enabled: true,
         workspaceRememberLane: new WorkspaceRememberTaskLane(fakeBridge),
         clientMcpOverWs: opts.clientMcpOverWs ?? true,
+        allowUnpairedClientMcp: opts.allowUnpairedClientMcp,
+        verifyExtensionPairingCredential: opts.verifyExtensionPairingCredential,
         ...(opts.withProvider === false ? {} : { clientMcpProvider: provider }),
       });
-      server = app.listen(0, '127.0.0.1', () => {
-        port = (server.address() as AddressInfo).port;
-        handle?.attachServer(server);
+      const listeningServer = app.listen(0, '127.0.0.1', () => {
+        port = (listeningServer.address() as AddressInfo).port;
+        handle?.attachServer(listeningServer);
         resolve();
       });
+      listeningServer.once('error', reject);
+      server = listeningServer;
     });
   }
 
@@ -204,15 +218,20 @@ describe('client_mcp_over_ws reverse channel (serve layer)', () => {
   }
 
   /** Initialize the ACP connection and resolve once the init reply lands. */
-  function initialize(ws: WebSocket): Promise<void> {
+  function initialize(
+    ws: WebSocket,
+    params: Record<string, unknown> = {},
+  ): Promise<Record<string, unknown>> {
     return new Promise((resolve) => {
-      ws.once('message', () => resolve());
+      ws.once('message', (data) =>
+        resolve(JSON.parse(data.toString()) as Record<string, unknown>),
+      );
       ws.send(
         JSON.stringify({
           jsonrpc: '2.0',
           id: 1,
           method: 'initialize',
-          params: {},
+          params,
         }),
       );
     });
@@ -329,6 +348,124 @@ describe('client_mcp_over_ws reverse channel (serve layer)', () => {
     ws.close();
   });
 
+  it('rejects the Chrome extension bridge initialize before daemon pairing', async () => {
+    await startServer({
+      verifyExtensionPairingCredential: (credential) => credential === 'paired',
+    });
+    const ws = await wsConnect();
+
+    const reply = await new Promise<Record<string, unknown>>((resolve) => {
+      ws.once('message', (data) =>
+        resolve(JSON.parse(data.toString()) as Record<string, unknown>),
+      );
+      ws.send(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: { clientInfo: { name: 'qwen-cdp-bridge' } },
+        }),
+      );
+    });
+
+    expect(reply).toMatchObject({
+      id: 1,
+      error: { message: 'Chrome extension is not paired with this daemon' },
+    });
+    ws.close();
+  });
+
+  it('rejects the Chrome extension bridge when no pairing verifier is wired', async () => {
+    await startServer();
+    const ws = await wsConnect();
+
+    const reply = await initialize(ws, {
+      clientInfo: { name: 'qwen-cdp-bridge' },
+    });
+
+    expect(reply).toMatchObject({
+      id: 1,
+      error: { message: 'Chrome extension is not paired with this daemon' },
+    });
+    ws.close();
+  });
+
+  it('rejects reverse MCP from ordinary ACP clients by default', async () => {
+    await startServer({
+      verifyExtensionPairingCredential: () => false,
+      withProvider: false,
+    });
+    const ws = await wsConnect();
+
+    const initReply = await initialize(ws, {
+      clientInfo: { name: 'ordinary-acp-client' },
+    });
+    expect(initReply['result']).toBeDefined();
+
+    const mcpReply = new Promise<Record<string, unknown>>((resolve) => {
+      ws.once('message', (data) =>
+        resolve(JSON.parse(data.toString()) as Record<string, unknown>),
+      );
+    });
+    ws.send(JSON.stringify({ type: 'mcp_register', server: 'chrome-tools' }));
+    await expect(mcpReply).resolves.toMatchObject({
+      type: 'mcp_error',
+      code: 'not_authorized',
+    });
+    ws.close();
+  });
+
+  it('allows ordinary reverse MCP after explicit operator opt-in', async () => {
+    await startServer({
+      verifyExtensionPairingCredential: () => false,
+      allowUnpairedClientMcp: true,
+      withProvider: false,
+    });
+    const ws = await wsConnect();
+
+    const initReply = await initialize(ws, {
+      clientInfo: { name: 'ordinary-acp-client' },
+    });
+    expect(initReply['result']).toBeDefined();
+
+    const mcpReply = new Promise<Record<string, unknown>>((resolve) => {
+      ws.once('message', (data) =>
+        resolve(JSON.parse(data.toString()) as Record<string, unknown>),
+      );
+    });
+    ws.send(JSON.stringify({ type: 'mcp_register', server: 'chrome-tools' }));
+    await expect(mcpReply).resolves.toMatchObject({
+      type: 'mcp_error',
+      code: 'not_wired',
+    });
+    ws.close();
+  });
+
+  it('accepts the Chrome extension bridge initialize after daemon pairing', async () => {
+    await startServer({
+      verifyExtensionPairingCredential: (credential) => credential === 'paired',
+    });
+    const ws = await wsConnect();
+
+    await new Promise<void>((resolve) => {
+      ws.once('message', () => resolve());
+      ws.send(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            clientInfo: {
+              name: 'qwen-cdp-bridge',
+              extensionPairingCredential: 'paired',
+            },
+          },
+        }),
+      );
+    });
+    ws.close();
+  });
+
   it('tears down the client-hosted server on WS close', async () => {
     await startServer({ clientMcpOverWs: true });
     const ws = await wsConnect();
@@ -360,5 +497,47 @@ describe('client_mcp_over_ws reverse channel (serve layer)', () => {
     await vi.waitFor(() => {
       expect(provider.clients.has('chrome-tools')).toBe(false);
     });
+  });
+});
+
+describe('ClientMcpWsConnection lifecycle', () => {
+  it('waits for an in-flight registration before disconnect cleanup', async () => {
+    let finishRegistration:
+      | ((value: { toolCount: number }) => void)
+      | undefined;
+    const registration = new Promise<{ toolCount: number }>((resolve) => {
+      finishRegistration = resolve;
+    });
+    const calls: string[] = [];
+    const provider: ClientMcpServerProvider = {
+      registerClientMcpServer: vi.fn(async () => {
+        calls.push('register:start');
+        const result = await registration;
+        calls.push('register:done');
+        return result;
+      }),
+      unregisterClientMcpServer: vi.fn(async () => {
+        calls.push('unregister');
+      }),
+    };
+    const connection = new ClientMcpWsConnection(() => {}, provider);
+
+    const registerResult = connection.handleFrame({
+      type: 'mcp_register',
+      server: 'browser-tools',
+    });
+    await vi.waitFor(() => expect(calls).toEqual(['register:start']));
+
+    const disposed = connection.dispose();
+    await Promise.resolve();
+    expect(calls).toEqual(['register:start']);
+
+    finishRegistration?.({ toolCount: 1 });
+    await expect(registerResult).resolves.toMatchObject({
+      kind: 'error',
+      code: 'closed',
+    });
+    await disposed;
+    expect(calls).toEqual(['register:start', 'register:done', 'unregister']);
   });
 });
