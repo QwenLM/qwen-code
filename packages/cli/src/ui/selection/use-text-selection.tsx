@@ -251,14 +251,16 @@ export function TextSelectionController(
 
   // Invalidate the selection when the content scrolls, streams, or the terminal
   // resizes — anything that moves the composited frame under a fixed selection.
-  // Our own highlight renders keep scrollHeight/frameHeight unchanged, so this
-  // does not feed back into a render loop.
+  // A resize reflows content, which changes the frame/scroll height, so the
+  // frame subscription already covers it (no extra stdout 'resize' listener,
+  // which would trip the max-listeners warning). Our own highlight renders keep
+  // both heights unchanged, so this does not feed back into a render loop.
   useEffect(() => {
     const buffer = getBuffer();
     if (!buffer) {
       return;
     }
-    const check = () => {
+    return buffer.subscribe(() => {
       if (selectionRef.current.isEmpty) {
         return;
       }
@@ -270,15 +272,8 @@ export function TextSelectionController(
       ) {
         clearSelection();
       }
-    };
-    const unsubscribe = buffer.subscribe(check);
-    const onResize = () => clearSelection();
-    stdout.on('resize', onResize);
-    return () => {
-      unsubscribe();
-      stdout.off('resize', onResize);
-    };
-  }, [getBuffer, clearSelection, stdout]);
+    });
+  }, [getBuffer, clearSelection]);
 
   useEffect(() => {
     if (!props.isActive) {
