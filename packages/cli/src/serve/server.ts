@@ -770,6 +770,10 @@ export function createServeApp(
       // Reverse tool channel: answer the child's `client_mcp/message`
       // ext-method by reaching the WS connection that hosts the named server.
       clientMcpSender: clientMcpSenderRegistry.lookup,
+      clientMcpRuntimeRegistrations:
+        clientMcpSenderRegistry.runtimeRegistrations.bind(
+          clientMcpSenderRegistry,
+        ),
     });
   if (!injectedWorkspaceRegistry && !deps.bridge) {
     defaultBridgeForAdmission = bridge;
@@ -1418,6 +1422,7 @@ export function createServeApp(
     promptDeadlineMs: opts.promptDeadlineMs,
     sessionShellCommandEnabled,
     languageCodes,
+    verifyExtensionPairingCredential: opts.verifyExtensionPairingCredential,
   });
 
   registerWorkspaceMcpControlRoutes(app, {

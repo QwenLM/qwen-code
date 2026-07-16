@@ -107,6 +107,17 @@ function numberArg(
   return value;
 }
 
+function booleanArg(
+  args: Record<string, unknown>,
+  name: string,
+  fallback: boolean,
+): boolean {
+  const value = args[name];
+  if (value === undefined) return fallback;
+  if (typeof value !== 'boolean') throw new Error(`'${name}' must be boolean`);
+  return value;
+}
+
 function text(text: string): BrowserToolResult {
   return {
     content: [
@@ -305,8 +316,15 @@ export const BROWSER_TOOLS: readonly BrowserToolDefinition[] = [
   tool('list_network_requests', 'List captured page network requests.'),
   tool(
     'get_network_request',
-    'Get request and response details, including response body when available.',
-    { requestId: stringProperty('CDP network request id.') },
+    'Get request and response details. Response bodies are omitted unless explicitly requested.',
+    {
+      requestId: stringProperty('CDP network request id.'),
+      includeResponseBody: {
+        type: 'boolean',
+        description:
+          'Include the response body. It may contain sensitive application data.',
+      },
+    },
     ['requestId'],
   ),
   tool('clear_network_requests', 'Clear captured network requests.'),
@@ -330,6 +348,7 @@ export class BrowserTools implements BrowserToolHandler {
   private readonly networkEntries = new Map<string, NetworkEntry>();
   private consoleId = 0;
   private readyTabId: number | null = null;
+  private navigationGeneration = 0;
 
   constructor(private readonly session: DebuggerSession) {
     this.session.onEvent((method, params) => this.handleEvent(method, params));
@@ -388,7 +407,10 @@ export class BrowserTools implements BrowserToolHandler {
           case 'list_network_requests':
             return json(this.listNetwork());
           case 'get_network_request':
-            return await this.getNetwork(stringArg(args, 'requestId')!);
+            return await this.getNetwork(
+              stringArg(args, 'requestId')!,
+              booleanArg(args, 'includeResponseBody', false),
+            );
           case 'clear_network_requests':
             this.networkEntries.clear();
             return text('Network requests cleared.');
@@ -502,6 +524,7 @@ export class BrowserTools implements BrowserToolHandler {
     if (protocol !== 'http:' && protocol !== 'https:') {
       throw new Error('Navigation only supports http: and https: URLs');
     }
+    const generation = this.navigationGeneration;
     const result = await this.session.send('Page.navigate', {
       url: normalized,
     });
@@ -509,14 +532,15 @@ export class BrowserTools implements BrowserToolHandler {
       throw new Error(`Navigation failed: ${result['errorText']}`);
     }
     this.elements.clear();
-    await this.waitForDocumentReady();
+    await this.waitForDocumentReady(generation);
     return json({ url: normalized, ...result });
   }
 
   private async reload(): Promise<BrowserToolResult> {
+    const generation = this.navigationGeneration;
     await this.session.send('Page.reload');
     this.elements.clear();
-    await this.waitForDocumentReady();
+    await this.waitForDocumentReady(generation);
     return text('Page reloaded.');
   }
 
@@ -527,24 +551,26 @@ export class BrowserTools implements BrowserToolHandler {
     const entry = object(entries[current + offset]);
     if (typeof entry['id'] !== 'number')
       throw new Error('No history entry available');
+    const generation = this.navigationGeneration;
     await this.session.send('Page.navigateToHistoryEntry', {
       entryId: entry['id'],
     });
     this.elements.clear();
-    await this.waitForDocumentReady();
+    await this.waitForDocumentReady(generation);
     return text(offset < 0 ? 'Navigated back.' : 'Navigated forward.');
   }
 
-  private async waitForDocumentReady(): Promise<void> {
+  private async waitForDocumentReady(generation: number): Promise<void> {
     const deadline = Date.now() + NAVIGATION_TIMEOUT_MS;
-    await new Promise((resolve) => setTimeout(resolve, 50));
     while (Date.now() <= deadline) {
-      const result = await this.session.send('Runtime.evaluate', {
-        expression:
-          "document.readyState === 'interactive' || document.readyState === 'complete'",
-        returnByValue: true,
-      });
-      if (object(result['result'])['value'] === true) return;
+      if (this.navigationGeneration !== generation) {
+        const result = await this.session.send('Runtime.evaluate', {
+          expression:
+            "document.readyState === 'interactive' || document.readyState === 'complete'",
+          returnByValue: true,
+        });
+        if (object(result['result'])['value'] === true) return;
+      }
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
     throw new Error('Timed out waiting for page navigation');
@@ -598,30 +624,36 @@ export class BrowserTools implements BrowserToolHandler {
     });
     const objectId = object(resolved['object'])['objectId'];
     if (typeof objectId !== 'string') throw new Error(`Cannot resolve ${ref}`);
-    const result = await this.session.send('Runtime.callFunctionOn', {
-      objectId,
-      functionDeclaration: `function(value) {
-        this.focus();
-        if (this instanceof HTMLSelectElement) {
-          this.value = value;
-        } else if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement) {
-          const proto = this instanceof HTMLTextAreaElement
-            ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-          const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-          if (setter) setter.call(this, value); else this.value = value;
-        } else if (this.isContentEditable) {
-          this.textContent = value;
-        } else {
-          throw new TypeError('Element is not fillable');
-        }
-        this.dispatchEvent(new Event('input', { bubbles: true }));
-        this.dispatchEvent(new Event('change', { bubbles: true }));
-      }`,
-      arguments: [{ value }],
-      returnByValue: true,
-    });
-    if (result['exceptionDetails']) {
-      throw new Error(this.exceptionText(result['exceptionDetails']));
+    try {
+      const result = await this.session.send('Runtime.callFunctionOn', {
+        objectId,
+        functionDeclaration: `function(value) {
+          this.focus();
+          if (this instanceof HTMLSelectElement) {
+            this.value = value;
+          } else if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement) {
+            const proto = this instanceof HTMLTextAreaElement
+              ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+            const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+            if (setter) setter.call(this, value); else this.value = value;
+          } else if (this.isContentEditable) {
+            this.textContent = value;
+          } else {
+            throw new TypeError('Element is not fillable');
+          }
+          this.dispatchEvent(new Event('input', { bubbles: true }));
+          this.dispatchEvent(new Event('change', { bubbles: true }));
+        }`,
+        arguments: [{ value }],
+        returnByValue: true,
+      });
+      if (result['exceptionDetails']) {
+        throw new Error(this.exceptionText(result['exceptionDetails']));
+      }
+    } finally {
+      await this.session
+        .send('Runtime.releaseObject', { objectId })
+        .catch(() => undefined);
     }
     return text(`Filled ${ref}.`);
   }
@@ -737,7 +769,10 @@ export class BrowserTools implements BrowserToolHandler {
     }));
   }
 
-  private async getNetwork(requestId: string): Promise<BrowserToolResult> {
+  private async getNetwork(
+    requestId: string,
+    includeResponseBody: boolean,
+  ): Promise<BrowserToolResult> {
     const entry = this.networkEntries.get(requestId);
     if (!entry) throw new Error(`Network request '${requestId}' not found`);
     const detail: NetworkEntry & {
@@ -745,7 +780,12 @@ export class BrowserTools implements BrowserToolHandler {
       base64Encoded?: boolean;
       bodyTruncated?: boolean;
     } = { ...entry };
-    if (entry.finished && !entry.failed && !entry.redirectTo) {
+    if (
+      includeResponseBody &&
+      entry.finished &&
+      !entry.failed &&
+      !entry.redirectTo
+    ) {
       try {
         const body = await this.session.send('Network.getResponseBody', {
           requestId,
@@ -777,10 +817,29 @@ export class BrowserTools implements BrowserToolHandler {
       const timer = setTimeout(() => controller.abort(), ${PAGE_FETCH_TIMEOUT_MS});
       try {
         const response = await fetch(${JSON.stringify(url)}, { ...${JSON.stringify(init)}, signal: controller.signal });
-        const text = await response.text();
+        const reader = response.body?.getReader();
+        const decoder = new TextDecoder();
+        let text = '';
+        let bodyTruncated = false;
+        if (reader) {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const chunk = decoder.decode(value, { stream: true });
+            const remaining = ${MAX_BODY_CHARS} - text.length;
+            if (chunk.length > remaining) {
+              text += chunk.slice(0, Math.max(0, remaining));
+              bodyTruncated = true;
+              await reader.cancel();
+              break;
+            }
+            text += chunk;
+          }
+          if (!bodyTruncated) text += decoder.decode();
+        }
         return { url: response.url, status: response.status, statusText: response.statusText,
-          headers: Object.fromEntries(response.headers.entries()), body: text.slice(0, ${MAX_BODY_CHARS}),
-          bodyTruncated: text.length > ${MAX_BODY_CHARS} };
+          headers: Object.fromEntries(response.headers.entries()), body: text,
+          bodyTruncated };
       } finally {
         clearTimeout(timer);
       }
@@ -793,6 +852,12 @@ export class BrowserTools implements BrowserToolHandler {
       method === 'Page.frameNavigated' &&
       !object(params['frame'])['parentId']
     ) {
+      this.navigationGeneration += 1;
+      this.elements.clear();
+      return;
+    }
+    if (method === 'Page.navigatedWithinDocument') {
+      this.navigationGeneration += 1;
       this.elements.clear();
       return;
     }

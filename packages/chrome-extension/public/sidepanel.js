@@ -17,7 +17,6 @@ const DEFAULT_BASE_URL = 'http://127.0.0.1:4170';
 const STORAGE_KEY = 'qwen.daemon';
 const POLL_MS = 2000;
 const PROBE_TIMEOUT_MS = 2000;
-const PAIRING_VERIFY_CACHE_MS = 10_000;
 const FRAMED_MISS_LIMIT = 2;
 const SHELL_AUTH_MESSAGE_TYPE = 'qwen-daemon-auth';
 const DAEMON_READY_MESSAGE_TYPE = 'qwen-daemon-ready';
@@ -181,28 +180,13 @@ function notifyDaemonReady() {
     .catch(() => undefined);
 }
 
-let pairingCache = null;
 let pendingPairingNonce = null;
 
 /** Probe the daemon and reduce it to one onboarding state. */
 async function probeState(baseUrl, token, extensionPairingCredential) {
-  const cacheFresh =
-    !token &&
-    pairingCache?.baseUrl === baseUrl &&
-    pairingCache?.credential === extensionPairingCredential &&
-    Date.now() - pairingCache.verifiedAt < PAIRING_VERIFY_CACHE_MS;
-  if (
-    cacheFresh ||
-    (await verifyPairing(baseUrl, extensionPairingCredential))
-  ) {
+  if (await verifyPairing(baseUrl, extensionPairingCredential)) {
     pendingPairingNonce = null;
-    pairingCache = {
-      baseUrl,
-      credential: extensionPairingCredential,
-      verifiedAt: Date.now(),
-    };
   } else {
-    pairingCache = null;
     // Pairing endpoints intentionally precede bearer auth. The terminal code
     // stays in the extension and authenticates this first-use exchange before
     // any stored daemon token is exposed.
@@ -228,7 +212,6 @@ async function probeState(baseUrl, token, extensionPairingCredential) {
 
   const health = await probeJson(`${baseUrl}/health`, token);
   if (!health) {
-    pairingCache = null;
     return 'down';
   }
   const caps = await probeJson(`${baseUrl}/capabilities`, token);
@@ -281,27 +264,32 @@ function showWelcome(state, command) {
 
 let framedUrl = null;
 let framedMisses = 0;
-function postShellAuth(baseUrl, token) {
+function postShellAuth(baseUrl, token, extensionPairingCredential) {
   const win = els.iframe.contentWindow;
   if (!win) return;
   win.postMessage(
-    { type: SHELL_AUTH_MESSAGE_TYPE, token: token || null },
+    {
+      type: SHELL_AUTH_MESSAGE_TYPE,
+      token: token || null,
+      extensionPairingCredential: extensionPairingCredential || null,
+    },
     new URL(baseUrl).origin,
   );
 }
 
 /** Swap to the Web Shell iframe; only (re)assigns src when the URL changes. */
-function showShell(baseUrl, token) {
+function showShell(baseUrl, token, extensionPairingCredential) {
   framedMisses = 0;
   els.welcome.classList.add('hidden');
   els.pairForm.classList.add('hidden');
-  els.iframe.onload = () => postShellAuth(baseUrl, token);
+  els.iframe.onload = () =>
+    postShellAuth(baseUrl, token, extensionPairingCredential);
   if (framedUrl !== baseUrl) {
     framedUrl = baseUrl;
     els.iframe.src = baseUrl;
     notifyDaemonReady();
   } else {
-    postShellAuth(baseUrl, token);
+    postShellAuth(baseUrl, token, extensionPairingCredential);
   }
   els.iframe.classList.remove('hidden');
 }
@@ -322,7 +310,7 @@ async function tick() {
     const { baseUrl, token, extensionPairingCredential } = await readConfig();
     const state = await probeState(baseUrl, token, extensionPairingCredential);
     if (state === 'ready') {
-      showShell(baseUrl, token);
+      showShell(baseUrl, token, extensionPairingCredential);
     } else {
       if (framedUrl && framedMisses < FRAMED_MISS_LIMIT) {
         framedMisses += 1;
@@ -415,7 +403,6 @@ async function submitPairing(event) {
     );
     await savePairingCredential(baseUrl, `${credentialId}.${credentialSecret}`);
     pendingPairingNonce = null;
-    pairingCache = null;
     els.pairMessage.textContent = 'Paired.';
     els.pairCode.value = '';
     notifyDaemonReady();

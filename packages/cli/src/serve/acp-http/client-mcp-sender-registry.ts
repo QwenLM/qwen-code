@@ -59,6 +59,13 @@ export type WsClientMcpSender = (
   message: JSONRPCMessage,
 ) => Promise<JSONRPCMessage>;
 
+function runtimeConfig(): ClientMcpOverWsRuntimeConfig {
+  return {
+    type: 'sdk',
+    [CLIENT_MCP_OVER_WS_CONFIG_FLAG]: true,
+  };
+}
+
 /**
  * Process-scoped registry mapping an advertised client-hosted MCP server name
  * to the WS connection's `sendSdkMcpMessage`. One instance per daemon, shared
@@ -111,6 +118,18 @@ export class ClientMcpSenderRegistry {
   /** Currently-registered server names (tests / accounting). */
   serverNames(): string[] {
     return [...this.senders.keys()];
+  }
+
+  runtimeRegistrations(): Array<{
+    name: string;
+    config: Record<string, unknown>;
+    originatorClientId: string;
+  }> {
+    return [...this.senders].map(([name, { owner }]) => ({
+      name,
+      config: runtimeConfig(),
+      originatorClientId: owner,
+    }));
   }
 
   /**
@@ -178,16 +197,9 @@ export function createClientMcpServerProvider(
       // re-registering the same name can't be deleted by our teardown.
       registry.set(serverName, sendSdkMcpMessage, originatorClientId);
       try {
-        const runtimeConfig: ClientMcpOverWsRuntimeConfig = {
-          // SDK-type so the child binds `SdkControlClientTransport`
-          // (`isSdkMcpServerConfig`); the flag tells the child to KEEP the
-          // type and bind `sendSdkMcpMessage` to the reverse ext-method.
-          type: 'sdk',
-          [CLIENT_MCP_OVER_WS_CONFIG_FLAG]: true,
-        };
         const result = await bridge.addRuntimeMcpServer(
           serverName,
-          runtimeConfig,
+          runtimeConfig(),
           originatorClientId,
         );
         if ((result as { skipped?: boolean }).skipped) {

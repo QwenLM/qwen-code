@@ -39,6 +39,9 @@ export class ChromeDebuggerSession implements DebuggerSession {
   }
 
   async ensureAttached(): Promise<{ tabId: number; changed: boolean }> {
+    if (this.tabId !== null) {
+      return { tabId: this.tabId, changed: false };
+    }
     if (this.pinnedTabId !== null) {
       return { tabId: this.pinnedTabId, changed: false };
     }
@@ -144,10 +147,7 @@ export class ChromeDebuggerSession implements DebuggerSession {
       await this.detachCurrent();
       throw new Error('No active Chrome tab');
     }
-    if (
-      !tab.url ||
-      /^(chrome|edge|devtools|chrome-extension):/i.test(tab.url)
-    ) {
+    if (!tab.url || (!/^https?:/i.test(tab.url) && tab.url !== 'about:blank')) {
       await this.detachCurrent();
       throw new Error(`Chrome does not allow debugging this page: ${tab.url}`);
     }

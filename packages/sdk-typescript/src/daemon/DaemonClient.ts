@@ -444,6 +444,8 @@ export interface CreateSessionRequest {
   sourceType?: string;
   /** Optional source-specific identifier. Requires `sourceType`. */
   sourceId?: string;
+  /** Pairing credential used only to authorize Chrome extension sessions. */
+  extensionPairingCredential?: string;
 }
 
 export interface RestoreSessionRequest {
@@ -1935,6 +1937,11 @@ export class DaemonClient {
             ? { sourceType: req.sourceType }
             : {}),
           ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
+          ...(req.extensionPairingCredential !== undefined
+            ? {
+                extensionPairingCredential: req.extensionPairingCredential,
+              }
+            : {}),
         }),
       },
       async (res) => {

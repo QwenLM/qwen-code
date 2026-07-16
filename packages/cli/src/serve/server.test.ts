@@ -7721,6 +7721,70 @@ describe('createServeApp', () => {
       });
     });
 
+    it('marks sessions authenticated by the paired Chrome extension', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        {
+          ...baseOpts,
+          workspace: WS_BOUND,
+          verifyExtensionPairingCredential: (credential) =>
+            credential === 'paired-credential',
+        },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ extensionPairingCredential: 'paired-credential' });
+
+      expect(res.status).toBe(200);
+      expect(bridge.calls[0]).toMatchObject({
+        sourceType: 'chrome_extension',
+      });
+    });
+
+    it('rejects invalid Chrome extension session credentials', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        {
+          ...baseOpts,
+          workspace: WS_BOUND,
+          verifyExtensionPairingCredential: () => false,
+        },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ extensionPairingCredential: 'wrong' });
+
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('extension_pairing_rejected');
+      expect(bridge.calls).toHaveLength(0);
+    });
+
+    it('rejects client-supplied Chrome extension session metadata', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sourceType: 'chrome_extension' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('reserved_session_source');
+      expect(bridge.calls).toHaveLength(0);
+    });
+
     it('rejects sourceId without sourceType', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(

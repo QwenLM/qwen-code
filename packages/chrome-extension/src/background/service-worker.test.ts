@@ -128,6 +128,35 @@ describe('browser-tools service worker', () => {
     vi.restoreAllMocks();
   });
 
+  it('does not connect before extension pairing succeeds', async () => {
+    mocks.checkExtensionPairing.mockResolvedValueOnce({
+      paired: false,
+      reason: 'missing_credential',
+    });
+
+    await import('./service-worker.js');
+    await flushPromises();
+
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    expect(mocks.getDaemonFeatures).not.toHaveBeenCalled();
+    expect(scheduled).toEqual([expect.objectContaining({ delay: 1_000 })]);
+  });
+
+  it('keeps native tools disabled when an external adapter is active', async () => {
+    mocks.getDaemonFeatures.mockResolvedValueOnce(
+      new Set(['browser_automation_mcp']),
+    );
+
+    await import('./service-worker.js');
+    await flushPromises();
+    const ws = FakeWebSocket.instances[0]!;
+    ws.open();
+    ws.message({ id: 'browser-tools-acp-init', result: {} });
+    await flushPromises();
+
+    expect(mocks.registerBrowserMcp).not.toHaveBeenCalled();
+  });
+
   it('pairs before connecting, registers tools, and reconnects after cleanup', async () => {
     await import('./service-worker.js');
     await flushPromises();

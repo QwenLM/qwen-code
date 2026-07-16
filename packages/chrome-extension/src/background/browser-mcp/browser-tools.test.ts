@@ -15,6 +15,7 @@ class FakeSession implements DebuggerSession {
   listener: DebuggerEventListener = () => {};
   changed = true;
   tabId = 1;
+  autoNavigate = true;
   readonly send = vi.fn(
     async (
       method: string,
@@ -45,6 +46,16 @@ class FakeSession implements DebuggerSession {
         String(params?.['expression']).includes('document.readyState')
       ) {
         return { result: { value: true } };
+      }
+      if (
+        this.autoNavigate &&
+        (method === 'Page.navigate' ||
+          method === 'Page.reload' ||
+          method === 'Page.navigateToHistoryEntry')
+      ) {
+        queueMicrotask(() =>
+          this.emit('Page.frameNavigated', { frame: { id: 'main' } }),
+        );
       }
       return {};
     },
@@ -231,6 +242,9 @@ describe('BrowserTools', () => {
       arguments: [{ value: 'qwen' }],
       returnByValue: true,
     });
+    expect(session.send).toHaveBeenCalledWith('Runtime.releaseObject', {
+      objectId: 'input-1',
+    });
 
     const stale = await tools.callTool('fill', {
       ref: 'missing',
@@ -301,6 +315,33 @@ describe('BrowserTools', () => {
 
     expect(result.isError).toBe(true);
     expect(resultText(result)).toContain('TypeError: value setter failed');
+    expect(session.send).toHaveBeenCalledWith('Runtime.releaseObject', {
+      objectId: 'input-1',
+    });
+  });
+
+  it('waits for the new document before accepting readyState', async () => {
+    await tools.callTool('list_console_messages', {});
+    session.autoNavigate = false;
+    vi.useFakeTimers();
+    try {
+      let settled = false;
+      const navigation = tools
+        .callTool('navigate_page', { url: 'https://example.test/next' })
+        .then((result) => {
+          settled = true;
+          return result;
+        });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false);
+      session.emit('Page.frameNavigated', { frame: { id: 'main' } });
+      await vi.advanceTimersByTimeAsync(200);
+
+      expect((await navigation).isError).not.toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('retries CDP domain setup after initialization fails', async () => {
@@ -354,6 +395,12 @@ describe('BrowserTools', () => {
         timeout: 20_000,
       }),
     );
+    const expression = String(
+      session.send.mock.calls.at(-1)?.[1]?.['expression'] ?? '',
+    );
+    expect(expression).toContain('response.body?.getReader()');
+    expect(expression).toContain('await reader.cancel()');
+    expect(expression).not.toContain('response.text()');
   });
 
   it('captures console output', async () => {
@@ -446,6 +493,7 @@ describe('BrowserTools', () => {
 
     const result = await tools.callTool('get_network_request', {
       requestId: 'request-1',
+      includeResponseBody: true,
     });
     const request = JSON.parse(resultText(result));
     expect(request.requestHeaders.Authorization).toBe('[REDACTED]');
@@ -491,8 +539,14 @@ describe('BrowserTools', () => {
       encodedDataLength: 11,
     });
 
-    await tools.callTool('get_network_request', { requestId: 'request-2' });
-    await tools.callTool('get_network_request', { requestId: 'request-2' });
+    await tools.callTool('get_network_request', {
+      requestId: 'request-2',
+      includeResponseBody: true,
+    });
+    await tools.callTool('get_network_request', {
+      requestId: 'request-2',
+      includeResponseBody: true,
+    });
 
     expect(session.send).toHaveBeenCalledTimes(2 + 6);
     expect(session.send).toHaveBeenNthCalledWith(7, 'Network.getResponseBody', {
@@ -501,6 +555,27 @@ describe('BrowserTools', () => {
     expect(session.send).toHaveBeenNthCalledWith(8, 'Network.getResponseBody', {
       requestId: 'request-2',
     });
+  });
+
+  it('omits response bodies unless explicitly requested', async () => {
+    await tools.callTool('list_network_requests', {});
+    session.emit('Network.requestWillBeSent', {
+      requestId: 'sensitive-request',
+      request: { url: 'https://example.test/session', method: 'GET' },
+    });
+    session.emit('Network.loadingFinished', {
+      requestId: 'sensitive-request',
+    });
+
+    const result = await tools.callTool('get_network_request', {
+      requestId: 'sensitive-request',
+    });
+
+    expect(JSON.parse(resultText(result))).not.toHaveProperty('responseBody');
+    expect(session.send).not.toHaveBeenCalledWith(
+      'Network.getResponseBody',
+      expect.anything(),
+    );
   });
 
   it('keeps network metadata when a response body is unavailable', async () => {

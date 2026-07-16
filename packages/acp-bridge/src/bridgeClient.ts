@@ -449,6 +449,7 @@ function sliceLineRange(
  */
 export interface BridgeClientSessionEntry {
   sessionId: string;
+  sourceType?: string;
   events: EventBus;
   artifacts: SessionArtifactStore;
   recordingDegraded: boolean;
@@ -1075,6 +1076,22 @@ export class BridgeClient implements Client {
         undefined,
         '`payload` must be a JSON-RPC message object',
       );
+    }
+    if (
+      server === 'qwen-browser-tools' &&
+      (payload as Record<string, unknown>)['method'] === 'tools/call'
+    ) {
+      const sessionId = params['sessionId'];
+      const entry =
+        typeof sessionId === 'string'
+          ? this.resolveEntry(sessionId)
+          : undefined;
+      if (entry?.sourceType !== 'chrome_extension') {
+        throw RequestError.invalidParams(
+          undefined,
+          'browser tools require a session created by the paired Chrome extension',
+        );
+      }
     }
     const send = this.clientMcpSender(server);
     if (!send) {

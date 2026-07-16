@@ -440,6 +440,12 @@ export interface BridgeOptions {
    * receives an SDK MCP runtime server, so the method is never called.
    */
   clientMcpSender?: ClientMcpMessageSender;
+  /** Client-hosted MCP servers to restore after an ACP child restart. */
+  clientMcpRuntimeRegistrations?: () => ReadonlyArray<{
+    name: string;
+    config: Record<string, unknown>;
+    originatorClientId: string;
+  }>;
   /**
    * Daemon-host seam for the `create_sub_session` tool. When a tool running
    * inside a child's agent turn asks (over `extMethod`) to spawn a fresh

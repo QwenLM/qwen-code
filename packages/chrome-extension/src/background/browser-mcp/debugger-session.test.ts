@@ -68,24 +68,17 @@ describe('ChromeDebuggerSession', () => {
     expect(attach).not.toHaveBeenCalled();
   });
 
-  it('detaches the previous tab when the new active tab is restricted', async () => {
-    query
-      .mockResolvedValueOnce([{ id: 7, url: 'https://example.com' }])
-      .mockResolvedValueOnce([{ id: 8, url: 'chrome://extensions' }]);
+  it('rejects local file pages before attaching', async () => {
+    query.mockResolvedValueOnce([{ id: 8, url: 'file:///tmp/secret.txt' }]);
     const session = new ChromeDebuggerSession();
-
-    await session.send('Page.enable');
-    await expect(session.send('Runtime.enable')).rejects.toThrow(
+    await expect(session.ensureAttached()).rejects.toThrow(
       'does not allow debugging',
     );
-
-    expect(detach).toHaveBeenCalledWith({ tabId: 7 }, expect.any(Function));
+    expect(attach).not.toHaveBeenCalled();
   });
 
-  it('switches the debugger attachment when the active tab changes', async () => {
-    query
-      .mockResolvedValueOnce([{ id: 7, url: 'https://one.example' }])
-      .mockResolvedValueOnce([{ id: 8, url: 'https://two.example' }]);
+  it('keeps the first attached tab when the active tab changes', async () => {
+    query.mockResolvedValueOnce([{ id: 7, url: 'https://one.example' }]);
     const session = new ChromeDebuggerSession();
 
     await session.send('Page.enable');
@@ -97,11 +90,12 @@ describe('ChromeDebuggerSession', () => {
       '1.3',
       expect.any(Function),
     );
-    expect(detach).toHaveBeenCalledWith({ tabId: 7 }, expect.any(Function));
-    expect(attach).toHaveBeenNthCalledWith(
-      2,
-      { tabId: 8 },
-      '1.3',
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(attach).toHaveBeenCalledTimes(1);
+    expect(sendCommand).toHaveBeenLastCalledWith(
+      { tabId: 7 },
+      'Runtime.enable',
+      {},
       expect.any(Function),
     );
     await session.detach();
@@ -113,7 +107,7 @@ describe('ChromeDebuggerSession', () => {
     session.onEvent(listener);
     await session.send('Page.enable');
 
-    const detachListener = onDetach.addListener.mock.calls[0]?.[0];
+    const detachListener = onDetach.addListener.mock.calls.at(-1)?.[0];
     detachListener({ tabId: 7 }, 'canceled_by_user');
     await session.send('Runtime.enable');
 
@@ -190,7 +184,7 @@ describe('ChromeDebuggerSession', () => {
 
     await session.withAttached(() => session.send('Runtime.enable'));
     expect(sendCommand).toHaveBeenLastCalledWith(
-      { tabId: 8 },
+      { tabId: 7 },
       'Runtime.enable',
       {},
       expect.any(Function),

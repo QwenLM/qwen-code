@@ -97,7 +97,12 @@ interface RegisterSessionRoutesDeps {
   promptDeadlineMs?: number;
   sessionShellCommandEnabled: boolean;
   languageCodes: string[];
+  verifyExtensionPairingCredential?: (
+    credential: string | undefined,
+  ) => boolean;
 }
+
+const CHROME_EXTENSION_SESSION_SOURCE = 'chrome_extension';
 
 const WORKSPACE_TRANSCRIPT_PAGE_SOURCE_MAX_BYTES = 4 * 1024 * 1024;
 const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
@@ -1110,13 +1115,51 @@ export function registerSessionRoutes(
     }
     const approvalMode = parseOptionalApprovalMode(body, res);
     if (approvalMode === null) return;
-    const source = parseSessionSource(body['sourceType'], body['sourceId']);
+    let source = parseSessionSource(body['sourceType'], body['sourceId']);
     if ('error' in source) {
       res.status(400).json({
         error: source.error,
         code: 'invalid_session_source',
       });
       return;
+    }
+    const rawExtensionCredential = body['extensionPairingCredential'];
+    if (
+      rawExtensionCredential !== undefined &&
+      typeof rawExtensionCredential !== 'string'
+    ) {
+      res.status(400).json({
+        error: '`extensionPairingCredential` must be a string when provided',
+        code: 'invalid_extension_pairing_credential',
+      });
+      return;
+    }
+    if (source.sourceType === CHROME_EXTENSION_SESSION_SOURCE) {
+      res.status(400).json({
+        error: '`chrome_extension` is a reserved session source',
+        code: 'reserved_session_source',
+      });
+      return;
+    }
+    if (typeof rawExtensionCredential === 'string') {
+      if (
+        deps.verifyExtensionPairingCredential?.(rawExtensionCredential) !== true
+      ) {
+        res.status(401).json({
+          error: 'Chrome extension pairing credential rejected',
+          code: 'extension_pairing_rejected',
+        });
+        return;
+      }
+      if (source.sourceType !== undefined) {
+        res.status(400).json({
+          error:
+            '`extensionPairingCredential` cannot be combined with session source metadata',
+          code: 'extension_pairing_source_conflict',
+        });
+        return;
+      }
+      source = { sourceType: CHROME_EXTENSION_SESSION_SOURCE };
     }
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;

@@ -7,6 +7,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -89,4 +90,33 @@ describe('chrome extension package scripts', () => {
     expect(daemonSource).toContain(`chrome-extension://${extensionId}`);
     expect(sidePanelSource).toContain(`'${extensionId}'`);
   });
+
+  it('writes the package version into the built manifest', async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-ext-build-'));
+    try {
+      execFileSync(
+        process.execPath,
+        [
+          path.join(
+            root,
+            'packages/chrome-extension/scripts/sync-extension.js',
+          ),
+          `--target=${tempDir}`,
+        ],
+        { stdio: 'ignore' },
+      );
+      const manifest = JSON.parse(
+        readFileSync(path.join(tempDir, 'manifest.json'), 'utf8'),
+      );
+      const packageJson = JSON.parse(
+        readFileSync(
+          path.join(root, 'packages/chrome-extension/package.json'),
+          'utf8',
+        ),
+      );
+      expect(manifest.version).toBe(packageJson.version);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

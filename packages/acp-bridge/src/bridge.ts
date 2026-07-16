@@ -2097,6 +2097,26 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               'initialize',
             ),
         );
+        for (const registration of opts.clientMcpRuntimeRegistrations?.() ??
+          []) {
+          const response = await withTimeout(
+            connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd,
+              registration,
+            ),
+            MCP_RESTART_SERVER_DEADLINE_MS,
+            SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd,
+          );
+          if (
+            response !== null &&
+            typeof response === 'object' &&
+            (response as { skipped?: boolean }).skipped === true
+          ) {
+            throw new Error(
+              `Failed to restore client MCP server '${registration.name}'`,
+            );
+          }
+        }
       } catch (err) {
         // Mark the half-initialized channel as dying/unavailable, then
         // kill it. Coalesced callers (`inFlightChannelSpawn` branch in

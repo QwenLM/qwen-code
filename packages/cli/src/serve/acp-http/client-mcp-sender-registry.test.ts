@@ -67,6 +67,23 @@ describe('ClientMcpSenderRegistry', () => {
     reg.delete('srv', 'connA'); // already gone -> no throw
     expect(reg.serverNames()).toEqual([]);
   });
+
+  it('exposes live registrations for ACP child recovery', () => {
+    const reg = new ClientMcpSenderRegistry();
+    reg.set(
+      'qwen-browser-tools',
+      vi.fn(async () => msg(1)),
+      'extension-client',
+    );
+
+    expect(reg.runtimeRegistrations()).toEqual([
+      {
+        name: 'qwen-browser-tools',
+        config: { type: 'sdk', __clientMcpOverWs: true },
+        originatorClientId: 'extension-client',
+      },
+    ]);
+  });
 });
 
 describe('createClientMcpServerProvider', () => {

@@ -3269,6 +3269,10 @@ export async function runQwenServe(
         // Reverse tool channel: let `BridgeClient.extMethod` reach the WS
         // connection that hosts a named client MCP server (#5626).
         clientMcpSender: clientMcpSenderRegistry.lookup,
+        clientMcpRuntimeRegistrations:
+          clientMcpSenderRegistry.runtimeRegistrations.bind(
+            clientMcpSenderRegistry,
+          ),
         onCreateSubSession: subSessionLauncher.launch,
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
@@ -3577,6 +3581,10 @@ export async function runQwenServe(
       });
       const secondaryBridge = runtime.createAcpSessionBridge({
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
+        clientMcpRuntimeRegistrations:
+          secondaryClientMcpSenderRegistry.runtimeRegistrations.bind(
+            secondaryClientMcpSenderRegistry,
+          ),
         onCreateSubSession: secondarySubSessionLauncher.launch,
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
@@ -3944,6 +3952,8 @@ export async function runQwenServe(
       try {
         wsBridge = runtime.createAcpSessionBridge({
           clientMcpSender: wsClientMcpRegistry.lookup,
+          clientMcpRuntimeRegistrations:
+            wsClientMcpRegistry.runtimeRegistrations.bind(wsClientMcpRegistry),
           onCreateSubSession: wsSubSessionLauncher.launch,
           maxSessions: opts.maxSessions,
           freshSessionAdmission: totalSessionAdmission.admit,
