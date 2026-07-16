@@ -44,6 +44,7 @@ import {
   convertToFunctionErrorResponse,
   convertToFunctionResponse,
   extractToolFilePaths,
+  isToolCallConcurrencySafe,
 } from './coreToolScheduler.js';
 import type { Part, PartListUnion } from '@google/genai';
 import {
@@ -11409,6 +11410,60 @@ describe('Fire hook functions integration', () => {
         release();
         await schedulePromise;
       }
+    });
+
+    describe('isToolCallConcurrencySafe', () => {
+      it('treats agent tools as safe regardless of resolved kind', () => {
+        expect(isToolCallConcurrencySafe(ToolNames.AGENT, undefined, {})).toBe(
+          true,
+        );
+        expect(isToolCallConcurrencySafe(ToolNames.AGENT, Kind.Other, {})).toBe(
+          true,
+        );
+      });
+
+      it('treats pure-read kinds as safe', () => {
+        expect(isToolCallConcurrencySafe('read_file', Kind.Read, {})).toBe(
+          true,
+        );
+        expect(isToolCallConcurrencySafe('grep', Kind.Search, {})).toBe(true);
+        expect(isToolCallConcurrencySafe('fetch', Kind.Fetch, {})).toBe(true);
+      });
+
+      it('treats mutating kinds as unsafe', () => {
+        expect(isToolCallConcurrencySafe('edit', Kind.Edit, {})).toBe(false);
+        expect(isToolCallConcurrencySafe('rm', Kind.Delete, {})).toBe(false);
+        expect(isToolCallConcurrencySafe('mv', Kind.Move, {})).toBe(false);
+        expect(isToolCallConcurrencySafe('think', Kind.Think, {})).toBe(false);
+      });
+
+      it('treats a read-only shell command as safe and a mutating one as unsafe', () => {
+        expect(
+          isToolCallConcurrencySafe('shell', Kind.Execute, {
+            command: 'git status',
+          }),
+        ).toBe(true);
+        expect(
+          isToolCallConcurrencySafe('shell', Kind.Execute, {
+            command: 'rm -rf build',
+          }),
+        ).toBe(false);
+      });
+
+      it('treats a shell call with a non-string command as unsafe (fail-closed)', () => {
+        expect(isToolCallConcurrencySafe('shell', Kind.Execute, {})).toBe(
+          false,
+        );
+        expect(
+          isToolCallConcurrencySafe('shell', Kind.Execute, { command: 42 }),
+        ).toBe(false);
+      });
+
+      it('treats an unresolved (undefined) kind on a non-agent tool as unsafe', () => {
+        expect(isToolCallConcurrencySafe('mystery_tool', undefined, {})).toBe(
+          false,
+        );
+      });
     });
 
     it('should run concurrency-safe tools in parallel and unsafe tools sequentially', async () => {

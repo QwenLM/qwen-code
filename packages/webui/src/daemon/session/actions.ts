@@ -61,7 +61,7 @@ export interface CreateDaemonSessionActionsArgs {
   getCreateSessionRequest: () => CreateSessionRequest;
   createDetachedSession: (
     workspaceCwd?: string,
-    overrides?: Pick<CreateSessionRequest, 'approvalMode'>,
+    overrides?: Pick<CreateSessionRequest, 'approvalMode' | 'sourceType'>,
   ) => Promise<DaemonSessionClient>;
   getConnection: () => DaemonConnectionState;
   hasSessionActivePrompt: () => boolean;
@@ -613,6 +613,7 @@ export function createDaemonSessionActions({
     async createSession(options?: {
       workspaceCwd?: string;
       approvalMode?: DaemonApprovalMode;
+      sourceType?: string;
     }) {
       try {
         manualSessionClearRef.current = false;
@@ -622,10 +623,14 @@ export function createDaemonSessionActions({
         // `setApprovalMode` round-trip. Approval mode is fail-closed at spawn:
         // an application failure aborts creation (this call rejects) rather than
         // leaving the session in a different mode than the caller requested.
-        const approvalOverride =
-          options?.approvalMode !== undefined
+        const requestOverrides = {
+          ...(options?.approvalMode !== undefined
             ? { approvalMode: options.approvalMode }
-            : {};
+            : {}),
+          ...(options?.sourceType !== undefined
+            ? { sourceType: options.sourceType }
+            : {}),
+        };
         const session = sessionRef.current;
         const activeSession =
           session && getConnection().sessionId === session.sessionId
@@ -638,7 +643,7 @@ export function createDaemonSessionActions({
               ...(options?.workspaceCwd !== undefined
                 ? { workspaceCwd: options.workspaceCwd }
                 : {}),
-              ...approvalOverride,
+              ...requestOverrides,
             }),
             'Create session timed out',
           );
@@ -647,7 +652,7 @@ export function createDaemonSessionActions({
         }
 
         const nextSession = await withActionTimeout(
-          createDetachedSession(options?.workspaceCwd, approvalOverride),
+          createDetachedSession(options?.workspaceCwd, requestOverrides),
           'Create session timed out',
         );
         if (manualSessionClearRef.current) {

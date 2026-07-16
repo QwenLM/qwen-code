@@ -98,6 +98,7 @@ describe('useScopedSessions', () => {
       archiveState: undefined,
       view: undefined,
       group: undefined,
+      sourceType: 'default',
     });
 
     await act(async () => {

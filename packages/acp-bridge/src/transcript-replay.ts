@@ -622,7 +622,10 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       createTranscriptToolCallResultUpdate({
         toolName,
         callId,
-        success: !result?.['error'],
+        success:
+          result?.['status'] === undefined
+            ? !result?.['error']
+            : result['status'] === 'success' && !result['error'],
         errorMessage: extractErrorMessage(result?.['error']),
         message: record.message?.parts,
         resultDisplay,

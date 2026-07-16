@@ -154,6 +154,7 @@ export function createWebShellDaemonScenario(
       'permission_vote',
       'session_permission_vote',
       'session_scope_override',
+      'session_source_metadata',
       'workspace_settings',
       'workspace_voice',
     ],
