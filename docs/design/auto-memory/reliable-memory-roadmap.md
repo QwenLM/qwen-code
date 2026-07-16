@@ -58,6 +58,54 @@ flowchart LR
 9. 自动覆盖和删除前必须检查并发冲突。
 10. Recall、Extraction、Apply 和 Consolidation 都必须可衡量。
 
+## 与主流 Coding CLI 的能力比较（截至 2026-07-16）
+
+本节只比较跨 Session 的持久知识，不把对话恢复、Context Compaction、Instruction 文件或 Skill 本身等同于 Auto Memory。竞品能力变化较快，结论基于本仓库当前实现和下列官方资料：
+
+- [Claude Code：How Claude remembers your project](https://code.claude.com/docs/en/memory)
+- [Codex：Memories](https://learn.chatgpt.com/docs/customization/memories)
+- [Gemini CLI：Memory files](https://geminicli.com/docs/tools/memory/)
+- [Gemini CLI：Configuration reference](https://github.com/google-gemini/gemini-cli/blob/main/docs/reference/configuration.md#experimental)
+
+### 能力快照
+
+| 维度                 | Qwen Code 当前实现                                                             | Claude Code                                                             | Codex CLI                                                                                             | Gemini CLI                                                                            |
+| -------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| 持久指令与自动学习   | QWEN/AGENTS 指令与 Managed Memory 并存；支持显式 `/remember` 和后台 Extraction | `CLAUDE.md` 与 Auto Memory 分离；Auto Memory 默认开启，按价值自行记录   | `AGENTS.md` 与本地 Memories 分离；Memories 默认关闭                                                   | `GEMINI.md` 分层 Context；可通过工具直接保存，后台 Auto Memory 仍是默认关闭的实验能力 |
+| 存储与作用域         | Markdown；User、Project、可选 Git-shared Team 三种作用域                       | 每 Repository 一个本地目录，跨 Worktree 共享；`MEMORY.md` 加 Topic 文件 | `~/.codex/memories/` 本地生成状态，包含摘要、持久条目、近期输入和证据                                 | Global、Private Project、Repository Shared 三层 Markdown                              |
+| 写入时机             | 用户轮次后启动后台 Extraction；Project Dream 定期整理                          | 工作期间由 Claude 直接读写，未承诺每个 Session 都产生 Memory            | 跳过活跃或短任务，空闲足够久后后台生成；可受 Rate Limit 门槛约束                                      | `save_memory`/文件工具直接写；实验 Auto Memory 从历史 Session 后台提取 Patch          |
+| Recall               | Model-primary，失败时使用 ASCII Heuristic；Topic 扫描在检索前截断 200          | 启动时加载 `MEMORY.md` 前 200 行或 25KB，Topic 按需读取                 | 在未来任务中按相关性注入本地 Memory；公开文档不承诺具体排序算法                                       | 保存内容自动进入分层 Context；公开文档不承诺独立相关性排序算法                        |
+| 写入治理             | Extraction/Dream Agent 直接修改正式目录；Team 有额外限制                       | 直接写本地 Markdown；`/memory` 可浏览、编辑、删除和关闭                 | 生成文件可检查，提供任务级 Use/Contribute 控制；官方文档未描述写前 Inbox                              | 实验 Auto Memory 把 Unified Diff 放入 `/memory inbox`，批准前不应用                   |
+| 来源、冲突和生命周期 | 当前没有稳定 ID、统一 Provenance、过期或 Supersedes 语义；仅 Project Dream     | 官方文档未描述结构化 Provenance、冲突或过期 Schema                      | 文件包含 Supporting Evidence，并有 Extraction/Global Consolidation；官方文档未描述用户可见冲突 Schema | 分层路由并避免跨层重复；实验 Patch 可评审，官方文档未描述统一过期 Schema              |
+| 安全与隐私           | 当前 Secret Guard 只覆盖 Team；外部上下文和任务级隐身控制不足                  | Plain Markdown 可审计；官方 Memory 页面未承诺 Secret Scanner            | 生成字段会做 Secret Redaction，并支持禁止外部上下文任务贡献                                           | Plain Markdown 可审计；官方 Memory 页面未承诺 Secret Scanner                          |
+| 用户控制             | `/remember`、`/forget`、`/dream`；当前 `/forget` 缺确认和跨操作治理            | `/memory` 查看文件、打开目录、切换 Auto Memory                          | `/memories` 分别控制当前任务是否读取和贡献                                                            | `/memory show/add/refresh`；实验 `/memory inbox` 评审 Patch                           |
+
+“官方文档未描述”只表示不能从公开资料确认，不能直接推断竞品内部一定没有该能力。
+
+### 当前相对位置
+
+Qwen Code 当前的优势是作用域模型较完整：User、Project、Team 三层、显式 Remember/Forget、Project Dream 和 Git-shared Team Memory 已经形成基础闭环。相比只提供单一项目笔记的方案，它更接近团队知识治理系统。
+
+主要差距按优先级为：
+
+1. **写入可信度落后于 Gemini CLI 实验方案。** Agent 仍直接修改正式 Memory，没有 Patch/Candidate 隔离、写前评审、Digest 冲突检测和 Staging GC。
+2. **提取时机落后于 Codex CLI。** 当前按用户轮次触发，容易处理过短或仍在进行的任务；缺少 Idle、Session 完成、Rate Limit、外部上下文和任务级 Contribute 门槛。
+3. **Recall 可靠性和多语言能力不足。** 当前 Model-primary 的结果可能赶不上首轮消费，ASCII Heuristic 对 CJK 较弱，并且 200 文件预截断会造成系统性漏召回。
+4. **审计体验落后于 Claude Code。** 虽有 Markdown，但缺少统一 Inbox/浏览入口来解释“写了什么、为什么写、何时使用、如何拒绝”。
+5. **安全边界不一致。** Private Memory 写入没有与 Team 相同的 Secret Guard；`/forget` 也没有稳定预览、确认和进程内 Undo。
+6. **知识生命周期不足。** 缺少稳定 ID、Provenance、Confidence、Expiry、Supersedes、跨作用域冲突和数据驱动的检索评估。
+
+### 本路线图完成后的目标位置
+
+本方案不以复制某一个竞品为目标，而是组合各方案已经验证的优点：
+
+- 保留 Claude Code 的 Plain Markdown、简洁 Index 和按需 Topic 可审计性。
+- 采用 Codex CLI 的延迟资格判断、任务级 Use/Contribute、外部上下文门槛、Secret Redaction 和独立 Extraction/Consolidation 控制。
+- 采用 Gemini CLI 实验方案的 Staging Patch 和 Inbox-before-apply，同时增加 Digest 冲突检查、GC 和 Team 强制评审。
+- 在竞品公开能力之上增加 Schema v2 Provenance、全作用域 Secret Guard、BM25 + Model Shadow Eval、Expiry/Supersedes 以及 Recall Delivery Telemetry。
+
+完成 Phase 1 后应先达到“召回不丢、删除安全、所有作用域不写 Secret”；完成 Phase 2 后达到“自动写入可隔离、可评审、可回滚”；完成 Phase 3 后再以离线标注集和线上 Telemetry 证明检索质量，而不是仅凭功能数量宣称优于竞品。
+
 ---
 
 ## Phase 1：可靠性、安全、可观测
@@ -778,6 +826,83 @@ Important existing boundaries:
 
 The design below changes these boundaries incrementally rather than replacing
 the entire subsystem.
+
+## 3.1 Competitive baseline as of 2026-07-16
+
+This comparison covers durable knowledge across sessions. Conversation resume,
+context compaction, instruction files, and skills are related context surfaces,
+but are not counted as auto memory by themselves. Product behavior changes
+quickly; the baseline uses the current repository and these official sources:
+
+- [Claude Code: How Claude remembers your project](https://code.claude.com/docs/en/memory)
+- [Codex: Memories](https://learn.chatgpt.com/docs/customization/memories)
+- [Gemini CLI: Memory files](https://geminicli.com/docs/tools/memory/)
+- [Gemini CLI: Configuration reference](https://github.com/google-gemini/gemini-cli/blob/main/docs/reference/configuration.md#experimental)
+
+### 3.1.1 Capability snapshot
+
+| Dimension                       | Current Qwen Code                                                                                           | Claude Code                                                                                         | Codex CLI                                                                                                                  | Gemini CLI                                                                                                              |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Durable guidance and learning   | QWEN/AGENTS guidance plus managed memory; explicit `/remember` and background extraction                    | Separates `CLAUDE.md` from auto memory; auto memory is on by default and records selected learnings | Separates `AGENTS.md` from local memories; local memories are off by default                                               | Hierarchical `GEMINI.md`; direct save support, with background auto memory still experimental and off by default        |
+| Storage and scope               | Markdown with user, project, and optional Git-shared team scopes                                            | One machine-local directory per repository, shared across worktrees; `MEMORY.md` plus topic files   | Generated local state under `~/.codex/memories/`, including summaries, durable entries, recent inputs, and evidence        | Global, private-project, and repository-shared Markdown tiers                                                           |
+| Capture timing                  | Background extraction after user turns; periodic project Dream                                              | Claude reads and writes during work and does not promise a write every session                      | Skips active or short tasks, waits for idle time, and can gate generation on remaining rate limit                          | Direct `save_memory`/file writes; experimental auto memory extracts patches from past sessions in the background        |
+| Recall                          | Model-primary with ASCII heuristic fallback; topic scan truncates at 200 before selection                   | Loads the first 200 lines or 25 KB of `MEMORY.md`; reads topic files on demand                      | Injects relevant local memory into future tasks; public docs do not promise a ranking algorithm                            | Automatically includes stored facts in hierarchical context; public docs do not promise a separate relevance ranker     |
+| Write governance                | Extraction and Dream agents directly mutate live memory; team scope has additional restrictions             | Direct local Markdown writes; `/memory` supports browse, edit, delete, and disable                  | Generated files are inspectable and task-level use/contribute controls exist; no pre-write inbox is publicly documented    | Experimental auto memory writes unified-diff patches to `/memory inbox`; nothing applies before approval                |
+| Provenance, conflict, lifecycle | No stable ID, unified provenance, expiry, or supersession semantics; project-only Dream                     | Public docs do not describe structured provenance, conflict, or expiry schema                       | Stores supporting evidence and has extraction/global consolidation; no user-visible conflict schema is publicly documented | Routes across tiers and avoids duplication; patches are reviewable, but no unified expiry schema is publicly documented |
+| Security and privacy            | Secret guard currently covers only team memory; external-context and task-incognito controls are incomplete | Plain Markdown is auditable; the official memory page does not promise a secret scanner             | Redacts secrets from generated fields and can exclude external-context tasks from contribution                             | Plain Markdown is auditable; the official memory page does not promise a secret scanner                                 |
+| User controls                   | `/remember`, `/forget`, and `/dream`; forget currently lacks confirmation and operation governance          | `/memory` opens files and the directory and toggles auto memory                                     | `/memories` independently controls task-level use and contribution                                                         | `/memory show/add/refresh`; experimental `/memory inbox` reviews patches                                                |
+
+“Not publicly documented” means the official material does not establish the
+capability; it is not proof that an internal implementation lacks it.
+
+### 3.1.2 Current position and gaps
+
+Qwen Code's current advantage is its scope model: user, project, team,
+explicit remember/forget, project Dream, and Git-shared team memory already form
+a useful governance foundation. It is closer to a team knowledge system than a
+single project scratchpad.
+
+The priority gaps are:
+
+1. **Write trust trails Gemini CLI's experimental path.** Agents still mutate
+   live memory without patch isolation, review-before-apply, digest conflict
+   checks, or staging GC.
+2. **Capture eligibility trails Codex CLI.** Per-turn extraction can process
+   short or active work and lacks idle, completed-session, rate-limit,
+   external-context, and task-contribution gates.
+3. **Recall reliability and multilingual support are weak.** Model-primary
+   output may miss the consuming turn, ASCII heuristics underperform on CJK,
+   and pre-retrieval truncation at 200 creates systematic misses.
+4. **Audit UX trails Claude Code.** Markdown is available, but there is no
+   single inbox/browser that explains what was written, why, when it was used,
+   and how to reject it.
+5. **Safety is inconsistent across scopes.** Private writes lack the team
+   secret guard, and forget lacks stable preview, confirmation, and
+   process-local undo.
+6. **Knowledge lifecycle is incomplete.** Stable IDs, provenance, confidence,
+   expiry, supersession, cross-scope conflicts, and retrieval evaluation are
+   absent.
+
+### 3.1.3 Target position after this roadmap
+
+The target combines proven properties rather than copying one competitor:
+
+- Preserve Claude Code's auditable plain Markdown, compact index, and on-demand
+  topic pattern.
+- Adopt Codex CLI's deferred eligibility, task-level use/contribution,
+  external-context gating, secret redaction, and separate extraction and
+  consolidation controls.
+- Adopt Gemini CLI's experimental staged-patch and inbox-before-apply pattern,
+  then add digest checks, GC, and mandatory team review.
+- Extend the public baseline with schema-v2 provenance, all-scope secret guards,
+  BM25 plus model shadow evaluation, expiry/supersession, and recall-delivery
+  telemetry.
+
+Phase 1 must first demonstrate reliable delivery, safe deletion, and zero new
+secrets in every scope. Phase 2 must demonstrate isolated, reviewable, and
+conflict-safe writes. Phase 3 must establish retrieval quality with annotated
+offline evaluation and online telemetry rather than claim superiority from a
+feature checklist alone.
 
 ---
 
