@@ -17,6 +17,7 @@ type MockConnection = {
   currentMode: string;
   models: Array<{ id: string; label?: string }>;
   commands: unknown[];
+  skills: string[];
   capabilities: { qwenCodeVersion: string; features: string[] };
   loadingTranscript: boolean;
   catchingUp: boolean;
@@ -33,6 +34,7 @@ type ChatEditorTestProps = {
     metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
   ) => boolean | void;
   skills?: Array<{ name: string; description: string }>;
+  commands?: Array<{ name: string }>;
   isPreparing?: boolean;
   dialogOpen?: boolean;
   placeholderText?: string;
@@ -67,13 +69,16 @@ const {
     currentMode: 'default',
     models: [{ id: 'qwen', label: 'Qwen' }],
     commands: [],
+    skills: [],
     capabilities: { qwenCodeVersion: '1.2.3', features: [] },
     loadingTranscript: false,
     catchingUp: false,
   };
+  const loadSkillsStatus = vi.fn().mockResolvedValue({ skills: [] });
   const workspaceClient = {
     workspaceByCwd: vi.fn(() => ({
       workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: loadSkillsStatus,
     })),
   };
   return {
@@ -104,7 +109,7 @@ const {
       client: workspaceClient,
     },
     mockWorkspaceActions: {
-      loadSkillsStatus: vi.fn().mockResolvedValue({ skills: [] }),
+      loadSkillsStatus,
       loadProviders: vi.fn().mockResolvedValue({ current: null }),
       loadPreflight: vi.fn().mockResolvedValue(null),
       loadEnv: vi.fn().mockResolvedValue(null),
@@ -800,11 +805,14 @@ beforeEach(() => {
   mockConnection.error = undefined;
   mockConnection.errorStatus = undefined;
   mockConnection.missingSession = false;
+  mockConnection.commands = [];
+  mockConnection.skills = [];
   mockConnection.loadingTranscript = false;
   mockConnection.catchingUp = false;
   mockWorkspace.capabilities = {
     workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
   };
+  mockWorkspace.client.workspaceByCwd.mockClear();
   testState.prompt = 'hello';
   testState.inputAnnotations = undefined;
   testState.streamingState = 'idle';
@@ -925,6 +933,25 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('reloads skills from the target workspace when starting a new session', async () => {
+    const { container } = renderApp({
+      lockedWorkspaceCwd: '/work/secondary',
+    });
+    await flush();
+    mockWorkspace.client.workspaceByCwd.mockClear();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockWorkspace.client.workspaceByCwd).toHaveBeenCalledWith(
+      '/work/secondary',
+    );
+  });
+
   it('uses a registered capability fallback while the workspace list is stale', async () => {
     mockConnection.sessionId = undefined;
     mockWorkspace.capabilities = {
@@ -1018,6 +1045,87 @@ describe('App session callbacks', () => {
     expect(testState.latestChatEditorProps?.skills).toEqual([
       { name: 'enabled-skill', description: 'Enabled' },
     ]);
+  });
+
+  it('reloads skills when starting a new session', async () => {
+    mockConnection.commands = [
+      {
+        name: 'review',
+        description: 'Review',
+        raw: {
+          name: 'review',
+          description: 'Review',
+          input: null,
+          _meta: { source: 'skill' },
+        },
+      },
+    ];
+    mockConnection.skills = ['review'];
+    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
+      skills: [{ name: 'review', description: 'Review', status: 'ok' }],
+    });
+    const { container } = renderApp();
+    await flush();
+    expect(testState.latestChatEditorProps?.skills).toEqual([
+      { name: 'review', description: 'Review' },
+    ]);
+    expect(testState.latestChatEditorProps?.commands).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'review' })]),
+    );
+
+    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
+      skills: [{ name: 'review', description: 'Review', status: 'disabled' }],
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(testState.latestChatEditorProps?.skills).toEqual([]);
+    expect(testState.latestChatEditorProps?.commands).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'review' })]),
+    );
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it('adds an enabled skill command when starting a new session', async () => {
+    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
+      skills: [{ name: 'review', description: 'Review', status: 'disabled' }],
+    });
+    const { container } = renderApp();
+    await flush();
+    expect(testState.latestChatEditorProps?.commands).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'review' })]),
+    );
+
+    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
+      skills: [
+        {
+          name: 'review',
+          description: 'Review',
+          argumentHint: '<path>',
+          status: 'ok',
+        },
+      ],
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(testState.latestChatEditorProps?.commands).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'review',
+          argumentHint: '<path>',
+          source: 'skill',
+        }),
+      ]),
+    );
   });
 
   it.each([404, 410])(
@@ -1765,6 +1873,25 @@ describe('App session callbacks', () => {
     expect(editorFocus).toHaveBeenCalled();
   });
 
+  it.each(['/skills', '/skills detail', '/skills details'])(
+    'opens the Skill manager page with %s',
+    async (command) => {
+      const { container } = renderApp();
+      await flush();
+
+      testState.prompt = command;
+      await clickSubmit(container);
+      await flush();
+
+      expect(
+        container
+          .querySelector('[data-testid="inline-panel"]')
+          ?.getAttribute('aria-label'),
+      ).toBe('Skills');
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    },
+  );
+
   it('opens plugin management tabs from the sidebar', async () => {
     mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
       initialized: true,
@@ -1791,9 +1918,21 @@ describe('App session callbacks', () => {
     expect(Array.from(tabs ?? []).map((tab) => tab.textContent)).toEqual([
       'Extensions',
       'MCP',
+      'Skills',
     ]);
     expect(extensionsTab?.getAttribute('aria-selected')).toBe('true');
     expect(document.activeElement).toBe(extensionsTab);
+
+    await act(async () => {
+      tabs?.[2]?.focus();
+      tabs?.[2]?.click();
+      await Promise.resolve();
+    });
+    expect(
+      panel
+        ?.querySelectorAll<HTMLButtonElement>('button[role="tab"]')[2]
+        ?.getAttribute('aria-selected'),
+    ).toBe('true');
   });
 
   it('only shows server startup progress during MCP discovery', async () => {
