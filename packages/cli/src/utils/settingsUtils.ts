@@ -347,6 +347,11 @@ export function validateSettingValue(
         return `Value must be one of: ${allowed}`;
       }
       break;
+    case 'object':
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return 'Value must be an object';
+      }
+      break;
     default:
       return `Settings of type '${def.type}' cannot be modified via this API`;
   }

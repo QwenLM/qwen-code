@@ -112,6 +112,7 @@ const HIDDEN_SETTING_KEYS = new Set([
   'ui.enableUserFeedback',
   'ui.compactMode',
   'ui.compactInline',
+  'mcpServers',
 ]);
 
 type Scope = 'user' | 'workspace';

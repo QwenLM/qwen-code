@@ -362,6 +362,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_github_setup',
       'workspace_mcp_restart',
       'session_recap',
+      'session_generation',
       'session_btw',
       'mcp_workspace_pool',
       'mcp_pool_restart',
@@ -382,6 +383,7 @@ describe('qwen serve — capabilities envelope', () => {
       'extension_management_v2',
       'workspace_persisted_transcript',
       'workspace_session_export',
+      'workspace_archived_session_export',
       'voice_transcribe',
     ]);
   });

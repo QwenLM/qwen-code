@@ -13,6 +13,7 @@ import {
   SessionArchivedError,
   SessionArchivingError,
   SessionConflictError,
+  SessionNotArchivedError,
   SessionNotFoundError,
 } from '../acp-session-bridge.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -216,6 +217,24 @@ export async function assertSessionLoadable(
     throw new SessionConflictError(sessionId);
   }
   return location;
+}
+
+export async function assertSessionArchived(
+  workspaceCwd: string,
+  sessionId: string,
+): Promise<void> {
+  const location = await new SessionService(workspaceCwd).getSessionLocation(
+    sessionId,
+  );
+  if (location === 'active') {
+    throw new SessionNotArchivedError(sessionId);
+  }
+  if (location === 'conflict') {
+    throw new SessionConflictError(sessionId);
+  }
+  if (location === undefined) {
+    throw new SessionNotFoundError(sessionId);
+  }
 }
 
 function isSessionNotFoundError(err: unknown): boolean {

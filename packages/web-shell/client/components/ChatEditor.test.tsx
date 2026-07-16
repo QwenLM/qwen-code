@@ -232,7 +232,12 @@ describe('ChatEditor workspace toolbar integration', () => {
     });
     const chip = container.querySelector('[aria-label="Workspace: api"]');
     expect(chip).not.toBeNull();
-    expect(chip?.getAttribute('title')).toBe('/work/api');
+    // The full cwd is surfaced via the hover tooltip (mirroring the git branch
+    // chip), not a native `title` attribute.
+    expect(chip?.getAttribute('data-web-shell-workspace-title')).toBe(
+      '/work/api',
+    );
+    expect(chip?.getAttribute('title')).toBeNull();
     expect(
       container.querySelector('[data-web-shell-workspace]'),
     ).not.toBeNull();
@@ -247,7 +252,7 @@ describe('ChatEditor workspace toolbar integration', () => {
     expect(
       container
         .querySelector('[data-web-shell-workspace]')
-        ?.getAttribute('title'),
+        ?.getAttribute('data-web-shell-workspace-title'),
     ).toBe('api');
   });
 

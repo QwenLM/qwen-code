@@ -29,6 +29,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import {
   ActivityIcon,
+  BlocksIcon,
   CalendarClockIcon,
   ChevronDownIcon,
   ChevronRightIcon,
@@ -204,6 +205,7 @@ interface WebShellSidebarProps {
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
   onOpenSettings: () => void;
+  onOpenPlugins: () => void;
   onOpenDaemonStatus: () => void;
   onOpenScheduledTasks: () => void;
   onOpenSessions: () => void;
@@ -221,6 +223,7 @@ interface WebShellSidebarProps {
     sessionId: string,
     workspaceCwd?: string,
   ) => Promise<void> | void;
+  onSelectCurrentSession?: () => void;
   onError: (error: unknown, fallback: string) => void;
   theme: WebShellTheme;
   onThemeChange: (theme: WebShellTheme) => void;
@@ -402,6 +405,7 @@ export function WebShellSidebar({
   collapsed,
   onCollapsedChange,
   onOpenSettings,
+  onOpenPlugins,
   onOpenDaemonStatus,
   onOpenScheduledTasks,
   onOpenSessions,
@@ -410,6 +414,7 @@ export function WebShellSidebar({
   canOpenSplitView,
   onNewSession,
   onLoadSession,
+  onSelectCurrentSession,
   onError,
   theme,
   onThemeChange,
@@ -1377,12 +1382,11 @@ export function WebShellSidebar({
         sessionId,
         workspaceCwd || primaryWorkspaceCwd,
       );
-      if (
-        sessionIdentity === currentSessionIdentity ||
-        busySessionIdsRef.current.has(sessionIdentity)
-      ) {
+      if (sessionIdentity === currentSessionIdentity) {
+        onSelectCurrentSession?.();
         return;
       }
+      if (busySessionIdsRef.current.has(sessionIdentity)) return;
       setCompletedUnreadIds((current) => {
         if (!current.has(sessionIdentity)) return current;
         const next = new Set(current);
@@ -1406,6 +1410,7 @@ export function WebShellSidebar({
       currentSessionIdentity,
       onError,
       onLoadSession,
+      onSelectCurrentSession,
       primaryWorkspaceCwd,
       setSessionBusy,
       t,
@@ -2425,6 +2430,13 @@ export function WebShellSidebar({
       const isCurrent = isCurrentSession(session);
       const isEditing = isCurrent && editingSessionId === session.sessionId;
       const exporting = exportingSessionIds.has(sessionIdentity);
+      const needsUserInput =
+        !session.isWaitingForPermission && session.isWaitingForUserQuestion;
+      const attentionLabel = session.isWaitingForPermission
+        ? t('sidebar.waitingForApproval')
+        : needsUserInput
+          ? t('sidebar.userInputNeeded')
+          : null;
       return (
         <div
           key={sessionIdentity}
@@ -2487,14 +2499,25 @@ export function WebShellSidebar({
                 <>
                   <span className={styles.sessionText}>{label}</span>
                   <div className={styles.sessionMetaSlot}>
+                    {attentionLabel && (
+                      <span
+                        className={cx(
+                          styles.sessionAttention,
+                          needsUserInput && styles.sessionAttentionUserInput,
+                        )}
+                        aria-label={attentionLabel}
+                      >
+                        {attentionLabel}
+                      </span>
+                    )}
                     {session.hasActivePrompt ? (
                       <span
                         className={styles.sessionLoading}
                         aria-label={t('sidebar.running')}
                       />
-                    ) : (
+                    ) : !attentionLabel ? (
                       <span className={styles.sessionTime}>{time}</span>
-                    )}
+                    ) : null}
                     {readOnly && canMutateSessionArchive(session) && (
                       <div
                         className={styles.sessionActions}
@@ -3286,6 +3309,18 @@ export function WebShellSidebar({
               <SquarePenIcon size={16} strokeWidth={1.2} />
             </span>
             {!collapsed && <span>{t('sidebar.newTask')}</span>}
+          </button>
+          <button
+            className={styles.pluginButton}
+            type="button"
+            title={t('sidebar.plugins')}
+            aria-label={t('sidebar.plugins')}
+            onClick={onOpenPlugins}
+          >
+            <span className={styles.navIcon}>
+              <BlocksIcon size={16} strokeWidth={1.2} />
+            </span>
+            {!collapsed && <span>{t('sidebar.plugins')}</span>}
           </button>
           {footerItems.has('scheduledTasks') && (
             <button

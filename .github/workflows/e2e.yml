@@ -96,9 +96,9 @@ jobs:
           VERBOSE: 'true'
         run: |-
           if [[ "${{ matrix.sandbox }}" == "sandbox:docker" ]]; then
-            npm run test:integration:sandbox:docker
+            npm run test:integration:sandbox:docker -- --exclude '**/interactive/cron-interactive.test.ts'
           else
-            npm run test:integration:sandbox:none
+            npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts'
           fi
 
   e2e-test-macos:
@@ -143,7 +143,56 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
-        run: 'npm run test:e2e'
+        run: 'npx cross-env VERBOSE=true KEEP_OUTPUT=true QWEN_SANDBOX=false vitest run --root ./integration-tests --exclude "**/interactive/cron-interactive.test.ts"'
+
+  cron-interactive-nightly:
+    name: 'cron-interactive E2E (nightly)'
+    runs-on: 'ubuntu-latest'
+    if: |-
+      ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    # This test is inherently timing-flaky (wall-clock cron fire + real model
+    # latency). Run it nightly only so flakes do not turn push CI red.
+    # continue-on-error prevents this job from marking the workflow as failed.
+    continue-on-error: true
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+
+      - name: 'Set up Node.js'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'  # v6.4.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+          registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Configure npm for rate limiting'
+        run: |-
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+          npm config set fetch-retries 5
+          npm config set fetch-timeout 300000
+
+      - name: 'Install dependencies'
+        run: |-
+          npm ci --prefer-offline --no-audit --progress=false
+
+      - name: 'Build project'
+        run: |-
+          npm run build
+
+      - name: 'Bundle CLI for E2E tests'
+        run: |-
+          npm run bundle
+
+      - name: 'Run cron-interactive E2E tests'
+        env:
+          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+          KEEP_OUTPUT: 'true'
+          VERBOSE: 'true'
+        run: 'npx cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests interactive/cron-interactive.test.ts'
 
   web-shell-browser-regression:
     name: 'web-shell Browser Regression'

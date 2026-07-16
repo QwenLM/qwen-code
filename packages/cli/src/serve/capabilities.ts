@@ -190,6 +190,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // may be `null` for too-short histories or transient model failures
   // (best-effort, never throws). SDK helper: `DaemonClient.recapSession`.
   session_recap: { since: 'v1' },
+  // `POST /session/:id/generate` streams a stateless, tool-free model call.
+  // The ACP child prefers fastModel and falls back to the main session model.
+  session_generation: { since: 'v1' },
   // Side question (/btw) against the session's conversation context.
   // Single-turn, tool-free LLM call via runForkedAgent (cache path).
   session_btw: { since: 'v1' },
@@ -307,6 +310,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // This is separate from `session_export` so clients do not infer the plural
   // route from the legacy primary-workspace export capability.
   workspace_session_export: { since: 'v1' },
+  // Workspace-qualified full session export from archived persisted storage.
+  // This remains independent from active export so older daemons cannot ignore
+  // archive intent and return an active transcript with the same session id.
+  workspace_archived_session_export: { since: 'v1' },
   // Workspace-qualified ACP transport (issue #6378 Phase 4):
   // `/workspaces/:workspace/acp` mounts a per-runtime ACP dispatcher (HTTP +
   // WebSocket) for each registered workspace, with per-runtime device-flow and
@@ -364,6 +371,7 @@ export interface AdvertiseFeatureToggles {
   voiceTranscriptionAvailable?: boolean;
   sessionShellCommandEnabled?: boolean;
   sessionArtifactsPersistenceAvailable?: boolean;
+  sessionGenerationAvailable?: boolean;
   rateLimit?: boolean;
   reloadAvailable?: boolean;
   /**
@@ -463,6 +471,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'session_artifacts_persistence',
     (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
+  ],
+  [
+    'session_generation',
+    (toggles) => toggles.sessionGenerationAvailable === true,
   ],
   ['rate_limit', (toggles) => toggles.rateLimit === true],
   ['workspace_reload', (toggles) => toggles.reloadAvailable === true],
