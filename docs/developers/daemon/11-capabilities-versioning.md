@@ -36,7 +36,7 @@ The complete registry lives in `packages/cli/src/serve/capabilities.ts`.
 }
 ```
 
-`workspaceCwd` is the canonical primary workspace path (see [`02-serve-runtime.md`](./02-serve-runtime.md)). When `multi_workspace_sessions` is advertised, `workspaces[]` lists every registered sessions-only runtime. `policy.permission` is the active mediator policy.
+`workspaceCwd` is the canonical primary workspace path (see [`02-serve-runtime.md`](./02-serve-runtime.md)). Current daemons use `workspaces[]` as the registered runtime catalog; `multi_workspace_sessions` indicates that more than one runtime is active. `policy.permission` is the active mediator policy.
 
 ### `ServeCapabilityDescriptor`
 
