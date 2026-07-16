@@ -78,6 +78,12 @@ import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine } from './utils/stdioHelpers.js';
 import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
+import {
+  CUSTOM_SANDBOX_IMAGE_ENV_VAR,
+  HOST_UPDATE_RELAUNCH_ENV_VAR,
+  UPDATE_COMPLETE_EXIT_CODE,
+} from './utils/processUtils.js';
+import { getInstallationInfo } from './utils/installationInfo.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -245,6 +251,14 @@ export async function main() {
   let argv = await parseArguments();
   profileCheckpoint('after_parse_arguments');
 
+  if (
+    (argv.acp || argv.experimentalAcp) &&
+    process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] === '1'
+  ) {
+    delete process.env['ELECTRON_RUN_AS_NODE'];
+    delete process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'];
+  }
+
   if (isBareMode(argv.bare)) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
   }
@@ -334,7 +348,43 @@ export async function main() {
     const memoryArgs = settings.merged.advanced?.autoConfigureMemory
       ? getNodeMemoryArgs(isDebugMode)
       : [];
+    const updateProjectRoot = process.cwd();
+    const onUpdateRelaunch = async () => {
+      await initializeI18n(
+        resolveLanguageSetting(settings.merged.general?.language as string),
+      );
+      const { updateBeforeRelaunch } = await import(
+        './utils/update-relaunch.js'
+      );
+      const shouldRelaunch = await updateBeforeRelaunch(
+        settings,
+        updateProjectRoot,
+      );
+      return shouldRelaunch ? UPDATE_COMPLETE_EXIT_CODE : 0;
+    };
     const sandboxConfig = await loadSandboxConfig(settings.merged, argv);
+    const customSandboxImage =
+      argv.sandboxImage ??
+      process.env['QWEN_SANDBOX_IMAGE'] ??
+      settings.merged.tools?.sandboxImage;
+    if (
+      sandboxConfig &&
+      sandboxConfig.command !== 'sandbox-exec' &&
+      customSandboxImage
+    ) {
+      // Images built before this handoff protocol must be rebuilt; they cannot
+      // be made to skip their in-process updater from the host.
+      process.env[CUSTOM_SANDBOX_IMAGE_ENV_VAR] = sandboxConfig.image;
+    } else if (sandboxConfig && sandboxConfig.command !== 'sandbox-exec') {
+      const hostInstallationInfo = getInstallationInfo(updateProjectRoot, true);
+      process.env[HOST_UPDATE_RELAUNCH_ENV_VAR] = String(
+        Boolean(
+          hostInstallationInfo.updateCommand ||
+            (hostInstallationInfo.isStandalone &&
+              hostInstallationInfo.standaloneDir),
+        ),
+      );
+    }
     // We intentially omit the list of extensions here because extensions
     // should not impact auth or setting up the sandbox.
     // TODO(jacobr): refactor loadCliConfig so there is a minimal version
@@ -442,8 +492,12 @@ export async function main() {
           )
         : injectStdinIntoArgs(process.argv, stdinData);
 
-      await relaunchOnExitCode(() =>
-        start_sandbox(sandboxConfig, memoryArgs, partialConfig, sandboxArgs),
+      await relaunchOnExitCode(
+        () =>
+          start_sandbox(sandboxConfig, memoryArgs, partialConfig, sandboxArgs),
+        {
+          onUpdateRelaunch,
+        },
       );
       process.exit(0);
     } else {
@@ -451,6 +505,7 @@ export async function main() {
       // restarted if needed.
       await relaunchAppInChildProcess(memoryArgs, [], {
         afterSpawn: clearCorruptionEnvVars,
+        onUpdateRelaunch,
       });
     }
   }

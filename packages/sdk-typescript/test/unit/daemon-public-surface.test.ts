@@ -25,7 +25,10 @@ import type {
   DaemonChannelControlTransition,
   DaemonChannelSelection,
   DaemonChannelSetResult,
+  DaemonChannelStartupAttemptFailure,
+  DaemonChannelStartupFailure,
   DaemonChannelStopResult,
+  DaemonChannelWorkerStartErrorResponse,
   DaemonControlEvent,
   DaemonEvent,
   DaemonEventEnvelope,
@@ -112,6 +115,11 @@ import type {
   DaemonWorkspaceVoiceUpdate,
   KnownDaemonEvent,
 } from '../../src/index.js';
+import type {
+  DaemonChannelStartupAttemptFailure as DaemonEntryChannelStartupAttemptFailure,
+  DaemonChannelStartupFailure as DaemonEntryChannelStartupFailure,
+  DaemonChannelWorkerStartErrorResponse as DaemonEntryChannelWorkerStartErrorResponse,
+} from '../../src/daemon/index.js';
 
 describe('public SDK entry — typed daemon event surface (#4217)', () => {
   it('exports the runtime narrow + reducer surface', () => {
@@ -202,7 +210,13 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonChannelControlTransition>().not.toBeNever();
     expectTypeOf<DaemonChannelControlState>().not.toBeNever();
     expectTypeOf<DaemonChannelSetResult>().not.toBeNever();
+    expectTypeOf<DaemonChannelStartupFailure>().not.toBeNever();
+    expectTypeOf<DaemonChannelStartupAttemptFailure>().not.toBeNever();
     expectTypeOf<DaemonChannelStopResult>().not.toBeNever();
+    expectTypeOf<DaemonChannelWorkerStartErrorResponse>().not.toBeNever();
+    expectTypeOf<DaemonChannelStartupFailure>().toEqualTypeOf<DaemonEntryChannelStartupFailure>();
+    expectTypeOf<DaemonChannelStartupAttemptFailure>().toEqualTypeOf<DaemonEntryChannelStartupAttemptFailure>();
+    expectTypeOf<DaemonChannelWorkerStartErrorResponse>().toEqualTypeOf<DaemonEntryChannelWorkerStartErrorResponse>();
     expectTypeOf<DaemonHistoryTruncatedData>().not.toBeNever();
     expectTypeOf<DaemonStreamErrorData>().not.toBeNever();
     expectTypeOf<DaemonPermissionOption>().not.toBeNever();

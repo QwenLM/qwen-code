@@ -892,6 +892,7 @@ describe('ScheduledTasksDialog multi-workspace', () => {
   async function mountMulti(
     byWorkspace: Record<string, MockTask[]>,
     ws: typeof WORKSPACES = WORKSPACES,
+    lockedWorkspace?: (typeof WORKSPACES)[number],
   ) {
     actions.listScheduledTasks.mockImplementation(async (wsId?: string) =>
       wsId === undefined
@@ -914,6 +915,7 @@ describe('ScheduledTasksDialog multi-workspace', () => {
             onRunPrompt={vi.fn()}
             onCreateViaChat={vi.fn()}
             workspaces={ws}
+            lockedWorkspace={lockedWorkspace}
             onError={vi.fn()}
           />
         </I18nProvider>,
@@ -979,6 +981,38 @@ describe('ScheduledTasksDialog multi-workspace', () => {
 
     expect(actions.createScheduledTask).toHaveBeenCalledWith(
       expect.objectContaining({ prompt: 'do secondary work' }),
+      'id-other',
+    );
+  });
+
+  it('lists and creates tasks in a locked secondary workspace', async () => {
+    const secondary = WORKSPACES[1]!;
+    await mountMulti(
+      {
+        primary: [baseTask({ id: 'p1', name: 'Primary task' })],
+        'id-other': [baseTask({ id: 's1', name: 'Secondary task' })],
+      },
+      [secondary],
+      secondary,
+    );
+
+    expect(actions.listScheduledTasks).toHaveBeenCalledWith('id-other');
+    expect(actions.listScheduledTasks).not.toHaveBeenCalledWith(undefined);
+    expect(document.body.textContent).toContain('Secondary task');
+    expect(document.body.textContent).not.toContain('Primary task');
+
+    click(findButton('New scheduled task'));
+    expect(findWorkspaceSelect()).toBeUndefined();
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]')!;
+    act(() => {
+      prompt.textContent = 'do locked work';
+      prompt.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    });
+    click(findButton('Create'));
+    await flush();
+
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: 'do locked work' }),
       'id-other',
     );
   });

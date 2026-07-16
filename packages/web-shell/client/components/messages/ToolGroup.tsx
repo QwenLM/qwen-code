@@ -572,6 +572,9 @@ export function formatToolGroupSummary(
 ): string {
   if (hasActiveTool(tools)) {
     const activeTool = getActiveTool(tools);
+    if (isAskUserQuestionToolName(activeTool.toolName)) {
+      return t('toolGroup.summary.provideInformation');
+    }
     return t('toolGroup.running', {
       name: localizeToolDisplayName(activeTool.toolName, t),
       count: tools.length,
@@ -596,7 +599,11 @@ export function formatSingleToolSummary(
     return t('toolGroup.summary.updatedTodos', { count: 1 });
   }
   if (isAskUserQuestionToolName(tool.toolName)) {
-    return t('toolGroup.summary.askedUser', { count: 1 });
+    return isActiveToolStatus(tool.status)
+      ? t('toolGroup.summary.provideInformation')
+      : t('toolGroup.summary.askedQuestions', {
+          count: getAskUserQuestionCount(tool),
+        });
   }
 
   const { displayName, description, hideDisplayName } =
@@ -637,13 +644,13 @@ function SingleToolSummary({
   workspaceCwd?: string;
 }) {
   const { t } = useI18n();
+  const isAskUserQuestion = isAskUserQuestionToolName(tool.toolName);
   const runningPrefix =
-    isActiveToolStatus(tool.status) && t('toolGroup.runningPrefix').trim();
+    !isAskUserQuestion &&
+    isActiveToolStatus(tool.status) &&
+    t('toolGroup.runningPrefix').trim();
 
-  if (
-    isTodoWriteToolName(tool.toolName) ||
-    isAskUserQuestionToolName(tool.toolName)
-  ) {
+  if (isTodoWriteToolName(tool.toolName) || isAskUserQuestion) {
     return (
       <>
         {runningPrefix && <span>{runningPrefix} </span>}
@@ -678,7 +685,7 @@ function formatCompletedToolSummary(
   let read = 0;
   let searched = 0;
   let todos = 0;
-  let asked = 0;
+  let askedQuestions = 0;
   let other = 0;
 
   for (const tool of tools) {
@@ -707,7 +714,7 @@ function formatCompletedToolSummary(
     } else if (isTodoWriteToolName(name)) {
       todos++;
     } else if (isAskUserQuestionToolName(name)) {
-      asked++;
+      askedQuestions += getAskUserQuestionCount(tool);
     } else {
       other++;
     }
@@ -719,11 +726,20 @@ function formatCompletedToolSummary(
     read ? t('toolGroup.summary.readFiles', { count: read }) : '',
     searched ? t('toolGroup.summary.searched', { count: searched }) : '',
     todos ? t('toolGroup.summary.updatedTodos', { count: todos }) : '',
-    asked ? t('toolGroup.summary.askedUser') : '',
+    askedQuestions
+      ? t('toolGroup.summary.askedQuestions', { count: askedQuestions })
+      : '',
     other ? t('toolGroup.summary.otherTools', { count: other }) : '',
   ].filter(Boolean);
 
   return parts.join(' ');
+}
+
+function getAskUserQuestionCount(tool: ACPToolCall): number {
+  const questions = tool.args?.questions;
+  return Array.isArray(questions) && questions.length > 0
+    ? questions.length
+    : 1;
 }
 
 export function hasActiveTool(tools: ACPToolCall[]): boolean {

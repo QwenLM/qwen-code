@@ -1,4 +1,21 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from 'react';
+import {
+  BotIcon,
+  DatabaseIcon,
+  FlaskConicalIcon,
+  PaletteIcon,
+  ServerIcon,
+  Settings2Icon,
+  ShieldIcon,
+  SlidersHorizontalIcon,
+  WrenchIcon,
+} from 'lucide-react';
 import type {
   DaemonSettingDescriptor,
   DaemonSettingUpdateResult,
@@ -17,20 +34,57 @@ import {
   THEME_SETTING_KEY,
   LANGUAGE_SETTING_KEY,
   themeSettingToWebShellTheme,
+  useTheme,
   webShellThemeToSettingValue,
   type WebShellTheme,
 } from '../../themeContext';
-import styles from './SettingsMessage.module.css';
+import {
+  ModelManagementSection,
+  type ModelManagementProps,
+} from './ModelManagementSection';
+import { Alert, AlertDescription } from '../ui/alert';
+import { Badge } from '../ui/badge';
+import { Button } from '../ui/button';
+import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from '../ui/empty';
+import {
+  Field,
+  FieldContent,
+  FieldDescription,
+  FieldGroup,
+  FieldTitle,
+} from '../ui/field';
+import { Input } from '../ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../ui/select';
+import { Separator } from '../ui/separator';
+import { Spinner } from '../ui/spinner';
+import { Switch } from '../ui/switch';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 
 type ChatWidthMode = '1000' | 'wide';
 
 interface SettingsMessageProps {
   settingsState: SettingsMessageSettingsState;
-  onLanguageChange: (language: WebShellLanguage) => void;
-  onSubDialog: (settingKey: string) => void;
+  onLanguageChange: (language: WebShellLanguage, scope: Scope) => void;
+  onSubDialog: (settingKey: string, scope: Scope) => void;
   onThemeChange: (theme: WebShellTheme) => void;
   chatWidthMode: ChatWidthMode;
   onChatWidthModeChange: (mode: ChatWidthMode) => void;
+  /** Model list/add/delete/select, rendered inside the Model category. */
+  modelManagement?: ModelManagementProps;
   embedded?: boolean;
 }
 
@@ -41,18 +95,24 @@ export interface SettingsMessageSettingsState {
   error: Error | undefined;
   reload: () => Promise<DaemonWorkspaceSettingsStatus | undefined>;
   setValue: (
-    scope: 'workspace',
+    scope: 'workspace' | 'user',
     key: string,
     value: unknown,
   ) => Promise<DaemonSettingUpdateResult>;
 }
 
-const SUB_DIALOG_KEYS = new Set(['fastModel', 'visionModel']);
+const SUB_DIALOG_KEYS = new Set([
+  'fastModel',
+  'visionModel',
+  'voiceModel',
+  'modelFallbacks',
+]);
 const HIDDEN_SETTING_KEYS = new Set([
   'ui.hideTips',
   'ui.enableUserFeedback',
   'ui.compactMode',
   'ui.compactInline',
+  'mcpServers',
 ]);
 
 type Scope = 'user' | 'workspace';
@@ -137,7 +197,7 @@ function formatValue(
       : String(effective);
   }
   const s = String(effective);
-  return s.length > 24 ? s.slice(0, 21) + '...' : s;
+  return s.length > 24 ? `${s.slice(0, 21)}…` : s;
 }
 
 function scopeHasValue(
@@ -186,10 +246,7 @@ interface SettingsPageCategory {
   items: SettingsPageItem[];
 }
 
-function groupByCategory(
-  settings: DaemonSettingDescriptor[],
-  t: Translator,
-): CategoryGroup[] {
+function groupByCategory(settings: DaemonSettingDescriptor[]): CategoryGroup[] {
   const map = new Map<string, DaemonSettingDescriptor[]>();
   for (const s of settings) {
     let group = map.get(s.category);
@@ -200,9 +257,124 @@ function groupByCategory(
     group.push(s);
   }
   return Array.from(map.entries()).map(([category, items]) => ({
-    category: formatSettingCategory(category, t),
+    category,
     items,
   }));
+}
+
+function CategoryIcon({ category }: { category: string }) {
+  const normalized = category.toLowerCase();
+  const Icon = normalized.includes('ui')
+    ? PaletteIcon
+    : normalized.includes('tool')
+      ? WrenchIcon
+      : normalized.includes('context')
+        ? DatabaseIcon
+        : normalized.includes('privacy')
+          ? ShieldIcon
+          : normalized.includes('model')
+            ? BotIcon
+            : normalized.includes('daemon')
+              ? ServerIcon
+              : normalized.includes('advanced')
+                ? SlidersHorizontalIcon
+                : normalized.includes('experimental')
+                  ? FlaskConicalIcon
+                  : Settings2Icon;
+  return <Icon data-icon="inline-start" aria-hidden="true" />;
+}
+
+function SettingsRow({
+  title,
+  description,
+  metadata,
+  control,
+}: {
+  title: string;
+  description?: string;
+  metadata?: ReactNode;
+  control: ReactNode;
+}) {
+  return (
+    <Field
+      orientation="responsive"
+      className="min-h-20 gap-6 px-5 py-4 max-md:px-4"
+    >
+      <FieldContent className="min-w-0">
+        <FieldTitle>
+          {title}
+          {metadata}
+        </FieldTitle>
+        {description && (
+          <FieldDescription className="max-w-3xl">
+            {description}
+          </FieldDescription>
+        )}
+      </FieldContent>
+      <div className="flex min-w-0 justify-end max-md:justify-start">
+        {control}
+      </div>
+    </Field>
+  );
+}
+
+function SettingInput({
+  name,
+  label,
+  type,
+  value,
+  disabled,
+  onCommit,
+  onInvalid,
+}: {
+  name: string;
+  label: string;
+  type: 'number' | 'text';
+  value: unknown;
+  disabled: boolean;
+  onCommit: (value: unknown) => void;
+  onInvalid: () => void;
+}) {
+  const currentValue = String(value ?? '');
+  const [draft, setDraft] = useState(currentValue);
+
+  useEffect(() => setDraft(currentValue), [currentValue]);
+
+  const commit = () => {
+    if (type === 'number') {
+      const trimmed = draft.trim();
+      const parsed = Number(trimmed);
+      if (!trimmed || !Number.isFinite(parsed)) {
+        setDraft(currentValue);
+        onInvalid();
+        return;
+      }
+      if (parsed !== value) onCommit(parsed);
+      return;
+    }
+    if (draft !== currentValue) onCommit(draft);
+  };
+
+  return (
+    <Input
+      type={type}
+      name={name}
+      autoComplete="off"
+      aria-label={label}
+      value={draft}
+      disabled={disabled}
+      className="w-[min(80px,50vw)] max-md:w-full"
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') event.currentTarget.blur();
+        if (event.key === 'Escape') {
+          setDraft(currentValue);
+          event.currentTarget.blur();
+        }
+      }}
+    />
+  );
 }
 
 export type FlatRow =
@@ -234,46 +406,33 @@ export function SettingsMessage({
   onThemeChange,
   chatWidthMode,
   onChatWidthModeChange,
+  modelManagement,
   embedded = false,
 }: SettingsMessageProps) {
-  const { t } = useI18n();
+  const { language: selectedLanguage, t } = useI18n();
+  const selectedTheme = useTheme();
   const { status, settings, loading, error, reload, setValue } = settingsState;
   const [scope, setScope] = useState<Scope>('workspace');
   const [activeCategory, setActiveCategory] = useState('');
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const [editMode, setEditMode] = useState<{
-    key: string;
-    draft: string;
-  } | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
   const [restartPending, setRestartPending] = useState(false);
 
   const showInitialLoading = loading && !status;
-  const themeSetting = settings.find((s) => s.key === THEME_SETTING_KEY);
-  const themeValue = themeSettingToWebShellTheme(
-    themeSetting?.values.effective,
-  );
-  const languageSetting = settings.find((s) => s.key === LANGUAGE_SETTING_KEY);
-  const languageValue = languageSettingToWebShellLanguage(
-    languageSetting?.values.effective,
-  );
-
   const categories = useMemo(() => {
     const visibleSettings = settings.filter(
       (setting) => !HIDDEN_SETTING_KEYS.has(setting.key),
     );
-    const groups: SettingsPageCategory[] = groupByCategory(
-      visibleSettings,
-      t,
-    ).map((group) => ({
-      id: group.category,
-      label: group.category,
-      items: group.items.map((setting) => ({
-        type: 'setting' as const,
-        setting,
-      })),
-    }));
+    const groups: SettingsPageCategory[] = groupByCategory(visibleSettings).map(
+      (group) => ({
+        id: group.category,
+        label: formatSettingCategory(group.category, t),
+        items: group.items.map((setting) => ({
+          type: 'setting' as const,
+          setting,
+        })),
+      }),
+    );
     const localItem = {
       type: 'local' as const,
       localKey: 'chatWidth' as const,
@@ -319,20 +478,14 @@ export function SettingsMessage({
           )
           .join('; '),
       );
-    else if (settings.length > 0 && !restartPending) setMessage(null);
-  }, [error, settings, status, t, restartPending]);
-
-  useEffect(() => {
-    if (editMode) {
-      setTimeout(() => inputRef.current?.focus(), 0);
-    }
-  }, [editMode]);
+    else if (settings.length > 0) setMessage(null);
+  }, [error, settings, status, t]);
 
   const handleSetValue = useCallback(
     (key: string, value: unknown) => {
       if (!restartPending) setMessage(null);
       setBusyKey(key);
-      setValue('workspace', key, value)
+      setValue(scope, key, value)
         .then(async (result) => {
           try {
             await reload();
@@ -341,7 +494,6 @@ export function SettingsMessage({
           }
           if (result?.requiresRestart && key !== LANGUAGE_SETTING_KEY) {
             setRestartPending(true);
-            setMessage(t('settings.requiresRestart'));
           }
         })
         .catch((err: unknown) => {
@@ -349,77 +501,60 @@ export function SettingsMessage({
         })
         .finally(() => setBusyKey(null));
     },
-    [reload, restartPending, setValue, t],
+    [reload, restartPending, scope, setValue],
   );
-
-  const handleEditSubmit = useCallback(() => {
-    if (!editMode) return;
-    const setting = settings.find(
-      (candidate) => candidate.key === editMode.key,
-    );
-    if (!setting) {
-      setEditMode(null);
-      return;
-    }
-    let parsed: unknown = editMode.draft;
-    if (setting.type === 'number') {
-      const trimmed = editMode.draft.trim();
-      if (trimmed === '' || !Number.isFinite(Number(trimmed))) {
-        setMessage(t('settings.invalidNumber'));
-        return;
-      }
-      parsed = Number(trimmed);
-    }
-    setEditMode(null);
-    handleSetValue(setting.key, parsed);
-  }, [editMode, settings, handleSetValue, t]);
 
   const activeGroup =
     categories.find((category) => category.id === activeCategory) ??
     categories[0];
 
+  // The model-management block is surfaced inside the "Model" category, detected
+  // by the raw category of its dialog settings (fastModel etc.).
+  const isModelCategory = activeGroup?.items.some(
+    (item) => item.type === 'setting' && item.setting.category === 'Model',
+  );
+
   const renderSelect = (
     value: string,
     onChange: (value: string) => void,
     options: Array<{ value: string; label: string }>,
+    ariaLabel: string,
     disabled = false,
   ) => (
-    <select
-      className={styles.select}
-      value={value}
-      disabled={disabled}
-      onChange={(event) => onChange(event.target.value)}
-    >
-      {options.map((option) => (
-        <option key={option.value} value={option.value}>
-          {option.label}
-        </option>
-      ))}
-    </select>
+    <Select value={value} disabled={disabled} onValueChange={onChange}>
+      <SelectTrigger
+        size="sm"
+        aria-label={ariaLabel}
+        className="w-[min(160px,50vw)] bg-background max-md:w-full"
+      >
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent position="popper" align="end">
+        <SelectGroup>
+          {options.map((option) => (
+            <SelectItem key={option.value} value={option.value}>
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectGroup>
+      </SelectContent>
+    </Select>
   );
 
   const renderSettingControl = (setting: DaemonSettingDescriptor) => {
     const value = resolveValue(setting, scope);
     const isBusy = busyKey === setting.key;
-    const isEditing = editMode?.key === setting.key;
-    const readOnly = scope !== 'workspace';
+    // User-scope settings are editable (this PR enables user-scope writes); the
+    // daemon rejects disallowed keys regardless of scope.
+    const disabled = isBusy;
 
-    if (readOnly) {
-      return (
-        <button
-          type="button"
-          className={styles.actionButton}
-          disabled
-          title={t('settings.readOnly')}
-        >
-          {formatValue(setting, scope, t) || t('settings.readOnly')}
-        </button>
-      );
-    }
-
+    // Theme is a daemon-backed setting, so update both the live shell and the
+    // settings API. Language is applied through the language callback (which
+    // forwards the selected scope to the /language command). Both controls
+    // reflect the value for the SELECTED scope, falling back to the live value.
     if (setting.key === THEME_SETTING_KEY) {
       return renderSelect(
-        themeValue ?? WebShellThemeId.Dark,
+        themeSettingToWebShellTheme(value) ?? selectedTheme,
         (next) => {
           const theme = next as WebShellTheme;
           onThemeChange(theme);
@@ -429,46 +564,48 @@ export function SettingsMessage({
           value: theme,
           label: t(`theme.${theme}`),
         })),
-        isBusy,
+        formatSettingLabel(setting, t),
+        disabled,
       );
     }
 
     if (setting.key === LANGUAGE_SETTING_KEY) {
       return renderSelect(
-        languageValue ?? 'zh-CN',
-        (next) => onLanguageChange(next as WebShellLanguage),
+        languageSettingToWebShellLanguage(value) ?? selectedLanguage,
+        (next) => onLanguageChange(next as WebShellLanguage, scope),
         WEB_SHELL_LANGUAGES.map((language) => ({
           value: language,
           label: languageLabel(language),
         })),
-        isBusy,
+        formatSettingLabel(setting, t),
+        disabled,
       );
     }
 
     if (SUB_DIALOG_KEYS.has(setting.key)) {
       return (
-        <button
+        <Button
           type="button"
-          className={styles.actionButton}
-          onClick={() => onSubDialog(setting.key)}
+          variant="outline"
+          size="sm"
+          disabled={disabled}
+          className="max-w-[260px] truncate"
+          onClick={() => onSubDialog(setting.key, scope)}
         >
-          {formatValue(setting, scope, t) || t('settings.action.edit')}
-        </button>
+          {formatValue(setting, scope, t) || t('settings.action.select')}
+        </Button>
       );
     }
 
     if (setting.type === 'boolean') {
       const checked = value === true;
       return (
-        <button
-          type="button"
-          className={`${styles.switch} ${checked ? styles.switchOn : ''}`}
-          disabled={isBusy}
-          onClick={() => handleSetValue(setting.key, !checked)}
-          aria-pressed={checked}
-        >
-          <span className={styles.switchKnob} />
-        </button>
+        <Switch
+          checked={checked}
+          disabled={disabled}
+          onCheckedChange={(next) => handleSetValue(setting.key, next)}
+          aria-label={formatSettingLabel(setting, t)}
+        />
       );
     }
 
@@ -486,211 +623,233 @@ export function SettingsMessage({
           value: String(index),
           label: formatSettingOption(setting, option.value, option.label, t),
         })),
-        isBusy,
-      );
-    }
-
-    if (isEditing) {
-      return (
-        <div className={styles.editor}>
-          <input
-            ref={inputRef}
-            className={styles.editInput}
-            type={setting.type === 'number' ? 'number' : 'text'}
-            value={editMode.draft}
-            onChange={(event) =>
-              setEditMode({ key: editMode.key, draft: event.target.value })
-            }
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault();
-                handleEditSubmit();
-              }
-              if (event.key === 'Escape') {
-                event.preventDefault();
-                setEditMode(null);
-              }
-            }}
-          />
-          <button
-            type="button"
-            className={styles.actionButton}
-            onClick={handleEditSubmit}
-          >
-            {t('settings.action.save')}
-          </button>
-        </div>
+        formatSettingLabel(setting, t),
+        disabled,
       );
     }
 
     return (
-      <button
-        type="button"
-        className={styles.actionButton}
-        disabled={isBusy}
-        onClick={() =>
-          setEditMode({
-            key: setting.key,
-            draft: String(value ?? ''),
-          })
-        }
-      >
-        {formatValue(setting, scope, t) || t('settings.action.edit')}
-      </button>
+      <SettingInput
+        name={setting.key}
+        label={formatSettingLabel(setting, t)}
+        type={setting.type === 'number' ? 'number' : 'text'}
+        value={value}
+        disabled={disabled}
+        onCommit={(next) => handleSetValue(setting.key, next)}
+        onInvalid={() => setMessage(t('settings.invalidNumber'))}
+      />
     );
   };
 
   return (
     <div
-      className={`${styles.panel} ${embedded ? styles.embeddedPanel : ''}`}
+      className={
+        embedded
+          ? 'flex min-h-0 flex-1 flex-col text-sm text-foreground'
+          : 'flex max-w-[min(var(--chat-regular-content-width,1000px),calc(100vw-64px))] flex-col overflow-hidden rounded-xl border border-border bg-background text-sm text-foreground'
+      }
       data-keyboard-scope
     >
       {!embedded && (
-        <div className={styles.header}>
-          <span className={styles.title}>{t('settings.title')}</span>
-          <span className={styles.secondary}>
-            {t('settings.scope.workspace')}
-          </span>
+        <div className="flex items-center justify-between border-b border-border px-5 py-4">
+          <div>
+            <h2 className="text-base font-semibold text-balance">
+              {t('settings.title')}
+            </h2>
+            <div className="mt-0.5 text-xs text-muted-foreground">
+              {t('settings.scope.workspace')}
+            </div>
+          </div>
         </div>
       )}
 
       {(message || showInitialLoading) && (
-        <div className={styles.hint}>{message || t('settings.loading')}</div>
+        <Alert className="mx-4 mt-3 w-auto">
+          {showInitialLoading && <Spinner />}
+          <AlertDescription>
+            {message || t('settings.loading')}
+          </AlertDescription>
+        </Alert>
       )}
 
-      <div className={styles.scopeTabs} role="tablist">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={scope === 'workspace'}
-          className={`${styles.scopeTab} ${
-            scope === 'workspace' ? styles.scopeTabActive : ''
-          }`}
-          onClick={() => setScope('workspace')}
-        >
-          {t('settings.scope.workspace')}
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={scope === 'user'}
-          className={`${styles.scopeTab} ${
-            scope === 'user' ? styles.scopeTabActive : ''
-          }`}
-          onClick={() => {
-            setEditMode(null);
-            setScope('user');
-          }}
-        >
-          {t('settings.scope.user')}
-        </button>
-      </div>
-
-      <div className={styles.settingsPage}>
-        <nav className={styles.sidebar} aria-label={t('settings.title')}>
-          {categories.map((category) => (
-            <button
-              key={category.id}
-              type="button"
-              className={`${styles.categoryButton} ${
-                category.id === activeCategory
-                  ? styles.categoryButtonActive
-                  : ''
-              }`}
-              onClick={() => setActiveCategory(category.id)}
-            >
-              <span>{category.label}</span>
-              <span className={styles.categoryCount}>
-                {category.items.length}
-              </span>
-            </button>
-          ))}
-        </nav>
-
-        <section className={styles.content}>
-          {!loading && !activeGroup && (
-            <div className={styles.empty}>{t('settings.empty')}</div>
+      <Tabs
+        value={scope}
+        className="flex min-h-0 flex-1 flex-col gap-0"
+        onValueChange={(next) => {
+          setScope(next as Scope);
+        }}
+      >
+        <div className="flex items-center justify-between gap-4 border-b border-border px-3 py-2">
+          <TabsList className="p-0">
+            <TabsTrigger value="workspace">
+              {t('settings.scope.workspace')}
+            </TabsTrigger>
+            <TabsTrigger value="user">{t('settings.scope.user')}</TabsTrigger>
+          </TabsList>
+          {restartPending && (
+            <Badge variant="secondary">{t('settings.requiresRestart')}</Badge>
           )}
-          {activeGroup?.items.map((item) => {
-            if (item.type === 'local') {
-              return (
-                <div className={styles.card} key={item.localKey}>
-                  <div className={styles.cardBody}>
-                    <div className={styles.cardTitle}>
-                      {t('settings.label.ui.chatWidth')}
-                    </div>
-                    <div className={styles.cardDescription}>
-                      {t('settings.description.ui.chatWidth')}
-                    </div>
-                  </div>
-                  <div className={styles.cardControl}>
-                    {renderSelect(
-                      chatWidthMode,
-                      (next) => onChatWidthModeChange(next as ChatWidthMode),
-                      [
-                        {
-                          value: '1000',
-                          label: t('settings.option.ui.chatWidth.1000'),
-                        },
-                        {
-                          value: 'wide',
-                          label: t('settings.option.ui.chatWidth.wide'),
-                        },
-                      ],
-                    )}
-                  </div>
-                </div>
-              );
-            }
+        </div>
 
-            const setting = item.setting;
-            const description = formatSettingDescription(setting, t);
-            const hintKey = scopeHintKey(setting, scope);
-            const hasScopeValue = scopeHasValue(setting, scope);
-            return (
-              <div className={styles.card} key={setting.key}>
-                <div className={styles.cardBody}>
-                  <div className={styles.cardTitle}>
-                    {formatSettingLabel(setting, t)}
-                    {hasScopeValue && (
-                      <span className={styles.scopeBadge}>
-                        {scope === 'workspace'
-                          ? t('settings.scope.workspace')
-                          : t('settings.scope.user')}
-                      </span>
-                    )}
-                  </div>
-                  {description && (
-                    <div className={styles.cardDescription}>{description}</div>
-                  )}
-                  {hintKey && (
-                    <div className={styles.scopeHint}>
-                      {t(hintKey, {
-                        scope: t(
-                          scope === 'workspace'
-                            ? 'settings.scope.user'
-                            : 'settings.scope.workspace',
-                        ),
+        <TabsContent
+          value={scope}
+          forceMount
+          className="grid min-h-0 flex-1 grid-cols-[190px_minmax(0,1fr)] outline-none max-md:grid-cols-1"
+        >
+          <nav
+            className="flex min-h-0 flex-col gap-1 overflow-y-auto border-r border-border bg-muted/20 p-3 max-md:flex-row max-md:overflow-x-auto max-md:border-r-0 max-md:border-b"
+            aria-label={t('settings.title')}
+          >
+            {categories.map((category) => (
+              <Button
+                key={category.id}
+                type="button"
+                variant={category.id === activeCategory ? 'secondary' : 'ghost'}
+                size="sm"
+                aria-current={
+                  category.id === activeCategory ? 'page' : undefined
+                }
+                className="w-full justify-start gap-2 px-2.5 max-md:w-auto max-md:shrink-0"
+                onClick={() => setActiveCategory(category.id)}
+              >
+                <CategoryIcon category={category.id} />
+                <span className="min-w-0 flex-1 truncate text-left">
+                  {category.label}
+                </span>
+                <span className="text-xs tabular-nums text-muted-foreground">
+                  {category.items.length}
+                </span>
+              </Button>
+            ))}
+          </nav>
+
+          <section className="min-h-0 min-w-0 overflow-y-auto bg-background p-5 max-md:p-3">
+            {!loading && !activeGroup && (
+              <Empty className="min-h-60">
+                <EmptyHeader>
+                  <EmptyMedia variant="icon">
+                    <Settings2Icon />
+                  </EmptyMedia>
+                  <EmptyTitle>{t('settings.empty')}</EmptyTitle>
+                  <EmptyDescription>{t('settings.empty')}</EmptyDescription>
+                </EmptyHeader>
+              </Empty>
+            )}
+            {activeGroup && (
+              <div className="mx-auto w-full max-w-5xl">
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <CategoryIcon category={activeGroup.id} />
+                      {activeGroup.label}
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="-mb-(--card-spacing) p-0">
+                    <FieldGroup className="gap-0">
+                      {activeGroup.items.map((item, index) => {
+                        const separator = index > 0 && (
+                          <Separator className="mx-5 w-auto max-md:mx-4" />
+                        );
+                        if (item.type === 'local') {
+                          return (
+                            <div key={item.localKey}>
+                              {separator}
+                              <SettingsRow
+                                title={t('settings.label.ui.chatWidth')}
+                                description={t(
+                                  'settings.description.ui.chatWidth',
+                                )}
+                                control={renderSelect(
+                                  chatWidthMode,
+                                  (next) =>
+                                    onChatWidthModeChange(
+                                      next as ChatWidthMode,
+                                    ),
+                                  [
+                                    {
+                                      value: '1000',
+                                      label: t(
+                                        'settings.option.ui.chatWidth.1000',
+                                      ),
+                                    },
+                                    {
+                                      value: 'wide',
+                                      label: t(
+                                        'settings.option.ui.chatWidth.wide',
+                                      ),
+                                    },
+                                  ],
+                                  t('settings.label.ui.chatWidth'),
+                                  false,
+                                )}
+                              />
+                            </div>
+                          );
+                        }
+
+                        const setting = item.setting;
+                        const description = formatSettingDescription(
+                          setting,
+                          t,
+                        );
+                        const hintKey = scopeHintKey(setting, scope);
+                        const hasScopeValue = scopeHasValue(setting, scope);
+                        const scopeHint = hintKey
+                          ? t(hintKey, {
+                              scope: t(
+                                scope === 'workspace'
+                                  ? 'settings.scope.user'
+                                  : 'settings.scope.workspace',
+                              ),
+                            })
+                          : undefined;
+                        return (
+                          <div key={setting.key}>
+                            {separator}
+                            <SettingsRow
+                              title={formatSettingLabel(setting, t)}
+                              description={
+                                [description, scopeHint]
+                                  .filter(Boolean)
+                                  .join(' · ') || undefined
+                              }
+                              metadata={
+                                hasScopeValue ? (
+                                  <Badge variant="secondary">
+                                    {scope === 'workspace'
+                                      ? t('settings.scope.workspace')
+                                      : t('settings.scope.user')}
+                                  </Badge>
+                                ) : undefined
+                              }
+                              control={
+                                busyKey === setting.key ? (
+                                  <Spinner />
+                                ) : (
+                                  renderSettingControl(setting)
+                                )
+                              }
+                            />
+                          </div>
+                        );
                       })}
-                    </div>
-                  )}
-                </div>
-                <div className={styles.cardControl}>
-                  {busyKey === setting.key ? (
-                    <span className={styles.busy}>...</span>
-                  ) : (
-                    renderSettingControl(setting)
-                  )}
-                </div>
+                    </FieldGroup>
+                  </CardContent>
+                </Card>
+                {isModelCategory && modelManagement && (
+                  <div className="mt-4">
+                    <ModelManagementSection {...modelManagement} />
+                  </div>
+                )}
               </div>
-            );
-          })}
-        </section>
-      </div>
+            )}
+          </section>
+        </TabsContent>
+      </Tabs>
 
       {!embedded && (
-        <div className={styles.footer}>
-          {editMode ? t('settings.footer.edit') : t('settings.footer')}
+        <div className="border-t border-border px-5 py-3 text-xs text-muted-foreground">
+          {t('settings.footer')}
         </div>
       )}
     </div>

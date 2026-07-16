@@ -10,6 +10,7 @@ import type {
   DaemonSessionContextStatus,
   DaemonSessionClient,
   DaemonSessionBtwResult,
+  DaemonSessionGenerationEvent,
   CreateSessionRequest,
   DaemonForkSessionResult,
   DaemonMidTurnMessageResult,
@@ -69,6 +70,7 @@ export interface CreateDaemonSessionActionsArgs {
   setConnection: Dispatch<SetStateAction<DaemonConnectionState>>;
   setPromptStatus: Dispatch<SetStateAction<DaemonPromptStatus>>;
   setRestoreSessionId: Dispatch<SetStateAction<string | undefined>>;
+  setRestoreWorkspaceCwd: Dispatch<SetStateAction<string | undefined>>;
   setRestoreMode: Dispatch<SetStateAction<'load' | 'resume'>>;
   setRestoreSessionNonce: Dispatch<SetStateAction<number>>;
   setAttachSessionNonce: Dispatch<SetStateAction<number>>;
@@ -131,6 +133,7 @@ export function createDaemonSessionActions({
   setConnection,
   setPromptStatus,
   setRestoreSessionId,
+  setRestoreWorkspaceCwd,
   setRestoreMode,
   setRestoreSessionNonce,
   setAttachSessionNonce,
@@ -159,6 +162,7 @@ export function createDaemonSessionActions({
     }
     store.reset();
     setRestoreSessionId(undefined);
+    setRestoreWorkspaceCwd(undefined);
   }
 
   function startPendingSessionLoad(
@@ -205,6 +209,7 @@ export function createDaemonSessionActions({
   function startSessionSwitch(
     sessionId: string,
     mode: 'load' | 'resume',
+    workspaceCwd?: string,
   ): Promise<void> {
     manualSessionClearRef.current = false;
     const loadPromise = startPendingSessionLoad(sessionId, mode);
@@ -247,6 +252,7 @@ export function createDaemonSessionActions({
     store.reset();
     setRestoreMode(mode);
     setRestoreSessionId(sessionId);
+    setRestoreWorkspaceCwd(workspaceCwd ?? getConnection().workspaceCwd);
     setRestoreSessionNonce((nonce) => nonce + 1);
     return loadPromise.catch((error: unknown) => {
       if (!isAbortError(error)) {
@@ -596,12 +602,12 @@ export function createDaemonSessionActions({
       }
     },
 
-    async loadSession(sessionId) {
-      return startSessionSwitch(sessionId, 'load');
+    async loadSession(sessionId, options) {
+      return startSessionSwitch(sessionId, 'load', options?.workspaceCwd);
     },
 
-    async resumeSession(sessionId) {
-      return startSessionSwitch(sessionId, 'resume');
+    async resumeSession(sessionId, options) {
+      return startSessionSwitch(sessionId, 'resume', options?.workspaceCwd);
     },
 
     async createSession(options?: {
@@ -890,6 +896,19 @@ export function createDaemonSessionActions({
           'recap_session',
         );
       }
+    },
+
+    async *generateSessionContent(
+      prompt: string,
+      opts?: { signal?: AbortSignal },
+    ): AsyncGenerator<DaemonSessionGenerationEvent> {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Generate content failed',
+        'generate_session_content',
+      );
+      yield* session.generateContent(prompt, opts);
     },
 
     async getRewindSnapshots(): Promise<{

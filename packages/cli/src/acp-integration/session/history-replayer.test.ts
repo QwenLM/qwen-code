@@ -844,6 +844,33 @@ describe('HistoryReplayer', () => {
       });
     });
 
+    it('preserves vision bridge disclosures on replay', async () => {
+      const resultDisplay = {
+        type: 'vision_bridge_notice' as const,
+        summary: 'Transcribed PDF pages 1-2',
+        notice: 'Converted 2 images via qwen3-vl-plus.',
+      };
+      const record = createToolResultRecord('read_file', resultDisplay);
+
+      await replayer.replay([record]);
+
+      expect(sentUpdates()[0]).toMatchObject({
+        content: [
+          {
+            type: 'content',
+            content: {
+              type: 'text',
+              text: `${resultDisplay.summary}\n${resultDisplay.notice}`,
+            },
+          },
+          {
+            type: 'content',
+            content: { type: 'text', text: '{"result":"ok"}' },
+          },
+        ],
+      });
+    });
+
     it('should replay structured artifacts from stored tool results', async () => {
       const record = createToolResultRecord('read_file', 'File contents here');
       const artifacts = [
@@ -990,6 +1017,36 @@ describe('HistoryReplayer', () => {
       await replayer.replay([systemRecord]);
 
       expect(sendUpdateSpy).not.toHaveBeenCalled();
+    });
+
+    it('preserves slash-command provenance when replaying results', async () => {
+      const systemRecord: ChatRecord = {
+        uuid: 'system-uuid',
+        parentUuid: null,
+        sessionId: 'test-session',
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'slash_command',
+        cwd: '/test',
+        version: '1.0.0',
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/compress-fast',
+          outputHistoryItems: [
+            { type: 'assistant', text: 'Context compressed.' },
+          ],
+        },
+      };
+
+      await replayer.replay([systemRecord]);
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Context compressed.' },
+        _meta: replayMeta(systemRecord, {
+          source: 'slash_command',
+        }),
+      });
     });
   });
 

@@ -2184,6 +2184,16 @@ export default {
     'Diese Standalone-Installation kann nicht automatisch aktualisiert werden. Bitte neu installieren von:',
   'Manual update required. Please reinstall Qwen Code.':
     'Manuelles Update erforderlich. Bitte installieren Sie Qwen Code neu.',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    'Diese Sitzung verwendet das benutzerdefinierte Sandbox-Image {{image}}. Aktualisieren Sie das Image und starten Sie Qwen Code neu.',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    'Aktualisieren Sie Qwen Code auf dem Host und starten Sie anschließend die Sandbox neu.',
+  'The update will be installed after you exit this session.':
+    'Das Update wird nach dem Beenden dieser Sitzung installiert.',
+  'Run /update to install the update on the host.':
+    'Führen Sie /update aus, um das Update auf dem Host zu installieren.',
+  'Run /update to install the update.':
+    'Führen Sie /update aus, um das Update zu installieren.',
 
   // ============================================================================
   // reload-plugins command

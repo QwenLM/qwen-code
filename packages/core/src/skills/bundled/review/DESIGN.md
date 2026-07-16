@@ -228,6 +228,15 @@ Line-based classification was chosen because it's deterministic, cheap, and catc
 - Any failure → downgrade `APPROVE` to `COMMENT`, body explains.
 - All pending → downgrade to `COMMENT` (don't approve before CI decides), body explains.
 
+**The hole under all of this: a check that never ran looked like a check that passed.** GitHub reports a skipped job as `status: completed, conclusion: skipped`. The classifier tested for failure conclusions and for pending statuses, and `skipped` matched neither — so it fell through into `all_pass`. Every word above delegates runtime truth to CI _because_ the LLM pipeline reads code statically. If the delegation returns nothing, and returns it wearing a green badge, the delegation is worse than not having it.
+
+PR #6486: the one job that would have exercised the new `Ctrl+F` hotkey — `Integration Tests (CLI, No Sandbox)` — was skipped, as were the macOS and Windows `Test` legs. `all_pass`. And even had it run, it would have passed: the test drove a CSI-u sequence into a PTY that never negotiated the kitty protocol, so the keypress was discarded before reaching the handler. A test that cannot fail, in a job that did not run, scored as verification.
+
+`skipped`/`neutral` are now recognised, with two deliberately different consequences:
+
+- **Some checks skipped → a disclosure, not a downgrade.** Empirically this repo emits skipped runs constantly — routing jobs (`authorize`, `review-pr`, `precheck-pr`) that also emit a successful run of the same name, which is why "did it run" is a question about the _name_, not about any single run. And a docs-only PR legitimately skips the test matrix. Auto-downgrading on any skip would downgrade every review in the repo, which is how a gate gets ignored. So presubmit _names_ them and Step 7 rules on them — because whether a skipped check would have exercised **this** diff is a question about the diff, which presubmit cannot see and the reviewer can.
+- **Every check skipped → a downgrade.** Checks exist, not one ran: there is no green here to approve on, and no judgment is required to say so. (A repo with no CI at all is a different claim — `totalChecks === 0`, not downgraded.)
+
 **Why downgrade rather than block:** the reviewer LLM has done substantive work; throwing the review away because CI is red wastes that. Downgrading to `COMMENT` keeps all inline findings, preserves the static review value, and lets GitHub's check status carry the "do not merge" signal naturally.
 
 **Why this stacks with self-PR downgrade:** a self-authored PR with red CI hits **both** downgrade rules. The event is `COMMENT` either way, so stacking is operationally a no-op — but the body should mention both reasons so a future maintainer reading the review knows why an LLM that found no Critical issues did not approve.
@@ -293,9 +302,83 @@ The resolution is the same one this document already records for presubmit and c
 
 - **`parse-args`** owns the grammar. Every previously-shipped parsing bug is a named row in its table-driven tests. The raw string travels **on stdin** (`--stdin` with a quoted heredoc), never as a positional: a flag-first raw string (`/review --effort low`) is consumed by the CLI's own strict parser before the handler runs, and a positional also breaks on quotes and shell metacharacters. Pure-function tests could not see that class — the documented invocation failed only when run against the built binary — so the suite includes yargs-level wiring tests alongside the table.
 - **`compose-review`** owns event selection and body composition — the C/S table (counting body Criticals and discarded Suggestions), the event caps (cannot-tell existing Criticals, uncoverable chunks, unreviewed dimensions, context-unavailable), the downgrade carve-outs, and the clause composition. Its truth-table tests pin each shipped bug; writing them immediately caught one more instance of the class (all Suggestions discarded → S=0 → APPROVE). The input is validated at the boundary: the producer is a model writing JSON that omits inapplicable fields, so absent counts default to zero and malformed values throw typed errors — before that, an omitted count meant `undefined + 1 = NaN`, which fails every event comparison and would have returned APPROVE over a body-only blocker. 422 recovery stops being a hand-derived recomposition: it is the same call with updated counts, so the "recompute may never upgrade the verdict" guarantee holds by construction.
-- **`pr-context`** ends the fetch-prose chain at its root: review bodies **and replied-Critical root bodies** render **in full** (a body-only blocker lives only there; a capped body names its review or comment id so the tail stays fetchable one object at a time, and reply snippets name their comment id when cut), and replied Critical threads are quarantined into their own section instead of settling into "Already discussed" — a reply alone never retires a blocker. The `gh` wrapper's `maxBuffer` rises to 64 MiB, closing the ENOBUFS that killed two subcommands mid-review on a comment-heavy PR.
+- **`pr-context`** ends the fetch-prose chain at its root: review bodies **and every blocker-bearing body** render **in full** (a body-only blocker lives only there; a capped body names its review or comment id so the tail stays fetchable one object at a time, and reply snippets name their comment id when cut), and blocker-bearing threads are quarantined into a "Blockers to re-check" section instead of settling into "Already discussed" — a reply alone never retires a blocker. The `gh` wrapper's `maxBuffer` rises to 64 MiB, closing the ENOBUFS that killed two subcommands mid-review on a comment-heavy PR.
 
 What deliberately stays prose: everything judgment-shaped — what counts as a Critical, verification, the posting gate's authorization semantics, the angles. A truth table cannot decide whether a finding is real; it can guarantee that a real finding is never mislabeled, dropped by a downgrade, or approved past.
+
+## Why blocker recognition is semantic, not the `[Critical]` marker
+
+The mandatory re-check section used to be gated on the literal string `[Critical]`. That marker is emitted by exactly one author — `/review` itself. Every human blocker was therefore invisible to the gate, and the fallback was a prose instruction in Step 6 telling the model to also scan "Already discussed" semantically.
+
+Prose does not beat structure. PR #6486 is the proof, and it cost a shipped blocker.
+
+A maintainer built the PR, drove the real CLI through a PTY, and found that `Ctrl+F` **dual-fires** — it toggles the model _and_ moves the input cursor, because `text-buffer.ts:2663` still binds `Ctrl+F → move('right')` and both handlers are independent subscribers of a `KeypressContext.broadcast()` that has no stop-propagation. They filed it as an **issue comment**, headed `🔴 Finding 1 — … (blocker)`. No `[Critical]` marker, because a human wrote it.
+
+Three things then compounded:
+
+1. Issue comments all settle into **"Already discussed — do NOT re-report"**.
+2. They render as **240-character one-line snippets**.
+3. The first 240 characters of a verification report are its **preamble**: _"I built this PR from source and drove the real CLI … to validate the model-toggle hotkey before merge. Sharing the results as a merge reference."_
+
+So the one artifact that proved the PR was broken was presented to the review agents as a **maintainer endorsement**, in the section that says not to re-report it. The blocker itself began 1 143 characters past the cut. Three hours later `/review` reviewed the same commit — the fix did not land until that evening — and submitted **"Reviewed — no blockers"**. This is precisely the "dropped blocker" failure the Step 6 re-check exists to prevent, and the re-check could not prevent it, because the input it was handed said the opposite of the truth.
+
+The fix moves the decision out of prose and into `carriesBlockerSignal`: any body asserting a blocking defect — inline thread or issue comment, `[Critical]` or `(blocker)` or "is a blocker" or "must fix" or "still reproducible" or 阻塞项 — is promoted into **"Blockers to re-check"** and rendered **in full**. A bare `🔴` is deliberately **not** a signal, for the reason the next paragraph measures.
+
+Two properties are deliberate:
+
+- **Fail-safe direction.** A false positive costs one extra ruling by the re-check; a false negative ships the bug. When in doubt, promote.
+- **Precision still matters, in the other direction.** Promotion means full-body rendering, and a context file that outgrows one `read_file` is its own way of losing a blocker (PR #5738, recorded above). The prose scan of "Already discussed" is retained as a floor — `carriesBlockerSignal` recognises the phrasings we have seen, not every phrasing that exists.
+
+**Both of those were nearly undone by the first implementation, and only a live run showed it.** That version scanned the whole body for the words `blocker`, `🔴`, `阻塞`, `[Critical]`. Run against the real #6486 thread it promoted **8 of 15** issue comments; exactly one was a live blocker. The others were the triage bot's own template line **"No critical blockers."** (the word inside its own negation), the author's **"### 🔴 Critical fixes"** (a severity emoji on a list of repairs), and a later comment _quoting_ `[Critical]` while arguing a finding away. Eight full bodies took the context file from 30 KB to 59 KB and pushed the real blocker to character **43 094** — past the 25 000 one `read_file` returns. The section existed, held the right blocker, and no agent could see it: PR #5738's failure, reintroduced one section further down by the fix for it.
+
+Three changes, and the ordering one is load-bearing:
+
+- **The section is written FIRST**, ahead of the description and the review history. Nothing in the file outranks the claims a `C=0` verdict may not be reached without ruling on. On the live thread this moved the heading from char 25 961 to **569**, and the blocker body from 43 094 to **4 421**.
+- **Recognition matches assertion patterns, not word presence** — `[Critical]`, `(blocker)`, `is a blocker`, a bare `blocking` (with a `non-blocking` / `非阻塞` lookbehind), `must fix`, `still reproducible/repro/broken/fails`, `阻塞项/问题/点` — with a **bilingual** negation guard, so neither "no blockers" nor "没有阻塞项" ever promotes. Live promotions dropped 8 → 3 (the one real blocker plus two harmless mentions), and the file 59 KB → 40 KB.
+- **The section carries a character budget.** Tight patterns keep promotion rare; the budget keeps a pathological thread from blowing the read window anyway. Bodies past it degrade to snippets **naming their exact fetch**, which the re-check already must run before ruling — not to silence.
+
+The lesson generalizes past this file: **"a false positive is cheap" is a claim about a budget, and it has to be measured against the real distribution, not assumed.** Here it was false until the ordering was fixed.
+
+## Why a test-efficacy probe, when there is already a Test Coverage agent
+
+Agent 5 asks whether a test **exists** and whether its assertions **look like** they check something. Agent 7 runs the suite and reports that it is **green**. Neither can see a test that protects nothing, and there are two ways to ship one:
+
+- **Unreachable** — the project's test command never collects the file.
+- **Inert** — it runs, it passes, and it would still pass with the change reverted.
+
+PR #6486 shipped both, in one file. The new test lived in `integration-tests/`, which is not an npm workspace, so `npm test --workspaces` never collected it; its CI job (`Integration Tests (CLI, No Sandbox)`) was skipped, so CI never ran it either. **The test executed nowhere — not in CI, not in the review — and nothing in the pipeline noticed.** And had it run, it would have passed regardless: it drove a kitty CSI-u sequence into a PTY that never negotiated the kitty protocol, so the keypress was discarded before reaching the handler under test. It could only ever have caught a startup crash. Agent 5 saw a test file with plausible assertions and said coverage was fine.
+
+Both questions are decidable without judgment, which is why they are a subcommand and not a prompt. Unreachability needs no execution at all — it is a path against the root `package.json` workspace globs. Inertness needs one run: revert the diff's **source** files to base, keep its **tests**, re-run them. A test that is still green is green whether or not the feature exists.
+
+**The trap, and the reason the classifier is asymmetric.** Reverting source frequently breaks the test's own compile — it imports a symbol the diff introduced — and the runner exits non-zero having collected nothing. It is tempting to score that as "the test caught the revert". It is not: a compile error says nothing about whether the test would catch a _behavioural_ regression, and scoring it as `gated` would hand back precisely the false assurance this command exists to remove. So `gated` requires a real **assertion** failure; a bare non-zero exit with nothing collected is `inconclusive`, and `inconclusive` is never reported as a finding.
+
+Two other deliberate limits:
+
+- **A test-only diff is never probed.** A new test for old code is _supposed_ to pass with nothing reverted. Probing it would flag every such PR as inert — a false blocker on exactly the PRs we want people to write.
+- **Findings are Suggestions, not Criticals.** A test that does not gate is not itself wrong code; nothing is broken today. What the finding must say concretely is which behaviour is now shipping unprotected.
+
+## Why "fixed by this diff" is the verdict that needed a bar
+
+The re-check has three verdicts, and until PR #6486 only two of them cost anything:
+
+| verdict              | consequence                                           |
+| -------------------- | ----------------------------------------------------- |
+| `still stands`       | `REQUEST_CHANGES` — blocks the merge                  |
+| `cannot tell`        | serialized into the body, caps the event at `COMMENT` |
+| `fixed by this diff` | **nothing. Silent, free, unrecorded.**                |
+
+An agent under context pressure, choosing among three answers where one is free and two are not, drifts toward the free one — and the free one is the only one that can ship a bug.
+
+Worse, the bar for it read "you read the lines and the fix is there", which invites reading **the diff's lines**. That is precisely the reading that fails. A fix's new lines are always in the diff; whether they _work_ routinely depends on code outside it.
+
+PR #6486 is the case. A `Ctrl+F` dual-fire blocker was filed — the hotkey toggled the model _and_ moved the input cursor. The author added a guard to the toggle handler: visible in the diff, and it reads like a fix. It changed nothing. The second handler is `text-buffer.ts:2663`, in a file the PR never touches, subscribed independently to a `KeypressContext.broadcast()` that has no stop-propagation — `return`ing from one subscriber does not stop the other. Read the diff and you see a guard and rule "fixed". Read `text-buffer.ts:2663` and you cannot.
+
+Two changes, split the way this document keeps arriving at — **determinism owns the evidence, judgment owns the ruling**:
+
+- **`pr-context` extracts the evidence** (`extractCodeRefs`). A blocker's body names the code it is about — #6486's named `text-buffer.ts:2663` outright — so a promoted blocker that names a file now renders a **Referenced code** list (a blocker citing no path gets none — the reader traces the mechanism themselves). "Go read the untouched code" stops being a hope the agent might have and becomes a list it is handed.
+- **SKILL.md raises the bar** on the ruling: name the mechanism, name what now stops it, and when the stopping condition lives outside the diff, read it there — or the verdict is `cannot tell`.
+
+No new `compose-review` input was needed: `cannot tell` already caps the event. The change is to make wrong "fixed" rulings land there instead of passing silently.
 
 ## What the first dogfood batch changed
 

@@ -188,6 +188,7 @@ class FakeBridge {
   }
   async killSession(sessionId: string) {
     this.killed.push(sessionId);
+    return true;
   }
 
   loadShouldThrow = false;
@@ -1168,6 +1169,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     };
     expect(result.agentCapabilities._meta.qwen.methods).toContain(
       '_qwen/session/shell',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).not.toContain(
+      '_qwen/session/rewind',
     );
   });
 
@@ -4620,7 +4624,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     for (const f of frames) expect(f.error?.code).toBe(-32602);
   });
 
-  it('session/new orphan: DELETE before spawn resolves → bridge.killSession', async () => {
+  it('session/new orphan: DELETE before spawn resolves removes the persisted session', async () => {
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
     let release: () => void = () => {};
     bridge.gate = new Promise<void>((r) => (release = r));
     const connId = await initialize();
@@ -4638,6 +4645,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     release(); // spawn resolves AFTER destroy
     await new Promise((r) => setTimeout(r, 40));
     expect(bridge.killed).toContain('sess-1');
+    expect(removeSession).toHaveBeenCalledWith('sess-1');
+    removeSession.mockRestore();
   });
 
   it('session/load orphan (attached:false) → killSession, not detach', async () => {

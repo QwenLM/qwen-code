@@ -11,6 +11,7 @@ import {
   createTranscriptUsageUpdate,
 } from '@qwen-code/acp-bridge/transcriptReplay';
 import {
+  apiActivityTracker,
   getActiveGoal,
   type GoalTerminalEvent,
 } from '@qwen-code/qwen-code-core';
@@ -148,6 +149,21 @@ export class MessageEmitter extends BaseEmitter {
     );
   }
 
+  async emitSlashCommandOutput(
+    text: string,
+    timestamp?: string | number,
+  ): Promise<void> {
+    const epochMs = BaseEmitter.toEpochMs(timestamp);
+    await this.sendUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text },
+      _meta: {
+        source: 'slash_command',
+        ...(epochMs != null ? { timestamp: epochMs } : {}),
+      },
+    });
+  }
+
   /**
    * Emits usage metadata.
    */
@@ -192,11 +208,28 @@ export class MessageEmitter extends BaseEmitter {
       cumulative.apiTimeMs = addFinite(cumulative.apiTimeMs, durationMs);
     }
 
+    // A live model round is discriminated by a present `durationMs` (replay
+    // frames omit it). Only then do we drain the model-API-error / auto-retry
+    // counters onto this frame's `_meta`, so the daemon host's metrics ring
+    // windows the increments alongside token burn and LLM latency. Draining on
+    // a replayed frame would consume real pending counts the bridge ignores for
+    // replay, silently dropping them — hence the `durationMs` guard. Absent /
+    // zero keys keep no-error frames byte-identical to before.
+    let activityMeta: Record<string, unknown> = {};
+    if (typeof durationMs === 'number') {
+      const activity = apiActivityTracker.drain();
+      activityMeta = {
+        ...(activity.errors > 0 ? { apiErrors: activity.errors } : {}),
+        ...(activity.retries > 0 ? { apiRetries: activity.retries } : {}),
+      };
+    }
+
     await this.sendUpdate(
       createTranscriptUsageUpdate(usageMetadata, {
         text,
         extra: {
           ...(typeof durationMs === 'number' ? { durationMs } : {}),
+          ...activityMeta,
           ...subagentMeta,
         },
       }),

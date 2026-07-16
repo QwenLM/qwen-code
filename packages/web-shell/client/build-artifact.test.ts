@@ -75,6 +75,29 @@ describe('build artifact — package boundary', () => {
     expect(unscoped).toEqual([]);
   });
 
+  it('applies Tailwind theme variables to WebShell roots', () => {
+    const themeRules: string[] = [];
+    postcss.parse(readInjectedCss()).walkRules((rule) => {
+      if (
+        rule.nodes.some(
+          (node) => node.type === 'decl' && node.prop === '--spacing',
+        )
+      ) {
+        themeRules.push(rule.selector);
+      }
+    });
+
+    expect(themeRules).toContain(
+      ':where([data-web-shell-root][data-web-shell-shadcn], [data-web-shell-portal-root][data-web-shell-shadcn])',
+    );
+    expect(themeRules).not.toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(':root'),
+        expect.stringContaining(':host'),
+      ]),
+    );
+  });
+
   it('prefixes global CSS registrations and animations', () => {
     const unscoped: string[] = [];
     postcss.parse(readInjectedCss()).walkAtRules((atRule) => {

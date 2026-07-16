@@ -14,12 +14,22 @@ import type {
   SubagentMeta,
 } from '../types.js';
 import { hasFullSessionContext } from '../types.js';
-import type { ToolCallLocation, ToolKind } from '@agentclientprotocol/sdk';
-import { ToolNames, Kind } from '@qwen-code/qwen-code-core';
+import type {
+  ToolCallContent,
+  ToolCallLocation,
+  ToolKind,
+} from '@agentclientprotocol/sdk';
+import {
+  formatVisionBridgeNoticeDisplay,
+  isVisionBridgeNoticeDisplay,
+  ToolNames,
+  Kind,
+} from '@qwen-code/qwen-code-core';
 import {
   createTranscriptToolCallResultUpdate,
   createTranscriptToolCallStartUpdate,
 } from '@qwen-code/acp-bridge/transcriptReplay';
+import { sanitizeTerminalText } from '../../../ui/utils/textUtils.js';
 
 const KIND_MAP: Record<Kind, ToolKind> = {
   [Kind.Read]: 'read',
@@ -54,6 +64,7 @@ const KIND_MAP: Record<Kind, ToolKind> = {
  */
 export class ToolCallEmitter extends BaseEmitter {
   private readonly planEmitter: PlanEmitter;
+  private readonly preparedCallIds = new Set<string>();
 
   constructor(ctx: SessionEmitterContext) {
     super(ctx);
@@ -71,6 +82,12 @@ export class ToolCallEmitter extends BaseEmitter {
     if (this.isTodoWriteTool(params.toolName)) {
       return false;
     }
+    if (
+      params.phase === 'preparing' &&
+      this.preparedCallIds.has(params.callId)
+    ) {
+      return false;
+    }
 
     const { title, locations, kind } = this.resolveToolMetadata(
       params.toolName,
@@ -80,6 +97,9 @@ export class ToolCallEmitter extends BaseEmitter {
       params.toolName,
       params.subagentMeta,
     );
+    const updatesPreparedCall =
+      params.phase !== 'preparing' &&
+      this.preparedCallIds.delete(params.callId);
 
     await this.sendUpdate(
       createTranscriptToolCallStartUpdate({
@@ -89,15 +109,50 @@ export class ToolCallEmitter extends BaseEmitter {
         args: params.args,
         metadata: { title, locations, kind },
         timestamp: params.timestamp,
+        asUpdate: updatesPreparedCall,
         extra: {
+          ...(params.phase ? { phase: params.phase } : {}),
           ...params.subagentMeta,
           provenance: provenance.provenance,
           ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
         },
       }),
     );
+    if (params.phase === 'preparing') {
+      this.preparedCallIds.add(params.callId);
+    }
 
     return true;
+  }
+
+  /**
+   * Emits a terminal frame when a prepared tool call is discarded before
+   * execution. TodoWrite remains represented exclusively by plan updates.
+   *
+   * @param callId - ID of the prepared tool call
+   * @param toolName - Name of the prepared tool
+   */
+  async emitPreparationDiscarded(
+    callId: string,
+    toolName: string,
+  ): Promise<void> {
+    if (this.isTodoWriteTool(toolName)) return;
+
+    this.preparedCallIds.delete(callId);
+    const provenance = ToolCallEmitter.resolveToolProvenance(toolName);
+    await this.sendUpdate({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: callId,
+      status: 'failed',
+      content: [],
+      _meta: {
+        toolName,
+        phase: 'preparing',
+        preparationDiscarded: true,
+        provenance: provenance.provenance,
+        ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
+      },
+    });
   }
 
   /**
@@ -124,6 +179,7 @@ export class ToolCallEmitter extends BaseEmitter {
       return; // Skip tool_call_update for TodoWriteTool
     }
 
+    this.preparedCallIds.delete(params.callId);
     const provenance = ToolCallEmitter.resolveToolProvenance(
       params.toolName,
       params.subagentMeta,
@@ -137,6 +193,7 @@ export class ToolCallEmitter extends BaseEmitter {
         resultDisplay: params.resultDisplay,
         errorMessage: params.error?.message,
         artifacts: params.artifacts,
+        contentPrefix: buildToolResultContentPrefix(params.resultDisplay),
         timestamp: params.timestamp,
         extra: {
           ...params.subagentMeta,
@@ -162,6 +219,7 @@ export class ToolCallEmitter extends BaseEmitter {
     error: Error,
     subagentMeta?: SubagentMeta,
   ): Promise<void> {
+    this.preparedCallIds.delete(callId);
     const provenance = ToolCallEmitter.resolveToolProvenance(
       toolName,
       subagentMeta,
@@ -318,4 +376,21 @@ export class ToolCallEmitter extends BaseEmitter {
     }
     return KIND_MAP[kind] ?? 'other';
   }
+}
+
+export function buildToolResultContentPrefix(
+  resultDisplay: unknown,
+): ToolCallContent[] {
+  if (!isVisionBridgeNoticeDisplay(resultDisplay)) return [];
+  return [
+    {
+      type: 'content',
+      content: {
+        type: 'text',
+        text: sanitizeTerminalText(
+          formatVisionBridgeNoticeDisplay(resultDisplay),
+        ),
+      },
+    },
+  ];
 }

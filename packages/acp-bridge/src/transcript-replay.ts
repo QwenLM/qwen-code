@@ -59,6 +59,9 @@ export interface TranscriptReplayPresentationAdapter {
     args: Readonly<Record<string, unknown>>,
   ): TranscriptReplayToolMetadata;
   formatHistoryGap(gap: TranscriptReplayGapInput): string;
+  buildToolResultContentPrefix?(
+    resultDisplay: unknown,
+  ): readonly ToolCallContent[];
 }
 
 export interface TranscriptReplayMachineOptions {
@@ -92,6 +95,7 @@ export interface TranscriptToolCallStartOptions extends UpdateMetaOptions {
   readonly args?: Readonly<Record<string, unknown>>;
   readonly status?: 'pending' | 'in_progress' | 'completed' | 'failed';
   readonly metadata: TranscriptReplayToolMetadata;
+  readonly asUpdate?: boolean;
 }
 
 export interface TranscriptToolCallResultOptions extends UpdateMetaOptions {
@@ -102,6 +106,7 @@ export interface TranscriptToolCallResultOptions extends UpdateMetaOptions {
   readonly resultDisplay?: unknown;
   readonly errorMessage?: string;
   readonly artifacts?: readonly unknown[];
+  readonly contentPrefix?: readonly ToolCallContent[];
 }
 
 export interface TranscriptTodoItem {
@@ -215,7 +220,7 @@ export function createTranscriptToolCallStartUpdate(
 ): SessionUpdate {
   const provenance = resolveToolProvenance(options.toolName);
   return {
-    sessionUpdate: 'tool_call',
+    sessionUpdate: options.asUpdate ? 'tool_call_update' : 'tool_call',
     toolCallId: options.callId,
     status: options.status ?? 'pending',
     title: options.metadata.title,
@@ -624,6 +629,10 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         artifacts: Array.isArray(result?.['artifacts'])
           ? result['artifacts']
           : undefined,
+        contentPrefix: this.buildToolResultContentPrefix(
+          resultDisplay,
+          record.uuid,
+        ),
         ...meta,
       }),
     );
@@ -657,6 +666,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           role: 'assistant',
           text: item['text'].replace(/\n/g, '  \n'),
           ...meta,
+          extra: { source: 'slash_command' },
         }),
       );
     }
@@ -738,6 +748,28 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         false,
       );
       return 'Some earlier messages are unavailable because the saved history is incomplete.';
+    }
+  }
+
+  private buildToolResultContentPrefix(
+    resultDisplay: unknown,
+    recordId: string,
+  ): readonly ToolCallContent[] {
+    try {
+      return (
+        this.options.presentation?.buildToolResultContentPrefix?.(
+          resultDisplay,
+        ) ?? []
+      );
+    } catch {
+      this.report(
+        'presentation_fallback',
+        'Tool result content presentation fell back to no prefix.',
+        recordId,
+        undefined,
+        false,
+      );
+      return [];
     }
   }
 
@@ -875,17 +907,19 @@ function resolveToolProvenance(toolName: string): {
 function buildToolResultContent(
   options: TranscriptToolCallResultOptions,
 ): ToolCallContent[] {
+  const prefix = [...(options.contentPrefix ?? [])];
   const diff = extractDiffContent(options.resultDisplay);
-  if (diff) return [diff];
+  if (diff) return [...prefix, diff];
   if (options.errorMessage) {
     return [
+      ...prefix,
       {
         type: 'content',
         content: { type: 'text', text: options.errorMessage },
       },
     ];
   }
-  const content: ToolCallContent[] = [];
+  const content: ToolCallContent[] = [...prefix];
   for (const part of options.message ?? []) {
     if (!isObjectRecord(part)) continue;
     if (typeof part['text'] === 'string' && part['text']) {

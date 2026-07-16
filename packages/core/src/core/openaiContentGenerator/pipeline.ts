@@ -27,6 +27,10 @@ import {
   QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
 } from './constants.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { getToolCallPreparations } from '../tool-call-preparation.js';
+import { InvalidStreamError } from '../invalid-stream-error.js';
+import { logProtocolTagSanitized } from '../../telemetry/loggers.js';
+import { ProtocolTagSanitizedEvent } from '../../telemetry/types.js';
 
 const debugLogger = createDebugLogger('OPENAI_PIPELINE');
 
@@ -440,6 +444,7 @@ export class ContentGenerationPipeline {
           guarded,
           context,
           request,
+          userPromptId,
         );
         async function* drainThenCleanup(): AsyncGenerator<GenerateContentResponse> {
           try {
@@ -466,6 +471,7 @@ export class ContentGenerationPipeline {
     stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
     context: RequestContext,
     request: GenerateContentParameters,
+    userPromptId: string,
   ): AsyncGenerator<GenerateContentResponse> {
     const collectedGeminiResponses: GenerateContentResponse[] = [];
 
@@ -478,6 +484,32 @@ export class ContentGenerationPipeline {
     // function-call parts from the finish chunk).
     let pendingFinishResponse: GenerateContentResponse | null = null;
     let finishYielded = false;
+    let pendingFinishProtocolTagSanitized:
+      | NonNullable<RequestContext['protocolTagSanitized']>
+      | undefined;
+    const logPendingProtocolTagSanitized = (
+      response: GenerateContentResponse,
+      sanitization:
+        | NonNullable<RequestContext['protocolTagSanitized']>
+        | undefined,
+    ) => {
+      if (!sanitization) return;
+      const event = new ProtocolTagSanitizedEvent({
+        model: context.model,
+        promptId: userPromptId,
+        responseId: response.responseId,
+        tagName: sanitization.tagName,
+        toolCallCount: sanitization.toolCallCount,
+      });
+      debugLogger.warn('Sanitized a model protocol tag', {
+        model: event.model,
+        promptId: event.prompt_id,
+        responseId: event.response_id,
+        tagName: event.tag_name,
+        toolCallCount: event.tool_call_count,
+      });
+      logProtocolTagSanitized(this.config.cliConfig, event);
+    };
 
     try {
       // Stage 2a: Convert and yield each chunk while preserving original
@@ -498,13 +530,34 @@ export class ContentGenerationPipeline {
           context,
         );
 
+        const sanitization = context.protocolTagSanitized;
+        if (sanitization) {
+          context.protocolTagSanitized = undefined;
+        }
+
         // Stage 2b: Filter empty responses to avoid downstream issues
         if (
           response.candidates?.[0]?.content?.parts?.length === 0 &&
           !response.candidates?.[0]?.finishReason &&
-          !response.usageMetadata
+          !response.usageMetadata &&
+          // Preparation-only responses must reach ACP before arguments complete.
+          getToolCallPreparations(response).length === 0
         ) {
           continue;
+        }
+
+        if (
+          pendingFinishProtocolTagSanitized &&
+          pendingFinishResponse &&
+          !response.candidates?.[0]?.finishReason &&
+          response.candidates?.some(
+            (candidate) => (candidate.content?.parts?.length ?? 0) > 0,
+          )
+        ) {
+          throw new InvalidStreamError(
+            'Model response continued after a finish reason.',
+            'PROTOCOL_TAG_LEAK',
+          );
         }
 
         // Stage 2c: Handle chunk merging for providers that send
@@ -530,6 +583,14 @@ export class ContentGenerationPipeline {
           continue;
         }
 
+        if (
+          !pendingFinishResponse &&
+          response.candidates?.[0]?.finishReason &&
+          sanitization
+        ) {
+          pendingFinishProtocolTagSanitized = sanitization;
+        }
+
         const shouldYield = this.handleChunkMerging(
           response,
           collectedGeminiResponses,
@@ -541,26 +602,76 @@ export class ContentGenerationPipeline {
         if (shouldYield) {
           // If we have a pending finish response, yield it instead
           if (pendingFinishResponse) {
+            logPendingProtocolTagSanitized(
+              pendingFinishResponse,
+              pendingFinishProtocolTagSanitized,
+            );
             yield pendingFinishResponse;
             finishYielded = true;
             // Keep pendingFinishResponse alive so late-arriving usage
             // metadata can still be merged (see finishYielded block above).
           } else {
+            logPendingProtocolTagSanitized(response, sanitization);
             yield response;
           }
         }
       }
 
+      if (
+        context.pendingThinkingTagCandidate &&
+        !context.pendingThinkingTagCandidate.closingTagName &&
+        !/\S/.test(context.pendingThinkingTagCandidate.text)
+      ) {
+        const pendingParts = context.pendingUntrustedResponseParts;
+        context.pendingThinkingTagCandidate = undefined;
+        context.pendingUntrustedResponseParts = undefined;
+        if (pendingParts?.length) {
+          const response = new GenerateContentResponse();
+          response.candidates = [
+            {
+              content: { parts: pendingParts, role: 'model' },
+              index: 0,
+            },
+          ];
+          yield response;
+        }
+      } else if (context.pendingThinkingTagCandidate) {
+        throw new InvalidStreamError(
+          'Model response leaked thinking tags.',
+          'PROTOCOL_TAG_LEAK',
+        );
+      }
+
       // Stage 2d: If there's still a pending finish response at the end
       // (e.g. no usage chunk arrived after the finish chunk), yield it.
       if (pendingFinishResponse && !finishYielded) {
+        logPendingProtocolTagSanitized(
+          pendingFinishResponse,
+          pendingFinishProtocolTagSanitized,
+        );
         yield pendingFinishResponse;
       }
     } catch (error) {
+      if (error instanceof InvalidStreamError) {
+        throw error;
+      }
+
       // Re-throw StreamContentError directly so it can be handled by
       // the caller's retry logic (e.g., TPM throttling retry in sendMessageStream)
       if (error instanceof StreamContentError) {
         throw redactProxyError(error);
+      }
+
+      if (
+        context.pendingThinkingTagCandidate?.closingTagName &&
+        request.config?.abortSignal?.aborted !== true
+      ) {
+        context.pendingThinkingTagCandidate = undefined;
+        context.pendingUntrustedResponseParts = undefined;
+        throw new InvalidStreamError(
+          'Model response leaked thinking tags.',
+          'PROTOCOL_TAG_LEAK',
+        );
       }
 
       // Bypass handleError: it strips `code` from timeout errors, which would
@@ -607,10 +718,9 @@ export class ContentGenerationPipeline {
     if (isFinishChunk) {
       if (hasPendingFinish) {
         // Duplicate finish chunk (e.g. from OpenRouter providers that send two
-        // finish_reason chunks for tool calls). The streaming tool call parser
-        // was already reset after the first finish chunk, so the second one
-        // carries no functionCall parts. Merge only usageMetadata and keep the
-        // candidates (including functionCall parts) from the first finish chunk.
+        // finish_reason chunks for tool calls). The first finish response owns
+        // the candidates, including functionCall parts. Merge only usageMetadata
+        // from later finish chunks.
         const lastResponse =
           collectedGeminiResponses[collectedGeminiResponses.length - 1];
         if (response.usageMetadata) {

@@ -1,6 +1,6 @@
 'use client';
 
-import type * as React from 'react';
+import * as React from 'react';
 import { Dialog as DialogPrimitive } from 'radix-ui';
 
 import { cn } from '@/lib/utils';
@@ -40,12 +40,13 @@ function DialogClose({
   return <DialogPrimitive.Close data-slot="dialog-close" {...props} />;
 }
 
-function DialogOverlay({
-  className,
-  ...props
-}: React.ComponentProps<typeof DialogPrimitive.Overlay>) {
+const DialogOverlay = React.forwardRef<
+  React.ComponentRef<typeof DialogPrimitive.Overlay>,
+  React.ComponentProps<typeof DialogPrimitive.Overlay>
+>(function DialogOverlay({ className, ...props }, ref) {
   return (
     <DialogPrimitive.Overlay
+      ref={ref}
       data-slot="dialog-overlay"
       className={cn(
         'fixed inset-0 isolate z-[var(--web-shell-dialog-backdrop-z-index,50)] bg-black/10 duration-100 supports-backdrop-filter:backdrop-blur-xs data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0',
@@ -54,22 +55,27 @@ function DialogOverlay({
       {...props}
     />
   );
-}
+});
 
-function DialogContent({
-  className,
-  children,
-  showCloseButton = true,
-  overlayProps,
-  ...props
-}: React.ComponentProps<typeof DialogPrimitive.Content> & {
+type DialogContentProps = React.ComponentProps<
+  typeof DialogPrimitive.Content
+> & {
   showCloseButton?: boolean;
   overlayProps?: React.ComponentProps<typeof DialogPrimitive.Overlay>;
-}) {
+};
+
+const DialogContent = React.forwardRef<
+  React.ComponentRef<typeof DialogPrimitive.Content>,
+  DialogContentProps
+>(function DialogContent(
+  { className, children, showCloseButton = true, overlayProps, ...props },
+  ref,
+) {
   return (
     <DialogPortal>
       <DialogOverlay {...overlayProps} />
       <DialogPrimitive.Content
+        ref={ref}
         data-slot="dialog-content"
         className={cn(
           'fixed top-1/2 left-1/2 z-[var(--web-shell-dialog-backdrop-z-index,50)] grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95',
@@ -93,7 +99,7 @@ function DialogContent({
       </DialogPrimitive.Content>
     </DialogPortal>
   );
-}
+});
 
 function DialogHeader({ className, ...props }: React.ComponentProps<'div'>) {
   return (

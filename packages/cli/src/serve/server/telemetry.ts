@@ -18,6 +18,14 @@ import {
   MAX_CLIENT_ID_LENGTH,
 } from './request-helpers.js';
 
+function decodePathSegment(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 // Route handlers are split across `routes/*.ts`; any added or renamed route
 // that needs daemon telemetry must keep these patterns in sync.
 export function resolveDaemonTelemetryRoute(
@@ -34,6 +42,13 @@ export function resolveDaemonTelemetryRoute(
   }
   if (req.method === 'GET' && path === '/daemon/status') {
     return { route: 'GET /daemon/status' };
+  }
+  const rewindSnapshots = path.match(/^\/session\/([^/]+)\/rewind\/snapshots$/);
+  if (rewindSnapshots?.[1] && req.method === 'GET') {
+    return {
+      route: 'GET /session/:id/rewind/snapshots',
+      sessionId: rewindSnapshots[1],
+    };
   }
   const sessionAction = path.match(
     /^\/session\/([^/]+)\/(load|resume|prompt|cancel|recap|btw|mid-turn-message|model|shell|detach|rewind|approval-mode|language|a2ui-action)$/,
@@ -126,6 +141,24 @@ export function resolveDaemonTelemetryRoute(
       sessionId: workspaceTranscript[1],
     };
   }
+  const workspaceExport = path.match(
+    /^\/workspaces\/[^/]+\/session\/([^/]+)\/export$/,
+  );
+  if (workspaceExport?.[1] && req.method === 'GET') {
+    return {
+      route: 'GET /workspaces/:workspace/session/:id/export',
+      sessionId: workspaceExport[1],
+    };
+  }
+  const workspaceArchivedExport = path.match(
+    /^\/workspaces\/[^/]+\/session\/([^/]+)\/archive\/export$/,
+  );
+  if (workspaceArchivedExport?.[1] && req.method === 'GET') {
+    return {
+      route: 'GET /workspaces/:workspace/session/:id/archive/export',
+      sessionId: workspaceArchivedExport[1],
+    };
+  }
   const pluralWorkspacePrefix = /^\/workspaces\/[^/]+/;
   if (pluralWorkspacePrefix.test(path)) {
     const suffix = path.replace(pluralWorkspacePrefix, '/workspace');
@@ -139,6 +172,7 @@ export function resolveDaemonTelemetryRoute(
         suffix === '/workspace/preflight' ||
         suffix === '/workspace/hooks' ||
         suffix === '/workspace/settings' ||
+        suffix === '/workspace/voice' ||
         suffix === '/workspace/permissions' ||
         suffix === '/workspace/trust' ||
         suffix === '/workspace/memory' ||
@@ -166,6 +200,8 @@ export function resolveDaemonTelemetryRoute(
     if (req.method === 'POST') {
       if (
         suffix === '/workspace/settings' ||
+        suffix === '/workspace/voice' ||
+        suffix === '/workspace/voice/transcribe' ||
         suffix === '/workspace/permissions' ||
         suffix === '/workspace/trust/request' ||
         suffix === '/workspace/init' ||
@@ -192,7 +228,7 @@ export function resolveDaemonTelemetryRoute(
         return { route: 'POST /workspace/agents/:agentType' };
       }
       if (
-        /^\/workspace\/mcp\/[^/]+\/(enable|disable|authenticate|clear-auth)$/.test(
+        /^\/workspace\/mcp\/[^/]+\/(approve|enable|disable|authenticate|clear-auth)$/.test(
           suffix,
         )
       ) {
@@ -295,6 +331,7 @@ export function daemonTelemetryMiddleware(
   // the OTel counter's scope, so the "requests" line reflects daemon API
   // traffic rather than static-asset or unrouted noise.
   recordRequest?: (durationMs: number, statusCode: number) => void,
+  resolveSessionWorkspaceCwd?: (sessionId: string) => string | undefined,
 ): (req: Request, res: Response, next: NextFunction) => void {
   const workspaceHashByCwd = new Map<string, string>();
   const resolveWorkspaceHash = (workspaceCwd: string): string => {
@@ -311,7 +348,18 @@ export function daemonTelemetryMiddleware(
       next();
       return;
     }
-    const workspaceHash = resolveWorkspaceHash(resolveWorkspaceCwd(req));
+    const resolveOwnerWorkspace =
+      route.route === 'GET /session/:id/rewind/snapshots' ||
+      route.route === 'POST /session/:id/rewind' ||
+      route.route === 'POST /session/:id/shell';
+    const sessionId = route.sessionId
+      ? decodePathSegment(route.sessionId)
+      : undefined;
+    const workspaceCwd =
+      (resolveOwnerWorkspace && sessionId
+        ? resolveSessionWorkspaceCwd?.(sessionId)
+        : undefined) ?? resolveWorkspaceCwd(req);
+    const workspaceHash = resolveWorkspaceHash(workspaceCwd);
     const rawClientId = req.get(CLIENT_ID_HEADER);
     const clientId =
       rawClientId !== undefined &&
@@ -326,7 +374,7 @@ export function daemonTelemetryMiddleware(
         method: req.method,
         route: route.route,
         workspaceHash,
-        ...(route.sessionId ? { sessionId: route.sessionId } : {}),
+        ...(sessionId ? { sessionId } : {}),
         ...(route.permissionRequestId
           ? { permissionRequestId: route.permissionRequestId }
           : {}),

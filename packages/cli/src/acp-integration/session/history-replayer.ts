@@ -14,7 +14,10 @@ import {
   type TranscriptReplayStateV1,
 } from '@qwen-code/acp-bridge/transcriptReplay';
 import type { SessionEmitterContext } from './types.js';
-import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
+import {
+  buildToolResultContentPrefix,
+  ToolCallEmitter,
+} from './emitters/tool-call-emitter.js';
 import { formatHistoryGapNotice } from '../../ui/utils/history-gap-notice.js';
 
 export const MISSING_TOOL_RESULT_MESSAGE =
@@ -152,6 +155,7 @@ export class HistoryReplayer {
       resolveToolMetadata: (toolName, args) =>
         this.toolCallEmitter.resolveToolMetadata(toolName, { ...args }),
       formatHistoryGap: (gap) => formatHistoryGapNotice(gap),
+      buildToolResultContentPrefix,
     };
   }
 

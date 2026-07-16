@@ -1,9 +1,11 @@
 import {
   createContext,
   memo,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
@@ -175,7 +177,86 @@ function MermaidBlock({ code }: { code: string }) {
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'diagram' | 'code'>('diagram');
   const [copied, setCopied] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [isDragging, setIsDragging] = useState(false);
+  const dragRef = useRef<{
+    startX: number;
+    startY: number;
+    origX: number;
+    origY: number;
+  } | null>(null);
   const mermaidTheme = appTheme === 'light' ? 'default' : 'dark';
+
+  const ZOOM_MIN = 0.5;
+  const ZOOM_MAX = 3;
+  const ZOOM_STEP = 0.25;
+
+  const handleZoomIn = () => {
+    setZoom((z) => Math.min(ZOOM_MAX, Math.round((z + ZOOM_STEP) * 100) / 100));
+  };
+  const handleZoomOut = () => {
+    setZoom((z) => Math.max(ZOOM_MIN, Math.round((z - ZOOM_STEP) * 100) / 100));
+  };
+  const resetZoomAndPan = useCallback(() => {
+    dragRef.current = null;
+    setIsDragging(false);
+    setZoom(1);
+    setOffset({ x: 0, y: 0 });
+  }, []);
+
+  const handleMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      setIsDragging(true);
+      dragRef.current = {
+        startX: e.clientX,
+        startY: e.clientY,
+        origX: offset.x,
+        origY: offset.y,
+      };
+    },
+    [offset],
+  );
+
+  useEffect(() => {
+    if (!isDragging) return;
+
+    const onMouseMove = (e: MouseEvent) => {
+      if (!dragRef.current) return;
+      const dx = e.clientX - dragRef.current.startX;
+      const dy = e.clientY - dragRef.current.startY;
+      // Clamp Y to prevent dragging into overflow-y: hidden clipped area.
+      // X is unclamped — overflow-x: auto provides native horizontal scroll.
+      const PAN_LIMIT = 1500;
+      setOffset({
+        x: dragRef.current.origX + dx,
+        y: Math.max(
+          -PAN_LIMIT,
+          Math.min(PAN_LIMIT, dragRef.current.origY + dy),
+        ),
+      });
+    };
+
+    const onMouseUp = () => {
+      dragRef.current = null;
+      setIsDragging(false);
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    window.addEventListener('blur', onMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+      window.removeEventListener('blur', onMouseUp);
+    };
+  }, [isDragging]);
+
+  useEffect(() => {
+    setZoom(1);
+    setOffset({ x: 0, y: 0 });
+  }, [code]);
 
   useEffect(() => {
     let cancelled = false;
@@ -191,6 +272,10 @@ function MermaidBlock({ code }: { code: string }) {
             theme: mermaidTheme,
             securityLevel: 'strict',
             suppressErrorRendering: true,
+            flowchart: {
+              wrappingWidth: 300,
+              useMaxWidth: false,
+            },
           });
           lastMermaidTheme = mermaidTheme;
         }
@@ -247,6 +332,34 @@ function MermaidBlock({ code }: { code: string }) {
       <div className={styles.codeBlockHeader}>
         <span className={styles.codeBlockLang}>{t('mermaid.label')}</span>
         <span className={styles.mermaidActions}>
+          {viewMode === 'diagram' && (
+            <>
+              <button
+                className={styles.codeBlockCopy}
+                onClick={handleZoomOut}
+                title={t('mermaid.zoomOut')}
+                disabled={zoom <= ZOOM_MIN}
+              >
+                {t('mermaid.zoomOut')}
+              </button>
+              <button
+                className={styles.codeBlockCopy}
+                onClick={resetZoomAndPan}
+                title={t('mermaid.zoomReset')}
+                disabled={zoom === 1 && offset.x === 0 && offset.y === 0}
+              >
+                {t('mermaid.zoomReset')}
+              </button>
+              <button
+                className={styles.codeBlockCopy}
+                onClick={handleZoomIn}
+                title={t('mermaid.zoomIn')}
+                disabled={zoom >= ZOOM_MAX}
+              >
+                {t('mermaid.zoomIn')}
+              </button>
+            </>
+          )}
           <button
             className={styles.codeBlockCopy}
             onClick={() =>
@@ -274,9 +387,19 @@ function MermaidBlock({ code }: { code: string }) {
         </div>
       ) : (
         <div
-          className={`${styles.mermaidBlock} ${styles.mermaidInline}`}
-          dangerouslySetInnerHTML={{ __html: svg }}
-        />
+          className={`${styles.mermaidZoomWrapper} ${isDragging ? styles.mermaidDragging : ''}`}
+          onMouseDown={handleMouseDown}
+          onDoubleClick={resetZoomAndPan}
+        >
+          <div
+            className={`${styles.mermaidBlock} ${styles.mermaidInline}`}
+            style={{
+              transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})`,
+              transformOrigin: 'top center',
+            }}
+            dangerouslySetInnerHTML={{ __html: svg }}
+          />
+        </div>
       )}
     </div>
   );

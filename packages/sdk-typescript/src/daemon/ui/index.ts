@@ -118,6 +118,7 @@ export type {
   DaemonUiMcpChildRefusedEvent,
   DaemonUiMcpServerRestartedEvent,
   DaemonUiMcpServerRestartRefusedEvent,
+  DaemonUiMcpServerChangedEvent,
   // Auth device-flow events
   DaemonUiAuthDeviceFlowEvent,
   DaemonUiAuthDeviceFlowStartedEvent,
