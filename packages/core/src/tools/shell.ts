@@ -2865,7 +2865,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
             error: {
               message:
                 result.error.message +
-                (longRunHint ? `\n\n---\n${longRunHint}` : ''),
+                  (longRunHint ? `\n\n---\n${longRunHint}` : ''),
               type: ToolErrorType.SHELL_EXECUTE_ERROR,
             },
           }
