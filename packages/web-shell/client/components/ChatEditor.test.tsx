@@ -3,10 +3,15 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { WebShellComposerTag } from '../customization';
 import { I18nProvider } from '../i18n';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+
+const { mockComposerTags } = vi.hoisted(() => ({
+  mockComposerTags: { current: [] as WebShellComposerTag[] },
+}));
 
 Object.defineProperty(window, 'matchMedia', {
   writable: true,
@@ -44,7 +49,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
       },
       pastedImages: [],
       removeImage: vi.fn(),
-      composerTags: [],
+      composerTags: mockComposerTags.current,
       removeTopTag: vi.fn(),
       addTags: vi.fn(),
       removeInlineTags: vi.fn(),
@@ -103,14 +108,18 @@ afterEach(() => {
     act(() => root.unmount());
     container.remove();
   }
+  mockComposerTags.current = [];
 });
 
 function renderChatEditor(props: {
+  composerTags?: WebShellComposerTag[];
   gitBranch?: string;
   workspaceName?: string;
   workspaceTitle?: string;
   visibleToolbarActions?: readonly ComposerToolbarAction[];
 }) {
+  const { composerTags = [], ...editorProps } = props;
+  mockComposerTags.current = composerTags;
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -125,7 +134,7 @@ function renderChatEditor(props: {
           showChatWidthToggle={false}
           currentMode="default"
           currentModel="qwen"
-          {...props}
+          {...editorProps}
         />
       </I18nProvider>,
     );
@@ -133,6 +142,24 @@ function renderChatEditor(props: {
 
   return container;
 }
+
+describe('ChatEditor composer tag icons', () => {
+  it('renders built-in icons for top composer tags', () => {
+    const kinds = ['extension', 'file', 'mcp', 'skill'] as const;
+    const container = renderChatEditor({
+      visibleToolbarActions: [],
+      composerTags: kinds.map((kind) => ({
+        id: `${kind}:reference`,
+        kind,
+        value: kind,
+      })),
+    });
+
+    expect(
+      container.querySelectorAll('[style*="--composer-tag-icon-url"]'),
+    ).toHaveLength(kinds.length);
+  });
+});
 
 describe('ChatEditor git branch toolbar integration', () => {
   it('shows the git branch indicator when the branch action is visible', () => {

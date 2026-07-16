@@ -64,6 +64,7 @@ import {
   createInputAnnotationsFromComposerTags,
   getComposerTagIconUrl,
   getComposerTagSerialized,
+  isBuiltinComposerTagIconUrl,
 } from '../utils/composerTag';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import { isSafeImageSrc } from '../components/messages/Markdown';
@@ -673,7 +674,10 @@ class ComposerTagWidget extends WidgetType {
     const tagLabel = this.tag.kind ? '' : rawTagLabel;
     const iconUrl = this.tag.iconUrl ?? getComposerTagIconUrl(this.tag.kind);
     const safeIconUrl =
-      iconUrl && isSafeImageSrc(iconUrl) ? iconUrl : undefined;
+      iconUrl &&
+      (isBuiltinComposerTagIconUrl(iconUrl) || isSafeImageSrc(iconUrl))
+        ? iconUrl
+        : undefined;
     let customContent: ReactNode | null | undefined;
     try {
       customContent = this.tag.renderContent?.({
