@@ -960,6 +960,7 @@ function currentServeFeaturesForRunQwenServe(
     persistSettingAvailable: true,
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
+    sessionGenerationAvailable: true,
     rateLimit: opts.rateLimit === true,
     reloadAvailable: true,
     channelReloadAvailable: opts.channelSelection !== undefined,
