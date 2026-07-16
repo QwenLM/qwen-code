@@ -91,6 +91,18 @@ jobs:
           echo "$CHANGED_FILES" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
 
+      - name: Validate required secrets
+        run: |
+          if [ -z "${{ secrets.OPENAI_API_KEY }}" ]; then
+            echo "Missing required secret: OPENAI_API_KEY"
+            exit 1
+          fi
+          if [ -z "${{ secrets.OPENAI_BASE_URL }}" ]; then
+            echo "Missing required secret: OPENAI_BASE_URL"
+            exit 1
+          fi
+          echo "All required secrets are present"
+
       - name: Run Qwen PR Review
         uses: QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2
         env:
@@ -100,6 +112,9 @@ jobs:
           CHANGED_FILES: ${{ steps.get_pr.outputs.changed_files || steps.get_pr_comment.outputs.changed_files }}
           ADDITIONAL_INSTRUCTIONS: ${{ steps.get_pr.outputs.additional_instructions || steps.get_pr_comment.outputs.additional_instructions }}
           REPOSITORY: ${{ github.repository }}
+          QWEN_AUTH_TYPE: api-key
+          QWEN_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          QWEN_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
         with:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
@@ -117,7 +132,8 @@ jobs:
                 "run_shell_command(grep)",
                 "write_file"
               ],
-              "sandbox": false
+              "sandbox": false,
+              "authType": "api-key"
             }
           prompt: |
             You are an expert code reviewer. You have access to shell commands to gather PR information and perform the review.
