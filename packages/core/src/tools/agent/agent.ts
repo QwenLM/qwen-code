@@ -2332,6 +2332,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // incompatibility guard below rejects. Unavailable fork requests retain
       // their existing foreground general-purpose fallback.
       //
+      // This is the source of truth for the background-classification rule. Two
+      // UI classifiers replicate it from tool-call args (they cannot see
+      // subagentConfig.background) and must be kept in sync when it changes:
+      //   - packages/web-shell/client/adapters/toolClassification.ts
+      //     (isBackgroundSubAgentToolCall)
+      //   - packages/desktop/packages/shared/src/agent/tool-matching.ts
+      //     (detectBackgroundEvents)
+      //
       // Background delegation is top-level-only in v1, mirroring the fork
       // downgrade above: a nested launcher would be handed a completion
       // contract it cannot honor — the success guidance names send_message

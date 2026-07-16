@@ -410,6 +410,16 @@ function detectBackgroundEvents(
   // Qwen Agent calls default to background unless they explicitly opt out or
   // use a launch shape that stays foreground. Task keeps its provider-specific
   // explicit opt-in behavior.
+  //
+  // NOTE: This heuristic (top-level `agent` call, no explicit
+  // `run_in_background`, no `working_dir`, no named teammate) mirrors two other
+  // implementations that must stay in sync:
+  //   - core dispatch (source of truth): packages/core/src/tools/agent/agent.ts
+  //     (`backgroundRequested`/`shouldRunInBackground` in AgentTool.execute)
+  //   - web-shell UI: packages/web-shell/client/adapters/toolClassification.ts
+  //     (`isBackgroundSubAgentToolCall`)
+  // If the routing rule changes in core, update all three. This copy does not
+  // have the web-shell's `rawOutput.status === 'background'` fallback.
   const normalizedToolName = entry.name.toLowerCase();
   const isTopLevelQwenAgent =
     normalizedToolName === 'agent' && parentToolUseId === undefined;
