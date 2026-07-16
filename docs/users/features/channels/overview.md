@@ -99,16 +99,24 @@ IDs, so a list response can be used for deterministic follow-up operations.
   request such as `只看中文偏好` to list the matching entries.
 - `查看刚才那条记忆`, `把关于 staging 的记忆改成默认使用 production`, and
   `忘掉刚才那条` work when the natural reference resolves to exactly one entry.
-  `把 <id> 改成默认使用 production` updates that entry immediately, and
-  `忘掉 <id>` removes it immediately. Neither operation needs confirmation.
+  Natural updates and removals first show the proposed change. Confirm an
+  update with `确认更新记忆` or `confirm memory update`, or a removal with
+  `确认删除记忆` or `confirm memory removal`, within 60 seconds. Exact-ID
+  updates and removals remain immediate and do not need confirmation.
 - `清空记忆` starts the clear-all confirmation flow; `确认清空记忆` completes
   it.
 
 When a natural inspect, update, or removal request matches multiple entries,
 the bot returns the candidate IDs and previews without changing memory. There
-is no pending selection or confirmation state: retry the request with one exact
-ID, such as `忘掉 m-a31f0d82c7e4`. Exact-ID operations remain the deterministic
-fast path. A natural request with no match reports that no entry matched.
+is no pending selection for an ambiguous result: retry the request with one
+exact ID, such as `忘掉 m-a31f0d82c7e4`. Exact-ID operations remain the
+deterministic fast path. A natural request with no match reports that no entry
+matched.
+
+Pending update, removal, and clear confirmations apply only to the sender and
+chat or thread that created them. A newer executable memory mutation replaces
+an older pending one for that sender and target. Pending confirmations are
+discarded when the channel process restarts.
 
 The legacy slash aliases `/remember-channel`, `/channel-memory`, and
 `/forget-channel` have been removed. They are no longer channel-memory
