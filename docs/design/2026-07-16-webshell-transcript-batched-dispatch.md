@@ -176,6 +176,21 @@ the `awaitingResync` read requires. The burst regression test was tightened from
 emitted redundant per-event dispatches would fail, not just a pure per-event
 revert.
 
+Round 8 (post-review, ci-bot, on the Round 7 fix): Putting `flushTranscriptSync`
+on the catch and unmount paths made a reducer throw cascade. `runTranscriptFlush`
+swaps the pending buffer to a local before `store.dispatch`, so a throw there
+(a) escapes as an uncaught `setTimeout` error on the macrotask path, and (b) via
+`flushTranscriptSync` propagates out of the catch block — aborting `lastSeenEventId`
+bookkeeping, reconnect, auth branching, terminal cleanup, and `pendingSessionLoad`
+rejection — and out of the `useEffect` cleanup, leaving half-torn-down state.
+Fixed at the source: `runTranscriptFlush` wraps `store.dispatch` in try/catch and
+logs (`console.error` with the batch size) instead of letting the throw escape.
+One guard fixes all three paths; the batch is dropped (a reducer throw is a bug
+to surface, not a reason to crash the session). `settleActivePromptFromTurnEvent`
+gained a JSDoc stating its callers must flush buffered transcript events first,
+since it dispatches `assistant.done` directly and the precondition was previously
+only an inline comment at the call site.
+
 ## Verification Plan
 
 - Unit-test the batcher: a burst of many events yields **exactly one**

@@ -385,7 +385,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       if (pendingTranscriptEvents.length === 0) return;
       const batch = pendingTranscriptEvents;
       pendingTranscriptEvents = [];
-      store.dispatch(batch);
+      // Swallow a reducer throw (log it) so it cannot escape as an uncaught
+      // timer error or — via flushTranscriptSync — abort the catch block's
+      // error recovery and the unmount cleanup.
+      try {
+        store.dispatch(batch);
+      } catch (error) {
+        console.error(
+          '[DaemonSessionProvider] batched transcript dispatch failed',
+          { eventCount: batch.length, error },
+        );
+      }
     };
     const cancelTranscriptFlush = () => {
       if (transcriptFlushTimer === undefined) return;
@@ -1933,6 +1943,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   );
 }
 
+/**
+ * Settle the session's active prompt from a `turn_complete` / `turn_error`
+ * event. Dispatches `assistant.done` directly on `store`, so callers that have
+ * buffered (batched) transcript events must flush them first
+ * (`flushTranscriptSync()`) — otherwise `assistant.done` is applied ahead of
+ * the turn's still-buffered transcript content.
+ */
 function settleActivePromptFromTurnEvent(
   activePrompts: Map<string, ActivePrompt>,
   settledPrompts: Map<string, SettledPrompt>,
