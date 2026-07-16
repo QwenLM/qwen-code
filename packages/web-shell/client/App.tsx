@@ -604,6 +604,7 @@ type SessionActionsWithCreate = {
   createSession: (options?: {
     workspaceCwd?: string;
     approvalMode?: string;
+    sourceType?: string;
   }) => Promise<{ sessionId: string }>;
   attachSession: () => Promise<void>;
   clearSession: () => Promise<void>;
