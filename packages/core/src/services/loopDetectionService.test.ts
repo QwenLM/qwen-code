@@ -1471,9 +1471,11 @@ describe('LoopDetectionService', () => {
       expect(service.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
     });
 
-    it('fires at the built-in default soft cap value', () => {
+    it('allows diverse calls past the built-in default soft cap', () => {
       // Documents that the default soft cap is DEFAULT_MAX_TOOL_CALLS_PER_TURN
-      // and that diverse calls are allowed past it (no fire at default+1).
+      // and that diverse calls are allowed past it (no fire at default+1). The
+      // hard-cap firing at the default config is covered by the SOFT_CAP=10
+      // 'fires at the hard cap' test (same code path, scaled by the multiplier).
       const svc = new LoopDetectionService(mockConfig);
       svc.reset('');
       for (let i = 0; i < DEFAULT_MAX_TOOL_CALLS_PER_TURN + 1; i++) {
@@ -1537,6 +1539,33 @@ describe('LoopDetectionService', () => {
         ),
       ).toBe(true);
       expect(loggers.logLoopDetected).toHaveBeenCalledTimes(1);
+    });
+
+    it('rolls back the stuck-repetition signal on retry', () => {
+      // Larger soft cap so the failed attempt can build a stuck signal (6
+      // non-consecutive repeats of one call) without crossing the soft cap and
+      // firing early.
+      const svc = new LoopDetectionService(makeConfig(20));
+      svc.reset('');
+      // Failed attempt: 6 repeats of one call interleaved with distinct calls
+      // (so the consecutive-identical guard does not fire). Total stays under
+      // the soft cap, so the cap does not fire — but capMaxKeyRepeat reaches 6.
+      for (let i = 0; i < 6; i++) {
+        svc.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('t', { stuck: true }),
+        );
+        svc.checkAlwaysOnSafeties(createToolCallRequestEvent('t', { d: i }));
+      }
+      svc.checkAlwaysOnSafeties(retryEvent);
+      // The stuck signal must be cleared on retry: a diverse replay is allowed
+      // well past the soft cap (20). If capMaxKeyRepeat had survived at 6, the
+      // replay would halt at the 21st call (total > 20 and stuck).
+      for (let i = 0; i < 25; i++) {
+        expect(
+          svc.checkAlwaysOnSafeties(createToolCallRequestEvent('t', { i })),
+        ).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
     });
 
     it('preserves committed round-trip counts when a later attempt retries', () => {
