@@ -236,8 +236,15 @@ name         = cron_create
 args         = {...}
 ```
 
-All model-facing response builders use `providerName ?? name`. All internal
-consumers use `name` and `args`.
+All model-facing response-name builders use `providerName ?? name`. All
+internal consumers use `name` and `args`.
+
+Permission-denial text is intentionally different from response pairing. It
+identifies the policy-checked target and, for proxy calls, the provider route
+(for example, `"cron_create" via "deferred_tool_call"`) so users can understand
+what was denied. Custom policy or hook denial reasons are preserved and receive
+the same proxy identity context. The surrounding `functionResponse.name` still
+uses `providerName`, and ordinary tool denial text keeps its existing behavior.
 
 A successful proxy normalization also carries the resolved target instance.
 Before returning it, the helper verifies that `ToolRegistry` still maps the
@@ -401,7 +408,11 @@ Detailed behavior:
 
 - Keep `ensureTool()`.
 - Exact `select:` can re-render an already presented schema.
-- Keyword search may omit already presented schemas to save tokens.
+- Keyword search omits targets whose current schema fingerprint is already
+  committed as presented, so a high-scoring result cannot repeatedly consume
+  limited `max_results` slots. Pending metadata that has not entered active
+  history does not hide the target; schema replacement invalidates the old
+  fingerprint and makes the target searchable again.
 - Use the existing wrapper escaping when rendering schemas, so untrusted
   descriptions cannot break out of the model-facing envelope.
 - Return `{ name, schemaFingerprint }` as internal pending metadata on the
@@ -497,7 +508,8 @@ All success, validation-error, permission-denial, hook-denial, cancellation,
 timeout, and unhandled-exception response paths must use the same centralized
 provider-name helper. Existing `FunctionResponse` parts returned by a tool must
 also be normalized at this boundary instead of passing through with the target
-name.
+name. Permission-denial messages use the real target plus proxy route for user
+clarity, without changing this provider-facing response-name rule.
 
 ## Lifecycle and Compatibility
 
@@ -556,16 +568,30 @@ system prefix.
 Resume handles two history formats:
 
 - New proxy history: scan `deferred_tool_call` arguments for target names,
-  resolve current schemas, append them to the startup runtime reminder, and
-  rebuild presentation fingerprints.
+  resolve current schemas, append them as an escaped, pure structural
+  `<system-reminder>` user entry, and rebuild presentation fingerprints. The
+  structural envelope prevents Retry cleanup from treating restored schema
+  context as an orphaned user prompt. Restore this proxy state only when the
+  warmed registry still contains both `tool_search` and `deferred_tool_call`;
+  either tool alone is not a callable discovery/proxy capability.
 - Old direct history: collect real deferred function-call names and pass them
   through `ToolRegistry.revealDeferredTool(name)` before building initial
   declarations. In that resumed chat, their declarations stay direct and
   stable.
 
+If either proxy control tool is unavailable, resume skips proxy presentation
+restoration and uses the startup direct-declaration fallback. Old direct-call
+compatibility remains independent of proxy availability.
+
 History itself never grants execution permission. Current registry existence,
 current schema presentation, execution-context policy, and target permissions
 must still apply.
+
+Retry cleanup preserves presentation state when it removes only a failed user
+prompt because the schema-bearing history remains active. If cleanup removes a
+`tool_search` function response, it clears all proxy presentations rather than
+attempting to reconstruct partial authorization from history text. Other broad
+history mutations continue to clear presentation state conservatively.
 
 ### Clear and MCP lifecycle
 
@@ -696,20 +722,20 @@ schema necessarily yields a net benefit.
 
 ## Source Change Map
 
-| Source area                                                      | Required change                                                                                                                                                                                                                                           |
-| ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/core/src/tools/tool-names.ts`                          | Add the reserved proxy name and display name.                                                                                                                                                                                                             |
-| `packages/core/src/config/config.ts`                             | Register `tool_search` and the proxy atomically for the main registry, rolling search back if proxy registration fails; keep the proxy out of `forSubAgent` registries.                                                                                   |
-| `packages/core/src/tools/tool-registry.ts`                       | Separate committed proxy presentations from direct declaration visibility, compare pending and current schema fingerprints at commit, preserve `includeDeferred` behavior, reserve the proxy name, and invalidate fingerprints on tool lifecycle changes. |
-| `packages/core/src/tools/tool-search.ts`                         | Render a captured schema and return its name plus fingerprint as pending presentation metadata without calling `setTools()`.                                                                                                                              |
-| `packages/core/src/core/deferred-tool-call-normalization.ts`     | Provide the shared normalization helper for proxy envelope validation, target resolution, instance binding, presentation gating, and provider-facing response naming.                                                                                     |
-| `packages/core/src/core/turn.ts`                                 | Explicitly represent provider identity and execution identity.                                                                                                                                                                                            |
-| `packages/core/src/core/coreToolScheduler.ts`                    | Reuse the shared helper to normalize proxy calls before target authorization, execute the retained target instance, centralize provider response naming, and forward pending presentation metadata.                                                       |
-| `packages/core/src/core/client.ts`                               | Commit presentation metadata after history append; handle disabled search, compression, resume, and clear.                                                                                                                                                |
-| `packages/cli/src/acp-integration/session/Session.ts`            | Reuse the shared helper and retained target instance in ACP's independent `runTool()` path; commit presentations after their response message enters active history; keep all function response names provider-facing.                                    |
-| `packages/core/src/tools/enterPlanMode.ts` and `exitPlanMode.ts` | Remove dynamic exit-tool reveal and keep the exit tool on the stable direct main-session surface.                                                                                                                                                         |
-| `packages/core/src/agents/runtime/agent-core.ts`                 | Preserve real-name agent filtering and defensively reject hallucinated proxy names.                                                                                                                                                                       |
-| Provider converter tests                                         | Verify Gemini, OpenAI, and Anthropic call/result pairing; if scheduler response normalization is complete, converter production code does not need proxy-specific routing.                                                                                |
+| Source area                                                      | Required change                                                                                                                                                                                                                                                      |
+| ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/core/src/tools/tool-names.ts`                          | Add the reserved proxy name and display name.                                                                                                                                                                                                                        |
+| `packages/core/src/config/config.ts`                             | Register `tool_search` and the proxy atomically for the main registry, rolling search back if proxy registration fails; keep the proxy out of `forSubAgent` registries.                                                                                              |
+| `packages/core/src/tools/tool-registry.ts`                       | Separate committed proxy presentations from direct declaration visibility, compare pending and current schema fingerprints at commit, preserve `includeDeferred` behavior, reserve the proxy name, and invalidate fingerprints on tool lifecycle changes.            |
+| `packages/core/src/tools/tool-search.ts`                         | Render a captured schema and return its name plus fingerprint as pending presentation metadata without calling `setTools()`.                                                                                                                                         |
+| `packages/core/src/core/deferred-tool-call-normalization.ts`     | Provide the shared normalization helper for proxy envelope validation, target resolution, instance binding, presentation gating, and provider-facing response naming.                                                                                                |
+| `packages/core/src/core/turn.ts`                                 | Explicitly represent provider identity and execution identity.                                                                                                                                                                                                       |
+| `packages/core/src/core/coreToolScheduler.ts`                    | Reuse the shared helper to normalize proxy calls before target authorization, execute the retained target instance, show target plus route in permission denials, centralize provider response naming, and forward pending presentation metadata.                    |
+| `packages/core/src/core/client.ts`                               | Commit presentation metadata after history append; require the complete discovery/proxy capability before resume restoration; protect restored schema context from Retry stripping; invalidate presentation state only when stripping removes a presentation source. |
+| `packages/cli/src/acp-integration/session/Session.ts`            | Reuse the shared helper and retained target instance in ACP's independent `runTool()` path; show target plus route in permission denials; commit presentations after their response message enters active history; keep response names provider-facing.              |
+| `packages/core/src/tools/enterPlanMode.ts` and `exitPlanMode.ts` | Remove dynamic exit-tool reveal and keep the exit tool on the stable direct main-session surface.                                                                                                                                                                    |
+| `packages/core/src/agents/runtime/agent-core.ts`                 | Preserve real-name agent filtering and defensively reject hallucinated proxy names.                                                                                                                                                                                  |
+| Provider converter tests                                         | Verify Gemini, OpenAI, and Anthropic call/result pairing; if scheduler response normalization is complete, converter production code does not need proxy-specific routing.                                                                                           |
 
 ## Implementation Plan
 
@@ -747,6 +773,9 @@ schema necessarily yields a net benefit.
 - Proxy presentation does not affect `getFunctionDeclarations()`.
 - A constructed but cancelled or uncommitted `tool_search` result does not grant
   proxy eligibility.
+- After a keyword result is committed as presented, the next keyword search
+  uses limited result slots for matching unpresented schemas; exact `select:`
+  remains available, and a refreshed schema becomes searchable again.
 - `includeDeferred`, `visibleTools`, `alwaysLoad`, and resume-time direct
   compatibility reveal preserve their documented behavior.
 - All registration sources reject reserved-name collisions.
@@ -768,6 +797,9 @@ schema necessarily yields a net benefit.
   instance, never the replacement.
 - Real target permission denial, confirmation, and plan-mode policy use the
   target identity and target arguments.
+- Proxied permission-denial text shows the real target and provider route,
+  while `functionResponse.name` remains `deferred_tool_call`; ordinary calls
+  retain their existing denial text.
 - PreToolUse, PostToolUse, and PostToolUseFailure hooks receive target identity
   and preserve hook correlation IDs.
 
@@ -789,8 +821,9 @@ schema necessarily yields a net benefit.
 
 ### Lifecycle and compatibility
 
-- `enter_plan_mode` does not change declarations, and `exit_plan_mode` remains
-  directly callable.
+- `enter_plan_mode` does not access declaration-sync state; declaration bytes
+  remain unchanged and `exit_plan_mode` remains directly callable through its
+  stable `alwaysLoad` declaration.
 - When `tool_search` is disabled, deferred tools are exposed directly and the
   proxy is omitted.
 - When `deferred_tool_call` is disabled or denied, `tool_search` registration is
@@ -800,6 +833,12 @@ schema necessarily yields a net benefit.
   not unlock it.
 - Subagents preserve their direct effective tool declarations.
 - Compression restores current schemas before restoring proxy eligibility.
+- Resume restores proxy presentation state only when both `tool_search` and
+  `deferred_tool_call` are registered; otherwise it uses direct declarations.
+- Resume schema context is a safely escaped pure system-reminder entry. Retry
+  preserves that entry and its presentation state when removing only a failed
+  prompt, but clears all presentations if a stripped entry contains a
+  `tool_search` response.
 - New proxy transcripts and old direct-call transcripts both resume correctly.
 - `/clear` removes presentation and session-direct state.
 - Removed or reconnected MCP tools require another search.

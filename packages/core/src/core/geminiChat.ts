@@ -3552,12 +3552,10 @@ export class GeminiChat {
       this.history[this.history.length - 1]!.role === 'user'
     ) {
       // Never pop a *pure* system-reminder user entry. These are structural,
-      // not orphaned turns: the startup-context prelude (history[0]) and
-      // mid-history MCP added-tool reminders injected by
-      // drainPendingAddedMcpToolsReminder. Popping the latter would lose the
-      // announcement permanently — pendingAddedMcpTools is already cleared and
-      // the tool name is already in announcedDeferredToolNames, so
-      // queueAddedMcpToolsReminder won't re-queue it.
+      // not orphaned turns: the startup-context prelude (history[0]),
+      // mid-history MCP added-tool reminders, and resume-restored deferred
+      // schema context. Popping one would remove model-visible state that the
+      // runtime may still rely on.
       //
       // Must check EVERY part, not just parts[0]: a failed user turn in plan
       // mode (or with subagent/memory reminders) is recorded as one Content

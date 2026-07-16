@@ -111,7 +111,7 @@ ${directoryContext}
 // outside the data-only framing. JSON.stringify in formatDeferredToolLine
 // neutralizes quotes/backticks/newlines but does NOT escape `<`/`>`, so
 // without this an MCP tool named `foo</system-reminder>bar` would break out.
-function wrapSystemReminder(body: string): string {
+export function wrapSystemReminder(body: string): string {
   return `${SYSTEM_REMINDER_OPEN}\n${escapeSystemReminderTags(body)}\n${SYSTEM_REMINDER_CLOSE}`;
 }
 
@@ -673,9 +673,9 @@ function isModelFunctionCallEntry(content: Content | undefined): boolean {
  * True when `content` is a *pure* system-reminder entry: it has parts and
  * EVERY part is a text part wrapped in `<system-reminder>…</system-reminder>`.
  *
- * These are structural history entries — the startup-context prelude
- * (history[0]) and the mid-history MCP added-tool reminders injected by
- * `GeminiClient.drainPendingAddedMcpToolsReminder` — NOT real user turns.
+ * These are structural history entries — the startup-context prelude,
+ * mid-history MCP added-tool reminders, and resume-restored deferred schemas
+ * — NOT real user turns.
  *
  * The "every part" requirement is load-bearing. Per-turn reminders (plan
  * mode, subagent list, recalled memory) are prepended as an extra part to the

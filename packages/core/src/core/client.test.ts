@@ -1330,6 +1330,23 @@ describe('Gemini Client (client.ts)', () => {
       expect(restoredSchemaText).toContain(
         'To call a restored deferred tool on a later turn',
       );
+      expect(restoredSchemaText).toMatch(
+        /^<system-reminder>[\s\S]*<\/system-reminder>$/,
+      );
+
+      reg.clearProxySchemaPresentations.mockClear();
+      client['chat']!.addHistory({
+        role: 'user',
+        parts: [{ text: 'failed prompt' }],
+      });
+
+      expect(client.stripOrphanedUserEntriesFromHistory()).toEqual([
+        { role: 'user', parts: [{ text: 'failed prompt' }] },
+      ]);
+      expect(client.getHistory().at(-1)?.parts?.[0]?.text).toBe(
+        restoredSchemaText,
+      );
+      expect(reg.clearProxySchemaPresentations).not.toHaveBeenCalled();
     });
 
     it.each([
@@ -2771,14 +2788,26 @@ describe('Gemini Client (client.ts)', () => {
       expect(getHistory).not.toHaveBeenCalled();
     });
 
-    it('stripOrphanedUserEntriesFromHistory forces full IDE context only when entries were removed', async () => {
+    it('stripOrphanedUserEntriesFromHistory invalidates only presentation sources that were removed', async () => {
       const cacheClear = mockFileReadCacheClear();
       const clearProxySchemaPresentations = vi.mocked(
         mockConfig.getToolRegistry,
       )().clearProxySchemaPresentations;
       vi.mocked(clearProxySchemaPresentations).mockClear();
-      const strip = vi.fn();
-      // Case 1: history actually shrank → forceFullIdeContext + cache clear.
+      const strippedToolSearchResponse: Content = {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: ToolNames.TOOL_SEARCH,
+              response: { output: 'schema' },
+            },
+          },
+        ],
+      };
+      const strip = vi.fn().mockReturnValue([strippedToolSearchResponse]);
+      // Removing a tool_search response removes a possible presentation
+      // source, so proxy state must fail closed.
       client['chat'] = {
         getHistoryLength: vi.fn().mockReturnValueOnce(3).mockReturnValueOnce(1),
         stripOrphanedUserEntriesFromHistory: strip,
@@ -2792,12 +2821,17 @@ describe('Gemini Client (client.ts)', () => {
       expect(clearProxySchemaPresentations).toHaveBeenCalledOnce();
       expect(client['forceFullIdeContext']).toBe(true);
 
-      // Case 2: no entries removed → don't touch caches / IDE context.
+      // Removing only a failed prompt keeps the schema-bearing active history
+      // intact, so its presentation state remains valid.
       const cacheClear2 = mockFileReadCacheClear();
       vi.mocked(clearProxySchemaPresentations).mockClear();
-      const strip2 = vi.fn();
+      const strip2 = vi
+        .fn()
+        .mockReturnValue([
+          { role: 'user', parts: [{ text: 'failed prompt' }] },
+        ]);
       client['chat'] = {
-        getHistoryLength: vi.fn().mockReturnValue(2),
+        getHistoryLength: vi.fn().mockReturnValueOnce(3).mockReturnValueOnce(2),
         stripOrphanedUserEntriesFromHistory: strip2,
       } as unknown as GeminiChat;
       client['forceFullIdeContext'] = false;
@@ -2805,14 +2839,29 @@ describe('Gemini Client (client.ts)', () => {
       client.stripOrphanedUserEntriesFromHistory();
 
       expect(strip2).toHaveBeenCalledOnce();
-      expect(cacheClear2).not.toHaveBeenCalled();
+      expect(cacheClear2).toHaveBeenCalled();
+      expect(clearProxySchemaPresentations).not.toHaveBeenCalled();
+      expect(client['forceFullIdeContext']).toBe(true);
+
+      // No history mutation leaves every cache untouched.
+      const cacheClear3 = mockFileReadCacheClear();
+      const strip3 = vi.fn().mockReturnValue([]);
+      client['chat'] = {
+        getHistoryLength: vi.fn().mockReturnValue(2),
+        stripOrphanedUserEntriesFromHistory: strip3,
+      } as unknown as GeminiChat;
+      client['forceFullIdeContext'] = false;
+
+      client.stripOrphanedUserEntriesFromHistory();
+
+      expect(cacheClear3).not.toHaveBeenCalled();
       expect(clearProxySchemaPresentations).not.toHaveBeenCalled();
       expect(client['forceFullIdeContext']).toBe(false);
     });
 
     it('retry strips orphaned trailing user entries and clears the cache', async () => {
       const cacheClear = mockFileReadCacheClear();
-      const stripOrphanedUserEntriesFromHistory = vi.fn();
+      const stripOrphanedUserEntriesFromHistory = vi.fn().mockReturnValue([]);
       // The wrapper now gates cache-clear / forceFullIdeContext on a
       // before/after length comparison — return one value pre-strip
       // (mocked first) and a smaller value post-strip (subsequent
@@ -7518,7 +7567,7 @@ Other open files:
           getHistory: vi.fn().mockReturnValue([]),
           getHistoryLength: vi.fn().mockReturnValueOnce(3).mockReturnValue(2),
           setHistory: vi.fn(),
-          stripOrphanedUserEntriesFromHistory: vi.fn(),
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
           repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
         };
         client['chat'] = mockChat as GeminiChat;

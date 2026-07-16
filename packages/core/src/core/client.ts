@@ -96,6 +96,7 @@ import {
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
+  wrapSystemReminder,
   type AgentAvailabilityEntry,
 } from '../utils/environmentContext.js';
 import {
@@ -520,9 +521,21 @@ export class GeminiClient {
     debugLogger.debug(
       `[FILE_READ_CACHE] clear after stripOrphanedUserEntriesFromHistory(prev=${before}, new=${after})`,
     );
-    this.clearProxySchemaPresentationsAfterHistoryMutation(
-      'stripOrphanedUserEntriesFromHistory',
+    // Presentation eligibility remains valid when retry removes only the
+    // failed prompt: the schema-bearing history is still active. A stripped
+    // tool_search response is different because it may be the presentation
+    // source, so fail closed instead of trying to reconstruct partial state
+    // from history text.
+    const strippedToolSearchResponse = strippedEntries.some((entry) =>
+      (entry.parts ?? []).some(
+        (part) => part.functionResponse?.name === ToolNames.TOOL_SEARCH,
+      ),
     );
+    if (strippedToolSearchResponse) {
+      this.clearProxySchemaPresentationsAfterHistoryMutation(
+        'stripOrphanedUserEntriesFromHistory',
+      );
+    }
     this.config.getFileReadCache().clear();
     // The stripped user turn may have carried the IDE context (open files,
     // workspace state) that `lastSentIdeContext` advanced past. Without
@@ -1388,10 +1401,11 @@ export class GeminiClient {
                     role: 'user',
                     parts: [
                       {
-                        text:
+                        text: wrapSystemReminder(
                           'Current schemas for deferred tools restored from session history:\n\n' +
-                          formatFunctionSchemaBlocks(restoredSchemas) +
-                          '\n\nTo call a restored deferred tool on a later turn, use `deferred_tool_call` with `name` set to the exact function name above and `arguments` matching that function schema.',
+                            formatFunctionSchemaBlocks(restoredSchemas) +
+                            '\n\nTo call a restored deferred tool on a later turn, use `deferred_tool_call` with `name` set to the exact function name above and `arguments` matching that function schema.',
+                        ),
                       },
                     ],
                   },
